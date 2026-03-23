@@ -1,10 +1,4 @@
-"""Lightweight, chart-agnostic overlay payload shapes.
-
-Each overlay adapter should emit a list of :class:`ChartOverlay` objects. The
-payload is intentionally minimal and free of plotting-library specifics so that
-different renderers (lightweight-charts, mplfinance, custom front-ends) can
-translate the same artefacts.
-"""
+"""Lightweight, chart-agnostic overlay payload shapes."""
 
 from __future__ import annotations
 
@@ -132,11 +126,7 @@ def _default_payload() -> OverlayPayload:
 
 
 def coerce_overlay_payload(payload: Mapping[str, Any] | None) -> OverlayPayload:
-    """Ensure overlay payload keys exist with list defaults.
-
-    Adapters can emit partial payloads; this helper fills missing collections so
-    downstream renderers can rely on their presence.
-    """
+    """Ensure overlay payload keys exist with list defaults."""
 
     base: OverlayPayload = _default_payload()
     if payload is None:
@@ -227,45 +217,11 @@ def build_overlay(indicator_type: str, payload: Mapping[str, Any] | None) -> Cha
     return overlay
 
 
-def normalize_overlays(
-    indicator_type: str, overlays: List[Mapping[str, Any]] | None
-) -> List[ChartOverlay]:
-    """Normalize arbitrary overlay adapter output to the canonical schema."""
-
-    if not overlays:
-        return []
-
-    normalised: List[ChartOverlay] = []
-    for entry in overlays:
-        if entry is None:
-            continue
-        if "type" in entry and "payload" in entry:
-            overlay_type = str(entry.get("type"))
-            payload = coerce_overlay_payload(entry.get("payload"))
-            overlay = build_overlay(overlay_type, payload)
-            if "pane_key" in entry:
-                overlay["pane_key"] = entry.get("pane_key")
-            if "pane_views" in entry:
-                overlay["pane_views"] = entry.get("pane_views")
-            if "renderers" in entry:
-                overlay["renderers"] = entry.get("renderers")
-            normalised.append(overlay)
-        else:
-            normalised.append(build_overlay(indicator_type, entry))
-    return normalised
-
-
 __all__ = [
-    "MarkerPayload",
-    "PriceLinePayload",
     "BubblePayload",
-    "PolylinePayload",
-    "BoxPayload",
-    "SegmentPayload",
-    "TouchPointPayload",
-    "OverlayPayload",
     "ChartOverlay",
+    "MarkerPayload",
+    "OverlayPayload",
     "build_overlay",
     "coerce_overlay_payload",
-    "normalize_overlays",
 ]

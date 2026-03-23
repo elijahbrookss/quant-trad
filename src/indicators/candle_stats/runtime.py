@@ -14,7 +14,7 @@ from engines.indicator_engine.contracts import (
     RuntimeOutput,
 )
 from indicators.manifest import build_runtime_spec
-from signals.overlays.builders import build_line_overlay
+from overlays.builders import build_line_overlay
 
 from . import overlays as _overlay_registrations
 from .manifest import MANIFEST

@@ -15,9 +15,9 @@ from engines.indicator_engine.contracts import (
 )
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
 from indicators.candle_stats.runtime import TypedCandleStatsIndicator
-from signals.overlays.builders import build_line_overlay
-from signals.overlays.registry import register_overlay_type
-from signals.overlays.schema import build_overlay
+from overlays.builders import build_line_overlay
+from overlays.registry import register_overlay_type
+from overlays.schema import build_overlay
 
 
 register_overlay_type(

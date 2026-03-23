@@ -9,7 +9,6 @@ __all__ = [
     "TL",
     "TrendlineIndicator",
     "TrendlineIndicatorDefinition",
-    "trendline_overlay_adapter",
 ]
 
 
@@ -30,8 +29,4 @@ def __getattr__(name: str) -> Any:
             "TrendlineIndicator": TrendlineIndicator,
         }
         return exports[name]
-    if name == "trendline_overlay_adapter":
-        from .overlays import trendline_overlay_adapter
-
-        return trendline_overlay_adapter
     raise AttributeError(name)

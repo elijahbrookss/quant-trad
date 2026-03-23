@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from engines.bot_runtime.core.domain import Candle
 from engines.bot_runtime.runtime.mixins.state_streaming import RuntimeStateStreamingMixin
-from signals.overlays.schema import build_overlay
+from overlays.schema import build_overlay
 from utils.log_context import build_log_context
 
 
@@ -92,7 +92,7 @@ def test_persist_series_bar_telemetry_does_not_duplicate_run_id_in_log_context()
     payload = runtime._series_bar_telemetry_buffer.payloads[0]
     assert payload["run_id"] == "run-1"
     assert payload["event_type"] == "series_bar.telemetry"
-    assert payload["payload"]["series_key"] == "BTCUSD|1h"
+    assert payload["payload"]["series_key"] == "instr-1|1h"
     assert payload["payload"]["bar_index"] == 12
     assert payload["payload"]["candle"]["close"] == 100.5
 

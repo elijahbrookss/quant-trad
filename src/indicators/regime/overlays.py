@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from engines.bot_runtime.core.domain import Candle, normalize_epoch
-from signals.overlays.schema import build_overlay
+from overlays.schema import build_overlay
 
 from .blocks import build_regime_blocks
 from .config import RegimeBlockConfig, default_regime_runtime_config

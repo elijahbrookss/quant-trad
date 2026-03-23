@@ -9,7 +9,6 @@ __all__ = [
     "MarketProfileIndicator",
     "Profile",
     "ValueArea",
-    "market_profile_overlay_adapter",
 ]
 
 
@@ -27,8 +26,4 @@ def __getattr__(name: str) -> Any:
         from .manifest import MANIFEST
 
         return MANIFEST
-    if name == "market_profile_overlay_adapter":
-        from .overlays import market_profile_overlay_adapter
-
-        return market_profile_overlay_adapter
     raise AttributeError(name)

@@ -17,10 +17,7 @@ def overlay_transformer(types: str | Iterable[str]) -> Callable[[OverlayTransfor
     """Register a transformer for one or more overlay types."""
 
     def decorator(func: OverlayTransformer) -> OverlayTransformer:
-        if isinstance(types, str):
-            names = [types]
-        else:
-            names = list(types)
+        names = [types] if isinstance(types, str) else list(types)
         for name in names:
             if not name:
                 continue

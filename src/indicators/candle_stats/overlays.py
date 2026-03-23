@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from signals.overlays.registry import register_overlay_type
+from overlays.registry import register_overlay_type
 
 
 register_overlay_type(

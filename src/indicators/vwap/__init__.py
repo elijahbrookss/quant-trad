@@ -8,7 +8,6 @@ __all__ = [
     "MANIFEST",
     "VWAPIndicator",
     "VWAPIndicatorDefinition",
-    "vwap_overlay_adapter",
 ]
 
 
@@ -25,8 +24,4 @@ def __getattr__(name: str) -> Any:
         from .compute import VWAPIndicator
 
         return VWAPIndicator
-    if name == "vwap_overlay_adapter":
-        from .overlays import vwap_overlay_adapter
-
-        return vwap_overlay_adapter
     raise AttributeError(name)

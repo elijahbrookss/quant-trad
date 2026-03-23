@@ -25,8 +25,8 @@ from engines.bot_runtime.runtime.overlay_types import ensure_runtime_overlay_typ
 from engines.bot_runtime.strategy.series_builder import SeriesBuilder, StrategySeries
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
 from indicators.runtime.indicator_overlay_cache import default_overlay_cache
-from signals.overlays.builtins import ensure_builtin_overlays_registered
-from signals.overlays.schema import build_overlay
+from overlays.builtins import ensure_builtin_overlays_registered
+from overlays.schema import build_overlay
 from utils.log_context import build_log_context, merge_log_context, series_log_context, with_log_context
 from utils.perf_log import get_obs_enabled, get_obs_slow_ms, get_obs_step_sample_rate, should_sample
 

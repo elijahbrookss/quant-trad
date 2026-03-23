@@ -13,7 +13,7 @@ from engines.indicator_engine.contracts import (
     RuntimeOutput,
 )
 from indicators.manifest import build_runtime_spec
-from signals.overlays.schema import build_overlay
+from overlays.schema import build_overlay
 
 from .config import RegimeStabilizerConfig
 from .engine import RegimeEngineV1

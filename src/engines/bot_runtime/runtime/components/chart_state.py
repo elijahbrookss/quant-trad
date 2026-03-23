@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import logging
-from signals.overlays.transformers import apply_overlay_transform
+from overlays.transformers import apply_overlay_transform
 from utils.perf_log import LogThrottle, get_obs_log_throttle_seconds
 
 logger = logging.getLogger(__name__)

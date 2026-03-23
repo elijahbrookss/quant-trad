@@ -1,24 +1,13 @@
 from __future__ import annotations
 
 import logging
-from time import perf_counter
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+import math
+from typing import Any, Dict, List, Mapping, Optional
 
 import pandas as pd
 
-from indicators.market_profile.compute.engine import MarketProfileIndicator
 from indicators.market_profile.manifest import DEFAULT_MERGE_THRESHOLD, DEFAULT_MIN_MERGE_SESSIONS
-from signals.base import BaseSignal
-from signals.overlays.schema import build_overlay
-from signals.overlays.registry import overlay_type
-from signals.overlays.transformers import overlay_transformer
-from signals.rules.common.utils import (
-    bias_label_from_direction,
-    finite_float,
-    format_duration,
-    rgba_from_hex,
-    to_epoch_seconds,
-)
+from overlays.transformers import overlay_transformer
 
 
 log = logging.getLogger("MarketProfileOverlays")
@@ -33,6 +22,83 @@ _RETEST_COLORS = {
     "support": "#0ea5e9",  # sky blue
     "resistance": "#f97316",  # amber
 }
+
+
+def _signal_metadata(signal: Mapping[str, Any]) -> Mapping[str, Any]:
+    metadata = signal.get("metadata")
+    return metadata if isinstance(metadata, Mapping) else {}
+
+
+def _signal_kind(signal: Mapping[str, Any]) -> str:
+    return str(signal.get("type") or signal.get("event_key") or signal.get("key") or "").strip()
+
+
+def _signal_time(signal: Mapping[str, Any]) -> Any:
+    metadata = _signal_metadata(signal)
+    return (
+        signal.get("event_time")
+        or signal.get("time")
+        or metadata.get("signal_time")
+        or metadata.get("time")
+        or metadata.get("trigger_time")
+    )
+
+
+def _signal_symbol(signal: Mapping[str, Any]) -> str:
+    text = str(signal.get("symbol") or _signal_metadata(signal).get("symbol") or "").strip()
+    return text
+
+
+def finite_float(value: Any) -> Optional[float]:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return numeric
+
+
+def format_duration(seconds: float) -> str:
+    if seconds >= 1:
+        return f"{seconds:.2f}s"
+    return f"{seconds * 1000:.1f}ms"
+
+
+def to_epoch_seconds(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        ts = pd.Timestamp(value)
+    except Exception:
+        return None
+    if pd.isna(ts):
+        return None
+    ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+    return int(ts.timestamp())
+
+
+def bias_label_from_direction(direction: Optional[str], fallback: Optional[str] = None) -> Optional[str]:
+    hint = str(direction or fallback or "").strip().lower()
+    if hint in {"above", "up", "long", "buy", "support"}:
+        return "Long"
+    if hint in {"below", "down", "short", "sell", "resistance"}:
+        return "Short"
+    return None
+
+
+def rgba_from_hex(color: str, alpha: float) -> Optional[str]:
+    value = str(color or "").strip().lstrip("#")
+    if len(value) != 6:
+        return None
+    try:
+        red = int(value[0:2], 16)
+        green = int(value[2:4], 16)
+        blue = int(value[4:6], 16)
+    except ValueError:
+        return None
+    opacity = min(max(float(alpha), 0.0), 1.0)
+    return f"rgba({red},{green},{blue},{opacity:.2f})"
 
 
 def _variant_compact(variant: str) -> str:
@@ -360,444 +426,7 @@ def _apply_collision_avoidance(
         })
 
 
-@overlay_type(
-    ["market_profile", "market-profile", "mpf"],
-    label="Market Profile",
-    pane_views=("va_box", "touch"),
-    description="Market profile value area boxes and touch markers.",
-    renderers={"lightweight": "va_box", "mpl": "box"},
-    payload_keys=("boxes", "markers", "bubbles"),
-    ui_color="#38bdf8",
-)
-def market_profile_overlay_adapter(
-    signals: Sequence[BaseSignal],
-    plot_df: pd.DataFrame,
-    **_: Any,
-) -> List[Dict[str, Any]]:
-    log.debug(
-        "🚀 OVERLAY ADAPTER CALLED | signals=%d | has_plot_df=%s | plot_df_len=%s",
-        len(signals),
-        plot_df is not None,
-        len(plot_df) if plot_df is not None else 0,
-    )
-    start_time = perf_counter()
-    bubbles: List[Dict[str, Any]] = []
-    summary = {
-        "total": len(signals),
-        "converted_breakout": 0,
-        "converted_retest": 0,
-        "skipped_source": 0,
-        "skipped_price": 0,
-        "skipped_time": 0,
-    }
-    close_by_epoch: Dict[int, float] = {}
-    if plot_df is not None and not plot_df.empty and "close" in plot_df.columns:
-        for ts, close_value in zip(plot_df.index, plot_df["close"]):
-            epoch = to_epoch_seconds(ts)
-            close_f = finite_float(close_value)
-            if epoch is not None and close_f is not None:
-                close_by_epoch[int(epoch)] = float(close_f)
-
-    for sig in signals:
-        metadata = sig.metadata or {}
-        log.debug(
-            "Processing signal | type=%s | source=%s | sig.time=%s | has_confirm_indices=%s | confirm_indices=%s | confirm_times=%s",
-            sig.type,
-            metadata.get("source"),
-            sig.time,
-            "confirm_indices" in metadata,
-            metadata.get("confirm_indices", []),
-            metadata.get("confirm_times", []),
-        )
-        if metadata.get("source") != "MarketProfile":
-            summary["skipped_source"] += 1
-            continue
-
-        breakout_index = metadata.get("bar_index") or metadata.get("trigger_index")
-
-        # Use explicit signal/trigger timestamp. Do not map by runtime bar_index because
-        # signal source timeframe (e.g. 30m) can differ from chart timeframe (e.g. 1h),
-        # which would place bubbles on wrong candles.
-        signal_time = metadata.get("signal_time") or metadata.get("time") or metadata.get("trigger_time") or sig.time
-        marker_time = _normalize_marker_time(signal_time, plot_df, None, "bubble")
-        log.debug(
-            "Normalized bubble time | signal_time=%s | epoch=%s | idx=%s",
-            signal_time,
-            marker_time,
-            breakout_index,
-        )
-        if marker_time is None:
-            summary["skipped_time"] += 1
-            continue
-
-        level_price = _resolve_level_price(metadata)
-        if level_price is None:
-            summary["skipped_price"] += 1
-            continue
-
-        level_label = _level_label(metadata)
-
-        if sig.type in ("retest", "retest_v2"):
-            retest_role = str(metadata.get("retest_role", "retest")).lower()
-            color = _RETEST_COLORS.get(retest_role, "#38bdf8")
-            # Position at retest close instead of level price
-            anchor_price = finite_float(metadata.get("retest_close")) or finite_float(metadata.get("trigger_close")) or level_price
-            bars_since = metadata.get("bars_since_breakout")
-            direction_tag = _direction_compact(
-                direction=metadata.get("direction"),
-                breakout_direction=metadata.get("breakout_direction"),
-                pointer_direction=metadata.get("pointer_direction"),
-                bias=metadata.get("bias"),
-            )
-            detail = (
-                f"RT {level_label} {float(level_price):.2f}"
-                + (f" +{int(bars_since)}" if bars_since is not None else "")
-            )
-            short_label = (
-                f"{level_label} RT {float(level_price):.2f}"
-                + (f" +{int(bars_since)}" if bars_since is not None else "")
-                + (f" {direction_tag}" if direction_tag else "")
-            )
-            trace_id = str(metadata.get("trace_id") or "").strip()
-            indicator_short = _short_indicator_id(metadata.get("indicator_id"))
-            if indicator_short:
-                short_label = f"{indicator_short} {short_label}"
-            meta_parts = []
-            if trace_id:
-                meta_parts.append(f"id={trace_id}")
-            if indicator_short:
-                meta_parts.append(f"ind={indicator_short}")
-            meta_parts.append(f"lvl={float(level_price):.2f}")
-            meta_text = " | ".join(meta_parts) if meta_parts else None
-            pointer_hint = str(
-                metadata.get("pointer_direction")
-                or metadata.get("breakout_direction")
-                or metadata.get("direction")
-                or ""
-            ).lower()
-            if pointer_hint in {"above", "up"}:
-                bubble_direction = "above"
-            elif pointer_hint in {"below", "down"}:
-                bubble_direction = "below"
-            else:
-                bubble_direction = "above" if retest_role == "resistance" else "below"
-
-            bias_label = bias_label_from_direction(
-                metadata.get("direction"), fallback=pointer_hint or retest_role
-            )
-
-            bubbles.append(
-                {
-                    "time": marker_time,
-                    "price": float(anchor_price),
-                    "label": short_label,
-                    "detail": detail,
-                    "meta": meta_text,
-                    "accentColor": color,
-                    "backgroundColor": rgba_from_hex(color, 0.18) or "rgba(14,165,233,0.25)",
-                    "textColor": "#ffffff",
-                    "direction": metadata.get("pointer_direction")
-                    or metadata.get("direction")
-                    or bubble_direction,
-                    "bias": bias_label,
-                    "profile_key": str(metadata.get("profile_key") or metadata.get("value_area_id") or ""),
-                    "boundary_type": str(metadata.get("boundary_type") or metadata.get("level_type") or ""),
-                    "boundary_price": finite_float(metadata.get("boundary_price") or metadata.get("level_price")),
-                    "diagnostics": _signal_diagnostics(metadata, signal_time=signal_time),
-                    "subtype": "bubble",
-                }
-            )
-            summary["converted_retest"] += 1
-            continue
-
-        breakout_direction = _resolve_breakout_direction(metadata)
-        color = _BREAKOUT_COLORS.get(breakout_direction, "#6b7280")
-
-        # Trust emitter-provided trigger close. Index remapping can be wrong when
-        # chart timeframe != signal source timeframe.
-        trigger_close = finite_float(metadata.get("trigger_close"))
-        close_at_signal = close_by_epoch.get(int(marker_time))
-        bubble_price = float(trigger_close if trigger_close is not None else close_at_signal if close_at_signal is not None else level_price)
-
-        if breakout_direction == "above":
-            label = f"{level_label} breakout"
-            detail_prefix = "Closed above"
-            short_side = "BO"
-        elif breakout_direction == "below":
-            label = f"{level_label} breakdown"
-            detail_prefix = "Closed below"
-            short_side = "BD"
-        else:
-            label = f"{level_label} breakout"
-            detail_prefix = "Closed near"
-            short_side = "BO"
-
-        detail = f"{detail_prefix} {level_label} {float(level_price):.2f}"
-        confirm_bars = metadata.get("confirm_bars")
-        trace_id = str(metadata.get("trace_id") or "").strip()
-        variant = str(metadata.get("variant") or metadata.get("breakout_variant") or "").strip()
-        variant_compact = _variant_compact(variant)
-        started_bar = metadata.get("started_bar_index")
-        streak_emit = metadata.get("confirm_streak_at_emit")
-        current_bar = metadata.get("bar_index")
-        profile_key = str(metadata.get("profile_key") or metadata.get("value_area_id") or "").strip()
-        profile_tag = profile_key[-12:] if profile_key else ""
-        if confirm_bars is not None:
-            short_label = f"{short_side} {level_label}@{float(level_price):.2f} c{int(confirm_bars)}"
-        else:
-            short_label = f"{short_side} {level_label}@{float(level_price):.2f}"
-        direction_tag = _direction_compact(
-            direction=metadata.get("direction"),
-            breakout_direction=metadata.get("breakout_direction"),
-            pointer_direction=metadata.get("pointer_direction"),
-            bias=metadata.get("bias"),
-        )
-        if direction_tag:
-            short_label = f"{short_label} {direction_tag}"
-        indicator_short = _short_indicator_id(metadata.get("indicator_id"))
-        if indicator_short:
-            short_label = f"{indicator_short} {short_label}"
-        meta_parts = []
-        if trace_id:
-            meta_parts.append(f"id={trace_id}")
-        if indicator_short:
-            meta_parts.append(f"ind={indicator_short}")
-        meta_parts.append(f"lvl={float(level_price):.2f}")
-        meta_text = " | ".join(meta_parts) if meta_parts else None
-
-        bias_label = bias_label_from_direction(
-            breakout_direction or metadata.get("direction")
-        )
-
-        pointer_hint = metadata.get("pointer_direction") or breakout_direction or metadata.get("direction")
-
-        # Confirmation markers (checkmarks)
-        confirm_indices = metadata.get("confirm_indices") or []
-        confirm_times = metadata.get("confirm_times") or []
-        confirm_markers: List[Dict[str, Any]] = []
-
-        log.debug(
-            "Processing breakout | confirm_indices=%s | confirm_times=%s | has_plot_df=%s",
-            confirm_indices,
-            confirm_times,
-            plot_df is not None,
-        )
-
-        if confirm_times and plot_df is not None:
-            for ts_idx, ts in enumerate(confirm_times):
-                confirm_idx = confirm_indices[ts_idx] if ts_idx < len(confirm_indices) else None
-                normalized_time = _normalize_marker_time(
-                    ts,
-                    plot_df=plot_df,
-                    idx=confirm_idx,
-                    marker_kind="confirm",
-                )
-                if normalized_time is None:
-                    continue
-                try:
-                    if isinstance(confirm_idx, int) and 0 <= confirm_idx < len(plot_df):
-                        row = plot_df.iloc[confirm_idx]
-                        ts_val = plot_df.index[confirm_idx]
-                    else:
-                        ts_val = pd.Timestamp(ts)
-                        row = plot_df.loc[ts_val]
-                    body_high = max(float(row.get("open", row.get("close"))), float(row.get("close")))
-                    body_low = min(float(row.get("open", row.get("close"))), float(row.get("close")))
-
-                    marker_point = {
-                        "time": normalized_time,
-                        "price": (body_high + body_low) / 2.0,
-                        "shape": "square",
-                        "color": color,
-                        "text": "✓",
-                        "position": "inBar",
-                        "subtype": "marker",
-                    }
-                    confirm_markers.append(marker_point)
-                    log.debug(
-                        "Created confirmation marker | ts=%s | epoch=%s | price=%.5f",
-                        ts,
-                        normalized_time,
-                        marker_point["price"],
-                    )
-                except Exception as e:
-                    log.warning(
-                        "Failed to create confirmation marker | ts=%s | epoch=%s | idx=%s | error=%s",
-                        ts,
-                        normalized_time,
-                        confirm_idx,
-                        e,
-                    )
-                    continue
-
-        # Prior markers (circles)
-        prior_indices = metadata.get("prior_indices") or []
-        prior_times = metadata.get("prior_times") or []
-        prior_markers: List[Dict[str, Any]] = []
-
-        log.debug(
-            "Processing prior window | prior_indices=%s | prior_times=%s | has_plot_df=%s",
-            prior_indices,
-            prior_times,
-            plot_df is not None,
-        )
-
-        if prior_times and plot_df is not None:
-            for position, ts in enumerate(prior_times):
-                prior_idx = prior_indices[position] if position < len(prior_indices) else None
-                normalized_time = _normalize_marker_time(
-                    ts,
-                    plot_df=plot_df,
-                    idx=prior_idx,
-                    marker_kind="prior",
-                )
-                if normalized_time is None:
-                    continue
-                try:
-                    if isinstance(prior_idx, int) and 0 <= prior_idx < len(plot_df):
-                        row = plot_df.iloc[prior_idx]
-                        ts_val = plot_df.index[prior_idx]
-                    else:
-                        ts_val = pd.Timestamp(ts)
-                        row = plot_df.loc[ts_val]
-                    body_high = max(float(row.get("open", row.get("close"))), float(row.get("close")))
-                    body_low = min(float(row.get("open", row.get("close"))), float(row.get("close")))
-
-                    # Circle with numbered text or bullet
-                    marker_text = str(position + 1) if len(prior_times) > 1 else "•"
-
-                    prior_marker = {
-                        "time": normalized_time,
-                        "price": (body_high + body_low) / 2.0,
-                        "shape": "circle",
-                        "color": color,
-                        "text": marker_text,
-                        "position": "inBar",
-                        "subtype": "marker",
-                    }
-                    prior_markers.append(prior_marker)
-                    log.debug(
-                        "Created prior marker | ts=%s | epoch=%s | price=%.5f | text=%s",
-                        ts,
-                        normalized_time,
-                        prior_marker["price"],
-                        marker_text,
-                    )
-                except Exception as e:
-                    log.warning(
-                        "Failed to create prior marker | ts=%s | epoch=%s | idx=%s | error=%s",
-                        ts,
-                        normalized_time,
-                        prior_idx,
-                        e,
-                    )
-                    continue
-
-        # Combine both marker types (prior first, then confirm)
-        marker_points = prior_markers + confirm_markers
-
-        bubble = {
-            "time": marker_time,
-            "price": bubble_price,
-            "lock_price": True,
-            "label": short_label,
-            "detail": detail,
-            "meta": meta_text,
-            "accentColor": color,
-            "backgroundColor": rgba_from_hex(color, 0.2) or "rgba(30,41,59,0.75)",
-            "textColor": "#ffffff",
-            "direction": pointer_hint,
-            "bias": bias_label,
-            "profile_key": str(metadata.get("profile_key") or metadata.get("value_area_id") or ""),
-            "boundary_type": str(metadata.get("boundary_type") or metadata.get("level_type") or ""),
-            "boundary_price": finite_float(metadata.get("boundary_price") or metadata.get("level_price")),
-            "diagnostics": _signal_diagnostics(metadata, signal_time=signal_time),
-            "subtype": "bubble",
-        }
-        if marker_points:
-            bubble["_markers"] = marker_points
-
-        # Debug logging for bubble placement
-        log.debug(
-            "Created bubble | signal_time=%s (epoch=%s) | idx=%s | price=%.2f (close=%.2f, level=%.2f) | label=%s | markers=%d",
-            signal_time,
-            marker_time,
-            breakout_index,
-            bubble_price,
-            trigger_close or 0,
-            level_price,
-            label,
-            len(marker_points) if marker_points else 0,
-        )
-
-        bubbles.append(bubble)
-        summary["converted_breakout"] += 1
-
-    duration = perf_counter() - start_time
-    symbol = next((sig.symbol for sig in signals if getattr(sig, "symbol", None)), None)
-
-    log.info(
-        "Market profile overlays | symbol=%s | total=%d | converted=%d (breakout=%d, retest=%d) | "
-        "skipped[source=%d, price=%d, time=%d] | duration=%s",
-        symbol,
-        summary["total"],
-        len(bubbles),
-        summary["converted_breakout"],
-        summary["converted_retest"],
-        summary["skipped_source"],
-        summary["skipped_price"],
-        summary["skipped_time"],
-        format_duration(duration),
-    )
-
-    if not bubbles:
-        return []
-
-    # Apply collision avoidance to prevent overlapping bubbles
-    _apply_collision_avoidance(bubbles)
-
-    markers: List[Dict[str, Any]] = []
-    for b in bubbles:
-        extra = b.pop("_markers", None)
-        if extra:
-            markers.extend(extra)
-
-    # Count marker types for logging
-    confirm_marker_count = sum(1 for m in markers if m.get("shape") == "square")
-    prior_marker_count = sum(1 for m in markers if m.get("shape") == "circle")
-
-    log.info(
-        "Market profile overlays final | bubbles=%d | markers=%d (confirm=%d, prior=%d)",
-        len(bubbles),
-        len(markers),
-        confirm_marker_count,
-        prior_marker_count,
-    )
-    if markers:
-        log.debug("Sample marker: %s", markers[0] if markers else None)
-
-    marker_times = [m.get("time") for m in markers if isinstance(m.get("time"), (int, float))]
-    bubble_times = [b.get("time") for b in bubbles if isinstance(b.get("time"), (int, float))]
-    log.debug(
-        "Overlay time bounds | marker_min=%s | marker_max=%s | bubble_min=%s | bubble_max=%s | marker_count=%d | bubble_count=%d",
-        min(marker_times) if marker_times else None,
-        max(marker_times) if marker_times else None,
-        min(bubble_times) if bubble_times else None,
-        max(bubble_times) if bubble_times else None,
-        len(marker_times),
-        len(bubble_times),
-    )
-
-    payload = {
-        "price_lines": [],
-        "markers": markers,
-        "bubbles": bubbles,
-    }
-
-    return [build_overlay(MarketProfileIndicator.NAME, payload)]
-
-
-__all__ = ["market_profile_overlay_adapter", "market_profile_overlay_transformer"]
+__all__ = ["market_profile_overlay_transformer"]
 
 
 @overlay_transformer(["market-profile", "market_profile", "mpf"])

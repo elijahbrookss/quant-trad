@@ -48,7 +48,6 @@ def ensure_builtin_overlays_registered() -> None:
 
     _discover_indicator_overlay_modules()
 
-    # Non-indicator overlays are registered explicitly here.
     register_overlay_type(
         "strategy_signal",
         label="Strategy Signals",
@@ -57,6 +56,15 @@ def ensure_builtin_overlays_registered() -> None:
         renderers={"lightweight": "marker", "mpl": "scatter"},
         payload_keys=("markers",),
         ui_color="#10b981",
+    )
+    register_overlay_type(
+        "indicator_signal",
+        label="Indicator Signals",
+        pane_views=("signal_bubble",),
+        description="Indicator research signal bubbles.",
+        renderers={"lightweight": "signal_bubble", "mpl": "scatter"},
+        payload_keys=("bubbles",),
+        ui_color="#38bdf8",
     )
     register_overlay_type(
         "regime_overlay",
@@ -78,7 +86,6 @@ def ensure_builtin_overlays_registered() -> None:
         ui_default_visible=False,
     )
 
-    # Per-lens regime overlays (structure, expansion, liquidity, volatility, etc.)
     lens_colors = {
         "structure": "#f59e0b",
         "expansion": "#a855f7",

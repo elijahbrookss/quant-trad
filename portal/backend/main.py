@@ -13,14 +13,9 @@ from .controller import bots, candles, indicators as ind_controller, instruments
 from .service.bots.bot_watchdog import get_watchdog
 from .service.db.postgres_extensions import ensure_postgres_extensions
 
-# Auto-discover indicators and signal rules via package imports
-# Indicators: pure computation, returns domain objects
+# Auto-discover indicators via package imports.
 import indicators  # noqa: F401
-
-# Signals: auto-discovers all @signal_rule decorated functions
-# This triggers decorator execution and registration in _REGISTRY
-import signals  # noqa: F401
-from signals.overlays.builtins import ensure_builtin_overlays_registered
+from overlays.builtins import ensure_builtin_overlays_registered
 
 _SETTINGS = get_settings()
 
