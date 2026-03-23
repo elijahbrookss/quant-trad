@@ -43,7 +43,6 @@ def _parse_timestamp(value: Any) -> datetime:
             except ValueError:
                 continue
     return _utcnow()
-_normalise_direction = evaluator._normalise_direction
 _normalise_action = evaluator._normalise_action
 _TYPED_RULE_V1 = "typed_rule_v1"
 _SUPPORTED_RULE_NODES = {"all", "signal_match", "context_match", "metric_match"}
