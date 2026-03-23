@@ -38,3 +38,8 @@ This preserves source-session computation while keeping runtime truth aligned to
 
 Merged profiles become valid when merge criteria are satisfied in time.
 Known-at gating applies equally to merged and unmerged profiles.
+
+Merge chains are contiguous.
+- A later profile may extend the current merged cluster only if it overlaps the current active cluster when it becomes known.
+- If an intervening profile breaks the overlap chain, the earlier merged cluster is closed.
+- Later profiles must not reopen a closed cluster even if they overlap that earlier cluster's range.

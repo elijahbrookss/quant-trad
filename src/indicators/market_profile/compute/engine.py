@@ -24,11 +24,22 @@ from .internal.computation import build_tpo_histogram, extract_value_area
 from .internal.bin_size import select_bin_size, infer_precision_from_step
 from .internal.merging import merge_profiles
 
+
 def _to_utc_timestamp(value: Any) -> pd.Timestamp:
     ts = pd.Timestamp(value)
     if ts.tzinfo is None:
         return ts.tz_localize("UTC")
     return ts.tz_convert("UTC")
+
+
+def _ensure_utc_index(index: Any) -> pd.DatetimeIndex:
+    if not isinstance(index, pd.DatetimeIndex):
+        return pd.to_datetime(index, utc=True)
+    if index.tz is None:
+        return index.tz_localize("UTC")
+    if str(index.tz) != "UTC":
+        return index.tz_convert("UTC")
+    return index
 
 
 class MarketProfileIndicator(ComputeIndicator):
@@ -331,16 +342,9 @@ class MarketProfileIndicator(ComputeIndicator):
             "extend_value_area_to_chart_end", bool(self.extend_value_area_to_chart_end)
         )
         profile_params.setdefault("days_back", int(self.days_back))
-        use_merged = bool(profile_params.get("use_merged_value_areas", self.use_merged_value_areas))
-        merge_threshold = float(profile_params.get("merge_threshold", self.merge_threshold))
-        min_merge_sessions = int(profile_params.get("min_merge_sessions", self.min_merge_sessions))
         resolved_chart_timeframe = str(chart_timeframe or "").strip().lower() or "30m"
-        base_profiles = (
-            self.get_merged_profiles(merge_threshold, min_merge_sessions)
-            if use_merged
-            else self.get_profiles()
-        )
-        profile_params["profiles_premerged"] = bool(use_merged)
+        base_profiles = self.get_profiles()
+        profile_params["profiles_premerged"] = False
         profile_params["strategy_timeframe"] = resolved_chart_timeframe
         payload_profiles: List[Dict[str, Any]] = []
         for profile in base_profiles:
@@ -479,15 +483,34 @@ class MarketProfileIndicator(ComputeIndicator):
         Returns:
             List of Profile objects
         """
-        df = self.df.copy()
-        df.index = pd.to_datetime(df.index, utc=True)
-        profiles = []
+        if self.df is None or self.df.empty:
+            logger.info("Starting daily profile computation for %d sessions", 0)
+            logger.info("Completed daily profile computation. Total profiles: %d", 0)
+            return []
 
-        logger.info("Starting daily profile computation for %d sessions", len(np.unique(df.index.date)))
+        df = self.df
+        index = _ensure_utc_index(df.index)
+        if not index.is_monotonic_increasing:
+            order = np.argsort(index.asi8, kind="stable")
+            df = df.iloc[order]
+            index = index.take(order)
 
-        # Group rows by calendar date
-        grouped = df.groupby(df.index.date)
-        for session_date, group in grouped:
+        session_keys = index.normalize()
+        session_values = session_keys.asi8
+        boundaries = (
+            np.flatnonzero(session_values[1:] != session_values[:-1]) + 1
+            if len(session_values) > 1
+            else np.array([], dtype=np.int64)
+        )
+        start_indices = np.concatenate((np.array([0], dtype=np.int64), boundaries))
+        end_indices = np.concatenate((boundaries, np.array([len(df)], dtype=np.int64)))
+        profiles: List[Profile] = []
+
+        logger.info("Starting daily profile computation for %d sessions", len(start_indices))
+
+        for start_idx, end_idx in zip(start_indices.tolist(), end_indices.tolist()):
+            group = df.iloc[start_idx:end_idx]
+            session_date = session_keys[start_idx].date()
             logger.debug("Processing session: %s, bars: %d", session_date, len(group))
 
             # Build TPO histogram
@@ -502,8 +525,8 @@ class MarketProfileIndicator(ComputeIndicator):
 
             # Create Profile object
             profile = Profile(
-                start=group.index.min(),
-                end=group.index.max(),
+                start=index[start_idx],
+                end=index[end_idx - 1],
                 value_area=value_area,
                 session_count=1,
                 tpo_histogram=tpo_hist,
@@ -511,7 +534,7 @@ class MarketProfileIndicator(ComputeIndicator):
             )
 
             profiles.append(profile)
-            logger.info(
+            logger.debug(
                 "Profile for %s: POC=%.{prec}f, VAH=%.{prec}f, VAL=%.{prec}f".replace("{prec}", str(self.price_precision)),
                 session_date,
                 profile.poc,
