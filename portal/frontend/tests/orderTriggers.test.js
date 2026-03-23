@@ -7,7 +7,7 @@ test('buildTriggerRows flattens typed preview trigger rows with rule names', () 
   const instrumentResult = {
     trigger_rows: [
       {
-        rule_id: 'r1',
+        strategy_rule_id: 'r1',
         row_id: 'row-1',
         action: 'buy',
         event_key: 'balance_breakout_long',
@@ -17,7 +17,7 @@ test('buildTriggerRows flattens typed preview trigger rows with rule names', () 
         epoch: 1704067200,
       },
       {
-        rule_id: 'r2',
+        strategy_rule_id: 'r2',
         row_id: 'row-2',
         action: 'sell',
         event_key: 'balance_breakout_short',

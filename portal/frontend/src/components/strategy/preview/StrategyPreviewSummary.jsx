@@ -17,7 +17,7 @@ export const StrategyPreviewSummary = ({ result, instrumentId }) => {
   const rows = Array.isArray(triggerRows) ? triggerRows : []
   const buyCount = rows.filter((entry) => String(entry?.action || '').toLowerCase() === 'buy').length
   const sellCount = rows.filter((entry) => String(entry?.action || '').toLowerCase() === 'sell').length
-  const matchedRules = new Set(rows.map((entry) => entry?.rule_id).filter(Boolean)).size
+  const matchedRules = new Set(rows.map((entry) => entry?.strategy_rule_id).filter(Boolean)).size
   const missingIndicators = Array.isArray(missingIndicatorsRaw)
     ? missingIndicatorsRaw.filter(Boolean)
     : []

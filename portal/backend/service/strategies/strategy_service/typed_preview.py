@@ -1,4 +1,4 @@
-"""Typed-output strategy preview replay."""
+"""Typed-output strategy preview walk-forward execution."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 from engines.bot_runtime.core.domain import Candle
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
 from indicators.config import IndicatorExecutionContext
-from signals.overlays.transformers import apply_overlay_transform
-from signals.overlays.schema import build_overlay
+from overlays.transformers import apply_overlay_transform
+from overlays.schema import build_overlay
 from portal.backend.service.indicators.indicator_service import (
     build_runtime_indicator_graph,
     get_instance_meta,
@@ -79,7 +79,7 @@ def _build_marker(*, action: str, candle: Candle, rule: Mapping[str, Any], trigg
         "position": "belowBar" if is_buy else "aboveBar",
         "text": str(rule.get("name") or trigger.get("event_key") or action).strip(),
         "subtype": "strategy_signal",
-        "rule_id": rule.get("id"),
+        "strategy_rule_id": rule.get("id"),
         "indicator_id": trigger.get("indicator_id"),
         "output_name": trigger.get("output_name"),
         "event_key": trigger.get("event_key"),
@@ -155,7 +155,7 @@ def _build_trigger_rows(
                 "timestamp": candle.time.isoformat(),
                 "action": rule.get("action"),
                 "side": "BUY" if str(rule.get("action")).lower() == "buy" else "SELL",
-                "rule_id": rule.get("id"),
+                "strategy_rule_id": rule.get("id"),
                 "rule_name": rule.get("name"),
                 "trigger_indicator_id": trigger.get("indicator_id"),
                 "trigger_output_name": trigger.get("output_name"),
@@ -295,7 +295,7 @@ def evaluate_strategy_preview(
                 current_epoch=int(candle.time.timestamp()),
             )
             for match in matches:
-                rule = record.rules.get(match.get("rule_id"))
+                rule = record.rules.get(match.get("strategy_rule_id"))
                 if not isinstance(rule, Mapping):
                     continue
                 rows = _build_trigger_rows(rule=rule, candle=candle, outputs=frame.outputs)
