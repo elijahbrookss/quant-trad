@@ -65,14 +65,6 @@ class PivotLevelIndicator(ComputeIndicator):
         }
     ]
 
-    @staticmethod
-    def _normalise_confirmation_bars(value: Any) -> int:
-        try:
-            bars = int(value)
-        except (TypeError, ValueError):
-            return 1
-        return bars if bars >= 1 else 1
-
     def __init__(
         self,
         df: pd.DataFrame,
@@ -80,7 +72,6 @@ class PivotLevelIndicator(ComputeIndicator):
         lookbacks: Tuple[int, ...] = (10, 20, 50),
         threshold: float = 0.005,
         days_back: int = 180,
-        pivot_breakout_confirmation_bars: int = 1,
     ):
         """
         :param df: OHLC DataFrame indexed by timestamp
@@ -93,9 +84,6 @@ class PivotLevelIndicator(ComputeIndicator):
         self.lookbacks = lookbacks
         self.threshold = threshold
         self.days_back = days_back
-        self.pivot_breakout_confirmation_bars = self._normalise_confirmation_bars(
-            pivot_breakout_confirmation_bars,
-        )
         self.levels: List[Level] = []
         self.trace_id = self._build_trace_id()
 
@@ -347,30 +335,4 @@ class PivotLevelIndicator(ComputeIndicator):
             "timeframe": self.timeframe,
             "price_lines": price_lines,
             "markers": markers
-        }
-
-    def build_runtime_signal_payload(
-        self,
-        *,
-        indicator_id: Optional[str] = None,
-        params: Optional[Dict[str, Any]] = None,
-        symbol: Optional[str] = None,
-        color: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Provide canonical runtime payload for strict signal execution path."""
-        payload_params = dict(params or {})
-        if not payload_params:
-            payload_params = {
-                "timeframe": str(self.timeframe),
-                "lookbacks": list(self.lookbacks),
-                "threshold": float(self.threshold),
-                "days_back": int(self.days_back),
-                "pivot_breakout_confirmation_bars": int(self.pivot_breakout_confirmation_bars),
-            }
-        return {
-            "_indicator_id": str(indicator_id or ""),
-            "symbol": str(symbol or ""),
-            "signals": [],
-            "profile_params": payload_params,
-            "overlay_color": str(color).strip() if isinstance(color, str) and color.strip() else None,
         }

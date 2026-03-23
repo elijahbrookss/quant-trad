@@ -422,38 +422,3 @@ class TrendlineIndicator(ComputeIndicator):
                     })
 
         return {"segments": segs, "markers": markers}
-
-    def build_runtime_signal_payload(
-        self,
-        *,
-        indicator_id: Optional[str] = None,
-        params: Optional[Mapping[str, Any]] = None,
-        symbol: Optional[str] = None,
-        color: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Provide canonical runtime payload for strict signal execution path."""
-        payload_params = dict(params or {})
-        if not payload_params:
-            payload_params = {
-                "lookbacks": list(self.lookbacks),
-                "tolerance": float(self.tolerance),
-                "timeframe": str(self.timeframe),
-                "min_span_bars": int(self.min_span_bars),
-                "window_size": int(self.window_size),
-                "max_windows_per_side": int(self.max_windows_per_side),
-                "pivot_dedupe_frac": float(self.pivot_dedupe_frac),
-                "enforce_direction": bool(self.enforce_direction),
-                "algo": str(self.algo),
-                "projection_bars": int(self.projection_bars),
-                "ransac_trials": int(self.ransac_trials),
-                "ransac_tol_frac": float(self.ransac_tol_frac),
-                "ransac_min_inliers": int(self.ransac_min_inliers),
-                "max_lines_per_side": int(self.max_lines_per_side),
-            }
-        return {
-            "_indicator_id": str(indicator_id or ""),
-            "symbol": str(symbol or ""),
-            "signals": [],
-            "profile_params": payload_params,
-            "overlay_color": str(color).strip() if isinstance(color, str) and color.strip() else None,
-        }

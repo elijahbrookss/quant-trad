@@ -46,14 +46,6 @@ MANIFEST = IndicatorManifest(
             default=180,
             advanced=True,
         ),
-        IndicatorParam(
-            key="pivot_breakout_confirmation_bars",
-            type="int",
-            label="Breakout Confirmation Bars",
-            description="Bars required to confirm pivot breakout signals.",
-            default=1,
-            advanced=True,
-        ),
     ),
     runtime_inputs=(
         IndicatorRuntimeInput(
