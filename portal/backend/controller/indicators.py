@@ -16,6 +16,7 @@ from portal.backend.service.indicators.async_dispatch import (
     enqueue_signal_job,
     quantlab_partition_key,
     quantlab_request_fingerprint,
+    resolve_overlay_cursor_epoch,
     reuse_quantlab_job,
     wait_for_job,
 )
@@ -54,11 +55,12 @@ def _raise_indicator_http_error(
     datasource: Optional[str] = None,
     exchange: Optional[str] = None,
     instrument_id: Optional[str] = None,
+    cursor_epoch: Optional[Any] = None,
     duration_ms: Optional[float] = None,
 ) -> None:
     log = logger.error if int(status_code) >= 500 else logger.warning
     log(
-        "event=%s indicator_id=%s status_code=%s duration_ms=%s detail=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s",
+        "event=%s indicator_id=%s status_code=%s duration_ms=%s detail=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s cursor_epoch=%s",
         event,
         inst_id,
         status_code,
@@ -71,6 +73,7 @@ def _raise_indicator_http_error(
         datasource,
         exchange,
         instrument_id,
+        cursor_epoch,
     )
     raise HTTPException(status_code, detail)
 
@@ -87,6 +90,7 @@ def _raise_failed_job(
     datasource: Optional[str] = None,
     exchange: Optional[str] = None,
     instrument_id: Optional[str] = None,
+    cursor_epoch: Optional[Any] = None,
 ) -> None:
     message = str(error or "async job failed")
     lower = message.lower()
@@ -103,6 +107,7 @@ def _raise_failed_job(
             datasource=datasource,
             exchange=exchange,
             instrument_id=instrument_id,
+            cursor_epoch=cursor_epoch,
         )
     if "lookuperror" in lower or "no overlays computed" in lower or "no candles" in lower:
         _raise_indicator_http_error(
@@ -117,6 +122,7 @@ def _raise_failed_job(
             datasource=datasource,
             exchange=exchange,
             instrument_id=instrument_id,
+            cursor_epoch=cursor_epoch,
         )
     if "valueerror" in lower or "invalid" in lower:
         _raise_indicator_http_error(
@@ -131,6 +137,7 @@ def _raise_failed_job(
             datasource=datasource,
             exchange=exchange,
             instrument_id=instrument_id,
+            cursor_epoch=cursor_epoch,
         )
     _raise_indicator_http_error(
         event=event,
@@ -154,6 +161,7 @@ class IndicatorInstanceIn(BaseModel):
     dependencies: List[Dict[str, Any]] = Field(default_factory=list)
     output_prefs: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     color: Optional[str] = None
+    color_palette: Optional[str] = None
 
 class IndicatorInstanceOut(BaseModel):
     id: str
@@ -163,6 +171,9 @@ class IndicatorInstanceOut(BaseModel):
     dependencies: List[Dict[str, Any]] = Field(default_factory=list)
     enabled: bool
     color: Optional[str] = None
+    color_palette: Optional[str] = None
+    color_mode: Optional[str] = None
+    color_palettes: Optional[List[Dict[str, Any]]] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     output_prefs: Optional[Dict[str, Dict[str, Any]]] = None
@@ -179,6 +190,8 @@ class OverlayRequest(BaseModel):
     exchange: Optional[str] = None
     instrument_id: Optional[str] = None
     visibility_epoch: Optional[Any] = None
+    cursor_epoch: Optional[Any] = None
+    cursor_time: Optional[str] = None
 
 class SignalRequest(BaseModel):
     start: str
@@ -239,6 +252,7 @@ async def create(body: IndicatorInstanceIn):
             dict(body.params),
             dependencies=list(body.dependencies or []),
             color=body.color,
+            color_palette=body.color_palette,
             output_prefs=dict(body.output_prefs or {}),
         )
     except ValueError as e:
@@ -250,6 +264,7 @@ async def create(body: IndicatorInstanceIn):
 async def update(inst_id: str, body: IndicatorInstanceIn):
     try:
         color_provided = "color" in body.__fields_set__
+        color_palette_provided = "color_palette" in body.__fields_set__
         return update_instance(
             inst_id,
             body.type,
@@ -259,6 +274,8 @@ async def update(inst_id: str, body: IndicatorInstanceIn):
             output_prefs=dict(body.output_prefs or {}),
             color=body.color,
             color_provided=color_provided,
+            color_palette=body.color_palette,
+            color_palette_provided=color_palette_provided,
         )
     except KeyError:
         raise HTTPException(404, "Indicator not found")
@@ -341,19 +358,26 @@ async def get_indicator_type_alias(type_id: str):
 @router.post("/{inst_id}/overlays")
 async def overlays(inst_id: str, req: OverlayRequest):
     t0 = perf_counter()
-    logger.info(
-        "event=indicator_overlay_request_started indicator_id=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s visibility_epoch=%s",
-        inst_id,
-        req.start,
-        req.end,
-        req.interval,
-        req.symbol,
-        req.datasource,
-        req.exchange,
-        req.instrument_id,
-        req.visibility_epoch,
-    )
+    resolved_cursor_epoch = None
     try:
+        resolved_cursor_epoch = resolve_overlay_cursor_epoch(
+            cursor_epoch=req.cursor_epoch,
+            cursor_time=req.cursor_time,
+        )
+        logger.info(
+            "event=indicator_overlay_request_started indicator_id=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s visibility_epoch=%s cursor_epoch=%s cursor_time=%s",
+            inst_id,
+            req.start,
+            req.end,
+            req.interval,
+            req.symbol,
+            req.datasource,
+            req.exchange,
+            req.instrument_id,
+            req.visibility_epoch,
+            resolved_cursor_epoch,
+            req.cursor_time,
+        )
         meta = get_instance_meta(inst_id)
         request_fingerprint = quantlab_request_fingerprint(
             job_type=JOB_TYPE_OVERLAYS,
@@ -367,6 +391,8 @@ async def overlays(inst_id: str, req: OverlayRequest):
             exchange=req.exchange,
             instrument_id=req.instrument_id,
             visibility_epoch=req.visibility_epoch,
+            cursor_epoch=resolved_cursor_epoch,
+            cursor_time=req.cursor_time,
         )
         request_payload = {
             "inst_id": inst_id,
@@ -378,6 +404,7 @@ async def overlays(inst_id: str, req: OverlayRequest):
             "exchange": req.exchange,
             "instrument_id": req.instrument_id,
             "visibility_epoch": req.visibility_epoch,
+            "cursor_epoch": resolved_cursor_epoch,
         }
         partition_key = quantlab_partition_key(request_payload)
         reusable = reuse_quantlab_job(
@@ -388,7 +415,7 @@ async def overlays(inst_id: str, req: OverlayRequest):
         if reusable and reusable.get("status") == "succeeded":
             payload = reusable.get("result")
             logger.info(
-                "event=indicator_overlay_request_finished indicator_id=%s status_code=200 duration_ms=%.3f overlays=%s runtime_path=%s cache_hit=true start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s",
+                "event=indicator_overlay_request_finished indicator_id=%s status_code=200 duration_ms=%.3f overlays=%s runtime_path=%s cache_hit=true start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s cursor_epoch=%s",
                 inst_id,
                 (perf_counter() - t0) * 1000.0,
                 len(payload.get("overlays")) if isinstance(payload, dict) and isinstance(payload.get("overlays"), list) else None,
@@ -400,6 +427,7 @@ async def overlays(inst_id: str, req: OverlayRequest):
                 req.datasource,
                 req.exchange,
                 req.instrument_id,
+                resolved_cursor_epoch,
             )
             return payload
 
@@ -416,12 +444,13 @@ async def overlays(inst_id: str, req: OverlayRequest):
                 exchange=req.exchange,
                 instrument_id=req.instrument_id,
                 visibility_epoch=req.visibility_epoch,
+                cursor_epoch=resolved_cursor_epoch,
                 request_fingerprint=request_fingerprint,
             )
         payload = await wait_for_job(job_id)
         overlays = payload.get("overlays") if isinstance(payload, dict) else None
         logger.info(
-            "event=indicator_overlay_request_finished indicator_id=%s status_code=200 duration_ms=%.3f overlays=%s runtime_path=%s cache_hit=false start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s",
+            "event=indicator_overlay_request_finished indicator_id=%s status_code=200 duration_ms=%.3f overlays=%s runtime_path=%s cache_hit=false start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s cursor_epoch=%s",
             inst_id,
             (perf_counter() - t0) * 1000.0,
             len(overlays) if isinstance(overlays, list) else None,
@@ -433,6 +462,7 @@ async def overlays(inst_id: str, req: OverlayRequest):
             req.datasource,
             req.exchange,
             req.instrument_id,
+            resolved_cursor_epoch,
         )
         return payload
     except AsyncJobNotFoundError:
@@ -449,6 +479,7 @@ async def overlays(inst_id: str, req: OverlayRequest):
             exchange=req.exchange,
             instrument_id=req.instrument_id,
             duration_ms=(perf_counter() - t0) * 1000.0,
+            cursor_epoch=resolved_cursor_epoch,
         )
     except AsyncJobTimeoutError as e:
         _raise_indicator_http_error(
@@ -464,6 +495,7 @@ async def overlays(inst_id: str, req: OverlayRequest):
             exchange=req.exchange,
             instrument_id=req.instrument_id,
             duration_ms=(perf_counter() - t0) * 1000.0,
+            cursor_epoch=resolved_cursor_epoch,
         )
     except AsyncJobFailedError as e:
         _raise_failed_job(
@@ -477,6 +509,7 @@ async def overlays(inst_id: str, req: OverlayRequest):
             datasource=req.datasource,
             exchange=req.exchange,
             instrument_id=req.instrument_id,
+            cursor_epoch=resolved_cursor_epoch,
         )
     except KeyError:
         _raise_indicator_http_error(
@@ -492,6 +525,7 @@ async def overlays(inst_id: str, req: OverlayRequest):
             exchange=req.exchange,
             instrument_id=req.instrument_id,
             duration_ms=(perf_counter() - t0) * 1000.0,
+            cursor_epoch=resolved_cursor_epoch,
         )
     except LookupError as e:
         _raise_indicator_http_error(
@@ -507,6 +541,7 @@ async def overlays(inst_id: str, req: OverlayRequest):
             exchange=req.exchange,
             instrument_id=req.instrument_id,
             duration_ms=(perf_counter() - t0) * 1000.0,
+            cursor_epoch=resolved_cursor_epoch,
         )
     except ValueError as e:
         _raise_indicator_http_error(
@@ -522,6 +557,7 @@ async def overlays(inst_id: str, req: OverlayRequest):
             exchange=req.exchange,
             instrument_id=req.instrument_id,
             duration_ms=(perf_counter() - t0) * 1000.0,
+            cursor_epoch=resolved_cursor_epoch,
         )
     except RuntimeError as e:
         _raise_indicator_http_error(
@@ -537,10 +573,11 @@ async def overlays(inst_id: str, req: OverlayRequest):
             exchange=req.exchange,
             instrument_id=req.instrument_id,
             duration_ms=(perf_counter() - t0) * 1000.0,
+            cursor_epoch=resolved_cursor_epoch,
         )
     except Exception as e:
         logger.exception(
-            "event=indicator_overlay_request_failed indicator_id=%s status_code=500 duration_ms=%.3f detail=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s",
+            "event=indicator_overlay_request_failed indicator_id=%s status_code=500 duration_ms=%.3f detail=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s cursor_epoch=%s",
             inst_id,
             (perf_counter() - t0) * 1000.0,
             str(e),
@@ -551,6 +588,7 @@ async def overlays(inst_id: str, req: OverlayRequest):
             req.datasource,
             req.exchange,
             req.instrument_id,
+            resolved_cursor_epoch,
         )
         raise HTTPException(500, "Unexpected error computing overlays")
 

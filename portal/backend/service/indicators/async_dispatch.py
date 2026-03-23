@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import hashlib
 import json
 import logging
@@ -53,6 +54,35 @@ def _request_fingerprint(parts: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def resolve_overlay_cursor_epoch(
+    *,
+    cursor_epoch: Optional[Any] = None,
+    cursor_time: Optional[Any] = None,
+) -> Optional[int]:
+    if cursor_epoch is not None:
+        try:
+            numeric = float(cursor_epoch)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid cursor_epoch: {cursor_epoch}") from None
+        if not numeric or not float(numeric).is_integer():
+            raise ValueError(f"Invalid cursor_epoch: {cursor_epoch}")
+        return int(numeric)
+
+    if cursor_time is None:
+        return None
+    raw = str(cursor_time).strip()
+    if not raw:
+        return None
+    normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        raise ValueError(f"Invalid cursor_time: {cursor_time}") from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp())
+
+
 def _series_partition_key(payload: Mapping[str, Any]) -> str:
     partition_key = "|".join(
         [
@@ -79,7 +109,7 @@ def _series_partition_key(payload: Mapping[str, Any]) -> str:
             payload.get("interval"),
         )
     else:
-        logger.info(
+        logger.debug(
             "quantlab_partition_key_ready | partition_key_len=%s | partition_key_hashed=%s | inst_id=%s | symbol=%s | interval=%s",
             key_len,
             partition_key_hashed,
@@ -108,10 +138,16 @@ def quantlab_request_fingerprint(
     instrument_id: Optional[str],
     config: Optional[Mapping[str, Any]] = None,
     visibility_epoch: Optional[Any] = None,
+    cursor_epoch: Optional[Any] = None,
+    cursor_time: Optional[Any] = None,
 ) -> str:
+    resolved_cursor_epoch = resolve_overlay_cursor_epoch(
+        cursor_epoch=cursor_epoch,
+        cursor_time=cursor_time,
+    )
     return _request_fingerprint(
         {
-            "request_contract_version": "quantlab_request_v1",
+            "request_contract_version": "quantlab_request_v2",
             "job_type": str(job_type),
             "indicator_id": str(indicator_id),
             "indicator_updated_at": str(indicator_updated_at or ""),
@@ -124,6 +160,7 @@ def quantlab_request_fingerprint(
             "instrument_id": str(instrument_id or ""),
             "config": dict(config or {}),
             "visibility_epoch": visibility_epoch,
+            "cursor_epoch": resolved_cursor_epoch,
         }
     )
 
@@ -188,6 +225,7 @@ def enqueue_overlay_job(
     exchange: Optional[str],
     instrument_id: Optional[str],
     visibility_epoch: Optional[int],
+    cursor_epoch: Optional[int],
     request_fingerprint: Optional[str] = None,
 ) -> str:
     payload: Dict[str, Any] = {
@@ -200,6 +238,7 @@ def enqueue_overlay_job(
         "exchange": exchange,
         "instrument_id": instrument_id,
         "visibility_epoch": visibility_epoch,
+        "cursor_epoch": cursor_epoch,
     }
     if request_fingerprint:
         payload["request_fingerprint"] = str(request_fingerprint)
@@ -245,6 +284,7 @@ __all__ = [
     "enqueue_signal_job",
     "quantlab_partition_key",
     "quantlab_request_fingerprint",
+    "resolve_overlay_cursor_epoch",
     "reuse_quantlab_job",
     "wait_for_job",
 ]

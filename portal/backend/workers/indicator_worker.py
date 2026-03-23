@@ -80,6 +80,11 @@ def _process_signals(payload: Dict[str, Any], *, ctx: IndicatorServiceContext) -
 
 
 def _process_overlays(payload: Dict[str, Any], *, ctx: IndicatorServiceContext) -> Dict[str, Any]:
+    overlay_options: Dict[str, Any] = {}
+    if payload.get("visibility_epoch") is not None:
+        overlay_options["visibility_epoch"] = payload.get("visibility_epoch")
+    if payload.get("cursor_epoch") is not None:
+        overlay_options["cursor_epoch"] = payload.get("cursor_epoch")
     return overlays_for_instance(
         inst_id=str(payload["inst_id"]),
         start=str(payload["start"]),
@@ -89,9 +94,7 @@ def _process_overlays(payload: Dict[str, Any], *, ctx: IndicatorServiceContext) 
         datasource=payload.get("datasource"),
         exchange=payload.get("exchange"),
         instrument_id=payload.get("instrument_id"),
-        overlay_options={"visibility_epoch": payload.get("visibility_epoch")}
-        if payload.get("visibility_epoch") is not None
-        else None,
+        overlay_options=overlay_options or None,
         ctx=ctx,
     )
 
@@ -144,7 +147,7 @@ def main() -> int:
 
         started = time.monotonic()
         logger.info(
-            "indicator_worker_job_started | worker_id=%s job_id=%s job_type=%s indicator_id=%s instrument_id=%s symbol=%s interval=%s timeframe_seconds=%s start=%s end=%s datasource=%s exchange=%s",
+            "indicator_worker_job_started | worker_id=%s job_id=%s job_type=%s indicator_id=%s instrument_id=%s symbol=%s interval=%s timeframe_seconds=%s start=%s end=%s datasource=%s exchange=%s cursor_epoch=%s",
             worker_id,
             job.id,
             job.job_type,
@@ -157,6 +160,7 @@ def main() -> int:
             job.payload.get("end"),
             job.payload.get("datasource"),
             job.payload.get("exchange"),
+            job.payload.get("cursor_epoch"),
         )
         try:
             if job.job_type == JOB_TYPE_OVERLAYS:

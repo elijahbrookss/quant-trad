@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import uuid
 from copy import deepcopy
+from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -31,6 +32,50 @@ from ..indicator_factory import INDICATOR_MAP as _INDICATOR_MAP
 from ...market import candle_service
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_epoch_seconds(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return int(value.timestamp())
+    if isinstance(value, (int, float)):
+        if not float(value).is_integer():
+            return None
+        return int(value)
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        numeric = float(raw)
+    except ValueError:
+        numeric = None
+    if numeric is not None:
+        if not float(numeric).is_integer():
+            return None
+        return int(numeric)
+    normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp())
+
+
+def _iso_utc_from_epoch(epoch: int) -> str:
+    return datetime.fromtimestamp(int(epoch), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _resolve_cursor_index(candles: Sequence[Candle], *, cursor_epoch: int) -> int:
+    for index, candle in enumerate(candles):
+        candle_epoch = int(candle.time.timestamp())
+        if candle_epoch == int(cursor_epoch):
+            return index
+    raise ValueError(
+        "Indicator overlay inspection requires cursor_epoch aligned to a candle in the requested window."
+    )
 
 def list_types(*, ctx: IndicatorServiceContext = _context) -> List[str]:
     return list(_INDICATOR_MAP.keys())
@@ -144,12 +189,13 @@ def create_instance(
     params: Dict[str, Any],
     dependencies: Optional[Sequence[Dict[str, Any]]] = None,
     color: Optional[str] = None,
+    color_palette: Optional[str] = None,
     output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
     *,
     ctx: IndicatorServiceContext = _context,
 ) -> Dict[str, Any]:
     creator = IndicatorInstanceCreator(ctx)
-    return creator.create(type_str, name, params, dependencies, color, output_prefs)
+    return creator.create(type_str, name, params, dependencies, color, color_palette, output_prefs)
 
 
 def update_instance(
@@ -162,6 +208,8 @@ def update_instance(
     *,
     color: Optional[str] = None,
     color_provided: bool = False,
+    color_palette: Optional[str] = None,
+    color_palette_provided: bool = False,
     ctx: IndicatorServiceContext = _context,
 ) -> Dict[str, Any]:
     updater = IndicatorInstanceUpdater(ctx)
@@ -174,6 +222,8 @@ def update_instance(
         output_prefs,
         color=color,
         color_provided=color_provided,
+        color_palette=color_palette,
+        color_palette_provided=color_palette_provided,
     )
 
 
@@ -253,7 +303,7 @@ def overlays_for_instance(
     overlay_options: Optional[Mapping[str, Any]] = None,
     ctx: IndicatorServiceContext = _context,
 ) -> Dict[str, Any]:
-    _ = overlay_options
+    overlay_options_map = dict(overlay_options or {})
     t0 = perf_counter()
     meta = get_instance_meta(inst_id, ctx=ctx)
     if not bool(meta.get("runtime_supported")):
@@ -325,6 +375,11 @@ def overlays_for_instance(
         return {
             "indicator_id": inst_id,
             "runtime_path": "typed_indicator_engine_v1",
+            "overlay_state": {
+                "mode": "latest",
+                "cursor_epoch": None,
+                "cursor_time": None,
+            },
             "window": {
                 "start": start,
                 "end": end,
@@ -333,34 +388,79 @@ def overlays_for_instance(
             "overlays": [],
         }
 
-    last_frame = None
+    requested_cursor_epoch = _coerce_epoch_seconds(overlay_options_map.get("cursor_epoch"))
+    if overlay_options_map.get("cursor_epoch") is not None and requested_cursor_epoch is None:
+        raise ValueError(f"Invalid cursor_epoch: {overlay_options_map.get('cursor_epoch')}")
+    overlay_state_mode = "latest"
     t_engine_start = perf_counter()
     last_index = len(candles) - 1
+    target_index = last_index
+    if requested_cursor_epoch is not None:
+        overlay_state_mode = "cursor"
+        target_index = _resolve_cursor_index(candles, cursor_epoch=requested_cursor_epoch)
+    selected_frame = None
     for index, candle in enumerate(candles):
-        last_frame = engine.step(
+        frame = engine.step(
             bar=candle,
             bar_time=candle.time,
-            include_overlays=index == last_index,
+            include_overlays=index == target_index,
         )
+        if index == target_index:
+            selected_frame = frame
     engine_duration_ms = (perf_counter() - t_engine_start) * 1000.0
 
+    if selected_frame is None:
+        raise RuntimeError("indicator_overlay_cursor_frame_missing: overlay frame was not captured")
+
+    overlay_epoch = int(candles[target_index].time.timestamp())
     t_collect_start = perf_counter()
     overlays = (
         [
             overlay
             for overlay in _collect_runtime_overlays(
-            last_frame.overlays,
-            current_epoch=int(candles[-1].time.timestamp()),
+            selected_frame.overlays,
+            current_epoch=overlay_epoch,
         )
             if str(overlay.get("indicator_id") or "") == inst_id
         ]
-        if last_frame is not None
+        if selected_frame is not None
         else []
     )
+    for overlay in overlays:
+        payload = overlay.get("payload")
+        if str(overlay.get("type") or "") != "market_profile" or not isinstance(payload, Mapping):
+            continue
+        boxes = payload.get("boxes")
+        if not isinstance(boxes, list) or not boxes:
+            continue
+        latest_box = boxes[-1] if isinstance(boxes[-1], Mapping) else None
+        if overlay_state_mode == "cursor":
+            logger.info(
+                "event=indicator_overlay_cursor_frame_summary indicator_id=%s overlay_type=%s requested_cursor_epoch=%s resolved_cursor_epoch=%s boxes=%s latest_profile_key=%s latest_val=%s latest_vah=%s",
+                inst_id,
+                overlay.get("type"),
+                requested_cursor_epoch,
+                overlay_epoch,
+                len(boxes),
+                latest_box.get("profile_key") if latest_box else None,
+                latest_box.get("y1") if latest_box else None,
+                latest_box.get("y2") if latest_box else None,
+            )
+        else:
+            logger.info(
+                "event=indicator_overlay_final_frame_summary indicator_id=%s overlay_type=%s current_epoch=%s boxes=%s latest_profile_key=%s latest_val=%s latest_vah=%s",
+                inst_id,
+                overlay.get("type"),
+                overlay_epoch,
+                len(boxes),
+                latest_box.get("profile_key") if latest_box else None,
+                latest_box.get("y1") if latest_box else None,
+                latest_box.get("y2") if latest_box else None,
+            )
     collect_duration_ms = (perf_counter() - t_collect_start) * 1000.0
     total_duration_ms = (perf_counter() - t0) * 1000.0
     logger.info(
-        "event=indicator_overlay_execute_complete indicator_id=%s indicator_type=%s symbol=%s timeframe=%s source_timeframe=%s bars=%s overlays=%s duration_total_ms=%.3f duration_graph_ms=%.3f duration_fetch_ms=%.3f duration_candle_build_ms=%.3f duration_engine_ms=%.3f duration_overlay_collect_ms=%.3f",
+        "event=indicator_overlay_execute_complete indicator_id=%s indicator_type=%s symbol=%s timeframe=%s source_timeframe=%s bars=%s overlays=%s overlay_state_mode=%s overlay_epoch=%s duration_total_ms=%.3f duration_graph_ms=%.3f duration_fetch_ms=%.3f duration_candle_build_ms=%.3f duration_engine_ms=%.3f duration_overlay_collect_ms=%.3f",
         inst_id,
         meta.get("type"),
         resolved_symbol,
@@ -368,6 +468,8 @@ def overlays_for_instance(
         logged_source_timeframe,
         len(candles),
         len(overlays),
+        overlay_state_mode,
+        overlay_epoch,
         total_duration_ms,
         graph_duration_ms,
         fetch_duration_ms,
@@ -378,6 +480,12 @@ def overlays_for_instance(
     return {
         "indicator_id": inst_id,
         "runtime_path": "typed_indicator_engine_v1",
+        "overlay_state": {
+            "mode": overlay_state_mode,
+            "cursor_epoch": overlay_epoch,
+            "cursor_time": _iso_utc_from_epoch(overlay_epoch),
+            "requested_cursor_epoch": requested_cursor_epoch,
+        },
         "window": {
             "start": start,
             "end": end,
@@ -466,9 +574,10 @@ class IndicatorService:
         params: Dict[str, Any],
         dependencies: Optional[Sequence[Dict[str, Any]]] = None,
         color: Optional[str] = None,
+        color_palette: Optional[str] = None,
         output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        return create_instance(type_str, name, params, dependencies, color, output_prefs, ctx=self._ctx)
+        return create_instance(type_str, name, params, dependencies, color, color_palette, output_prefs, ctx=self._ctx)
 
     def update_instance(
         self,
@@ -481,6 +590,8 @@ class IndicatorService:
         *,
         color: Optional[str] = None,
         color_provided: bool = False,
+        color_palette: Optional[str] = None,
+        color_palette_provided: bool = False,
     ) -> Dict[str, Any]:
         return update_instance(
             inst_id,
@@ -491,6 +602,8 @@ class IndicatorService:
             output_prefs,
             color=color,
             color_provided=color_provided,
+            color_palette=color_palette,
+            color_palette_provided=color_palette_provided,
             ctx=self._ctx,
         )
 

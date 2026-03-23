@@ -10,6 +10,7 @@ import pandas as pd
 
 from engines.bot_runtime.core.domain import Candle
 from indicators.market_profile.compute.engine import MarketProfileIndicator
+from portal.backend.service.indicators.indicator_service import api as indicator_api
 from portal.backend.service.indicators.indicator_service.api import _collect_runtime_overlays
 from indicators.market_profile.runtime.typed_indicator import TypedMarketProfileIndicator
 
@@ -102,7 +103,33 @@ def test_market_profile_runtime_indicator_emits_signal_output_without_overlay_ma
     overlays = indicator.overlay_snapshot()
 
     assert outputs["balance_breakout"].ready is True
-    assert outputs["balance_breakout"].value["events"] == [{"key": "balance_breakout_long"}]
+    assert outputs["balance_breakout"].value["events"] == [
+        {
+            "key": "balance_breakout_long",
+            "direction": "long",
+            "metadata": {
+                "trigger_price": 104.0,
+                "reference": {
+                    "kind": "price_level",
+                    "family": "value_area",
+                    "name": "VAH",
+                    "label": "VAH",
+                    "price": 101.0,
+                    "precision": 2,
+                    "source": "market_profile",
+                    "key": "2025-01-01T00:00:00+00:00:2025-01-01T02:00:00+00:00:1",
+                    "context": {
+                        "profile_key": "2025-01-01T00:00:00+00:00:2025-01-01T02:00:00+00:00:1",
+                        "active_value_area": {
+                            "vah": 101.0,
+                            "val": 99.0,
+                            "poc": 100.0,
+                        },
+                    },
+                },
+            },
+        }
+    ]
     assert "value_area" in overlays
     assert set(overlays.keys()) == {"value_area"}
     assert overlays["value_area"].value["payload"]["markers"] == []
@@ -182,3 +209,157 @@ def test_market_profile_to_lightweight_profiles_include_known_at_for_preview_tra
     assert payload["profiles"]
     assert all(profile.get("formed_at") is not None for profile in payload["profiles"])
     assert all(profile.get("known_at") is not None for profile in payload["profiles"])
+
+
+def test_overlay_preview_can_collect_state_at_requested_cursor_epoch(monkeypatch):
+    index = pd.date_range("2026-03-01T00:00:00Z", periods=3, freq="1h")
+    frame = pd.DataFrame(
+        {
+            "open": [10.0, 11.0, 12.0],
+            "high": [11.0, 12.0, 13.0],
+            "low": [9.0, 10.0, 11.0],
+            "close": [10.5, 11.5, 12.5],
+            "volume": [1.0, 1.0, 1.0],
+        },
+        index=index,
+    )
+
+    monkeypatch.setattr(
+        indicator_api,
+        "get_instance_meta",
+        lambda inst_id, ctx=None: {
+            "id": inst_id,
+            "type": "market_profile",
+            "runtime_supported": True,
+            "datasource": "BINANCE",
+            "exchange": "binance",
+        },
+    )
+    monkeypatch.setattr(
+        indicator_api,
+        "build_runtime_indicator_graph",
+        lambda *args, **kwargs: (None, [SimpleNamespace()]),
+    )
+    monkeypatch.setattr(
+        indicator_api.candle_service,
+        "fetch_ohlcv_by_instrument",
+        lambda *args, **kwargs: frame,
+    )
+
+    fake_engine = None
+
+    class FakeEngine:
+        def __init__(self, indicators):
+            self.calls = []
+
+        def step(self, *, bar, bar_time, include_overlays):
+            epoch = int(bar_time.timestamp())
+            self.calls.append((epoch, include_overlays))
+            overlays = {}
+            if include_overlays:
+                overlays = {
+                    "indicator-1.cursor": SimpleNamespace(
+                        ready=True,
+                        value={
+                            "type": "indicator_signal",
+                            "payload": {
+                                "bubbles": [
+                                    {
+                                        "time": epoch,
+                                        "price": float(bar.close),
+                                        "label": f"cursor-{epoch}",
+                                    }
+                                ]
+                            },
+                        },
+                    )
+                }
+            return SimpleNamespace(overlays=overlays)
+
+    def _engine_factory(indicators):
+        nonlocal fake_engine
+        fake_engine = FakeEngine(indicators)
+        return fake_engine
+
+    monkeypatch.setattr(indicator_api, "IndicatorExecutionEngine", _engine_factory)
+
+    target_epoch = int(index[1].timestamp())
+    payload = indicator_api.overlays_for_instance(
+        "indicator-1",
+        start=index[0].isoformat(),
+        end=index[-1].isoformat(),
+        interval="1h",
+        symbol="BTC/USD",
+        datasource="BINANCE",
+        exchange="binance",
+        instrument_id="instrument-1",
+        overlay_options={"cursor_epoch": target_epoch},
+    )
+
+    assert payload["overlay_state"] == {
+        "mode": "cursor",
+        "cursor_epoch": target_epoch,
+        "cursor_time": "2026-03-01T01:00:00Z",
+        "requested_cursor_epoch": target_epoch,
+    }
+    assert fake_engine is not None
+    assert fake_engine.calls == [
+        (int(index[0].timestamp()), False),
+        (target_epoch, True),
+        (int(index[2].timestamp()), False),
+    ]
+    assert payload["overlays"][0]["payload"]["bubbles"][0]["time"] == target_epoch
+
+
+def test_overlay_preview_rejects_cursor_epoch_not_aligned_to_window_candle(monkeypatch):
+    index = pd.date_range("2026-03-01T00:00:00Z", periods=2, freq="1h")
+    frame = pd.DataFrame(
+        {
+            "open": [10.0, 11.0],
+            "high": [11.0, 12.0],
+            "low": [9.0, 10.0],
+            "close": [10.5, 11.5],
+            "volume": [1.0, 1.0],
+        },
+        index=index,
+    )
+
+    monkeypatch.setattr(
+        indicator_api,
+        "get_instance_meta",
+        lambda inst_id, ctx=None: {
+            "id": inst_id,
+            "type": "market_profile",
+            "runtime_supported": True,
+            "datasource": "BINANCE",
+            "exchange": "binance",
+        },
+    )
+    monkeypatch.setattr(
+        indicator_api,
+        "build_runtime_indicator_graph",
+        lambda *args, **kwargs: (None, [SimpleNamespace()]),
+    )
+    monkeypatch.setattr(
+        indicator_api.candle_service,
+        "fetch_ohlcv_by_instrument",
+        lambda *args, **kwargs: frame,
+    )
+    monkeypatch.setattr(
+        indicator_api,
+        "IndicatorExecutionEngine",
+        lambda indicators: SimpleNamespace(step=lambda **kwargs: SimpleNamespace(overlays={})),
+    )
+
+    with pytest.raises(ValueError, match="cursor_epoch aligned to a candle"):
+        indicator_api.overlays_for_instance(
+            "indicator-1",
+            start=index[0].isoformat(),
+            end=index[-1].isoformat(),
+            interval="1h",
+            symbol="BTC/USD",
+            datasource="BINANCE",
+            exchange="binance",
+            instrument_id="instrument-1",
+            overlay_options={"cursor_epoch": int(index[0].timestamp()) + 1},
+        )
