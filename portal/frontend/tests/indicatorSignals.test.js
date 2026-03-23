@@ -14,24 +14,50 @@ function createSignalsAdapter(response) {
       end: END,
       interval: '1h',
       symbol: 'ES',
+      datasource: 'ALPACA',
+      exchange: 'cme',
+      instrument_id: 'instrument-1',
     });
     return response;
   };
 }
 
-test('runSignalGeneration stores signals and toggles loading flag', async () => {
+test('runSignalGeneration stores signal events, merges signal overlays, and toggles loading flag', async () => {
   const indicator = {
     id: 'ind-1',
-    params: { pivot_breakout_confirmation_bars: 2 },
+    color: '#22c55e',
+    params: {},
   };
 
   const chartState = {
     symbol: 'ES',
     interval: '1h',
+    datasource: 'ALPACA',
+    exchange: 'cme',
+    instrument_id: 'instrument-1',
   };
 
   let currentState = {
-    signalResults: { 'ind-1': [{ legacy: true }] },
+    indicators: [{ id: 'ind-1', enabled: true }],
+    overlays: [
+      {
+        ind_id: 'ind-1',
+        source: 'indicator',
+        overlay_id: 'ind-1.overlay',
+        type: 'market_profile',
+        payload: { markers: [] },
+        ui: { color: '#22c55e' },
+      },
+      {
+        ind_id: 'ind-1',
+        source: 'signal',
+        overlay_id: 'ind-1.signal.legacy',
+        type: 'indicator_signal',
+        payload: { bubbles: [] },
+        ui: { color: '#ef4444' },
+      },
+    ],
+    signalEventsByIndicator: { 'ind-1': [{ legacy: true }] },
   };
 
   const updateCalls = [];
@@ -45,7 +71,18 @@ test('runSignalGeneration stores signals and toggles loading flag', async () => 
 
   const adapterResponse = {
     signals: [
-      { type: 'breakout', symbol: 'ES', time: START },
+      { event_key: 'breakout', symbol: 'ES', event_time: START },
+    ],
+    overlays: [
+      {
+        type: 'indicator_signal',
+        source: 'signal',
+        payload: {
+          bubbles: [
+            { time: 1704067200, price: 100.5, label: 'Breakout', subtype: 'bubble' },
+          ],
+        },
+      },
     ],
   };
 
@@ -80,8 +117,12 @@ test('runSignalGeneration stores signals and toggles loading flag', async () => 
   });
 
   const finalState = getChart();
-  assert.equal(finalState.signalResults['ind-1'].length, 1);
-  assert.equal(finalState.signalResults['ind-1'][0].type, 'breakout');
+  assert.equal(finalState.signalEventsByIndicator['ind-1'].length, 1);
+  assert.equal(finalState.signalEventsByIndicator['ind-1'][0].event_key, 'breakout');
+  assert.equal(finalState.overlays.length, 2);
+  assert.equal(finalState.overlays[0].source, 'indicator');
+  assert.equal(finalState.overlays[1].source, 'signal');
+  assert.equal(finalState.overlays[1].ui.color, '#22c55e');
 });
 
 test('runSignalGeneration exits early when chart context missing', async () => {
@@ -101,6 +142,6 @@ test('runSignalGeneration exits early when chart context missing', async () => {
   });
 
   assert.equal(success, false);
-  assert.equal(errorMsg, 'Cannot generate signals: missing chart symbol or interval.');
+  assert.equal(errorMsg, 'Cannot generate signals: missing chart instrument or interval.');
   assert.equal(updateCalls.length, 0);
 });

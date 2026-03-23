@@ -1,4 +1,10 @@
 import { createLogger } from '../utils/logger.js';
+import { normalizeIndicatorArtifactResponse } from './indicatorArtifacts.js';
+import {
+  rebuildIndicatorArtifactsFromCache,
+  seedIndicatorArtifactSliceCache,
+  writeIndicatorArtifactSliceCache,
+} from './indicatorOverlaySlices.js';
 
 const signalsLogger = createLogger('IndicatorSignals');
 
@@ -49,6 +55,10 @@ export const applyIndicatorColors = (overlays = [], colors = {}) =>
     return {
       ...ov,
       color,
+      ui: {
+        ...(ov.ui || {}),
+        color,
+      },
       payload: {
         ...ov.payload,
         price_lines,
@@ -59,6 +69,19 @@ export const applyIndicatorColors = (overlays = [], colors = {}) =>
       },
     };
   });
+
+const buildVisibleArtifactSets = (indicators = [], visibilityByIndicator = {}) => {
+  const visibleIndicatorIds = new Set(
+    (indicators || [])
+      .filter((entry) => entry?.enabled !== false && visibilityByIndicator?.[entry.id] !== false)
+      .map((entry) => entry?.id)
+      .filter(Boolean)
+  );
+  return {
+    indicator: visibleIndicatorIds,
+    signal: visibleIndicatorIds,
+  };
+};
 
 export async function runSignalGeneration({
   indicator,
@@ -77,12 +100,12 @@ export async function runSignalGeneration({
     return false;
   }
 
-  if (!chartState || !chartState.symbol || !chartState.interval) {
+  if (!chartState || !chartState.symbol || !chartState.interval || !chartState.instrument_id) {
     signalsLogger.warn('signal_generation_skipped_chart_inputs', {
       chartId,
       hasChartState: Boolean(chartState),
     });
-    setError?.('Cannot generate signals: missing chart symbol or interval.');
+    setError?.('Cannot generate signals: missing chart instrument or interval.');
     return false;
   }
 
@@ -99,6 +122,7 @@ export async function runSignalGeneration({
     interval: chartState.interval,
     datasource: chartState.datasource,
     exchange: chartState.exchange,
+    instrument_id: chartState.instrument_id,
   });
 
   const loadingState = getChart(chartId) || {};
@@ -129,17 +153,40 @@ export async function runSignalGeneration({
     if (chartState.exchange) {
       requestPayload.exchange = chartState.exchange;
     }
+    if (chartState.instrument_id) {
+      requestPayload.instrument_id = chartState.instrument_id;
+    }
 
     const response = await signalsAdapter(indicator.id, requestPayload);
 
     const rawSignals = Array.isArray(response?.signals) ? response.signals : [];
-    const prevSignals = getChart(chartId)?.signalResults || {};
+    const signalOverlays = normalizeIndicatorArtifactResponse(indicator, response, { defaultSource: 'signal' });
+    const latestState = getChart(chartId) || {};
+    const retainBySource = buildVisibleArtifactSets(
+      Array.isArray(latestState?.indicators) ? latestState.indicators : [],
+      latestState?.indicatorVisibilityById && typeof latestState.indicatorVisibilityById === 'object'
+        ? latestState.indicatorVisibilityById
+        : {},
+    );
+    const nextSliceCache = writeIndicatorArtifactSliceCache(
+      seedIndicatorArtifactSliceCache(latestState?.indicatorArtifactSlices || {}, latestState?.overlays || []),
+      {
+        indicatorId: indicator.id,
+        source: 'signal',
+        nextSlice: signalOverlays,
+      },
+    );
+    const nextOverlays = rebuildIndicatorArtifactsFromCache(nextSliceCache, retainBySource);
+    const prevSignals = latestState?.signalEventsByIndicator || {};
     updateChart(chartId, {
-      signalResults: { ...prevSignals, [indicator.id]: rawSignals },
+      overlays: nextOverlays,
+      indicatorArtifactSlices: nextSliceCache,
+      signalEventsByIndicator: { ...prevSignals, [indicator.id]: rawSignals },
     });
 
     scopedLogger.info('signal_generation_complete', {
       signals: rawSignals.length,
+      overlays: signalOverlays.length,
     });
 
     setError?.(null);
