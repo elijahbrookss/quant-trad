@@ -13,6 +13,7 @@ import {
 import { writeIndicatorArtifactSliceCache } from './indicatorOverlaySlices.js';
 import {
   buildSignalInspectionKey,
+  collectSignalBubbleEpochs,
   formatSignalEventLabel,
   formatSignalIdSuffix,
   formatSignalTimestamp,
@@ -22,7 +23,11 @@ import {
   sortSignalsNewestFirst,
 } from './indicatorSignalDebug.js';
 
-const flattenSignals = (signalEventsByIndicator = {}, indicatorsById = {}) => {
+const flattenSignals = (
+  signalEventsByIndicator = {},
+  indicatorsById = {},
+  bubbleEpochBySignalId = new Map(),
+) => {
   const rows = [];
   Object.entries(signalEventsByIndicator || {}).forEach(([indicatorId, signals]) => {
     if (!Array.isArray(signals) || !signals.length) return;
@@ -30,6 +35,9 @@ const flattenSignals = (signalEventsByIndicator = {}, indicatorsById = {}) => {
     sortSignalsNewestFirst(signals).forEach((signal) => {
       const signalId = resolveSignalId(signal);
       const signalKey = buildSignalInspectionKey(signal);
+      const chartEpoch = (signalId && bubbleEpochBySignalId.get(signalId))
+        ?? resolveSignalChartEpoch(signal)
+        ?? null;
       rows.push({
         indicator,
         indicatorId,
@@ -40,6 +48,7 @@ const flattenSignals = (signalEventsByIndicator = {}, indicatorsById = {}) => {
         label: formatSignalEventLabel(signal?.event_key),
         timestamp: formatSignalTimestamp(signal),
         epoch: resolveSignalCursorEpoch(signal) || 0,
+        chartEpoch,
         direction: typeof signal?.direction === 'string' ? signal.direction.trim() : '',
         outputName: typeof signal?.output_name === 'string' ? signal.output_name.trim() : '',
         seriesKey: typeof signal?.series_key === 'string' ? signal.series_key.trim() : '',
@@ -123,10 +132,14 @@ export default function QuantLabSignalsRail({ chartId }) {
   const activeSignalInspection = chart?.activeSignalInspection && typeof chart.activeSignalInspection === 'object'
     ? chart.activeSignalInspection
     : null;
+  const bubbleEpochBySignalId = useMemo(
+    () => collectSignalBubbleEpochs(Array.isArray(chart?.overlays) ? chart.overlays : []),
+    [chart?.overlays],
+  );
 
   const allSignals = useMemo(
-    () => flattenSignals(signalEventsByIndicator, indicatorsById),
-    [indicatorsById, signalEventsByIndicator],
+    () => flattenSignals(signalEventsByIndicator, indicatorsById, bubbleEpochBySignalId),
+    [bubbleEpochBySignalId, indicatorsById, signalEventsByIndicator],
   );
 
   const filteredSignals = useMemo(() => {
@@ -175,9 +188,17 @@ export default function QuantLabSignalsRail({ chartId }) {
     if (!entry) return;
     setSelectedSignalKey(entry.signalKey);
     setRailError(null);
-    const focusEpoch = resolveSignalChartEpoch(entry.signal);
+    const focusEpoch = Number(entry.chartEpoch);
+    info('signal_navigation_request', {
+      signalId: entry.signalId,
+      signalKey: entry.signalKey,
+      indicatorId: entry.indicatorId,
+      chartEpoch: entry.chartEpoch,
+      cursorEpoch: entry.epoch,
+      label: entry.label,
+    });
     if (!Number.isFinite(focusEpoch)) {
-      setRailError('Cannot focus signal: signal is missing a valid event_time/known_at.');
+      setRailError('Cannot focus signal: plotted signal time is missing.');
       return;
     }
     updateChart(chartId, {
@@ -207,7 +228,7 @@ export default function QuantLabSignalsRail({ chartId }) {
       });
       setRailError('Unable to focus that signal on the chart.');
     }
-  }, [chartId, getChart, updateChart, warn]);
+  }, [chartId, getChart, info, updateChart, warn]);
 
   const openSignalDetail = useCallback((entry) => {
     if (!entry) return;

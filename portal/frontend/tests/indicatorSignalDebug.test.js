@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  collectSignalBubbleEpochs,
   formatSignalIdSuffix,
   formatSignalLabelWithId,
   resolveSignalChartEpoch,
@@ -31,4 +32,35 @@ test('signal chart epoch prefers event time over known_at', () => {
   };
 
   assert.equal(resolveSignalChartEpoch(signal), 1774317600);
+});
+
+test('signal bubble epochs are collected from plotted overlay bubbles by signal id', () => {
+  const overlays = [
+    {
+      payload: {
+        bubbles: [
+          {
+            signal_id: 'sig_focus_target',
+            time: '2026-03-24T02:00:00Z',
+          },
+        ],
+      },
+    },
+    {
+      payload: {
+        markers: [
+          {
+            subtype: 'bubble',
+            signal_id: 'sig_marker_target',
+            time: 1774318200,
+          },
+        ],
+      },
+    },
+  ];
+
+  const epochs = collectSignalBubbleEpochs(overlays);
+
+  assert.equal(epochs.get('sig_focus_target'), 1774317600);
+  assert.equal(epochs.get('sig_marker_target'), 1774318200);
 });

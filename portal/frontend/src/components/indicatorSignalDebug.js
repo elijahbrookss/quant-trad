@@ -56,6 +56,32 @@ export const resolveSignalChartEpoch = (signal) => (
   toSignalEpochSeconds(signal?.event_time) ?? toSignalEpochSeconds(signal?.known_at)
 );
 
+export const collectSignalBubbleEpochs = (overlays = []) => {
+  const epochsBySignalId = new Map();
+
+  for (const overlay of overlays || []) {
+    const payload = overlay?.payload;
+    if (!payload || typeof payload !== 'object') continue;
+
+    const bubbleCandidates = [
+      ...(Array.isArray(payload?.bubbles) ? payload.bubbles : []),
+      ...(Array.isArray(payload?.markers)
+        ? payload.markers.filter((marker) => marker?.subtype === 'bubble')
+        : []),
+    ];
+
+    for (const bubble of bubbleCandidates) {
+      const signalId = resolveSignalId(bubble);
+      if (!signalId || epochsBySignalId.has(signalId)) continue;
+      const epoch = toSignalEpochSeconds(bubble?.time);
+      if (!Number.isFinite(epoch)) continue;
+      epochsBySignalId.set(signalId, epoch);
+    }
+  }
+
+  return epochsBySignalId;
+};
+
 export const resolveSignalId = (signal) => {
   const direct = typeof signal?.signal_id === 'string' ? signal.signal_id.trim() : '';
   if (direct) return direct;
