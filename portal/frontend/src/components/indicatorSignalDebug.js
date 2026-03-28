@@ -52,12 +52,43 @@ export const formatSignalTimestamp = (signal) => {
   return new Date(epoch * 1000).toLocaleString();
 };
 
+export const resolveSignalChartEpoch = (signal) => (
+  toSignalEpochSeconds(signal?.event_time) ?? toSignalEpochSeconds(signal?.known_at)
+);
+
+export const resolveSignalId = (signal) => {
+  const direct = typeof signal?.signal_id === 'string' ? signal.signal_id.trim() : '';
+  if (direct) return direct;
+  const metadataCandidates = [
+    signal?.metadata?.signal_id,
+    signal?.metadata?.trace_id,
+    signal?.pattern_id,
+  ];
+  for (const candidate of metadataCandidates) {
+    const value = typeof candidate === 'string' ? candidate.trim() : '';
+    if (value) return value;
+  }
+  return null;
+};
+
+export const formatSignalIdSuffix = (signal, size = 4) => {
+  const signalId = resolveSignalId(signal);
+  if (!signalId) return null;
+  return signalId.slice(-Math.max(1, size));
+};
+
+export const formatSignalLabelWithId = (label, signal) => {
+  const suffix = formatSignalIdSuffix(signal);
+  const base = typeof label === 'string' && label.trim() ? label.trim() : 'Signal';
+  return suffix ? `${base} · ${suffix}` : base;
+};
+
 export const resolveSignalCursorEpoch = (signal) => (
   toSignalEpochSeconds(signal?.known_at) ?? toSignalEpochSeconds(signal?.event_time)
 );
 
 export const buildSignalInspectionKey = (signal) => (
-  [
+  resolveSignalId(signal) || [
     signal?.indicator_id || '',
     signal?.output_name || '',
     signal?.event_key || '',
