@@ -3,7 +3,7 @@ import { Maximize2, Minimize2 } from 'lucide-react';
 import SymbolPalette from '../SymbolPalette.jsx';
 import HotkeyHint from '../HotkeyHint.jsx';
 import LoadingOverlay from '../LoadingOverlay.jsx';
-import { getPaneDefinition, listPaneDefinitions } from '../../chart/panes/registry.js';
+import { getPaneDefinition } from '../../chart/panes/registry.js';
 
 const DEFAULT_ARM_TIMEOUT_MS = 10000;
 const MIN_RECT_SIDE_PX = 4;
@@ -105,6 +105,7 @@ export function ChartSurface({
   const [selectionArmed, setSelectionArmed] = useState(false);
   const [dragRect, setDragRect] = useState(null);
   const [savedRects, setSavedRects] = useState([]);
+  const [paneLegendLayout, setPaneLegendLayout] = useState([]);
   const armTimeoutRef = useRef(null);
   const drawingRef = useRef(false);
 
@@ -290,29 +291,88 @@ export function ChartSurface({
         .filter(Boolean),
     [paneLegendEntries],
   );
-  const paneLegendLayout = useMemo(() => {
-    if (!legendSections.length) return [];
-    const paneSections = legendSections
-      .map((section) => ({ section, pane: getPaneDefinition(section.key) }))
-      .sort((left, right) => left.pane.index - right.pane.index);
-    const activeAuxPanes = listPaneDefinitions()
-      .filter((pane) => pane.key !== 'price' && paneSections.some((section) => section.pane.key === pane.key))
-      .sort((left, right) => left.index - right.index);
-    if (!activeAuxPanes.length) return [];
 
-    const priceStretch = getPaneDefinition('price').stretchFactor;
-    const totalStretch = priceStretch + activeAuxPanes.reduce((total, pane) => total + pane.stretchFactor, 0);
-    let cursor = priceStretch;
+  useEffect(() => {
+    if (!legendSections.length) {
+      setPaneLegendLayout([]);
+      return;
+    }
 
-    return paneSections.map(({ section, pane }) => {
-      const topPercent = (cursor / totalStretch) * 100;
-      cursor += pane.stretchFactor;
-      return {
-        ...section,
-        top: `calc(${topPercent}% + 8px)`,
-      };
+    const chart = chartRef?.current;
+    const shell = shellRef?.current;
+    if (!chart?.panes || !shell) return;
+
+    let frameId = null;
+    const measure = () => {
+      const panes = chart.panes?.() || [];
+
+      const paneSections = legendSections
+        .map((section) => ({ section, pane: getPaneDefinition(section.key) }))
+        .sort((left, right) => left.pane.index - right.pane.index);
+
+      const paneOffsets = [];
+      let runningTop = 0;
+      panes.forEach((paneApi, index) => {
+        paneOffsets[index] = runningTop;
+        const paneHeight = Number(paneApi?.getHeight?.());
+        if (Number.isFinite(paneHeight) && paneHeight > 0) {
+          runningTop += paneHeight;
+        }
+      });
+
+      const measured = paneSections
+        .map(({ section, pane }) => {
+          const paneApi = panes[pane.index];
+          const paneTop = paneOffsets[pane.index];
+          const paneHeight = Number(paneApi?.getHeight?.());
+          if (!Number.isFinite(paneTop) || !Number.isFinite(paneHeight) || paneHeight <= 0) return null;
+          const top = Math.max(8, Math.round(paneTop + 10));
+          return {
+            ...section,
+            top: `${top}px`,
+          };
+        })
+        .filter(Boolean);
+
+      setPaneLegendLayout((current) => {
+        if (
+          current.length === measured.length
+          && current.every((item, index) => item.key === measured[index].key && item.top === measured[index].top)
+        ) {
+          return current;
+        }
+        return measured;
+      });
+    };
+
+    const scheduleMeasure = () => {
+      if (frameId !== null) return;
+      frameId = window.requestAnimationFrame(() => {
+        frameId = null;
+        measure();
+      });
+    };
+
+    const observer = new ResizeObserver(() => {
+      scheduleMeasure();
     });
-  }, [legendSections]);
+
+    observer.observe(shell);
+    legendSections.forEach((section) => {
+      const pane = getPaneDefinition(section.key);
+      const paneElement = chart.panes?.()?.[pane.index]?.getHTMLElement?.();
+      if (paneElement) observer.observe(paneElement);
+    });
+
+    measure();
+
+    return () => {
+      if (frameId !== null) {
+        window.cancelAnimationFrame(frameId);
+      }
+      observer.disconnect();
+    };
+  }, [chartRef, legendSections, shellRef]);
 
   const chartShellClasses = useMemo(() => {
     const base =
@@ -320,7 +380,7 @@ export function ChartSurface({
     const cursor = interactionLayerActive ? 'cursor-crosshair' : '';
     const size = isFullscreen
       ? 'h-screen w-screen rounded-none'
-      : 'h-[680px] rounded-2xl';
+      : 'qt-chart-shell rounded-[5px]';
     return `${base} ${size} ${cursor}`.trim();
   }, [isFullscreen, interactionLayerActive]);
 
@@ -334,15 +394,15 @@ export function ChartSurface({
         startSelectionArm();
       }}
     >
-      <div className="pointer-events-none absolute left-6 top-6 z-10 flex max-w-[70%] flex-col gap-1 text-slate-200 drop-shadow-[0_10px_30px_rgba(0,0,0,0.65)]">
+      <div className="pointer-events-none absolute left-4 top-4 z-10 flex max-w-[70%] flex-col gap-1 text-slate-200 drop-shadow-[0_10px_30px_rgba(0,0,0,0.65)]">
         <div className="flex flex-wrap items-baseline gap-1.5">
-          <span className="text-[17px] font-semibold tracking-[-0.02em] text-white">{symbolDisplay}</span>
-          <span className="rounded-full border border-white/14 bg-black/48 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.24em] text-slate-100/92">
+          <span className="text-[14px] font-semibold tracking-[-0.02em] text-white">{symbolDisplay}</span>
+          <span className="rounded-[6px] border border-white/14 bg-black/48 px-2 py-0.5 text-[8px] font-semibold uppercase tracking-[0.18em] text-slate-100/92">
             {intervalDisplay}
           </span>
         </div>
         {instrumentMeta ? (
-          <div className="text-[9px] font-semibold uppercase tracking-[0.28em] text-slate-300/78">
+          <div className="text-[8px] font-semibold uppercase tracking-[0.2em] text-slate-300/78">
             {instrumentMeta}
           </div>
         ) : null}
@@ -352,7 +412,7 @@ export function ChartSurface({
           {paneLegendLayout.map((section) => (
             <div
               key={section.key}
-              className="absolute left-3 rounded-md border border-white/7 bg-black/26 px-1.5 py-1 backdrop-blur-[6px]"
+              className="absolute left-3 rounded-[5px] border border-white/7 bg-black/26 px-1.5 py-1 backdrop-blur-[6px]"
               style={{ top: section.top }}
             >
               <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
@@ -378,7 +438,7 @@ export function ChartSurface({
             type="button"
             data-chart-ui-control="true"
             onClick={clearSelections}
-            className="pointer-events-auto inline-flex items-center rounded-full border border-white/10 bg-black/34 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.2em] text-slate-100/86 transition hover:border-white/20 hover:bg-black/52 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--accent-ring-strong)]"
+            className="pointer-events-auto inline-flex items-center rounded-[6px] border border-white/10 bg-black/34 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-100/86 transition hover:border-white/20 hover:bg-black/52 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--accent-ring-strong)]"
             title="Clear temporary selections (Esc)"
           >
             Clear marks
@@ -391,7 +451,7 @@ export function ChartSurface({
           data-chart-ui-control="true"
           aria-pressed={isFullscreen}
           onClick={toggleFullscreen}
-          className="pointer-events-auto inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/12 bg-black/42 text-slate-100/90 shadow-[0_8px_24px_rgba(0,0,0,0.28)] transition hover:border-white/24 hover:bg-black/58 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--accent-ring-strong)]"
+          className="pointer-events-auto inline-flex h-8 w-8 items-center justify-center rounded-[6px] border border-white/12 bg-black/42 text-slate-100/90 shadow-[0_8px_24px_rgba(0,0,0,0.28)] transition hover:border-white/24 hover:bg-black/58 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--accent-ring-strong)]"
           title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
         >
           {isFullscreen ? (
@@ -411,20 +471,20 @@ export function ChartSurface({
       />
       {chartStateNotice?.message && chartStateNotice.state !== 'ready' && chartStateNotice.state !== 'loading' ? (
         <div className="pointer-events-none absolute inset-0 z-[5] grid place-items-center px-6">
-          <div className="relative max-w-xl rounded-2xl border border-white/8 bg-black/70 px-6 py-5 text-center text-sm text-slate-200 shadow-[0_26px_90px_rgba(0,0,0,0.7)] backdrop-blur">
-            <div className="pointer-events-none absolute inset-2 rounded-2xl bg-[radial-gradient(circle_at_center,_rgba(255,255,255,0.06),_transparent_55%)]" />
-            <p className="relative text-[11px] uppercase tracking-[0.32em] text-[color:var(--accent-text-soft)]">
+          <div className="relative max-w-xl rounded-[8px] border border-white/8 bg-black/70 px-6 py-5 text-center text-[12px] text-slate-200 shadow-[0_26px_90px_rgba(0,0,0,0.7)] backdrop-blur">
+            <div className="pointer-events-none absolute inset-2 rounded-[6px] bg-[radial-gradient(circle_at_center,_rgba(255,255,255,0.06),_transparent_55%)]" />
+            <p className="relative text-[10px] uppercase tracking-[0.24em] text-[color:var(--accent-text-soft)]">
               {chartStateNotice.state === 'empty'
                 ? 'No Data'
                 : chartStateNotice.state === 'error'
                   ? 'Issue'
                   : 'Status'}
             </p>
-            <p className="relative mt-2 text-base font-semibold tracking-tight text-slate-50">
+            <p className="relative mt-2 text-[15px] font-semibold tracking-tight text-slate-50">
               {chartStateNotice.message}
             </p>
             {windowSummary ? (
-              <p className="relative mt-2 text-xs text-slate-400">{windowSummary}</p>
+              <p className="relative mt-2 text-[11px] text-slate-400">{windowSummary}</p>
             ) : null}
           </div>
         </div>

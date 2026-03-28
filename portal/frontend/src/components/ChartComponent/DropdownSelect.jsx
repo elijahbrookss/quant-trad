@@ -12,6 +12,7 @@ export function DropdownSelect({
   placeholder = 'Select option',
   disabled = false,
   className = '',
+  labelMode = 'stacked',
 }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef(null);
@@ -78,25 +79,32 @@ export function DropdownSelect({
     setOpen(false);
   };
 
+  const inlineLabel = label && labelMode === 'inline';
+
   return (
-    <div ref={containerRef} className={`flex flex-col gap-2 ${className}`}>
+    <div
+      ref={containerRef}
+      className={`${inlineLabel ? 'flex items-center gap-2.5' : 'flex flex-col gap-2'} ${className}`}
+    >
       {label ? (
-        <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">{label}</span>
+        <span className={`${inlineLabel ? 'shrink-0 text-[8px] tracking-[0.16em]' : 'text-[9px] tracking-[0.18em]'} uppercase text-neutral-400`}>
+          {label}
+        </span>
       ) : null}
-      <div className="relative">
+      <div className={`relative ${inlineLabel ? 'min-w-0 flex-1' : ''}`}>
         <button
           type="button"
           disabled={disabled}
           onClick={() => setOpen((prev) => !prev)}
           aria-haspopup="listbox"
           aria-expanded={open}
-          className={`flex w-full items-center justify-between border-b border-slate-700 bg-transparent px-2 py-1.5 text-sm font-medium text-slate-200 transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
+          className={`flex w-full items-center justify-between border-b border-slate-700 bg-transparent px-2 py-1.5 text-[12px] font-medium text-slate-200 transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
             disabled
               ? 'cursor-not-allowed opacity-50'
               : 'hover:border-slate-600 hover:text-slate-100'
           } ${open ? 'border-[color:var(--accent-alpha-60)] text-[color:var(--accent-text-strong)]' : ''}`}
         >
-          <span className={`${hasSelection ? 'text-slate-100' : 'text-slate-400'}`}>
+          <span className={`min-w-0 truncate whitespace-nowrap ${hasSelection ? 'text-slate-100' : 'text-slate-400'}`}>
             {displayLabel}
           </span>
           <svg
@@ -113,7 +121,7 @@ export function DropdownSelect({
 
         <div
           role="listbox"
-          className={`absolute z-20 mt-1 w-full overflow-hidden rounded-md border border-white/12 bg-[#0e111c]/95 shadow-[0_18px_48px_rgba(0,0,0,0.45)] backdrop-blur transition-all ${
+          className={`absolute z-20 mt-1 w-full overflow-hidden rounded-[6px] border border-white/12 bg-[#0e111c]/95 shadow-[0_18px_48px_rgba(0,0,0,0.45)] backdrop-blur transition-all ${
             open ? 'max-h-96 opacity-100' : 'pointer-events-none max-h-0 opacity-0'
           }`}
         >
@@ -121,7 +129,7 @@ export function DropdownSelect({
             {groups.map((group) => (
               <div key={group.id} className="flex flex-col p-2">
                 {group.label ? (
-                  <span className="px-2 pb-2 text-[10px] font-semibold uppercase tracking-[0.28em] text-slate-500">
+                  <span className="px-2 pb-2 text-[9px] font-semibold uppercase tracking-[0.22em] text-slate-500">
                     {group.label}
                   </span>
                 ) : null}
@@ -139,7 +147,7 @@ export function DropdownSelect({
                       disabled={isOptionDisabled}
                       onClick={() => handleSelect(option.value, isOptionDisabled)}
                       title={tooltip || undefined}
-                      className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
+                      className={`flex w-full items-center justify-between rounded-[6px] px-3 py-2 text-left text-[12px] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
                         isOptionDisabled
                           ? 'cursor-not-allowed text-slate-500'
                           : isActive
@@ -150,11 +158,11 @@ export function DropdownSelect({
                       <span className="flex flex-col">
                         <span className="font-medium tracking-tight">{option.label}</span>
                         {option.description ? (
-                          <span className="text-[11px] text-slate-400">{option.description}</span>
+                          <span className="text-[10px] text-slate-400">{option.description}</span>
                         ) : null}
                       </span>
                       {option.badge ? (
-                        <span className="rounded-full border border-slate-700/70 bg-slate-800/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.28em] text-slate-300">
+                        <span className="rounded-[6px] border border-slate-700/70 bg-slate-800/60 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.2em] text-slate-300">
                           {option.badge}
                         </span>
                       ) : null}
