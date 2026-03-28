@@ -248,6 +248,7 @@ class IndicatorFactory:
             "name": record.get("name") or record.get("type") or inst_id or "Indicator",
             "params": deepcopy(record.get("params") or {}),
             "dependencies": deepcopy(record.get("dependencies") or []),
+            "output_prefs": deepcopy(record.get("output_prefs") or {}),
             "color": record.get("color"),
             "color_palette": record.get("color_palette"),
             "datasource": record.get("datasource"),
