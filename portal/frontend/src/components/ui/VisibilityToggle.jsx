@@ -16,12 +16,14 @@ export default function VisibilityToggle({
     sm: "h-7 w-7",
     md: "h-9 w-9",
     lg: "h-10 w-10",
+    xl: "h-10 w-10",
   };
 
   const iconSizeClasses = {
     sm: "size-3.5",
     md: "size-4",
     lg: "size-5",
+    xl: "size-5",
   };
 
   const handleClick = () => {
@@ -37,7 +39,7 @@ export default function VisibilityToggle({
       disabled={disabled}
       className={`
         ${sizeClasses[size] || sizeClasses.md}
-        inline-flex items-center justify-center rounded-md border transition
+        inline-flex items-center justify-center rounded-[6px] border transition
         ${
           visible
             ? "border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-12)] text-[color:var(--accent-text-soft)] hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-18)]"

@@ -190,7 +190,7 @@ export default function IndicatorCard({
   return (
     <div
       className={`
-        group relative overflow-visible rounded-lg border transition-all
+        group relative overflow-visible rounded-[6px] border transition-all
         ${selected ? "border-[color:var(--accent-alpha-60)] shadow-[0_8px_30px_-20px_rgba(0,0,0,0.9)]" : "border-white/8"}
         bg-[#0d1422]/90 hover:bg-[#0f1626] px-3 py-2.5
         ${hiddenStyles}
@@ -198,7 +198,7 @@ export default function IndicatorCard({
     >
       {/* Left color accent bar */}
       <div
-        className="absolute left-0 top-0 h-full w-1 rounded-l-lg"
+        className="absolute left-0 top-0 h-full w-1 rounded-l-[6px]"
         style={{ backgroundColor: color }}
         aria-hidden="true"
       />
@@ -229,7 +229,7 @@ export default function IndicatorCard({
             <button
               type="button"
               onClick={() => setExpanded((prev) => !prev)}
-              className="flex items-center gap-1 text-left text-sm font-semibold text-white hover:text-[color:var(--accent-text-soft)] transition"
+              className="flex items-center gap-1 text-left text-[12px] font-semibold text-white transition hover:text-[color:var(--accent-text-soft)]"
             >
               <span className="truncate max-w-[180px]" title={displayName}>
                 {displayName}
@@ -238,14 +238,14 @@ export default function IndicatorCard({
             </button>
 
             {/* Type badge */}
-            <span className="rounded bg-white/5 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-slate-400">
+            <span className="rounded-[6px] border border-white/10 bg-white/6 px-2.5 py-1 text-[10px] uppercase tracking-[0.12em] text-slate-300">
               {typeLabel}
             </span>
 
             {/* Transient status badge - only shown during operations */}
             {statusMeta && (
               <span
-                className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${statusMeta.tone}`}
+                className={`inline-flex items-center gap-1.5 rounded-[7px] border px-2 py-0.5 text-[9px] font-semibold ${statusMeta.tone}`}
               >
                 <Loader2 className="size-3 animate-spin" />
                 {statusMeta.label}
@@ -258,10 +258,10 @@ export default function IndicatorCard({
                 {summaryParams.map((item) => (
                   <span
                     key={item.key}
-                    className="inline-flex items-center gap-1 rounded border border-white/8 bg-white/5 px-1.5 py-0.5 text-[10px] text-slate-300"
+                    className="inline-flex items-center gap-1.5 rounded-[6px] border border-white/12 bg-white/7 px-2.5 py-1 text-[10px] text-slate-200"
                   >
-                    <span className="text-slate-500">{formatParamKey(item.key)}</span>
-                    <span className="text-slate-200">{formatValue(item.value)}</span>
+                    <span className="text-slate-400">{formatParamKey(item.key)}</span>
+                    <span className="text-slate-100">{formatValue(item.value)}</span>
                   </span>
                 ))}
               </div>
@@ -270,7 +270,7 @@ export default function IndicatorCard({
 
           {/* Relative time */}
           {relativeTime && !expanded && (
-            <p className="mt-0.5 text-[10px] text-slate-500">Updated {relativeTime}</p>
+            <p className="mt-0.5 text-[9px] text-slate-500">Updated {relativeTime}</p>
           )}
         </div>
 
@@ -282,7 +282,7 @@ export default function IndicatorCard({
               type="button"
               onClick={() => onGenerateSignals?.(indicator.id)}
               className={`
-                inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition
+                inline-flex items-center gap-1.5 rounded-[7px] px-3 py-1.5 text-[11px] font-semibold transition
                 ${
                   disableSignalAction || isGeneratingSignals
                     ? "cursor-not-allowed border border-white/10 text-slate-500"
@@ -310,10 +310,10 @@ export default function IndicatorCard({
               {({ close }) => (
                 <>
                   <PopoverButton
-                    className="flex h-8 w-8 items-center justify-center rounded-md border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
-                    title="Change color"
+                    className="flex h-10 w-10 items-center justify-center rounded-[6px] border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
+                    title="Change colors"
                   >
-                    <Palette className="size-3.5" />
+                    <Palette className="size-[1.15rem]" />
                   </PopoverButton>
                   <Transition
                     as={Fragment}
@@ -324,7 +324,10 @@ export default function IndicatorCard({
                     leaveFrom="opacity-100 translate-y-0"
                     leaveTo="opacity-0 translate-y-1"
                   >
-                    <PopoverPanel className="absolute right-0 top-full z-40 mt-2 w-48 rounded-xl border border-white/12 bg-[#131a2b] p-3 shadow-2xl">
+                    <PopoverPanel className="absolute right-0 top-full z-40 mt-2 w-48 rounded-[6px] border border-white/12 bg-[#131a2b] p-3 shadow-2xl">
+                      <div className="mb-2">
+                        <p className="text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-200">Colors</p>
+                      </div>
                       <div className="grid grid-cols-6 gap-1.5">
                         {colorSwatches.map((c) => (
                           <button
@@ -352,11 +355,10 @@ export default function IndicatorCard({
               {({ close }) => (
                 <>
                   <PopoverButton
-                    className="flex h-8 items-center justify-center rounded-md border border-white/10 bg-white/5 px-2 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
-                    title="Change palette"
+                    className="flex h-10 w-10 items-center justify-center rounded-[6px] border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
+                    title="Change colors"
                   >
-                    <Palette className="mr-1 size-3.5" />
-                    <span className="text-[11px] font-medium uppercase tracking-[0.18em]">Palette</span>
+                    <Palette className="size-[1.15rem]" />
                   </PopoverButton>
                   <Transition
                     as={Fragment}
@@ -367,7 +369,10 @@ export default function IndicatorCard({
                     leaveFrom="opacity-100 translate-y-0"
                     leaveTo="opacity-0 translate-y-1"
                   >
-                    <PopoverPanel className="absolute right-0 top-full z-40 mt-2 w-64 rounded-xl border border-white/12 bg-[#131a2b] p-2 shadow-2xl">
+                    <PopoverPanel className="absolute right-0 top-full z-40 mt-2 w-64 rounded-[6px] border border-white/12 bg-[#131a2b] p-2 shadow-2xl">
+                      <div className="px-2 pb-2 pt-1">
+                        <p className="text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-200">Colors</p>
+                      </div>
                       <div className="space-y-1">
                         {paletteOptions.map((palette) => {
                           const swatches = Object.values(palette?.overlay_colors || {}).slice(0, 3)
@@ -376,7 +381,7 @@ export default function IndicatorCard({
                             <button
                               key={palette?.key}
                               type="button"
-                              className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition ${
+                              className={`flex w-full items-center justify-between gap-3 rounded-[7px] border px-3 py-2 text-left transition ${
                                 selectedPalette
                                   ? 'border-[color:var(--accent-alpha-50)] bg-[color:var(--accent-alpha-10)]'
                                   : 'border-white/8 bg-white/5 hover:border-[color:var(--accent-alpha-30)]'
@@ -388,11 +393,11 @@ export default function IndicatorCard({
                               disabled={disableActions}
                             >
                               <div className="min-w-0">
-                                <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-100">
-                                  {palette?.label || palette?.key || 'Palette'}
+                                <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-100">
+                                  {palette?.label || palette?.key || 'Colors'}
                                 </div>
                                 {palette?.description ? (
-                                  <div className="mt-0.5 text-[11px] text-slate-400">
+                                  <div className="mt-0.5 text-[10px] text-slate-400">
                                     {palette.description}
                                   </div>
                                 ) : null}
@@ -423,7 +428,7 @@ export default function IndicatorCard({
             visible={visibleOnChart}
             onChange={() => onToggle?.(indicator.id)}
             disabled={busy && statusKey !== "computing" && statusKey !== "updating"}
-            size="sm"
+            size="xl"
           />
 
           {/* Context menu */}
@@ -431,10 +436,10 @@ export default function IndicatorCard({
             {({ close }) => (
               <>
                 <PopoverButton
-                  className="flex h-8 w-8 items-center justify-center rounded-md border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
+                  className="flex h-10 w-10 items-center justify-center rounded-[6px] border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
                   title="More actions"
                 >
-                  <MoreHorizontal className="size-4" />
+                  <MoreHorizontal className="size-[1.15rem]" />
                 </PopoverButton>
                 <Transition
                   as={Fragment}
@@ -445,10 +450,10 @@ export default function IndicatorCard({
                   leaveFrom="opacity-100 translate-y-0"
                   leaveTo="opacity-0 translate-y-1"
                 >
-                  <PopoverPanel className="absolute right-0 top-full z-40 mt-2 w-56 rounded-xl border border-white/12 bg-[#131a2b] p-2 shadow-2xl">
+                  <PopoverPanel className="absolute right-0 top-full z-40 mt-2 w-56 rounded-[6px] border border-white/12 bg-[#131a2b] p-2 shadow-2xl">
                     {/* Runtime / Trading section */}
                     <div className="mb-2">
-                      <p className="px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.3em] text-slate-500">
+                      <p className="px-2 py-1 text-[8px] font-semibold uppercase tracking-[0.22em] text-slate-500">
                         Runtime
                       </p>
                       <button
@@ -458,7 +463,7 @@ export default function IndicatorCard({
                         }}
                         disabled={disableActions || typeof onRecompute !== "function"}
                         className={`
-                          w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm transition
+                          w-full flex items-center gap-2.5 rounded-[7px] px-3 py-2 text-left text-[12px] transition
                           ${
                             disableActions || typeof onRecompute !== "function"
                               ? "cursor-not-allowed text-slate-500"
@@ -475,7 +480,7 @@ export default function IndicatorCard({
 
                     {/* Configuration section */}
                     <div className="my-2">
-                      <p className="px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.3em] text-slate-500">
+                      <p className="px-2 py-1 text-[8px] font-semibold uppercase tracking-[0.22em] text-slate-500">
                         Configuration
                       </p>
                       <button
@@ -483,7 +488,7 @@ export default function IndicatorCard({
                           onEdit?.(indicator);
                           close();
                         }}
-                        className="w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/5"
+                        className="w-full flex items-center gap-2.5 rounded-[7px] px-3 py-2 text-left text-[12px] text-slate-200 transition hover:bg-white/5"
                       >
                         <Pencil className="size-4" />
                         Edit Parameters
@@ -497,7 +502,7 @@ export default function IndicatorCard({
                         }}
                         disabled={duplicateDisabled}
                         className={`
-                          w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm transition
+                          w-full flex items-center gap-2.5 rounded-[7px] px-3 py-2 text-left text-[12px] transition
                           ${
                             duplicateDisabled
                               ? "cursor-not-allowed text-slate-500"
@@ -513,7 +518,7 @@ export default function IndicatorCard({
                           await copyParams();
                           close();
                         }}
-                        className="w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/5"
+                        className="w-full flex items-center gap-2.5 rounded-[7px] px-3 py-2 text-left text-[12px] text-slate-200 transition hover:bg-white/5"
                       >
                         <Copy className="size-4" />
                         Copy Params JSON
@@ -524,7 +529,7 @@ export default function IndicatorCard({
 
                     {/* Danger section */}
                     <div className="mt-2">
-                      <p className="px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.3em] text-slate-500">
+                      <p className="px-2 py-1 text-[8px] font-semibold uppercase tracking-[0.22em] text-slate-500">
                         Danger
                       </p>
                       <button
@@ -536,7 +541,7 @@ export default function IndicatorCard({
                         }}
                         disabled={disableActions}
                         className={`
-                          w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm transition
+                          w-full flex items-center gap-2.5 rounded-[7px] px-3 py-2 text-left text-[12px] transition
                           ${
                             disableActions
                               ? "cursor-not-allowed text-slate-500"
@@ -558,14 +563,14 @@ export default function IndicatorCard({
 
       {/* Failed state banner */}
       {statusKey === "failed" && (
-        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-rose-500/30 bg-rose-500/8 px-3 py-2 text-xs text-rose-100">
+        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-3 rounded-[6px] border border-rose-500/30 bg-rose-500/8 px-3 py-2 text-[11px] text-rose-100">
           <span>Indicator job failed. Keep for review or retry.</span>
           <div className="flex items-center gap-2">
             {canRetry && (
               <button
                 type="button"
                 onClick={() => onRetryCreate?.(indicator)}
-                className="rounded border border-amber-400/50 px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] text-amber-100 hover:bg-amber-500/10"
+                className="rounded-[7px] border border-amber-400/50 px-2.5 py-1 text-[9px] uppercase tracking-[0.16em] text-amber-100 hover:bg-amber-500/10"
               >
                 Retry
               </button>
@@ -574,7 +579,7 @@ export default function IndicatorCard({
               <button
                 type="button"
                 onClick={() => onRemoveLocal?.(indicator.id)}
-                className="rounded border border-white/20 px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] text-slate-100 hover:border-white/40"
+                className="rounded-[7px] border border-white/20 px-2.5 py-1 text-[9px] uppercase tracking-[0.16em] text-slate-100 hover:border-white/40"
               >
                 Remove
               </button>
@@ -585,12 +590,12 @@ export default function IndicatorCard({
 
       {/* Expanded params view */}
       {expanded && (
-        <div className="mt-3 rounded-lg border border-white/8 bg-[#0a0f1a]/60 p-3 text-xs">
+        <div className="mt-3 rounded-[6px] border border-white/8 bg-[#0a0f1a]/60 p-3 text-[11px]">
           <div className="grid gap-2 sm:grid-cols-2">
             {paramsList.map(({ key, value }) => (
               <div
                 key={key}
-                className="flex items-start gap-2 rounded border border-white/5 bg-white/5 px-2 py-1.5"
+                className="flex items-start gap-2 rounded-[7px] border border-white/5 bg-white/5 px-2 py-1.5"
               >
                 <span className="text-[10px] font-mono uppercase tracking-wide text-slate-500">{key}</span>
                 <span className="text-slate-200">{formatValue(value)}</span>
@@ -603,7 +608,7 @@ export default function IndicatorCard({
               <button
                 type="button"
                 onClick={copyId}
-                className="rounded border border-white/10 px-2 py-0.5 text-[9px] uppercase tracking-[0.18em] text-slate-300 transition hover:border-[color:var(--accent-alpha-40)]"
+                className="rounded-[7px] border border-white/10 px-2 py-0.5 text-[8px] uppercase tracking-[0.14em] text-slate-300 transition hover:border-[color:var(--accent-alpha-40)]"
               >
                 Copy
               </button>

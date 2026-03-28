@@ -14,10 +14,17 @@ import { applyIndicatorColors, runSignalGeneration } from './indicatorSignals.js
 import { normalizeIndicatorArtifactResponse } from './indicatorArtifacts.js'
 import {
   pruneIndicatorArtifactSliceCache,
-  rebuildIndicatorArtifactsFromCache,
   seedIndicatorArtifactSliceCache,
   writeIndicatorArtifactSliceCache,
 } from './indicatorOverlaySlices.js'
+import {
+  buildColorMap,
+  buildVisibleOverlaysFromCache as computeVisibleOverlaysFromCache,
+  DEFAULT_INDICATOR_COLOR,
+  indicatorIsVisibleOnChart,
+  normalizedVisibilityMap,
+  shallowEqualMap,
+} from './indicatorChartArtifacts.js'
 import {
   getIndicatorColorPalettes,
   getIndicatorSignalColor,
@@ -32,15 +39,6 @@ import { useChartState } from '../contexts/ChartStateContext'
 import IndicatorCard from './IndicatorCard.jsx';
 import DeleteIndicatorModal from './DeleteIndicatorModal.jsx';
 import DropdownSelect from './ChartComponent/DropdownSelect.jsx';
-import ActiveSignalInspectionBanner from './ActiveSignalInspectionBanner.jsx';
-import IndicatorSignalList from './IndicatorSignalList.jsx';
-import {
-  buildSignalInspectionKey,
-  formatSignalEventLabel,
-  formatSignalReferenceText,
-  resolveSignalCursorEpoch,
-  sortSignalsNewestFirst,
-} from './indicatorSignalDebug.js';
 import { createLogger } from '../utils/logger.js';
 
 
@@ -50,29 +48,8 @@ const COLOR_SWATCHES = [
   '#3b82f6', '#10b981', '#ec4899', '#14b8a6', '#eab308', '#f43f5e'
 ];
 
-const DEFAULT_INDICATOR_COLOR = '#60a5fa';
 const DEFAULT_PAGE_SIZE = 6;
 const PAGE_SIZE_OPTIONS = [6, 12, 24, 48];
-
-const buildColorMap = (list = []) => {
-  if (!Array.isArray(list)) return {};
-  return list.reduce((acc, indicator) => {
-    if (!indicator?.id) return acc;
-    const raw = typeof indicator?.color === 'string' ? indicator.color.trim() : '';
-    acc[indicator.id] = raw || DEFAULT_INDICATOR_COLOR;
-    return acc;
-  }, {});
-};
-
-const shallowEqualMap = (a = {}, b = {}) => {
-  const keysA = Object.keys(a);
-  const keysB = Object.keys(b);
-  if (keysA.length !== keysB.length) return false;
-  for (const key of keysA) {
-    if (a[key] !== b[key]) return false;
-  }
-  return true;
-};
 
 const formatIndicatorType = (type) => {
   if (!type) return 'Custom';
@@ -151,35 +128,6 @@ const sortIndicators = (list = []) => {
   });
 };
 
-const normalizedVisibilityMap = (value) => (
-  value && typeof value === 'object' && !Array.isArray(value) ? value : {}
-);
-
-const buildVisibleArtifactSets = (list = [], visibilityById = {}, activeInspection = null) => {
-  const visibleIds = new Set(
-    (list || [])
-      .filter((indicator) => indicator?.enabled !== false && visibilityById?.[indicator.id] !== false)
-      .map((indicator) => indicator?.id)
-      .filter(Boolean),
-  );
-  const inspectionIndicatorId = activeInspection?.indicatorId;
-  const indicatorIds = new Set(visibleIds);
-  const inspectionIds = new Set();
-  if (inspectionIndicatorId && visibleIds.has(inspectionIndicatorId)) {
-    indicatorIds.delete(inspectionIndicatorId);
-    inspectionIds.add(inspectionIndicatorId);
-  }
-  return {
-    indicator: indicatorIds,
-    signal: visibleIds,
-    inspection: inspectionIds,
-  };
-};
-
-const indicatorIsVisibleOnChart = (indicator, visibilityById = {}) => (
-  Boolean(indicator?.enabled !== false && visibilityById?.[indicator?.id] !== false)
-);
-
 // Manages the list of indicators and syncs enabled ones to the chart context
 export const IndicatorSection = ({ chartId }) => {
   const [indicators, setIndicators] = useState([])
@@ -206,8 +154,6 @@ export const IndicatorSection = ({ chartId }) => {
   const noticeTimerRef = useRef(null);
   const [deleteModal, setDeleteModal] = useState({ open: false, indicatorId: null, indicatorName: '' });
   const overlayRefreshSeqRef = useRef(0);
-  const [selectedSignalKey, setSelectedSignalKey] = useState(null);
-
 
   const { updateChart, getChart } = useChartState()
 
@@ -217,13 +163,9 @@ export const IndicatorSection = ({ chartId }) => {
   // Read current chart slice
   const chartState = getChart(chartId)
   const indicatorVisibilityById = normalizedVisibilityMap(chartState?.indicatorVisibilityById)
-  const signalEventsByIndicator = chartState?.signalEventsByIndicator && typeof chartState.signalEventsByIndicator === 'object'
-    ? chartState.signalEventsByIndicator
-    : {};
   const activeSignalInspection = chartState?.activeSignalInspection && typeof chartState.activeSignalInspection === 'object'
     ? chartState.activeSignalInspection
     : null;
-  const [inspectionBusyKey, setInspectionBusyKey] = useState(null);
 
   const mergeIndicatorLists = useCallback((incoming = [], previous = undefined) => {
     const prevList = Array.isArray(previous) ? previous : (Array.isArray(indicatorsRef.current) ? indicatorsRef.current : []);
@@ -396,25 +338,6 @@ export const IndicatorSection = ({ chartId }) => {
     return required.filter((key) => !contextPayload[key]);
   }, [contextPayload]);
 
-  const buildVisibleOverlaysFromCache = useCallback((sliceCache, list, colors, visibilityMap, activeInspectionOverride = undefined) => {
-    const safeList = Array.isArray(list) ? list : [];
-    const allowedIndicatorIds = new Set(safeList.map((indicator) => indicator?.id).filter(Boolean));
-    const latestChart = getChart(chartId) || {};
-    const activeInspection = activeInspectionOverride === undefined
-      ? latestChart?.activeSignalInspection || null
-      : activeInspectionOverride;
-    const seededCache = seedIndicatorArtifactSliceCache(sliceCache || {}, latestChart?.overlays || []);
-    const prunedCache = pruneIndicatorArtifactSliceCache(seededCache, allowedIndicatorIds);
-    const visibleOverlays = rebuildIndicatorArtifactsFromCache(
-      prunedCache,
-      buildVisibleArtifactSets(safeList, visibilityMap || {}, activeInspection),
-    );
-    return {
-      sliceCache: prunedCache,
-      overlays: applyIndicatorColors(visibleOverlays, colors || {}, safeList),
-    };
-  }, [chartId, getChart]);
-
   const commitOverlaySlice = useCallback((indicatorId, source, nextSlice, {
     list,
     colors,
@@ -435,12 +358,13 @@ export const IndicatorSection = ({ chartId }) => {
       },
     );
     const nextColorMap = colors || buildColorMap(safeList);
-    const { sliceCache, overlays } = buildVisibleOverlaysFromCache(
+    const { sliceCache, overlays } = computeVisibleOverlaysFromCache(
       nextSliceCache,
       safeList,
       nextColorMap,
       normalizedVisibilityMap((getChart(chartId) || {}).indicatorVisibilityById),
       activeInspection,
+      latestChart?.overlays || [],
     );
     const nextPatch = {
       indicatorArtifactSlices: sliceCache,
@@ -452,52 +376,26 @@ export const IndicatorSection = ({ chartId }) => {
     }
     updateChart(chartId, nextPatch);
     return { sliceCache, overlays };
-  }, [buildVisibleOverlaysFromCache, chartId, getChart, updateChart]);
+  }, [chartId, getChart, updateChart]);
 
   const clearActiveSignalInspection = useCallback(({ list, colors } = {}) => {
     const latestChart = getChart(chartId) || {};
     const safeList = Array.isArray(list) ? list : indicatorsRef.current;
     const nextColorMap = colors || buildColorMap(safeList);
-    const nextState = buildVisibleOverlaysFromCache(
+    const nextState = computeVisibleOverlaysFromCache(
       latestChart?.indicatorArtifactSlices || {},
       safeList,
       nextColorMap,
       normalizedVisibilityMap(latestChart?.indicatorVisibilityById),
       null,
+      latestChart?.overlays || [],
     );
     updateChart(chartId, {
       indicatorArtifactSlices: nextState.sliceCache,
       overlays: nextState.overlays,
       activeSignalInspection: null,
     });
-  }, [buildVisibleOverlaysFromCache, chartId, getChart, updateChart]);
-
-  const navigateToSignal = useCallback((signal) => {
-    const signalKey = buildSignalInspectionKey(signal);
-    setSelectedSignalKey(signalKey);
-    const cursorEpoch = resolveSignalCursorEpoch(signal);
-    if (!Number.isFinite(cursorEpoch)) {
-      setError('Cannot focus signal: signal is missing a valid known_at/event_time.');
-      return;
-    }
-    const handles = getChart(chartId)?.handles;
-    const focusFn = handles?.focusAtTime;
-    if (typeof focusFn !== 'function') {
-      warn('signal_navigation_unavailable', {
-        indicatorId: signal?.indicator_id,
-        eventKey: signal?.event_key,
-      });
-      return;
-    }
-    const focused = focusFn(Number(cursorEpoch));
-    if (!focused) {
-      warn('signal_navigation_failed', {
-        indicatorId: signal?.indicator_id,
-        eventKey: signal?.event_key,
-        cursorEpoch,
-      });
-    }
-  }, [chartId, getChart, setError, warn]);
+  }, [chartId, getChart, updateChart]);
 
   useEffect(() => {
     if (!activeSignalInspection?.indicatorId) return;
@@ -506,16 +404,6 @@ export const IndicatorSection = ({ chartId }) => {
       clearActiveSignalInspection({ list: indicators, colors: buildColorMap(indicators) });
     }
   }, [activeSignalInspection?.indicatorId, clearActiveSignalInspection, indicators]);
-
-  useEffect(() => {
-    if (!selectedSignalKey) return;
-    const exists = Object.values(signalEventsByIndicator || {}).some((signals) => (
-      Array.isArray(signals) && signals.some((signal) => buildSignalInspectionKey(signal) === selectedSignalKey)
-    ));
-    if (!exists) {
-      setSelectedSignalKey(null);
-    }
-  }, [selectedSignalKey, signalEventsByIndicator]);
 
   const requireContextPayload = useCallback(
     (reason = 'unknown') => {
@@ -651,12 +539,13 @@ export const IndicatorSection = ({ chartId }) => {
       latestChart?.indicatorArtifactSlices || {},
       new Set(working.map((indicator) => indicator?.id).filter(Boolean)),
     );
-    const seededVisibleState = buildVisibleOverlaysFromCache(
+    const seededVisibleState = computeVisibleOverlaysFromCache(
       sliceCache,
       working,
       nextColorMap,
       visibilityById,
       null,
+      latestChart?.overlays || [],
     );
     sliceCache = seededVisibleState.sliceCache;
     let mergedOverlays = seededVisibleState.overlays;
@@ -673,12 +562,13 @@ export const IndicatorSection = ({ chartId }) => {
         source: 'indicator',
         nextSlice,
       });
-      const nextState = buildVisibleOverlaysFromCache(
+      const nextState = computeVisibleOverlaysFromCache(
         sliceCache,
         working,
         nextColorMap,
         normalizedVisibilityMap((getChart(chartId) || {}).indicatorVisibilityById),
         null,
+        (getChart(chartId) || {}).overlays || [],
       );
       sliceCache = nextState.sliceCache;
       mergedOverlays = nextState.overlays;
@@ -778,12 +668,13 @@ export const IndicatorSection = ({ chartId }) => {
       return;
     }
 
-    const finalOverlays = buildVisibleOverlaysFromCache(
+    const finalOverlays = computeVisibleOverlaysFromCache(
       sliceCache,
       working,
       nextColorMap,
       normalizedVisibilityMap((getChart(chartId) || {}).indicatorVisibilityById),
       null,
+      (getChart(chartId) || {}).overlays || [],
     );
     updateChart(chartId, {
       indicatorArtifactSlices: finalOverlays.sliceCache,
@@ -1067,11 +958,13 @@ export const IndicatorSection = ({ chartId }) => {
       const latestIndicators = indicatorsRef.current;
       const latestColors = buildColorMap(latestIndicators);
       const latestChart = getChart(chartId) || {};
-      const nextOverlayState = buildVisibleOverlaysFromCache(
+      const nextOverlayState = computeVisibleOverlaysFromCache(
         latestChart?.indicatorArtifactSlices || {},
         latestIndicators,
         latestColors,
         nextVisibility,
+        latestChart?.activeSignalInspection || null,
+        latestChart?.overlays || [],
       );
       updateChart(chartId, {
         indicatorVisibilityById: nextVisibility,
@@ -1116,11 +1009,13 @@ export const IndicatorSection = ({ chartId }) => {
       const latestIndicators = indicatorsRef.current
       const latestChart = getChart(chartId) || {}
       const nextColorMap = buildColorMap(latestIndicators)
-      const nextOverlayState = buildVisibleOverlaysFromCache(
+      const nextOverlayState = computeVisibleOverlaysFromCache(
         latestChart?.indicatorArtifactSlices || {},
         latestIndicators,
         nextColorMap,
         nextVisibility,
+        latestChart?.activeSignalInspection || null,
+        latestChart?.overlays || [],
       )
       updateChart(chartId, {
         indicatorVisibilityById: nextVisibility,
@@ -1208,73 +1103,6 @@ export const IndicatorSection = ({ chartId }) => {
       logError('signal_generation_failed', e);
     }
   };
-
-  const inspectSignalOverlayState = useCallback(async (indicatorId, signal) => {
-    const indicator = indicatorsRef.current.find((entry) => entry?.id === indicatorId);
-    if (!indicator) {
-      setError('Cannot inspect signal: indicator not found.');
-      return;
-    }
-
-    navigateToSignal(signal);
-
-    const cursorEpoch = resolveSignalCursorEpoch(signal);
-    if (!Number.isFinite(cursorEpoch)) {
-      setError('Cannot inspect signal: signal is missing a valid known_at/event_time.');
-      return;
-    }
-
-    const ctx = requireContextPayload('inspect_signal_overlay');
-    if (!ctx) return;
-
-    const inspectionKey = buildSignalInspectionKey(signal);
-    setInspectionBusyKey(inspectionKey);
-    info('signal_overlay_inspection_start', {
-      indicatorId,
-      eventKey: signal?.event_key,
-      cursorEpoch,
-    });
-
-    try {
-      const payload = await fetchIndicatorOverlays(indicatorId, {
-        ...ctx,
-        cursor_epoch: cursorEpoch,
-      });
-      const overlays = normalizeIndicatorArtifactResponse(indicator, payload, { defaultSource: 'inspection' });
-      const nextInspection = {
-        indicatorId,
-        signalKey: inspectionKey,
-        eventKey: signal?.event_key || null,
-        label: formatSignalEventLabel(signal?.event_key),
-        reference: formatSignalReferenceText(signal),
-        cursorEpoch,
-        cursorTime: payload?.overlay_state?.cursor_time || null,
-      };
-      commitOverlaySlice(indicatorId, 'inspection', overlays, {
-        list: indicatorsRef.current,
-        colors: buildColorMap(indicatorsRef.current),
-        overlayLoading: false,
-        activeInspection: nextInspection,
-      });
-      setError(null);
-      info('signal_overlay_inspection_complete', {
-        indicatorId,
-        eventKey: signal?.event_key,
-        cursorEpoch,
-        overlays: overlays.length,
-      });
-    } catch (err) {
-      setError(err?.message || 'Failed to inspect signal overlay state.');
-      logError('signal_overlay_inspection_failed', {
-        indicatorId,
-        eventKey: signal?.event_key,
-        cursorEpoch,
-      }, err);
-    } finally {
-      setInspectionBusyKey(null);
-    }
-  }, [clearActiveSignalInspection, commitOverlaySlice, info, logError, navigateToSignal, requireContextPayload, setError]);
-
 
   const openEditModal = (indicator = null) => {
     if (indicator) {
@@ -1487,9 +1315,6 @@ export const IndicatorSection = ({ chartId }) => {
   const signalsLoadingByIndicator = chartState?.signalsLoadingByIndicator && typeof chartState.signalsLoadingByIndicator === 'object'
     ? chartState.signalsLoadingByIndicator
     : {}
-  const activeInspectionIndicator = activeSignalInspection?.indicatorId
-    ? indicators.find((indicator) => indicator?.id === activeSignalInspection.indicatorId) || null
-    : null;
 
   const typeOptions = useMemo(() => {
     const unique = new Set();
@@ -1618,7 +1443,7 @@ export const IndicatorSection = ({ chartId }) => {
   return (
     <div className="space-y-4">
       {error && (
-        <div className="relative rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">
+        <div className="relative rounded-[8px] border border-red-500/30 bg-red-500/10 px-4 py-3 text-[12px] text-red-100">
           <div className="pr-6">
             <p className="font-semibold text-red-200">Error</p>
             <p className="mt-1 text-red-100/90">{error}</p>
@@ -1635,18 +1460,18 @@ export const IndicatorSection = ({ chartId }) => {
       )}
 
       {notice && !error && (
-        <div className="flex items-center gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-100">
+        <div className="flex items-center gap-2 rounded-[8px] border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-100">
           <span className="h-2 w-2 rounded-full bg-amber-300" aria-hidden="true" />
           <span>{notice}</span>
         </div>
       )}
 
-      <section className="relative overflow-visible rounded-2xl border border-white/10 bg-[#0d1422]/90 shadow-[0_22px_80px_-60px_rgba(0,0,0,0.85)]">
-        <div className="relative space-y-4 p-5">
+      <section className="relative overflow-visible rounded-[8px] border border-white/10 bg-[#0d1422]/90 shadow-[0_22px_80px_-60px_rgba(0,0,0,0.85)]">
+        <div className="relative space-y-4 p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="space-y-1">
-              <p className="text-[11px] uppercase tracking-[0.32em] text-slate-400">Indicators / overlays & signals</p>
-              <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
+              <p className="text-[10px] uppercase tracking-[0.22em] text-slate-400">Indicators / overlays & signals</p>
+              <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
                 <span className="font-semibold text-slate-100">{indicatorSummary}</span>
                 <span className="h-4 w-px bg-white/10" aria-hidden="true" />
                 <span className="text-slate-500">Enabled</span>
@@ -1661,7 +1486,7 @@ export const IndicatorSection = ({ chartId }) => {
                 type="button"
                 onClick={handleRefreshList}
                 disabled={actionLocked}
-                className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold transition ${
+                className={`inline-flex items-center gap-2 rounded-[8px] border px-3 py-2 text-[11px] font-semibold transition ${
                   actionLocked
                     ? 'cursor-not-allowed border-white/10 text-slate-500'
                     : 'border-white/15 text-slate-200 hover:border-[color:var(--accent-alpha-40)] hover:text-white'
@@ -1674,7 +1499,7 @@ export const IndicatorSection = ({ chartId }) => {
                 type="button"
                 disabled={actionLocked}
                 onClick={() => openEditModal()}
-                className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold uppercase tracking-[0.2em] shadow-[0_12px_35px_-18px_var(--accent-shadow-strong)] transition ${
+                className={`inline-flex items-center gap-2 rounded-[8px] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.14em] shadow-[0_12px_35px_-18px_var(--accent-shadow-strong)] transition ${
                   actionLocked
                     ? 'cursor-not-allowed bg-[color:var(--accent-alpha-10)] text-slate-500'
                     : 'bg-[color:var(--accent-alpha-25)] text-[color:var(--accent-text-bright)] hover:bg-[color:var(--accent-alpha-35)]'
@@ -1694,14 +1519,14 @@ export const IndicatorSection = ({ chartId }) => {
                 placeholder="Search by name, type, or parameter"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full rounded-lg border border-white/10 bg-[#0b111d] px-8 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none transition focus:border-[color:var(--accent-alpha-40)] focus:ring-2 focus:ring-[color:var(--accent-ring-strong)]"
+                className="w-full rounded-[8px] border border-white/10 bg-[#0b111d] px-8 py-2 text-[12px] text-slate-100 placeholder-slate-500 outline-none transition focus:border-[color:var(--accent-alpha-40)] focus:ring-2 focus:ring-[color:var(--accent-ring-strong)]"
               />
             </label>
 
             <select
               value={typeFilter}
               onChange={(e) => setTypeFilter(e.target.value)}
-              className="w-full rounded-lg border border-white/10 bg-[#0b111d] px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-200 outline-none transition hover:border-[color:var(--accent-alpha-40)] focus:border-[color:var(--accent-alpha-60)]"
+              className="w-full rounded-[8px] border border-white/10 bg-[#0b111d] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-200 outline-none transition hover:border-[color:var(--accent-alpha-40)] focus:border-[color:var(--accent-alpha-60)]"
             >
               <option value="all">All types</option>
               {typeOptions.map((type) => (
@@ -1709,7 +1534,7 @@ export const IndicatorSection = ({ chartId }) => {
               ))}
             </select>
 
-            <label className="flex items-center gap-3 rounded-lg border border-white/10 bg-[#0b111d] px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-200">
+            <label className="flex items-center gap-3 rounded-[8px] border border-white/10 bg-[#0b111d] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-200">
               <input
                 type="checkbox"
                 className="size-4 accent-[color:var(--accent-base)]"
@@ -1719,7 +1544,7 @@ export const IndicatorSection = ({ chartId }) => {
               <span>Enabled only</span>
             </label>
 
-            <div className="flex items-center justify-end gap-2 rounded-lg border border-white/5 bg-[#0b111d] px-3 py-2 text-xs text-slate-300">
+            <div className="flex items-center justify-end gap-2 rounded-[8px] border border-white/5 bg-[#0b111d] px-3 py-2 text-[11px] text-slate-300">
               <span className="text-slate-500">Page size</span>
               <DropdownSelect
                 value={pageSize}
@@ -1730,17 +1555,17 @@ export const IndicatorSection = ({ chartId }) => {
           </div>
 
           {selectedIds.size > 0 && (
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-08)] px-4 py-3">
-              <div className="flex items-center gap-3 text-xs font-semibold text-[color:var(--accent-text-soft)]">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-[8px] border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-08)] px-4 py-3">
+              <div className="flex items-center gap-3 text-[11px] font-semibold text-[color:var(--accent-text-soft)]">
                 <span>{selectedIds.size} selected</span>
-                <span className="text-[11px] text-slate-500">Signals run per-indicator and replace only that indicator&apos;s prior signals.</span>
+                <span className="text-[10px] text-slate-500">Signals run per-indicator and replace only that indicator&apos;s prior signals.</span>
               </div>
-              <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
+              <div className="flex flex-wrap items-center gap-2 text-[11px] font-semibold">
                 <button
                   type="button"
                   disabled={actionLocked}
                   onClick={() => handleBulkToggle(true)}
-                  className={`rounded border px-3 py-1.5 transition ${
+                    className={`rounded-[7px] border px-3 py-1.5 transition ${
                     actionLocked ? 'cursor-not-allowed border-white/10 text-slate-500' : 'border-white/10 text-slate-100 hover:border-[color:var(--accent-alpha-40)] hover:text-white'
                   }`}
                 >
@@ -1750,7 +1575,7 @@ export const IndicatorSection = ({ chartId }) => {
                   type="button"
                   disabled={actionLocked}
                   onClick={() => handleBulkToggle(false)}
-                  className={`rounded border px-3 py-1.5 transition ${
+                    className={`rounded-[7px] border px-3 py-1.5 transition ${
                     actionLocked ? 'cursor-not-allowed border-white/10 text-slate-500' : 'border-white/10 text-slate-100 hover:border-[color:var(--accent-alpha-40)] hover:text-white'
                   }`}
                 >
@@ -1759,7 +1584,7 @@ export const IndicatorSection = ({ chartId }) => {
                 <button
                   type="button"
                   disabled
-                  className="rounded border border-dashed border-white/10 px-3 py-1.5 text-slate-500"
+                  className="rounded-[7px] border border-dashed border-white/10 px-3 py-1.5 text-slate-500"
                   title="Disabled: indicator jobs run one at a time."
                 >
                   Bulk signals (queued)
@@ -1768,7 +1593,7 @@ export const IndicatorSection = ({ chartId }) => {
                   type="button"
                   disabled={actionLocked}
                   onClick={handleBulkDelete}
-                  className={`rounded border px-3 py-1.5 transition ${
+                    className={`rounded-[7px] border px-3 py-1.5 transition ${
                     actionLocked ? 'cursor-not-allowed border-white/10 text-slate-500' : 'border-rose-400/40 text-rose-100 hover:border-rose-300/60 hover:text-rose-50'
                   }`}
                 >
@@ -1777,12 +1602,6 @@ export const IndicatorSection = ({ chartId }) => {
               </div>
             </div>
           )}
-
-          <ActiveSignalInspectionBanner
-            activeInspection={activeSignalInspection}
-            indicatorName={activeInspectionIndicator?.name || activeInspectionIndicator?.type || null}
-            onClear={() => clearActiveSignalInspection()}
-          />
 
           <div className="space-y-2">
             {paginatedIndicators.map(indicator => {
@@ -1795,66 +1614,54 @@ export const IndicatorSection = ({ chartId }) => {
               const displayColor = supportsCustomIndicatorColor(indicator)
                 ? (indColors[indicator.id] ?? DEFAULT_INDICATOR_COLOR)
                 : (getIndicatorSignalColor(indicator) || DEFAULT_INDICATOR_COLOR)
-              const signalRows = Array.isArray(signalEventsByIndicator?.[indicator.id])
-                ? sortSignalsNewestFirst(signalEventsByIndicator[indicator.id]).slice(0, 5)
-                : []
               return (
-                <div key={indicator.id} className="space-y-2">
-                  <IndicatorCard
-                    indicator={indicator}
-                    color={displayColor}
-                    onToggle={toggleVisibility}
-                    onEdit={openEditModal}
-                    onDelete={handleDelete}
-                    onDuplicate={handleDuplicate}
-                    onGenerateSignals={generateSignals}
-                    onSelectColor={handleSelectColor}
-                    onSelectPalette={handleSelectPalette}
-                    onRecompute={handleRecomputeOverlays}
-                    showSignalAction={showSignalAction}
-                    colorSwatches={COLOR_SWATCHES}
-                    paletteOptions={paletteOptions}
-                    isGeneratingSignals={isGenerating}
-                    disableSignalAction={disableSignals}
-                    selected={isSelected}
-                    onSelectionToggle={() => toggleIndicatorSelection(indicator.id)}
-                    duplicatePending={duplicateBusyId === indicator.id}
-                    busy={actionLocked}
-                    activeJobId={jobState.indicatorId}
-                    isVisible={isVisible}
-                    showColorControl={supportsCustomIndicatorColor(indicator)}
-                    showPaletteControl={supportsIndicatorPaletteSelection(indicator)}
-                    onRetryCreate={() => retryCreate(indicator)}
-                    onRemoveLocal={() => removeLocalIndicator(indicator.id)}
-                  />
-                  <IndicatorSignalList
-                    signals={signalRows}
-                    selectedSignalKey={selectedSignalKey}
-                    activeInspectionKey={activeSignalInspection?.signalKey || null}
-                    inspectionBusyKey={inspectionBusyKey}
-                    onSelectSignal={navigateToSignal}
-                    onInspectSignal={(signal) => inspectSignalOverlayState(indicator.id, signal)}
-                  />
-                </div>
+                <IndicatorCard
+                  key={indicator.id}
+                  indicator={indicator}
+                  color={displayColor}
+                  onToggle={toggleVisibility}
+                  onEdit={openEditModal}
+                  onDelete={handleDelete}
+                  onDuplicate={handleDuplicate}
+                  onGenerateSignals={generateSignals}
+                  onSelectColor={handleSelectColor}
+                  onSelectPalette={handleSelectPalette}
+                  onRecompute={handleRecomputeOverlays}
+                  showSignalAction={showSignalAction}
+                  colorSwatches={COLOR_SWATCHES}
+                  paletteOptions={paletteOptions}
+                  isGeneratingSignals={isGenerating}
+                  disableSignalAction={disableSignals}
+                  selected={isSelected}
+                  onSelectionToggle={() => toggleIndicatorSelection(indicator.id)}
+                  duplicatePending={duplicateBusyId === indicator.id}
+                  busy={actionLocked}
+                  activeJobId={jobState.indicatorId}
+                  isVisible={isVisible}
+                  showColorControl={supportsCustomIndicatorColor(indicator)}
+                  showPaletteControl={supportsIndicatorPaletteSelection(indicator)}
+                  onRetryCreate={() => retryCreate(indicator)}
+                  onRemoveLocal={() => removeLocalIndicator(indicator.id)}
+                />
               )
             })}
 
             {!paginatedIndicators.length && !isLoading && (
-              <div className="rounded-lg border border-dashed border-slate-800 bg-slate-900/30 px-4 py-6 text-center text-sm text-slate-500">
+              <div className="rounded-[8px] border border-dashed border-slate-800 bg-slate-900/30 px-4 py-6 text-center text-[12px] text-slate-500">
                 {noIndicatorsMessage}
               </div>
             )}
           </div>
 
           {filteredCount > pageSize && (
-            <nav className="mt-2 flex items-center justify-between gap-3 text-xs text-slate-300" aria-label="Pagination">
+            <nav className="mt-2 flex items-center justify-between gap-3 text-[11px] text-slate-300" aria-label="Pagination">
               <span className="font-medium">Page <span className="text-[color:var(--accent-text-soft)]">{currentPage}</span> of {totalPages}</span>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
                   disabled={currentPage === 1}
-                  className={`rounded px-3 py-1 transition ${
+                  className={`rounded-[7px] px-3 py-1 transition ${
                     currentPage === 1
                       ? 'cursor-not-allowed text-slate-600'
                       : 'text-slate-200 hover:bg-slate-800'
@@ -1874,7 +1681,7 @@ export const IndicatorSection = ({ chartId }) => {
                       key={pageNumber}
                       type="button"
                       onClick={() => setCurrentPage(pageNumber)}
-                      className={`rounded px-2.5 py-1 transition ${
+                      className={`rounded-[7px] px-2.5 py-1 transition ${
                         isActive
                           ? 'bg-[color:var(--accent-alpha-18)] text-[color:var(--accent-text-soft)]'
                           : 'text-slate-400 hover:bg-slate-800 hover:text-white'
@@ -1888,7 +1695,7 @@ export const IndicatorSection = ({ chartId }) => {
                   type="button"
                   onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
                   disabled={currentPage === totalPages}
-                  className={`rounded px-3 py-1 transition ${
+                  className={`rounded-[7px] px-3 py-1 transition ${
                     currentPage === totalPages
                       ? 'cursor-not-allowed text-slate-600'
                       : 'text-slate-200 hover:bg-slate-800'
