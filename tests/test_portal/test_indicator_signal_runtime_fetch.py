@@ -220,6 +220,7 @@ def test_signal_executor_enriches_contract_fields_from_replay_context(monkeypatc
 
     assert payload["runtime_path"] == SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT
     event = payload["signals"][0]
+    assert event["signal_id"].startswith("sig_")
     assert event["timeframe_seconds"] == 3600
     assert event["series_key"] == "instrument-1|1h"
     assert event["event_time"] == "2026-02-01T00:00:00Z"
@@ -234,6 +235,7 @@ def test_signal_executor_enriches_contract_fields_from_replay_context(monkeypatc
     assert overlay["payload"]["bubbles"][0]["time"] == 1769904000
     assert overlay["payload"]["bubbles"][0]["price"] == 100.5
     assert overlay["payload"]["bubbles"][0]["meta"] == "Balance Breakout"
+    assert overlay["payload"]["bubbles"][0]["signal_id"] == event["signal_id"]
 
 
 def test_signal_executor_preserves_event_contract_metadata_when_present(monkeypatch) -> None:
@@ -319,6 +321,7 @@ def test_signal_executor_preserves_event_contract_metadata_when_present(monkeypa
     )
 
     event = payload["signals"][0]
+    assert event["signal_id"].startswith("sig_")
     assert event["pattern_id"] == "balance_breakout_v2"
     assert event["series_key"] == "instrument-1|1h"
     assert event["known_at"] == "2026-02-01T00:00:00Z"
@@ -344,6 +347,7 @@ def test_signal_executor_preserves_event_contract_metadata_when_present(monkeypa
         "exchange": "cme",
     }
     bubble = payload["overlays"][0]["payload"]["bubbles"][0]
+    assert bubble["signal_id"] == event["signal_id"]
     assert bubble["label"] == "Balance Breakout Long"
     assert bubble["meta"] == "VAH 101.25"
     assert bubble["detail"] == "Trigger 100.50"

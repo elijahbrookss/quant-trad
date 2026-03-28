@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import logging
+import json
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
@@ -105,6 +107,36 @@ def _signal_reference_payload(event: Mapping[str, Any]) -> Optional[Dict[str, An
     if not reference:
         return None
     return dict(reference)
+
+
+def _build_signal_id(
+    *,
+    series_key: str,
+    indicator_id: str,
+    output_name: str,
+    event_key: str,
+    event_time: str,
+    known_at: Any,
+    direction: Any,
+    pattern_id: Any,
+    confidence: Any,
+    metadata: Mapping[str, Any],
+) -> str:
+    identity_payload = {
+        "series_key": series_key,
+        "indicator_id": indicator_id,
+        "output_name": output_name,
+        "event_key": event_key,
+        "event_time": event_time,
+        "known_at": known_at,
+        "direction": direction,
+        "pattern_id": pattern_id,
+        "confidence": confidence,
+        "metadata": metadata,
+    }
+    encoded = json.dumps(identity_payload, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    digest = hashlib.blake2b(encoded, digest_size=10).hexdigest()
+    return f"sig_{digest}"
 
 
 def _build_candles(df: pd.DataFrame) -> List[Candle]:
@@ -408,7 +440,21 @@ class IndicatorSignalExecutor:
                     metadata["datasource"] = datasource
                 if exchange:
                     metadata["exchange"] = exchange
+                resolved_known_at = known_at if known_at is not None else event_time
+                signal_id = _build_signal_id(
+                    series_key=series_key,
+                    indicator_id=indicator_key,
+                    output_name=output_name,
+                    event_key=event_key,
+                    event_time=event_time,
+                    known_at=resolved_known_at,
+                    direction=event.get("direction"),
+                    pattern_id=event.get("pattern_id"),
+                    confidence=event.get("confidence"),
+                    metadata=metadata,
+                )
                 event_payload: Dict[str, Any] = {
+                    "signal_id": signal_id,
                     "event_key": event_key,
                     "instrument_id": instrument_id,
                     "series_key": series_key,
@@ -416,7 +462,7 @@ class IndicatorSignalExecutor:
                     "output_name": output_name,
                     "symbol": symbol,
                     "event_time": event_time,
-                    "known_at": known_at if known_at is not None else event_time,
+                    "known_at": resolved_known_at,
                     "timeframe_seconds": timeframe_seconds,
                     "metadata": metadata,
                 }
@@ -449,6 +495,7 @@ class IndicatorSignalExecutor:
                 raise RuntimeError("indicator_signal_overlay_invalid: missing event_key")
             bucket = signal_bubbles_by_output.setdefault(output_name, [])
             bubble: Dict[str, Any] = {
+                "signal_id": event.get("signal_id"),
                 "time": bubble_time,
                 "price": bubble_price,
                 "label": _humanize_signal_label(event_key),
