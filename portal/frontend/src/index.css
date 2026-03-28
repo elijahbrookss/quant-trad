@@ -29,12 +29,79 @@
   --accent-shadow-soft: rgba(56, 189, 248, 0.3);
   --accent-shadow-strong: rgba(56, 189, 248, 0.55);
   --accent-gradient-spot: rgba(56, 189, 248, 0.14);
+  --app-shell-header-px: 0.875rem;
+  --app-shell-header-py: 0.5rem;
+  --app-shell-main-px: 0.625rem;
+  --app-shell-main-px-lg: 0.875rem;
+  --app-shell-main-px-xl: 1rem;
+  --app-shell-main-py: 1rem;
+  --app-section-gap: 1.5rem;
+  --ui-radius-control: 6px;
+  --ui-radius-panel: 8px;
+  --ui-radius-shell: 10px;
+  --qt-chart-height: 640px;
+  --qt-chart-height-2xl: 700px;
+  --qt-rail-width-xl: 300px;
+  --qt-rail-width-2xl: 330px;
 }
 
 html,
 body {
   background-color: #14171f;
   min-height: 100%;
+}
+
+/* Approximate the visual density of a browser zoomed-out desktop workspace
+   through a centralized density profile rather than geometric scaling, so
+   charts and other coordinate-sensitive surfaces keep native layout/input behavior. */
+html {
+  font-size: 16px;
+}
+
+@media (min-width: 1280px) {
+  html {
+    font-size: 9px;
+  }
+
+  :root {
+    --app-shell-header-px: 0.75rem;
+    --app-shell-header-py: 0.375rem;
+    --app-shell-main-px: 0.5rem;
+    --app-shell-main-px-lg: 0.75rem;
+    --app-shell-main-px-xl: 0.875rem;
+    --app-shell-main-py: 0.75rem;
+    --app-section-gap: 1rem;
+    --qt-chart-height: 515px;
+    --qt-chart-height-2xl: 560px;
+    --qt-rail-width-xl: 225px;
+    --qt-rail-width-2xl: 248px;
+  }
+}
+
+@media (min-width: 1600px) {
+  html {
+    font-size: 8.625px;
+  }
+
+  :root {
+    --qt-chart-height: 530px;
+    --qt-chart-height-2xl: 575px;
+    --qt-rail-width-xl: 220px;
+    --qt-rail-width-2xl: 242px;
+  }
+}
+
+@media (min-width: 2200px) {
+  html {
+    font-size: 8.25px;
+  }
+
+  :root {
+    --qt-chart-height: 545px;
+    --qt-chart-height-2xl: 590px;
+    --qt-rail-width-xl: 212px;
+    --qt-rail-width-2xl: 234px;
+  }
 }
 
 body {
@@ -74,6 +141,75 @@ body {
   background-color: #14171f;
   background-image: radial-gradient(circle at top, var(--accent-gradient-spot) 0%, rgba(20, 23, 31, 1) 55%);
   background-attachment: fixed;
+}
+
+.app-shell-header {
+  padding-left: var(--app-shell-header-px);
+  padding-right: var(--app-shell-header-px);
+  padding-top: var(--app-shell-header-py);
+  padding-bottom: var(--app-shell-header-py);
+}
+
+.app-shell-main {
+  padding-top: var(--app-shell-main-py);
+  padding-bottom: var(--app-shell-main-py);
+  padding-left: var(--app-shell-main-px);
+  padding-right: var(--app-shell-main-px);
+}
+
+@media (min-width: 1024px) {
+  .app-shell-main {
+    padding-left: var(--app-shell-main-px-lg);
+    padding-right: var(--app-shell-main-px-lg);
+  }
+}
+
+@media (min-width: 1280px) {
+  .app-shell-main {
+    padding-left: var(--app-shell-main-px-xl);
+    padding-right: var(--app-shell-main-px-xl);
+  }
+}
+
+.app-section-stack {
+  gap: var(--app-section-gap);
+}
+
+.qt-chart-shell {
+  height: var(--qt-chart-height);
+}
+
+@media (min-width: 1536px) {
+  .qt-chart-shell {
+    height: var(--qt-chart-height-2xl);
+  }
+}
+
+.qt-signals-rail {
+  height: var(--qt-chart-height);
+}
+
+@media (min-width: 1536px) {
+  .qt-signals-rail {
+    height: var(--qt-chart-height-2xl);
+  }
+}
+
+.qt-workspace-grid {
+  display: grid;
+  gap: 0.75rem;
+}
+
+@media (min-width: 1280px) {
+  .qt-workspace-grid {
+    grid-template-columns: minmax(0, 1fr) var(--qt-rail-width-xl);
+  }
+}
+
+@media (min-width: 1536px) {
+  .qt-workspace-grid {
+    grid-template-columns: minmax(0, 1fr) var(--qt-rail-width-2xl);
+  }
 }
 
 #tv-attr-logo {
