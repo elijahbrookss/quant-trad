@@ -84,6 +84,7 @@ export function useOverlaySync({
   setDataLoading,
   signalDetailsRef,
   setPaneLegendEntries,
+  activeSignalSelection,
 }) {
   // Overlay resource handles
   const overlayHandlesRef = useRef({ priceLines: [] });
@@ -132,6 +133,7 @@ export function useOverlaySync({
       overlays,
       bubbleAlpha: 0.16,
       normalizeTime: toSec,
+      activeSignalSelection,
       onOverlayProjected: ({ overlay, normalized }) => {
         const overlayLogger = logger.child({
           indicatorId: overlay?.ind_id,
@@ -330,7 +332,7 @@ export function useOverlaySync({
     });
 
     setDataLoading(false);
-  }, [chartRef, seriesRef, pvMgrRef, lastBarRef, barSpacingRef, logger, setDataLoading, setPaneLegendEntries]);
+  }, [activeSignalSelection, barSpacingRef, chartRef, lastBarRef, logger, pvMgrRef, seriesRef, setDataLoading, setPaneLegendEntries, signalDetailsRef]);
 
   return {
     syncOverlays,

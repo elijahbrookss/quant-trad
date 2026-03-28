@@ -1,5 +1,6 @@
 import { adaptPayload, getPaneKeyForOverlay, getPaneViewsForOverlay } from '../indicators/registry.js'
 import { getPaneDefinition } from '../panes/registry.js'
+import { formatSignalLabelWithId } from '../../components/indicatorSignalDebug.js'
 
 const toRgba = (hex, alpha = 0.16) => {
   if (typeof hex !== 'string') return undefined
@@ -25,6 +26,7 @@ export function projectOverlayPayloads({
   overlays = [],
   bubbleAlpha = 0.16,
   normalizeTime = (value) => value,
+  activeSignalSelection = null,
   onOverlayProjected = null,
 } = {}) {
   const priceLines = []
@@ -89,13 +91,22 @@ export function projectOverlayPayloads({
     appendToPaneGroup(markersByPane, paneKey, normalized.markers)
 
     if (Array.isArray(normalized.bubbles) && normalized.bubbles.length) {
+      const selectedSignalId = typeof activeSignalSelection?.signalId === 'string'
+        ? activeSignalSelection.signalId.trim()
+        : '';
       const tinted = resolvedColor
         ? normalized.bubbles.map((bubble) => ({
             ...bubble,
+            label: formatSignalLabelWithId(bubble?.label, bubble),
+            isSelected: Boolean(selectedSignalId && bubble?.signal_id === selectedSignalId),
             accentColor: resolvedColor,
             backgroundColor: toRgba(resolvedColor, bubbleAlpha) || bubble.backgroundColor,
           }))
-        : normalized.bubbles
+        : normalized.bubbles.map((bubble) => ({
+            ...bubble,
+            label: formatSignalLabelWithId(bubble?.label, bubble),
+            isSelected: Boolean(selectedSignalId && bubble?.signal_id === selectedSignalId),
+          }))
       appendToPaneGroup(bubblesByPane, paneKey, tinted)
       for (const bubble of tinted) {
         const epoch = normalizeTime(bubble?.time)
