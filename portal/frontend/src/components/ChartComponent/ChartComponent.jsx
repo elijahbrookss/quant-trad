@@ -513,6 +513,13 @@ export const ChartComponent = ({ chartId }) => {
     const scaleApi = chart?.timeScale?.();
     const targetEpoch = Number(epoch);
     if (!scaleApi || !Number.isFinite(targetEpoch)) return false;
+    const zoomMode = options?.zoomMode === 'signal' ? 'signal' : 'preserve';
+
+    debug('signal_focus_requested', {
+      targetEpoch,
+      zoomMode,
+      candleCount: candleTimesRef.current.length,
+    });
 
     if (pendingFocusEpochRef.current === targetEpoch) {
       return true;
@@ -541,7 +548,19 @@ export const ChartComponent = ({ chartId }) => {
       const resolvedSpan = Number.isFinite(currentSpan) && currentSpan > 0
         ? currentSpan
         : timeframeSeconds * 48;
-      const zoomMode = options?.zoomMode === 'signal' ? 'signal' : 'preserve';
+      const snappedEpoch = Number.isFinite(targetIndex) ? seriesTimes[targetIndex] : scheduledEpoch;
+      debug('signal_focus_resolved', {
+        scheduledEpoch,
+        snappedEpoch,
+        targetIndex,
+        firstSeriesEpoch: seriesTimes[0] ?? null,
+        lastSeriesEpoch: seriesTimes.length ? seriesTimes[seriesTimes.length - 1] : null,
+        currentRangeFrom: currentRange?.from ?? null,
+        currentRangeTo: currentRange?.to ?? null,
+        currentLogicalFrom: currentLogicalRange?.from ?? null,
+        currentLogicalTo: currentLogicalRange?.to ?? null,
+        zoomMode,
+      });
       if (Number.isFinite(targetIndex) && typeof scheduledScaleApi.setVisibleLogicalRange === 'function') {
         const fallbackBars = Math.max(24, Math.round(resolvedSpan / timeframeSeconds));
         const resolvedBars = Number.isFinite(currentLogicalSpan) && currentLogicalSpan > 0
@@ -557,7 +576,6 @@ export const ChartComponent = ({ chartId }) => {
           to: targetIndex + rightBars,
         });
       } else {
-        const snappedEpoch = Number.isFinite(targetIndex) ? seriesTimes[targetIndex] : scheduledEpoch;
         const targetSpan = zoomMode === 'signal'
           ? Math.max(
               timeframeSeconds * 24,
@@ -572,11 +590,13 @@ export const ChartComponent = ({ chartId }) => {
           to: snappedEpoch + rightSpan,
         });
       }
-      scheduledScaleApi.scrollToPosition?.(0, false);
+      if (zoomMode !== 'signal') {
+        scheduledScaleApi.scrollToPosition?.(0, false);
+      }
     });
 
     return true;
-  }, []);
+  }, [debug]);
 
   useEffect(() => () => {
     if (focusFrameRef.current != null) {
