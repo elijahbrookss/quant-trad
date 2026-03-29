@@ -12,7 +12,7 @@ from engines.bot_runtime.core.domain import StrategySignal
 class SignalConsumption:
     epoch: int
     consumed_signals: List[Dict[str, object]]
-    chosen_direction: Optional[str]
+    chosen_signal: Optional[Dict[str, object]]
 
 
 def consume_signals(
@@ -20,14 +20,23 @@ def consume_signals(
     *,
     epoch: int,
     last_consumed_epoch: int,
-) -> Tuple[List[Dict[str, object]], Optional[str], int]:
+) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]], int]:
     consumed: List[Dict[str, object]] = []
     while signals and signals[0].epoch <= epoch:
         signal = signals.popleft()
         if signal.epoch <= last_consumed_epoch:
             continue
-        consumed.append({"epoch": signal.epoch, "direction": signal.direction})
-    chosen = consumed[-1]["direction"] if consumed else None
+        consumed.append(
+            {
+                "epoch": signal.epoch,
+                "direction": signal.direction,
+                "decision_id": signal.decision_id,
+                "rule_id": signal.rule_id,
+                "intent": signal.intent,
+                "event_key": signal.event_key,
+            }
+        )
+    chosen = consumed[-1] if consumed else None
     updated_last = last_consumed_epoch
     if consumed:
         updated_last = max(updated_last, consumed[-1]["epoch"])

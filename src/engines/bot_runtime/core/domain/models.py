@@ -64,6 +64,10 @@ class StrategySignal:
 
     epoch: int
     direction: str
+    decision_id: Optional[str] = None
+    rule_id: Optional[str] = None
+    intent: Optional[str] = None
+    event_key: Optional[str] = None
 
 
 @dataclass

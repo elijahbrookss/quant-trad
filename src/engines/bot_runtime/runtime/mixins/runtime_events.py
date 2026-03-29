@@ -250,12 +250,25 @@ class RuntimeEventsMixin:
             "symbol": event.symbol,
             "timeframe": event.timeframe,
             "side": payload.get("direction") or payload.get("side"),
+            "decision_id": payload.get("decision_id"),
+            "rule_id": payload.get("rule_id"),
+            "intent": payload.get("intent"),
+            "event_key": payload.get("event_key"),
             "qty": payload.get("qty"),
             "price": payload.get("price"),
             "event_impact_pnl": payload.get("event_impact_pnl"),
             "trade_net_pnl": payload.get("trade_net_pnl"),
             "reason_detail": payload.get("message"),
-            "context": payload.get("context"),
+            "rejection_stage": (
+                payload.get("rejection_artifact", {}).get("rejection_stage")
+                if isinstance(payload.get("rejection_artifact"), Mapping)
+                else None
+            ),
+            "context": (
+                payload.get("rejection_artifact", {}).get("context")
+                if isinstance(payload.get("rejection_artifact"), Mapping)
+                else None
+            ),
         }
 
     def _persist_runtime_event(self, event: RuntimeEvent) -> None:
@@ -429,7 +442,19 @@ class RuntimeEventsMixin:
             category=RuntimeEventCategory.RUNTIME,
         )
 
-    def _emit_signal_event(self, *, series: StrategySeries, candle: Candle, direction: str) -> RuntimeEvent:
+    def _emit_signal_event(
+        self,
+        *,
+        series: StrategySeries,
+        candle: Candle,
+        direction: str,
+        decision_artifact: Optional[Mapping[str, Any]] = None,
+    ) -> RuntimeEvent:
+        trigger = (
+            decision_artifact.get("trigger")
+            if isinstance(decision_artifact, Mapping) and isinstance(decision_artifact.get("trigger"), Mapping)
+            else {}
+        )
         return self._emit_runtime_event(
             event_name=RuntimeEventName.SIGNAL_EMITTED,
             series=series,
@@ -439,6 +464,11 @@ class RuntimeEventsMixin:
                 "signal_type": "strategy_signal",
                 "direction": direction,
                 "signal_price": float(candle.close),
+                "decision_id": decision_artifact.get("decision_id") if isinstance(decision_artifact, Mapping) else None,
+                "rule_id": decision_artifact.get("rule_id") if isinstance(decision_artifact, Mapping) else None,
+                "intent": decision_artifact.get("emitted_intent") if isinstance(decision_artifact, Mapping) else None,
+                "event_key": trigger.get("event_key"),
+                "decision_artifact": dict(decision_artifact or {}),
                 "bar": {
                     "time": _isoformat(candle.time),
                     "open": float(candle.open),
@@ -456,12 +486,13 @@ class RuntimeEventsMixin:
         series: StrategySeries,
         candle: Candle,
         decision: str,
+        decision_artifact: Optional[Mapping[str, Any]],
+        rejection_artifact: Optional[Mapping[str, Any]],
         direction: Optional[str],
         signal_price: float,
         reason_code: str,
         message: Optional[str],
         trade_id: Optional[str],
-        context: Optional[Mapping[str, Any]],
     ) -> RuntimeEvent:
         correlation_id = self._bar_correlation_id(series, candle.time)
         signal_event = self._find_signal_event(series=series, correlation_id=correlation_id)
@@ -479,9 +510,18 @@ class RuntimeEventsMixin:
             "direction": direction,
             "signal_price": float(signal_price),
             "trade_id": trade_id,
-            "context": dict(context or {}),
+            "decision_id": decision_artifact.get("decision_id") if isinstance(decision_artifact, Mapping) else None,
+            "rule_id": decision_artifact.get("rule_id") if isinstance(decision_artifact, Mapping) else None,
+            "intent": decision_artifact.get("emitted_intent") if isinstance(decision_artifact, Mapping) else None,
+            "event_key": (
+                decision_artifact.get("trigger", {}).get("event_key")
+                if isinstance(decision_artifact, Mapping) and isinstance(decision_artifact.get("trigger"), Mapping)
+                else None
+            ),
             "event_subtype": "signal_accepted" if decision == "accepted" else "signal_rejected",
         }
+        if isinstance(rejection_artifact, Mapping):
+            payload["rejection_artifact"] = dict(rejection_artifact)
         if decision != "accepted":
             payload["message"] = message or "Decision rejected"
         return self._emit_runtime_event(
@@ -825,4 +865,6 @@ class RuntimeEventsMixin:
             },
             "wallet_ledger": wallet_ledger_view,
             "decision_trace": list(self._run_context.decision_trace),
+            "decision_artifacts": list(self._run_context.decision_artifacts),
+            "rejection_artifacts": list(self._run_context.rejection_artifacts),
         }
