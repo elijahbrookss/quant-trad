@@ -18,12 +18,14 @@ code_paths:
 
 This document defines the indicator authoring contract used by the rebuilt runtime indicator engine and the indicator create/edit surfaces.
 
+For the practical internal implementation pattern, see [INDICATOR_STATE_ENGINE_DESIGN_GUIDE.md](docs/architecture/indicators/INDICATOR_STATE_ENGINE_DESIGN_GUIDE.md).
+
 ## Documentation Header
 
 - `Component`: Indicator authoring and runtime integration contract
 - `Owner/Domain`: Indicators / Runtime Contracts
 - `Doc Version`: 2.0
-- `Related Contracts`: [[00_system_contract]], [[01_runtime_contract]], [[BOT_RUNTIME_ENGINE_ARCHITECTURE]], `src/engines/indicator_engine/contracts.py`, `src/engines/indicator_engine/runtime_engine.py`
+- `Related Contracts`: [[00_system_contract]], [[01_runtime_contract]], [[BOT_RUNTIME_ENGINE_ARCHITECTURE]], [INDICATOR_STATE_ENGINE_DESIGN_GUIDE.md](docs/architecture/indicators/INDICATOR_STATE_ENGINE_DESIGN_GUIDE.md), `src/engines/indicator_engine/contracts.py`, `src/engines/indicator_engine/runtime_engine.py`
 
 ## 1) Problem and scope
 
@@ -291,6 +293,9 @@ Good example:
   - context: `value_location`
   - context: `balance_state`
   - signal: `balance_breakout`
+  - signal: `confirmed_balance_breakout`
+  - signal: `balance_reclaim`
+  - signal: `balance_retest`
   - overlays: `value_area`
 
 Bad example:
