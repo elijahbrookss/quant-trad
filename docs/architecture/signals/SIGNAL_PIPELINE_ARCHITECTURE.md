@@ -106,6 +106,9 @@ Canonical signal-output event item:
 - optional `metadata`,
 - `metadata.reference` is the generic level/reference contract for UI/debug consumers when a signal refers to a concrete price level.
 
+Example:
+- a Market Profile breakout family may emit a raw breakout, then a confirmed breakout, then a fast reclaim, then a stricter structural retest as separate typed `signal` outputs, with `pattern_id` linking the sequence while each event remains independently known-at correct.
+
 `metadata.reference` contract:
 - `kind`: semantic class such as `price_level`,
 - optional `family`: indicator/domain grouping such as `value_area` or `pivot`,

@@ -56,9 +56,11 @@ Responsibilities:
   - `value_location`
   - `balance_state`
   - `balance_breakout`
+  - `confirmed_balance_breakout`
+  - `balance_reclaim`
+  - `balance_retest`
 - publish manifest-declared overlays:
   - `value_area`
-  - `breakout_markers`
 
 Rules:
 - runtime outputs derive from canonical profile state,
@@ -68,6 +70,11 @@ Rules:
 - known-at profile resolution is incremental: once a non-overlapping profile breaks a merge chain, earlier merged clusters are closed and must not be reopened by later profiles,
 - `overlay_snapshot()` materializes the current value-area overlay from that current state when a consumer asks for it,
 - `balance_breakout` signal events carry a generic `metadata.reference` contract pointing at the canonical referenced level (`VAH` or `VAL`) plus additive context such as active value-area bounds and trigger price,
+- confirmation, reclaim, and retest are indicator-owned temporal state, not strategy-owned sequencing,
+- `confirmed_balance_breakout` is emitted only after the configured consecutive outside-bar confirmation count is satisfied,
+- `balance_reclaim` is emitted only after a confirmed breakout completes the `outside -> inside -> outside` reclaim sequence within the configured reclaim window,
+- `balance_retest` is emitted only after breakout acceptance is established away from value and a later ATR-normalized pullback tests and holds the referenced boundary,
+- confirmed breakout, reclaim, and retest events carry a shared `pattern_id` plus canonical breakout/reclaim/retest timing fields in `metadata`,
 - strategies consume typed outputs only,
 - overlay consumers consume canonical overlay payloads only,
 - runtime consumers do not reconstruct value areas from hidden engine state.
@@ -79,7 +86,7 @@ Code path:
 
 Responsibilities:
 - emit canonical market-profile overlay payloads directly from indicator-owned state,
-- keep value-area boxes and breakout markers aligned with the same bar timeline as typed outputs.
+- keep value-area boxes aligned with the same bar timeline as typed outputs.
 
 Rules:
 - overlays are optional and chart-only,

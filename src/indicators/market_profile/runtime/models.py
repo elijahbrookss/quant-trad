@@ -15,6 +15,9 @@ class MarketProfileBarState:
     previous_location: str | None
     location: str
     balance_state: str
+    open: float
+    high: float
+    low: float
     close: float
     val: float
     vah: float

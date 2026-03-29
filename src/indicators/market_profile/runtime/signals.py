@@ -11,7 +11,12 @@ from .models import MarketProfileBarState
 SignalEventBuilder = Callable[[MarketProfileBarState], list[dict[str, Any]]]
 
 
-def _value_area_reference(state: MarketProfileBarState, *, level_name: str, price: float) -> dict[str, Any]:
+def build_value_area_reference(
+    state: MarketProfileBarState,
+    *,
+    level_name: str,
+    price: float,
+) -> dict[str, Any]:
     return {
         "kind": "price_level",
         "family": "value_area",
@@ -39,7 +44,7 @@ def _balance_breakout_events(state: MarketProfileBarState) -> list[dict[str, Any
             "direction": "long",
             "metadata": {
                 "trigger_price": float(state.close),
-                "reference": _value_area_reference(state, level_name="VAH", price=state.vah),
+                "reference": build_value_area_reference(state, level_name="VAH", price=state.vah),
             },
         }]
     if state.previous_location == "inside_value" and state.location == "below_value":
@@ -48,7 +53,7 @@ def _balance_breakout_events(state: MarketProfileBarState) -> list[dict[str, Any
             "direction": "short",
             "metadata": {
                 "trigger_price": float(state.close),
-                "reference": _value_area_reference(state, level_name="VAL", price=state.val),
+                "reference": build_value_area_reference(state, level_name="VAL", price=state.val),
             },
         }]
     return []
@@ -70,4 +75,4 @@ def build_signal_outputs(state: MarketProfileBarState) -> dict[str, RuntimeOutpu
     return outputs
 
 
-__all__ = ["SIGNAL_EVENT_BUILDERS", "build_signal_outputs"]
+__all__ = ["SIGNAL_EVENT_BUILDERS", "build_signal_outputs", "build_value_area_reference"]
