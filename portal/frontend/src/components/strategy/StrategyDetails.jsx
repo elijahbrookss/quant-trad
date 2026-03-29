@@ -455,7 +455,7 @@ const StrategyDetails = ({
         </TabPanel>
 
         <TabPanel active={activeTab === 'logic'}>
-          <p className="px-6 pb-2 text-xs text-slate-400">Attach indicators, inspect typed outputs, and compose trigger-to-action rule flows.</p>
+          <p className="px-6 pb-2 text-xs text-slate-400">Attach indicators, inspect typed outputs, and compose trigger-to-intent strategy rules.</p>
           <RulesTab
             strategy={strategy}
             attachedIndicators={attachedIndicators}

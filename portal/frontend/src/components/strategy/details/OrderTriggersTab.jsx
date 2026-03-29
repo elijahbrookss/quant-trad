@@ -23,10 +23,22 @@ const DATE_PRESETS = [
 
 const guardLabel = (guard) => {
   if (guard?.type === 'context_match') {
-    return `${guard.output_name}: ${guard.actual ?? '—'}`
+    return `${guard.output_ref || 'context'}.${guard.field || 'state'} = ${guard.actual ?? '—'}`
   }
   if (guard?.type === 'metric_match') {
-    return `${guard.output_name}.${guard.field} ${guard.operator} ${guard.expected} (actual ${guard.actual ?? '—'})`
+    return `${guard.output_ref || 'metric'}.${guard.field} ${guard.operator} ${guard.expected} (actual ${guard.actual ?? '—'})`
+  }
+  if (guard?.type === 'holds_for_bars') {
+    const matchedBars = Array.isArray(guard?.bars_evaluated)
+      ? guard.bars_evaluated.filter((entry) => Boolean(entry?.matched)).length
+      : 0
+    return `${guard.base?.output_ref || 'signal'} held ${matchedBars}/${guard.bars || 0} bars`
+  }
+  if (guard?.type === 'signal_seen_within_bars') {
+    return `${guard.output_ref || 'signal'}.${guard.event_key} seen within ${guard.lookback_bars} bars`
+  }
+  if (guard?.type === 'signal_absent_within_bars') {
+    return `${guard.output_ref || 'signal'}.${guard.event_key} absent within ${guard.lookback_bars} bars`
   }
   return 'Guard'
 }
@@ -71,8 +83,8 @@ export const OrderTriggersTab = ({
   const latestTrigger = triggerRows[0] || null
   const uniqueRuleIds = new Set(triggerRows.map((row) => row.ruleId).filter(Boolean))
   const uniqueIndicatorIds = new Set(triggerRows.map((row) => row.indicatorId).filter(Boolean))
-  const buyCount = triggerRows.filter((row) => row.direction === 'BUY').length
-  const sellCount = triggerRows.filter((row) => row.direction === 'SELL').length
+  const longCount = triggerRows.filter((row) => row.direction === 'BUY').length
+  const shortCount = triggerRows.filter((row) => row.direction === 'SELL').length
 
   const filteredRows = useMemo(() => {
     const query = String(filterQuery || '').trim().toLowerCase()
@@ -239,14 +251,14 @@ export const OrderTriggersTab = ({
         <div className="flex flex-wrap items-center gap-4 rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2">
           <div className="flex items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-emerald-500" />
-            <span className="text-sm font-medium text-white">{buyCount}</span>
-            <span className="text-xs text-slate-500">buy triggers</span>
+            <span className="text-sm font-medium text-white">{longCount}</span>
+            <span className="text-xs text-slate-500">long decisions</span>
           </div>
           <div className="h-4 w-px bg-white/10" />
           <div className="flex items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-rose-500" />
-            <span className="text-sm font-medium text-white">{sellCount}</span>
-            <span className="text-xs text-slate-500">sell triggers</span>
+            <span className="text-sm font-medium text-white">{shortCount}</span>
+            <span className="text-xs text-slate-500">short decisions</span>
           </div>
           <div className="h-4 w-px bg-white/10" />
           <span className="text-xs text-slate-400">
@@ -276,8 +288,8 @@ export const OrderTriggersTab = ({
           <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-sm font-semibold text-white">Recent trigger events</p>
-                <p className="text-xs text-slate-400">These rows are built directly from typed signal outputs that passed rule evaluation.</p>
+                <p className="text-sm font-semibold text-white">Recent decision events</p>
+                <p className="text-xs text-slate-400">These rows are built directly from canonical decision artifacts selected by rule evaluation.</p>
                 {latestTrigger?.timestamp && (
                   <p className="mt-1 text-[11px] text-slate-500">
                     Latest: <span className="text-slate-300">{latestTrigger.timestamp}</span>
@@ -286,7 +298,7 @@ export const OrderTriggersTab = ({
               </div>
               <div className="flex flex-col items-end gap-1">
                 <span className="rounded-full border border-white/10 bg-black/50 px-3 py-1 text-[10px] uppercase tracking-[0.25em] text-slate-300">
-                  {triggerRows.length || 0} events
+                  {triggerRows.length || 0} decisions
                 </span>
               </div>
             </div>

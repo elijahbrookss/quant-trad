@@ -8,16 +8,18 @@ export const StrategyPreviewSummary = ({ result, instrumentId }) => {
 
   const {
     window,
-    trigger_rows: triggerRows = [],
+    decision_artifacts: decisionArtifacts = [],
     overlays: overlays = [],
     status,
     missing_indicators: missingIndicatorsRaw = [],
   } = instrumentResult
 
-  const rows = Array.isArray(triggerRows) ? triggerRows : []
-  const buyCount = rows.filter((entry) => String(entry?.action || '').toLowerCase() === 'buy').length
-  const sellCount = rows.filter((entry) => String(entry?.action || '').toLowerCase() === 'sell').length
-  const matchedRules = new Set(rows.map((entry) => entry?.strategy_rule_id).filter(Boolean)).size
+  const rows = Array.isArray(decisionArtifacts)
+    ? decisionArtifacts.filter((entry) => String(entry?.evaluation_result || '') === 'matched_selected')
+    : []
+  const buyCount = rows.filter((entry) => String(entry?.emitted_intent || '') === 'enter_long').length
+  const sellCount = rows.filter((entry) => String(entry?.emitted_intent || '') === 'enter_short').length
+  const matchedRules = new Set(rows.map((entry) => entry?.rule_id).filter(Boolean)).size
   const missingIndicators = Array.isArray(missingIndicatorsRaw)
     ? missingIndicatorsRaw.filter(Boolean)
     : []
@@ -57,7 +59,7 @@ export const StrategyPreviewSummary = ({ result, instrumentId }) => {
         <div className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 p-3 text-indigo-100">
           <p className="text-[10px] uppercase tracking-[0.3em] text-indigo-200/80">Rules Hit</p>
           <p className="text-lg font-semibold">{matchedRules}</p>
-          <p className="text-[11px] text-indigo-200/80">{rows.length} trigger event{rows.length === 1 ? '' : 's'}</p>
+          <p className="text-[11px] text-indigo-200/80">{rows.length} selected decision{rows.length === 1 ? '' : 's'}</p>
         </div>
         <div className="rounded-lg border border-sky-500/30 bg-sky-500/10 p-3 text-sky-100">
           <p className="text-[10px] uppercase tracking-[0.3em] text-sky-200/80">Overlays</p>
