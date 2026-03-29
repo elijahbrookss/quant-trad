@@ -23,6 +23,7 @@ def _runtime_deps() -> BotRuntimeDeps:
         strategy_evaluate=lambda *args, **kwargs: {},
         strategy_run_preview=lambda *args, **kwargs: {},
         indicator_get_instance_meta=lambda *args, **kwargs: {},
+        indicator_build_runtime_graph=lambda *args, **kwargs: ({}, []),
         indicator_build_runtime_instance=lambda *args, **kwargs: None,
         indicator_runtime_input_plan_for_instance=lambda *args, **kwargs: {},
         build_indicator_context=lambda bot_id, _overlay_cache: SimpleNamespace(
@@ -88,3 +89,5 @@ def test_run_artifact_payload_contains_runtime_event_stream_and_derived_views(mo
     assert "wallet_end" in artifact
     assert artifact["runtime_event_stream"][0]["event_name"] == RuntimeEventName.WALLET_INITIALIZED.value
     assert artifact["decision_trace"][1]["event_subtype"] == "strategy_signal"
+    assert artifact["decision_artifacts"] == []
+    assert artifact["rejection_artifacts"] == []

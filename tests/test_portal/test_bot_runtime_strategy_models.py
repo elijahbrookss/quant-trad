@@ -36,18 +36,23 @@ def test_strategy_to_dict_includes_rules_for_runtime_meta() -> None:
         rules={
             "rule-1": {
                 "id": "rule-1",
-                "name": "Buy breakout",
-                "action": "buy",
-                "conditions": [
-                    {"indicator_id": "ind-1", "signal_type": "breakout", "direction": "long"}
-                ],
+                "name": "Long breakout",
+                "intent": "enter_long",
+                "priority": 100,
+                "trigger": {
+                    "type": "signal_match",
+                    "indicator_id": "ind-1",
+                    "output_name": "signal",
+                    "event_key": "breakout_long",
+                },
+                "guards": [],
             }
         },
     )
 
     payload = strategy.to_dict()
     assert "rules" in payload
-    assert payload["rules"]["rule-1"]["action"] == "buy"
+    assert payload["rules"]["rule-1"]["intent"] == "enter_long"
 
 
 def test_strategy_to_dict_rules_are_copied() -> None:
@@ -63,10 +68,10 @@ def test_strategy_to_dict_rules_are_copied() -> None:
         global_risk_multiplier=None,
         indicator_links=[],
         instrument_links=[],
-        rules={"rule-1": {"id": "rule-1", "action": "buy", "conditions": []}},
+        rules={"rule-1": {"id": "rule-1", "intent": "enter_long", "trigger": {"type": "signal_match", "indicator_id": "ind-1", "output_name": "signal", "event_key": "breakout_long"}, "guards": []}},
     )
 
     payload = strategy.to_dict()
-    payload["rules"]["rule-1"]["action"] = "sell"
+    payload["rules"]["rule-1"]["intent"] = "enter_short"
 
-    assert strategy.rules["rule-1"]["action"] == "buy"
+    assert strategy.rules["rule-1"]["intent"] == "enter_long"
