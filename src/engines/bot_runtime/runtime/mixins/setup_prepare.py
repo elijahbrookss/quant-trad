@@ -885,8 +885,8 @@ class RuntimeSetupPrepareMixin:
         return _series_builder_cls()._build_candles(df, timeframe)
 
     @staticmethod
-    def _build_signals_from_trigger_rows(rows: Sequence[Mapping[str, Any]]) -> Deque[StrategySignal]:
-        return _series_builder_cls()._build_signals_from_trigger_rows(rows)
+    def _build_signals_from_decision_artifacts(artifacts: Sequence[Mapping[str, Any]]) -> Deque[StrategySignal]:
+        return _series_builder_cls()._build_signals_from_decision_artifacts(artifacts)
 
     @staticmethod
     def _strategy_key(series: StrategySeries) -> str:
