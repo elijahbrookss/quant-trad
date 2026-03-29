@@ -1,7 +1,8 @@
 import { Dialog, DialogPanel, DialogTitle, Switch } from '@headlessui/react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { fetchIndicatorTypes, fetchIndicatorType, fetchIndicators } from '../adapters/indicator.adapter.js'
+import { createLogger } from '../utils/logger.js'
 import { buildSignalOutputEnabledMap, buildSignalOutputPrefs, getIndicatorOutputsByType } from '../utils/indicatorOutputs.js'
 import DropdownSelect from './ChartComponent/DropdownSelect.jsx'
 
@@ -18,6 +19,7 @@ const EMPTY_META = {
 
 const NUMBER_FIELDS = new Set(['int', 'float'])
 const LIST_FIELDS = new Set(['int_list', 'float_list', 'string_list'])
+const SECTION_SCROLL_THRESHOLD = 8
 
 const toOptionEntry = (entry) => {
   if (entry && typeof entry === 'object' && 'value' in entry) {
@@ -257,6 +259,11 @@ const convertParamsForSave = (meta, params) => {
 }
 
 export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSave }) {
+  const logger = useMemo(
+    () => createLogger('IndicatorModal', { indicatorId: initial?.id || null }),
+    [initial?.id],
+  )
+  const { debug } = logger
   const [types, setTypes] = useState([])
   const [availableIndicators, setAvailableIndicators] = useState([])
   const [typeId, setTypeId] = useState(initial?.type || '')
@@ -267,6 +274,7 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
   const [meta, setMeta] = useState(EMPTY_META)
   const [metaError, setMetaError] = useState(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const dependencyInitKeyRef = useRef('')
 
   useEffect(() => {
     if (!isOpen) return
@@ -288,6 +296,7 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     setDependencyBindings({})
     setSignalOutputEnabled({})
     setShowAdvanced(false)
+    dependencyInitKeyRef.current = ''
   }, [initial, isOpen])
 
   useEffect(() => {
@@ -301,14 +310,6 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
         setMeta(nextMeta)
         const preparedParams = prepareInitialParams(nextMeta, initial?.params)
         setParams(preparedParams)
-        setDependencyBindings(
-          prepareInitialDependencies(
-            nextMeta,
-            initial?.dependencies,
-            availableIndicators,
-            initial?.id,
-          ),
-        )
         setSignalOutputEnabled(
           buildSignalOutputEnabledMap({
             outputs: nextMeta.outputs,
@@ -328,7 +329,6 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
       cancelled = true
     }
   }, [
-    availableIndicators,
     initial?.dependencies,
     initial?.id,
     initial?.output_prefs,
@@ -336,6 +336,32 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     initial?.typed_outputs,
     initial?.type,
     isOpen,
+    typeId,
+  ])
+
+  useEffect(() => {
+    if (!isOpen || !typeId || !meta?.type) return
+    const initKey = [
+      String(initial?.id || ''),
+      String(typeId || ''),
+      JSON.stringify(initial?.dependencies || []),
+    ].join('|')
+    if (dependencyInitKeyRef.current === initKey) return
+    dependencyInitKeyRef.current = initKey
+    setDependencyBindings(
+      prepareInitialDependencies(
+        meta,
+        initial?.dependencies,
+        availableIndicators,
+        initial?.id,
+      ),
+    )
+  }, [
+    availableIndicators,
+    initial?.dependencies,
+    initial?.id,
+    isOpen,
+    meta,
     typeId,
   ])
 
@@ -433,6 +459,8 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     [meta.dependencies],
   )
   const signalOutputs = useMemo(() => getIndicatorOutputsByType(meta, 'signal'), [meta])
+  const dependencySectionScrollable = dependencyFields.length > SECTION_SCROLL_THRESHOLD
+  const signalSectionScrollable = signalOutputs.length > SECTION_SCROLL_THRESHOLD
 
   const handleDependencyChange = (outputName) => (indicatorId) => {
     setDependencyBindings((prev) => ({ ...prev, [outputName]: indicatorId }))
@@ -470,13 +498,20 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
       return
     }
     const preparedParams = convertParamsForSave(meta, params)
+    const outputPrefs = buildSignalOutputPrefs(meta, signalOutputEnabled)
+    debug('indicator_modal_submit', {
+      indicatorId: initial?.id || null,
+      typeId,
+      signalOutputEnabled,
+      outputPrefs,
+    })
     onSave({
       id: initial?.id,
       type: typeId,
       name: name.trim(),
       params: preparedParams,
       dependencies: preparedDependencies,
-      output_prefs: buildSignalOutputPrefs(meta, signalOutputEnabled),
+      output_prefs: outputPrefs,
     })
   }
 
@@ -485,23 +520,24 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
   return (
     <Dialog open={isOpen} onClose={onClose} className="relative z-50">
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" aria-hidden="true" />
-      <div className="fixed inset-0 flex items-center justify-center p-6">
-        <DialogPanel className="flex w-full max-w-4xl max-h-[92vh] flex-col overflow-hidden rounded-xl border border-white/10 bg-[#0c111d] text-slate-100 shadow-2xl">
-          <header className="border-b border-white/10 bg-white/5 px-6 py-4">
-            <DialogTitle className="text-lg font-semibold text-white">
-              {initial?.id ? 'Edit indicator' : 'Create indicator'}
-            </DialogTitle>
-            <p className="mt-1 text-sm text-slate-400">
-              Configure indicator parameters. Required fields are marked with *.
-            </p>
-          </header>
+      <div className="fixed inset-0 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6">
+        <div className="flex min-h-full items-start justify-center sm:items-center">
+          <DialogPanel className="flex w-full max-w-[88rem] min-h-[min(72vh,44rem)] max-h-[min(94vh,72rem)] flex-col overflow-hidden rounded-[24px] border border-white/10 bg-[#0c111d] text-slate-100 shadow-2xl">
+            <header className="shrink-0 border-b border-white/10 bg-white/5 px-6 py-4 sm:px-7">
+              <DialogTitle className="text-lg font-semibold text-white">
+                {initial?.id ? 'Edit indicator' : 'Create indicator'}
+              </DialogTitle>
+              <p className="mt-1 text-sm text-slate-400">
+                Configure indicator parameters. Required fields are marked with *.
+              </p>
+            </header>
 
-          <div className="flex-1 space-y-6 overflow-y-auto px-6 py-6">
-            {(metaError || error) && (
-              <div className="rounded-md border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200 shadow-sm">
-                {metaError || error}
-              </div>
-            )}
+            <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-6 py-6 sm:px-7">
+              {(metaError || error) && (
+                <div className="rounded-md border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200 shadow-sm">
+                  {metaError || error}
+                </div>
+              )}
 
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1">
@@ -552,7 +588,7 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
                       </div>
 
                       {coreFields.length > 0 ? (
-                        <div className="grid gap-3 md:grid-cols-2">{coreFields.map(renderField)}</div>
+                        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{coreFields.map(renderField)}</div>
                       ) : (
                         <p className="text-sm text-slate-400">No configurable parameters for this indicator.</p>
                       )}
@@ -577,7 +613,7 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
                         </div>
 
                         {showAdvanced && (
-                          <div className="grid gap-3 md:grid-cols-2">{optionalFields.map(renderField)}</div>
+                          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{optionalFields.map(renderField)}</div>
                         )}
                       </div>
                     )}
@@ -596,49 +632,51 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
                         Dependent indicators must bind to a specific upstream indicator instance.
                       </p>
                     </div>
-                    <div className="grid gap-3 md:grid-cols-2">
-                      {dependencyFields.map((dependency) => {
-                        const outputName = String(dependency?.output_name || '').trim()
-                        const candidates = compatibleIndicatorsForDependency(
-                          dependency,
-                          availableIndicators,
-                          initial?.id,
-                        )
-                        const value = dependencyBindings?.[outputName] || ''
-                        return (
-                          <div
-                            key={`${dependency.indicator_type}.${outputName}`}
-                            className="space-y-2 rounded-lg border border-white/10 bg-slate-800/60 px-4 py-3 shadow-sm"
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <label className="text-sm font-semibold text-white">
-                                {dependency.label || `${formatIndicatorType(dependency.indicator_type)} Dependency`}
-                                <span className="ml-1 text-rose-300">*</span>
-                              </label>
+                    <div className={dependencySectionScrollable ? 'max-h-[min(30vh,24rem)] overflow-y-auto pr-1' : ''}>
+                      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                        {dependencyFields.map((dependency) => {
+                          const outputName = String(dependency?.output_name || '').trim()
+                          const candidates = compatibleIndicatorsForDependency(
+                            dependency,
+                            availableIndicators,
+                            initial?.id,
+                          )
+                          const value = dependencyBindings?.[outputName] || ''
+                          return (
+                            <div
+                              key={`${dependency.indicator_type}.${outputName}`}
+                              className="space-y-2 rounded-lg border border-white/10 bg-slate-800/60 px-4 py-3 shadow-sm"
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <label className="text-sm font-semibold text-white">
+                                  {dependency.label || `${formatIndicatorType(dependency.indicator_type)} Dependency`}
+                                  <span className="ml-1 text-rose-300">*</span>
+                                </label>
+                              </div>
+                              {dependency.description && (
+                                <p className="text-xs text-slate-300/80">{dependency.description}</p>
+                              )}
+                              {candidates.length ? (
+                                <DropdownSelect
+                                  value={value}
+                                  onChange={handleDependencyChange(outputName)}
+                                  placeholder={`Select ${formatIndicatorType(dependency.indicator_type)}…`}
+                                  options={candidates.map((indicator) => ({
+                                    value: indicator.id,
+                                    label: indicator.name || indicator.id,
+                                    description: `${formatIndicatorType(indicator.type)} · ${indicator.id}`,
+                                  }))}
+                                  className="w-full"
+                                />
+                              ) : (
+                                <p className="text-sm text-amber-200">
+                                  No compatible {formatIndicatorType(dependency.indicator_type)} indicators are available.
+                                </p>
+                              )}
                             </div>
-                            {dependency.description && (
-                              <p className="text-xs text-slate-300/80">{dependency.description}</p>
-                            )}
-                            {candidates.length ? (
-                              <DropdownSelect
-                                value={value}
-                                onChange={handleDependencyChange(outputName)}
-                                placeholder={`Select ${formatIndicatorType(dependency.indicator_type)}…`}
-                                options={candidates.map((indicator) => ({
-                                  value: indicator.id,
-                                  label: indicator.name || indicator.id,
-                                  description: `${formatIndicatorType(indicator.type)} · ${indicator.id}`,
-                                }))}
-                                className="w-full"
-                              />
-                            ) : (
-                              <p className="text-sm text-amber-200">
-                                No compatible {formatIndicatorType(dependency.indicator_type)} indicators are available.
-                              </p>
-                            )}
-                          </div>
-                        )
-                      })}
+                          )
+                        })}
+                      </div>
                     </div>
                   </div>
                 )}
@@ -651,38 +689,40 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
                         Signal outputs auto-discover from the indicator manifest. Disable them here to hide them from authoring and preview surfaces only. Bot runtime still evaluates whatever signals your strategy rules reference.
                       </p>
                     </div>
-                    <div className="grid gap-3 md:grid-cols-2">
-                      {signalOutputs.map((output) => {
-                        const outputName = String(output?.name || '').trim()
-                        const enabled = signalOutputEnabled[outputName] !== false
-                        return (
-                          <div
-                            key={outputName}
-                            className="space-y-2 rounded-lg border border-white/10 bg-slate-800/60 px-4 py-3 shadow-sm"
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <div>
-                                <label className="text-sm font-semibold text-white">
-                                  {output.label || outputName}
-                                </label>
-                                <p className="text-xs text-slate-400">{outputName}</p>
+                    <div className={signalSectionScrollable ? 'max-h-[min(30vh,24rem)] overflow-y-auto pr-1' : ''}>
+                      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                        {signalOutputs.map((output) => {
+                          const outputName = String(output?.name || '').trim()
+                          const enabled = signalOutputEnabled[outputName] !== false
+                          return (
+                            <div
+                              key={outputName}
+                              className="space-y-2 rounded-lg border border-white/10 bg-slate-800/60 px-4 py-3 shadow-sm"
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <label className="text-sm font-semibold text-white">
+                                    {output.label || outputName}
+                                  </label>
+                                  <p className="text-xs text-slate-400">{outputName}</p>
+                                </div>
+                                <Switch
+                                  checked={enabled}
+                                  onChange={handleSignalOutputToggle(outputName)}
+                                  className={`${enabled ? 'bg-emerald-500/70' : 'bg-slate-600/60'} relative inline-flex h-6 w-11 items-center rounded-full transition`}
+                                >
+                                  <span className={`${enabled ? 'translate-x-6' : 'translate-x-1'} inline-block h-4 w-4 transform rounded-full bg-white transition`} />
+                                </Switch>
                               </div>
-                              <Switch
-                                checked={enabled}
-                                onChange={handleSignalOutputToggle(outputName)}
-                                className={`${enabled ? 'bg-emerald-500/70' : 'bg-slate-600/60'} relative inline-flex h-6 w-11 items-center rounded-full transition`}
-                              >
-                                <span className={`${enabled ? 'translate-x-6' : 'translate-x-1'} inline-block h-4 w-4 transform rounded-full bg-white transition`} />
-                              </Switch>
+                              <p className="text-xs text-slate-300/80">
+                                {enabled
+                                  ? 'Available in indicator signal previews and rule creation.'
+                                  : 'Hidden from indicator signal previews and new rule creation.'}
+                              </p>
                             </div>
-                            <p className="text-xs text-slate-300/80">
-                              {enabled
-                                ? 'Available in indicator signal previews and rule creation.'
-                                : 'Hidden from indicator signal previews and new rule creation.'}
-                            </p>
-                          </div>
-                        )
-                      })}
+                          )
+                        })}
+                      </div>
                     </div>
                   </div>
                 )}
@@ -693,25 +733,26 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
                 Select an indicator type to configure its parameters.
               </p>
             )}
-          </div>
+            </div>
 
-          <footer className="flex items-center justify-end gap-3 border-t border-white/10 bg-white/5 px-6 py-4">
-            <button
-              type="button"
-              className="rounded-md border border-white/10 bg-transparent px-3 py-2 text-sm text-slate-200 transition hover:bg-white/10"
-              onClick={onClose}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="rounded-md bg-[color:var(--accent-alpha-40)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] transition hover:bg-[color:var(--accent-alpha-60)]"
-              onClick={handleSubmit}
-            >
-              Save indicator
-            </button>
-          </footer>
-        </DialogPanel>
+            <footer className="shrink-0 flex items-center justify-end gap-3 border-t border-white/10 bg-white/5 px-6 py-4 sm:px-7">
+              <button
+                type="button"
+                className="rounded-md border border-white/10 bg-transparent px-3 py-2 text-sm text-slate-200 transition hover:bg-white/10"
+                onClick={onClose}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded-md bg-[color:var(--accent-alpha-40)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] transition hover:bg-[color:var(--accent-alpha-60)]"
+                onClick={handleSubmit}
+              >
+                Save indicator
+              </button>
+            </footer>
+          </DialogPanel>
+        </div>
       </div>
     </Dialog>
   )

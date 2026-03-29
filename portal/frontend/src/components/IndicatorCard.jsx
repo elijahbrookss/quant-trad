@@ -13,6 +13,7 @@ import {
   Loader2,
 } from "lucide-react";
 import VisibilityToggle from "./ui/VisibilityToggle";
+import { buildSignalOutputEnabledMap } from "../utils/indicatorOutputs.js";
 
 // Keys to hide from param display
 const HIDE_KEYS = new Set([
@@ -71,6 +72,15 @@ const formatParamKey = (key) => {
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
     .join(" ");
 };
+
+const enabledSignalOutputs = (indicator) => (
+  Array.isArray(indicator?.typed_outputs)
+    ? indicator.typed_outputs.filter((entry) => {
+        if (entry?.type !== "signal" || !entry?.name) return false;
+        return buildSignalOutputEnabledMap(indicator)[String(entry.name).trim()] !== false;
+      })
+    : []
+);
 
 export default function IndicatorCard({
   indicator,
@@ -142,6 +152,9 @@ export default function IndicatorCard({
   const displayName = indicator?.name?.trim() || typeLabel || "Indicator";
   const lastUpdated = indicator?.updated_at || indicator?.created_at || null;
   const relativeTime = formatRelativeTime(lastUpdated);
+  const signalOutputs = useMemo(() => enabledSignalOutputs(indicator), [indicator]);
+  const signalSummary = useMemo(() => signalOutputs.slice(0, 2), [signalOutputs]);
+  const signalOverflow = Math.max(signalOutputs.length - signalSummary.length, 0);
 
   const visibleOnChart = typeof isVisible === "boolean" ? isVisible : indicator?.enabled !== false;
 
@@ -268,6 +281,22 @@ export default function IndicatorCard({
             )}
           </div>
 
+          {!expanded && signalSummary.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+              {signalSummary.map((entry) => (
+                <span
+                  key={entry.name}
+                  className="inline-flex items-center rounded-[6px] border border-emerald-400/20 bg-emerald-500/8 px-2 py-0.5 text-[9px] uppercase tracking-[0.12em] text-emerald-200"
+                >
+                  {entry.label || entry.name}
+                </span>
+              ))}
+              {signalOverflow > 0 && (
+                <span className="text-[9px] text-slate-500">+{signalOverflow} more</span>
+              )}
+            </div>
+          )}
+
           {/* Relative time */}
           {relativeTime && !expanded && (
             <p className="mt-0.5 text-[9px] text-slate-500">Updated {relativeTime}</p>
@@ -303,6 +332,16 @@ export default function IndicatorCard({
               )}
             </button>
           )}
+
+          <button
+            type="button"
+            onClick={() => onEdit?.(indicator)}
+            className="flex h-10 w-10 items-center justify-center rounded-[6px] border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
+            title="Edit indicator"
+            disabled={disableActions}
+          >
+            <Pencil className="size-[1.05rem]" />
+          </button>
 
           {/* Color picker popover */}
           {showColorControl && (
@@ -444,18 +483,18 @@ export default function IndicatorCard({
                 <Transition
                   as={Fragment}
                   enter="transition ease-out duration-100"
-                  enterFrom="opacity-0 translate-y-1"
-                  enterTo="opacity-100 translate-y-0"
+                  enterFrom="opacity-0 translate-y-1 scale-[0.98]"
+                  enterTo="opacity-100 translate-y-0 scale-100"
                   leave="transition ease-in duration-75"
-                  leaveFrom="opacity-100 translate-y-0"
-                  leaveTo="opacity-0 translate-y-1"
+                  leaveFrom="opacity-100 translate-y-0 scale-100"
+                  leaveTo="opacity-0 translate-y-1 scale-[0.98]"
                 >
-                  <PopoverPanel className="absolute right-0 top-full z-40 mt-2 w-56 rounded-[6px] border border-white/12 bg-[#131a2b] p-2 shadow-2xl">
-                    {/* Runtime / Trading section */}
-                    <div className="mb-2">
-                      <p className="px-2 py-1 text-[8px] font-semibold uppercase tracking-[0.22em] text-slate-500">
-                        Runtime
-                      </p>
+                  <PopoverPanel
+                    anchor={{ to: "bottom end", gap: 10, padding: 12 }}
+                    portal
+                    className="z-50 w-44 rounded-[6px] border border-white/12 bg-[#131a2b] p-1.5 shadow-2xl"
+                  >
+                    <div className="space-y-0.5">
                       <button
                         onClick={() => {
                           onRecompute?.(indicator.id);
@@ -463,7 +502,7 @@ export default function IndicatorCard({
                         }}
                         disabled={disableActions || typeof onRecompute !== "function"}
                         className={`
-                          w-full flex items-center gap-2.5 rounded-[7px] px-3 py-2 text-left text-[12px] transition
+                          flex w-full items-center gap-2 rounded-[6px] px-2.5 py-2 text-left text-[11px] transition
                           ${
                             disableActions || typeof onRecompute !== "function"
                               ? "cursor-not-allowed text-slate-500"
@@ -472,26 +511,7 @@ export default function IndicatorCard({
                         `}
                       >
                         <RefreshCw className="size-4" />
-                        Recompute Overlays
-                      </button>
-                    </div>
-
-                    <div className="h-px bg-white/8 my-1" />
-
-                    {/* Configuration section */}
-                    <div className="my-2">
-                      <p className="px-2 py-1 text-[8px] font-semibold uppercase tracking-[0.22em] text-slate-500">
-                        Configuration
-                      </p>
-                      <button
-                        onClick={() => {
-                          onEdit?.(indicator);
-                          close();
-                        }}
-                        className="w-full flex items-center gap-2.5 rounded-[7px] px-3 py-2 text-left text-[12px] text-slate-200 transition hover:bg-white/5"
-                      >
-                        <Pencil className="size-4" />
-                        Edit Parameters
+                        Recompute
                       </button>
                       <button
                         onClick={() => {
@@ -502,7 +522,7 @@ export default function IndicatorCard({
                         }}
                         disabled={duplicateDisabled}
                         className={`
-                          w-full flex items-center gap-2.5 rounded-[7px] px-3 py-2 text-left text-[12px] transition
+                          flex w-full items-center gap-2 rounded-[6px] px-2.5 py-2 text-left text-[11px] transition
                           ${
                             duplicateDisabled
                               ? "cursor-not-allowed text-slate-500"
@@ -518,20 +538,16 @@ export default function IndicatorCard({
                           await copyParams();
                           close();
                         }}
-                        className="w-full flex items-center gap-2.5 rounded-[7px] px-3 py-2 text-left text-[12px] text-slate-200 transition hover:bg-white/5"
+                        className="flex w-full items-center gap-2 rounded-[6px] px-2.5 py-2 text-left text-[11px] text-slate-200 transition hover:bg-white/5"
                       >
                         <Copy className="size-4" />
-                        Copy Params JSON
+                        Copy
                       </button>
                     </div>
 
-                    <div className="h-px bg-white/8 my-1" />
+                    <div className="my-1.5 h-px bg-white/8" />
 
-                    {/* Danger section */}
-                    <div className="mt-2">
-                      <p className="px-2 py-1 text-[8px] font-semibold uppercase tracking-[0.22em] text-slate-500">
-                        Danger
-                      </p>
+                    <div>
                       <button
                         onClick={() => {
                           if (!disableActions) {
@@ -541,7 +557,7 @@ export default function IndicatorCard({
                         }}
                         disabled={disableActions}
                         className={`
-                          w-full flex items-center gap-2.5 rounded-[7px] px-3 py-2 text-left text-[12px] transition
+                          flex w-full items-center gap-2 rounded-[6px] px-2.5 py-2 text-left text-[11px] transition
                           ${
                             disableActions
                               ? "cursor-not-allowed text-slate-500"
@@ -550,7 +566,7 @@ export default function IndicatorCard({
                         `}
                       >
                         <Trash2 className="size-4" />
-                        Delete Indicator
+                        Delete
                       </button>
                     </div>
                   </PopoverPanel>
