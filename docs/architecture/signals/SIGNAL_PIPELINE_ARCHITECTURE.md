@@ -198,7 +198,7 @@ Persistence boundaries:
 ## 8) Risks accepted
 
 - Current bot runtime rule source is `series.meta["rules"]`; if missing, runtime emits no strategy signals.
-- `Strategy.to_dict()` currently omits `rules`, while series metadata is built from `strategy.to_dict()`. This creates a shipped risk of empty rule evaluation in bot runtime.
+- Strategy preview and bot runtime still rely on adjacent evaluation surfaces rather than one shared compiled strategy contract. This remains a semantic-drift risk until the strategy decision layer converges on one canonical path.
 - QuantLab still has a distinct research endpoint, but it now derives from the same indicator output contract instead of a separate `src/signals` package.
 
 ## 9) Strict contract

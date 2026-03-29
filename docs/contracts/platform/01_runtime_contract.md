@@ -10,7 +10,8 @@ All derived outputs should follow one timeline:
 4. publish typed outputs via `snapshot()`
 5. publish optional canonical overlays via `overlay_snapshot()`
 6. evaluate strategies from published typed outputs only
-7. build downstream read models from the same bar result
+7. publish canonical decision artifacts from the same bar result
+8. build downstream read models and downstream rejection artifacts from the same bar result
 
 ## Artifact Contract
 
@@ -23,6 +24,7 @@ Public runtime surfaces are:
 Rules:
 - outputs are the only strategy-visible indicator interface,
 - overlays are not strategy inputs,
+- decision artifacts must derive from the published typed outputs for the same bar,
 - indicator overlays represent the full current visual state for the bar,
 - indicators may prepare immutable source facts before walk-forward execution when those facts are true source inputs rather than reconstructed chart history,
 - indicators must not prebuild full chart-history overlays before walk-forward execution starts,
@@ -34,6 +36,7 @@ Rules:
 - `ready=False` means unusable now, not pending,
 - runtime never waits, retries, or substitutes missing values,
 - runtime and preview consumers must not fetch overlays through a parallel overlay service path.
+- runtime and preview consumers must not reconstruct decision artifacts through a parallel rule-evaluation path.
 
 ## Cache Contract
 
