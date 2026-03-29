@@ -66,9 +66,12 @@ export const buildRegimeBlockSnapshots = (blocks = []) => {
       expansion: block?.expansion || {},
       confidence: block?.confidence ?? null,
       entry_confidence: block?.entry_confidence ?? null,
+      score_margin: block?.score_margin ?? null,
       bars: block?.bars ?? null,
       regime_key: block?.regime_key,
       block_id: block?.block_id,
+      known_at: normalizeEpoch(block?.known_at ?? block?.x1),
+      trend_direction: block?.structure?.trend_direction ?? 'neutral',
     }))
     .filter((block) => Number.isFinite(block?.x1) && Number.isFinite(block?.x2))
     .sort((a, b) => (a.x1 ?? 0) - (b.x1 ?? 0))
@@ -143,12 +146,15 @@ export const buildReadoutSnapshot = ({ focusTs, blocks, points, lastSnapshot }) 
         ? Number(block.entry_confidence)
         : null
   return {
-    structure: {
-      state: block?.structure?.state ?? 'unknown',
-      confidence: structureConfidence,
-      block_id: block?.block_id ?? null,
-      bars: block?.bars ?? null,
-    },
+      structure: {
+        state: block?.structure?.state ?? 'unknown',
+        confidence: structureConfidence,
+        block_id: block?.block_id ?? null,
+        bars: block?.bars ?? null,
+        score_margin: block?.score_margin ?? null,
+        trend_direction: block?.trend_direction ?? block?.structure?.trend_direction ?? 'neutral',
+        known_at: block?.known_at ?? null,
+      },
     volatility: {
       ...(candle?.volatility || {}),
       state: candle?.volatility?.state ?? 'unknown',
@@ -185,8 +191,14 @@ export const buildAxisTooltip = (axis, payload = {}) => {
     const confidenceText = Number.isFinite(Number(confidence))
       ? `avg_conf ${(Number(confidence) * 100).toFixed(0)}%`
       : 'avg_conf n/a'
+    const marginText = Number.isFinite(Number(payload?.score_margin))
+      ? `margin ${Number(payload.score_margin).toFixed(2)}`
+      : 'margin n/a'
     const barsText = bars ? `bars ${bars}` : 'bars n/a'
-    return `${state} • ${confidenceText} • ${barsText} • block ${blockId}`
+    const direction = payload?.trend_direction && payload?.trend_direction !== 'neutral'
+      ? ` • ${payload.trend_direction}`
+      : ''
+    return `${state}${direction} • ${confidenceText} • ${marginText} • ${barsText} • block ${blockId}`
   }
   const drivers = []
   if (axis === 'volatility') {

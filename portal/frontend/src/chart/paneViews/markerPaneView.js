@@ -43,6 +43,9 @@ export function createMarkerPaneView(timeScaleApi, priceScaleApi) {
     ctx.font = `${size}px monospace`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
+    ctx.lineWidth = Math.max(size * 0.18, 2);
+    ctx.strokeStyle = 'rgba(15, 23, 42, 0.9)';
+    ctx.strokeText(text, x, y);
     ctx.fillStyle = color;
     ctx.fillText(text, x, y);
   };
@@ -94,7 +97,16 @@ export function createMarkerPaneView(timeScaleApi, priceScaleApi) {
         // Draw text if provided
         if (marker.text) {
           const textY = marker.position === 'aboveBar' ? canvasY - size * 1.5 : canvasY + size * 1.5;
-          drawText(ctx, canvasX, textY, marker.text, color, size * 1.2);
+          const isRegimeMarker = [
+            'regime_change',
+            'regime_transition',
+            'regime_research',
+            'regime_block_label',
+          ].includes(marker.subtype);
+          const fontSize = isRegimeMarker
+            ? Math.max(size * 1.65, 14 * Math.min(hpr, vpr))
+            : Math.max(size * 1.2, 11 * Math.min(hpr, vpr));
+          drawText(ctx, canvasX, textY, marker.text, color, fontSize);
         }
       }
 
