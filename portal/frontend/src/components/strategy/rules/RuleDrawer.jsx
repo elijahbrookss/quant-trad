@@ -26,7 +26,19 @@ const eventOptions = (indicator, outputName) => {
     : []
 }
 
-const contextStateOptions = (indicator, outputName) => {
+const contextFieldOptions = (indicator, outputName) => {
+  const outputs = getIndicatorOutputsByType(indicator, 'context')
+  const output = outputs.find((entry) => entry?.name === outputName)
+  const dynamicFields = Array.isArray(output?.fields)
+    ? output.fields
+      .filter((entry) => entry && entry !== 'state')
+      .map((entry) => ({ value: entry, label: entry }))
+    : []
+  return [{ value: 'state', label: 'State' }, ...dynamicFields]
+}
+
+const contextValueOptions = (indicator, outputName, field) => {
+  if (field !== 'state') return []
   const outputs = getIndicatorOutputsByType(indicator, 'context')
   const output = outputs.find((entry) => entry?.name === outputName)
   return Array.isArray(output?.state_keys)
@@ -84,8 +96,8 @@ export const RuleDrawer = ({
     indicators,
     ensureIndicatorMeta,
     initialValues,
-    getDefaultName: ({ action, trigger, guards, indicatorLookup }) => buildRuleDefaultName({
-      action,
+    getDefaultName: ({ intent, trigger, guards, indicatorLookup }) => buildRuleDefaultName({
+      intent,
       trigger,
       guards,
       indicatorLookup,
@@ -100,18 +112,13 @@ export const RuleDrawer = ({
   const conditionSummary = useMemo(
     () => buildRuleConditionSummary({
       rule: {
-        when: {
-          type: 'all',
-          conditions: [
-            {
-              type: 'signal_match',
-              indicator_id: form.trigger.indicator_id,
-              output_name: form.trigger.output_name,
-              event_key: form.trigger.event_key,
-            },
-            ...(form.guards || []).filter(Boolean),
-          ].filter((entry) => entry?.indicator_id),
+        trigger: {
+          type: 'signal_match',
+          indicator_id: form.trigger.indicator_id,
+          output_name: form.trigger.output_name,
+          event_key: form.trigger.event_key,
         },
+        guards: (form.guards || []).filter(Boolean).filter((entry) => entry?.indicator_id),
       },
       indicatorLookup: indicatorMap,
       limit: 2,
@@ -136,7 +143,7 @@ export const RuleDrawer = ({
           <header className="flex items-start justify-between border-b border-white/10 px-6 py-5">
             <div>
               <DialogTitle className="text-lg font-semibold text-white">
-                {initialValues ? 'Edit strategy flow' : 'Create strategy flow'}
+                {initialValues ? 'Edit strategy rule' : 'Create strategy rule'}
               </DialogTitle>
               <p className="mt-1 text-sm text-slate-400">
                 One signal trigger is required. Add up to two optional context or metric guards.
@@ -229,7 +236,7 @@ export const RuleDrawer = ({
                           const outputType = guard.type === 'context_match' ? 'context' : 'metric'
                           const indicatorOptions = indicatorOptionsForGuards(indicators, outputType)
                           const outputOptions = outputOptionsForType(indicator, outputType)
-                          const contextOptions = contextStateOptions(indicator, guard.output_name)
+                          const contextOptions = contextFieldOptions(indicator, guard.output_name)
                           const metricOptions = metricFieldOptions(indicator, guard.output_name)
                           return (
                             <div key={`guard-${index}`} className="rounded-xl border border-amber-200/20 bg-black/20 p-3">
@@ -273,14 +280,33 @@ export const RuleDrawer = ({
                                   disabled={!guard.indicator_id}
                                 />
                                 {guard.type === 'context_match' ? (
-                                  <DropdownSelect
-                                    value={guard.state_key}
-                                    onChange={(value) => handleGuardFieldChange(index, 'state_key', value)}
-                                    placeholder="Select state"
-                                    options={contextOptions}
-                                    className="gap-0"
-                                    disabled={!guard.output_name}
-                                  />
+                                  <div className="space-y-2">
+                                    <DropdownSelect
+                                      value={guard.field || 'state'}
+                                      onChange={(value) => handleGuardFieldChange(index, 'field', value)}
+                                      placeholder="Context field"
+                                      options={contextOptions}
+                                      className="gap-0"
+                                      disabled={!guard.output_name}
+                                    />
+                                    {contextValueOptions(indicator, guard.output_name, guard.field || 'state').length > 0 ? (
+                                      <DropdownSelect
+                                        value={guard.value_text || ''}
+                                        onChange={(value) => handleGuardFieldChange(index, 'value_text', value)}
+                                        placeholder="Context value"
+                                        options={contextValueOptions(indicator, guard.output_name, guard.field || 'state')}
+                                        className="gap-0"
+                                        disabled={!guard.output_name}
+                                      />
+                                    ) : (
+                                      <input
+                                        className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-slate-200"
+                                        value={guard.value_text || ''}
+                                        onChange={(event) => handleGuardFieldChange(index, 'value_text', event.target.value)}
+                                        placeholder="Context value"
+                                      />
+                                    )}
+                                  </div>
                                 ) : (
                                   <div className="grid gap-2 md:grid-cols-[1.2fr_100px_120px]">
                                     <DropdownSelect
@@ -325,16 +351,24 @@ export const RuleDrawer = ({
                   </div>
 
                   <div className="rounded-2xl border border-fuchsia-500/30 bg-fuchsia-500/10 p-4">
-                    <p className="text-[11px] uppercase tracking-[0.22em] text-fuchsia-200/80">Action</p>
+                    <p className="text-[11px] uppercase tracking-[0.22em] text-fuchsia-200/80">Intent</p>
                     <div className="mt-4 space-y-3">
                       <select
                         className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-slate-200"
-                        value={form.action}
-                        onChange={handleFieldChange('action')}
+                        value={form.intent}
+                        onChange={handleFieldChange('intent')}
                       >
-                        <option value="buy">Buy</option>
-                        <option value="sell">Sell</option>
+                        <option value="enter_long">Long entry</option>
+                        <option value="enter_short">Short entry</option>
                       </select>
+                      <input
+                        className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-slate-200"
+                        type="number"
+                        step="1"
+                        value={form.priority}
+                        onChange={handleFieldChange('priority')}
+                        placeholder="Priority"
+                      />
                       <label className="inline-flex items-center gap-2 text-xs text-slate-300">
                         <input
                           type="checkbox"
@@ -360,7 +394,7 @@ export const RuleDrawer = ({
                         value={form.name}
                         onChange={handleFieldChange('name')}
                         placeholder={buildRuleDefaultName({
-                          action: form.action,
+                          intent: form.intent,
                           trigger: {
                             type: 'signal_match',
                             indicator_id: form.trigger.indicator_id,
@@ -407,7 +441,7 @@ export const RuleDrawer = ({
                 Cancel
               </Button>
               <Button form={RULE_DRAWER_FORM_ID} type="submit" disabled={!canSubmit || submitting}>
-                {submitting ? 'Saving…' : initialValues ? 'Save flow' : 'Create flow'}
+                {submitting ? 'Saving...' : initialValues ? 'Save rule' : 'Create rule'}
               </Button>
             </div>
           </footer>

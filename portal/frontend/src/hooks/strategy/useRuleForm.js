@@ -8,8 +8,8 @@ const EMPTY_GUARD = {
   type: 'context_match',
   indicator_id: '',
   output_name: '',
-  state_key: '',
   field: '',
+  value_text: '',
   operator: '>',
   value: '',
 }
@@ -54,7 +54,8 @@ const useRuleForm = ({
       setForm({
         name: initialValues.name || '',
         description: initialValues.description || '',
-        action: initialValues.action || 'buy',
+        intent: initialValues.intent || (initialValues.action === 'sell' ? 'enter_short' : 'enter_long'),
+        priority: Number.isFinite(Number(initialValues.priority)) ? Number(initialValues.priority) : 0,
         trigger: {
           indicator_id: flow.trigger?.indicator_id || '',
           output_name: flow.trigger?.output_name || '',
@@ -64,6 +65,7 @@ const useRuleForm = ({
           ...EMPTY_GUARD,
           ...guard,
           value: guard?.value ?? '',
+          value_text: guard?.type === 'context_match' ? String(guard?.value ?? '') : '',
         })) : [],
         enabled: Boolean(initialValues.enabled),
       })
@@ -168,8 +170,8 @@ const useRuleForm = ({
     updateGuard(index, {
       indicator_id: indicatorId || '',
       output_name: '',
-      state_key: '',
       field: '',
+      value_text: '',
       value: '',
     })
     if (indicatorId && typeof ensureIndicatorMeta === 'function') {
@@ -180,8 +182,8 @@ const useRuleForm = ({
   const handleGuardOutputChange = (index, outputName) => {
     updateGuard(index, {
       output_name: outputName || '',
-      state_key: '',
       field: '',
+      value_text: '',
       value: '',
     })
   }
@@ -204,7 +206,8 @@ const useRuleForm = ({
           type: 'context_match',
           indicator_id: guard.indicator_id,
           output_name: guard.output_name,
-          state_key: guard.state_key,
+          field: guard.field || 'state',
+          value: String(guard.value_text || '').trim(),
         }
       }
       return {
@@ -217,13 +220,13 @@ const useRuleForm = ({
       }
     }).filter((guard) => {
       if (guard.type === 'context_match') {
-        return guard.indicator_id && guard.output_name && guard.state_key
+        return guard.indicator_id && guard.output_name && guard.field && guard.value
       }
       return guard.indicator_id && guard.output_name && guard.field && guard.operator && guard.value !== null && !Number.isNaN(guard.value)
     })
 
     const resolvedName = form.name.trim() || getDefaultName?.({
-      action: form.action,
+      intent: form.intent,
       trigger,
       guards,
       indicatorLookup: indicatorMap,
@@ -232,9 +235,11 @@ const useRuleForm = ({
     return {
       name: resolvedName,
       description: form.description.trim() || null,
-      action: form.action,
+      intent: form.intent,
+      priority: Number.isFinite(Number(form.priority)) ? Number(form.priority) : 0,
+      trigger,
+      guards,
       enabled: Boolean(form.enabled),
-      when: guards.length ? { type: 'all', conditions: [trigger, ...guards] } : trigger,
     }
   }
 

@@ -13,7 +13,8 @@ const STRATEGY_FORM_DEFAULT = {
 const RULE_FORM_DEFAULT = {
   name: '',
   description: '',
-  action: 'buy',
+  intent: 'enter_long',
+  priority: 0,
   trigger: {
     indicator_id: '',
     output_name: '',

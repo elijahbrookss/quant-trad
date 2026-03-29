@@ -11,10 +11,19 @@ const resolveIndicatorLabel = (indicatorLookup, indicatorId) => {
 
 const guardSummary = (guard) => {
   if (guard?.type === 'context_match') {
-    return `${guard.output_name} = ${guard.state_key}`
+    return `${guard.output_name}.${guard.field || 'state'} = ${guard.value}`
   }
   if (guard?.type === 'metric_match') {
     return `${guard.output_name}.${guard.field} ${guard.operator} ${guard.value}`
+  }
+  if (guard?.type === 'holds_for_bars') {
+    return `${guard.base?.output_name || 'signal'} held for ${guard.bars} bars`
+  }
+  if (guard?.type === 'signal_seen_within_bars') {
+    return `${guard.output_name}.${guard.event_key} seen within ${guard.lookback_bars} bars`
+  }
+  if (guard?.type === 'signal_absent_within_bars') {
+    return `${guard.output_name}.${guard.event_key} absent within ${guard.lookback_bars} bars`
   }
   return 'Guard'
 }
@@ -40,7 +49,7 @@ export const RuleList = ({
         <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white/5">
           <GitBranch className="h-6 w-6 text-slate-500" />
         </div>
-        <h4 className="mt-4 text-sm font-medium text-white">No trading flows yet</h4>
+        <h4 className="mt-4 text-sm font-medium text-white">No strategy rules yet</h4>
         <p className="mt-1.5 max-w-sm text-xs text-slate-500">
           Each rule starts with one signal trigger, then optional context and metric guards.
         </p>
@@ -50,7 +59,7 @@ export const RuleList = ({
           onClick={onAddRule}
         >
           <Plus className="h-4 w-4" />
-          Create first flow
+          Create first rule
         </button>
       </div>
     )
@@ -60,6 +69,7 @@ export const RuleList = ({
     <div className="space-y-3">
       {rules.map((rule) => {
         const { trigger, guards } = extractRuleFlow(rule)
+        const isLong = rule.intent !== 'enter_short'
         const triggerCount = trigger?.indicator_id ? 1 : 0
         const guardCount = Array.isArray(guards) ? guards.length : 0
         const summary = buildRuleConditionSummary({ rule, indicatorLookup })
@@ -104,7 +114,7 @@ export const RuleList = ({
                 <div className="flex items-center justify-between">
                   <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-200/80">Guards</p>
                   <ActionButton variant="ghost" onClick={() => onEdit(rule)}>
-                    Edit flow
+                    Edit rule
                   </ActionButton>
                 </div>
                 {guardCount ? (
@@ -134,15 +144,15 @@ export const RuleList = ({
                 <ArrowRight className="h-4 w-4" />
               </div>
 
-              <div className={`rounded-xl border p-3 ${rule.action === 'buy' ? 'border-emerald-500/25 bg-emerald-500/10' : 'border-rose-500/25 bg-rose-500/10'}`}>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-300">Action</p>
+              <div className={`rounded-xl border p-3 ${isLong ? 'border-emerald-500/25 bg-emerald-500/10' : 'border-rose-500/25 bg-rose-500/10'}`}>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-300">Intent</p>
                 <div className="mt-3">
                   <span className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] ${
-                    rule.action === 'buy'
+                    isLong
                       ? 'border-emerald-400/30 bg-emerald-400/15 text-emerald-100'
                       : 'border-rose-400/30 bg-rose-400/15 text-rose-100'
                   }`}>
-                    {rule.action || 'action'}
+                    {isLong ? 'LONG' : 'SHORT'}
                   </span>
                 </div>
               </div>

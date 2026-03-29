@@ -108,29 +108,62 @@ export function validateStrategy(strategy) {
 export function validateRule(rule) {
   const errors = {}
 
-  // Validate name
   if (!rule.name || String(rule.name).trim() === '') {
     errors.name = 'Rule name is required'
   }
 
-  // Validate action
-  if (!rule.action || String(rule.action).trim() === '') {
-    errors.action = 'Action is required'
+  if (!rule.intent || String(rule.intent).trim() === '') {
+    errors.intent = 'Intent is required'
   }
 
-  // Validate conditions
-  if (!Array.isArray(rule.conditions) || rule.conditions.length === 0) {
-    errors.conditions = 'At least one condition is required'
+  const trigger = rule?.trigger && typeof rule.trigger === 'object' ? rule.trigger : null
+  if (!trigger) {
+    errors.trigger = 'Trigger is required'
   } else {
-    rule.conditions.forEach((condition, idx) => {
-      if (!condition.indicator_id) {
-        errors[`condition_${idx}_indicator`] = 'Indicator is required'
-      }
-      if (!condition.signal_type) {
-        errors[`condition_${idx}_signal`] = 'Signal type is required'
-      }
-    })
+    if (!trigger.indicator_id) {
+      errors.trigger_indicator_id = 'Trigger indicator is required'
+    }
+    if (!trigger.output_name) {
+      errors.trigger_output_name = 'Trigger output is required'
+    }
+    if (!trigger.event_key) {
+      errors.trigger_event_key = 'Trigger event is required'
+    }
   }
+
+  const guards = Array.isArray(rule.guards) ? rule.guards : []
+  if (guards.length > 2) {
+    errors.guards = 'At most two guards are supported in v1'
+  }
+  guards.forEach((guard, idx) => {
+    if (!guard?.indicator_id) {
+      errors[`guard_${idx}_indicator`] = 'Guard indicator is required'
+    }
+    if (!guard?.output_name) {
+      errors[`guard_${idx}_output`] = 'Guard output is required'
+    }
+    if (guard?.type === 'context_match') {
+      if (!guard.field) {
+        errors[`guard_${idx}_field`] = 'Context field is required'
+      }
+      if (String(guard.value ?? '').trim() === '') {
+        errors[`guard_${idx}_value`] = 'Context value is required'
+      }
+      return
+    }
+    if (guard?.type === 'metric_match') {
+      if (!guard.field) {
+        errors[`guard_${idx}_field`] = 'Metric field is required'
+      }
+      if (!guard.operator) {
+        errors[`guard_${idx}_operator`] = 'Metric operator is required'
+      }
+      const value = Number(guard.value)
+      if (!Number.isFinite(value)) {
+        errors[`guard_${idx}_value`] = 'Metric value must be numeric'
+      }
+    }
+  })
 
   return errors
 }

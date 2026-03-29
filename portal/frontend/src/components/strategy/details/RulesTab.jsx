@@ -33,7 +33,7 @@ export const RulesTab = ({
       <div className="flex h-32 items-center justify-center rounded-xl border border-dashed border-white/10 bg-black/20">
         <div className="flex items-center gap-2 text-sm text-slate-500">
           <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-500 border-t-transparent" />
-          Loading strategy flows...
+          Loading strategy rules...
         </div>
       </div>
     )
