@@ -53,6 +53,11 @@ class IndicatorInstanceCreator:
             manifest=definition.MANIFEST,
             output_prefs=output_prefs,
         )
+        logger.info(
+            "event=indicator_create_output_prefs_resolved indicator_type=%s output_prefs=%s",
+            type_str,
+            resolved_output_prefs,
+        )
         meta = {
             "id": str(uuid.uuid4()),
             "type": type_str,
@@ -126,6 +131,12 @@ class IndicatorInstanceUpdater:
         resolved_output_prefs = normalize_output_prefs(
             manifest=definition.MANIFEST,
             output_prefs=output_prefs,
+        )
+        logger.info(
+            "event=indicator_update_output_prefs_resolved indicator_id=%s indicator_type=%s output_prefs=%s",
+            inst_id,
+            type_str,
+            resolved_output_prefs,
         )
 
         params_unchanged = dict(meta.get("params") or {}) == resolved_params

@@ -4,6 +4,7 @@ import {
   rebuildIndicatorArtifactsFromCache,
   seedIndicatorArtifactSliceCache,
 } from './indicatorOverlaySlices.js';
+import { isSignalOutputEnabled } from '../utils/indicatorOutputs.js';
 
 export const DEFAULT_INDICATOR_COLOR = '#60a5fa';
 
@@ -61,13 +62,26 @@ export const buildVisibleOverlaysFromCache = (
   existingOverlays = [],
 ) => {
   const safeList = Array.isArray(list) ? list : [];
+  const indicatorById = safeList.reduce((acc, indicator) => {
+    if (!indicator?.id) return acc;
+    acc[indicator.id] = indicator;
+    return acc;
+  }, {});
   const allowedIndicatorIds = new Set(safeList.map((indicator) => indicator?.id).filter(Boolean));
   const seededCache = seedIndicatorArtifactSliceCache(sliceCache || {}, existingOverlays || []);
   const prunedCache = pruneIndicatorArtifactSliceCache(seededCache, allowedIndicatorIds);
   const visibleOverlays = rebuildIndicatorArtifactsFromCache(
     prunedCache,
     buildVisibleArtifactSets(safeList, visibilityMap || {}, activeInspection),
-  );
+  ).filter((overlay) => {
+    if (overlay?.source !== 'signal') return true;
+    const indicator = indicatorById?.[overlay?.ind_id] || null;
+    const outputName = typeof overlay?.overlay_name === 'string'
+      ? overlay.overlay_name.trim()
+      : '';
+    if (!indicator || !outputName) return true;
+    return isSignalOutputEnabled(indicator, outputName);
+  });
   return {
     sliceCache: prunedCache,
     overlays: applyIndicatorColors(visibleOverlays, colors || {}, safeList),

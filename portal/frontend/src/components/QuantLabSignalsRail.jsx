@@ -4,6 +4,7 @@ import { ArrowLeft, ChevronDown, ChevronUp, Copy, Crosshair, Search } from 'luci
 import { fetchIndicatorOverlays } from '../adapters/indicator.adapter.js';
 import { useChartState, useChartValue } from '../contexts/ChartStateContext.jsx';
 import { createLogger } from '../utils/logger.js';
+import { isSignalOutputEnabled } from '../utils/indicatorOutputs.js';
 import { normalizeIndicatorArtifactResponse } from './indicatorArtifacts.js';
 import {
   buildColorMap,
@@ -33,6 +34,10 @@ const flattenSignals = (
     if (!Array.isArray(signals) || !signals.length) return;
     const indicator = indicatorsById?.[indicatorId] || null;
     sortSignalsNewestFirst(signals).forEach((signal) => {
+      const outputName = typeof signal?.output_name === 'string' ? signal.output_name.trim() : '';
+      if (indicator && outputName && !isSignalOutputEnabled(indicator, outputName)) {
+        return;
+      }
       const signalId = resolveSignalId(signal);
       const signalKey = buildSignalInspectionKey(signal);
       const chartEpoch = (signalId && bubbleEpochBySignalId.get(signalId))
@@ -50,7 +55,7 @@ const flattenSignals = (
         epoch: resolveSignalCursorEpoch(signal) || 0,
         chartEpoch,
         direction: typeof signal?.direction === 'string' ? signal.direction.trim() : '',
-        outputName: typeof signal?.output_name === 'string' ? signal.output_name.trim() : '',
+        outputName,
         seriesKey: typeof signal?.series_key === 'string' ? signal.series_key.trim() : '',
       });
     });

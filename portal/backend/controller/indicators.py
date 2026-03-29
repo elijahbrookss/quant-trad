@@ -37,6 +37,11 @@ from portal.backend.service.indicators.indicator_service import (
 from portal.backend.service.indicators.indicator_service.runtime_contract import (
     assert_engine_signal_runtime_path,
 )
+from portal.backend.service.indicators.signal_payload_filtering import (
+    enabled_signal_output_names_from_meta,
+    filter_signal_payload,
+    normalise_enabled_event_keys,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -265,7 +270,14 @@ async def update(inst_id: str, body: IndicatorInstanceIn):
     try:
         color_provided = "color" in body.__fields_set__
         color_palette_provided = "color_palette" in body.__fields_set__
-        return update_instance(
+        logger.info(
+            "event=indicator_update_request indicator_id=%s indicator_type=%s output_prefs=%s dependency_count=%s",
+            inst_id,
+            body.type,
+            dict(body.output_prefs or {}),
+            len(list(body.dependencies or [])),
+        )
+        updated = update_instance(
             inst_id,
             body.type,
             dict(body.params),
@@ -277,6 +289,20 @@ async def update(inst_id: str, body: IndicatorInstanceIn):
             color_palette=body.color_palette,
             color_palette_provided=color_palette_provided,
         )
+        logger.info(
+            "event=indicator_update_response indicator_id=%s output_prefs=%s typed_outputs=%s",
+            inst_id,
+            dict(updated.get("output_prefs") or {}),
+            [
+                {
+                    "name": output.get("name"),
+                    "enabled": output.get("enabled", True),
+                }
+                for output in (updated.get("typed_outputs") or [])
+                if output.get("type") == "signal"
+            ],
+        )
+        return updated
     except KeyError:
         raise HTTPException(404, "Indicator not found")
     except ValueError as e:
@@ -606,6 +632,10 @@ async def signals(inst_id: str, req: SignalRequest):
     )
     try:
         meta = get_instance_meta(inst_id)
+        enabled_output_names = enabled_signal_output_names_from_meta(meta)
+        effective_config = dict(req.config or {})
+        effective_config["enabled_signal_outputs"] = sorted(enabled_output_names)
+        enabled_event_keys = normalise_enabled_event_keys(effective_config)
         request_fingerprint = quantlab_request_fingerprint(
             job_type=JOB_TYPE_SIGNALS,
             indicator_id=inst_id,
@@ -617,7 +647,7 @@ async def signals(inst_id: str, req: SignalRequest):
             datasource=req.datasource,
             exchange=req.exchange,
             instrument_id=req.instrument_id,
-            config=req.config,
+            config=effective_config,
         )
         request_payload = {
             "inst_id": inst_id,
@@ -628,7 +658,7 @@ async def signals(inst_id: str, req: SignalRequest):
             "datasource": req.datasource,
             "exchange": req.exchange,
             "instrument_id": req.instrument_id,
-            "config": dict(req.config or {}),
+            "config": dict(effective_config),
         }
         partition_key = quantlab_partition_key(request_payload)
         reusable = reuse_quantlab_job(
@@ -639,6 +669,11 @@ async def signals(inst_id: str, req: SignalRequest):
         if reusable and reusable.get("status") == "succeeded":
             payload = reusable.get("result")
             if isinstance(payload, dict):
+                payload = filter_signal_payload(
+                    payload,
+                    enabled_output_names=enabled_output_names,
+                    enabled_event_keys=enabled_event_keys,
+                )
                 assert_engine_signal_runtime_path(
                     payload,
                     context="signals_endpoint_runtime_path_mismatch",
@@ -664,11 +699,16 @@ async def signals(inst_id: str, req: SignalRequest):
                 datasource=req.datasource,
                 exchange=req.exchange,
                 instrument_id=req.instrument_id,
-                config=req.config,
+                config=effective_config,
                 request_fingerprint=request_fingerprint,
             )
         payload = await wait_for_job(job_id)
         if isinstance(payload, dict):
+            payload = filter_signal_payload(
+                payload,
+                enabled_output_names=enabled_output_names,
+                enabled_event_keys=enabled_event_keys,
+            )
             assert_engine_signal_runtime_path(
                 payload,
                 context="signals_endpoint_runtime_path_mismatch",

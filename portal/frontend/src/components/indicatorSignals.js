@@ -3,6 +3,7 @@ import {
   getIndicatorSignalColor,
   getPaletteOverlayColor,
 } from '../utils/indicatorColors.js';
+import { enabledSignalOutputNames } from '../utils/indicatorOutputs.js';
 import { normalizeIndicatorArtifactResponse } from './indicatorArtifacts.js';
 import {
   rebuildIndicatorArtifactsFromCache,
@@ -193,6 +194,11 @@ export async function runSignalGeneration({
     }
     if (chartState.instrument_id) {
       requestPayload.instrument_id = chartState.instrument_id;
+    }
+    if (Array.isArray(indicator?.typed_outputs)) {
+      requestPayload.config = {
+        enabled_signal_outputs: enabledSignalOutputNames(indicator),
+      };
     }
 
     const response = await signalsAdapter(indicator.id, requestPayload);

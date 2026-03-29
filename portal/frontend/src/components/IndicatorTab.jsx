@@ -31,7 +31,7 @@ import {
   supportsCustomIndicatorColor,
   supportsIndicatorPaletteSelection,
 } from '../utils/indicatorColors.js'
-import { indicatorHasAuthorableOutputs } from '../utils/indicatorOutputs.js'
+import { applySignalOutputPrefs, indicatorHasAuthorableOutputs } from '../utils/indicatorOutputs.js'
 // import IndicatorModal from './IndicatorModal'
 import IndicatorModalV2 from './IndicatorModal.v2.jsx'
 const IndicatorModal = IndicatorModalV2; // for now, swap in new version under old name
@@ -190,6 +190,27 @@ export const IndicatorSection = ({ chartId }) => {
     }
 
     const sorted = sortIndicators(merged);
+    updateChart(chartId, { indicators: sorted });
+    return sorted;
+  }, [chartId, updateChart]);
+
+  const mergeReturnedIndicator = useCallback((incoming, previous = undefined) => {
+    if (!incoming?.id) {
+      return Array.isArray(previous) ? previous : indicatorsRef.current;
+    }
+    const prevList = Array.isArray(previous)
+      ? previous
+      : (Array.isArray(indicatorsRef.current) ? indicatorsRef.current : []);
+    const merged = prevList.map((item) => {
+      if (item?.id !== incoming.id) return item;
+      const next = applySignalOutputPrefs({ ...item, ...incoming }, incoming?.output_prefs || item?.output_prefs || {});
+      if (item?._draft && !incoming?._draft) next._draft = item._draft;
+      return next;
+    });
+    const nextList = merged.some((item) => item?.id === incoming.id)
+      ? merged
+      : [...prevList, applySignalOutputPrefs(incoming, incoming?.output_prefs || {})];
+    const sorted = sortIndicators(nextList);
     updateChart(chartId, { indicators: sorted });
     return sorted;
   }, [chartId, updateChart]);
@@ -786,6 +807,12 @@ export const IndicatorSection = ({ chartId }) => {
     const core = stripRuntimeParams(normalizeParams(meta.params));
     const dependencies = Array.isArray(meta.dependencies) ? meta.dependencies : [];
     const outputPrefs = meta.output_prefs || {};
+    debug('indicator_save_requested', {
+      indicatorId: meta.id || null,
+      indicatorType: meta.type,
+      outputPrefs,
+      dependencyCount: dependencies.length,
+    });
     if (guardBusy('save_indicator')) return;
 
     if ('lookbacks' in core) {
@@ -828,7 +855,9 @@ export const IndicatorSection = ({ chartId }) => {
 
       startJob('Updating indicator…', { indicatorId: meta.id, type: 'update' });
       setIndicators((prev) => prev.map((ind) => (
-        ind.id === meta.id ? { ...ind, _status: 'updating' } : ind
+        ind.id === meta.id
+          ? applySignalOutputPrefs({ ...ind, _status: 'updating' }, outputPrefs)
+          : ind
       )));
       updateChart(chartId, {
         overlays: [],
@@ -847,7 +876,22 @@ export const IndicatorSection = ({ chartId }) => {
         name: meta.name,
         color: existing?.color ?? null,
       });
+      debug('indicator_save_response', {
+        indicatorId: meta.id,
+        responseOutputPrefs: payload?.output_prefs || null,
+        responseTypedOutputs: Array.isArray(payload?.typed_outputs)
+          ? payload.typed_outputs
+              .filter((entry) => entry?.type === 'signal')
+              .map((entry) => ({ name: entry?.name, enabled: entry?.enabled !== false }))
+          : null,
+      });
       indicatorId = payload?.id ?? meta.id;
+      if (payload?.id) {
+        setIndicators((prev) => mergeReturnedIndicator({
+          ...payload,
+          _status: 'updating',
+        }, prev));
+      }
 
       const latest = await fetchAndSyncIndicators({ silent: false });
       await refreshEnabledOverlays(latest);

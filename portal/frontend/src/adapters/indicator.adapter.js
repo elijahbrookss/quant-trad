@@ -41,22 +41,22 @@ async function handleResponse(res) {
 }
 
 export async function fetchIndicators() {
-  const res = await fetch(`${API_BASE_URL}/indicators/`, { mode: 'cors' })
+  const res = await fetch(`${API_BASE_URL}/indicators/`, { mode: 'cors', cache: 'no-store' })
   return handleResponse(res)
 }
 
 export async function fetchIndicatorTypes() {
-  const res = await fetch(`${API_BASE_URL}/indicators/types`, { mode: 'cors' })
+  const res = await fetch(`${API_BASE_URL}/indicators/types`, { mode: 'cors', cache: 'no-store' })
   return handleResponse(res)
 }
 
 export async function fetchIndicatorType(id) {
-    const res = await fetch(`${API_BASE_URL}/indicators/types/${id}`, { mode: 'cors' })
+    const res = await fetch(`${API_BASE_URL}/indicators/types/${id}`, { mode: 'cors', cache: 'no-store' })
     return handleResponse(res)
 }
 
 export async function fetchIndicator(id) {
-  const res = await fetch(`${API_BASE_URL}/indicators/${id}`, { mode: 'cors' })
+  const res = await fetch(`${API_BASE_URL}/indicators/${id}`, { mode: 'cors', cache: 'no-store' })
   return handleResponse(res)
 }
 
@@ -84,6 +84,12 @@ export async function createIndicator({ type, name, params, dependencies = [], o
 
 export async function updateIndicator(id, { type, name, params, dependencies = [], output_prefs = {}, color, color_palette }) {
   const body = { type, name, params, dependencies, output_prefs }
+  adapterLogger.debug('update_indicator_request', {
+    id,
+    type,
+    dependencyCount: dependencies.length,
+    outputPrefs: output_prefs,
+  })
   if (color !== undefined) {
     body.color = color
   }
@@ -96,7 +102,17 @@ export async function updateIndicator(id, { type, name, params, dependencies = [
     body: JSON.stringify(body),
     mode: 'cors',
   })
-  return handleResponse(res)
+  const payload = await handleResponse(res)
+  adapterLogger.debug('update_indicator_response', {
+    id,
+    outputPrefs: payload?.output_prefs || null,
+    typedOutputs: Array.isArray(payload?.typed_outputs)
+      ? payload.typed_outputs
+          .filter((entry) => entry?.type === 'signal')
+          .map((entry) => ({ name: entry?.name, enabled: entry?.enabled !== false }))
+      : null,
+  })
+  return payload
 }
 
 export async function deleteIndicator(id) {

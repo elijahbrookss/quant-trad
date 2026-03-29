@@ -64,6 +64,7 @@ def test_indicator_update_round_trips_disabled_signal_outputs() -> None:
     created_outputs = {entry["name"]: entry for entry in created["typed_outputs"]}
     assert created["output_prefs"] == {"balance_breakout": {"enabled": False}}
     assert created_outputs["balance_breakout"]["enabled"] is False
+    assert created_outputs["balance_reclaim"]["enabled"] is True
     assert created_outputs["balance_retest"]["enabled"] is True
 
     updated = update_instance(
@@ -78,6 +79,7 @@ def test_indicator_update_round_trips_disabled_signal_outputs() -> None:
     updated_outputs = {entry["name"]: entry for entry in updated["typed_outputs"]}
     assert updated["output_prefs"] == {"balance_retest": {"enabled": False}}
     assert updated_outputs["balance_breakout"]["enabled"] is True
+    assert updated_outputs["balance_reclaim"]["enabled"] is True
     assert updated_outputs["balance_retest"]["enabled"] is False
 
 
@@ -100,4 +102,5 @@ def test_factory_build_meta_from_record_preserves_output_prefs() -> None:
 
     assert meta["output_prefs"] == {"balance_breakout": {"enabled": False}}
     assert typed_outputs["balance_breakout"]["enabled"] is False
+    assert typed_outputs["balance_reclaim"]["enabled"] is True
     assert typed_outputs["balance_retest"]["enabled"] is True

@@ -2,9 +2,12 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  applySignalOutputPrefs,
   buildSignalOutputEnabledMap,
   buildSignalOutputPrefs,
+  enabledSignalOutputNames,
   getAuthorableOutputsByType,
+  isSignalOutputEnabled,
 } from '../src/utils/indicatorOutputs.js'
 
 test('buildSignalOutputEnabledMap respects typed output flags and stored prefs', () => {
@@ -43,6 +46,46 @@ test('buildSignalOutputPrefs persists only disabled signal outputs', () => {
   assert.deepEqual(outputPrefs, {
     retest: { enabled: false },
   })
+})
+
+test('enabledSignalOutputNames and isSignalOutputEnabled reflect stored prefs', () => {
+  const indicator = {
+    typed_outputs: [
+      { name: 'breakout', type: 'signal', enabled: true },
+      { name: 'retest', type: 'signal', enabled: true },
+    ],
+    output_prefs: {
+      retest: { enabled: false },
+    },
+  }
+
+  assert.deepEqual(enabledSignalOutputNames(indicator), ['breakout'])
+  assert.equal(isSignalOutputEnabled(indicator, 'breakout'), true)
+  assert.equal(isSignalOutputEnabled(indicator, 'retest'), false)
+})
+
+test('applySignalOutputPrefs updates signal enabled flags for local UI state', () => {
+  const next = applySignalOutputPrefs(
+    {
+      typed_outputs: [
+        { name: 'breakout', type: 'signal', enabled: true },
+        { name: 'retest', type: 'signal', enabled: true },
+        { name: 'context_state', type: 'context' },
+      ],
+    },
+    {
+      retest: { enabled: false },
+    },
+  )
+
+  assert.deepEqual(
+    next.typed_outputs,
+    [
+      { name: 'breakout', type: 'signal', enabled: true },
+      { name: 'retest', type: 'signal', enabled: false },
+      { name: 'context_state', type: 'context' },
+    ],
+  )
 })
 
 test('getAuthorableOutputsByType hides disabled signal outputs unless already selected', () => {

@@ -206,6 +206,7 @@ class IndicatorSignalExecutor:
             instrument_id=resolved_instrument_id,
         )
         enabled_event_keys = self._normalise_enabled_event_keys(dict(config or {}))
+        requested_output_names = self._normalise_enabled_output_names(dict(config or {}))
         _, indicators = build_runtime_indicator_graph(
             [inst_id],
             execution_context=execution_context,
@@ -221,6 +222,20 @@ class IndicatorSignalExecutor:
         )
         candles = _build_candles(df)
         engine = IndicatorExecutionEngine(indicators)
+        enabled_output_names = {
+            str(output.get("name") or "")
+            for output in (meta.get("typed_outputs") or [])
+            if isinstance(output, Mapping)
+            and output.get("type") == "signal"
+            and str(output.get("name") or "").strip()
+            and output.get("enabled", True) is not False
+        }
+        if requested_output_names is not None:
+            enabled_output_names = {
+                output_name
+                for output_name in enabled_output_names
+                if output_name in requested_output_names
+            }
 
         signals: List[Dict[str, Any]] = []
         signal_bubbles_by_output: Dict[str, List[Dict[str, Any]]] = {}
@@ -236,14 +251,7 @@ class IndicatorSignalExecutor:
                 datasource=execution_context.datasource,
                 exchange=execution_context.exchange,
                 instrument_id=execution_context.instrument_id,
-                enabled_output_names={
-                    str(output.get("name") or "")
-                    for output in (meta.get("typed_outputs") or [])
-                    if isinstance(output, Mapping)
-                    and output.get("type") == "signal"
-                    and str(output.get("name") or "").strip()
-                    and output.get("enabled", True) is not False
-                },
+                enabled_output_names=enabled_output_names,
                 enabled_event_keys=enabled_event_keys,
             )
             signals.extend(frame_signals)
@@ -560,6 +568,23 @@ class IndicatorSignalExecutor:
             candidates = []
         return {
             str(item).strip().lower()
+            for item in candidates
+            if str(item).strip()
+        }
+
+    @staticmethod
+    def _normalise_enabled_output_names(config: Mapping[str, Any]) -> Set[str] | None:
+        enabled = config.get("enabled_signal_outputs")
+        if enabled is None:
+            return None
+        if isinstance(enabled, (str, bytes)):
+            candidates: Sequence[Any] = [enabled]
+        elif isinstance(enabled, Sequence):
+            candidates = list(enabled)
+        else:
+            candidates = []
+        return {
+            str(item).strip()
             for item in candidates
             if str(item).strip()
         }

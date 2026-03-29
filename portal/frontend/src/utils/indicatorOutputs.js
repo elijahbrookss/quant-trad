@@ -30,6 +30,38 @@ export const buildSignalOutputEnabledMap = (indicatorOrMeta) => {
   return enabledByName
 }
 
+export const enabledSignalOutputNames = (indicatorOrMeta) => (
+  Object.entries(buildSignalOutputEnabledMap(indicatorOrMeta))
+    .filter(([, enabled]) => enabled !== false)
+    .map(([outputName]) => outputName)
+)
+
+export const isSignalOutputEnabled = (indicatorOrMeta, outputName) => {
+  const normalized = normalizedOutputName(outputName)
+  if (!normalized) return false
+  return buildSignalOutputEnabledMap(indicatorOrMeta)[normalized] !== false
+}
+
+export const applySignalOutputPrefs = (indicatorOrMeta, outputPrefs = {}) => {
+  const next = {
+    ...(indicatorOrMeta || {}),
+    output_prefs: { ...(outputPrefs || {}) },
+  }
+  if (!Array.isArray(indicatorOrMeta?.typed_outputs)) {
+    return next
+  }
+  next.typed_outputs = indicatorOrMeta.typed_outputs.map((entry) => {
+    if (entry?.type !== 'signal') return entry
+    const outputName = normalizedOutputName(entry?.name)
+    if (!outputName) return entry
+    return {
+      ...entry,
+      enabled: outputPrefs?.[outputName]?.enabled === false ? false : true,
+    }
+  })
+  return next
+}
+
 export const buildSignalOutputPrefs = (indicatorOrMeta, enabledByName = {}) => {
   const outputPrefs = {}
 
