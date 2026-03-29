@@ -52,9 +52,10 @@ class StrategyRuleOut(BaseModel):
 
     id: str
     name: str
-    action: str
-    when: Dict[str, Any]
-    flow: Dict[str, Any] = Field(default_factory=dict)
+    intent: str
+    priority: int = 0
+    trigger: Dict[str, Any]
+    guards: List[Dict[str, Any]] = Field(default_factory=list)
     description: Optional[str] = None
     enabled: bool
     created_at: str
@@ -65,7 +66,6 @@ class InstrumentSlotIn(BaseModel):
     """Lightweight instrument slot definition for strategies."""
 
     symbol: str
-    enabled: bool = Field(default=True)
     risk_multiplier: Optional[float] = Field(default=None)
 
 
@@ -139,8 +139,10 @@ class StrategyRuleCreateRequest(BaseModel):
     """Payload for creating a strategy rule."""
 
     name: str
-    action: str
-    when: Dict[str, Any]
+    intent: str
+    priority: int = 0
+    trigger: Dict[str, Any]
+    guards: List[Dict[str, Any]] = Field(default_factory=list)
     description: Optional[str] = None
     enabled: bool = True
 
@@ -149,8 +151,10 @@ class StrategyRuleUpdateRequest(BaseModel):
     """Payload for updating a strategy rule."""
 
     name: Optional[str] = None
-    action: Optional[str] = None
-    when: Optional[Dict[str, Any]] = None
+    intent: Optional[str] = None
+    priority: Optional[int] = None
+    trigger: Optional[Dict[str, Any]] = None
+    guards: Optional[List[Dict[str, Any]]] = None
     description: Optional[str] = None
     enabled: Optional[bool] = None
 
@@ -426,8 +430,10 @@ async def create_rule(strategy_id: str, body: StrategyRuleCreateRequest) -> Dict
         return strategy_service.create_rule(
             strategy_id,
             name=body.name,
-            action=body.action,
-            when=body.when,
+            intent=body.intent,
+            priority=body.priority,
+            trigger=body.trigger,
+            guards=body.guards,
             description=body.description,
             enabled=body.enabled,
         )

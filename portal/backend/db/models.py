@@ -128,21 +128,20 @@ class StrategyRuleRecord(Base):
         """Return a serialisable payload for the stored rule."""
 
         raw_conditions = self.conditions if self.conditions is not None else []
-        when = None
-        if isinstance(raw_conditions, dict) and str(raw_conditions.get("kind") or "").strip() == "typed_rule_v1":
-            when = raw_conditions.get("when")
-        elif isinstance(raw_conditions, dict):
-            when = raw_conditions
+        canonical = raw_conditions if isinstance(raw_conditions, dict) else {}
         return {
             "id": self.id,
             "strategy_id": self.strategy_id,
             "name": self.name,
             "action": self.action,
+            "intent": canonical.get("intent"),
+            "priority": canonical.get("priority", 0),
+            "trigger": canonical.get("trigger"),
+            "guards": canonical.get("guards") or [],
             "match": self.match,
             "description": self.description,
             "enabled": bool(self.enabled),
             "conditions": raw_conditions,
-            "when": when,
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
