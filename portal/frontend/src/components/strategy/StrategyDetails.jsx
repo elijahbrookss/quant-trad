@@ -213,16 +213,13 @@ const StrategyDetails = ({
     [handleQuickAddSymbol],
   )
 
-  const [activeTab, setActiveTab] = useState('instruments')
+  const [activeTab, setActiveTab] = useState('logic')
 
   useEffect(() => {
-    // Reset to instruments tab when strategy changes, or if there are instrument messages
     if (instrumentMessages.length > 0) {
       setActiveTab('instruments')
-    } else {
-      setActiveTab('instruments')
     }
-  }, [strategy?.id, instrumentMessages.length])
+  }, [strategy?.id])
 
   const handleAddInstrument = useCallback(
     (symbol) => {
@@ -243,7 +240,7 @@ const StrategyDetails = ({
 
   if (!hasStrategy) {
     return (
-      <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 p-6 text-center text-sm text-slate-400">
+      <div className="rounded-sm border border-dashed border-white/10 bg-[#0a0d13] p-6 text-center text-sm text-slate-400">
         Select a strategy to manage indicators, rules, and signal evaluations.
       </div>
     )
@@ -255,12 +252,12 @@ const StrategyDetails = ({
   return (
     <div className="space-y-4">
       {/* Compact Header */}
-      <div className="rounded-xl border border-white/[0.08] bg-black/30">
+      <div className="rounded border border-white/[0.12] bg-[#0a0d13]">
         {/* Main header row */}
         <div className="flex items-center justify-between gap-4 px-5 py-4">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-3">
-              <h2 className="truncate text-lg font-semibold text-white">{strategy.name}</h2>
+              <h2 className="truncate text-base font-semibold text-white">{strategy.name}</h2>
               <span className="shrink-0 rounded bg-white/[0.06] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-slate-400">
                 {strategy.exchange || strategy.datasource || 'Exchange'}
               </span>
@@ -270,11 +267,15 @@ const StrategyDetails = ({
             </div>
             {/* Inline stats */}
             <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
-              <span>{ruleCount} rule{ruleCount === 1 ? '' : 's'}</span>
+              <span className={ruleCount === 0 ? 'text-rose-400' : 'text-slate-400'}>
+                <span className="qt-mono">{ruleCount}</span> rule{ruleCount === 1 ? '' : 's'}
+              </span>
               <span className="text-slate-600">•</span>
-              <span>{indicatorCount} indicator{indicatorCount === 1 ? '' : 's'}</span>
+              <span className={indicatorCount === 0 ? 'text-amber-400' : 'text-slate-400'}>
+                <span className="qt-mono">{indicatorCount}</span> indicator{indicatorCount === 1 ? '' : 's'}
+              </span>
               <span className="text-slate-600">•</span>
-              <span>{atmTargets.length} TP target{atmTargets.length === 1 ? '' : 's'}</span>
+              <span className="text-slate-400"><span className="qt-mono">{atmTargets.length}</span> TP target{atmTargets.length === 1 ? '' : 's'}</span>
             </div>
           </div>
 
@@ -408,8 +409,14 @@ const StrategyDetails = ({
       )}
 
       {/* Tabs - consolidated (no Overview tab) */}
-      <div className="rounded-xl border border-white/[0.08] bg-black/40">
+      <div className="rounded border border-white/[0.10] bg-[#0a0d13]">
         <div className="flex gap-1 border-b border-white/[0.06] px-1">
+          <TabButton active={activeTab === 'logic'} onClick={() => setActiveTab('logic')}>
+            Decision Logic
+          </TabButton>
+          <TabButton active={activeTab === 'atm'} onClick={() => setActiveTab('atm')}>
+            Risk & Execution
+          </TabButton>
           <TabButton
             active={activeTab === 'instruments'}
             onClick={() => setActiveTab('instruments')}
@@ -421,38 +428,10 @@ const StrategyDetails = ({
               </span>
             )}
           </TabButton>
-          <TabButton active={activeTab === 'logic'} onClick={() => setActiveTab('logic')}>
-            Decision Logic
-          </TabButton>
-          <TabButton active={activeTab === 'atm'} onClick={() => setActiveTab('atm')}>
-            Risk & Execution
-          </TabButton>
           <TabButton active={activeTab === 'preview'} onClick={() => setActiveTab('preview')}>
             Order Triggers
           </TabButton>
         </div>
-
-        <TabPanel active={activeTab === 'instruments'}>
-          <p className="px-6 pb-2 text-xs text-slate-400">Contracts used for sizing, fees, and execution.</p>
-          <InstrumentsTab
-            strategy={strategy}
-            instrumentMap={instrumentMap}
-            instrumentMessages={instrumentMessages}
-            onAddInstrument={handleAddInstrument}
-            onRefreshMetadata={onRefreshInstrumentMetadata}
-            refreshStatus={instrumentRefreshStatus}
-            ActionButton={ActionButton}
-          />
-        </TabPanel>
-
-        <TabPanel active={activeTab === 'atm'}>
-          <ATMTab
-            template={strategy.atm_template}
-            templateOptions={atmTemplateOptions}
-            currentTemplateId={strategy.atm_template_id}
-            onTemplateChange={handleTemplateChange}
-          />
-        </TabPanel>
 
         <TabPanel active={activeTab === 'logic'}>
           <p className="px-6 pb-2 text-xs text-slate-400">Attach indicators, inspect typed outputs, and compose trigger-to-intent strategy rules.</p>
@@ -472,6 +451,28 @@ const StrategyDetails = ({
           />
         </TabPanel>
 
+        <TabPanel active={activeTab === 'atm'}>
+          <ATMTab
+            template={strategy.atm_template}
+            templateOptions={atmTemplateOptions}
+            currentTemplateId={strategy.atm_template_id}
+            onTemplateChange={handleTemplateChange}
+          />
+        </TabPanel>
+
+        <TabPanel active={activeTab === 'instruments'}>
+          <p className="px-6 pb-2 text-xs text-slate-400">Contracts used for sizing, fees, and execution.</p>
+          <InstrumentsTab
+            strategy={strategy}
+            instrumentMap={instrumentMap}
+            instrumentMessages={instrumentMessages}
+            onAddInstrument={handleAddInstrument}
+            onRefreshMetadata={onRefreshInstrumentMetadata}
+            refreshStatus={instrumentRefreshStatus}
+            ActionButton={ActionButton}
+          />
+        </TabPanel>
+
         <TabPanel active={activeTab === 'preview'}>
           <p className="px-6 pb-2 text-xs text-slate-400">Preview when this strategy would attempt orders.</p>
           <OrderTriggersTab
@@ -485,8 +486,6 @@ const StrategyDetails = ({
             onSubmit={handleSubmit}
             onDateRangeChange={handleDateRangeChange}
             DateRangePickerComponent={DateRangePickerComponent}
-            onNavigateToRules={() => setActiveTab('logic')}
-            onNavigateToExecution={() => setActiveTab('atm')}
           />
         </TabPanel>
       </div>
