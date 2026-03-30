@@ -33,7 +33,7 @@ class ContextMatchSpec:
     output_name: str
     output_key: str
     field: str
-    value: str
+    value: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -75,8 +75,6 @@ class DecisionRuleSpec:
     id: str
     name: str
     intent: Intent
-    priority: int
-    enabled: bool
     trigger: SignalMatchSpec
     guards: Tuple[GuardSpec, ...]
     description: str | None = None

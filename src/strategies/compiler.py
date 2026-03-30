@@ -56,7 +56,6 @@ def compile_strategy(
         for rule in authored_rules
     ]
     compiled_rules.sort(key=lambda item: str(item.id))
-    _validate_priority_conflicts(compiled_rules)
     max_history_bars = max((_required_history_bars(rule) for rule in compiled_rules), default=0)
     return CompiledStrategySpec(
         strategy_id=str(strategy_id),
@@ -79,8 +78,6 @@ def _compile_rule(
         raise ValueError("Strategy rule id is required")
     name = str(raw_rule.get("name") or rule_id).strip()
     intent = normalize_rule_intent(raw_rule.get("intent") or raw_rule.get("action"))
-    priority = int(raw_rule.get("priority") or 0)
-    enabled = bool(raw_rule.get("enabled", True))
     description = str(raw_rule.get("description")).strip() if raw_rule.get("description") else None
 
     trigger_payload, guard_payloads = _extract_authored_rule_parts(raw_rule)
@@ -101,8 +98,6 @@ def _compile_rule(
         id=rule_id,
         name=name,
         intent=intent,
-        priority=priority,
-        enabled=enabled,
         trigger=trigger,
         guards=guards,
         description=description,
@@ -255,7 +250,14 @@ def _compile_context_guard(
     field = str(node.get("field") or node.get("state_key") or "").strip()
     if not field:
         raise ValueError("context_match requires field")
-    value = str(node.get("value") or node.get("state_key") or "").strip()
+    raw_value = node.get("value")
+    if isinstance(raw_value, str):
+        value = (raw_value.strip(),) if raw_value.strip() else ()
+    elif isinstance(raw_value, list):
+        value = tuple(str(entry).strip() for entry in raw_value if str(entry).strip())
+    else:
+        fallback_value = str(node.get("state_key") or "").strip()
+        value = (fallback_value,) if fallback_value else ()
     if not value:
         raise ValueError("context_match requires value")
     normalized_field = "state" if field in {"state", "state_key"} else field
@@ -332,21 +334,6 @@ def _resolve_output_meta(
         if str(output.get("name") or "").strip() == output_name:
             return indicator_id, output_name, output
     raise ValueError(f"Indicator output not found: {indicator_id}.{output_name}")
-
-
-def _validate_priority_conflicts(rules: Sequence[DecisionRuleSpec]) -> None:
-    by_priority: dict[int, set[str]] = {}
-    for rule in rules:
-        if not rule.enabled:
-            continue
-        by_priority.setdefault(int(rule.priority), set()).add(str(rule.intent))
-    conflicts = [priority for priority, intents in by_priority.items() if len(intents) > 1]
-    if conflicts:
-        joined = ",".join(str(priority) for priority in sorted(conflicts))
-        raise ValueError(
-            "Same-priority rules emitting different intents are forbidden in v1 "
-            f"(priorities={joined})"
-        )
 
 
 def _required_history_bars(rule: DecisionRuleSpec) -> int:

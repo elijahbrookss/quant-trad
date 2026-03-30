@@ -127,10 +127,7 @@ def evaluate_strategy_bar(
         artifacts.append(artifact)
 
     if matched_indexes:
-        selected_index = sorted(
-            matched_indexes,
-            key=lambda idx: (-int(artifacts[idx]["priority"]), str(artifacts[idx]["rule_id"])),
-        )[0]
+        selected_index = sorted(matched_indexes, key=lambda idx: str(artifacts[idx]["rule_id"]))[0]
 
     for index, artifact in enumerate(artifacts):
         if not artifact["matched"]:
@@ -145,7 +142,7 @@ def evaluate_strategy_bar(
             artifact["suppression_reason"] = None
         else:
             artifact["evaluation_result"] = "matched_suppressed"
-            artifact["suppression_reason"] = "higher_priority_rule_selected"
+            artifact["suppression_reason"] = "another_rule_selected"
         artifact.pop("matched", None)
         artifact.pop("intent", None)
 
@@ -271,7 +268,6 @@ def _evaluate_rule(
         "decision_time": _isoformat(bar_time),
         "rule_id": rule.id,
         "rule_name": rule.name,
-        "priority": int(rule.priority),
         "trigger": trigger_result,
         "guard_results": guard_results,
         "evaluation_result": "not_matched",
@@ -355,7 +351,7 @@ def _evaluate_context_match(
             "output_ref": guard.output_key,
             "field": guard.field,
             "ready": False,
-            "expected": guard.value,
+            "expected": list(guard.value),
             "actual": None,
             "matched": False,
         }
@@ -365,9 +361,9 @@ def _evaluate_context_match(
         "output_ref": guard.output_key,
         "field": guard.field,
         "ready": True,
-        "expected": guard.value,
+        "expected": list(guard.value),
         "actual": actual,
-        "matched": str(actual) == guard.value,
+        "matched": str(actual) in guard.value,
     }
 
 
@@ -452,7 +448,8 @@ def _evaluate_holds_for_bars(
             "output_ref": guard.guard.output_key,
             **({"field": guard.guard.field} if hasattr(guard.guard, "field") else {}),
             **({"operator": guard.guard.operator} if isinstance(guard.guard, MetricMatchSpec) else {}),
-            **({"expected": guard.guard.value} if hasattr(guard.guard, "value") else {}),
+            **({"expected": list(guard.guard.value)} if isinstance(guard.guard, ContextMatchSpec) else {}),
+            **({"expected": guard.guard.value} if isinstance(guard.guard, MetricMatchSpec) else {}),
         },
         "window_results": window_results,
         "insufficient_history": not sufficient_history,
