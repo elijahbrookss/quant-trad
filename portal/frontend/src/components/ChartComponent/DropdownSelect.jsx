@@ -121,7 +121,7 @@ export function DropdownSelect({
 
         <div
           role="listbox"
-          className={`absolute z-20 mt-1 w-full overflow-hidden rounded-[6px] border border-white/12 bg-[#0e111c]/95 shadow-[0_18px_48px_rgba(0,0,0,0.45)] backdrop-blur transition-all ${
+          className={`absolute z-20 mt-1 w-full min-w-max overflow-hidden rounded-[6px] border border-white/12 bg-[#0e111c]/95 shadow-[0_18px_48px_rgba(0,0,0,0.45)] backdrop-blur transition-all ${
             open ? 'max-h-96 opacity-100' : 'pointer-events-none max-h-0 opacity-0'
           }`}
         >
