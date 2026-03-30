@@ -36,9 +36,10 @@
   --app-shell-main-px-xl: 1rem;
   --app-shell-main-py: 1rem;
   --app-section-gap: 1.5rem;
-  --ui-radius-control: 6px;
-  --ui-radius-panel: 8px;
-  --ui-radius-shell: 10px;
+  --ui-radius-control: 2px;
+  --ui-radius-panel: 3px;
+  --ui-radius-shell: 4px;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, 'Menlo', monospace;
   --qt-chart-height: 640px;
   --qt-chart-height-2xl: 700px;
   --qt-rail-width-xl: 300px;
@@ -60,7 +61,7 @@ html {
 
 @media (min-width: 1280px) {
   html {
-    font-size: 9px;
+    font-size: 12px;
   }
 
   :root {
@@ -80,7 +81,7 @@ html {
 
 @media (min-width: 1600px) {
   html {
-    font-size: 8.625px;
+    font-size: 13px;
   }
 
   :root {
@@ -93,7 +94,7 @@ html {
 
 @media (min-width: 2200px) {
   html {
-    font-size: 8.25px;
+    font-size: 14px;
   }
 
   :root {
@@ -108,6 +109,11 @@ body {
   background-image: radial-gradient(circle at top, var(--accent-gradient-spot) 0%, rgba(20, 23, 31, 1) 55%);
   background-attachment: fixed;
   color: #f8fafc;
+}
+
+.qt-mono {
+  font-family: var(--font-mono);
+  font-feature-settings: "calt" 1, "liga" 1;
 }
 
 * {
