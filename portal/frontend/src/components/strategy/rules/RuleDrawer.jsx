@@ -1,6 +1,6 @@
 import React, { useMemo, useRef } from 'react'
 import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react'
-import { ArrowRight, Plus, Trash2, X } from 'lucide-react'
+import { CopyPlus, Plus, Trash2, X } from 'lucide-react'
 
 import DropdownSelect from '../../ChartComponent/DropdownSelect.jsx'
 import { Button } from '../../ui'
@@ -79,8 +79,10 @@ export const RuleDrawer = ({
     form,
     indicatorMap,
     signalIndicators,
+    guardFieldFilters,
     canSubmit,
     addGuard,
+    duplicateGuard,
     removeGuard,
     buildPayload,
     handleFieldChange,
@@ -91,6 +93,8 @@ export const RuleDrawer = ({
     handleGuardIndicatorChange,
     handleGuardOutputChange,
     handleGuardFieldChange,
+    handleGuardFieldFilterChange,
+    clearGuardFieldFilter,
   } = useRuleForm({
     open,
     indicators,
@@ -121,7 +125,6 @@ export const RuleDrawer = ({
         guards: (form.guards || []).filter(Boolean).filter((entry) => entry?.indicator_id),
       },
       indicatorLookup: indicatorMap,
-      limit: 2,
     }),
     [form.trigger, form.guards, indicatorMap],
   )
@@ -139,14 +142,14 @@ export const RuleDrawer = ({
     <Dialog open={open} onClose={onCancel} className="relative z-50" initialFocus={initialFocusRef}>
       <DialogBackdrop className="fixed inset-0 bg-black/60 backdrop-blur-sm" />
       <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-[28px] border border-[#172033] bg-[linear-gradient(180deg,#101827_0%,#0a1220_100%)] text-slate-100 shadow-2xl">
+        <DialogPanel className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded border border-[#172033] bg-[linear-gradient(180deg,#101827_0%,#0a1220_100%)] text-slate-100 shadow-2xl">
           <header className="flex items-start justify-between border-b border-white/10 px-6 py-5">
             <div>
               <DialogTitle className="text-lg font-semibold text-white">
                 {initialValues ? 'Edit strategy rule' : 'Create strategy rule'}
               </DialogTitle>
               <p className="mt-1 text-sm text-slate-400">
-                One signal trigger is required. Add up to two optional context or metric guards.
+                One signal trigger is required. Add optional context or metric guards.
               </p>
             </div>
             <button
@@ -166,225 +169,297 @@ export const RuleDrawer = ({
             onSubmit={handleSave}
           >
             <div className="grid gap-5 xl:grid-cols-[1.6fr_0.7fr]">
-              <section className="space-y-5">
-                <div className="rounded-2xl border border-[#20304d] bg-[#0e1727] p-4">
-                  <p className="text-[11px] uppercase tracking-[0.24em] text-cyan-300/70">Flow summary</p>
-                  <p className="mt-2 text-sm text-slate-200">{conditionSummary}</p>
+              <section className="space-y-6">
+                <div>
+                  <p className="mb-3 text-[10px] uppercase tracking-[0.22em] text-slate-500">Trigger</p>
+                  <div className="space-y-2">
+                    <DropdownSelect
+                      value={form.trigger.indicator_id}
+                      onChange={handleTriggerIndicatorChange}
+                      placeholder="Select indicator"
+                      options={signalIndicators.map((ind) => ({
+                        value: ind.id,
+                        label: ind.name || ind.type || ind.id,
+                      }))}
+                    />
+                    <DropdownSelect
+                      value={form.trigger.output_name}
+                      onChange={handleTriggerOutputChange}
+                      placeholder="Select signal output"
+                      options={triggerOutputOptions.map((entry) => ({ value: entry.value, label: entry.label }))}
+                      disabled={!form.trigger.indicator_id}
+                    />
+                    <DropdownSelect
+                      value={form.trigger.event_key}
+                      onChange={handleTriggerEventChange}
+                      placeholder="Select event"
+                      options={triggerEventOptions}
+                      disabled={!form.trigger.output_name}
+                    />
+                  </div>
                 </div>
 
-                <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_48px_minmax(0,1fr)_48px_minmax(0,1fr)]">
-                  <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4">
-                    <p className="text-[11px] uppercase tracking-[0.22em] text-emerald-200/80">Signal Trigger</p>
-                    <div className="mt-4 space-y-3">
-                      <DropdownSelect
-                        value={form.trigger.indicator_id}
-                        onChange={handleTriggerIndicatorChange}
-                        placeholder="Select signal indicator"
-                        options={signalIndicators.map((indicator) => ({
-                          value: indicator.id,
-                          label: indicator.name || indicator.type || indicator.id,
-                        }))}
-                        className="gap-0"
-                      />
-                      <DropdownSelect
-                        value={form.trigger.output_name}
-                        onChange={handleTriggerOutputChange}
-                        placeholder="Select signal output"
-                        options={triggerOutputOptions.map((entry) => ({
-                          value: entry.value,
-                          label: entry.label,
-                        }))}
-                        className="gap-0"
-                        disabled={!form.trigger.indicator_id}
-                      />
-                      <DropdownSelect
-                        value={form.trigger.event_key}
-                        onChange={handleTriggerEventChange}
-                        placeholder="Select event"
-                        options={triggerEventOptions}
-                        className="gap-0"
-                        disabled={!form.trigger.output_name}
-                      />
-                    </div>
-                  </div>
+                <div className="border-t border-white/[0.06]" />
 
-                  <div className="flex items-center justify-center text-slate-500">
-                    <ArrowRight className="h-5 w-5" />
+                <div>
+                  <div className="mb-3 flex items-center justify-between">
+                    <p className="text-[10px] uppercase tracking-[0.22em] text-slate-500">
+                      Conditions
+                      <span className="ml-2 normal-case tracking-normal text-slate-600">optional</span>
+                    </p>
+                    <button
+                      type="button"
+                      onClick={addGuard}
+                      className="flex items-center gap-1 text-xs text-slate-400 transition hover:text-white"
+                    >
+                      <Plus className="h-3 w-3" /> Add
+                    </button>
                   </div>
-
-                  <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
-                    <div className="flex items-center justify-between">
-                      <p className="text-[11px] uppercase tracking-[0.22em] text-amber-200/80">Guards</p>
-                      <button
-                        type="button"
-                        onClick={addGuard}
-                        disabled={(form.guards || []).length >= 2}
-                        className="inline-flex items-center gap-1 rounded-full border border-amber-300/20 px-2 py-1 text-[11px] text-amber-100 transition hover:border-amber-300/40 disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        <Plus className="h-3 w-3" />
-                        Add
-                      </button>
-                    </div>
-                    <div className="mt-4 space-y-3">
-                      {(form.guards || []).length === 0 ? (
-                        <div className="rounded-xl border border-dashed border-amber-200/20 px-3 py-4 text-xs text-amber-100/80">
-                          Optional. Add up to two context or metric checks.
-                        </div>
-                      ) : (
-                        form.guards.map((guard, index) => {
-                          const indicator = indicatorMap.get(guard.indicator_id)
-                          const outputType = guard.type === 'context_match' ? 'context' : 'metric'
-                          const indicatorOptions = indicatorOptionsForGuards(indicators, outputType)
-                          const outputOptions = outputOptionsForType(indicator, outputType)
-                          const contextOptions = contextFieldOptions(indicator, guard.output_name)
-                          const metricOptions = metricFieldOptions(indicator, guard.output_name)
-                          return (
-                            <div key={`guard-${index}`} className="rounded-xl border border-amber-200/20 bg-black/20 p-3">
-                              <div className="flex items-center justify-between">
-                                <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-100/80">
-                                  Guard {index + 1}
-                                </span>
-                                <button
-                                  type="button"
-                                  className="rounded p-1 text-amber-100/70 transition hover:bg-white/5 hover:text-white"
-                                  onClick={() => removeGuard(index)}
-                                  aria-label="Remove guard"
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                </button>
-                              </div>
-                              <div className="mt-3 space-y-3">
-                                <DropdownSelect
-                                  value={guard.type}
-                                  onChange={(value) => handleGuardTypeChange(index, value)}
-                                  placeholder="Guard type"
-                                  options={[
-                                    { value: 'context_match', label: 'Context' },
-                                    { value: 'metric_match', label: 'Metric' },
-                                  ]}
-                                  className="gap-0"
-                                />
-                                <DropdownSelect
-                                  value={guard.indicator_id}
-                                  onChange={(value) => handleGuardIndicatorChange(index, value)}
-                                  placeholder={`Select ${outputType} indicator`}
-                                  options={indicatorOptions}
-                                  className="gap-0"
-                                />
-                                <DropdownSelect
-                                  value={guard.output_name}
-                                  onChange={(value) => handleGuardOutputChange(index, value)}
-                                  placeholder={`Select ${outputType} output`}
-                                  options={outputOptions.map((entry) => ({ value: entry.value, label: entry.label }))}
-                                  className="gap-0"
-                                  disabled={!guard.indicator_id}
-                                />
-                                {guard.type === 'context_match' ? (
-                                  <div className="space-y-2">
-                                    <DropdownSelect
-                                      value={guard.field || 'state'}
-                                      onChange={(value) => handleGuardFieldChange(index, 'field', value)}
-                                      placeholder="Context field"
-                                      options={contextOptions}
-                                      className="gap-0"
-                                      disabled={!guard.output_name}
-                                    />
-                                    {contextValueOptions(indicator, guard.output_name, guard.field || 'state').length > 0 ? (
-                                      <DropdownSelect
-                                        value={guard.value_text || ''}
-                                        onChange={(value) => handleGuardFieldChange(index, 'value_text', value)}
-                                        placeholder="Context value"
-                                        options={contextValueOptions(indicator, guard.output_name, guard.field || 'state')}
-                                        className="gap-0"
-                                        disabled={!guard.output_name}
-                                      />
-                                    ) : (
-                                      <input
-                                        className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-slate-200"
-                                        value={guard.value_text || ''}
-                                        onChange={(event) => handleGuardFieldChange(index, 'value_text', event.target.value)}
-                                        placeholder="Context value"
-                                      />
+                  <div className="max-h-72 space-y-2 overflow-y-auto">
+                    {(form.guards || []).length === 0 ? (
+                      <p className="text-xs italic text-slate-600">No conditions — rule fires on trigger alone.</p>
+                    ) : (
+                      form.guards.map((guard, index) => {
+                        const indicator = indicatorMap.get(guard.indicator_id)
+                        const outputType = guard.type === 'context_match' ? 'context' : 'metric'
+                        const indicatorOptions = indicatorOptionsForGuards(indicators, outputType)
+                        const outputOptions = outputOptionsForType(indicator, outputType)
+                        const contextOptions = contextFieldOptions(indicator, guard.output_name)
+                        const metricOptions = metricFieldOptions(indicator, guard.output_name)
+                        const valueOptions = contextValueOptions(indicator, guard.output_name, guard.field || 'state')
+                        const selectedValues = Array.isArray(guard.value_text)
+                          ? guard.value_text.filter(Boolean)
+                          : [guard.value_text].filter(Boolean)
+                        const availableValueOptions = valueOptions.filter(
+                          (option) => !selectedValues.includes(option.value),
+                        )
+                        const fieldFilter = guardFieldFilters[index] || ''
+                        const normalizedFieldFilter = fieldFilter.trim().toLowerCase()
+                        const filteredContextOptions = contextOptions.filter((option) => (
+                          !normalizedFieldFilter
+                          || String(option.label || option.value || '').toLowerCase().includes(normalizedFieldFilter)
+                        ))
+                        const selectedContextField = guard.field || 'state'
+                        const selectedContextOption = contextOptions.find(
+                          (option) => option.value === selectedContextField,
+                        )
+                        return (
+                          <div
+                            key={`guard-${index}`}
+                            className="flex flex-wrap items-start gap-2 rounded border border-white/[0.06] bg-white/[0.02] px-3 py-2"
+                          >
+                            <select
+                              value={guard.type}
+                              onChange={(e) => handleGuardTypeChange(index, e.target.value)}
+                              className="shrink-0 rounded border border-white/10 bg-black/40 px-2 py-1.5 text-xs text-slate-300 focus:outline-none"
+                            >
+                              <option value="context_match">ctx</option>
+                              <option value="metric_match">metric</option>
+                            </select>
+                            <div className="w-36 shrink-0">
+                              <DropdownSelect
+                                value={guard.indicator_id}
+                                onChange={(v) => handleGuardIndicatorChange(index, v)}
+                                placeholder="Indicator"
+                                options={indicatorOptions}
+                              />
+                            </div>
+                            <div className="w-40 shrink-0">
+                              <DropdownSelect
+                                value={guard.output_name}
+                                onChange={(v) => handleGuardOutputChange(index, v)}
+                                placeholder="Output"
+                                options={outputOptions.map((e) => ({ value: e.value, label: e.label }))}
+                                disabled={!guard.indicator_id}
+                              />
+                            </div>
+                            {guard.type === 'context_match' && (
+                              <>
+                                <div className="min-w-[14rem] flex-1">
+                                  <input
+                                    className="w-full rounded border border-white/10 bg-black/40 px-2 py-1.5 text-xs text-slate-200 focus:outline-none"
+                                    value={fieldFilter}
+                                    onChange={(e) => handleGuardFieldFilterChange(index, e.target.value)}
+                                    placeholder="Filter fields..."
+                                    disabled={!guard.output_name}
+                                  />
+                                  {selectedContextOption ? (
+                                    <div className="mt-2 flex items-center gap-2">
+                                      <span className="rounded border border-white/10 bg-black/30 px-2 py-1 text-xs text-slate-200">
+                                        {selectedContextOption.label}
+                                      </span>
+                                      <button
+                                        type="button"
+                                        className="text-[11px] text-slate-500 transition hover:text-white"
+                                        onClick={() => {
+                                          handleGuardFieldChange(index, 'field', '')
+                                          clearGuardFieldFilter(index)
+                                        }}
+                                      >
+                                        Clear
+                                      </button>
+                                    </div>
+                                  ) : null}
+                                  <div className="mt-2 max-h-40 overflow-y-auto rounded border border-white/[0.06] bg-black/20">
+                                    {filteredContextOptions.length > 0 ? filteredContextOptions.map((option) => (
+                                      <button
+                                        key={`${guard.indicator_id || 'guard'}-${option.value}`}
+                                        type="button"
+                                        className={`flex w-full items-center justify-between px-2 py-1.5 text-left text-xs transition ${
+                                          option.value === selectedContextField
+                                            ? 'bg-white/[0.06] text-white'
+                                            : 'text-slate-300 hover:bg-white/[0.03] hover:text-white'
+                                        }`}
+                                        onClick={() => {
+                                          handleGuardFieldChange(index, 'field', option.value)
+                                          clearGuardFieldFilter(index)
+                                        }}
+                                      >
+                                        <span>{option.label}</span>
+                                      </button>
+                                    )) : (
+                                      <div className="px-2 py-2 text-xs text-slate-500">No matching fields</div>
                                     )}
                                   </div>
-                                ) : (
-                                  <div className="grid gap-2 md:grid-cols-[1.2fr_100px_120px]">
-                                    <DropdownSelect
-                                      value={guard.field}
-                                      onChange={(value) => handleGuardFieldChange(index, 'field', value)}
-                                      placeholder="Metric field"
-                                      options={metricOptions}
-                                      className="gap-0"
-                                      disabled={!guard.output_name}
-                                    />
-                                    <select
-                                      className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-slate-200"
-                                      value={guard.operator}
-                                      onChange={(event) => handleGuardFieldChange(index, 'operator', event.target.value)}
-                                    >
-                                      <option value=">">&gt;</option>
-                                      <option value=">=">&gt;=</option>
-                                      <option value="<">&lt;</option>
-                                      <option value="<=">&lt;=</option>
-                                      <option value="==">==</option>
-                                      <option value="!=">!=</option>
-                                    </select>
+                                </div>
+                                <span className="self-center text-xs text-slate-500">=</span>
+                                <div className="min-w-[14rem] flex-1">
+                                  {valueOptions.length > 0 ? (
+                                    <div className="space-y-2">
+                                      <div className="flex flex-wrap gap-1.5">
+                                        {selectedValues.map((selectedValue) => (
+                                          <span
+                                            key={`${guard.output_name || 'value'}-${selectedValue}`}
+                                            className="inline-flex items-center gap-1 rounded border border-white/10 bg-black/30 px-2 py-1 text-xs text-slate-200"
+                                          >
+                                            {selectedValue}
+                                            <button
+                                              type="button"
+                                              className="text-slate-500 transition hover:text-rose-400"
+                                              onClick={() => handleGuardFieldChange(
+                                                index,
+                                                'value_text',
+                                                selectedValues.filter((entry) => entry !== selectedValue),
+                                              )}
+                                            >
+                                              ×
+                                            </button>
+                                          </span>
+                                        ))}
+                                      </div>
+                                      <select
+                                        defaultValue=""
+                                        onChange={(e) => {
+                                          const next = e.target.value
+                                          if (!next) return
+                                          handleGuardFieldChange(index, 'value_text', [...selectedValues, next])
+                                          e.target.value = ''
+                                        }}
+                                        className="w-full rounded border border-white/10 bg-black/40 px-2 py-1.5 text-xs text-slate-200 focus:outline-none"
+                                        disabled={!guard.output_name || availableValueOptions.length === 0}
+                                      >
+                                        <option value="">
+                                          {availableValueOptions.length === 0 ? 'All values selected' : 'Add value'}
+                                        </option>
+                                        {availableValueOptions.map((option) => (
+                                          <option key={`${guard.output_name || 'value-option'}-${option.value}`} value={option.value}>
+                                            {option.label}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                  ) : (
                                     <input
-                                      className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-slate-200"
-                                      value={guard.value}
-                                      onChange={(event) => handleGuardFieldChange(index, 'value', event.target.value)}
+                                      className="w-full rounded border border-white/10 bg-black/40 px-2 py-1.5 text-xs text-slate-200 focus:outline-none"
+                                      value={Array.isArray(guard.value_text) ? guard.value_text[0] || '' : guard.value_text || ''}
+                                      onChange={(e) => handleGuardFieldChange(index, 'value_text', e.target.value)}
                                       placeholder="Value"
-                                      inputMode="decimal"
                                     />
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          )
-                        })
-                      )}
-                    </div>
+                                  )}
+                                </div>
+                              </>
+                            )}
+                            {guard.type === 'metric_match' && (
+                              <>
+                                <div className="w-32 shrink-0">
+                                  <DropdownSelect
+                                    value={guard.field}
+                                    onChange={(v) => handleGuardFieldChange(index, 'field', v)}
+                                    placeholder="Field"
+                                    options={metricOptions}
+                                    disabled={!guard.output_name}
+                                  />
+                                </div>
+                                <select
+                                  value={guard.operator}
+                                  onChange={(e) => handleGuardFieldChange(index, 'operator', e.target.value)}
+                                  className="shrink-0 rounded border border-white/10 bg-black/40 px-2 py-1.5 text-xs text-slate-300 focus:outline-none"
+                                >
+                                  <option value=">">&gt;</option>
+                                  <option value=">=">&gt;=</option>
+                                  <option value="<">&lt;</option>
+                                  <option value="<=">&lt;=</option>
+                                  <option value="==">==</option>
+                                  <option value="!=">!=</option>
+                                </select>
+                                <input
+                                  className="w-24 shrink-0 rounded border border-white/10 bg-black/40 px-2 py-1.5 text-xs text-slate-200 focus:outline-none"
+                                  value={guard.value}
+                                  onChange={(e) => handleGuardFieldChange(index, 'value', e.target.value)}
+                                  placeholder="0.0"
+                                  inputMode="decimal"
+                                />
+                              </>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => duplicateGuard(index)}
+                              className="self-center rounded p-1 text-slate-600 transition hover:text-white"
+                              aria-label="Duplicate condition"
+                            >
+                              <CopyPlus className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => removeGuard(index)}
+                              className="self-center rounded p-1 text-slate-600 transition hover:text-rose-400"
+                              aria-label="Remove condition"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        )
+                      })
+                    )}
                   </div>
+                </div>
 
-                  <div className="flex items-center justify-center text-slate-500">
-                    <ArrowRight className="h-5 w-5" />
-                  </div>
+                <div className="border-t border-white/[0.06]" />
 
-                  <div className="rounded-2xl border border-fuchsia-500/30 bg-fuchsia-500/10 p-4">
-                    <p className="text-[11px] uppercase tracking-[0.22em] text-fuchsia-200/80">Intent</p>
-                    <div className="mt-4 space-y-3">
-                      <select
-                        className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-slate-200"
-                        value={form.intent}
-                        onChange={handleFieldChange('intent')}
-                      >
-                        <option value="enter_long">Long entry</option>
-                        <option value="enter_short">Short entry</option>
-                      </select>
-                      <input
-                        className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-slate-200"
-                        type="number"
-                        step="1"
-                        value={form.priority}
-                        onChange={handleFieldChange('priority')}
-                        placeholder="Priority"
-                      />
-                      <label className="inline-flex items-center gap-2 text-xs text-slate-300">
-                        <input
-                          type="checkbox"
-                          className="h-4 w-4 rounded border-white/20 bg-black/40"
-                          checked={form.enabled}
-                          onChange={handleFieldChange('enabled')}
-                        />
-                        Enabled
-                      </label>
-                    </div>
+                <div>
+                  <p className="mb-3 text-[10px] uppercase tracking-[0.22em] text-slate-500">Intent</p>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <select
+                      className="rounded border border-white/10 bg-black/40 px-3 py-1.5 text-sm text-slate-200 focus:outline-none"
+                      value={form.intent}
+                      onChange={handleFieldChange('intent')}
+                    >
+                      <option value="enter_long">Long entry</option>
+                      <option value="enter_short">Short entry</option>
+                    </select>
                   </div>
+                </div>
+
+                <div className="border-t border-white/[0.06]" />
+
+                <div>
+                  <p className="mb-2 text-[10px] uppercase tracking-[0.22em] text-slate-500">Flow summary</p>
+                  <p className="text-sm text-slate-300">{conditionSummary || 'No trigger selected'}</p>
                 </div>
               </section>
 
               <aside className="space-y-4">
-                <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                <div className="rounded border border-white/10 bg-black/20 p-4">
                   <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Rule details</p>
                   <div className="mt-3 space-y-3">
                     <div>
@@ -419,12 +494,11 @@ export const RuleDrawer = ({
                   </div>
                 </div>
 
-                <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-xs text-slate-400">
-                  <p className="font-semibold uppercase tracking-[0.18em] text-slate-300">Rule law</p>
+                <div className="rounded border border-white/10 bg-black/20 p-4 text-xs text-slate-400">
+                  <p className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Rule law</p>
                   <ul className="mt-3 space-y-2">
                     <li>One signal trigger is required.</li>
                     <li>Context and metric guards are optional.</li>
-                    <li>At most two guards are supported in v1.</li>
                     <li>Indicator signal toggles only affect authoring availability and previews. Runtime follows the signals referenced by your strategy rules.</li>
                   </ul>
                 </div>

@@ -9,7 +9,7 @@ const EMPTY_GUARD = {
   indicator_id: '',
   output_name: '',
   field: '',
-  value_text: '',
+  value_text: [],
   operator: '>',
   value: '',
 }
@@ -22,6 +22,7 @@ const useRuleForm = ({
   getDefaultName,
 } = {}) => {
   const [form, setForm] = useState(RULE_FORM_DEFAULT)
+  const [guardFieldFilters, setGuardFieldFilters] = useState([])
 
   const indicatorMap = useMemo(() => {
     const map = new Map()
@@ -47,31 +48,34 @@ const useRuleForm = ({
   useEffect(() => {
     if (!open) {
       setForm(RULE_FORM_DEFAULT)
+      setGuardFieldFilters([])
       return
     }
     if (initialValues) {
       const flow = extractRuleFlow(initialValues)
+      const guards = Array.isArray(flow.guards) ? flow.guards.map((guard) => ({
+        ...EMPTY_GUARD,
+        ...guard,
+        field: guard?.type === 'context_match' ? guard?.field || 'state' : guard?.field || '',
+        value: guard?.value ?? '',
+        value_text: Array.isArray(guard?.value) ? guard.value : guard?.value ? [guard.value] : [],
+      })) : []
       setForm({
         name: initialValues.name || '',
         description: initialValues.description || '',
         intent: initialValues.intent || (initialValues.action === 'sell' ? 'enter_short' : 'enter_long'),
-        priority: Number.isFinite(Number(initialValues.priority)) ? Number(initialValues.priority) : 0,
         trigger: {
           indicator_id: flow.trigger?.indicator_id || '',
           output_name: flow.trigger?.output_name || '',
           event_key: flow.trigger?.event_key || '',
         },
-        guards: Array.isArray(flow.guards) ? flow.guards.slice(0, 2).map((guard) => ({
-          ...EMPTY_GUARD,
-          ...guard,
-          value: guard?.value ?? '',
-          value_text: guard?.type === 'context_match' ? String(guard?.value ?? '') : '',
-        })) : [],
-        enabled: Boolean(initialValues.enabled),
+        guards,
       })
+      setGuardFieldFilters(guards.map(() => ''))
       return
     }
     setForm({ ...RULE_FORM_DEFAULT })
+    setGuardFieldFilters([])
   }, [open, initialValues])
 
   const trackedIndicatorIds = useMemo(() => {
@@ -111,14 +115,12 @@ const useRuleForm = ({
 
   const addGuard = useCallback(() => {
     setForm((prev) => {
-      if ((prev.guards || []).length >= 2) {
-        return prev
-      }
       return {
         ...prev,
         guards: [...(prev.guards || []), { ...EMPTY_GUARD }],
       }
     })
+    setGuardFieldFilters((prev) => [...prev, ''])
   }, [])
 
   const removeGuard = useCallback((index) => {
@@ -126,6 +128,19 @@ const useRuleForm = ({
       ...prev,
       guards: prev.guards.filter((_, guardIndex) => guardIndex !== index),
     }))
+    setGuardFieldFilters((prev) => prev.filter((_, guardIndex) => guardIndex !== index))
+  }, [])
+
+  const duplicateGuard = useCallback((index) => {
+    setForm((prev) => {
+      const source = prev.guards[index]
+      if (!source) return prev
+      return {
+        ...prev,
+        guards: [...prev.guards, { ...source, value_text: [] }],
+      }
+    })
+    setGuardFieldFilters((prev) => [...prev, ''])
   }, [])
 
   const handleFieldChange = (field) => (input) => {
@@ -163,7 +178,9 @@ const useRuleForm = ({
     updateGuard(index, {
       ...EMPTY_GUARD,
       type: type || 'context_match',
+      field: (type || 'context_match') === 'context_match' ? 'state' : '',
     })
+    setGuardFieldFilters((prev) => prev.map((entry, guardIndex) => (guardIndex === index ? '' : entry)))
   }
 
   const handleGuardIndicatorChange = (index, indicatorId) => {
@@ -171,26 +188,44 @@ const useRuleForm = ({
       indicator_id: indicatorId || '',
       output_name: '',
       field: '',
-      value_text: '',
+      value_text: [],
       value: '',
     })
+    setGuardFieldFilters((prev) => prev.map((entry, guardIndex) => (guardIndex === index ? '' : entry)))
     if (indicatorId && typeof ensureIndicatorMeta === 'function') {
       ensureIndicatorMeta(indicatorId)
     }
   }
 
   const handleGuardOutputChange = (index, outputName) => {
-    updateGuard(index, {
-      output_name: outputName || '',
-      field: '',
-      value_text: '',
-      value: '',
-    })
+    setForm((prev) => ({
+      ...prev,
+      guards: prev.guards.map((guard, guardIndex) => (
+        guardIndex === index
+          ? {
+            ...guard,
+            output_name: outputName || '',
+            field: guard.type === 'context_match' ? 'state' : '',
+            value_text: [],
+            value: '',
+          }
+          : guard
+      )),
+    }))
+    setGuardFieldFilters((prev) => prev.map((entry, guardIndex) => (guardIndex === index ? '' : entry)))
   }
 
   const handleGuardFieldChange = (index, field, value) => {
     updateGuard(index, { [field]: value })
   }
+
+  const handleGuardFieldFilterChange = useCallback((index, value) => {
+    setGuardFieldFilters((prev) => prev.map((entry, guardIndex) => (guardIndex === index ? value : entry)))
+  }, [])
+
+  const clearGuardFieldFilter = useCallback((index) => {
+    setGuardFieldFilters((prev) => prev.map((entry, guardIndex) => (guardIndex === index ? '' : entry)))
+  }, [])
 
   const buildPayload = () => {
     if (!canSubmit) return null
@@ -207,7 +242,7 @@ const useRuleForm = ({
           indicator_id: guard.indicator_id,
           output_name: guard.output_name,
           field: guard.field || 'state',
-          value: String(guard.value_text || '').trim(),
+          value: Array.isArray(guard.value_text) ? guard.value_text.filter(Boolean) : [guard.value_text].filter(Boolean),
         }
       }
       return {
@@ -220,7 +255,7 @@ const useRuleForm = ({
       }
     }).filter((guard) => {
       if (guard.type === 'context_match') {
-        return guard.indicator_id && guard.output_name && guard.field && guard.value
+        return guard.indicator_id && guard.output_name && guard.field && guard.value_text?.length
       }
       return guard.indicator_id && guard.output_name && guard.field && guard.operator && guard.value !== null && !Number.isNaN(guard.value)
     })
@@ -236,10 +271,8 @@ const useRuleForm = ({
       name: resolvedName,
       description: form.description.trim() || null,
       intent: form.intent,
-      priority: Number.isFinite(Number(form.priority)) ? Number(form.priority) : 0,
       trigger,
       guards,
-      enabled: Boolean(form.enabled),
     }
   }
 
@@ -247,8 +280,10 @@ const useRuleForm = ({
     form,
     indicatorMap,
     signalIndicators,
+    guardFieldFilters,
     canSubmit,
     addGuard,
+    duplicateGuard,
     removeGuard,
     buildPayload,
     handleFieldChange,
@@ -259,6 +294,8 @@ const useRuleForm = ({
     handleGuardIndicatorChange,
     handleGuardOutputChange,
     handleGuardFieldChange,
+    handleGuardFieldFilterChange,
+    clearGuardFieldFilter,
   }
 }
 
