@@ -54,8 +54,6 @@ export const OrderTriggersTab = ({
   onSubmit,
   onDateRangeChange,
   DateRangePickerComponent,
-  onNavigateToRules,
-  onNavigateToExecution,
 }) => {
   const [filterQuery, setFilterQuery] = useState('')
   const [filterSide, setFilterSide] = useState('ALL')
@@ -151,24 +149,16 @@ export const OrderTriggersTab = ({
   return (
     <div className="space-y-4">
       <form onSubmit={onSubmit} className="space-y-3" aria-label="Order trigger preview controls">
-        <div className="rounded-xl border border-white/[0.08] bg-black/30 p-3">
+        <div className="rounded border border-white/[0.08] bg-[#0a0d13] p-3">
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div>
               <p className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Order triggers</p>
               <p className="text-xs text-slate-400">Read-only preview of typed rule evaluation and indicator-owned overlays.</p>
             </div>
-            <div className="flex items-center gap-2">
-              <button type="button" onClick={onNavigateToRules} className="rounded border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-200 hover:border-white/20 hover:text-white">
-                View rules
-              </button>
-              <button type="button" onClick={onNavigateToExecution} className="rounded border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-200 hover:border-white/20 hover:text-white">
-                Execution config
-              </button>
-            </div>
           </div>
 
           <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-[1.7fr_1fr]">
-            <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-2.5">
+            <div className="rounded-sm border border-white/[0.08] bg-white/[0.02] p-2.5">
               <div className="mb-2 flex items-center justify-between">
                 <span className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Date range</span>
                 <div className="flex gap-1">
@@ -177,7 +167,7 @@ export const OrderTriggersTab = ({
                       key={preset.label}
                       type="button"
                       onClick={() => handlePresetClick(preset.days)}
-                      className="rounded px-2 py-0.5 text-[10px] font-medium text-slate-400 transition hover:bg-white/5 hover:text-white"
+                      className="qt-mono rounded px-2 py-0.5 text-[10px] font-medium text-slate-400 transition hover:bg-white/5 hover:text-white"
                     >
                       {preset.label}
                     </button>
@@ -190,17 +180,9 @@ export const OrderTriggersTab = ({
               />
             </div>
 
-            <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-2.5">
+            <div className="rounded-sm border border-white/[0.08] bg-white/[0.02] p-2.5">
               <div className="mb-2 flex items-center justify-between gap-2">
                 <span className="block text-[10px] uppercase tracking-[0.2em] text-slate-500">Instrument</span>
-                <Button
-                  type="submit"
-                  disabled={previewLoading || !previewInstrumentId}
-                  loading={previewLoading}
-                  className="h-8 px-3 text-xs"
-                >
-                  {previewLoading ? 'Previewing…' : 'Run preview'}
-                </Button>
               </div>
               {instruments.length ? (
                 <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
@@ -209,7 +191,7 @@ export const OrderTriggersTab = ({
                       key={`preview-instrument-${instrument?.id || instrument?.symbol}`}
                       type="button"
                       onClick={() => onInstrumentChange(instrument?.id)}
-                      className={`shrink-0 rounded border px-2.5 py-1 text-xs transition ${
+                      className={`qt-mono shrink-0 rounded-sm border px-2.5 py-1 text-xs transition ${
                         instrument?.id === previewInstrumentId
                           ? 'border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-15)] text-white'
                           : 'border-white/10 bg-white/[0.03] text-slate-400 hover:border-white/20 hover:text-white'
@@ -226,23 +208,21 @@ export const OrderTriggersTab = ({
             </div>
           </div>
 
-          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-xs">
-            <div className="flex items-center gap-1.5">
-              <span className="text-slate-500">Symbol</span>
-              <span className="text-white" title={activeInstrument?.symbol}>{getInstrumentDisplay(activeInstrument) || symbol}</span>
+          <div className="mt-2 flex items-center justify-between gap-3 border-t border-white/[0.06] pt-3">
+            <div className="flex flex-wrap items-center gap-4 text-[11px] text-slate-500">
+              <span>SYM <span className="qt-mono text-slate-200" title={activeInstrument?.symbol}>{getInstrumentDisplay(activeInstrument) || symbol}</span></span>
+              <span>TF <span className="qt-mono text-slate-200">{interval}</span></span>
+              <span>SRC <span className="qt-mono text-slate-200">{datasource}</span></span>
+              <span>EX <span className="text-slate-200">{exchange}</span></span>
             </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-slate-500">Interval</span>
-              <span className="text-white">{interval}</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-slate-500">Source</span>
-              <span className="text-white">{datasource}</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-slate-500">Exchange</span>
-              <span className="text-white">{exchange}</span>
-            </div>
+            <Button
+              type="submit"
+              disabled={previewLoading || !previewInstrumentId}
+              loading={previewLoading}
+              className="px-6 py-2 text-sm font-semibold"
+            >
+              {previewLoading ? 'Running…' : 'Run preview'}
+            </Button>
           </div>
         </div>
       </form>
@@ -285,29 +265,29 @@ export const OrderTriggersTab = ({
             focusRequest={focusRequest}
           />
 
-          <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4">
+          <div className="border-t border-white/[0.08] pt-3 mt-3">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-sm font-semibold text-white">Recent decision events</p>
+                <p className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Recent decision events</p>
                 <p className="text-xs text-slate-400">These rows are built directly from canonical decision artifacts selected by rule evaluation.</p>
                 {latestTrigger?.timestamp && (
-                  <p className="mt-1 text-[11px] text-slate-500">
+                  <p className="qt-mono mt-1 text-[11px] text-slate-500">
                     Latest: <span className="text-slate-300">{latestTrigger.timestamp}</span>
                   </p>
                 )}
               </div>
               <div className="flex flex-col items-end gap-1">
-                <span className="rounded-full border border-white/10 bg-black/50 px-3 py-1 text-[10px] uppercase tracking-[0.25em] text-slate-300">
-                  {triggerRows.length || 0} decisions
+                <span className="rounded-sm border border-white/10 bg-black/50 px-3 py-1 text-[10px] uppercase tracking-[0.25em] text-slate-300">
+                  <span className="qt-mono">{triggerRows.length || 0}</span> decisions
                 </span>
               </div>
             </div>
             <div className="mt-3 flex flex-wrap gap-2 text-[10px] uppercase tracking-[0.2em]">
-              <span className="rounded-full border border-white/10 bg-black/40 px-2 py-1 text-slate-300">
-                rules {uniqueRuleIds.size}
+              <span className="rounded-sm border border-white/10 bg-black/40 px-2 py-1 text-slate-300">
+                rules <span className="qt-mono">{uniqueRuleIds.size}</span>
               </span>
-              <span className="rounded-full border border-white/10 bg-black/40 px-2 py-1 text-slate-300">
-                indicators {uniqueIndicatorIds.size}
+              <span className="rounded-sm border border-white/10 bg-black/40 px-2 py-1 text-slate-300">
+                indicators <span className="qt-mono">{uniqueIndicatorIds.size}</span>
               </span>
             </div>
 
@@ -372,20 +352,19 @@ export const OrderTriggersTab = ({
                   </div>
                 </div>
 
-                <div className="space-y-2">
+                <div className="overflow-hidden rounded-sm border border-white/[0.08] divide-y divide-white/[0.04]">
                   {pagedRows.map((row) => {
                     const rowSelected = Boolean(
                       focusRequest
                       && focusRequest.rowKey === (row.rowKey || row.id)
                     )
                     return (
-                      <button
+                      <div
                         key={row.rowKey || row.id}
-                        type="button"
-                        className={`w-full rounded-xl border px-4 py-3 text-left transition ${
+                        className={`group cursor-pointer px-3 py-2 transition hover:bg-white/[0.03] ${
                           rowSelected
-                            ? 'border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-12)]'
-                            : 'border-white/10 bg-black/20 hover:border-white/20 hover:bg-white/[0.03]'
+                            ? 'border-l-2 border-l-[color:var(--accent-base)] bg-[color:var(--accent-alpha-05)]'
+                            : ''
                         }`}
                         onClick={() => {
                           if (!row.epoch) return
@@ -397,48 +376,21 @@ export const OrderTriggersTab = ({
                           })
                         }}
                       >
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div className="min-w-[220px] flex-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.2em] ${
-                                row.direction === 'BUY'
-                                  ? 'border-emerald-500/30 bg-emerald-500/15 text-emerald-200'
-                                  : 'border-rose-500/30 bg-rose-500/15 text-rose-200'
-                              }`}>
-                                {row.direction}
-                              </span>
-                              <span className="text-sm font-semibold text-white">{row.ruleName}</span>
-                              <span className="text-xs text-slate-500">{row.timestamp || '—'}</span>
-                            </div>
-                            <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-300">
-                              <span className="rounded-md border border-white/10 bg-white/5 px-2 py-1">
-                                Event: {row.triggerType || 'event'}
-                              </span>
-                              <span className="rounded-md border border-white/10 bg-white/5 px-2 py-1">
-                                Signal output: {row.outputRef || '—'}
-                              </span>
-                              <span className="rounded-md border border-white/10 bg-white/5 px-2 py-1">
-                                Indicator: {row.indicatorRef || '—'}
-                              </span>
-                            </div>
-                          </div>
-                          <div className="min-w-[220px] max-w-[440px]">
-                            <p className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Guards</p>
-                            <div className="mt-2 flex flex-wrap gap-2">
-                              {row.guards.length ? row.guards.map((guard, index) => (
-                                <span
-                                  key={`${row.rowKey || row.id}-guard-${index}`}
-                                  className="rounded-full border border-amber-400/20 bg-amber-400/10 px-2 py-1 text-[11px] text-amber-100"
-                                >
-                                  {guardLabel(guard)}
-                                </span>
-                              )) : (
-                                <span className="text-xs text-slate-500">No guards</span>
-                              )}
-                            </div>
-                          </div>
+                        <div className="flex items-baseline gap-3 text-xs">
+                          <span className={`w-8 shrink-0 text-[10px] font-bold ${
+                            row.direction === 'BUY' ? 'text-emerald-400' : 'text-rose-400'
+                          }`}>
+                            {row.direction}
+                          </span>
+                          <span className="qt-mono shrink-0 text-[10px] text-slate-600">{row.timestamp || '—'}</span>
+                          <span className="truncate text-slate-200">{row.ruleName}</span>
+                          {row.guards.length > 0 && (
+                            <span className="truncate text-[10px] text-amber-500/60">
+                              [{row.guards.map((guard) => guardLabel(guard)).join(' · ')}]
+                            </span>
+                          )}
                         </div>
-                      </button>
+                      </div>
                     )
                   })}
                 </div>

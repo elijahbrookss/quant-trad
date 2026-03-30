@@ -16,6 +16,14 @@ export const InstrumentsTab = ({
   refreshStatus
 }) => {
   const [expanded, setExpanded] = useState(null)
+  const freshnessClass = (updatedAt) => {
+    if (!updatedAt) return 'text-slate-600'
+    const ageDays = (Date.now() - new Date(updatedAt).getTime()) / 86400000
+    if (ageDays < 1) return 'text-emerald-400'
+    if (ageDays < 7) return 'text-slate-400'
+    if (ageDays < 30) return 'text-amber-400'
+    return 'text-rose-400'
+  }
 
   const formatExpiry = (value) => {
     if (!value) return '—'
@@ -55,7 +63,7 @@ export const InstrumentsTab = ({
   return (
     <>
       {instrumentMessages.length > 0 && (
-        <div className="mb-4 flex gap-3 rounded-xl border border-amber-400/40 bg-amber-500/5 p-3 text-xs text-amber-100">
+        <div className="mb-4 flex gap-3 rounded-sm border border-amber-400/40 bg-amber-500/5 p-3 text-xs text-amber-100">
           <div className="text-lg leading-5">⚠️</div>
           <div>
             <p className="font-semibold text-amber-200">Metadata issues</p>
@@ -71,7 +79,7 @@ export const InstrumentsTab = ({
         </div>
       )}
 
-      <div className="overflow-hidden rounded-xl border border-white/10 bg-black/30">
+      <div className="overflow-hidden rounded border border-white/10 bg-[#0a0d13]">
         <div className="grid grid-cols-[1.2fr_0.8fr_1fr_1fr_0.8fr_0.9fr_0.6fr] items-center gap-2 border-b border-white/5 px-3 py-2 text-[11px] uppercase tracking-[0.24em] text-slate-500">
           <span>Symbol</span>
           <span>Type</span>
@@ -110,7 +118,7 @@ export const InstrumentsTab = ({
                   className="grid w-full grid-cols-[1.2fr_0.8fr_1fr_1fr_0.8fr_0.9fr_0.6fr] items-center gap-2 px-3 py-1.5 text-left text-xs text-slate-200 hover:bg-white/[0.03] focus:outline-none"
                 >
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold leading-none text-white">{symbol || '—'}</span>
+                    <span className="qt-mono text-sm font-semibold leading-none text-white">{symbol || '—'}</span>
                     <span className="text-[12px] text-slate-500">{isOpen ? '▾' : '▸'}</span>
                   </div>
                   <div className="text-slate-300">{record?.instrument_type || '—'}</div>
@@ -121,11 +129,15 @@ export const InstrumentsTab = ({
                     {hasMetadata ? `${formatFeeRate(record.maker_fee_rate)} / ${formatFeeRate(record.taker_fee_rate)}` : '—'}
                   </div>
                   <div>
-                    <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.2em] ${badge.className}`}>
+                    <span className={`inline-flex rounded-sm border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.2em] ${badge.className}`}>
                       {badge.label}
                     </span>
                   </div>
-                  <div className="text-slate-400">{updatedAt ? formatRelative(updatedAt) : 'Needs refresh'}</div>
+                  <div>
+                    <span className={`qt-mono text-xs ${freshnessClass(updatedAt || record?.metadata?.updated_at)}`}>
+                      {updatedAt ? formatRelative(updatedAt) : 'Needs refresh'}
+                    </span>
+                  </div>
                   <div className="flex justify-end gap-1">
                     {onRefreshMetadata && (
                       <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onRefreshMetadata(symbol) }} disabled={isRefreshing}>
@@ -142,23 +154,23 @@ export const InstrumentsTab = ({
                   <div className="grid grid-cols-2 gap-3 border-t border-white/5 bg-white/[0.02] px-4 py-3 text-xs text-slate-200 md:grid-cols-3">
                     <div>
                       <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Tick size</p>
-                      <p className="text-sm text-white">{hasMetadata ? formatInstrumentNumber(record.tick_size) : '—'}</p>
+                      <p className="qt-mono text-sm text-white">{hasMetadata ? formatInstrumentNumber(record.tick_size) : '—'}</p>
                     </div>
                     <div>
                       <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Tick value</p>
-                      <p className="text-sm text-white">{hasMetadata ? `${formatInstrumentNumber(record.tick_value)} ${record.quote_currency || ''}` : '—'}</p>
+                      <p className="qt-mono text-sm text-white">{hasMetadata ? `${formatInstrumentNumber(record.tick_value)} ${record.quote_currency || ''}` : '—'}</p>
                     </div>
                     <div>
                       <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Contract size</p>
-                      <p className="text-sm text-white">{hasMetadata ? formatInstrumentNumber(record.contract_size) : '—'}</p>
+                      <p className="qt-mono text-sm text-white">{hasMetadata ? formatInstrumentNumber(record.contract_size) : '—'}</p>
                     </div>
                     <div>
                       <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Min order</p>
-                      <p className="text-sm text-white">{hasMetadata ? formatInstrumentNumber(record.min_order_size) : '—'}</p>
+                      <p className="qt-mono text-sm text-white">{hasMetadata ? formatInstrumentNumber(record.min_order_size) : '—'}</p>
                     </div>
                     <div>
                       <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Expiry</p>
-                      <p className="text-sm text-white">{formatExpiry(record?.expiry_ts)}</p>
+                      <p className="qt-mono text-sm text-white">{formatExpiry(record?.expiry_ts)}</p>
                     </div>
                     <div className="flex items-center gap-2">
                       <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Funding</p>
@@ -176,7 +188,7 @@ export const InstrumentsTab = ({
                     </div>
                     <div>
                       <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Updated at</p>
-                      <p className="text-sm text-white">{record?.updated_at ? new Date(record.updated_at).toLocaleString() : '—'}</p>
+                      <p className="qt-mono text-sm text-white">{record?.updated_at ? new Date(record.updated_at).toLocaleString() : '—'}</p>
                     </div>
                     <div>
                       <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Provider</p>
