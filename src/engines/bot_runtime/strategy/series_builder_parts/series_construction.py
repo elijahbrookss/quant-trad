@@ -433,12 +433,14 @@ class SeriesBuilderConstructionMixin:
             instrument_id=instrument.get("id") if isinstance(instrument, dict) else None,
         )
         self._attach_execution_adapter(risk_engine, execution_profile)
+        strategy_rules, strategy_params = strategy.compilation_inputs()
         compiled_strategy = compile_strategy(
             strategy_id=strategy.id,
             timeframe=timeframe,
-            rules=list((getattr(strategy, "rules", {}) or {}).values()),
+            rules=list(strategy_rules.values()),
             attached_indicator_ids=strategy.indicator_ids,
             indicator_meta_getter=self._deps.indicator_get_instance_meta,
+            params=strategy_params,
         )
 
         # Convert strategy to dict for backward compatibility with meta field
