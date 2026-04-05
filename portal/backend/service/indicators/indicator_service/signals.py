@@ -274,14 +274,23 @@ class IndicatorSignalExecutor:
             indicator_color=str(payload.get("color") or "").strip() or None,
             signal_bubbles_by_output=signal_bubbles_by_output,
         )
-        payload["signals"] = signals
-        payload["overlays"] = signal_overlays
-        payload["runtime_path"] = SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT
-        payload["runtime_invariants"] = {
+        runtime_invariants = {
             "source_timeframe": str(execution_context.interval or ""),
             "bars_used": len(candles),
             "signals_count": len(signals),
             "signal_overlay_count": len(signal_overlays),
+        }
+        payload["signals"] = signals
+        payload["overlays"] = signal_overlays
+        payload["runtime_path"] = SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT
+        payload["runtime_invariants"] = runtime_invariants
+        payload["machine"] = {
+            "signals": signals,
+            "runtime_path": SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT,
+            "runtime_invariants": runtime_invariants,
+        }
+        payload["ui"] = {
+            "overlays": signal_overlays,
         }
         logger.info(
             "event=indicator_signal_execute_complete indicator_id=%s indicator_type=%s symbol=%s timeframe=%s source_timeframe=%s bars=%s signals=%s signal_overlays=%s duration_total_ms=%.3f",
@@ -557,7 +566,7 @@ class IndicatorSignalExecutor:
 
     @staticmethod
     def _normalise_enabled_event_keys(config: Mapping[str, Any]) -> Set[str]:
-        enabled = config.get("enabled_rules")
+        enabled = config.get("enabled_event_keys")
         if enabled is None:
             return set()
         if isinstance(enabled, (str, bytes)):

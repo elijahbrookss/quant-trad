@@ -38,6 +38,10 @@ Out of scope:
 - transport diffing or websocket streaming,
 - strategy signal execution.
 
+Related API read contract:
+- `GET /api/indicators/{id}` returns one whole-indicator document with explicit `instance`, `manifest`, `outputs`, and `capabilities` sections.
+- The indicator read contract does not hide manifest data behind separate type lookups when the caller is reading one concrete indicator instance.
+
 ## Canonical flow
 
 ```mermaid

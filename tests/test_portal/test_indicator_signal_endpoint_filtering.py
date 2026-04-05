@@ -79,9 +79,12 @@ def test_filter_signal_payload_removes_disabled_output_overlays() -> None:
     ]
     assert filtered["runtime_invariants"]["signals_count"] == 1
     assert filtered["runtime_invariants"]["signal_overlay_count"] == 1
+    assert filtered["machine"]["signals"] == filtered["signals"]
+    assert filtered["machine"]["runtime_invariants"] == filtered["runtime_invariants"]
+    assert filtered["ui"]["overlays"] == filtered["overlays"]
 
 
-def test_normalise_enabled_event_keys_keeps_explicit_rule_filter() -> None:
+def test_normalise_enabled_event_keys_keeps_explicit_event_key_filter() -> None:
     assert normalise_enabled_event_keys(
-        {"enabled_rules": ["balance_breakout_long", "balance_reclaim_long", "balance_retest_long"]}
+        {"enabled_event_keys": ["balance_breakout_long", "balance_reclaim_long", "balance_retest_long"]}
     ) == {"balance_breakout_long", "balance_reclaim_long", "balance_retest_long"}

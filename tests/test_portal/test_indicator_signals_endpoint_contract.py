@@ -30,6 +30,7 @@ def test_signals_endpoint_rejects_non_engine_runtime_path(monkeypatch) -> None:
             "symbol": "ES",
             "datasource": "ALPACA",
             "instrument_id": "instrument-1",
+            "config": {"enabled_event_keys": ["breakout_long"]},
         },
     )
     assert response.status_code == 500
@@ -72,4 +73,13 @@ def test_signals_endpoint_accepts_engine_runtime_path(monkeypatch) -> None:
     body = response.json()
     assert body.get("runtime_path") == SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT
     assert body.get("overlays") == [{"type": "indicator_signal", "source": "signal", "payload": {"bubbles": []}}]
+    assert body.get("machine") == {
+        "signals": [],
+        "runtime_path": SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT,
+        "runtime_invariants": None,
+    }
+    assert body.get("ui") == {
+        "overlays": [{"type": "indicator_signal", "source": "signal", "payload": {"bubbles": []}}],
+    }
     assert captured["instrument_id"] == "instrument-1"
+    assert captured["config"]["enabled_event_keys"] == ["breakout_long"]
