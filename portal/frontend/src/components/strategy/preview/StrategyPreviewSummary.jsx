@@ -6,13 +6,28 @@ export const StrategyPreviewSummary = ({ result, instrumentId }) => {
   const instrumentResult = result?.instruments?.[instrumentId]
   if (!instrumentResult) return null
 
+  const machine = instrumentResult?.machine && typeof instrumentResult.machine === 'object'
+    ? instrumentResult.machine
+    : {}
+  const ui = instrumentResult?.ui && typeof instrumentResult.ui === 'object'
+    ? instrumentResult.ui
+    : {}
+
   const {
     window,
-    decision_artifacts: decisionArtifacts = [],
-    overlays: overlays = [],
     status,
     missing_indicators: missingIndicatorsRaw = [],
   } = instrumentResult
+  const decisionArtifacts = Array.isArray(machine?.decision_artifacts)
+    ? machine.decision_artifacts
+    : Array.isArray(instrumentResult?.decision_artifacts)
+      ? instrumentResult.decision_artifacts
+      : []
+  const overlays = Array.isArray(ui?.overlays)
+    ? ui.overlays
+    : Array.isArray(instrumentResult?.overlays)
+      ? instrumentResult.overlays
+      : []
 
   const rows = Array.isArray(decisionArtifacts)
     ? decisionArtifacts.filter((entry) => String(entry?.evaluation_result || '') === 'matched_selected')
