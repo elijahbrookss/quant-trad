@@ -42,6 +42,7 @@ This document explains how regime classification works now that regime is a norm
 - Strategies read typed outputs such as `regime.market_regime` and `regime.regime_metrics`.
 - `market_regime` is the stable structural context surface used for state gating.
 - `regime_metrics` exposes numeric structure strength and maturity fields such as trend/range/transition scores, score margin, directional efficiency, and bars-in-regime.
+- Both typed outputs also expose decision-grade normalized fields: `regime_confidence` (context trust), `regime_conviction` (score margin), `trend_strength`, `directional_conviction`, `volatility_intensity`, and `regime_maturity`.
 - Entry/exit logic should combine those outputs with other indicator outputs in the strategy rule pipeline, not by querying separate regime tables.
 
 ### 3) Overlay Consumption
