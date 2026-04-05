@@ -18,9 +18,11 @@ from ...db.models import (
     StrategyInstrumentLink as StrategyInstrumentLinkDB,
     StrategyRecord,
     StrategyRuleRecord,
+    StrategyVariantRecord,
 )
 from ..risk.atm import normalise_template
 from engines.bot_runtime.strategy.models import Strategy, StrategyIndicatorLink, StrategyInstrumentLink
+from risk import normalise_risk_config
 from utils.log_context import build_log_context, with_log_context
 
 logger = logging.getLogger(__name__)
@@ -35,7 +37,7 @@ class StrategyLoader:
     """
 
     @staticmethod
-    def fetch_strategy(strategy_id: str) -> Strategy:
+    def fetch_strategy(strategy_id: str, runtime_config: dict | None = None) -> Strategy:
         """Fetch strategy with all relationships from database.
 
         Args:
@@ -56,10 +58,32 @@ class StrategyLoader:
             if not strategy_rec:
                 raise ValueError(f"Strategy not found: {strategy_id}")
 
+            runtime_payload = dict(runtime_config or {})
+            variant_id = str(runtime_payload.get("strategy_variant_id") or "").strip() or None
+            variant_name = str(runtime_payload.get("strategy_variant_name") or "").strip() or None
+            resolved_params = runtime_payload.get("resolved_params")
+            if not isinstance(resolved_params, dict):
+                resolved_params = {}
+
+            variant_rec = None
+            if variant_id:
+                variant_rec = session.get(StrategyVariantRecord, variant_id)
+                if variant_rec and str(variant_rec.strategy_id or "").strip() != strategy_id:
+                    raise ValueError(
+                        f"Strategy variant {variant_id} does not belong to strategy {strategy_id}"
+                    )
+                if variant_rec and not resolved_params:
+                    resolved_params = dict(variant_rec.param_overrides or {})
+
+            selected_atm_template_id = (
+                (variant_rec.atm_template_id if variant_rec else None)
+                or strategy_rec.atm_template_id
+            )
+
             # Fetch ATM template if linked
             atm_template = None
-            if strategy_rec.atm_template_id:
-                template_rec = session.get(ATMTemplateRecord, strategy_rec.atm_template_id)
+            if selected_atm_template_id:
+                template_rec = session.get(ATMTemplateRecord, selected_atm_template_id)
                 if template_rec:
                     atm_template = normalise_template(template_rec.template)
 
@@ -116,13 +140,18 @@ class StrategyLoader:
                 timeframe=strategy_rec.timeframe,
                 datasource=strategy_rec.datasource,
                 exchange=strategy_rec.exchange,
-                atm_template_id=strategy_rec.atm_template_id,
+                atm_template_id=selected_atm_template_id,
                 atm_template=atm_template,
-                base_risk_per_trade=strategy_rec.base_risk_per_trade,
-                global_risk_multiplier=strategy_rec.global_risk_multiplier,
+                risk_config=normalise_risk_config(
+                    runtime_payload.get("risk_config")
+                    if isinstance(runtime_payload.get("risk_config"), dict)
+                    else strategy_rec.risk_config
+                ),
                 indicator_links=indicator_links,
                 instrument_links=instrument_links,
                 rules=rules,
+                variant_name=variant_name,
+                resolved_params=dict(resolved_params or {}),
             )
 
     @staticmethod

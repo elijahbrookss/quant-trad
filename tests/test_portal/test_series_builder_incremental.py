@@ -43,9 +43,23 @@ def test_incremental_eval_emits_only_current_epoch_and_newer_than_cursor():
     def _fake_evaluate(*args, **kwargs):
         _ = args, kwargs
         return {
-            "trigger_rows": [
-                {"epoch": int((now - timedelta(minutes=1)).timestamp()), "action": "buy"},
-                {"epoch": int(now.timestamp()), "action": "buy"},
+            "decision_artifacts": [
+                {
+                    "decision_id": "d-1",
+                    "rule_id": "rule-1",
+                    "bar_epoch": int((now - timedelta(minutes=1)).timestamp()),
+                    "evaluation_result": "matched_selected",
+                    "emitted_intent": "enter_long",
+                    "trigger": {"event_key": "breakout_long"},
+                },
+                {
+                    "decision_id": "d-2",
+                    "rule_id": "rule-1",
+                    "bar_epoch": int(now.timestamp()),
+                    "evaluation_result": "matched_selected",
+                    "emitted_intent": "enter_long",
+                    "trigger": {"event_key": "breakout_long"},
+                },
             ],
             "overlays": [],
             "perf": {"candle_fetch_ms": 3.5, "preview_replay_ms": 2.0},
@@ -95,7 +109,7 @@ def test_incremental_eval_uses_bounded_lookback_window():
         observed["start_iso"] = start_iso
         observed["end_iso"] = end_iso
         _ = timeframe, instrument_id, strategy, include_walk_forward_markers
-        return {"trigger_rows": [], "overlays": [], "perf": {}}
+        return {"decision_artifacts": [], "overlays": [], "perf": {}}
 
     builder._evaluate_strategy = _fake_evaluate  # type: ignore[assignment]
 
@@ -111,25 +125,39 @@ def test_incremental_eval_uses_bounded_lookback_window():
     assert observed["end_iso"] == isoformat(now)
 
 
-def test_build_signals_from_trigger_rows_preserves_signal_time_without_shift() -> None:
+def test_build_signals_from_decision_artifacts_preserves_signal_time_without_shift() -> None:
     ts = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
-    rows = [
+    artifacts = [
         {
-            "epoch": int(ts.timestamp()),
-            "action": "buy",
+            "decision_id": "d-1",
+            "rule_id": "rule-1",
+            "strategy_hash": "hash-1",
+            "bar_epoch": int(ts.timestamp()),
+            "evaluation_result": "matched_selected",
+            "emitted_intent": "enter_long",
+            "trigger": {"event_key": "breakout_long"},
         }
     ]
-    out = SeriesBuilder._build_signals_from_trigger_rows(rows)
+    out = SeriesBuilder._build_signals_from_decision_artifacts(artifacts)
     assert len(out) == 1
     assert out[0].epoch == int(ts.timestamp())
+    assert out[0].direction == "long"
+    assert out[0].signal_id == "d-1"
+    assert out[0].strategy_hash == "hash-1"
+    assert out[0].decision_id == "d-1"
+    assert out[0].rule_id == "rule-1"
 
-def test_build_signals_from_trigger_rows_ignores_unknown_actions() -> None:
+def test_build_signals_from_decision_artifacts_ignores_non_selected_entries() -> None:
     ts = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
-    rows = [
+    artifacts = [
         {
-            "epoch": int(ts.timestamp()),
-            "action": "hold",
+            "decision_id": "d-1",
+            "rule_id": "rule-1",
+            "bar_epoch": int(ts.timestamp()),
+            "evaluation_result": "matched_suppressed",
+            "emitted_intent": "enter_long",
+            "trigger": {"event_key": "breakout_long"},
         }
     ]
-    out = SeriesBuilder._build_signals_from_trigger_rows(rows)
+    out = SeriesBuilder._build_signals_from_decision_artifacts(artifacts)
     assert len(out) == 0

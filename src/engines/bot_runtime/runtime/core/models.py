@@ -16,6 +16,7 @@ from engines.bot_runtime.core.domain import (
 )
 from engines.indicator_engine.contracts import OutputType, RuntimeOutput, RuntimeOverlay
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
+from strategies.evaluator import DecisionEvaluationState
 
 DEFAULT_SIM_LOOKBACK_DAYS = 7
 MAX_LOG_ENTRIES = 500
@@ -47,6 +48,9 @@ class SeriesExecutionState:
     indicator_overlays: Dict[str, RuntimeOverlay] = field(default_factory=dict)
     indicator_output_types: Dict[str, OutputType] = field(default_factory=dict)
     overlay_runtime_metrics: Dict[str, float] = field(default_factory=dict)
+    decision_evaluation_state: DecisionEvaluationState = field(default_factory=DecisionEvaluationState)
+    decision_artifacts: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=2000))
+    rejection_artifacts: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=1000))
 
     def intrabar_active(self) -> bool:
         return bool(self.intrabar_candles) and self.intrabar_index < len(self.intrabar_candles)

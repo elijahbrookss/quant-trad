@@ -20,10 +20,6 @@ DEFAULT_ATM_TEMPLATE: Dict[str, Any] = {
         "atr_period": 14,
         "atr_multiplier": 1.0,
     },
-    "risk": {
-        "global_risk_multiplier": 1.0,
-        "base_risk_per_trade": None,
-    },
     "take_profit_orders": [
         {"id": "tp-1", "r_multiple": 1.0, "size_fraction": 0.34},
         {"id": "tp-2", "r_multiple": 2.0, "size_fraction": 0.33},

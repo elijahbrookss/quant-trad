@@ -236,6 +236,9 @@ def test_signal_executor_enriches_contract_fields_from_replay_context(monkeypatc
     assert overlay["payload"]["bubbles"][0]["price"] == 100.5
     assert overlay["payload"]["bubbles"][0]["meta"] == "Balance Breakout"
     assert overlay["payload"]["bubbles"][0]["signal_id"] == event["signal_id"]
+    assert payload["machine"]["signals"] == payload["signals"]
+    assert payload["machine"]["runtime_path"] == payload["runtime_path"]
+    assert payload["ui"]["overlays"] == payload["overlays"]
 
 
 def test_signal_executor_preserves_event_contract_metadata_when_present(monkeypatch) -> None:
@@ -365,3 +368,5 @@ def test_signal_executor_preserves_event_contract_metadata_when_present(monkeypa
             "profile_key": "profile-1",
         },
     }
+    assert payload["machine"]["signals"] == payload["signals"]
+    assert payload["ui"]["overlays"] == payload["overlays"]

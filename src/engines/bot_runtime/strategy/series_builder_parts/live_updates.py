@@ -108,18 +108,18 @@ class SeriesBuilderLiveUpdatesMixin:
                         instrument_id=str(instrument_id),
                         strategy=strategy_obj,
                     )
-                    trigger_rows = evaluation.get("trigger_rows") or []
+                    decision_artifacts = evaluation.get("decision_artifacts") or []
                     perf.add_fields(
-                        trigger_rows_count=len(trigger_rows),
+                        decision_artifacts_count=len(decision_artifacts),
                     )
             series.overlays = [dict(entry) for entry in evaluation.get("overlays") or [] if isinstance(entry, Mapping)]
             marker_context = self._series_log_context(
                 series,
-                trigger_rows=len(trigger_rows),
+                decision_artifacts=len(decision_artifacts),
                 overlays=len(series.overlays),
             )
             logger.debug(with_log_context("append_series_updates_preview_result", marker_context))
-            signals = self._build_signals_from_trigger_rows(trigger_rows)
+            signals = self._build_signals_from_decision_artifacts(decision_artifacts)
             raw_context = self._series_log_context(
                 series,
                 raw_signals=len(signals),
@@ -317,10 +317,10 @@ class SeriesBuilderLiveUpdatesMixin:
                 instrument_payload = instruments.get(instrument_id)
             if not isinstance(instrument_payload, dict):
                 instrument_payload = evaluation
-            trigger_rows = instrument_payload.get("trigger_rows", []) if isinstance(instrument_payload, dict) else []
+            decision_artifacts = instrument_payload.get("decision_artifacts", []) if isinstance(instrument_payload, dict) else []
             result_context = self._strategy_log_context(
                 strategy,
-                trigger_rows=len(trigger_rows) if isinstance(trigger_rows, list) else 0,
+                decision_artifacts=len(decision_artifacts) if isinstance(decision_artifacts, list) else 0,
                 overlays=len(instrument_payload.get("overlays", [])) if isinstance(instrument_payload, dict) and isinstance(instrument_payload.get("overlays"), list) else 0,
             )
             logger.info(with_log_context("evaluate_strategy_result", result_context))

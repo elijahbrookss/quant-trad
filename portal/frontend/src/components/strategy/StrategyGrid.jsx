@@ -154,6 +154,7 @@ export const StrategyGrid = ({ strategies, selectedId, onSelect }) => {
                 ? `${primarySymbol} +${symbols.length - 1}`
                 : primarySymbol
               const timeframeMeta = strategy?.timeframe || '—'
+              const variantCount = Array.isArray(strategy?.variants) ? strategy.variants.length : 0
 
               return (
                 <button
@@ -167,8 +168,15 @@ export const StrategyGrid = ({ strategies, selectedId, onSelect }) => {
                   } hover:bg-white/[0.03]`}
                   aria-label={`Select ${strategy.name}`}
                 >
-                  <span className="min-w-0 truncate pr-3 text-sm font-semibold text-slate-100">
-                    {strategy.name}
+                  <span className="min-w-0 pr-3">
+                    <span className="block truncate text-sm font-semibold text-slate-100">
+                      {strategy.name}
+                    </span>
+                    {variantCount > 1 ? (
+                      <span className="mt-1 inline-flex items-center rounded-full bg-white/[0.06] px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em] text-slate-400">
+                        {variantCount} variants
+                      </span>
+                    ) : null}
                   </span>
                   <span className="shrink-0 text-[11px] text-slate-500">
                     {timeframeMeta} · {symbolMeta}

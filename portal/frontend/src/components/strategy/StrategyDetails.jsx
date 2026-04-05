@@ -5,7 +5,7 @@ import { MoreVertical, Pencil, Trash2 } from 'lucide-react'
 import { symbolsFromInstrumentSlots } from '../../utils/instrumentSymbols.js'
 import { DateRangePickerComponent } from '../ChartComponent/DateTimePickerComponent.jsx'
 import DropdownSelect from '../ChartComponent/DropdownSelect.jsx'
-import { InstrumentsTab, ATMTab, RulesTab, OrderTriggersTab } from './index.js'
+import { InstrumentsTab, ATMTab, RiskTab, RulesTab, OrderTriggersTab, VariantsTab } from './index.js'
 import ActionButton from './ui/ActionButton.jsx'
 import TabButton from './ui/TabButton.jsx'
 import TabPanel from './ui/TabPanel.jsx'
@@ -43,7 +43,11 @@ const StrategyDetails = ({
   onEditRule,
   onDuplicateRule,
   onDeleteRule,
+  onAddVariant,
+  onEditVariant,
+  onDeleteVariant,
   onRunPreview,
+  onLaunchBot,
   previewWindow,
   setPreviewWindow,
   previewResult,
@@ -87,19 +91,15 @@ const StrategyDetails = ({
   const indicatorCount = Array.isArray(attachedIndicators) ? attachedIndicators.length : 0
   const atmTemplate = strategy?.atm_template || {}
   const atmTargets = Array.isArray(atmTemplate.take_profit_orders) ? atmTemplate.take_profit_orders : []
+  const variantCount = Array.isArray(strategy?.variants) ? strategy.variants.length : 0
 
-  const [quickBaseRisk, setQuickBaseRisk] = useState('')
-  const [quickTemplateId, setQuickTemplateId] = useState('')
   const [quickSymbol, setQuickSymbol] = useState('')
   const [quickError, setQuickError] = useState(null)
 
   useEffect(() => {
-    const currentRisk = strategy?.base_risk_per_trade
-    setQuickBaseRisk(currentRisk === null || currentRisk === undefined ? '' : String(currentRisk))
-    setQuickTemplateId(strategy?.atm_template_id || '')
     setQuickSymbol('')
     setQuickError(null)
-  }, [strategy?.id, strategy?.base_risk_per_trade, strategy?.atm_template_id])
+  }, [strategy?.id, strategy?.atm_template_id])
 
   const atmTemplateOptions = useMemo(() => {
     const options = []
@@ -122,22 +122,6 @@ const StrategyDetails = ({
     return String(value).trim().toUpperCase().replace(/\s+/g, '')
   }, [])
 
-  const handleQuickBaseRiskSave = useCallback(async () => {
-    if (!onQuickUpdate) return
-    const normalized = quickBaseRisk === '' ? null : Number(quickBaseRisk)
-    if (quickBaseRisk !== '' && !Number.isFinite(normalized)) {
-      setQuickError('Base risk must be a number.')
-      return
-    }
-    const current = strategy?.base_risk_per_trade ?? null
-    if ((current === null && normalized === null) || Number(current) === Number(normalized)) {
-      setQuickError(null)
-      return
-    }
-    setQuickError(null)
-    await onQuickUpdate({ base_risk_per_trade: normalized })
-  }, [onQuickUpdate, quickBaseRisk, strategy?.base_risk_per_trade])
-
   const handleTemplateChange = useCallback(
     async (event) => {
       if (!onQuickUpdate) return
@@ -145,7 +129,6 @@ const StrategyDetails = ({
       if ((strategy?.atm_template_id || null) === (next || null)) {
         return
       }
-      setQuickTemplateId(next || '')
       setQuickError(null)
       await onQuickUpdate({ atm_template_id: next || null })
     },
@@ -194,14 +177,17 @@ const StrategyDetails = ({
         return
       }
       setQuickError(null)
-      const nextRiskOverrides = { ...(strategy?.risk_overrides || {}) }
-      delete nextRiskOverrides[normalized]
+      const nextInstrumentMultipliers = { ...(strategy?.risk_config?.instrument_multipliers || {}) }
+      delete nextInstrumentMultipliers[normalized]
       await onQuickUpdate({
         instrument_slots: nextSlots,
-        risk_overrides: nextRiskOverrides,
+        risk_config: {
+          ...(strategy?.risk_config || {}),
+          instrument_multipliers: nextInstrumentMultipliers,
+        },
       })
     },
-    [onQuickUpdate, normalizeSymbol, strategy?.instrument_slots, strategy?.risk_overrides, buildSlotPayload],
+    [onQuickUpdate, normalizeSymbol, strategy?.instrument_slots, strategy?.risk_config, buildSlotPayload],
   )
 
   const handleQuickSymbolKey = useCallback(
@@ -213,16 +199,13 @@ const StrategyDetails = ({
     [handleQuickAddSymbol],
   )
 
-  const [activeTab, setActiveTab] = useState('instruments')
+  const [activeTab, setActiveTab] = useState('logic')
 
   useEffect(() => {
-    // Reset to instruments tab when strategy changes, or if there are instrument messages
     if (instrumentMessages.length > 0) {
       setActiveTab('instruments')
-    } else {
-      setActiveTab('instruments')
     }
-  }, [strategy?.id, instrumentMessages.length])
+  }, [strategy?.id])
 
   const handleAddInstrument = useCallback(
     (symbol) => {
@@ -243,7 +226,7 @@ const StrategyDetails = ({
 
   if (!hasStrategy) {
     return (
-      <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 p-6 text-center text-sm text-slate-400">
+      <div className="rounded-sm border border-dashed border-white/10 bg-[#0a0d13] p-6 text-center text-sm text-slate-400">
         Select a strategy to manage indicators, rules, and signal evaluations.
       </div>
     )
@@ -251,108 +234,123 @@ const StrategyDetails = ({
 
   // Computed values for header display
   const atmTemplateName = strategy.atm_template?.name?.trim() || 'Default ATM'
+  const providerLabel = strategy.provider_id || strategy.datasource || 'Provider'
+  const venueLabel = strategy.venue_id || strategy.exchange || 'Venue'
+  const baseRiskPerTrade = strategy?.risk_config?.base_risk_per_trade
+  const riskSummary =
+    baseRiskPerTrade === null || baseRiskPerTrade === undefined
+      ? 'Risk unset'
+      : `${baseRiskPerTrade} USD risk`
 
   return (
     <div className="space-y-4">
-      {/* Compact Header */}
-      <div className="rounded-xl border border-white/[0.08] bg-black/30">
-        {/* Main header row */}
-        <div className="flex items-center justify-between gap-4 px-5 py-4">
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-3">
-              <h2 className="truncate text-lg font-semibold text-white">{strategy.name}</h2>
-              <span className="shrink-0 rounded bg-white/[0.06] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-slate-400">
-                {strategy.exchange || strategy.datasource || 'Exchange'}
-              </span>
-              {strategy.timeframe && (
-                <span className="shrink-0 text-xs text-slate-500">{strategy.timeframe}</span>
-              )}
+      {/* Workspace Header */}
+      <div className="overflow-hidden rounded-[8px] border border-white/[0.12] bg-[#0a0d13]">
+        <div className="border-b border-white/[0.06] bg-[radial-gradient(circle_at_top_left,var(--accent-alpha-10),transparent_42%),linear-gradient(180deg,var(--accent-alpha-05),rgba(255,255,255,0))] px-5 py-4">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div className="min-w-0 flex-1 space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.2em] text-slate-400">
+                  {providerLabel}
+                </span>
+                <span className="rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.2em] text-slate-400">
+                  {venueLabel}
+                </span>
+                {strategy.timeframe ? (
+                  <span className="rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.2em] text-slate-400">
+                    {strategy.timeframe}
+                  </span>
+                ) : null}
+              </div>
+              <div className="flex items-center gap-3">
+              <h2 className="truncate text-base font-semibold text-white">{strategy.name}</h2>
+                <span className="text-xs text-slate-500">{riskSummary}</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
+                <span className={ruleCount === 0 ? 'text-rose-400' : 'text-slate-300'}>
+                  <span className="qt-mono">{ruleCount}</span> rule{ruleCount === 1 ? '' : 's'}
+                </span>
+                <span className="text-slate-600">•</span>
+                <span className={indicatorCount === 0 ? 'text-amber-400' : 'text-slate-300'}>
+                  <span className="qt-mono">{indicatorCount}</span> indicator{indicatorCount === 1 ? '' : 's'}
+                </span>
+                <span className="text-slate-600">•</span>
+                <span className="text-slate-300"><span className="qt-mono">{variantCount}</span> variant{variantCount === 1 ? '' : 's'}</span>
+                <span className="text-slate-600">•</span>
+                <span className="text-slate-300"><span className="qt-mono">{atmTargets.length}</span> TP target{atmTargets.length === 1 ? '' : 's'}</span>
+                <span className="text-slate-600">•</span>
+                <span className="text-slate-300">{atmTemplateName}</span>
+              </div>
+              {strategySymbols.length ? (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {strategySymbols.map((symbol) => (
+                    <span
+                      key={`summary-${symbol}`}
+                      className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-black/20 px-2.5 py-1 text-xs font-medium text-slate-300"
+                    >
+                      {getSymbolDisplay(symbol, instrumentMap)}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
             </div>
-            {/* Inline stats */}
-            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
-              <span>{ruleCount} rule{ruleCount === 1 ? '' : 's'}</span>
-              <span className="text-slate-600">•</span>
-              <span>{indicatorCount} indicator{indicatorCount === 1 ? '' : 's'}</span>
-              <span className="text-slate-600">•</span>
-              <span>{atmTargets.length} TP target{atmTargets.length === 1 ? '' : 's'}</span>
+            <div className="flex items-center gap-2 self-start">
+              <ActionButton onClick={onLaunchBot}>Launch Bot</ActionButton>
+              <ActionButton variant="ghost" onClick={onEdit}>
+                Edit
+              </ActionButton>
+              <Popover className="relative">
+                {({ close }) => (
+                  <>
+                    <PopoverButton
+                      className="flex h-8 w-8 items-center justify-center rounded-md border border-white/10 text-slate-400 transition hover:bg-white/5 hover:text-white focus:outline-none"
+                      title="More actions"
+                    >
+                      <MoreVertical className="h-4 w-4" />
+                    </PopoverButton>
+                    <Transition
+                      as={Fragment}
+                      enter="transition ease-out duration-100"
+                      enterFrom="opacity-0 scale-95"
+                      enterTo="opacity-100 scale-100"
+                      leave="transition ease-in duration-75"
+                      leaveFrom="opacity-100 scale-100"
+                      leaveTo="opacity-0 scale-95"
+                    >
+                      <PopoverPanel className="absolute right-0 top-full z-50 mt-1 w-44 origin-top-right rounded-lg border border-white/10 bg-[#131a2b] p-1.5 shadow-xl">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onEdit?.()
+                            close()
+                          }}
+                          className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/5"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                          Edit strategy
+                        </button>
+                        <div className="my-1 h-px bg-white/10" />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onDelete?.()
+                            close()
+                          }}
+                          className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm text-rose-300 transition hover:bg-rose-500/10"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          Delete strategy
+                        </button>
+                      </PopoverPanel>
+                    </Transition>
+                  </>
+                )}
+              </Popover>
             </div>
-          </div>
-
-          {/* Actions: Edit button + kebab menu */}
-          <div className="flex items-center gap-2">
-            <ActionButton variant="ghost" onClick={onEdit}>
-              Edit
-            </ActionButton>
-            <Popover className="relative">
-              {({ close }) => (
-                <>
-                  <PopoverButton
-                    className="flex h-8 w-8 items-center justify-center rounded-md border border-white/10 text-slate-400 transition hover:bg-white/5 hover:text-white focus:outline-none"
-                    title="More actions"
-                  >
-                    <MoreVertical className="h-4 w-4" />
-                  </PopoverButton>
-                  <Transition
-                    as={Fragment}
-                    enter="transition ease-out duration-100"
-                    enterFrom="opacity-0 scale-95"
-                    enterTo="opacity-100 scale-100"
-                    leave="transition ease-in duration-75"
-                    leaveFrom="opacity-100 scale-100"
-                    leaveTo="opacity-0 scale-95"
-                  >
-                    <PopoverPanel className="absolute right-0 top-full z-50 mt-1 w-44 origin-top-right rounded-lg border border-white/10 bg-[#131a2b] p-1.5 shadow-xl">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onEdit?.()
-                          close()
-                        }}
-                        className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/5"
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                        Edit strategy
-                      </button>
-                      <div className="my-1 h-px bg-white/10" />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onDelete?.()
-                          close()
-                        }}
-                        className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm text-rose-300 transition hover:bg-rose-500/10"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        Delete strategy
-                      </button>
-                    </PopoverPanel>
-                  </Transition>
-                </>
-              )}
-            </Popover>
           </div>
         </div>
 
-        {/* Configuration row */}
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-white/[0.06] px-5 py-3 text-sm">
-          {/* Base Risk */}
-          <div className="flex items-center gap-2">
-            <span className="text-slate-500">Risk:</span>
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              value={quickBaseRisk}
-              onChange={(e) => setQuickBaseRisk(e.target.value)}
-              onBlur={handleQuickBaseRiskSave}
-              onKeyDown={(e) => e.key === 'Enter' && handleQuickBaseRiskSave()}
-              className="w-16 rounded bg-white/5 px-2 py-1 text-white transition hover:bg-white/10 focus:bg-white/10 focus:outline-none focus:ring-1 focus:ring-[color:var(--accent-alpha-40)]"
-              placeholder="—"
-            />
-            <span className="text-slate-500">USD</span>
-          </div>
-
-          {/* Save status */}
           <div className="ml-auto text-xs">
             {quickUpdateStatus?.saving ? (
               <span className="text-slate-400">Saving...</span>
@@ -408,8 +406,25 @@ const StrategyDetails = ({
       )}
 
       {/* Tabs - consolidated (no Overview tab) */}
-      <div className="rounded-xl border border-white/[0.08] bg-black/40">
+      <div className="rounded border border-white/[0.10] bg-[#0a0d13]">
         <div className="flex gap-1 border-b border-white/[0.06] px-1">
+          <TabButton active={activeTab === 'logic'} onClick={() => setActiveTab('logic')}>
+            Decision Logic
+          </TabButton>
+          <TabButton active={activeTab === 'atm'} onClick={() => setActiveTab('atm')}>
+            ATM
+          </TabButton>
+          <TabButton active={activeTab === 'risk'} onClick={() => setActiveTab('risk')}>
+            Risk & Sizing
+          </TabButton>
+          <TabButton active={activeTab === 'variants'} onClick={() => setActiveTab('variants')}>
+            Variants
+            {variantCount > 1 ? (
+              <span className="ml-1.5 rounded-full bg-white/10 px-1.5 py-0.5 text-[10px] text-slate-300">
+                {variantCount}
+              </span>
+            ) : null}
+          </TabButton>
           <TabButton
             active={activeTab === 'instruments'}
             onClick={() => setActiveTab('instruments')}
@@ -421,41 +436,13 @@ const StrategyDetails = ({
               </span>
             )}
           </TabButton>
-          <TabButton active={activeTab === 'logic'} onClick={() => setActiveTab('logic')}>
-            Decision Logic
-          </TabButton>
-          <TabButton active={activeTab === 'atm'} onClick={() => setActiveTab('atm')}>
-            Risk & Execution
-          </TabButton>
           <TabButton active={activeTab === 'preview'} onClick={() => setActiveTab('preview')}>
             Order Triggers
           </TabButton>
         </div>
 
-        <TabPanel active={activeTab === 'instruments'}>
-          <p className="px-6 pb-2 text-xs text-slate-400">Contracts used for sizing, fees, and execution.</p>
-          <InstrumentsTab
-            strategy={strategy}
-            instrumentMap={instrumentMap}
-            instrumentMessages={instrumentMessages}
-            onAddInstrument={handleAddInstrument}
-            onRefreshMetadata={onRefreshInstrumentMetadata}
-            refreshStatus={instrumentRefreshStatus}
-            ActionButton={ActionButton}
-          />
-        </TabPanel>
-
-        <TabPanel active={activeTab === 'atm'}>
-          <ATMTab
-            template={strategy.atm_template}
-            templateOptions={atmTemplateOptions}
-            currentTemplateId={strategy.atm_template_id}
-            onTemplateChange={handleTemplateChange}
-          />
-        </TabPanel>
-
         <TabPanel active={activeTab === 'logic'}>
-          <p className="px-6 pb-2 text-xs text-slate-400">Attach indicators, inspect typed outputs, and compose trigger-to-action rule flows.</p>
+          <p className="px-6 pb-2 text-xs text-slate-400">Attach indicators, inspect typed outputs, and compose trigger-to-intent strategy rules.</p>
           <RulesTab
             strategy={strategy}
             attachedIndicators={attachedIndicators}
@@ -472,11 +459,49 @@ const StrategyDetails = ({
           />
         </TabPanel>
 
+        <TabPanel active={activeTab === 'atm'}>
+          <ATMTab
+            template={strategy.atm_template}
+            templateOptions={atmTemplateOptions}
+            currentTemplateId={strategy.atm_template_id}
+            onTemplateChange={handleTemplateChange}
+          />
+        </TabPanel>
+
+        <TabPanel active={activeTab === 'risk'}>
+          <p className="px-6 pb-2 text-xs text-slate-400">Capital risk and per-symbol sizing live separately from ATM behavior.</p>
+          <RiskTab strategy={strategy} />
+        </TabPanel>
+
+        <TabPanel active={activeTab === 'variants'}>
+          <VariantsTab
+            strategy={strategy}
+            onAddVariant={onAddVariant}
+            onEditVariant={onEditVariant}
+            onDeleteVariant={onDeleteVariant}
+            ActionButton={ActionButton}
+          />
+        </TabPanel>
+
+        <TabPanel active={activeTab === 'instruments'}>
+          <p className="px-6 pb-2 text-xs text-slate-400">Contracts used for sizing, fees, and execution.</p>
+          <InstrumentsTab
+            strategy={strategy}
+            instrumentMap={instrumentMap}
+            instrumentMessages={instrumentMessages}
+            onAddInstrument={handleAddInstrument}
+            onRefreshMetadata={onRefreshInstrumentMetadata}
+            refreshStatus={instrumentRefreshStatus}
+            ActionButton={ActionButton}
+          />
+        </TabPanel>
+
         <TabPanel active={activeTab === 'preview'}>
           <p className="px-6 pb-2 text-xs text-slate-400">Preview when this strategy would attempt orders.</p>
           <OrderTriggersTab
             strategy={strategy}
             instruments={strategyInstruments}
+            indicatorLookup={indicatorLookup}
             previewWindow={previewWindow}
             previewLoading={previewLoading}
             previewResult={previewResult}
@@ -485,8 +510,6 @@ const StrategyDetails = ({
             onSubmit={handleSubmit}
             onDateRangeChange={handleDateRangeChange}
             DateRangePickerComponent={DateRangePickerComponent}
-            onNavigateToRules={() => setActiveTab('logic')}
-            onNavigateToExecution={() => setActiveTab('atm')}
           />
         </TabPanel>
       </div>

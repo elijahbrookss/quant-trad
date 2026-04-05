@@ -3,6 +3,29 @@ import { createLogger } from '../utils/logger.js';
 import { API_BASE_URL } from '../config/appConfig.js'
 const adapterLogger = createLogger('IndicatorAdapter');
 
+export function normalizeIndicatorRead(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return null
+  }
+
+  const instance = payload.instance && typeof payload.instance === 'object' ? payload.instance : {}
+  const manifest = payload.manifest && typeof payload.manifest === 'object' ? payload.manifest : {}
+  const outputs = payload.outputs && typeof payload.outputs === 'object' ? payload.outputs : {}
+  const capabilities =
+    payload.capabilities && typeof payload.capabilities === 'object' ? payload.capabilities : {}
+
+  return {
+    ...instance,
+    manifest,
+    outputs,
+    capabilities,
+    typed_outputs: Array.isArray(outputs.typed) ? outputs.typed : [],
+    overlay_outputs: Array.isArray(outputs.overlays) ? outputs.overlays : [],
+    runtime_supported: Boolean(capabilities.runtime_supported),
+    compute_supported: Boolean(capabilities.compute_supported),
+  }
+}
+
 async function handleResponse(res) {
   if (res.ok) {
     return res.status === 204 ? null : res.json()
@@ -57,7 +80,7 @@ export async function fetchIndicatorType(id) {
 
 export async function fetchIndicator(id) {
   const res = await fetch(`${API_BASE_URL}/indicators/${id}`, { mode: 'cors', cache: 'no-store' })
-  return handleResponse(res)
+  return normalizeIndicatorRead(await handleResponse(res))
 }
 
 export async function createIndicator({ type, name, params, dependencies = [], output_prefs = {}, color, color_palette }) {
@@ -79,7 +102,7 @@ export async function createIndicator({ type, name, params, dependencies = [], o
     body: JSON.stringify(body),
     mode: 'cors',
   })
-  return handleResponse(res)
+  return normalizeIndicatorRead(await handleResponse(res))
 }
 
 export async function updateIndicator(id, { type, name, params, dependencies = [], output_prefs = {}, color, color_palette }) {
@@ -102,7 +125,7 @@ export async function updateIndicator(id, { type, name, params, dependencies = [
     body: JSON.stringify(body),
     mode: 'cors',
   })
-  const payload = await handleResponse(res)
+  const payload = normalizeIndicatorRead(await handleResponse(res))
   adapterLogger.debug('update_indicator_response', {
     id,
     outputPrefs: payload?.output_prefs || null,
@@ -130,7 +153,7 @@ export async function setIndicatorEnabled(id, enabled) {
     body: JSON.stringify({ enabled }),
     mode: 'cors',
   })
-  return handleResponse(res)
+  return normalizeIndicatorRead(await handleResponse(res))
 }
 
 export async function bulkToggleIndicators(ids = [], enabled) {
@@ -167,7 +190,7 @@ export async function duplicateIndicator(id, { name } = {}) {
     body,
     mode: 'cors',
   })
-  return handleResponse(res)
+  return normalizeIndicatorRead(await handleResponse(res))
 }
 
 export async function fetchIndicatorOverlays(

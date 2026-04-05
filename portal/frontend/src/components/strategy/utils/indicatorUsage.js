@@ -1,4 +1,10 @@
 const ruleRefs = (rule) => {
+  if (rule?.trigger && typeof rule.trigger === 'object') {
+    return [
+      rule.trigger,
+      ...(Array.isArray(rule.guards) ? rule.guards : []),
+    ].filter((entry) => entry && typeof entry === 'object')
+  }
   const flow = rule?.flow && typeof rule.flow === 'object' ? rule.flow : null
   if (flow) {
     return [

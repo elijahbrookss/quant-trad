@@ -22,6 +22,8 @@ from engines.bot_runtime.core.domain import (
 from engines.bot_runtime.adapters import BacktestAdapter, LiveAdapter, PaperAdapter
 from engines.bot_runtime.core.execution_profile import compile_series_execution_profile, SeriesExecutionProfile
 from atm import merge_templates
+from risk import normalise_risk_config
+from strategies.compiler import compile_strategy
 from utils.log_context import build_log_context, with_log_context
 
 from ..models import Strategy
@@ -31,23 +33,15 @@ logger = logging.getLogger(__name__)
 
 class SeriesBuilderConstructionMixin:
     @staticmethod
-    def _build_signals_from_trigger_rows(rows: Sequence[Mapping[str, Any]]) -> Deque[StrategySignal]:
+    def _build_signals_from_decision_artifacts(artifacts: Sequence[Mapping[str, Any]]) -> Deque[StrategySignal]:
         queued: List[StrategySignal] = []
-        context = build_log_context(
-            trigger_rows=len(rows),
-        )
-        logger.debug(with_log_context("build_signals_from_trigger_rows", context))
-        for entry in rows:
-            if not isinstance(entry, Mapping):
+        for artifact in artifacts:
+            if not isinstance(artifact, Mapping):
                 continue
-            epoch = SeriesBuilderConstructionMixin._normalise_epoch(entry.get("epoch"))
-            action = str(entry.get("action") or "").strip().lower()
-            direction = "long" if action == "buy" else "short" if action == "sell" else None
-            if epoch is None or direction is None:
+            if str(artifact.get("evaluation_result") or "") != "matched_selected":
                 continue
-            queued.append(StrategySignal(epoch=epoch, direction=direction))
+            queued.append(StrategySignal.from_decision_artifact(artifact))
         queued.sort(key=lambda signal: signal.epoch)
-        logger.debug(with_log_context("build_signals_from_trigger_rows", build_log_context(total_signals=len(queued))))
         return deque(queued)
 
     @staticmethod
@@ -176,38 +170,22 @@ class SeriesBuilderConstructionMixin:
         ):
             _apply_instrument_field(field_name)
 
-        risk = atm_template.get("risk") if isinstance(atm_template.get("risk"), dict) else {}
-        if strategy.base_risk_per_trade is not None:
-            risk["base_risk_per_trade"] = strategy.base_risk_per_trade
-        if strategy.global_risk_multiplier is not None:
-            risk["global_risk_multiplier"] = strategy.global_risk_multiplier
-        if risk:
-            atm_template["risk"] = risk
-
         if template_meta:
             atm_template["_meta"] = template_meta
 
         return atm_template
 
     @staticmethod
-    def _apply_risk_multiplier(atm_template: Dict[str, Any], multiplier: float) -> Dict[str, Any]:
-        """Apply risk multiplier to ATM template.
+    def _build_risk_config_for_instrument(strategy: Strategy, symbol: str, multiplier: float) -> Dict[str, Any]:
+        """Resolve concrete risk config for one instrument series."""
 
-        Multiplies the 'risk_per_trade' field (if present) by the given multiplier.
-        This allows per-instrument risk scaling within a strategy.
-
-        Args:
-            atm_template: Original ATM template
-            multiplier: Risk multiplier (e.g., 1.5 = 150% of base risk)
-
-        Returns:
-            Modified ATM template with adjusted risk
-        """
-        template_copy = deepcopy(atm_template)
-        if "risk_per_trade" in template_copy:
-            original_risk = template_copy["risk_per_trade"]
-            template_copy["risk_per_trade"] = original_risk * multiplier
-        return template_copy
+        risk_config = normalise_risk_config(getattr(strategy, "risk_config", {}) or {})
+        if multiplier != 1.0:
+            risk_config["instrument_risk_multiplier"] = float(multiplier)
+        else:
+            risk_config.pop("instrument_risk_multiplier", None)
+        risk_config["instrument_symbol"] = symbol
+        return risk_config
 
     def _build_series_for_strategy(self, strategy: Strategy) -> List[StrategySeries]:
         """Build series for all instruments in a strategy.
@@ -230,18 +208,10 @@ class SeriesBuilderConstructionMixin:
             raise RuntimeError(f"Strategy {strategy.id} has no instruments configured")
 
         series_list: List[StrategySeries] = []
-        enabled_links: List[Any] = []
+        eligible_links: List[Any] = []
 
         for instrument_link in strategy.instrument_links:
-            enabled = getattr(instrument_link, "enabled", True)
             symbol = str(getattr(instrument_link, "symbol", "") or "").strip()
-            if enabled is False:
-                context = self._strategy_log_context(
-                    strategy,
-                    symbol=symbol,
-                )
-                logger.info(with_log_context("series_instrument_skipped", context))
-                continue
             if self._runtime_symbols is not None and symbol.upper() not in self._runtime_symbols:
                 context = self._strategy_log_context(
                     strategy,
@@ -250,13 +220,13 @@ class SeriesBuilderConstructionMixin:
                 )
                 logger.info(with_log_context("series_instrument_filtered", context))
                 continue
-            enabled_links.append(instrument_link)
+            eligible_links.append(instrument_link)
 
-        if enabled_links:
-            with ThreadPoolExecutor(max_workers=len(enabled_links)) as executor:
+        if eligible_links:
+            with ThreadPoolExecutor(max_workers=len(eligible_links)) as executor:
                 future_map = {
                     executor.submit(self._build_single_series, strategy, link): link
-                    for link in enabled_links
+                    for link in eligible_links
                 }
                 for future in as_completed(future_map):
                     instrument_link = future_map[future]
@@ -391,10 +361,9 @@ class SeriesBuilderConstructionMixin:
         logger.debug(with_log_context("series_instrument_resolved", instrument_context))
 
         atm_template = self._build_atm_template_with_instrument(strategy, instrument)
+        risk_config = self._build_risk_config_for_instrument(strategy, symbol, risk_multiplier)
 
-        # Apply per-instrument risk multiplier to ATM template
         if risk_multiplier != 1.0:
-            atm_template = self._apply_risk_multiplier(atm_template, risk_multiplier)
             context = self._strategy_log_context(
                 strategy,
                 symbol=symbol,
@@ -406,6 +375,7 @@ class SeriesBuilderConstructionMixin:
         execution_profile = compile_series_execution_profile(
             instrument or {},
             template=atm_template,
+            risk_config=risk_config,
             runtime_requires_derivatives=False,
         )
         profile_context = self._strategy_log_context(
@@ -425,6 +395,7 @@ class SeriesBuilderConstructionMixin:
             atm_template,
             instrument=instrument,
             execution_profile=execution_profile,
+            risk_config=risk_config,
         )
         risk_engine.set_runtime_context(
             strategy_id=strategy.id,
@@ -436,13 +407,24 @@ class SeriesBuilderConstructionMixin:
             instrument_id=instrument.get("id") if isinstance(instrument, dict) else None,
         )
         self._attach_execution_adapter(risk_engine, execution_profile)
+        strategy_rules, strategy_params = strategy.compilation_inputs()
+        compiled_strategy = compile_strategy(
+            strategy_id=strategy.id,
+            timeframe=timeframe,
+            rules=list(strategy_rules.values()),
+            attached_indicator_ids=strategy.indicator_ids,
+            indicator_meta_getter=self._deps.indicator_get_instance_meta,
+            params=strategy_params,
+        )
 
         # Convert strategy to dict for backward compatibility with meta field
         series_meta = strategy.to_dict()
         series_meta.setdefault("rules", deepcopy(getattr(strategy, "rules", {}) or {}))
+        series_meta["compiled_strategy"] = compiled_strategy
         if instrument:
             series_meta["instrument"] = instrument
         series_meta["atm_template"] = atm_template
+        series_meta["risk_config"] = deepcopy(risk_config)
 
         ready_context = self._strategy_log_context(
             strategy,
@@ -618,11 +600,11 @@ class SeriesBuilderConstructionMixin:
         )
         strategy_eval_ms = max((time.perf_counter() - strategy_eval_started) * 1000.0, 0.0)
 
-        trigger_rows = evaluation.get("trigger_rows") or []
+        decision_artifacts = evaluation.get("decision_artifacts") or []
         current_epoch = int(candle.time.timestamp())
         signals = deque(
             signal
-            for signal in self._build_signals_from_trigger_rows(trigger_rows)
+            for signal in self._build_signals_from_decision_artifacts(decision_artifacts)
             if signal.epoch == current_epoch and signal.epoch > last_evaluated_epoch
         )
 

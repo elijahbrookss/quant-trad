@@ -3,52 +3,24 @@ import { PlusCircle, RefreshCw, Search } from 'lucide-react'
 import {
   listBots,
   fetchBotRuntimeCapacity,
-  createBot,
   startBot as startBotApi,
   stopBot as stopBotApi,
   deleteBot as deleteBotApi,
 } from '../../adapters/bot.adapter.js'
-import { fetchStrategies } from '../../adapters/strategy.adapter.js'
+import { fetchStrategies, fetchStrategy } from '../../adapters/strategy.adapter.js'
 import { createLogger } from '../../utils/logger.js'
 import { BotCreateModal } from './create/BotCreateModal.jsx'
 import { BotLensLiveModal } from './BotLensLiveModal.jsx'
-import { buildDefaultForm } from './create/botCreateFormDefaults.js'
-import { useBotCreateForm } from './create/useBotCreateForm.js'
+import { useBotCreateController } from './create/useBotCreateController.js'
 import { getBotStatus } from './botStatusModel.js'
 import { BotCard, sortBots } from './BotCard.jsx'
 import { useBotStream } from './useBotStream.js'
 import { usePortalSettings } from '../../contexts/PortalSettingsContext.jsx'
 
-const parseEnvText = (text) => {
-  const next = {}
-  for (const line of String(text || '').split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith('#')) continue
-    const idx = trimmed.indexOf('=')
-    if (idx <= 0) continue
-    const key = trimmed.slice(0, idx).trim()
-    const value = trimmed.slice(idx + 1).trim()
-    if (key) next[key] = value
-  }
-  return next
-}
-
 export function BotPanel() {
   const [bots, setBots] = useState([])
   const [loading, setLoading] = useState(false)
   const { settings } = usePortalSettings()
-  const {
-    form,
-    walletConfig,
-    walletError,
-    handleChange,
-    handleBacktestRangeChange,
-    handleStrategyToggle,
-    handleWalletBalanceChange,
-    handleWalletBalanceAdd,
-    handleWalletBalanceRemove,
-    resetForm,
-  } = useBotCreateForm(buildDefaultForm())
   const [createOpen, setCreateOpen] = useState(false)
   const [createError, setCreateError] = useState(null)
   const [lensBotId, setLensBotId] = useState(null)
@@ -128,6 +100,61 @@ export function BotPanel() {
     },
     [mergeBots],
   )
+
+  const upsertStrategy = useCallback((incoming) => {
+    if (!incoming?.id) {
+      return null
+    }
+    setStrategies((prev) => {
+      const next = Array.isArray(prev) ? [...prev] : []
+      const index = next.findIndex((strategy) => strategy?.id === incoming.id)
+      if (index === -1) {
+        next.push(incoming)
+        return next
+      }
+      next[index] = { ...next[index], ...incoming }
+      return next
+    })
+    return incoming
+  }, [])
+
+  const loadStrategyDetail = useCallback(
+    async (strategyId) => {
+      if (!strategyId) {
+        return null
+      }
+      const detail = await fetchStrategy(strategyId)
+      return upsertStrategy(detail)
+    },
+    [upsertStrategy],
+  )
+
+  const {
+    form,
+    walletError,
+    handleChange,
+    handleBacktestRangeChange,
+    handleStrategySelect,
+    handleVariantSelect,
+    handleWalletBalanceChange,
+    handleWalletBalanceAdd,
+    handleWalletBalanceRemove,
+    prepareForCreate,
+    submit: submitCreate,
+  } = useBotCreateController({
+    strategies,
+    fetchStrategyDetail: loadStrategyDetail,
+    logger,
+    defaults: {
+      snapshotIntervalMs: Number(settings?.botDefaults?.snapshotIntervalMs || 1000),
+      envText: settings?.botDefaults?.envText || '',
+    },
+    onCreated: (payload) => {
+      upsertBot(payload)
+      setCreateOpen(false)
+      setCreateError(null)
+    },
+  })
 
   const removeBot = useCallback((botId) => {
     if (!botId) return
@@ -304,48 +331,10 @@ export function BotPanel() {
   }, [])
 
   const handleCreate = async (event) => {
-    event.preventDefault()
     setError(null)
     setCreateError(null)
-    if (!form.name) return
-    if (!form.strategy_id) {
-      setCreateError('Select at least one strategy for this bot.')
-      return
-    }
-    if (form.run_type === 'backtest' && (!form.backtest_start || !form.backtest_end)) {
-      setCreateError('Provide both a start and end date for backtests.')
-      return
-    }
-    if (walletError || !walletConfig) {
-      setCreateError(walletError || 'Wallet config is required.')
-      return
-    }
-    const startISO = form.backtest_start ? new Date(form.backtest_start).toISOString() : undefined
-    const endISO = form.backtest_end ? new Date(form.backtest_end).toISOString() : undefined
-    const normalizedMode = form.run_type === 'backtest' ? form.mode : 'walk-forward'
-    logger.info('bot_create_request', {
-      run_type: form.run_type,
-      mode: normalizedMode,
-      strategy_id: form.strategy_id,
-      backtest_start: startISO,
-      backtest_end: endISO,
-    })
     try {
-      const payloadBody = {
-        ...form,
-        snapshot_interval_ms: Number(form.snapshot_interval_ms || 1000),
-        bot_env: form.bot_env || {},
-        mode: normalizedMode,
-        backtest_start: form.run_type === 'backtest' ? startISO : undefined,
-        backtest_end: form.run_type === 'backtest' ? endISO : undefined,
-        wallet_config: walletConfig,
-      }
-      delete payloadBody.wallet_balances
-      const payload = await createBot(payloadBody)
-      logger.info('bot_create_success', { bot_id: payload?.id })
-      upsertBot(payload)
-      resetForm({ strategy_id: form.strategy_id, run_type: form.run_type })
-      closeCreateModal()
+      await submitCreate(event)
     } catch (err) {
       logger.error('bot_create_failed', { message: err?.message }, err)
       setCreateError(err?.message || 'Unable to create bot')
@@ -486,10 +475,17 @@ export function BotPanel() {
   }
 
   const describeRange = useCallback((bot) => {
-    if ((bot?.run_type || '').toLowerCase() === 'backtest') {
+    const runType = (bot?.run_type || '').toLowerCase()
+    if (runType === 'backtest') {
       return `${formatDate(bot?.backtest_start)} → ${formatDate(bot?.backtest_end)}`
     }
-    return 'Sim trade (live)'
+    if (runType === 'paper' || runType === 'sim_trade') {
+      return 'Paper execution'
+    }
+    if (runType === 'live') {
+      return 'Live execution'
+    }
+    return 'Execution run'
   }, [])
 
     const sortedBots = useMemo(() => sortBots(bots), [bots])
@@ -546,21 +542,25 @@ export function BotPanel() {
               </span>
             </div>
             <p className="text-sm leading-relaxed text-slate-400">
-              Monitor and control walk-forward backtests across all configured strategies
+              Monitor and control backtest, paper, and live-ready bots across all configured strategies
             </p>
           </div>
           <button
             type="button"
-            onClick={() => {
+            onClick={async () => {
               logger.info('bot_create_modal_open')
               setCreateError(null)
-              resetForm({
-                strategy_id: form.strategy_id || "",
-                run_type: form.run_type || 'backtest',
-                snapshot_interval_ms: Number(settings?.botDefaults?.snapshotIntervalMs || 1000),
-                bot_env: parseEnvText(settings?.botDefaults?.envText || ''),
-              })
-              setCreateOpen(true)
+              try {
+                await prepareForCreate({
+                  strategyId: form.strategy_id || '',
+                  variantId: form.strategy_variant_id || '',
+                  runType: form.run_type || 'backtest',
+                })
+                setCreateOpen(true)
+              } catch (err) {
+                logger.error('bot_create_prepare_failed', { message: err?.message }, err)
+                setCreateError(err?.message || 'Unable to prepare bot create form')
+              }
             }}
             className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2.5 text-sm font-medium text-slate-200 backdrop-blur-sm transition-colors hover:border-slate-600 hover:bg-slate-800 hover:text-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-500"
           >
@@ -634,7 +634,7 @@ export function BotPanel() {
               {search.trim() ? 'No bots match your filter.' : 'No bots configured.'}
             </p>
             {!search.trim() ? (
-              <p className="mt-1 text-xs text-slate-600">Create your first bot to begin backtesting.</p>
+              <p className="mt-1 text-xs text-slate-600">Create your first bot to begin running a strategy.</p>
             ) : null}
           </div>
         ) : (
@@ -667,7 +667,8 @@ export function BotPanel() {
           onSubmit={handleCreate}
           onChange={handleChange}
           onBacktestRangeChange={handleBacktestRangeChange}
-          onStrategyToggle={handleStrategyToggle}
+          onStrategySelect={handleStrategySelect}
+          onVariantSelect={handleVariantSelect}
           onWalletBalanceChange={handleWalletBalanceChange}
           onWalletBalanceAdd={handleWalletBalanceAdd}
           onWalletBalanceRemove={handleWalletBalanceRemove}

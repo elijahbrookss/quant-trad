@@ -62,6 +62,26 @@ def delete_strategy_rule(rule_id: str) -> None:
     storage.delete_strategy_rule(rule_id)
 
 
+def list_strategy_variants(strategy_id: str) -> list[Dict[str, Any]]:
+    return storage.list_strategy_variants(strategy_id)
+
+
+def get_strategy_variant(variant_id: str) -> Optional[Dict[str, Any]]:
+    return storage.get_strategy_variant(variant_id)
+
+
+def ensure_default_strategy_variant(strategy_id: str) -> Dict[str, Any]:
+    return storage.ensure_default_strategy_variant(strategy_id)
+
+
+def upsert_strategy_variant(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    return storage.upsert_strategy_variant(dict(payload))
+
+
+def delete_strategy_variant(variant_id: str) -> None:
+    storage.delete_strategy_variant(variant_id)
+
+
 def get_atm_template(template_id: str) -> Optional[Dict[str, Any]]:
     return storage.get_atm_template(template_id)
 
@@ -90,15 +110,20 @@ __all__ = [
     "delete_strategy",
     "delete_strategy_indicator",
     "delete_strategy_rule",
+    "delete_strategy_variant",
     "delete_symbol_preset",
+    "ensure_default_strategy_variant",
     "get_atm_template",
+    "get_strategy_variant",
     "list_atm_templates",
     "list_strategies",
+    "list_strategy_variants",
     "list_symbol_presets",
     "upsert_atm_template",
     "upsert_strategy",
     "upsert_strategy_indicator",
     "upsert_strategy_rule",
+    "upsert_strategy_variant",
     "upsert_symbol_preset",
     "upsert_strategy_instrument",
     "delete_strategy_instrument",

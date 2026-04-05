@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Protocol, Tuple
 
+from risk import normalise_risk_config
+
 from .amount_constraints import AmountConstraints, resolve_amount_constraints
 from .margin import (
     InstrumentType,
@@ -136,18 +138,16 @@ def _coerce_float(value: Optional[object], default: Optional[float] = None) -> O
 
 
 def _extract_risk_contract(
-    template: Optional[Mapping[str, Any]],
+    risk_config: Optional[Mapping[str, Any]],
     instrument: Mapping[str, Any],
 ) -> RiskConfigContract:
-    template_payload = dict(template or {})
-    risk_payload = template_payload.get("risk")
-    if not isinstance(risk_payload, Mapping):
-        risk_payload = {}
-    base_risk_per_trade = _coerce_float(
-        risk_payload.get("base_risk_per_trade") or template_payload.get("base_risk_per_trade")
-    )
-    global_risk_multiplier = _coerce_float(risk_payload.get("global_risk_multiplier"), 1.0) or 1.0
-    instrument_risk_multiplier = _coerce_float(instrument.get("risk_multiplier"), 1.0) or 1.0
+    normalized = normalise_risk_config(risk_config)
+    base_risk_per_trade = _coerce_float(normalized.get("base_risk_per_trade"))
+    global_risk_multiplier = _coerce_float(normalized.get("global_risk_multiplier"), 1.0) or 1.0
+    instrument_risk_multiplier = _coerce_float(
+        normalized.get("instrument_risk_multiplier"),
+        _coerce_float(instrument.get("risk_multiplier"), 1.0) or 1.0,
+    ) or 1.0
     return RiskConfigContract(
         base_risk_per_trade=base_risk_per_trade,
         global_risk_multiplier=float(global_risk_multiplier),
@@ -171,6 +171,7 @@ def compile_series_execution_profile(
     instrument: Mapping[str, Any],
     *,
     template: Optional[Mapping[str, Any]] = None,
+    risk_config: Optional[Mapping[str, Any]] = None,
     runtime_requires_derivatives: bool = False,
     allowed_derivative_types: Optional[Iterable[str]] = None,
 ) -> SeriesExecutionProfile:
@@ -271,7 +272,7 @@ def compile_series_execution_profile(
         raw=instrument,
     )
 
-    risk = _extract_risk_contract(template, instrument)
+    risk = _extract_risk_contract(risk_config, instrument)
     accounting_mode = "margin" if margin_calc_type == "margin" else None
     profile = SeriesExecutionProfile(
         instrument=instrument_contract,
@@ -291,6 +292,7 @@ def compile_runtime_profile_or_error(
     instrument: Mapping[str, Any],
     *,
     template: Optional[Mapping[str, Any]] = None,
+    risk_config: Optional[Mapping[str, Any]] = None,
     allowed_derivative_types: Optional[Iterable[str]] = None,
 ) -> SeriesExecutionProfile:
     """Compile profile with runtime derivative requirements enabled."""
@@ -298,6 +300,7 @@ def compile_runtime_profile_or_error(
     return compile_series_execution_profile(
         instrument,
         template=template,
+        risk_config=risk_config,
         runtime_requires_derivatives=True,
         allowed_derivative_types=allowed_derivative_types,
     )

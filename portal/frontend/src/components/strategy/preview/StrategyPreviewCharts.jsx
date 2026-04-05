@@ -115,7 +115,11 @@ export const StrategyPreviewCharts = ({
               loading: false,
               error: null,
               candles,
-              overlays: Array.isArray(result?.overlays) ? result.overlays : [],
+              overlays: Array.isArray(result?.ui?.overlays)
+                ? result.ui.overlays
+                : Array.isArray(result?.overlays)
+                  ? result.overlays
+                  : [],
             },
           }))
         } catch (err) {
@@ -157,7 +161,7 @@ export const StrategyPreviewCharts = ({
           instruments[&lt;instrument_id&gt;]
         </span>
         with <span className="mx-1 font-mono text-[11px] uppercase tracking-[0.2em] text-rose-100">window</span>
-        and <span className="mx-1 font-mono text-[11px] uppercase tracking-[0.2em] text-rose-100">overlays</span>
+        and <span className="mx-1 font-mono text-[11px] uppercase tracking-[0.2em] text-rose-100">ui.overlays</span>
         for each instrument.
       </div>
     )

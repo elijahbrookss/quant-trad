@@ -20,7 +20,7 @@ class RegimeStabilizerConfig:
     structure_exit_score: float = 0.47
     structure_min_margin: float = 0.08
     structure_transition_margin: float = 0.05
-    structure_transition_enter_score: float = 0.68
+    structure_transition_enter_score: float = 0.40
     structure_transition_min_margin: float = 0.10
     structure_reversal_extra_score: float = 0.04
     structure_reversal_extra_margin: float = 0.03

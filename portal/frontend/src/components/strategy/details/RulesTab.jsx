@@ -30,27 +30,25 @@ export const RulesTab = ({
 
   if (!strategy) {
     return (
-      <div className="flex h-32 items-center justify-center rounded-xl border border-dashed border-white/10 bg-black/20">
+      <div className="flex h-32 items-center justify-center rounded-sm border border-dashed border-white/10 bg-[#0a0d13]">
         <div className="flex items-center gap-2 text-sm text-slate-500">
           <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-500 border-t-transparent" />
-          Loading strategy flows...
+          Loading strategy rules...
         </div>
       </div>
     )
   }
 
   return (
-    <div className="space-y-8">
-      <section className="rounded-xl border border-white/8 bg-black/20 p-5">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h3 className="text-sm font-semibold text-white">Indicator Inputs</h3>
-            <p className="mt-0.5 text-xs text-slate-500">
-              Attach indicators, inspect their published outputs, then use those outputs in rule flows.
-            </p>
-          </div>
-        </div>
-        <div className="mt-4">
+    <div className="flex min-h-0 divide-x divide-white/[0.06]">
+      <div className="w-[260px] shrink-0 overflow-y-auto p-4 space-y-3">
+        <span className="text-[10px] uppercase tracking-[0.2em] text-slate-500">
+          Indicator Inputs
+        </span>
+        <p className="text-xs text-slate-600">
+          Attach indicators; use their outputs in rules.
+        </p>
+        <div>
           <AttachedIndicators
             strategy={strategy}
             attached={attachedIndicatorEntries}
@@ -61,27 +59,29 @@ export const RulesTab = ({
             ActionButton={ActionButton}
           />
         </div>
-      </section>
+      </div>
 
-      <section className="rounded-xl border border-white/10 bg-black/20 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-4">
-            <h3 className="text-base font-semibold text-white">Rule Flows</h3>
+      <div className="min-w-0 flex-1 overflow-y-auto p-4 space-y-3">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <span className="text-[10px] uppercase tracking-[0.2em] text-slate-500">
+              Rule Flows
+            </span>
             {rules.length > 0 && (
-              <span className="rounded-full bg-white/5 px-2 py-0.5 text-[11px] text-slate-400">
-                {rules.length} rule{rules.length === 1 ? '' : 's'}
+              <span className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-slate-400">
+                <span className="qt-mono">{rules.length}</span> rule{rules.length === 1 ? '' : 's'}
               </span>
             )}
           </div>
-          <Button onClick={onAddRule} className="gap-1.5">
-            <Plus className="h-4 w-4" />
+          <Button onClick={onAddRule} className="h-7 gap-1.5 px-2.5 text-xs">
+            <Plus className="h-3 w-3" />
             New rule
           </Button>
         </div>
-        <p className="mt-1 text-xs text-slate-500">
-          Compose one required signal trigger with up to two optional context or metric guards.
+        <p className="text-xs text-slate-600">
+          Signal trigger + up to two optional context or metric guards.
         </p>
-        <div className="mt-5">
+        <div>
           <RuleList
             rules={rules}
             onEdit={onEditRule}
@@ -93,7 +93,7 @@ export const RulesTab = ({
             onAddRule={onAddRule}
           />
         </div>
-      </section>
+      </div>
     </div>
   )
 }

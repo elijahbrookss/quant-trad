@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
+
+from strategies.template import StrategyTemplate
 
 
 @dataclass(frozen=True)
@@ -76,13 +78,58 @@ class Strategy:
     exchange: str
     atm_template_id: Optional[str]
     atm_template: Optional[Dict[str, Any]]
-    base_risk_per_trade: Optional[float]
-    global_risk_multiplier: Optional[float]
+    risk_config: Dict[str, Any]
 
     # Relationships
     indicator_links: List[StrategyIndicatorLink]
     instrument_links: List[StrategyInstrumentLink]
     rules: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # rule_id -> rule dict
+    template_id: Optional[str] = None
+    variant_name: Optional[str] = None
+    resolved_params: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_template(
+        cls,
+        *,
+        id: str,
+        name: str,
+        datasource: str,
+        exchange: str,
+        template: StrategyTemplate,
+        indicator_links: Optional[List[StrategyIndicatorLink]] = None,
+        instrument_links: Optional[List[StrategyInstrumentLink]] = None,
+        variant_name: Optional[str] = None,
+        param_overrides: Optional[Mapping[str, Any]] = None,
+        atm_template_id: Optional[str] = None,
+        atm_template: Optional[Dict[str, Any]] = None,
+        risk_config: Optional[Mapping[str, Any]] = None,
+    ) -> Strategy:
+        if variant_name:
+            rules, resolved_params = template.instantiate_variant(
+                variant_name,
+                overrides=dict(param_overrides) if param_overrides else None,
+            )
+        else:
+            rules, resolved_params = template.instantiate(
+                overrides=dict(param_overrides) if param_overrides else None,
+            )
+        return cls(
+            id=id,
+            name=name,
+            timeframe=template.timeframe,
+            datasource=datasource,
+            exchange=exchange,
+            atm_template_id=atm_template_id,
+            atm_template=atm_template,
+            risk_config=dict(risk_config or {}),
+            indicator_links=list(indicator_links or []),
+            instrument_links=list(instrument_links or []),
+            rules=dict(rules),
+            template_id=template.template_id,
+            variant_name=variant_name,
+            resolved_params=dict(resolved_params),
+        )
 
     @property
     def primary_instrument(self) -> Optional[StrategyInstrumentLink]:
@@ -100,12 +147,16 @@ class Strategy:
         """Get list of indicator IDs attached to this strategy."""
         return [link.indicator_id for link in self.indicator_links]
 
+    def compilation_inputs(self) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
+        """Return the concrete rule/param pair consumed by compile_strategy."""
+        return deepcopy(self.rules), deepcopy(self.resolved_params)
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict format for backward compatibility.
 
         This allows gradual migration from dict-based code.
         """
-        return {
+        payload = {
             "id": self.id,
             "name": self.name,
             "timeframe": self.timeframe,
@@ -113,8 +164,7 @@ class Strategy:
             "exchange": self.exchange,
             "atm_template_id": self.atm_template_id,
             "atm_template": self.atm_template,
-            "base_risk_per_trade": self.base_risk_per_trade,
-            "global_risk_multiplier": self.global_risk_multiplier,
+            "risk_config": deepcopy(self.risk_config),
             "indicator_links": [
                 {
                     "id": link.id,
@@ -136,3 +186,10 @@ class Strategy:
             # Runtime consumes rules from series.meta["rules"].
             "rules": deepcopy(self.rules),
         }
+        if self.template_id is not None:
+            payload["template_id"] = self.template_id
+        if self.variant_name is not None:
+            payload["variant_name"] = self.variant_name
+        if self.resolved_params:
+            payload["resolved_params"] = deepcopy(self.resolved_params)
+        return payload

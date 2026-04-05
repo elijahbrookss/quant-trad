@@ -99,7 +99,7 @@ export function WalletBalancesSection({
           </div>
         ))}
       </div>
-      <p className="text-xs text-slate-500">Starting wallet balances for backtest simulation</p>
+      <p className="text-xs text-slate-500">Starting balances for the bot wallet or account context.</p>
       {walletError ? (
         <div className="rounded-lg border border-rose-900/50 bg-rose-950/20 px-3 py-2 text-xs text-rose-300">
           {walletError}

@@ -13,7 +13,8 @@ export function BotCreateModal({
   onSubmit,
   onChange,
   onBacktestRangeChange,
-  onStrategyToggle,
+  onStrategySelect,
+  onVariantSelect,
   onWalletBalanceChange,
   onWalletBalanceAdd,
   onWalletBalanceRemove,
@@ -31,13 +32,15 @@ export function BotCreateModal({
     <Dialog open={open} onClose={onClose} className="relative z-50">
       <div className="fixed inset-0 bg-black/80 backdrop-blur-sm" aria-hidden="true" />
       <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="w-full max-w-5xl rounded-xl border border-slate-800 bg-slate-950 p-6 shadow-2xl">
-          <div className="flex items-start justify-between gap-4 border-b border-slate-800 pb-4">
+        <DialogPanel className="flex max-h-[calc(100vh-2rem)] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-slate-800 bg-slate-950 shadow-2xl">
+          <div className="flex items-start justify-between gap-4 border-b border-slate-800 px-6 pt-6 pb-4">
             <div className="space-y-1">
               <DialogTitle className="text-xl font-medium text-slate-50">
                 Create Bot
               </DialogTitle>
-              <p className="text-sm text-slate-400">Configure a new backtest execution with strategies and initial capital</p>
+              <p className="text-sm text-slate-400">
+                Move from authored strategy design into one concrete bot configuration without changing compile or runtime semantics.
+              </p>
             </div>
             <button
               type="button"
@@ -48,7 +51,7 @@ export function BotCreateModal({
               <X className="size-4" />
             </button>
           </div>
-          <div className="mt-6">
+          <div className="mt-6 overflow-y-auto px-6 pb-6">
             <BotCreateForm
               form={form}
               strategies={strategies}
@@ -58,7 +61,8 @@ export function BotCreateModal({
               onSubmit={onSubmit}
               onChange={onChange}
               onBacktestRangeChange={onBacktestRangeChange}
-              onStrategyToggle={onStrategyToggle}
+              onStrategySelect={onStrategySelect}
+              onVariantSelect={onVariantSelect}
               onWalletBalanceChange={onWalletBalanceChange}
               onWalletBalanceAdd={onWalletBalanceAdd}
               onWalletBalanceRemove={onWalletBalanceRemove}

@@ -47,14 +47,67 @@ def _attach_market_aliases(record: Dict[str, Any]) -> Dict[str, Any]:
     return record
 
 
+def _strategy_core(record: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": record.get("id"),
+        "name": record.get("name"),
+        "description": record.get("description"),
+        "timeframe": record.get("timeframe"),
+        "datasource": record.get("datasource"),
+        "exchange": record.get("exchange"),
+        "provider_id": record.get("provider_id"),
+        "venue_id": record.get("venue_id"),
+        "atm_template_id": record.get("atm_template_id"),
+        "atm_template": dict(record.get("atm_template") or {}),
+        "risk_config": dict(record.get("risk_config") or {}),
+        "created_at": record.get("created_at"),
+        "updated_at": record.get("updated_at"),
+    }
+
+
+def _strategy_bindings(record: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "symbols": list(record.get("symbols") or []),
+        "instrument_slots": list(record.get("instrument_slots") or []),
+        "instruments": list(record.get("instruments") or []),
+        "indicator_ids": list(record.get("indicator_ids") or []),
+        "indicators": list(record.get("indicators") or []),
+    }
+
+
+def _build_strategy_summary(record: Dict[str, Any]) -> Dict[str, Any]:
+    shaped = _attach_market_aliases(dict(record))
+    return {
+        "strategy": _strategy_core(shaped),
+        "bindings": _strategy_bindings(shaped),
+    }
+
+
+def _build_strategy_detail(record: Dict[str, Any], *, variants: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    shaped = _attach_market_aliases(dict(record))
+    return {
+        "strategy": _strategy_core(shaped),
+        "bindings": _strategy_bindings(shaped),
+        "decision": {
+            "rules": list(shaped.get("rules") or []),
+        },
+        "read_context": {
+            "missing_indicators": list(shaped.get("missing_indicators") or []),
+            "instrument_messages": list(shaped.get("instrument_messages") or []),
+        },
+        "variants": list(variants or []),
+    }
+
+
 class StrategyRuleOut(BaseModel):
     """Response model describing a stored strategy rule."""
 
     id: str
     name: str
-    action: str
-    when: Dict[str, Any]
-    flow: Dict[str, Any] = Field(default_factory=dict)
+    intent: str
+    priority: int = 0
+    trigger: Dict[str, Any]
+    guards: List[Dict[str, Any]] = Field(default_factory=list)
     description: Optional[str] = None
     enabled: bool
     created_at: str
@@ -65,36 +118,24 @@ class InstrumentSlotIn(BaseModel):
     """Lightweight instrument slot definition for strategies."""
 
     symbol: str
-    enabled: bool = Field(default=True)
     risk_multiplier: Optional[float] = Field(default=None)
 
 
 class StrategyOut(BaseModel):
-    """Response model representing a strategy record."""
+    """Summary response model representing a strategy record."""
 
-    id: str
-    name: str
-    description: Optional[str] = None
-    instrument_slots: List[Dict[str, Any]] = Field(default_factory=list)
-    symbols: List[str] = Field(default_factory=list)
-    timeframe: str
-    datasource: Optional[str] = None
-    exchange: Optional[str] = None
-    provider_id: Optional[str] = None
-    venue_id: Optional[str] = None
-    indicator_ids: List[str]
-    indicators: List[Dict[str, Any]]
-    missing_indicators: List[str]
-    instruments: List[Dict[str, Any]] = Field(default_factory=list)
-    instrument_messages: List[Dict[str, Any]] = Field(default_factory=list)
-    rules: List[StrategyRuleOut]
-    atm_template: Dict[str, Any] = Field(default_factory=dict)
-    atm_template_id: Optional[str] = None
-    base_risk_per_trade: Optional[float] = None
-    global_risk_multiplier: Optional[float] = None
-    risk_overrides: Dict[str, Any] = Field(default_factory=dict)
-    created_at: str
-    updated_at: str
+    strategy: Dict[str, Any]
+    bindings: Dict[str, Any]
+
+
+class StrategyDetailOut(BaseModel):
+    """Detailed response model representing a strategy record."""
+
+    strategy: Dict[str, Any]
+    bindings: Dict[str, Any]
+    decision: Dict[str, Any]
+    read_context: Dict[str, Any]
+    variants: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class StrategyCreateRequest(BaseModel):
@@ -111,9 +152,7 @@ class StrategyCreateRequest(BaseModel):
     indicator_ids: List[str] = Field(default_factory=list)
     atm_template: Optional[Dict[str, Any]] = None
     atm_template_id: Optional[str] = None
-    base_risk_per_trade: Optional[float] = None
-    global_risk_multiplier: Optional[float] = None
-    risk_overrides: Optional[Dict[str, Any]] = None
+    risk_config: Optional[Dict[str, Any]] = None
 
 
 class StrategyUpdateRequest(BaseModel):
@@ -130,17 +169,17 @@ class StrategyUpdateRequest(BaseModel):
     indicator_ids: Optional[List[str]] = None
     atm_template: Optional[Dict[str, Any]] = None
     atm_template_id: Optional[str] = None
-    base_risk_per_trade: Optional[float] = None
-    global_risk_multiplier: Optional[float] = None
-    risk_overrides: Optional[Dict[str, Any]] = None
+    risk_config: Optional[Dict[str, Any]] = None
 
 
 class StrategyRuleCreateRequest(BaseModel):
     """Payload for creating a strategy rule."""
 
     name: str
-    action: str
-    when: Dict[str, Any]
+    intent: str
+    priority: int = 0
+    trigger: Dict[str, Any]
+    guards: List[Dict[str, Any]] = Field(default_factory=list)
     description: Optional[str] = None
     enabled: bool = True
 
@@ -149,10 +188,46 @@ class StrategyRuleUpdateRequest(BaseModel):
     """Payload for updating a strategy rule."""
 
     name: Optional[str] = None
-    action: Optional[str] = None
-    when: Optional[Dict[str, Any]] = None
+    intent: Optional[str] = None
+    priority: Optional[int] = None
+    trigger: Optional[Dict[str, Any]] = None
+    guards: Optional[List[Dict[str, Any]]] = None
     description: Optional[str] = None
     enabled: Optional[bool] = None
+
+
+class StrategyVariantRequest(BaseModel):
+    """Payload for creating a saved strategy variant."""
+
+    name: str
+    description: Optional[str] = None
+    param_overrides: Dict[str, Any] = Field(default_factory=dict)
+    atm_template_id: Optional[str] = None
+    is_default: bool = False
+
+
+class StrategyVariantUpdateRequest(BaseModel):
+    """Patch payload for updating a saved strategy variant."""
+
+    name: Optional[str] = None
+    description: Optional[str] = None
+    param_overrides: Optional[Dict[str, Any]] = None
+    atm_template_id: Optional[str] = None
+    is_default: Optional[bool] = None
+
+
+class StrategyVariantOut(BaseModel):
+    """Response model representing a saved strategy variant."""
+
+    id: str
+    strategy_id: str
+    name: str
+    description: Optional[str] = None
+    param_overrides: Dict[str, Any] = Field(default_factory=dict)
+    atm_template_id: Optional[str] = None
+    is_default: bool
+    created_at: str
+    updated_at: str
 
 
 class ATMTemplateRequest(BaseModel):
@@ -171,14 +246,19 @@ class ATMTemplateOut(ATMTemplateRequest):
     updated_at: Optional[str] = None
 
 
-class StrategySignalRequest(BaseModel):
-    """Request payload for generating strategy signals."""
+class StrategyVariantSelectionRequest(BaseModel):
+    """Payload for selecting the effective strategy variant."""
+
+    variant_id: Optional[str] = None
+
+
+class StrategyPreviewRequest(StrategyVariantSelectionRequest):
+    """Request payload for generating a strategy preview."""
 
     start: str
     end: str
     interval: str
     instrument_ids: List[str] = Field(default_factory=list)
-    config: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SymbolPresetRequest(BaseModel):
@@ -207,10 +287,10 @@ async def list_strategies() -> List[Dict[str, Any]]:
     """Return all stored strategies."""
 
     records = strategy_service.list_strategies()
-    return [_attach_market_aliases(record) for record in records]
+    return [_build_strategy_summary(record) for record in records]
 
 
-@router.post("/", response_model=StrategyOut, status_code=201)
+@router.post("/", response_model=StrategyDetailOut, status_code=201)
 async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
     """Create a new strategy record."""
 
@@ -267,11 +347,12 @@ async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
             indicator_ids=payload.get("indicator_ids") or [],
             atm_template=payload.get("atm_template"),
             atm_template_id=payload.get("atm_template_id"),
-            base_risk_per_trade=payload.get("base_risk_per_trade"),
-            global_risk_multiplier=payload.get("global_risk_multiplier"),
-            risk_overrides=payload.get("risk_overrides"),
+            risk_config=payload.get("risk_config"),
         )
-        return _attach_market_aliases(record)
+        return _build_strategy_detail(
+            record,
+            variants=strategy_service.list_strategy_variants(str(record.get("id") or "")),
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("strategy_create_failed")
         raise HTTPException(400, str(exc)) from exc
@@ -335,25 +416,95 @@ async def delete_symbol_preset(preset_id: str) -> Response:
     return Response(status_code=204)
 
 
-@router.get("/{strategy_id}", response_model=StrategyOut)
+@router.get("/{strategy_id}/variants", response_model=List[StrategyVariantOut])
+async def list_strategy_variants(strategy_id: str) -> List[Dict[str, Any]]:
+    """Return saved parameter variants for a strategy."""
+
+    try:
+        return strategy_service.list_strategy_variants(strategy_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/{strategy_id}/variants", response_model=StrategyVariantOut, status_code=201)
+async def create_strategy_variant(strategy_id: str, body: StrategyVariantRequest) -> Dict[str, Any]:
+    """Create a saved parameter variant for a strategy."""
+
+    try:
+        return strategy_service.create_strategy_variant(
+            strategy_id,
+            name=body.name,
+            description=body.description,
+            param_overrides=body.param_overrides,
+            atm_template_id=body.atm_template_id,
+            is_default=body.is_default,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("strategy_variant_create_failed")
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.put("/{strategy_id}/variants/{variant_id}", response_model=StrategyVariantOut)
+async def update_strategy_variant(
+    strategy_id: str,
+    variant_id: str,
+    body: StrategyVariantUpdateRequest,
+) -> Dict[str, Any]:
+    """Update a saved strategy variant."""
+
+    try:
+        return strategy_service.update_strategy_variant(
+            strategy_id,
+            variant_id,
+            **body.dict(exclude_unset=True),
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("strategy_variant_update_failed")
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.delete("/{strategy_id}/variants/{variant_id}", status_code=204, response_class=Response)
+async def delete_strategy_variant(strategy_id: str, variant_id: str) -> Response:
+    """Delete a saved non-default strategy variant."""
+
+    try:
+        strategy_service.delete_strategy_variant(strategy_id, variant_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return Response(status_code=204)
+
+
+@router.get("/{strategy_id}", response_model=StrategyDetailOut)
 async def get_strategy(strategy_id: str) -> Dict[str, Any]:
     """Retrieve a single strategy."""
 
     try:
         record = strategy_service.get_strategy(strategy_id)
-        return _attach_market_aliases(record)
+        return _build_strategy_detail(
+            record,
+            variants=strategy_service.list_strategy_variants(strategy_id),
+        )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
 
 
-@router.put("/{strategy_id}", response_model=StrategyOut)
+@router.put("/{strategy_id}", response_model=StrategyDetailOut)
 async def update_strategy(strategy_id: str, body: StrategyUpdateRequest) -> Dict[str, Any]:
     """Update an existing strategy."""
 
     try:
         payload = _apply_market_aliases(body.dict(exclude_unset=True))
         record = strategy_service.update_strategy(strategy_id, **payload)
-        return _attach_market_aliases(record)
+        return _build_strategy_detail(
+            record,
+            variants=strategy_service.list_strategy_variants(strategy_id),
+        )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -396,40 +547,54 @@ async def save_atm_template(body: ATMTemplateRequest) -> Dict[str, Any]:
         raise HTTPException(400, str(exc)) from exc
 
 
-@router.post("/{strategy_id}/indicators/{indicator_id}", response_model=StrategyOut)
+@router.post("/{strategy_id}/indicators/{indicator_id}", response_model=StrategyDetailOut)
 async def attach_indicator(strategy_id: str, indicator_id: str) -> Dict[str, Any]:
     """Attach an indicator to a strategy."""
 
     try:
-        return strategy_service.register_indicator(strategy_id, indicator_id)
+        record = strategy_service.register_indicator(strategy_id, indicator_id)
+        return _build_strategy_detail(
+            record,
+            variants=strategy_service.list_strategy_variants(strategy_id),
+        )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, str(exc)) from exc
 
 
-@router.delete("/{strategy_id}/indicators/{indicator_id}", response_model=StrategyOut)
+@router.delete("/{strategy_id}/indicators/{indicator_id}", response_model=StrategyDetailOut)
 async def detach_indicator(strategy_id: str, indicator_id: str) -> Dict[str, Any]:
     """Detach an indicator from a strategy."""
 
     try:
-        return strategy_service.unregister_indicator(strategy_id, indicator_id)
+        record = strategy_service.unregister_indicator(strategy_id, indicator_id)
+        return _build_strategy_detail(
+            record,
+            variants=strategy_service.list_strategy_variants(strategy_id),
+        )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
 
 
-@router.post("/{strategy_id}/rules", response_model=StrategyOut, status_code=201)
+@router.post("/{strategy_id}/rules", response_model=StrategyDetailOut, status_code=201)
 async def create_rule(strategy_id: str, body: StrategyRuleCreateRequest) -> Dict[str, Any]:
     """Create a rule for a strategy."""
 
     try:
-        return strategy_service.create_rule(
+        record = strategy_service.create_rule(
             strategy_id,
             name=body.name,
-            action=body.action,
-            when=body.when,
+            intent=body.intent,
+            priority=body.priority,
+            trigger=body.trigger,
+            guards=body.guards,
             description=body.description,
             enabled=body.enabled,
+        )
+        return _build_strategy_detail(
+            record,
+            variants=strategy_service.list_strategy_variants(strategy_id),
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -438,31 +603,58 @@ async def create_rule(strategy_id: str, body: StrategyRuleCreateRequest) -> Dict
         raise HTTPException(400, str(exc)) from exc
 
 
-@router.put("/{strategy_id}/rules/{rule_id}", response_model=StrategyOut)
+@router.put("/{strategy_id}/rules/{rule_id}", response_model=StrategyDetailOut)
 async def update_rule(strategy_id: str, rule_id: str, body: StrategyRuleUpdateRequest) -> Dict[str, Any]:
     """Update an existing rule."""
 
     try:
         payload = body.dict(exclude_unset=True)
-        return strategy_service.update_rule(strategy_id, rule_id, **payload)
+        record = strategy_service.update_rule(strategy_id, rule_id, **payload)
+        return _build_strategy_detail(
+            record,
+            variants=strategy_service.list_strategy_variants(strategy_id),
+        )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, str(exc)) from exc
 
 
-@router.delete("/{strategy_id}/rules/{rule_id}", response_model=StrategyOut)
+@router.delete("/{strategy_id}/rules/{rule_id}", response_model=StrategyDetailOut)
 async def delete_rule(strategy_id: str, rule_id: str) -> Dict[str, Any]:
     """Delete a strategy rule."""
 
     try:
-        return strategy_service.delete_rule(strategy_id, rule_id)
+        record = strategy_service.delete_rule(strategy_id, rule_id)
+        return _build_strategy_detail(
+            record,
+            variants=strategy_service.list_strategy_variants(strategy_id),
+        )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
 
 
+@router.post("/{strategy_id}/compile")
+async def compile_strategy_contract(
+    strategy_id: str,
+    body: Optional[StrategyVariantSelectionRequest] = None,
+) -> Dict[str, Any]:
+    """Validate and compile a strategy using the selected or default variant."""
+
+    try:
+        return strategy_service.compile_strategy_contract(
+            strategy_id,
+            variant_id=body.variant_id if body is not None else None,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("strategy_compile_failed")
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.post("/{strategy_id}/preview")
-async def run_preview(strategy_id: str, body: StrategySignalRequest) -> Dict[str, Any]:
+async def run_preview(strategy_id: str, body: StrategyPreviewRequest) -> Dict[str, Any]:
     """Run a rule-logic preview for a strategy."""
 
     try:
@@ -472,13 +664,23 @@ async def run_preview(strategy_id: str, body: StrategySignalRequest) -> Dict[str
             end=body.end,
             interval=body.interval,
             instrument_ids=body.instrument_ids,
-            config=body.config,
+            variant_id=body.variant_id,
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("strategy_preview_failed")
         raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/{strategy_id}/previews/{preview_id}/signals/{signal_id}")
+async def get_preview_signal_detail(strategy_id: str, preview_id: str, signal_id: str) -> Dict[str, Any]:
+    """Return one retained strategy preview signal with audit context."""
+
+    try:
+        return strategy_service.get_strategy_preview_signal_detail(strategy_id, preview_id, signal_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.get("/presets/symbols", response_model=List[SymbolPresetOut])

@@ -128,7 +128,12 @@ export const BotCard = memo(function BotCard({
   const runDurationLabel = buildRunDuration(bot, runtimeStatus, nowEpochMs)
   const completedDuration = buildCompletedDuration(bot)
   const runType = (bot.run_type || 'backtest').toLowerCase()
-  const runTypePill = runType === 'backtest' ? 'BT' : runType === 'paper' || runType === 'paper_trade' ? 'SIM' : 'LIVE'
+  const runTypePill =
+    runType === 'backtest'
+      ? 'BT'
+      : runType === 'paper' || runType === 'paper_trade' || runType === 'sim_trade'
+        ? 'PAPER'
+        : 'LIVE'
   const modeLabel =
     runType === 'backtest'
       ? (bot.mode || '').toLowerCase() === 'instant'
@@ -164,7 +169,8 @@ export const BotCard = memo(function BotCard({
 
   // Compact date range
   const dateRangeShort = useMemo(() => {
-    if (runType !== 'backtest') return 'Live'
+    if (runType === 'paper' || runType === 'paper_trade' || runType === 'sim_trade') return 'Paper'
+    if (runType === 'live') return 'Live'
     return `${formatDateShort(bot.backtest_start)} → ${formatDateShort(bot.backtest_end)}`
   }, [runType, bot.backtest_start, bot.backtest_end])
 

@@ -11,7 +11,8 @@ from engines.bot_runtime.core.execution_profile import compile_runtime_profile_o
 
 from .strategy_loader import StrategyLoader
 from ..market import instrument_service
-from ..storage.storage import delete_bot, load_bots, load_strategies, upsert_bot
+from ..storage.storage import delete_bot, get_strategy_variant, load_bots, load_strategies, upsert_bot
+from risk import normalise_risk_config
 
 MIN_STARTING_WALLET = 10.0
 _DERIVATIVE_TYPES = {"perp", "perps", "swap", "future", "futures", "derivative", "derivatives"}
@@ -20,6 +21,22 @@ _SETTINGS = get_settings()
 
 
 class BotConfigService:
+    @staticmethod
+    def _resolve_variant(strategy_id: str, variant_id: Optional[str]) -> Optional[Mapping[str, object]]:
+        normalized_variant_id = str(variant_id or "").strip() or None
+        variant = get_strategy_variant(normalized_variant_id) if normalized_variant_id else None
+        if variant and str(variant.get("strategy_id") or "").strip() != strategy_id:
+            raise ValueError("strategy_variant_id does not belong to the selected strategy.")
+        return variant
+
+    @staticmethod
+    def _resolve_effective_atm_template_id(
+        strategy_atm_template_id: Optional[str],
+        variant: Optional[Mapping[str, object]],
+    ) -> Optional[str]:
+        variant_atm_template_id = str(variant.get("atm_template_id") or "").strip() if isinstance(variant, Mapping) else ""
+        return variant_atm_template_id or str(strategy_atm_template_id or "").strip() or None
+
     def list_bots(self) -> List[Dict[str, object]]:
         bots = load_bots()
         for bot in bots:
@@ -38,11 +55,23 @@ class BotConfigService:
         strategy_id = self.validate_strategy_id(payload.get("strategy_id"))
         run_type = str(payload.get("run_type") or "backtest").lower()
         wallet_config = self.validate_wallet_config(payload.get("wallet_config"))
+        strategy = StrategyLoader.fetch_strategy(strategy_id)
+        variant_id = str(payload.get("strategy_variant_id") or "").strip() or None
+        variant = self._resolve_variant(strategy_id, variant_id)
+        effective_atm_template_id = self._resolve_effective_atm_template_id(strategy.atm_template_id, variant)
+        risk_config_payload = (
+            payload.get("risk_config") if isinstance(payload.get("risk_config"), Mapping) else strategy.risk_config
+        )
 
         record: Dict[str, object] = {
             "id": bot_id,
             "name": name,
             "strategy_id": strategy_id,
+            "strategy_variant_id": str(payload.get("strategy_variant_id") or "").strip() or None,
+            "strategy_variant_name": str(payload.get("strategy_variant_name") or "").strip() or None,
+            "atm_template_id": effective_atm_template_id,
+            "resolved_params": self.validate_resolved_params(payload.get("resolved_params")),
+            "risk_config": normalise_risk_config(risk_config_payload),
             "timeframe": None,
             "mode": (payload.get("mode") or "instant").lower(),
             "run_type": run_type,
@@ -71,6 +100,15 @@ class BotConfigService:
 
         if "strategy_id" in payload and payload["strategy_id"] is not None:
             record["strategy_id"] = self.validate_strategy_id(payload.get("strategy_id"))
+        if "strategy_variant_id" in payload:
+            record["strategy_variant_id"] = str(payload.get("strategy_variant_id") or "").strip() or None
+        if "strategy_variant_name" in payload:
+            record["strategy_variant_name"] = str(payload.get("strategy_variant_name") or "").strip() or None
+        if "resolved_params" in payload:
+            record["resolved_params"] = self.validate_resolved_params(payload.get("resolved_params"))
+        if "risk_config" in payload:
+            config = payload.get("risk_config") if isinstance(payload.get("risk_config"), Mapping) else {}
+            record["risk_config"] = normalise_risk_config(config)
         if "name" in payload and payload["name"] is not None:
             record["name"] = payload["name"]
         if "instrument_type" in payload:
@@ -102,6 +140,11 @@ class BotConfigService:
             if str(record.get("status") or "").lower() == "running" and next_env != current_env:
                 raise ValueError("Bot env settings changed. Stop and restart the bot to apply new env vars.")
             record["bot_env"] = next_env
+        strategy_id = self.validate_strategy_id(record.get("strategy_id"))
+        record["strategy_id"] = strategy_id
+        strategy = StrategyLoader.fetch_strategy(strategy_id)
+        variant = self._resolve_variant(strategy_id, record.get("strategy_variant_id"))
+        record["atm_template_id"] = self._resolve_effective_atm_template_id(strategy.atm_template_id, variant)
         self.validate_backtest_window(record)
         upsert_bot(record)
         return record
@@ -193,6 +236,14 @@ class BotConfigService:
         if total < MIN_STARTING_WALLET:
             raise ValueError(f"wallet_config balances must sum to at least {MIN_STARTING_WALLET}")
         return {"balances": normalized}
+
+    @staticmethod
+    def validate_resolved_params(value: Optional[object]) -> Dict[str, Any]:
+        if value in (None, ""):
+            return {}
+        if not isinstance(value, Mapping):
+            raise ValueError("resolved_params must be an object map")
+        return {str(key): item for key, item in value.items()}
 
     @staticmethod
     def validate_bot_env(value: Optional[Mapping[str, Any]]) -> Dict[str, str]:

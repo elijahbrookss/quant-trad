@@ -5,11 +5,16 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import nullcontext
+from copy import deepcopy
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from engines.bot_runtime.core.domain import Candle, StrategySignal, isoformat
-from strategies.evaluator import evaluate_typed_rules
+from strategies.evaluator import (
+    build_rejection_artifact,
+    classify_rejection_stage,
+    evaluate_strategy_bar,
+)
 from utils.log_context import with_log_context
 from utils.perf_log import perf_log, should_sample
 
@@ -336,7 +341,7 @@ class RuntimeExecutionLoopMixin:
                 try:
                     (
                         consumed_signals,
-                        direction,
+                        chosen_signal,
                         signals_pending,
                         signal_eval_metrics,
                         next_last_evaluated_epoch,
@@ -347,6 +352,8 @@ class RuntimeExecutionLoopMixin:
                         candle,
                         epoch,
                     )
+                    direction = chosen_signal.direction if chosen_signal is not None else None
+                    selected_decision = self._selected_decision_artifact_for_signal(state, chosen_signal)
                     overlays_update_ms = signal_eval_metrics.get("overlays_update_ms")
                     pending_signals_ops_ms = signal_eval_metrics.get("pending_signals_ops_ms")
                     indicators_count = signal_eval_metrics.get("indicators_count")
@@ -363,7 +370,7 @@ class RuntimeExecutionLoopMixin:
                     series_overlay_total_entries_count = signal_eval_metrics.get("series_overlay_total_entries_count")
                     series_overlay_regime_mode_rebuild = signal_eval_metrics.get("series_overlay_regime_mode_rebuild")
                     step_context["signals_pending"] = signals_pending
-                    self._record_signal_consumption(state, epoch, consumed_signals, direction)
+                    self._record_signal_consumption(state, epoch, consumed_signals, chosen_signal)
 
                     # Debug: Log signal consumption result
                     if direction is not None:
@@ -374,7 +381,12 @@ class RuntimeExecutionLoopMixin:
                             direction=direction,
                         )
                         logger.debug(with_log_context("signal_consumed", context))
-                        self._emit_signal_event(series=series, candle=candle, direction=direction)
+                        self._emit_signal_event(
+                            series=series,
+                            candle=candle,
+                            signal=chosen_signal,
+                            decision_artifact=selected_decision,
+                        )
                         signal_event_logged = True
                     self._record_step_trace(
                         "step_signal_eval",
@@ -495,22 +507,32 @@ class RuntimeExecutionLoopMixin:
                         instrument_id = series.instrument.get("id")
                     if not instrument_id:
                         decision_events_logged += 1
+                        rejection_artifact = (
+                            build_rejection_artifact(
+                                decision_artifact=selected_decision,
+                                rejection_stage="execution_policy",
+                                rejection_code="DECISION_REJECTED_INSTRUMENT_MISSING",
+                                rejection_reason="Instrument id missing.",
+                                context={"blocked_instrument_id": None},
+                            )
+                            if isinstance(selected_decision, Mapping)
+                            else None
+                        )
+                        if rejection_artifact is not None:
+                            state.rejection_artifacts.append(deepcopy(rejection_artifact))
+                            if self._run_context is not None:
+                                self._run_context.rejection_artifacts.append(deepcopy(rejection_artifact))
                         self._emit_decision_event(
                             series=series,
                             candle=candle,
+                            signal=chosen_signal,
                             decision="rejected",
-                            direction=direction,
+                            decision_artifact=selected_decision,
+                            rejection_artifact=rejection_artifact,
                             signal_price=float(candle.close),
                             reason_code="DECISION_REJECTED_INSTRUMENT_MISSING",
                             message="Instrument id missing.",
                             trade_id=None,
-                            context={
-                                "signal_type": "strategy_signal",
-                                "signal_direction": direction,
-                                "signal_price": candle.close,
-                                "blocked_instrument_id": None,
-                                "instrument_id": None,
-                            },
                         )
                         direction = None
                     else:
@@ -534,13 +556,14 @@ class RuntimeExecutionLoopMixin:
                         self._emit_decision_event(
                             series=series,
                             candle=candle,
+                            signal=chosen_signal,
                             decision="accepted",
-                            direction=direction,
+                            decision_artifact=selected_decision,
+                            rejection_artifact=None,
                             signal_price=float(candle.close),
                             reason_code="DECISION_ACCEPTED",
                             message=None,
                             trade_id=new_trade.trade_id,
-                            context={"trade_time": _isoformat(new_trade.entry_time)},
                         )
                     else:
                         # Signal was rejected (no trade opened)
@@ -550,10 +573,8 @@ class RuntimeExecutionLoopMixin:
                         blocking_trade_id: Optional[str] = None
                         rejection_code: Optional[str] = None
                         rejection_context: Dict[str, Any] = {
-                            "signal_type": "strategy_signal",
-                            "signal_direction": direction,
-                            "signal_price": candle.close,
                         }
+                        rejection_stage = "position_policy"
                         if blocking_trade is not None:
                             rejection_reason = "Active trade already open for instrument"
                             rejection_code = "DECISION_REJECTED_ACTIVE_TRADE"
@@ -568,11 +589,11 @@ class RuntimeExecutionLoopMixin:
                             rejection_context.update(rejection_meta)
                         elif series.risk_engine.active_trade is None:
                             rejection_reason = series.risk_engine.last_rejection_reason or "Risk engine declined entry"
-                            rejection_code = "DECISION_REJECTED_RISK_ENGINE"
+                            rejection_code = str(rejection_reason or "DECISION_REJECTED_RISK_ENGINE").strip().upper()
+                            rejection_stage = classify_rejection_stage(rejection_code)
                             rejection_meta = series.risk_engine.last_rejection_detail
                             if isinstance(rejection_meta, Mapping):
                                 rejection_context.update(rejection_meta)
-                            rejection_context["risk_engine_reason"] = rejection_reason
                         resolved_trade_id, metadata_payload = self._normalise_rejection_metadata(
                             rejection_meta,
                             blocking_trade_id,
@@ -580,16 +601,32 @@ class RuntimeExecutionLoopMixin:
 
                         decision_events_logged += 1
                         rejection_context.update(metadata_payload)
+                        rejection_artifact = (
+                            build_rejection_artifact(
+                                decision_artifact=selected_decision,
+                                rejection_stage=rejection_stage,
+                                rejection_code=rejection_code or "DECISION_REJECTED",
+                                rejection_reason=rejection_reason,
+                                context=rejection_context,
+                            )
+                            if isinstance(selected_decision, Mapping)
+                            else None
+                        )
+                        if rejection_artifact is not None:
+                            state.rejection_artifacts.append(deepcopy(rejection_artifact))
+                            if self._run_context is not None:
+                                self._run_context.rejection_artifacts.append(deepcopy(rejection_artifact))
                         self._emit_decision_event(
                             series=series,
                             candle=candle,
+                            signal=chosen_signal,
                             decision="rejected",
-                            direction=direction,
+                            decision_artifact=selected_decision,
+                            rejection_artifact=rejection_artifact,
                             signal_price=float(candle.close),
                             reason_code=rejection_code or "DECISION_REJECTED",
                             message=rejection_reason,
                             trade_id=resolved_trade_id,
-                            context=rejection_context,
                         )
 
                 if new_trade is not None:
@@ -976,7 +1013,7 @@ class RuntimeExecutionLoopMixin:
         series: StrategySeries,
         candle: Candle,
         epoch: int,
-    ) -> Tuple[List[Dict[str, object]], Optional[str], int, Dict[str, Optional[float]], int, int]:
+    ) -> Tuple[List[StrategySignal], Optional[StrategySignal], int, Dict[str, Optional[float]], int, int]:
         if epoch <= state.last_evaluated_epoch:
             consume_started = time.perf_counter()
             consumed, chosen, updated_last = consume_signals(
@@ -1037,13 +1074,23 @@ class RuntimeExecutionLoopMixin:
         indicator_state_update_ms = max((time.perf_counter() - indicator_started) * 1000.0, 0.0)
 
         signal_started = time.perf_counter()
-        rules = (series.meta or {}).get("rules") or {}
-        matched_rules = evaluate_typed_rules(
-            rules=rules,
+        compiled_strategy = (series.meta or {}).get("compiled_strategy")
+        if compiled_strategy is None:
+            raise RuntimeError("strategy_runtime_missing: compiled strategy is not initialized")
+        decision_result = evaluate_strategy_bar(
+            compiled_strategy=compiled_strategy,
+            state=state.decision_evaluation_state,
             outputs=outputs,
             output_types=state.indicator_output_types,
-            current_epoch=epoch,
+            instrument_id=str(series.instrument.get("id") if isinstance(series.instrument, Mapping) else ""),
+            symbol=str(series.symbol or ""),
+            timeframe=str(series.timeframe or ""),
+            bar_time=candle.time,
         )
+        for artifact in decision_result.artifacts:
+            state.decision_artifacts.append(deepcopy(artifact))
+            if self._run_context is not None:
+                self._run_context.decision_artifacts.append(deepcopy(artifact))
         signal_eval_ms = max((time.perf_counter() - signal_started) * 1000.0, 0.0)
 
         previous_overlay_count = float(len(series.overlays or []))
@@ -1083,10 +1130,14 @@ class RuntimeExecutionLoopMixin:
         series.overlays = overlays
 
         append_started = time.perf_counter()
-        for match in matched_rules:
-            action = str(match.get("action") or "")
-            direction = "long" if action == "buy" else "short"
-            state.pending_signals.append(StrategySignal(epoch=int(epoch), direction=direction))
+        if decision_result.selected_artifact is not None:
+            state.pending_signals.append(
+                StrategySignal.from_decision_artifact(
+                    decision_result.selected_artifact,
+                    source_type="runtime",
+                    source_id=self._run_context.run_id if self._run_context is not None else None,
+                )
+            )
         pending_append_ms = max((time.perf_counter() - append_started) * 1000.0, 0.0)
 
         consume_started = time.perf_counter()
@@ -1103,7 +1154,7 @@ class RuntimeExecutionLoopMixin:
             "pending_signals_append_ms": pending_append_ms,
             "pending_signals_consume_ms": pending_consume_ms,
             "pending_signals_ops_ms": pending_ops_ms,
-            "signals_emitted_count": float(len(matched_rules)),
+            "signals_emitted_count": 1.0 if decision_result.selected_artifact is not None else 0.0,
             "overlays_update_ms": overlays_update_ms,
             "indicator_state_update_ms": indicator_state_update_ms,
             "signal_eval_ms": signal_eval_ms,
@@ -1142,15 +1193,40 @@ class RuntimeExecutionLoopMixin:
         self,
         state: SeriesExecutionState,
         epoch: int,
-        consumed_signals: List[Dict[str, object]],
-        chosen_direction: Optional[str],
+        consumed_signals: List[StrategySignal],
+        chosen_signal: Optional[StrategySignal],
     ) -> None:
         state.signal_consumptions.append(
             SignalConsumption(
                 epoch=epoch,
-                consumed_signals=list(consumed_signals),
-                chosen_direction=chosen_direction,
+                consumed_signals=[signal.to_dict() for signal in consumed_signals],
+                chosen_signal=chosen_signal.to_dict() if chosen_signal is not None else None,
             )
+        )
+
+    @staticmethod
+    def _selected_decision_artifact_for_signal(
+        state: SeriesExecutionState,
+        signal: Optional[StrategySignal],
+    ) -> Optional[Dict[str, Any]]:
+        if signal is None:
+            return None
+        decision_id = str(signal.decision_id or "").strip()
+        if not decision_id:
+            raise RuntimeError(
+                "strategy_signal_missing_decision_id: cannot resolve selected decision artifact "
+                f"rule_id={signal.rule_id or '<missing>'}"
+            )
+        for artifact in reversed(state.decision_artifacts):
+            if str(artifact.get("decision_id") or "").strip() != decision_id:
+                continue
+            if str(artifact.get("evaluation_result") or "") != "matched_selected":
+                continue
+            return deepcopy(artifact)
+        raise RuntimeError(
+            "selected_decision_artifact_missing: queued signal has no matching decision artifact "
+            f"decision_id={decision_id} rule_id={signal.rule_id or '<missing>'} "
+            f"strategy_hash={signal.strategy_hash or '<missing>'}"
         )
 
     def _compute_playback_interval(self, base_seconds: float = 1.0) -> float:

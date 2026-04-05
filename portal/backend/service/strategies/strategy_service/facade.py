@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 from copy import deepcopy
 import uuid
 from dataclasses import dataclass, field
@@ -13,7 +14,9 @@ from ...market import instrument_service
 from ...risk.atm import normalise_template
 from ...indicators.indicator_service import get_instance_meta
 from engines.bot_runtime.core.execution_profile import compile_runtime_profile_or_error
-from strategies import evaluator
+from risk import normalise_risk_config
+from strategies.contracts import CompiledStrategySpec, DecisionRuleSpec
+from strategies.compiler import compile_strategy, normalize_rule_intent
 from . import persistence
 from .typed_preview import evaluate_strategy_preview
 
@@ -43,9 +46,7 @@ def _parse_timestamp(value: Any) -> datetime:
             except ValueError:
                 continue
     return _utcnow()
-_normalise_action = evaluator._normalise_action
-_TYPED_RULE_V1 = "typed_rule_v1"
-_SUPPORTED_RULE_NODES = {"all", "signal_match", "context_match", "metric_match"}
+_LEGACY_TYPED_RULE_V1 = "typed_rule_v1"
 
 storage_load_strategies = persistence.load_strategies
 storage_upsert_strategy = persistence.upsert_strategy
@@ -54,6 +55,11 @@ storage_upsert_strategy_indicator = persistence.upsert_strategy_indicator
 storage_delete_strategy_indicator = persistence.delete_strategy_indicator
 storage_upsert_strategy_rule = persistence.upsert_strategy_rule
 storage_delete_strategy_rule = persistence.delete_strategy_rule
+storage_list_strategy_variants = persistence.list_strategy_variants
+storage_get_strategy_variant = persistence.get_strategy_variant
+storage_ensure_default_strategy_variant = persistence.ensure_default_strategy_variant
+storage_upsert_strategy_variant = persistence.upsert_strategy_variant
+storage_delete_strategy_variant = persistence.delete_strategy_variant
 list_symbol_presets = persistence.list_symbol_presets
 upsert_symbol_preset = persistence.upsert_symbol_preset
 delete_symbol_preset = persistence.delete_symbol_preset
@@ -65,42 +71,11 @@ storage_delete_strategy_instrument = persistence.delete_strategy_instrument
 storage_list_strategy_instrument_symbols = persistence.list_strategy_instrument_symbols
 
 
-def _risk_fields_from_template(template: Optional[Mapping[str, Any]]) -> Dict[str, Optional[float]]:
-    """Extract risk settings from a template payload."""
-
-    if not isinstance(template, Mapping):
-        return {
-            "base_risk_per_trade": None,
-            "global_risk_multiplier": None,
-        }
-
-    def _safe_float(value: Any) -> Optional[float]:
-        try:
-            if value in (None, ""):
-                return None
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    # Read from nested risk object or flat fields
-    risk_config = template.get("risk") if isinstance(template.get("risk"), dict) else {}
-
-    return {
-        "base_risk_per_trade": _safe_float(
-            risk_config.get("base_risk_per_trade") or template.get("base_risk_per_trade")
-        ),
-        "global_risk_multiplier": _safe_float(
-            risk_config.get("global_risk_multiplier") or template.get("global_risk_multiplier")
-        ),
-    }
-
-
 @dataclass
 class InstrumentSlot:
     """Represents a symbol attached to a strategy along with runtime hints."""
 
     symbol: str
-    enabled: bool = True
     risk_multiplier: Optional[float] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -109,7 +84,6 @@ class InstrumentSlot:
 
         payload: Dict[str, Any] = {
             "symbol": self.symbol,
-            "enabled": bool(self.enabled),
         }
         if self.risk_multiplier is not None:
             payload["risk_multiplier"] = float(self.risk_multiplier)
@@ -126,149 +100,259 @@ class InstrumentSlot:
         if isinstance(value, Mapping):
             return InstrumentSlot(
                 symbol=str(value.get("symbol") or "").strip(),
-                enabled=bool(value.get("enabled", True)),
                 risk_multiplier=float(value["risk_multiplier"]) if value.get("risk_multiplier") is not None else None,
                 metadata=dict(value.get("metadata") or {}),
             )
         return InstrumentSlot(symbol=str(value or "").strip())
 
-
-def _indicator_output_meta(strategy: "StrategyDefinition", indicator_id: str, output_name: str) -> Dict[str, Any]:
-    if strategy.indicator_ids and indicator_id not in strategy.indicator_ids:
-        raise ValueError(f"Indicator {indicator_id} is not attached to this strategy")
-    meta = get_instance_meta(indicator_id)
-    outputs = meta.get("typed_outputs") if isinstance(meta, Mapping) else None
-    if not isinstance(outputs, list):
-        raise ValueError(f"Indicator {indicator_id} does not expose typed outputs")
-    for output in outputs:
-        if not isinstance(output, Mapping):
-            continue
-        if str(output.get("name") or "").strip() == output_name:
-            return dict(output)
-    raise ValueError(f"Indicator output not found: {indicator_id}.{output_name}")
+def _serialize_trigger(trigger: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "type": "signal_match",
+        "indicator_id": str(trigger.get("indicator_id") or "").strip(),
+        "output_name": str(trigger.get("output_name") or "").strip(),
+        "event_key": str(trigger.get("event_key") or "").strip(),
+    }
 
 
-def _validate_metric_value(node: Mapping[str, Any]) -> float:
-    try:
-        return float(node.get("value"))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Metric guard value must be numeric") from exc
-
-
-def _normalize_typed_clause(
-    strategy: "StrategyDefinition",
-    node: Mapping[str, Any],
-) -> Dict[str, Any]:
-    node_type = str(node.get("type") or "").strip().lower()
-    if node_type not in _SUPPORTED_RULE_NODES - {"all"}:
-        raise ValueError(f"Unsupported rule node type: {node_type or 'unknown'}")
-    indicator_id = str(node.get("indicator_id") or "").strip()
-    output_name = str(node.get("output_name") or "").strip()
-    if not indicator_id or not output_name:
-        raise ValueError("Rule clause requires indicator_id and output_name")
-    output_meta = _indicator_output_meta(strategy, indicator_id, output_name)
-    output_type = str(output_meta.get("type") or "").strip().lower()
-
-    if node_type == "signal_match":
-        if output_type != "signal":
-            raise ValueError(f"{indicator_id}.{output_name} is not a signal output")
-        event_key = str(node.get("event_key") or "").strip()
-        if not event_key:
-            raise ValueError("Signal trigger requires event_key")
-        event_keys = output_meta.get("event_keys") if isinstance(output_meta.get("event_keys"), list) else []
-        if event_keys and event_key not in event_keys:
-            raise ValueError(f"Unknown event key for {indicator_id}.{output_name}: {event_key}")
-        return {
-            "type": "signal_match",
-            "indicator_id": indicator_id,
-            "output_name": output_name,
-            "event_key": event_key,
-        }
-
-    if node_type == "context_match":
-        if output_type != "context":
-            raise ValueError(f"{indicator_id}.{output_name} is not a context output")
-        state_key = str(node.get("state_key") or "").strip()
-        if not state_key:
-            raise ValueError("Context guard requires state_key")
-        state_keys = output_meta.get("state_keys") if isinstance(output_meta.get("state_keys"), list) else []
-        if state_keys and state_key not in state_keys:
-            raise ValueError(f"Unknown state key for {indicator_id}.{output_name}: {state_key}")
+def _serialize_guard(guard: Mapping[str, Any]) -> Dict[str, Any]:
+    guard_type = str(guard.get("type") or "").strip().lower()
+    if guard_type == "context_match":
         return {
             "type": "context_match",
-            "indicator_id": indicator_id,
-            "output_name": output_name,
-            "state_key": state_key,
+            "indicator_id": str(guard.get("indicator_id") or "").strip(),
+            "output_name": str(guard.get("output_name") or "").strip(),
+            "field": str(guard.get("field") or "").strip(),
+            "value": str(guard.get("value") or "").strip(),
         }
+    if guard_type == "metric_match":
+        return {
+            "type": "metric_match",
+            "indicator_id": str(guard.get("indicator_id") or "").strip(),
+            "output_name": str(guard.get("output_name") or "").strip(),
+            "field": str(guard.get("field") or "").strip(),
+            "operator": str(guard.get("operator") or "").strip(),
+            "value": float(guard.get("value")),
+        }
+    if guard_type == "holds_for_bars":
+        inner = guard.get("guard")
+        return {
+            "type": "holds_for_bars",
+            "bars": int(guard.get("bars") or 0),
+            "guard": _serialize_guard(inner if isinstance(inner, Mapping) else {}),
+        }
+    if guard_type in {"signal_seen_within_bars", "signal_absent_within_bars"}:
+        return {
+            "type": guard_type,
+            "indicator_id": str(guard.get("indicator_id") or "").strip(),
+            "output_name": str(guard.get("output_name") or "").strip(),
+            "event_key": str(guard.get("event_key") or "").strip(),
+            "lookback_bars": int(guard.get("lookback_bars") or 0),
+        }
+    raise ValueError(f"Unsupported guard type: {guard_type or 'unknown'}")
 
-    if output_type != "metric":
-        raise ValueError(f"{indicator_id}.{output_name} is not a metric output")
-    field = str(node.get("field") or "").strip()
-    operator = str(node.get("operator") or "").strip()
-    if not field or not operator:
-        raise ValueError("Metric guard requires field and operator")
-    allowed_fields = output_meta.get("fields") if isinstance(output_meta.get("fields"), list) else []
-    if allowed_fields and field not in allowed_fields:
-        raise ValueError(f"Unknown metric field for {indicator_id}.{output_name}: {field}")
-    if operator not in {">", ">=", "<", "<=", "==", "!="}:
-        raise ValueError(f"Unsupported metric operator: {operator}")
-    return {
-        "type": "metric_match",
-        "indicator_id": indicator_id,
-        "output_name": output_name,
-        "field": field,
-        "operator": operator,
-        "value": _validate_metric_value(node),
-    }
 
-
-def _normalize_rule_when(
+def _normalize_rule_contract(
     strategy: "StrategyDefinition",
-    raw_when: Mapping[str, Any],
+    raw_rule: Mapping[str, Any],
+    *,
+    params: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    if not isinstance(raw_when, Mapping):
-        raise ValueError("Rule requires a when object")
-
-    node_type = str(raw_when.get("type") or "").strip().lower()
-    if node_type == "all":
-        conditions = raw_when.get("conditions")
-        if not isinstance(conditions, list) or not conditions:
-            raise ValueError("Rule flow requires non-empty conditions")
-        clauses = [_normalize_typed_clause(strategy, condition) for condition in conditions]
-    else:
-        clauses = [_normalize_typed_clause(strategy, raw_when)]
-
-    signal_clauses = [clause for clause in clauses if clause.get("type") == "signal_match"]
-    guard_clauses = [clause for clause in clauses if clause.get("type") != "signal_match"]
-    if len(signal_clauses) != 1:
-        raise ValueError("Exactly one signal trigger is required")
-    if len(guard_clauses) > 2:
-        raise ValueError("At most two guards are supported in v1")
-
-    normalized = [signal_clauses[0], *guard_clauses]
-    if len(normalized) == 1:
-        return normalized[0]
-    return {"type": "all", "conditions": normalized}
-
-
-def _rule_flow_from_when(when: Mapping[str, Any]) -> Dict[str, Any]:
-    clauses = list(when.get("conditions") or []) if str(when.get("type") or "").strip().lower() == "all" else [when]
-    trigger = next((dict(clause) for clause in clauses if clause.get("type") == "signal_match"), None)
-    guards = [dict(clause) for clause in clauses if clause.get("type") in {"context_match", "metric_match"}]
+    compiled = compile_strategy(
+        strategy_id=strategy.id,
+        timeframe=strategy.timeframe,
+        rules=[raw_rule],
+        attached_indicator_ids=strategy.indicator_ids,
+        indicator_meta_getter=get_instance_meta,
+        params=params,
+    )
+    rule = compiled.rules[0]
     return {
-        "trigger": trigger or {},
-        "guards": guards,
+        "id": str(raw_rule.get("id") or rule.id),
+        "name": str(raw_rule.get("name") or rule.name).strip(),
+        "intent": str(rule.intent),
+        "priority": int(rule.priority),
+        "trigger": _serialize_trigger(rule.trigger.__dict__),
+        "guards": [_serialize_guard(_guard_to_raw_dict(guard)) for guard in rule.guards],
+        "description": str(raw_rule.get("description")).strip() if raw_rule.get("description") else None,
+        "enabled": bool(raw_rule.get("enabled", rule.enabled)),
     }
+
+
+def _guard_to_raw_dict(guard: Any) -> Dict[str, Any]:
+    payload = dict(guard.__dict__)
+    if payload.get("guard") is not None:
+        payload["guard"] = _guard_to_raw_dict(payload["guard"])
+    payload.pop("output_key", None)
+    return payload
+
+
+def _rule_to_storage_conditions(rule: "StrategyRule") -> Dict[str, Any]:
+    return {
+        "intent": rule.intent,
+        "priority": int(rule.priority),
+        "trigger": deepcopy(rule.trigger),
+        "guards": deepcopy(rule.guards),
+    }
+
+
+def _select_default_strategy_variant(strategy_id: str) -> Dict[str, Any]:
+    return storage_ensure_default_strategy_variant(strategy_id)
+
+
+def _resolve_strategy_variant_payload(strategy_id: str, variant_id: Optional[str]) -> Dict[str, Any]:
+    if variant_id:
+        variant = storage_get_strategy_variant(variant_id)
+        if not variant or str(variant.get("strategy_id") or "").strip() != strategy_id:
+            raise KeyError("Strategy variant not found")
+        return dict(variant)
+    return dict(_select_default_strategy_variant(strategy_id))
+
+
+def _resolve_effective_variant_params(
+    strategy_id: str,
+    *,
+    selected_variant: Mapping[str, Any],
+) -> Dict[str, Any]:
+    default_variant = _select_default_strategy_variant(strategy_id)
+    default_variant_id = str(default_variant.get("id") or "").strip()
+    selected_variant_id = str(selected_variant.get("id") or "").strip()
+    default_params = dict(default_variant.get("param_overrides") or {})
+    selected_params = dict(selected_variant.get("param_overrides") or {})
+    if bool(selected_variant.get("is_default", False)):
+        return selected_params
+    if default_variant_id and selected_variant_id == default_variant_id:
+        return default_params
+    return {
+        **default_params,
+        **selected_params,
+    }
+
+
+def _compile_strategy_definition(
+    strategy: "StrategyDefinition",
+    *,
+    rules: Optional[Sequence[Mapping[str, Any]]] = None,
+    variant_id: Optional[str] = None,
+    selected_variant: Optional[Mapping[str, Any]] = None,
+    timeframe: Optional[str] = None,
+) -> tuple[CompiledStrategySpec, Dict[str, Any], Dict[str, Any]]:
+    resolved_variant = (
+        dict(selected_variant)
+        if selected_variant is not None
+        else _resolve_strategy_variant_payload(strategy.id, variant_id)
+    )
+    resolved_params = _resolve_effective_variant_params(
+        strategy.id,
+        selected_variant=resolved_variant,
+    )
+    compiled = compile_strategy(
+        strategy_id=strategy.id,
+        timeframe=str(timeframe or strategy.timeframe).strip(),
+        rules=list(rules) if rules is not None else [rule.to_dict() for rule in strategy.rules.values()],
+        attached_indicator_ids=strategy.indicator_ids,
+        indicator_meta_getter=get_instance_meta,
+        params=resolved_params,
+    )
+    return compiled, resolved_variant, resolved_params
+
+
+def _validate_rule_set(
+    strategy: "StrategyDefinition",
+    rules: Sequence[Mapping[str, Any]],
+    *,
+    variant_id: Optional[str] = None,
+) -> None:
+    _compile_strategy_definition(
+        strategy,
+        rules=rules,
+        variant_id=variant_id,
+    )
+
+
+def _serialize_compiled_rule(rule: DecisionRuleSpec) -> Dict[str, Any]:
+    return {
+        "id": rule.id,
+        "name": rule.name,
+        "intent": rule.intent,
+        "priority": int(rule.priority),
+        "enabled": bool(rule.enabled),
+        "description": rule.description,
+        "trigger": _serialize_trigger(rule.trigger.__dict__),
+        "guards": [_serialize_guard(_guard_to_raw_dict(guard)) for guard in rule.guards],
+    }
+
+
+def _serialize_variant_payload(variant: Mapping[str, Any], *, resolved_params: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": str(variant.get("id") or "").strip(),
+        "name": str(variant.get("name") or "").strip(),
+        "description": variant.get("description"),
+        "param_overrides": dict(variant.get("param_overrides") or {}),
+        "resolved_params": dict(resolved_params or {}),
+        "atm_template_id": str(variant.get("atm_template_id") or "").strip() or None,
+        "is_default": bool(variant.get("is_default", False)),
+    }
+
+
+def _serialize_compiled_strategy_payload(
+    strategy: "StrategyDefinition",
+    *,
+    compiled_strategy: CompiledStrategySpec,
+    selected_variant: Mapping[str, Any],
+    resolved_params: Mapping[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "strategy_id": strategy.id,
+        "strategy_name": strategy.name,
+        "timeframe": compiled_strategy.timeframe,
+        "strategy_hash": compiled_strategy.strategy_hash,
+        "variant": _serialize_variant_payload(selected_variant, resolved_params=resolved_params),
+        "compiled": {
+            "strategy_hash": compiled_strategy.strategy_hash,
+            "timeframe": compiled_strategy.timeframe,
+            "max_history_bars": int(compiled_strategy.max_history_bars),
+            "rule_count": len(compiled_strategy.rules),
+            "rules": [_serialize_compiled_rule(rule) for rule in compiled_strategy.rules],
+        },
+    }
+
+
+def _legacy_rule_payload(rule_entry: Mapping[str, Any]) -> Dict[str, Any]:
+    raw_conditions = rule_entry.get("conditions")
+    if isinstance(raw_conditions, Mapping) and str(raw_conditions.get("kind") or "").strip() == _LEGACY_TYPED_RULE_V1:
+        raw_when = raw_conditions.get("when")
+        payload: Dict[str, Any] = {
+            "id": rule_entry.get("id"),
+            "name": rule_entry.get("name"),
+            "intent": normalize_rule_intent(rule_entry.get("action", "buy")),
+            "description": rule_entry.get("description"),
+            "enabled": bool(rule_entry.get("enabled", True)),
+        }
+        if isinstance(raw_when, Mapping):
+            payload["when"] = raw_when
+        return payload
+    if isinstance(raw_conditions, Mapping):
+        payload = dict(raw_conditions)
+        payload.setdefault("id", rule_entry.get("id"))
+        payload.setdefault("name", rule_entry.get("name"))
+        payload.setdefault("intent", raw_conditions.get("intent") or normalize_rule_intent(rule_entry.get("action", "buy")))
+        payload.setdefault("description", rule_entry.get("description"))
+        payload.setdefault("enabled", bool(rule_entry.get("enabled", True)))
+        payload.setdefault("priority", raw_conditions.get("priority") or 0)
+        return payload
+    raise ValueError("Rule record missing canonical conditions payload")
 
 
 @dataclass
 class StrategyRule:
-    """Represents a typed rule with one signal trigger and optional guards."""
+    """Represents a canonical strategy rule."""
 
     id: str
     name: str
-    action: str
-    when: Dict[str, Any]
+    intent: str
+    trigger: Dict[str, Any]
+    guards: List[Dict[str, Any]]
+    priority: int = 0
     description: Optional[str] = None
     enabled: bool = True
     created_at: datetime = field(default_factory=_utcnow)
@@ -280,9 +364,10 @@ class StrategyRule:
         return {
             "id": self.id,
             "name": self.name,
-            "action": self.action,
-            "when": deepcopy(self.when),
-            "flow": _rule_flow_from_when(self.when),
+            "intent": self.intent,
+            "priority": int(self.priority),
+            "trigger": deepcopy(self.trigger),
+            "guards": deepcopy(self.guards),
             "description": self.description,
             "enabled": self.enabled,
             "created_at": self.created_at.isoformat() + "Z",
@@ -296,11 +381,11 @@ class StrategyRule:
             "id": self.id,
             "strategy_id": strategy_id,
             "name": self.name,
-            "action": self.action,
+            "action": "buy" if self.intent == "enter_long" else "sell",
             "match": "all",
             "description": self.description,
             "enabled": self.enabled,
-            "conditions": {"kind": _TYPED_RULE_V1, "when": deepcopy(self.when)},
+            "conditions": _rule_to_storage_conditions(self),
         }
 
 @dataclass
@@ -319,9 +404,7 @@ class StrategyDefinition:
     rules: MutableMapping[str, StrategyRule] = field(default_factory=dict)
     instrument_messages: List[Dict[str, str]] = field(default_factory=list)
     atm_template_id: Optional[str] = None
-    base_risk_per_trade: Optional[float] = None
-    global_risk_multiplier: Optional[float] = None
-    risk_overrides: Dict[str, Any] = field(default_factory=dict)
+    risk_config: Dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
 
@@ -440,9 +523,7 @@ class StrategyDefinition:
             "rules": [rule.to_dict() for rule in self.rules.values()],
             "atm_template": atm_template or {},
             "atm_template_id": self.atm_template_id,
-            "base_risk_per_trade": self.base_risk_per_trade,
-            "global_risk_multiplier": self.global_risk_multiplier,
-            "risk_overrides": dict(self.risk_overrides or {}),
+            "risk_config": normalise_risk_config(self.risk_config),
             "created_at": self.created_at.isoformat() + "Z",
             "updated_at": self.updated_at.isoformat() + "Z",
         }
@@ -460,9 +541,7 @@ class StrategyDefinition:
             "exchange": self.exchange,
             "indicator_ids": list(self.indicator_ids),
             "atm_template_id": self.atm_template_id,
-            "base_risk_per_trade": self.base_risk_per_trade,
-            "global_risk_multiplier": self.global_risk_multiplier,
-            "risk_overrides": dict(self.risk_overrides or {}),
+            "risk_config": normalise_risk_config(self.risk_config),
         }
 
     def update(self, **fields: Any) -> None:
@@ -503,14 +582,8 @@ class StrategyDefinition:
                 self.indicator_ids = new_ids
         if "atm_template_id" in fields:
             self.atm_template_id = fields.get("atm_template_id") or None
-        if "base_risk_per_trade" in fields:
-            value = fields.get("base_risk_per_trade")
-            self.base_risk_per_trade = float(value) if value is not None else None
-        if "global_risk_multiplier" in fields:
-            value = fields.get("global_risk_multiplier")
-            self.global_risk_multiplier = float(value) if value is not None else None
-        if "risk_overrides" in fields and fields["risk_overrides"] is not None:
-            self.risk_overrides = dict(fields.get("risk_overrides") or {})
+        if "risk_config" in fields and fields["risk_config"] is not None:
+            self.risk_config = normalise_risk_config(fields.get("risk_config"))
         self.updated_at = _utcnow()
 
     def add_rule(self, rule: StrategyRule) -> None:
@@ -580,9 +653,7 @@ class StrategyRegistry:
             base.created_at = _parse_timestamp(entry.get("created_at"))
             base.updated_at = _parse_timestamp(entry.get("updated_at"))
             base.atm_template_id = entry.get("atm_template_id")
-            base.base_risk_per_trade = entry.get("base_risk_per_trade")
-            base.global_risk_multiplier = entry.get("global_risk_multiplier")
-            base.risk_overrides = entry.get("risk_overrides") or {}
+            base.risk_config = normalise_risk_config(entry.get("risk_config"))
 
             for link in entry.get("indicator_links", []):
                 indicator_id = str(link.get("indicator_id") or "").strip()
@@ -596,17 +667,8 @@ class StrategyRegistry:
                 rule_id = str(rule_entry.get("id") or "").strip()
                 if not rule_id:
                     continue
-                raw_conditions = rule_entry.get("conditions")
-                raw_when = None
-                if isinstance(raw_conditions, Mapping) and str(raw_conditions.get("kind") or "").strip() == _TYPED_RULE_V1:
-                    raw_when = raw_conditions.get("when")
-                else:
-                    raw_when = raw_conditions
                 try:
-                    when = _normalize_rule_when(
-                        base,
-                        raw_when or {},
-                    )
+                    normalized_rule = _normalize_rule_contract(base, _legacy_rule_payload(rule_entry))
                 except Exception as exc:
                     logger.warning(
                         "strategy_rule_skipped | strategy_id=%s rule_id=%s error=%s",
@@ -617,11 +679,13 @@ class StrategyRegistry:
                     continue
                 rule = StrategyRule(
                     id=rule_id,
-                    name=str(rule_entry.get("name") or rule_id),
-                    action=_normalise_action(rule_entry.get("action", "buy")),
-                    when=when,
-                    description=rule_entry.get("description"),
-                    enabled=bool(rule_entry.get("enabled", True)),
+                    name=str(normalized_rule.get("name") or rule_id),
+                    intent=str(normalized_rule.get("intent") or "enter_long"),
+                    priority=int(normalized_rule.get("priority") or 0),
+                    trigger=dict(normalized_rule.get("trigger") or {}),
+                    guards=[dict(item) for item in (normalized_rule.get("guards") or []) if isinstance(item, Mapping)],
+                    description=normalized_rule.get("description"),
+                    enabled=bool(normalized_rule.get("enabled", True)),
                     created_at=_parse_timestamp(rule_entry.get("created_at")),
                     updated_at=_parse_timestamp(rule_entry.get("updated_at")),
                 )
@@ -693,9 +757,7 @@ class StrategyRegistry:
         indicator_ids: Optional[Iterable[str]] = None,
         atm_template: Optional[Mapping[str, Any]] = None,
         atm_template_id: Optional[str] = None,
-        base_risk_per_trade: Optional[float] = None,
-        global_risk_multiplier: Optional[float] = None,
-        risk_overrides: Optional[Mapping[str, Any]] = None,
+        risk_config: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create a new strategy record and return its payload."""
 
@@ -723,7 +785,6 @@ class StrategyRegistry:
             raise ValueError("ATM template is required when creating a strategy.")
 
         normalised_template = normalise_template(template_payload, require_template=True)
-        risk_fields = _risk_fields_from_template(normalised_template)
 
         # Save or get the ATM template ID
         if atm_template_id:
@@ -742,12 +803,15 @@ class StrategyRegistry:
             exchange=str(exchange).strip() if exchange else None,
             indicator_ids=list(dict.fromkeys(indicators)),
             atm_template_id=final_template_id,
-            base_risk_per_trade=base_risk_per_trade if base_risk_per_trade is not None else risk_fields.get("base_risk_per_trade"),
-            global_risk_multiplier=global_risk_multiplier if global_risk_multiplier is not None else risk_fields.get("global_risk_multiplier"),
-            risk_overrides={
-                **({slot.symbol: slot.risk_multiplier for slot in clean_slots if slot.risk_multiplier is not None}),
-                **(dict(risk_overrides or {})),
-            },
+            risk_config=normalise_risk_config(
+                {
+                    **dict(risk_config or {}),
+                    "instrument_multipliers": {
+                        **dict((risk_config or {}).get("instrument_multipliers") or {}),
+                        **{slot.symbol: slot.risk_multiplier for slot in clean_slots if slot.risk_multiplier is not None},
+                    },
+                }
+            ),
         )
         for inst_id in record.indicator_ids:
             try:
@@ -785,6 +849,7 @@ class StrategyRegistry:
                     snapshot=instrument_rec,
                 )
         logger.info("strategy_created | id=%s name=%s", strategy_id, clean_name)
+        storage_ensure_default_strategy_variant(strategy_id)
         return record.to_dict()
 
     def update(self, strategy_id: str, **fields: Any) -> Dict[str, Any]:
@@ -796,9 +861,6 @@ class StrategyRegistry:
         old_exchange = record.exchange
         if fields.get("atm_template") is not None:
             normalised_template = normalise_template(fields.get("atm_template"), require_template=True)
-            risk_fields = _risk_fields_from_template(normalised_template)
-            record.base_risk_per_trade = risk_fields.get("base_risk_per_trade")
-            record.global_risk_multiplier = risk_fields.get("global_risk_multiplier")
             candidate_template_id = fields.get("atm_template_id") or record.atm_template_id
             saved_template = upsert_atm_template(
                 {
@@ -810,11 +872,17 @@ class StrategyRegistry:
             record.atm_template_id = saved_template.get("id")
         record.update(**fields)
         if record.instruments:
-            record.risk_overrides = {
+            instrument_multipliers = {
                 slot.symbol: slot.risk_multiplier
                 for slot in record.instruments
                 if slot.risk_multiplier is not None
             }
+            record.risk_config = normalise_risk_config(
+                {
+                    **record.risk_config,
+                    "instrument_multipliers": instrument_multipliers,
+                }
+            )
         self._sync_instruments(record)
         storage_upsert_strategy(record.to_storage_payload())
         # Persist instrument link changes: upsert new links, delete removed links
@@ -946,23 +1014,48 @@ class StrategyRegistry:
         strategy_id: str,
         *,
         name: str,
-        action: str,
-        when: Mapping[str, Any],
+        intent: str,
+        trigger: Mapping[str, Any],
+        guards: Sequence[Mapping[str, Any]] | None = None,
+        priority: int = 0,
         description: Optional[str] = None,
         enabled: bool = True,
     ) -> Dict[str, Any]:
         """Create a rule for the strategy."""
 
         record = self.get(strategy_id)
-        normalized_when = _normalize_rule_when(record, when)
+        _, _, default_params = _compile_strategy_definition(
+            record,
+            rules=[],
+        )
         rule_id = str(uuid.uuid4())
+        normalized_rule = _normalize_rule_contract(
+            record,
+            {
+                "id": rule_id,
+                "name": name,
+                "intent": intent,
+                "priority": priority,
+                "trigger": trigger,
+                "guards": list(guards or []),
+                "description": description,
+                "enabled": enabled,
+            },
+            params=default_params,
+        )
+        _validate_rule_set(
+            record,
+            [*(existing.to_dict() for existing in record.rules.values()), normalized_rule],
+        )
         rule = StrategyRule(
             id=rule_id,
-            name=str(name).strip(),
-            action=_normalise_action(action),
-            when=normalized_when,
-            description=str(description).strip() if description else None,
-            enabled=bool(enabled),
+            name=str(normalized_rule.get("name") or rule_id),
+            intent=str(normalized_rule.get("intent") or "enter_long"),
+            priority=int(normalized_rule.get("priority") or 0),
+            trigger=dict(normalized_rule.get("trigger") or {}),
+            guards=[dict(item) for item in (normalized_rule.get("guards") or []) if isinstance(item, Mapping)],
+            description=normalized_rule.get("description"),
+            enabled=bool(normalized_rule.get("enabled", True)),
         )
         record.add_rule(rule)
         storage_upsert_strategy_rule(rule.to_storage_payload(strategy_id))
@@ -979,21 +1072,42 @@ class StrategyRegistry:
         """Update a rule for a strategy."""
 
         record = self.get(strategy_id)
+        _, _, default_params = _compile_strategy_definition(
+            record,
+            rules=[],
+        )
         rule = record.rules.get(rule_id)
         if rule is None:
             raise KeyError("Rule not found")
 
-        if "name" in fields and fields["name"] is not None:
-            rule.name = str(fields["name"]).strip()
-        if "action" in fields and fields["action"] is not None:
-            rule.action = _normalise_action(fields["action"])
-        if "when" in fields and fields["when"] is not None:
-            rule.when = _normalize_rule_when(record, fields["when"])
-        if "description" in fields:
-            description = fields["description"]
-            rule.description = str(description).strip() if description else None
-        if "enabled" in fields and fields["enabled"] is not None:
-            rule.enabled = bool(fields["enabled"])
+        normalized_rule = _normalize_rule_contract(
+            record,
+            {
+                "id": rule.id,
+                "name": fields.get("name", rule.name),
+                "intent": fields.get("intent", rule.intent),
+                "priority": fields.get("priority", rule.priority),
+                "trigger": fields.get("trigger", rule.trigger),
+                "guards": fields.get("guards", rule.guards),
+                "description": fields.get("description", rule.description),
+                "enabled": fields.get("enabled", rule.enabled),
+            },
+            params=default_params,
+        )
+        _validate_rule_set(
+            record,
+            [
+                *(existing.to_dict() for existing_id, existing in record.rules.items() if existing_id != rule_id),
+                normalized_rule,
+            ],
+        )
+        rule.name = str(normalized_rule.get("name") or rule.id)
+        rule.intent = str(normalized_rule.get("intent") or "enter_long")
+        rule.priority = int(normalized_rule.get("priority") or 0)
+        rule.trigger = dict(normalized_rule.get("trigger") or {})
+        rule.guards = [dict(item) for item in (normalized_rule.get("guards") or []) if isinstance(item, Mapping)]
+        rule.description = normalized_rule.get("description")
+        rule.enabled = bool(normalized_rule.get("enabled", True))
 
         rule.updated_at = _utcnow()
         record.updated_at = _utcnow()
@@ -1032,23 +1146,147 @@ class StrategyRegistry:
         end: str,
         interval: str,
         instrument_ids: Optional[List[str]] = None,
-        config: Optional[Dict[str, Any]] = None,
+        variant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run a rule-logic strategy preview against typed indicator outputs."""
         record = self.get(strategy_id)
         requested_ids = [str(item).strip() for item in (instrument_ids or []) if str(item).strip()]
-        return evaluate_strategy_preview(
+        preview_id = str(uuid.uuid4())
+        compiled_strategy, selected_variant, resolved_params = _compile_strategy_definition(
+            record,
+            variant_id=variant_id,
+            timeframe=interval,
+        )
+        payload = evaluate_strategy_preview(
             record=record,
             strategy_id=strategy_id,
+            preview_id=preview_id,
             start=start,
             end=end,
             interval=interval,
             instrument_ids=requested_ids,
-            config=config,
+            compiled_strategy=compiled_strategy,
+            selected_variant=selected_variant,
+            resolved_params=resolved_params,
         )
+        _PREVIEW_RESULTS.put(payload)
+        return payload
+
+
+@dataclass(frozen=True)
+class StrategyPreviewResult:
+    preview_id: str
+    strategy_id: str
+    payload: Dict[str, Any]
+    created_at: datetime = field(default_factory=_utcnow)
+
+
+class StrategyPreviewStore:
+    """Per-process retained strategy preview results for follow-up inspection."""
+
+    def __init__(self, *, max_entries: int = 100) -> None:
+        self._max_entries = max(1, int(max_entries))
+        self._results: OrderedDict[str, StrategyPreviewResult] = OrderedDict()
+
+    def put(self, payload: Mapping[str, Any]) -> StrategyPreviewResult:
+        preview_id = str(payload.get("preview_id") or "").strip()
+        strategy_id = str(payload.get("strategy_id") or "").strip()
+        if not preview_id or not strategy_id:
+            raise ValueError("strategy_preview_result_invalid: preview_id and strategy_id are required")
+        result = StrategyPreviewResult(
+            preview_id=preview_id,
+            strategy_id=strategy_id,
+            payload=deepcopy(dict(payload)),
+        )
+        self._results[preview_id] = result
+        self._results.move_to_end(preview_id)
+        while len(self._results) > self._max_entries:
+            self._results.popitem(last=False)
+        return result
+
+    def get(self, strategy_id: str, preview_id: str) -> StrategyPreviewResult:
+        result = self._results.get(str(preview_id))
+        if result is None or result.strategy_id != str(strategy_id):
+            raise KeyError("Strategy preview not found")
+        return result
+
+    def get_signal_detail(self, strategy_id: str, preview_id: str, signal_id: str) -> Dict[str, Any]:
+        result = self.get(strategy_id, preview_id)
+        target_signal_id = str(signal_id or "").strip()
+        if not target_signal_id:
+            raise KeyError("Strategy preview signal not found")
+        instruments = result.payload.get("instruments")
+        if not isinstance(instruments, Mapping):
+            raise KeyError("Strategy preview signal not found")
+        for instrument_payload in instruments.values():
+            if not isinstance(instrument_payload, Mapping):
+                continue
+            machine_payload = instrument_payload.get("machine")
+            signals = machine_payload.get("signals") if isinstance(machine_payload, Mapping) else instrument_payload.get("signals")
+            if not isinstance(signals, list):
+                continue
+            matched_signal = next(
+                (
+                    dict(item)
+                    for item in signals
+                    if isinstance(item, Mapping)
+                    and str(item.get("signal_id") or "").strip() == target_signal_id
+                ),
+                None,
+            )
+            if matched_signal is None:
+                continue
+            decision_artifacts = (
+                machine_payload.get("decision_artifacts")
+                if isinstance(machine_payload, Mapping)
+                else instrument_payload.get("decision_artifacts")
+            )
+            matched_artifact = next(
+                (
+                    dict(item)
+                    for item in (decision_artifacts or [])
+                    if isinstance(item, Mapping)
+                    and str(item.get("decision_id") or "").strip() == str(matched_signal.get("decision_id") or "").strip()
+                ),
+                None,
+            )
+            overlays = instrument_payload.get("overlays")
+            ui_signal_markers: List[Dict[str, Any]] = []
+            if isinstance(overlays, list):
+                for overlay in overlays:
+                    if not isinstance(overlay, Mapping):
+                        continue
+                    payload = overlay.get("payload")
+                    markers = payload.get("markers") if isinstance(payload, Mapping) else None
+                    if not isinstance(markers, list):
+                        continue
+                    ui_signal_markers.extend(
+                        dict(marker)
+                        for marker in markers
+                        if isinstance(marker, Mapping)
+                        and str(marker.get("signal_id") or "").strip() == target_signal_id
+                    )
+            return {
+                "preview_id": result.preview_id,
+                "strategy_id": result.strategy_id,
+                "signal": matched_signal,
+                "audit": {
+                    "decision_artifact": matched_artifact,
+                    "window": deepcopy(dict(instrument_payload.get("window") or {})),
+                    "instrument_id": instrument_payload.get("instrument_id"),
+                    "symbol": instrument_payload.get("symbol"),
+                    "status": instrument_payload.get("status"),
+                    "missing_indicators": list(instrument_payload.get("missing_indicators") or []),
+                },
+                "ui": {
+                    "markers": ui_signal_markers,
+                },
+            }
+        raise KeyError("Strategy preview signal not found")
 
 
 _REGISTRY = StrategyRegistry()
+_PREVIEW_RESULTS = StrategyPreviewStore()
 
 
 def list_strategies() -> List[Dict[str, Any]]:
@@ -1063,6 +1301,93 @@ def get_strategy(strategy_id: str) -> Dict[str, Any]:
     return _REGISTRY.get(strategy_id).to_dict()
 
 
+def list_strategy_variants(strategy_id: str) -> List[Dict[str, Any]]:
+    """Return persisted variants for a strategy, ensuring the default exists."""
+
+    _REGISTRY.get(strategy_id)
+    storage_ensure_default_strategy_variant(strategy_id)
+    return storage_list_strategy_variants(strategy_id)
+
+
+def get_strategy_variant(strategy_id: str, variant_id: str) -> Dict[str, Any]:
+    """Return one strategy variant scoped to a strategy."""
+
+    _REGISTRY.get(strategy_id)
+    variant = storage_get_strategy_variant(variant_id)
+    if not variant or str(variant.get("strategy_id") or "") != strategy_id:
+        raise KeyError("Strategy variant not found")
+    return variant
+
+
+def create_strategy_variant(
+    strategy_id: str,
+    *,
+    name: str,
+    description: Optional[str] = None,
+    param_overrides: Optional[Mapping[str, Any]] = None,
+    atm_template_id: Optional[str] = None,
+    is_default: bool = False,
+) -> Dict[str, Any]:
+    """Create a saved variant for a strategy."""
+
+    record = _REGISTRY.get(strategy_id)
+    if atm_template_id and not get_atm_template(atm_template_id):
+        raise ValueError("ATM template not found.")
+    storage_ensure_default_strategy_variant(strategy_id)
+    payload = {
+        "strategy_id": strategy_id,
+        "name": name,
+        "description": description,
+        "param_overrides": dict(param_overrides or {}),
+        "atm_template_id": atm_template_id,
+        "is_default": is_default,
+    }
+    selected_variant = {
+        **payload,
+        "id": str(payload.get("id") or ""),
+    }
+    _compile_strategy_definition(
+        record,
+        selected_variant=selected_variant,
+    )
+    return storage_upsert_strategy_variant(payload)
+
+
+def update_strategy_variant(
+    strategy_id: str,
+    variant_id: str,
+    **fields: Any,
+) -> Dict[str, Any]:
+    """Update a saved strategy variant."""
+
+    record = _REGISTRY.get(strategy_id)
+    current = get_strategy_variant(strategy_id, variant_id)
+    next_atm_template_id = fields.get("atm_template_id", current.get("atm_template_id"))
+    if next_atm_template_id and not get_atm_template(next_atm_template_id):
+        raise ValueError("ATM template not found.")
+    payload = {
+        "id": variant_id,
+        "strategy_id": strategy_id,
+        "name": fields.get("name", current.get("name")),
+        "description": fields.get("description", current.get("description")),
+        "param_overrides": fields.get("param_overrides", current.get("param_overrides") or {}),
+        "atm_template_id": next_atm_template_id,
+        "is_default": fields.get("is_default", current.get("is_default", False)),
+    }
+    _compile_strategy_definition(
+        record,
+        selected_variant=payload,
+    )
+    return storage_upsert_strategy_variant(payload)
+
+
+def delete_strategy_variant(strategy_id: str, variant_id: str) -> None:
+    """Delete a saved non-default strategy variant."""
+
+    get_strategy_variant(strategy_id, variant_id)
+    storage_delete_strategy_variant(variant_id)
+
+
 def create_strategy(
     name: str,
     *,
@@ -1074,9 +1399,7 @@ def create_strategy(
     indicator_ids: Optional[Iterable[str]] = None,
     atm_template: Optional[Mapping[str, Any]] = None,
     atm_template_id: Optional[str] = None,
-    base_risk_per_trade: Optional[float] = None,
-    global_risk_multiplier: Optional[float] = None,
-    risk_overrides: Optional[Mapping[str, Any]] = None,
+    risk_config: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create a new strategy using the global registry."""
 
@@ -1090,9 +1413,7 @@ def create_strategy(
         indicator_ids=indicator_ids,
         atm_template=atm_template,
         atm_template_id=atm_template_id,
-        base_risk_per_trade=base_risk_per_trade,
-        global_risk_multiplier=global_risk_multiplier,
-        risk_overrides=risk_overrides,
+        risk_config=risk_config,
     )
 
 
@@ -1144,8 +1465,10 @@ def create_rule(
     strategy_id: str,
     *,
     name: str,
-    action: str,
-    when: Mapping[str, Any],
+    intent: str,
+    trigger: Mapping[str, Any],
+    guards: Optional[Sequence[Mapping[str, Any]]] = None,
+    priority: int = 0,
     description: Optional[str] = None,
     enabled: bool = True,
 ) -> Dict[str, Any]:
@@ -1154,8 +1477,10 @@ def create_rule(
     return _REGISTRY.add_rule(
         strategy_id,
         name=name,
-        action=action,
-        when=when,
+        intent=intent,
+        trigger=trigger,
+        guards=guards,
+        priority=priority,
         description=description,
         enabled=enabled,
     )
@@ -1180,7 +1505,7 @@ def run_strategy_preview(
     end: str,
     interval: str,
     instrument_ids: Optional[List[str]] = None,
-    config: Optional[Dict[str, Any]] = None,
+    variant_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run a strategy preview for the requested window."""
 
@@ -1190,8 +1515,39 @@ def run_strategy_preview(
         end=end,
         interval=interval,
         instrument_ids=instrument_ids,
-        config=config,
+        variant_id=variant_id,
     )
+
+
+def compile_strategy_contract(
+    strategy_id: str,
+    *,
+    variant_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Validate and compile a strategy using the selected or default variant."""
+
+    record = _REGISTRY.get(strategy_id)
+    compiled_strategy, selected_variant, resolved_params = _compile_strategy_definition(
+        record,
+        variant_id=variant_id,
+    )
+    return _serialize_compiled_strategy_payload(
+        record,
+        compiled_strategy=compiled_strategy,
+        selected_variant=selected_variant,
+        resolved_params=resolved_params,
+    )
+
+
+def get_strategy_preview_signal_detail(
+    strategy_id: str,
+    preview_id: str,
+    signal_id: str,
+) -> Dict[str, Any]:
+    """Return one retained strategy preview signal with audit context."""
+
+    _REGISTRY.get(strategy_id)
+    return _PREVIEW_RESULTS.get_signal_detail(strategy_id, preview_id, signal_id)
 
 
 def list_symbol_presets_service() -> List[Dict[str, Any]]:

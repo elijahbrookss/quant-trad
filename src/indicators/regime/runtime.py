@@ -67,6 +67,29 @@ def _as_float(name: str, value: Any) -> float:
         raise RuntimeError(f"regime_config_invalid: {name} must be numeric") from exc
 
 
+def _float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_float(*values: Any, default: float = 0.0) -> float:
+    for value in values:
+        parsed = _float_or_none(value)
+        if parsed is not None:
+            return parsed
+    return float(default)
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
 class TypedRegimeIndicator(Indicator):
     def __init__(
         self,
@@ -170,6 +193,63 @@ class TypedRegimeIndicator(Indicator):
         liquidity = stabilized.get("liquidity") or {}
         expansion = stabilized.get("expansion") or {}
         metrics = stabilized.get("metrics") or {}
+        metric_output_value = {
+            key: float(value)
+            for key, value in metrics.items()
+            if not isinstance(value, bool) and isinstance(value, (int, float))
+        }
+
+        regime_confidence = _clamp01(
+            _first_float(
+                metric_output_value.get("context_trust_score"),
+                structure.get("context_trust_score"),
+            )
+        )
+        regime_conviction = _clamp01(
+            _first_float(
+                metric_output_value.get("score_margin"),
+                structure.get("score_margin"),
+            )
+        )
+        trend_strength = _clamp01(
+            _first_float(
+                metric_output_value.get("trend_score"),
+                structure.get("trend_score"),
+            )
+        )
+        trend_direction_value = _first_float(
+            metric_output_value.get("trend_direction_value"),
+            structure.get("trend_direction_value"),
+        )
+        directional_conviction = max(-1.0, min(1.0, trend_direction_value * trend_strength))
+        volatility_intensity = _clamp01(
+            abs(
+                _first_float(
+                    metric_output_value.get("atr_zscore"),
+                    volatility.get("atr_zscore"),
+                )
+            )
+            / 2.0
+        )
+        context_age_since_known_bars = _first_float(
+            metric_output_value.get("context_age_since_known_bars"),
+            structure.get("context_age_since_known_bars"),
+        )
+        mature_floor = float(
+            getattr(self._stabilizer.config, "context_mature_after_known_bars", 2.0)
+        )
+        # 0.0 = newly known; 1.0 = well-established several bars beyond the maturity floor.
+        regime_maturity = _clamp01((context_age_since_known_bars - mature_floor) / 4.0)
+
+        derived_output_fields = {
+            "regime_confidence": regime_confidence,
+            "regime_conviction": regime_conviction,
+            "trend_strength": trend_strength,
+            "directional_conviction": directional_conviction,
+            "volatility_intensity": volatility_intensity,
+            "regime_maturity": regime_maturity,
+        }
+
         self._context_output = RuntimeOutput(
             bar_time=bar.time,
             ready=True,
@@ -220,17 +300,15 @@ class TypedRegimeIndicator(Indicator):
                     ),
                     "candidate_count": int(structure.get("candidate_count") or 0),
                     "current_confirm_required": int(structure.get("current_confirm_required") or 0),
+                    **derived_output_fields,
                 },
             },
         )
+        metric_output_value.update(derived_output_fields)
         self._metric_output = RuntimeOutput(
             bar_time=bar.time,
             ready=True,
-            value={
-                key: float(value)
-                for key, value in metrics.items()
-                if not isinstance(value, bool) and isinstance(value, (int, float))
-            },
+            value=metric_output_value,
         )
         self._overlay_ready = True
         self._overlay_cache = None

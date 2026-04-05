@@ -44,6 +44,12 @@ def _trend_stats() -> dict[str, float]:
     }
 
 
+def _trend_down_stats() -> dict[str, float]:
+    stats = _trend_stats()
+    stats["slope"] = -180.0
+    return stats
+
+
 def _range_stats() -> dict[str, float]:
     return {
         "atr_zscore": -0.15,
@@ -80,8 +86,75 @@ def _transitionish_stats() -> dict[str, float]:
     }
 
 
+def _transition_entry_sequence_stats() -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+    return (
+        {
+            "atr_zscore": 0.20,
+            "tr_pct": 0.012,
+            "atr_ratio": 1.02,
+            "directional_efficiency": 0.68,
+            "slope": 128.8,
+            "slope_stability": 0.24,
+            "range_position": 0.78,
+            "atr_short": 700.0,
+            "atr_slope": 12.0,
+            "range_contraction": 1.16,
+            "overlap_pct": 0.30,
+            "volume_zscore": 0.0,
+            "volume_vs_median": 1.0,
+        },
+        {
+            "atr_zscore": 0.20,
+            "tr_pct": 0.012,
+            "atr_ratio": 1.02,
+            "directional_efficiency": 0.48,
+            "slope": 96.8,
+            "slope_stability": 0.24,
+            "range_position": 0.78,
+            "atr_short": 700.0,
+            "atr_slope": 12.0,
+            "range_contraction": 1.04,
+            "overlap_pct": 0.34,
+            "volume_zscore": 0.0,
+            "volume_vs_median": 1.0,
+        },
+        {
+            "atr_zscore": 0.20,
+            "tr_pct": 0.012,
+            "atr_ratio": 1.02,
+            "directional_efficiency": 0.44,
+            "slope": 90.4,
+            "slope_stability": 0.24,
+            "range_position": 0.78,
+            "atr_short": 700.0,
+            "atr_slope": 12.0,
+            "range_contraction": 1.00,
+            "overlap_pct": 0.38,
+            "volume_zscore": 0.0,
+            "volume_vs_median": 1.0,
+        },
+    )
+
+
 def _dependency_ref() -> OutputRef:
     return OutputRef(indicator_id="stats-1", output_name="candle_stats")
+
+
+def _runtime_indicator() -> TypedRegimeIndicator:
+    return TypedRegimeIndicator(
+        indicator_id="regime-1",
+        version="v1",
+        params={
+            "min_confidence": 0.5,
+            "structure_min_confidence": 0.4,
+            "structure_confirm_bars": 1,
+            "volatility_confirm_bars": 1,
+            "liquidity_confirm_bars": 1,
+            "expansion_confirm_bars": 1,
+            "smoothing_alpha": 1.0,
+        },
+        candle_stats_indicator_id="stats-1",
+    )
 
 
 def _context_fields(
@@ -162,6 +235,255 @@ def test_regime_runtime_emits_context_and_metric_outputs() -> None:
     assert metrics.value["trend_direction_value"] == 1.0
     assert metrics.value["bars_in_regime"] == 1.0
     assert metrics.value["is_trustworthy"] == 0.0
+
+
+def test_regime_runtime_emits_bounded_decision_grade_metric_fields() -> None:
+    indicator = _runtime_indicator()
+    bar = _candle(0, close=100_000.0)
+    indicator.apply_bar(
+        bar,
+        {
+            _dependency_ref(): _dependency_output(
+                bar.time,
+                _trend_stats(),
+            )
+        },
+    )
+
+    metrics = indicator.snapshot()["regime_metrics"]
+
+    assert metrics.ready is True
+    for field_name in (
+        "regime_confidence",
+        "regime_conviction",
+        "trend_strength",
+        "directional_conviction",
+        "volatility_intensity",
+        "regime_maturity",
+    ):
+        assert field_name in metrics.value
+    assert 0.0 <= metrics.value["regime_confidence"] <= 1.0
+    assert 0.0 <= metrics.value["regime_conviction"] <= 1.0
+    assert 0.0 <= metrics.value["trend_strength"] <= 1.0
+    assert -1.0 <= metrics.value["directional_conviction"] <= 1.0
+    assert 0.0 <= metrics.value["volatility_intensity"] <= 1.0
+    assert 0.0 <= metrics.value["regime_maturity"] <= 1.0
+
+
+def test_regime_runtime_emits_decision_grade_context_fields() -> None:
+    indicator = _runtime_indicator()
+    bar = _candle(0, close=100_000.0)
+    indicator.apply_bar(
+        bar,
+        {
+            _dependency_ref(): _dependency_output(
+                bar.time,
+                _trend_stats(),
+            )
+        },
+    )
+
+    context = indicator.snapshot()["market_regime"]
+    fields = context.value["fields"]
+
+    assert context.ready is True
+    for field_name in (
+        "regime_confidence",
+        "regime_conviction",
+        "trend_strength",
+        "directional_conviction",
+        "volatility_intensity",
+        "regime_maturity",
+    ):
+        assert field_name in fields
+
+
+def test_regime_runtime_keeps_outputs_not_ready_when_dependency_is_not_ready() -> None:
+    indicator = _runtime_indicator()
+    bar = _candle(0, close=100_000.0)
+    indicator.apply_bar(
+        bar,
+        {
+            _dependency_ref(): RuntimeOutput(
+                bar_time=bar.time,
+                ready=False,
+                value={},
+            )
+        },
+    )
+
+    snapshot = indicator.snapshot()
+
+    assert snapshot["market_regime"].ready is False
+    assert snapshot["regime_metrics"].ready is False
+
+
+def test_regime_runtime_directional_conviction_tracks_trend_direction_sign() -> None:
+    positive_indicator = _runtime_indicator()
+    positive_bar = _candle(0, close=100_000.0)
+    positive_indicator.apply_bar(
+        positive_bar,
+        {
+            _dependency_ref(): _dependency_output(
+                positive_bar.time,
+                _trend_stats(),
+            )
+        },
+    )
+
+    negative_indicator = _runtime_indicator()
+    negative_bar = _candle(0, close=100_000.0)
+    negative_indicator.apply_bar(
+        negative_bar,
+        {
+            _dependency_ref(): _dependency_output(
+                negative_bar.time,
+                _trend_down_stats(),
+            )
+        },
+    )
+
+    assert positive_indicator.snapshot()["market_regime"].value["state_key"] == "transition_up"
+    assert negative_indicator.snapshot()["market_regime"].value["state_key"] == "transition_down"
+    assert positive_indicator.snapshot()["regime_metrics"].value["directional_conviction"] > 0.0
+    assert negative_indicator.snapshot()["regime_metrics"].value["directional_conviction"] < 0.0
+
+
+def test_transition_score_stays_low_during_stable_ambiguous_market() -> None:
+    indicator = TypedRegimeIndicator(
+        indicator_id="regime-1",
+        version="v1",
+        params={
+            "min_confidence": 0.5,
+            "structure_min_confidence": 0.4,
+            "structure_confirm_bars": 1,
+            "volatility_confirm_bars": 1,
+            "liquidity_confirm_bars": 1,
+            "expansion_confirm_bars": 1,
+            "smoothing_alpha": 1.0,
+        },
+        candle_stats_indicator_id="stats-1",
+    )
+
+    for index in range(3):
+        candle = _candle(index, close=100_000.0 + index * 2.0)
+        indicator.apply_bar(
+            candle,
+            {_dependency_ref(): _dependency_output(candle.time, _transitionish_stats())},
+        )
+
+    metrics = indicator.snapshot()["regime_metrics"]
+    final_candle = _candle(2, close=100_000.0 + 2 * 2.0)
+    structure_row = indicator._regime_rows[final_candle.time.replace(tzinfo=None)]["structure"]
+    assert metrics.value["transition_score"] == 0.0
+    assert metrics.value["transition_directional_momentum_break"] == 0.0
+    assert metrics.value["transition_overlap_regime_shift"] == 0.0
+    assert metrics.value["transition_range_width_expansion"] == 0.0
+    assert metrics.value["transition_slope_reversal"] == 0.0
+    assert metrics.value["transition_score_divergence"] == 0.0
+    assert structure_row["raw_state"] == "transition"
+    assert structure_row["state"] == "transition"
+    assert structure_row["structure_candidate_state"] is None
+    assert structure_row["structure_candidate_count"] == 0
+
+
+def test_transition_candidate_accumulates_on_fading_change_sequence() -> None:
+    indicator = TypedRegimeIndicator(
+        indicator_id="regime-1",
+        version="v1",
+        params={
+            "min_confidence": 0.5,
+            "structure_min_confidence": 0.4,
+            "structure_confirm_bars": 1,
+            "volatility_confirm_bars": 1,
+            "liquidity_confirm_bars": 1,
+            "expansion_confirm_bars": 1,
+            "smoothing_alpha": 1.0,
+        },
+        candle_stats_indicator_id="stats-1",
+    )
+
+    for index in range(6):
+        candle = _candle(index, close=100_000.0 + index)
+        indicator.apply_bar(
+            candle,
+            {_dependency_ref(): _dependency_output(candle.time, _range_stats())},
+        )
+
+    first_change, fading_change, late_fade = _transition_entry_sequence_stats()
+    traces: list[tuple[dict[str, object], dict[str, float]]] = []
+    for index, stats in enumerate((first_change, fading_change, late_fade), start=6):
+        candle = _candle(index, close=100_060.0 + index * 10.0)
+        indicator.apply_bar(
+            candle,
+            {_dependency_ref(): _dependency_output(candle.time, stats)},
+        )
+        structure_row = indicator._regime_rows[candle.time.replace(tzinfo=None)]["structure"]
+        metrics = indicator.snapshot()["regime_metrics"].value
+        traces.append((structure_row, metrics))
+
+    first_row, first_metrics = traces[0]
+    second_row, second_metrics = traces[1]
+    third_row, third_metrics = traces[2]
+
+    assert first_row["raw_state"] in {"trend", "transition"}
+    assert first_row["state"] == "range"
+    assert first_row["structure_candidate_state"] == "transition"
+    assert first_row["structure_candidate_count"] == 1
+    assert first_row["structure_current_confirm_required"] == 3
+    assert first_metrics["transition_score"] > 0.68
+
+    assert second_row["raw_state"] == "transition"
+    assert second_row["state"] == "range"
+    assert second_row["structure_candidate_state"] == "transition"
+    assert second_row["structure_candidate_count"] == 2
+    assert second_row["structure_current_confirm_required"] == 3
+    assert 0.40 < second_metrics["transition_score"] < 0.68
+
+    assert third_row["state"] == "range"
+    assert third_row["structure_candidate_state"] is None
+    assert third_row["structure_candidate_count"] == 0
+    assert third_metrics["transition_score"] < 0.40
+
+
+def test_transition_score_rises_on_structural_change() -> None:
+    indicator = TypedRegimeIndicator(
+        indicator_id="regime-1",
+        version="v1",
+        params={
+            "min_confidence": 0.5,
+            "structure_min_confidence": 0.4,
+            "structure_confirm_bars": 1,
+            "volatility_confirm_bars": 1,
+            "liquidity_confirm_bars": 1,
+            "expansion_confirm_bars": 1,
+            "smoothing_alpha": 1.0,
+        },
+        candle_stats_indicator_id="stats-1",
+    )
+
+    for index in range(2):
+        candle = _candle(index, close=100_000.0 + index * 3.0)
+        indicator.apply_bar(
+            candle,
+            {_dependency_ref(): _dependency_output(candle.time, _range_stats())},
+        )
+
+    baseline_metrics = indicator.snapshot()["regime_metrics"].value
+
+    change_candle = _candle(2, close=100_250.0)
+    indicator.apply_bar(
+        change_candle,
+        {_dependency_ref(): _dependency_output(change_candle.time, _trend_stats())},
+    )
+
+    changed_metrics = indicator.snapshot()["regime_metrics"].value
+    assert baseline_metrics["transition_score"] == 0.0
+    assert changed_metrics["transition_score"] > 0.8
+    assert changed_metrics["transition_directional_momentum_break"] == 1.0
+    assert changed_metrics["transition_overlap_regime_shift"] == 1.0
+    assert changed_metrics["transition_range_width_expansion"] == 1.0
+    assert changed_metrics["transition_score_divergence"] > 0.9
 
 
 def test_regime_overlay_markers_align_to_confirmed_block_known_at() -> None:
@@ -276,6 +598,10 @@ def test_established_range_persists_through_brief_transition_noise() -> None:
             candle,
             {_dependency_ref(): _dependency_output(candle.time, _transitionish_stats())},
         )
+        if index == 6:
+            structure_row = indicator._regime_rows[candle.time.replace(tzinfo=None)]["structure"]
+            assert structure_row["structure_candidate_state"] == "transition"
+            assert structure_row["structure_candidate_count"] == 1
 
     snapshot = indicator.snapshot()["market_regime"]
     assert snapshot.value["fields"]["context_regime_state"] == "range"
@@ -310,6 +636,10 @@ def test_established_trend_persists_through_brief_transition_noise() -> None:
             candle,
             {_dependency_ref(): _dependency_output(candle.time, _transitionish_stats())},
         )
+        if index == 6:
+            structure_row = indicator._regime_rows[candle.time.replace(tzinfo=None)]["structure"]
+            assert structure_row["structure_candidate_state"] == "transition"
+            assert structure_row["structure_candidate_count"] == 1
 
     snapshot = indicator.snapshot()["market_regime"]
     assert snapshot.value["fields"]["context_regime_state"] == "trend_up"

@@ -16,3 +16,8 @@ coverage.xml
 docker/ibkr-gateway/ibgateway-installer.sh
 .claude/
 .vscode/
+
+# Codex prompts
+docs/codex/
+.codex/
+.codex

@@ -20,7 +20,7 @@ def enabled_signal_output_names_from_meta(meta: Mapping[str, Any]) -> Set[str]:
 
 
 def normalise_enabled_event_keys(config: Mapping[str, Any]) -> Set[str]:
-    enabled = config.get("enabled_rules")
+    enabled = config.get("enabled_event_keys")
     if enabled is None:
         return set()
     if isinstance(enabled, (str, bytes)):
@@ -98,11 +98,21 @@ def filter_signal_payload(
 
     runtime_invariants = filtered.get("runtime_invariants")
     if isinstance(runtime_invariants, Mapping):
-        filtered["runtime_invariants"] = {
+        runtime_invariants = {
             **dict(runtime_invariants),
             "signals_count": len(retained_signals),
             "signal_overlay_count": len(retained_overlays),
         }
+        filtered["runtime_invariants"] = runtime_invariants
+
+    filtered["machine"] = {
+        "signals": retained_signals,
+        "runtime_path": filtered.get("runtime_path"),
+        "runtime_invariants": filtered.get("runtime_invariants"),
+    }
+    filtered["ui"] = {
+        "overlays": retained_overlays,
+    }
     return filtered
 
 

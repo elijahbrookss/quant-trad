@@ -47,6 +47,37 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+def _indicator_instance_section(meta: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": meta.get("id"),
+        "type": meta.get("type"),
+        "name": meta.get("name"),
+        "params": dict(meta.get("params") or {}),
+        "dependencies": list(meta.get("dependencies") or []),
+        "enabled": bool(meta.get("enabled", False)),
+        "color": meta.get("color"),
+        "color_palette": meta.get("color_palette"),
+        "datasource": meta.get("datasource"),
+        "exchange": meta.get("exchange"),
+        "output_prefs": dict(meta.get("output_prefs") or {}),
+    }
+
+
+def _indicator_read(meta: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "instance": _indicator_instance_section(meta),
+        "manifest": dict(meta.get("manifest") or {}),
+        "outputs": {
+            "typed": list(meta.get("typed_outputs") or []),
+            "overlays": list(meta.get("overlay_outputs") or []),
+        },
+        "capabilities": {
+            "runtime_supported": bool(meta.get("runtime_supported", False)),
+            "compute_supported": bool(meta.get("compute_supported", False)),
+        },
+    }
+
+
 def _raise_indicator_http_error(
     *,
     event: str,
@@ -185,6 +216,14 @@ class IndicatorInstanceOut(BaseModel):
     typed_outputs: Optional[List[Dict[str, Any]]] = None
     overlay_outputs: Optional[List[Dict[str, Any]]] = None
     runtime_supported: Optional[bool] = None
+    compute_supported: Optional[bool] = None
+
+
+class IndicatorReadOut(BaseModel):
+    instance: Dict[str, Any]
+    manifest: Dict[str, Any]
+    outputs: Dict[str, Any]
+    capabilities: Dict[str, Any]
 
 class OverlayRequest(BaseModel):
     start: str
@@ -248,10 +287,10 @@ async def get_indicator_type(type_id: str):
 async def list_instances():
     return list_instances_meta()
 
-@router.post("/", response_model=IndicatorInstanceOut, status_code=201)
+@router.post("/", response_model=IndicatorReadOut, status_code=201)
 async def create(body: IndicatorInstanceIn):
     try:
-        return create_instance(
+        meta = create_instance(
             body.type,
             body.name,
             dict(body.params),
@@ -260,12 +299,13 @@ async def create(body: IndicatorInstanceIn):
             color_palette=body.color_palette,
             output_prefs=dict(body.output_prefs or {}),
         )
+        return _indicator_read(meta)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except RuntimeError as e:
         raise HTTPException(500, str(e))
 
-@router.put("/{inst_id}", response_model=IndicatorInstanceOut)
+@router.put("/{inst_id}", response_model=IndicatorReadOut)
 async def update(inst_id: str, body: IndicatorInstanceIn):
     try:
         color_provided = "color" in body.__fields_set__
@@ -302,7 +342,7 @@ async def update(inst_id: str, body: IndicatorInstanceIn):
                 if output.get("type") == "signal"
             ],
         )
-        return updated
+        return _indicator_read(updated)
     except KeyError:
         raise HTTPException(404, "Indicator not found")
     except ValueError as e:
@@ -310,10 +350,10 @@ async def update(inst_id: str, body: IndicatorInstanceIn):
     except RuntimeError as e:
         raise HTTPException(500, str(e))
 
-@router.get("/{inst_id}", response_model=IndicatorInstanceOut)
+@router.get("/{inst_id}", response_model=IndicatorReadOut)
 async def get_one(inst_id: str):
     try:
-        return get_instance_meta(inst_id)
+        return _indicator_read(get_instance_meta(inst_id))
     except KeyError:
         raise HTTPException(404, "Indicator not found")
 
@@ -339,18 +379,18 @@ async def delete(inst_id: str) -> Response:
     return Response(status_code=204)
 
 
-@router.post("/{inst_id}/duplicate", response_model=IndicatorInstanceOut)
+@router.post("/{inst_id}/duplicate", response_model=IndicatorReadOut)
 async def duplicate(inst_id: str, body: Optional[IndicatorDuplicateRequest] = None):
     try:
-        return duplicate_instance(inst_id, name=body.name if body else None)
+        return _indicator_read(duplicate_instance(inst_id, name=body.name if body else None))
     except KeyError:
         raise HTTPException(404, "Indicator not found")
 
 
-@router.patch("/{inst_id}/enabled", response_model=IndicatorInstanceOut)
+@router.patch("/{inst_id}/enabled", response_model=IndicatorReadOut)
 async def toggle_enabled(inst_id: str, body: IndicatorToggleRequest):
     try:
-        return set_instance_enabled(inst_id, body.enabled)
+        return _indicator_read(set_instance_enabled(inst_id, body.enabled))
     except KeyError:
         raise HTTPException(404, "Indicator not found")
 

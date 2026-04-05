@@ -78,15 +78,19 @@ flowchart TD
 
 - QuantLab still has its own indicator signal executor for research requests.
 - Strategy preview and bot runtime now share the same typed-output indicator engine and typed rule evaluator.
-- A trigger in preview is a row derived from typed `signal` outputs; a signal in bot runtime is a `StrategySignal(epoch, direction)` used for execution.
+- Strategy preview now emits a retained preview-scoped machine signal contract separate from UI overlays. Each retained strategy preview signal carries `signal_id`, `source_type=strategy_preview`, and `source_id=<preview_id>`.
+- Strategy preview selected decision artifacts may now carry audit-only output snapshots: `observed_outputs` for the full current-bar output world state and `referenced_outputs` for the trigger/guard subset. These remain off the engine-facing `StrategySignal`.
+- Indicator preview remains ephemeral response data only. It now separates `machine.signals` from `ui.overlays`, but it does not create a durable retrieval contract.
+- A signal in bot runtime is an immutable `StrategySignal` built explicitly from the selected decision artifact and carrying only engine-relevant fields (`epoch`, `direction`, `signal_id`, `source_type`, `source_id`, `decision_id`, `rule_id`, `intent`, `event_key`, `strategy_hash`).
 - Wallet movement events are downstream of decision/execution events, not emitted directly by indicator signals.
 - If this conflicts with Strict contract, Strict contract wins.
 
 ## 3) Inputs, outputs, and side effects
 
 Inputs:
-- QuantLab: `POST /api/indicators/{inst_id}/signals` with `start/end/interval/config` and required `instrument_id` (plus optional display-oriented `symbol/datasource/exchange` context).
-- Strategy preview: `POST /api/strategies/{strategy_id}/preview` with `start/end/interval/instrument_ids/config`.
+- QuantLab: `POST /api/indicators/{inst_id}/signals` with `start/end/interval/config` and required `instrument_id` (plus optional display-oriented `symbol/datasource/exchange` context). `config.enabled_event_keys` is the canonical event filter input when callers want to restrict returned signal events.
+- Strategy preview: `POST /api/strategies/{strategy_id}/preview` with `start/end/interval/instrument_ids` and optional `variant_id`.
+- Strategy compile/validate: `POST /api/strategies/{strategy_id}/compile` with optional `variant_id`.
 - Bot runtime: each candle in the runtime loop after `start()`.
 
 Dependencies:
@@ -96,8 +100,8 @@ Dependencies:
 - runtime event and wallet gateway contracts for bot execution.
 
 Outputs:
-- QuantLab: indicator payload with flattened signal preview rows derived from canonical `signal` outputs, standard chart `overlays`, `runtime_path`, and `runtime_invariants`.
-- Strategy preview: per-instrument `trigger_rows` and canonical `overlays`.
+- QuantLab: indicator payload with machine-first `signals`, UI companion `overlays`, `runtime_path`, and `runtime_invariants`.
+- Strategy preview: retained preview result identified by `preview_id`, per-instrument machine-first `signals` plus decision artifacts, and UI companion `overlays`.
 - Bot runtime: queued `StrategySignal` objects and runtime events (`SIGNAL_EMITTED`, `DECISION_*`, `ENTRY_FILLED`, `EXIT_FILLED`, wallet projections).
 
 Canonical signal-output event item:
@@ -142,21 +146,30 @@ QuantLab indicator signals:
 - Response returns once async job reaches `succeeded`; failed/timeout/not-found map to HTTP errors.
 
 Strategy preview signals:
-- `run_strategy_preview` delegates to `evaluate_strategy_preview`.
+- `run_strategy_preview` first resolves the selected-or-default strategy variant, compiles one concrete `CompiledStrategySpec`, and then delegates to `evaluate_strategy_preview`.
 - For each instrument, preview builds runtime indicators, executes candles sequentially through `IndicatorExecutionEngine`, and evaluates rules with `evaluate_typed_rules`.
-- Preview returns two downstream-facing products from the same engine timeline:
-  - `trigger_rows` for rule inspection with `strategy_rule_id`,
-  - `overlays` emitted directly from indicator `overlay_snapshot()` payloads, including the canonical `strategy_signal` overlay for preview markers.
+- Preview now returns one retained parent preview result identified by `preview_id`.
+- Preview payloads surface the resolved variant identity and resolved params separately from the per-instrument machine/UI signal sections.
+- For each instrument, preview returns two explicit sections from the same engine timeline:
+  - `machine.signals` and `machine.decision_artifacts`,
+  - `ui.overlays`, including the canonical `strategy_signal` overlay for preview markers.
+- Each retained strategy preview signal uses `signal_id=<decision_id>`, `source_type=strategy_preview`, and `source_id=<preview_id>`.
+- For selected decision artifacts only, preview also records audit snapshots derived from the same current-bar engine frame:
+  - `observed_outputs`: all ready/pending indicator outputs at the selected decision bar,
+  - `referenced_outputs`: the subset directly referenced by the trigger and guard evaluations.
 - Preview does not fetch indicator overlays through a separate overlay service path.
 
 Bot runtime signals:
 - For each bar and each attached indicator: `IndicatorExecutionEngine.step(...)` executes `apply_bar -> snapshot -> overlay_snapshot`.
 - The runtime consumes the flattened typed output map only.
-- `evaluate_typed_rules` builds `StrategySignal` only when:
+- `evaluate_typed_rules` produces canonical decision artifacts for every evaluated rule plus zero-or-one selected decision artifact for the bar.
+- Bot runtime maps the selected decision artifact into one immutable `StrategySignal` only when:
   - a `signal_match` node matches the current-bar signal output,
   - the enclosing rule resolves true,
   - the resulting action maps to the current bar epoch.
-- Consumed direction triggers `SIGNAL_EMITTED`; decision/execution events follow from risk engine outcomes.
+- Full trigger traces, guard results, suppression metadata, and preview labels remain on the decision artifact path only.
+- The consumed `StrategySignal` carries the execution-facing identity and provenance fields needed by runtime events, including `signal_id`, `source_type=runtime`, `source_id=<run_id>`, and `strategy_hash`.
+- Consumed signal direction triggers `SIGNAL_EMITTED`; decision/execution events follow from risk engine outcomes, while the matching decision artifact remains attached for audit.
 
 Ordering keys used:
 - QuantLab job processing order key: `AsyncJobRecord.created_at` within partition slot.
@@ -198,7 +211,7 @@ Persistence boundaries:
 ## 8) Risks accepted
 
 - Current bot runtime rule source is `series.meta["rules"]`; if missing, runtime emits no strategy signals.
-- `Strategy.to_dict()` currently omits `rules`, while series metadata is built from `strategy.to_dict()`. This creates a shipped risk of empty rule evaluation in bot runtime.
+- Strategy preview and bot runtime still have separate consumers, but the selected-decision-to-`StrategySignal` transformation is now explicit and typed. Future drift risk is concentrated in that mapper instead of spread across multiple ad hoc dict flattening sites.
 - QuantLab still has a distinct research endpoint, but it now derives from the same indicator output contract instead of a separate `src/signals` package.
 
 ## 9) Strict contract

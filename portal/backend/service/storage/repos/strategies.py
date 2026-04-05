@@ -4,6 +4,28 @@ from __future__ import annotations
 
 from ._shared import *
 
+
+def _normalize_variant_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a storage-safe strategy variant payload."""
+
+    strategy_id = str(payload.get("strategy_id") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    if not strategy_id:
+        raise ValueError("strategy_id is required for strategy variants")
+    if not name:
+        raise ValueError("name is required for strategy variants")
+    description = payload.get("description")
+    return {
+        "id": str(payload.get("id") or uuid.uuid4()),
+        "strategy_id": strategy_id,
+        "name": name,
+        "description": str(description).strip() if description else None,
+        "param_overrides": dict(_json_safe(payload.get("param_overrides") or {})),
+        "atm_template_id": str(payload.get("atm_template_id") or "").strip() or None,
+        "is_default": bool(payload.get("is_default", False)),
+    }
+
+
 def load_strategies() -> List[Dict[str, Any]]:
     """Return strategies plus indicators and rules."""
 
@@ -48,6 +70,140 @@ def load_strategies() -> List[Dict[str, Any]]:
         return payload
 
 
+def list_strategy_variants(strategy_id: str) -> List[Dict[str, Any]]:
+    """Return all persisted variants for a strategy."""
+
+    if not db.available:
+        return []
+    with db.session() as session:
+        rows = session.execute(
+            select(StrategyVariantRecord).where(
+                StrategyVariantRecord.strategy_id == strategy_id
+            )
+        ).scalars().all()
+        ordered = sorted(
+            (row.to_dict() for row in rows),
+            key=lambda item: (
+                0 if item.get("is_default") else 1,
+                str(item.get("name") or ""),
+                str(item.get("id") or ""),
+            ),
+        )
+        return ordered
+
+
+def get_strategy_variant(variant_id: str) -> Optional[Dict[str, Any]]:
+    """Return a single strategy variant by id."""
+
+    if not db.available or not variant_id:
+        return None
+    with db.session() as session:
+        record = session.get(StrategyVariantRecord, variant_id)
+        return record.to_dict() if record else None
+
+
+def ensure_default_strategy_variant(strategy_id: str) -> Dict[str, Any]:
+    """Ensure a strategy has one default saved variant."""
+
+    if not db.available:
+        now = _utcnow().isoformat() + "Z"
+        return {
+            "id": str(uuid.uuid4()),
+            "strategy_id": strategy_id,
+            "name": "default",
+            "description": None,
+            "param_overrides": {},
+            "atm_template_id": None,
+            "is_default": True,
+            "created_at": now,
+            "updated_at": now,
+        }
+    with db.session() as session:
+        rows = session.execute(
+            select(StrategyVariantRecord).where(
+                StrategyVariantRecord.strategy_id == strategy_id
+            )
+        ).scalars().all()
+        for row in rows:
+            if row.is_default:
+                return row.to_dict()
+
+        default_row = next(
+            (row for row in rows if str(row.name or "").strip().lower() == "default"),
+            None,
+        )
+        now = _utcnow()
+        if default_row is None:
+            default_row = StrategyVariantRecord(
+                id=str(uuid.uuid4()),
+                strategy_id=strategy_id,
+                name="default",
+                description=None,
+                param_overrides={},
+                atm_template_id=None,
+                is_default=True,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(default_row)
+        else:
+            default_row.is_default = True
+            default_row.updated_at = now
+        return default_row.to_dict()
+
+
+def upsert_strategy_variant(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Create or update a persisted strategy variant."""
+
+    normalized = _normalize_variant_payload(payload)
+    if not db.available:
+        return normalized
+    with db.session() as session:
+        record = session.get(StrategyVariantRecord, normalized["id"])
+        now = _utcnow()
+        if record is None:
+            record = StrategyVariantRecord(
+                id=normalized["id"],
+                strategy_id=normalized["strategy_id"],
+                created_at=now,
+            )
+            session.add(record)
+        if normalized["is_default"]:
+            siblings = session.execute(
+                select(StrategyVariantRecord).where(
+                    StrategyVariantRecord.strategy_id == normalized["strategy_id"]
+                )
+            ).scalars().all()
+            for sibling in siblings:
+                if sibling.id != normalized["id"] and sibling.is_default:
+                    sibling.is_default = False
+                    sibling.updated_at = now
+        record.strategy_id = normalized["strategy_id"]
+        record.name = normalized["name"]
+        record.description = normalized["description"]
+        record.param_overrides = normalized["param_overrides"]
+        record.atm_template_id = normalized["atm_template_id"]
+        record.is_default = normalized["is_default"]
+        record.updated_at = now
+        if record.created_at is None:
+            record.created_at = now
+        return record.to_dict()
+
+
+def delete_strategy_variant(variant_id: str) -> None:
+    """Delete a persisted non-default strategy variant."""
+
+    if not db.available:
+        return
+    with db.session() as session:
+        record = session.get(StrategyVariantRecord, variant_id)
+        if record is None:
+            return
+        if record.is_default:
+            raise ValueError("Default strategy variant cannot be deleted")
+        session.delete(record)
+
+
 def upsert_strategy(payload: Dict[str, Any]) -> None:
     """Persist a strategy definition along with indicator ordering."""
 
@@ -72,9 +228,7 @@ def upsert_strategy(payload: Dict[str, Any]) -> None:
             record.exchange = payload.get("exchange")
             # indicator attachments are persisted in portal_strategy_indicators
             record.atm_template_id = payload.get("atm_template_id")
-            record.base_risk_per_trade = payload.get("base_risk_per_trade")
-            record.global_risk_multiplier = payload.get("global_risk_multiplier")
-            record.risk_overrides = payload.get("risk_overrides") or {}
+            record.risk_config = payload.get("risk_config") or {}
             record.updated_at = now
             if record.created_at is None:
                 record.created_at = now
@@ -301,7 +455,7 @@ def upsert_strategy_rule(payload: Dict[str, Any]) -> None:
             record.match = payload.get("match") or record.match
             record.description = payload.get("description")
             record.enabled = bool(payload.get("enabled", True))
-            record.conditions = list(payload.get("conditions") or [])
+            record.conditions = dict(_json_safe(payload.get("conditions") or {}))
             record.updated_at = now
             if record.created_at is None:
                 record.created_at = now
@@ -321,7 +475,3 @@ def delete_strategy_rule(rule_id: str) -> None:
                 session.delete(record)
     except SQLAlchemyError as exc:
         logger.warning("strategy_rule_delete_failed | id=%s | error=%s", rule_id, exc)
-
-
-
-

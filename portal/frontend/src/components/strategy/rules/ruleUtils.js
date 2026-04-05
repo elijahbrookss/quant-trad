@@ -1,4 +1,10 @@
 export const extractRuleFlow = (rule) => {
+  if (rule?.trigger) {
+    return {
+      trigger: rule.trigger || {},
+      guards: Array.isArray(rule.guards) ? rule.guards : [],
+    }
+  }
   if (rule?.flow?.trigger) {
     return {
       trigger: rule.flow.trigger || {},
@@ -35,7 +41,15 @@ export const buildRuleConditionSummary = ({ rule, indicatorLookup, limit = 2 }) 
     const guardLabel = guardMeta?.name || guardMeta?.type || guard.indicator_id || 'Indicator'
     const guardOutput = outputLabel(guardMeta, guard.output_name)
     if (guard.type === 'context_match') {
-      parts.push(`${guardLabel} ${guardOutput} = ${guard.state_key}`)
+      parts.push(`${guardLabel} ${guardOutput}.${guard.field || 'state'} = ${guard.value}`)
+      return
+    }
+    if (guard.type === 'holds_for_bars') {
+      parts.push(`Hold ${guard.bars} bars`)
+      return
+    }
+    if (guard.type === 'signal_seen_within_bars' || guard.type === 'signal_absent_within_bars') {
+      parts.push(`${guard.event_key} ${guard.type === 'signal_seen_within_bars' ? 'seen' : 'absent'} in ${guard.lookback_bars}`)
       return
     }
     parts.push(`${guardLabel} ${guardOutput}.${guard.field} ${guard.operator} ${guard.value}`)
@@ -44,17 +58,15 @@ export const buildRuleConditionSummary = ({ rule, indicatorLookup, limit = 2 }) 
   return `${parts.join(' • ')}${tail}`
 }
 
-export const buildRuleDefaultName = ({ action, trigger, guards, indicatorLookup }) => {
+export const buildRuleDefaultName = ({ intent, trigger, guards, indicatorLookup }) => {
   const summary = buildRuleConditionSummary({
     rule: {
-      when: {
-        type: 'all',
-        conditions: [trigger, ...(Array.isArray(guards) ? guards : [])].filter(Boolean),
-      },
+      trigger,
+      guards,
     },
     indicatorLookup,
     limit: 2,
   })
-  const actionLabel = action ? action.toUpperCase() : 'Rule'
+  const actionLabel = intent === 'enter_short' ? 'SHORT' : 'LONG'
   return `${actionLabel} • ${summary}`
 }

@@ -104,7 +104,11 @@ const useStrategyPreview = ({
           return
         }
 
-        const overlays = Array.isArray(instrumentResult?.overlays) ? instrumentResult.overlays : []
+        const overlays = Array.isArray(instrumentResult?.ui?.overlays)
+          ? instrumentResult.ui.overlays
+          : Array.isArray(instrumentResult?.overlays)
+            ? instrumentResult.overlays
+            : []
 
         const appliedDateRange = Array.isArray(window.dateRange)
           && window.dateRange[0] instanceof Date

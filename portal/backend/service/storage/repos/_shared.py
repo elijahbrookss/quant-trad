@@ -26,6 +26,7 @@ from ....db import (
     StrategyInstrumentLink,
     StrategyRecord,
     StrategyRuleRecord,
+    StrategyVariantRecord,
     SymbolPresetRecord,
     db,
 )
@@ -123,6 +124,7 @@ __all__ = [
     "StrategyInstrumentLink",
     "StrategyRecord",
     "StrategyRuleRecord",
+    "StrategyVariantRecord",
     "SymbolPresetRecord",
     "db",
     "delete",
