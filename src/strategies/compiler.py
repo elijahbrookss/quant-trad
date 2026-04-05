@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping as ABCMapping
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .contracts import (
@@ -24,6 +25,41 @@ _ALLOWED_METRIC_OPERATORS = {">", ">=", "<", "<=", "==", "!="}
 _ALLOWED_SIGNAL_WINDOW_TYPES = {"signal_seen_within_bars", "signal_absent_within_bars"}
 
 
+def _is_valid_param_key(value: Any) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    first = value[0]
+    if not (first.isalpha() or first == "_"):
+        return False
+    return all(char.isalnum() or char == "_" for char in value[1:])
+
+
+def _validate_params(params: Mapping[str, Any]) -> None:
+    """Raise ValueError if params dict contains invalid keys."""
+    for key in params:
+        if not _is_valid_param_key(key):
+            raise ValueError(f"Invalid parameter key: {key!r}")
+
+
+def _resolve_param_refs(node: Any, params: Mapping[str, Any] | None) -> Any:
+    if isinstance(node, str):
+        if not node.startswith("$params."):
+            return node
+        key = node[len("$params.") :]
+        if not key:
+            raise ValueError("Malformed parameter reference: $params.")
+        if not _is_valid_param_key(key):
+            raise ValueError(f"Malformed parameter reference: {node}")
+        if params is None or key not in params:
+            raise ValueError(f"Strategy rule references undefined parameter: $params.{key}")
+        return params[key]
+    if isinstance(node, ABCMapping):
+        return {key: _resolve_param_refs(value, params) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_resolve_param_refs(item, params) for item in node]
+    return node
+
+
 def normalize_rule_intent(value: Any) -> Intent:
     text = str(value or "").strip().lower()
     if text in {"enter_long", "buy", "long"}:
@@ -44,9 +80,14 @@ def compile_strategy(
     rules: Mapping[str, Any] | Sequence[Any],
     attached_indicator_ids: Iterable[str],
     indicator_meta_getter: IndicatorMetaGetter,
+    params: Mapping[str, Any] | None = None,
 ) -> CompiledStrategySpec:
     attached_ids = {str(identifier).strip() for identifier in attached_indicator_ids if str(identifier).strip()}
+    resolved_params = dict(params) if params else {}
+    if resolved_params:
+        _validate_params(resolved_params)
     authored_rules = list(rules.values()) if isinstance(rules, Mapping) else list(rules)
+    authored_rules = [_resolve_param_refs(rule, resolved_params or None) for rule in authored_rules]
     compiled_rules = [
         _compile_rule(
             raw_rule=rule,
