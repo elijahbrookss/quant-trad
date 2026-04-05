@@ -413,20 +413,12 @@ function AppShell({ chartId }) {
                 <Route
                   path="/strategy"
                   element={
-                    <div className="space-y-8">
+                    <div className="space-y-5">
                       <SectionHeading
                         title="Strategy"
-                        kicker="Decision Lens"
                         description="Author decision logic, attach indicators, and preview rule outputs without execution realism."
-                        actions={
-                          <div className="rounded-2xl border border-white/10 bg-white/5 p-3.5 text-[11px] text-slate-300">
-                            <div className="uppercase tracking-[0.28em] text-slate-500">Focus</div>
-                            <p className="mt-2 text-[13px] text-slate-200">Signals, rules, and ATM templates.</p>
-                            <p className="mt-1 text-[10px] text-slate-500">Execution realism stays in Bot runs.</p>
-                          </div>
-                        }
                       />
-                      <section className="rounded-[26px] border border-white/8 bg-[#1a1d27]/80 p-5 shadow-[0_40px_120px_-70px_rgba(0,0,0,0.85)]">
+                      <section className="rounded-[8px] border border-white/8 bg-[#171b24]/70 p-3.5">
                         <Suspense fallback={<RouteSectionFallback title="strategy workspace" />}>
                           <StrategyTab chartId={chartId} />
                         </Suspense>
