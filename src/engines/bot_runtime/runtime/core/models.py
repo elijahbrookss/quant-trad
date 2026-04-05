@@ -51,7 +51,6 @@ class SeriesExecutionState:
     decision_evaluation_state: DecisionEvaluationState = field(default_factory=DecisionEvaluationState)
     decision_artifacts: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=2000))
     rejection_artifacts: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=1000))
-    latest_selected_decision: Optional[Dict[str, Any]] = None
 
     def intrabar_active(self) -> bool:
         return bool(self.intrabar_candles) and self.intrabar_index < len(self.intrabar_candles)

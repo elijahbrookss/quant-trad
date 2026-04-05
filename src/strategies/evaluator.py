@@ -9,7 +9,6 @@ from typing import Any, Deque, Dict, Iterable, Mapping, Optional
 
 from engines.indicator_engine.contracts import OutputType, RuntimeOutput
 
-from .compiler import intent_to_direction, normalize_rule_intent
 from .contracts import (
     CompiledStrategySpec,
     ContextMatchSpec,
@@ -113,6 +112,7 @@ def evaluate_strategy_bar(
         artifact = _evaluate_rule(
             rule=rule,
             strategy_id=compiled_strategy.strategy_id,
+            strategy_hash=compiled_strategy.strategy_hash,
             instrument_id=instrument_id,
             symbol=symbol,
             timeframe=timeframe,
@@ -127,7 +127,10 @@ def evaluate_strategy_bar(
         artifacts.append(artifact)
 
     if matched_indexes:
-        selected_index = sorted(matched_indexes, key=lambda idx: str(artifacts[idx]["rule_id"]))[0]
+        selected_index = sorted(
+            matched_indexes,
+            key=lambda idx: (-int(artifacts[idx].get("priority") or 0), str(artifacts[idx]["rule_id"])),
+        )[0]
 
     for index, artifact in enumerate(artifacts):
         if not artifact["matched"]:
@@ -142,7 +145,13 @@ def evaluate_strategy_bar(
             artifact["suppression_reason"] = None
         else:
             artifact["evaluation_result"] = "matched_suppressed"
-            artifact["suppression_reason"] = "another_rule_selected"
+            selected_priority = int(artifacts[selected_index].get("priority") or 0)
+            current_priority = int(artifact.get("priority") or 0)
+            artifact["suppression_reason"] = (
+                "higher_priority_rule_selected"
+                if selected_priority > current_priority
+                else "rule_id_tiebreaker_selected"
+            )
         artifact.pop("matched", None)
         artifact.pop("intent", None)
 
@@ -163,20 +172,6 @@ def advance_decision_state(
     for output_key, runtime_output in outputs.items():
         history = state.output_history.setdefault(output_key, deque(maxlen=max_history_bars))
         history.append(runtime_output.copy())
-
-
-def build_signal_candidate(
-    artifact: Mapping[str, Any],
-) -> dict[str, Any]:
-    intent = normalize_rule_intent(artifact.get("emitted_intent") or artifact.get("intent"))
-    return {
-        "epoch": int(artifact.get("bar_epoch") or 0),
-        "direction": intent_to_direction(intent),
-        "decision_id": artifact.get("decision_id"),
-        "rule_id": artifact.get("rule_id"),
-        "intent": intent,
-        "event_key": ((artifact.get("trigger") or {}).get("event_key") if isinstance(artifact.get("trigger"), Mapping) else None),
-    }
 
 
 def classify_rejection_stage(reason_code: str | None) -> str:
@@ -202,6 +197,7 @@ def build_rejection_artifact(
         "rejection_id": f"{decision_id}:{rejection_stage}",
         "decision_id": decision_id,
         "strategy_id": decision_artifact.get("strategy_id"),
+        "strategy_hash": decision_artifact.get("strategy_hash"),
         "instrument_id": decision_artifact.get("instrument_id"),
         "symbol": decision_artifact.get("symbol"),
         "bar_epoch": decision_artifact.get("bar_epoch"),
@@ -233,6 +229,7 @@ def _evaluate_rule(
     *,
     rule: DecisionRuleSpec,
     strategy_id: str,
+    strategy_hash: str,
     instrument_id: str,
     symbol: str,
     timeframe: str,
@@ -260,6 +257,7 @@ def _evaluate_rule(
     return {
         "decision_id": f"{strategy_id}:{instrument_id}:{epoch}:{rule.id}",
         "strategy_id": strategy_id,
+        "strategy_hash": strategy_hash,
         "instrument_id": instrument_id,
         "symbol": symbol,
         "timeframe": timeframe,
@@ -268,13 +266,15 @@ def _evaluate_rule(
         "decision_time": _isoformat(bar_time),
         "rule_id": rule.id,
         "rule_name": rule.name,
+        "priority": int(rule.priority),
+        "enabled": bool(rule.enabled),
         "trigger": trigger_result,
         "guard_results": guard_results,
         "evaluation_result": "not_matched",
         "emitted_intent": None,
         "suppression_reason": None,
         "intent": rule.intent,
-        "matched": matched,
+        "matched": bool(rule.enabled) and matched,
     }
 
 
@@ -619,7 +619,6 @@ __all__ = [
     "DecisionFrameResult",
     "advance_decision_state",
     "build_rejection_artifact",
-    "build_signal_candidate",
     "classify_rejection_stage",
     "evaluate_strategy_bar",
     "normalize_rejection_context",

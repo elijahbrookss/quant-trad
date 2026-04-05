@@ -109,6 +109,31 @@ def test_parameterized_metric_match_resolves_correctly() -> None:
     assert guard.value == 1.0
 
 
+def test_compiled_rule_preserves_priority_and_enabled_flags() -> None:
+    rules = {
+        "r1": {
+            "id": "r1",
+            "name": "test",
+            "intent": "enter_long",
+            "priority": 25,
+            "enabled": False,
+            "trigger": _trigger(),
+            "guards": [],
+        }
+    }
+
+    spec = compile_strategy(
+        strategy_id="s1",
+        timeframe="1m",
+        rules=rules,
+        attached_indicator_ids=["ind-1"],
+        indicator_meta_getter=_make_meta_getter([_SIGNAL_OUTPUT]),
+    )
+
+    assert spec.rules[0].priority == 25
+    assert spec.rules[0].enabled is False
+
+
 def test_multiple_params_in_one_strategy_resolve_independently() -> None:
     rules = _rules(
         _metric_guard(value="$params.min_atr_z"),
@@ -257,3 +282,52 @@ def test_compiled_spec_from_params_matches_literal_compiled_spec() -> None:
     )
 
     assert literal_spec == param_spec
+
+
+def test_strategy_hash_ignores_strategy_id_but_tracks_effective_semantics() -> None:
+    rules = _rules(_metric_guard(value=1.0))
+
+    spec_a = compile_strategy(
+        strategy_id="strategy-a",
+        timeframe="1m",
+        rules=rules,
+        attached_indicator_ids=["ind-1"],
+        indicator_meta_getter=_make_meta_getter([_SIGNAL_OUTPUT, _METRIC_OUTPUT]),
+    )
+    spec_b = compile_strategy(
+        strategy_id="strategy-b",
+        timeframe="1m",
+        rules=rules,
+        attached_indicator_ids=["ind-1"],
+        indicator_meta_getter=_make_meta_getter([_SIGNAL_OUTPUT, _METRIC_OUTPUT]),
+    )
+    spec_c = compile_strategy(
+        strategy_id="strategy-a",
+        timeframe="1m",
+        rules=_rules(_metric_guard(value=2.0)),
+        attached_indicator_ids=["ind-1"],
+        indicator_meta_getter=_make_meta_getter([_SIGNAL_OUTPUT, _METRIC_OUTPUT]),
+    )
+
+    assert spec_a.strategy_hash == spec_b.strategy_hash
+    assert spec_a.strategy_hash != spec_c.strategy_hash
+
+
+def test_strategy_hash_matches_between_literal_and_param_resolved_semantics() -> None:
+    literal_spec = compile_strategy(
+        strategy_id="strategy-a",
+        timeframe="1m",
+        rules=_rules(_metric_guard(value=1.0)),
+        attached_indicator_ids=["ind-1"],
+        indicator_meta_getter=_make_meta_getter([_SIGNAL_OUTPUT, _METRIC_OUTPUT]),
+    )
+    param_spec = compile_strategy(
+        strategy_id="strategy-a",
+        timeframe="1m",
+        rules=_rules(_metric_guard(value="$params.threshold")),
+        attached_indicator_ids=["ind-1"],
+        indicator_meta_getter=_make_meta_getter([_SIGNAL_OUTPUT, _METRIC_OUTPUT]),
+        params={"threshold": 1.0},
+    )
+
+    assert literal_spec.strategy_hash == param_spec.strategy_hash

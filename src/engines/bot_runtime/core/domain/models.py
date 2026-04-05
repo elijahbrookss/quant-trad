@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Mapping, Optional, TYPE_CHECKING
 
 from ..execution_intent import ExecutionIntent, LimitParams
 from .time_utils import isoformat
@@ -58,16 +58,129 @@ class Candle:
         return self.end or self.time
 
 
-@dataclass
+@dataclass(frozen=True)
 class StrategySignal:
     """Queued strategy action derived from rule markers."""
 
     epoch: int
     direction: str
+    signal_id: Optional[str] = None
+    source_type: Optional[str] = None
+    source_id: Optional[str] = None
+    strategy_hash: Optional[str] = None
     decision_id: Optional[str] = None
     rule_id: Optional[str] = None
     intent: Optional[str] = None
     event_key: Optional[str] = None
+
+    @classmethod
+    def from_decision_artifact(
+        cls,
+        artifact: Mapping[str, Any],
+        *,
+        source_type: Optional[str] = None,
+        source_id: Optional[str] = None,
+    ) -> "StrategySignal":
+        decision_id = str(artifact.get("decision_id") or "").strip()
+        rule_id = str(artifact.get("rule_id") or "").strip()
+        raw_epoch = artifact.get("bar_epoch")
+        try:
+            epoch = int(raw_epoch)
+        except (TypeError, ValueError):
+            raise RuntimeError(
+                "strategy_signal_invalid: decision artifact missing bar_epoch "
+                f"decision_id={decision_id or '<missing>'} rule_id={rule_id or '<missing>'}"
+            ) from None
+        intent = cls._normalize_intent(artifact.get("emitted_intent") or artifact.get("intent"))
+        trigger = artifact.get("trigger") if isinstance(artifact.get("trigger"), Mapping) else {}
+        return cls(
+            epoch=epoch,
+            direction="long" if intent == "enter_long" else "short",
+            signal_id=cls._optional_text(artifact.get("signal_id")) or decision_id or None,
+            source_type=cls._optional_text(source_type),
+            source_id=cls._optional_text(source_id),
+            strategy_hash=cls._optional_text(artifact.get("strategy_hash")),
+            decision_id=decision_id or None,
+            rule_id=rule_id or None,
+            intent=intent,
+            event_key=cls._optional_text(trigger.get("event_key")),
+        )
+
+    @classmethod
+    def from_runtime_event_payload(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        default_source_id: Optional[str] = None,
+    ) -> "StrategySignal":
+        decision_artifact = payload.get("decision_artifact")
+        artifact = dict(decision_artifact) if isinstance(decision_artifact, Mapping) else {}
+        if artifact.get("bar_epoch") in (None, ""):
+            bar = payload.get("bar")
+            bar_time = bar.get("time") if isinstance(bar, Mapping) else None
+            if isinstance(bar_time, str):
+                artifact["bar_epoch"] = cls._epoch_from_iso(bar_time)
+        artifact.setdefault("decision_id", payload.get("decision_id"))
+        artifact.setdefault("rule_id", payload.get("rule_id"))
+        artifact.setdefault("strategy_hash", payload.get("strategy_hash"))
+        artifact.setdefault("signal_id", payload.get("signal_id"))
+        artifact.setdefault("emitted_intent", payload.get("intent"))
+        artifact.setdefault(
+            "trigger",
+            {"event_key": payload.get("event_key")},
+        )
+        return cls.from_decision_artifact(
+            artifact,
+            source_type=cls._optional_text(payload.get("source_type")) or "runtime",
+            source_id=cls._optional_text(payload.get("source_id")) or cls._optional_text(default_source_id),
+        )
+
+    @staticmethod
+    def _normalize_intent(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if text in {"enter_long", "buy", "long"}:
+            return "enter_long"
+        if text in {"enter_short", "sell", "short"}:
+            return "enter_short"
+        raise RuntimeError(f"strategy_signal_invalid: unsupported intent value={value!r}")
+
+    @staticmethod
+    def _optional_text(value: Any) -> Optional[str]:
+        text = str(value or "").strip()
+        return text or None
+
+    @staticmethod
+    def _epoch_from_iso(value: str) -> int:
+        text = str(value or "").strip()
+        if not text:
+            raise RuntimeError("strategy_signal_invalid: runtime event missing bar.time")
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"strategy_signal_invalid: runtime event bar.time is invalid value={value!r}"
+            ) from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        else:
+            parsed = parsed.astimezone(timezone.utc)
+        return int(parsed.timestamp())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "epoch": self.epoch,
+            "direction": self.direction,
+            "signal_id": self.signal_id,
+            "source_type": self.source_type,
+            "source_id": self.source_id,
+            "strategy_hash": self.strategy_hash,
+            "decision_id": self.decision_id,
+            "rule_id": self.rule_id,
+            "intent": self.intent,
+            "event_key": self.event_key,
+        }
 
 
 @dataclass

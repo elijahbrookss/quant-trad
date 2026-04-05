@@ -131,6 +131,7 @@ def test_build_signals_from_decision_artifacts_preserves_signal_time_without_shi
         {
             "decision_id": "d-1",
             "rule_id": "rule-1",
+            "strategy_hash": "hash-1",
             "bar_epoch": int(ts.timestamp()),
             "evaluation_result": "matched_selected",
             "emitted_intent": "enter_long",
@@ -141,6 +142,8 @@ def test_build_signals_from_decision_artifacts_preserves_signal_time_without_shi
     assert len(out) == 1
     assert out[0].epoch == int(ts.timestamp())
     assert out[0].direction == "long"
+    assert out[0].signal_id == "d-1"
+    assert out[0].strategy_hash == "hash-1"
     assert out[0].decision_id == "d-1"
     assert out[0].rule_id == "rule-1"
 

@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from engines.bot_runtime.core.domain import StrategySignal
 from engines.bot_runtime.core.runtime_events import (
     ExitKind,
     ReasonCode,
@@ -247,6 +248,7 @@ class RuntimeEventsMixin:
             "parent_event_id": event.parent_id,
             "trade_id": payload.get("trade_id"),
             "strategy_id": event.strategy_id,
+            "strategy_hash": payload.get("strategy_hash"),
             "symbol": event.symbol,
             "timeframe": event.timeframe,
             "side": payload.get("direction") or payload.get("side"),
@@ -447,27 +449,26 @@ class RuntimeEventsMixin:
         *,
         series: StrategySeries,
         candle: Candle,
-        direction: str,
+        signal: StrategySignal,
         decision_artifact: Optional[Mapping[str, Any]] = None,
     ) -> RuntimeEvent:
-        trigger = (
-            decision_artifact.get("trigger")
-            if isinstance(decision_artifact, Mapping) and isinstance(decision_artifact.get("trigger"), Mapping)
-            else {}
-        )
         return self._emit_runtime_event(
             event_name=RuntimeEventName.SIGNAL_EMITTED,
             series=series,
             bar_ts=candle.time,
             reason_code=ReasonCode.SIGNAL_STRATEGY_SIGNAL,
             payload={
+                "signal_id": signal.signal_id,
+                "source_type": signal.source_type,
+                "source_id": signal.source_id,
                 "signal_type": "strategy_signal",
-                "direction": direction,
+                "direction": signal.direction,
                 "signal_price": float(candle.close),
-                "decision_id": decision_artifact.get("decision_id") if isinstance(decision_artifact, Mapping) else None,
-                "rule_id": decision_artifact.get("rule_id") if isinstance(decision_artifact, Mapping) else None,
-                "intent": decision_artifact.get("emitted_intent") if isinstance(decision_artifact, Mapping) else None,
-                "event_key": trigger.get("event_key"),
+                "strategy_hash": signal.strategy_hash,
+                "decision_id": signal.decision_id,
+                "rule_id": signal.rule_id,
+                "intent": signal.intent,
+                "event_key": signal.event_key,
                 "decision_artifact": dict(decision_artifact or {}),
                 "bar": {
                     "time": _isoformat(candle.time),
@@ -485,10 +486,10 @@ class RuntimeEventsMixin:
         *,
         series: StrategySeries,
         candle: Candle,
+        signal: StrategySignal,
         decision: str,
         decision_artifact: Optional[Mapping[str, Any]],
         rejection_artifact: Optional[Mapping[str, Any]],
-        direction: Optional[str],
         signal_price: float,
         reason_code: str,
         message: Optional[str],
@@ -506,18 +507,18 @@ class RuntimeEventsMixin:
             )
         event_name = RuntimeEventName.DECISION_ACCEPTED if decision == "accepted" else RuntimeEventName.DECISION_REJECTED
         payload: Dict[str, Any] = {
+            "signal_id": signal.signal_id,
+            "source_type": signal.source_type,
+            "source_id": signal.source_id,
             "decision": decision,
-            "direction": direction,
+            "direction": signal.direction,
             "signal_price": float(signal_price),
             "trade_id": trade_id,
-            "decision_id": decision_artifact.get("decision_id") if isinstance(decision_artifact, Mapping) else None,
-            "rule_id": decision_artifact.get("rule_id") if isinstance(decision_artifact, Mapping) else None,
-            "intent": decision_artifact.get("emitted_intent") if isinstance(decision_artifact, Mapping) else None,
-            "event_key": (
-                decision_artifact.get("trigger", {}).get("event_key")
-                if isinstance(decision_artifact, Mapping) and isinstance(decision_artifact.get("trigger"), Mapping)
-                else None
-            ),
+            "strategy_hash": signal.strategy_hash,
+            "decision_id": signal.decision_id,
+            "rule_id": signal.rule_id,
+            "intent": signal.intent,
+            "event_key": signal.event_key,
             "event_subtype": "signal_accepted" if decision == "accepted" else "signal_rejected",
         }
         if isinstance(rejection_artifact, Mapping):

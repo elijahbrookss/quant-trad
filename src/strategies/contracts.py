@@ -75,8 +75,10 @@ class DecisionRuleSpec:
     id: str
     name: str
     intent: Intent
+    priority: int
     trigger: SignalMatchSpec
     guards: Tuple[GuardSpec, ...]
+    enabled: bool = True
     description: str | None = None
 
 
@@ -84,6 +86,7 @@ class DecisionRuleSpec:
 class CompiledStrategySpec:
     strategy_id: str
     timeframe: str
+    strategy_hash: str
     rules: Tuple[DecisionRuleSpec, ...]
     max_history_bars: int = 0
 

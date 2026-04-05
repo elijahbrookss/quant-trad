@@ -137,7 +137,7 @@ class SeriesBuilderLifecycleMixin:
         """
         series_list: List[StrategySeries] = []
         for strategy_id in strategy_ids:
-            strategy = self._deps.fetch_strategy(strategy_id)
+            strategy = self._deps.fetch_strategy(strategy_id, self.config)
             # Build one series per enabled instrument
             series_per_strategy = self._build_series_for_strategy(strategy)
             series_list.extend(series_per_strategy)

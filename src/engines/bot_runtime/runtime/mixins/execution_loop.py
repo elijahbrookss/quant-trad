@@ -12,7 +12,6 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from engines.bot_runtime.core.domain import Candle, StrategySignal, isoformat
 from strategies.evaluator import (
     build_rejection_artifact,
-    build_signal_candidate,
     classify_rejection_stage,
     evaluate_strategy_bar,
 )
@@ -353,7 +352,8 @@ class RuntimeExecutionLoopMixin:
                         candle,
                         epoch,
                     )
-                    direction = chosen_signal.get("direction") if isinstance(chosen_signal, Mapping) else None
+                    direction = chosen_signal.direction if chosen_signal is not None else None
+                    selected_decision = self._selected_decision_artifact_for_signal(state, chosen_signal)
                     overlays_update_ms = signal_eval_metrics.get("overlays_update_ms")
                     pending_signals_ops_ms = signal_eval_metrics.get("pending_signals_ops_ms")
                     indicators_count = signal_eval_metrics.get("indicators_count")
@@ -384,8 +384,8 @@ class RuntimeExecutionLoopMixin:
                         self._emit_signal_event(
                             series=series,
                             candle=candle,
-                            direction=direction,
-                            decision_artifact=state.latest_selected_decision,
+                            signal=chosen_signal,
+                            decision_artifact=selected_decision,
                         )
                         signal_event_logged = True
                     self._record_step_trace(
@@ -499,7 +499,6 @@ class RuntimeExecutionLoopMixin:
             decision_flow_started_perf = time.perf_counter()
             blocking_trade = None
             new_trade = None
-            selected_decision = deepcopy(state.latest_selected_decision) if direction is not None else None
             try:
                 # Attempt to create trade from signal
                 if direction is not None:
@@ -526,10 +525,10 @@ class RuntimeExecutionLoopMixin:
                         self._emit_decision_event(
                             series=series,
                             candle=candle,
+                            signal=chosen_signal,
                             decision="rejected",
                             decision_artifact=selected_decision,
                             rejection_artifact=rejection_artifact,
-                            direction=direction,
                             signal_price=float(candle.close),
                             reason_code="DECISION_REJECTED_INSTRUMENT_MISSING",
                             message="Instrument id missing.",
@@ -557,10 +556,10 @@ class RuntimeExecutionLoopMixin:
                         self._emit_decision_event(
                             series=series,
                             candle=candle,
+                            signal=chosen_signal,
                             decision="accepted",
                             decision_artifact=selected_decision,
                             rejection_artifact=None,
-                            direction=direction,
                             signal_price=float(candle.close),
                             reason_code="DECISION_ACCEPTED",
                             message=None,
@@ -620,10 +619,10 @@ class RuntimeExecutionLoopMixin:
                         self._emit_decision_event(
                             series=series,
                             candle=candle,
+                            signal=chosen_signal,
                             decision="rejected",
                             decision_artifact=selected_decision,
                             rejection_artifact=rejection_artifact,
-                            direction=direction,
                             signal_price=float(candle.close),
                             reason_code=rejection_code or "DECISION_REJECTED",
                             message=rejection_reason,
@@ -1014,7 +1013,7 @@ class RuntimeExecutionLoopMixin:
         series: StrategySeries,
         candle: Candle,
         epoch: int,
-    ) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]], int, Dict[str, Optional[float]], int, int]:
+    ) -> Tuple[List[StrategySignal], Optional[StrategySignal], int, Dict[str, Optional[float]], int, int]:
         if epoch <= state.last_evaluated_epoch:
             consume_started = time.perf_counter()
             consumed, chosen, updated_last = consume_signals(
@@ -1092,7 +1091,6 @@ class RuntimeExecutionLoopMixin:
             state.decision_artifacts.append(deepcopy(artifact))
             if self._run_context is not None:
                 self._run_context.decision_artifacts.append(deepcopy(artifact))
-        state.latest_selected_decision = deepcopy(decision_result.selected_artifact) if decision_result.selected_artifact else None
         signal_eval_ms = max((time.perf_counter() - signal_started) * 1000.0, 0.0)
 
         previous_overlay_count = float(len(series.overlays or []))
@@ -1133,15 +1131,11 @@ class RuntimeExecutionLoopMixin:
 
         append_started = time.perf_counter()
         if decision_result.selected_artifact is not None:
-            candidate = build_signal_candidate(decision_result.selected_artifact)
             state.pending_signals.append(
-                StrategySignal(
-                    epoch=int(candidate["epoch"]),
-                    direction=str(candidate["direction"]),
-                    decision_id=str(candidate.get("decision_id") or ""),
-                    rule_id=str(candidate.get("rule_id") or ""),
-                    intent=str(candidate.get("intent") or ""),
-                    event_key=str(candidate.get("event_key") or ""),
+                StrategySignal.from_decision_artifact(
+                    decision_result.selected_artifact,
+                    source_type="runtime",
+                    source_id=self._run_context.run_id if self._run_context is not None else None,
                 )
             )
         pending_append_ms = max((time.perf_counter() - append_started) * 1000.0, 0.0)
@@ -1199,15 +1193,40 @@ class RuntimeExecutionLoopMixin:
         self,
         state: SeriesExecutionState,
         epoch: int,
-        consumed_signals: List[Dict[str, object]],
-        chosen_signal: Optional[Dict[str, object]],
+        consumed_signals: List[StrategySignal],
+        chosen_signal: Optional[StrategySignal],
     ) -> None:
         state.signal_consumptions.append(
             SignalConsumption(
                 epoch=epoch,
-                consumed_signals=list(consumed_signals),
-                chosen_signal=dict(chosen_signal) if isinstance(chosen_signal, Mapping) else None,
+                consumed_signals=[signal.to_dict() for signal in consumed_signals],
+                chosen_signal=chosen_signal.to_dict() if chosen_signal is not None else None,
             )
+        )
+
+    @staticmethod
+    def _selected_decision_artifact_for_signal(
+        state: SeriesExecutionState,
+        signal: Optional[StrategySignal],
+    ) -> Optional[Dict[str, Any]]:
+        if signal is None:
+            return None
+        decision_id = str(signal.decision_id or "").strip()
+        if not decision_id:
+            raise RuntimeError(
+                "strategy_signal_missing_decision_id: cannot resolve selected decision artifact "
+                f"rule_id={signal.rule_id or '<missing>'}"
+            )
+        for artifact in reversed(state.decision_artifacts):
+            if str(artifact.get("decision_id") or "").strip() != decision_id:
+                continue
+            if str(artifact.get("evaluation_result") or "") != "matched_selected":
+                continue
+            return deepcopy(artifact)
+        raise RuntimeError(
+            "selected_decision_artifact_missing: queued signal has no matching decision artifact "
+            f"decision_id={decision_id} rule_id={signal.rule_id or '<missing>'} "
+            f"strategy_hash={signal.strategy_hash or '<missing>'}"
         )
 
     def _compute_playback_interval(self, base_seconds: float = 1.0) -> float:

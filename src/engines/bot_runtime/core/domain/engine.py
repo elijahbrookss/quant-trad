@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, TYPE_CHE
 
 import risk as risk_math
 from atm import merge_templates
+from risk import normalise_risk_config
 
 from utils.log_context import build_log_context, merge_log_context, with_log_context
 from ..amount_constraints import normalize_qty_with_constraints
@@ -50,13 +51,16 @@ class LadderRiskEngine:
         config: Optional[Dict[str, object]] = None,
         instrument: Optional[Dict[str, Any]] = None,
         execution_profile: Optional[SeriesExecutionProfile] = None,
+        risk_config: Optional[Mapping[str, Any]] = None,
     ):
         provided_template = config or {}
         self.template = merge_templates(provided_template)
         self.instrument = instrument or {}
+        self.risk_config = normalise_risk_config(risk_config)
         self.execution_profile = execution_profile or compile_series_execution_profile(
             self.instrument,
             template=self.template,
+            risk_config=self.risk_config,
             runtime_requires_derivatives=False,
         )
         self._runtime_log_context = build_log_context(
@@ -96,10 +100,7 @@ class LadderRiskEngine:
             initial_stop_config = {}
         self.r_multiple = float(initial_stop_config.get("atr_multiplier") or 1.0)
 
-        risk_config = self.template.get("risk")
-        if not isinstance(risk_config, dict):
-            risk_config = {}
-        self.base_risk_per_trade = coerce_float(risk_config.get("base_risk_per_trade"))
+        self.base_risk_per_trade = coerce_float(self.execution_profile.risk.base_risk_per_trade)
         self.stop_r_multiple = coerce_float(self.template.get("stop_r_multiple"))
 
         self.stop_adjustments_config: List[Dict[str, Any]] = list(self.template.get("stop_adjustments") or [])
@@ -280,13 +281,6 @@ class LadderRiskEngine:
         # Validate take profit orders exist
         if not template.get("take_profit_orders"):
             missing_fields.append("take_profit_orders")
-
-        # Validate risk configuration
-        risk_config = template.get("risk")
-        if not isinstance(risk_config, dict):
-            missing_fields.append("risk (must be a dict)")
-        elif not risk_config.get("base_risk_per_trade"):
-            missing_fields.append("risk.base_risk_per_trade")
 
         if missing_fields:
             raise ValueError(
@@ -1093,7 +1087,7 @@ class LadderRiskEngine:
         if self.base_risk_per_trade is None or self.base_risk_per_trade <= 0:
             raise ValueError(
                 f"base_risk_per_trade is required but got {self.base_risk_per_trade}. "
-                f"Configure risk.base_risk_per_trade in your strategy template. "
+                f"Configure risk_config.base_risk_per_trade in your strategy or bot sizing config. "
                 f"This is required for dynamic position sizing."
             )
 

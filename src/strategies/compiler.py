@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping as ABCMapping
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -23,6 +25,7 @@ IndicatorMetaGetter = Callable[[str], Mapping[str, Any]]
 
 _ALLOWED_METRIC_OPERATORS = {">", ">=", "<", "<=", "==", "!="}
 _ALLOWED_SIGNAL_WINDOW_TYPES = {"signal_seen_within_bars", "signal_absent_within_bars"}
+_COMPILED_STRATEGY_HASH_VERSION = "compiled_strategy_v1"
 
 
 def _is_valid_param_key(value: Any) -> bool:
@@ -98,12 +101,93 @@ def compile_strategy(
     ]
     compiled_rules.sort(key=lambda item: str(item.id))
     max_history_bars = max((_required_history_bars(rule) for rule in compiled_rules), default=0)
+    strategy_hash = _compiled_strategy_hash(
+        timeframe=str(timeframe or ""),
+        rules=compiled_rules,
+        max_history_bars=max_history_bars,
+    )
     return CompiledStrategySpec(
         strategy_id=str(strategy_id),
         timeframe=str(timeframe or ""),
+        strategy_hash=strategy_hash,
         rules=tuple(compiled_rules),
         max_history_bars=max_history_bars,
     )
+
+
+def _compiled_strategy_hash(
+    *,
+    timeframe: str,
+    rules: Sequence[DecisionRuleSpec],
+    max_history_bars: int,
+) -> str:
+    payload = {
+        "contract_version": _COMPILED_STRATEGY_HASH_VERSION,
+        "timeframe": str(timeframe or ""),
+        "max_history_bars": int(max_history_bars),
+        "rules": [_decision_rule_payload(rule) for rule in rules],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _decision_rule_payload(rule: DecisionRuleSpec) -> dict[str, Any]:
+    return {
+        "id": rule.id,
+        "intent": rule.intent,
+        "priority": int(rule.priority),
+        "enabled": bool(rule.enabled),
+        "trigger": _signal_match_payload(rule.trigger),
+        "guards": [_guard_payload(guard) for guard in rule.guards],
+    }
+
+
+def _guard_payload(guard: GuardSpec) -> dict[str, Any]:
+    if isinstance(guard, ContextMatchSpec):
+        return {
+            "type": guard.type,
+            "indicator_id": guard.indicator_id,
+            "output_name": guard.output_name,
+            "output_key": guard.output_key,
+            "field": guard.field,
+            "value": list(guard.value),
+        }
+    if isinstance(guard, MetricMatchSpec):
+        return {
+            "type": guard.type,
+            "indicator_id": guard.indicator_id,
+            "output_name": guard.output_name,
+            "output_key": guard.output_key,
+            "field": guard.field,
+            "operator": guard.operator,
+            "value": guard.value,
+        }
+    if isinstance(guard, HoldsForBarsSpec):
+        return {
+            "type": guard.type,
+            "bars": int(guard.bars),
+            "guard": _guard_payload(guard.guard),
+        }
+    if isinstance(guard, SignalWindowSpec):
+        return {
+            "type": guard.type,
+            "indicator_id": guard.indicator_id,
+            "output_name": guard.output_name,
+            "output_key": guard.output_key,
+            "event_key": guard.event_key,
+            "lookback_bars": int(guard.lookback_bars),
+        }
+    raise TypeError(f"Unsupported guard type for strategy hash: {type(guard)!r}")
+
+
+def _signal_match_payload(trigger: SignalMatchSpec) -> dict[str, Any]:
+    return {
+        "type": trigger.type,
+        "indicator_id": trigger.indicator_id,
+        "output_name": trigger.output_name,
+        "output_key": trigger.output_key,
+        "event_key": trigger.event_key,
+    }
 
 
 def _compile_rule(
@@ -120,6 +204,8 @@ def _compile_rule(
     name = str(raw_rule.get("name") or rule_id).strip()
     intent = normalize_rule_intent(raw_rule.get("intent") or raw_rule.get("action"))
     description = str(raw_rule.get("description")).strip() if raw_rule.get("description") else None
+    priority = int(raw_rule.get("priority") or 0)
+    enabled = bool(raw_rule.get("enabled", True))
 
     trigger_payload, guard_payloads = _extract_authored_rule_parts(raw_rule)
     trigger = _compile_signal_trigger(
@@ -139,8 +225,10 @@ def _compile_rule(
         id=rule_id,
         name=name,
         intent=intent,
+        priority=priority,
         trigger=trigger,
         guards=guards,
+        enabled=enabled,
         description=description,
     )
 
