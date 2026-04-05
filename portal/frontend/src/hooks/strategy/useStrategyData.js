@@ -2,9 +2,41 @@ import { useCallback, useEffect, useState } from 'react'
 
 import {
   fetchATMTemplates,
-  fetchStrategiesWithVariants,
+  fetchStrategies,
+  fetchStrategy,
 } from '../../adapters/strategy.adapter.js'
 import { fetchIndicators } from '../../adapters/indicator.adapter.js'
+
+const parseUpdatedAt = (value) => {
+  if (!value) return null
+  const epoch = Date.parse(value)
+  return Number.isFinite(epoch) ? epoch : null
+}
+
+export const mergeStrategyState = (current, incoming) => {
+  if (!incoming?.id) {
+    return current || null
+  }
+  if (!current?.id) {
+    return incoming
+  }
+
+  const currentUpdatedAt = parseUpdatedAt(current?.updated_at || current?.strategy?.updated_at)
+  const incomingUpdatedAt = parseUpdatedAt(incoming?.updated_at || incoming?.strategy?.updated_at)
+
+  if (
+    currentUpdatedAt !== null
+    && incomingUpdatedAt !== null
+    && incomingUpdatedAt < currentUpdatedAt
+  ) {
+    return current
+  }
+
+  return {
+    ...current,
+    ...incoming,
+  }
+}
 
 const useStrategyData = ({ logger } = {}) => {
   const [strategies, setStrategies] = useState([])
@@ -13,19 +45,45 @@ const useStrategyData = ({ logger } = {}) => {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
+  const upsertStrategy = useCallback((incoming) => {
+    if (!incoming?.id) {
+      return null
+    }
+
+    setStrategies((prev) => {
+      const next = Array.isArray(prev) ? [...prev] : []
+      const index = next.findIndex((entry) => entry?.id === incoming.id)
+      if (index === -1) {
+        next.push(incoming)
+        return next
+      }
+      next[index] = mergeStrategyState(next[index], incoming)
+      return next
+    })
+
+    return incoming
+  }, [])
+
+  const removeStrategy = useCallback((strategyId) => {
+    if (!strategyId) {
+      return
+    }
+    setStrategies((prev) => prev.filter((strategy) => strategy?.id !== strategyId))
+  }, [])
+
   const refreshStrategies = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const withVariants = await fetchStrategiesWithVariants({
-        onVariantError: (strategyId, variantErr) => {
-          if (logger?.warn) {
-            logger.warn('strategy_variants_load_failed', { strategyId, error: variantErr?.message || variantErr })
-          }
-        },
+      const summaries = await fetchStrategies()
+      setStrategies((prev) => {
+        const existing = new Map((Array.isArray(prev) ? prev : []).map((strategy) => [strategy?.id, strategy]))
+        return (Array.isArray(summaries) ? summaries : []).map((summary) => {
+          const current = existing.get(summary?.id)
+          return current ? mergeStrategyState(current, summary) : summary
+        })
       })
-      setStrategies(withVariants)
-      return withVariants
+      return Array.isArray(summaries) ? summaries : []
     } catch (err) {
       const message = err?.message || 'Unable to load strategies'
       setError(message)
@@ -37,6 +95,24 @@ const useStrategyData = ({ logger } = {}) => {
       setLoading(false)
     }
   }, [logger])
+
+  const refreshStrategyDetail = useCallback(
+    async (strategyId) => {
+      if (!strategyId) {
+        return null
+      }
+      try {
+        const detail = await fetchStrategy(strategyId)
+        return upsertStrategy(detail)
+      } catch (err) {
+        if (logger?.warn) {
+          logger.warn('strategy_detail_load_failed', { strategyId, error: err?.message || err })
+        }
+        throw err
+      }
+    },
+    [logger, upsertStrategy],
+  )
 
   const refreshTemplates = useCallback(async () => {
     try {
@@ -72,12 +148,15 @@ const useStrategyData = ({ logger } = {}) => {
   return {
     strategies,
     setStrategies,
+    upsertStrategy,
+    removeStrategy,
     indicators,
     setIndicators,
     atmTemplates,
     loading,
     error,
     refreshStrategies,
+    refreshStrategyDetail,
     refreshTemplates,
     refreshIndicators,
   }

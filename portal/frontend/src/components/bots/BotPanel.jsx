@@ -7,7 +7,7 @@ import {
   stopBot as stopBotApi,
   deleteBot as deleteBotApi,
 } from '../../adapters/bot.adapter.js'
-import { fetchStrategiesWithVariants } from '../../adapters/strategy.adapter.js'
+import { fetchStrategies, fetchStrategy } from '../../adapters/strategy.adapter.js'
 import { createLogger } from '../../utils/logger.js'
 import { BotCreateModal } from './create/BotCreateModal.jsx'
 import { BotLensLiveModal } from './BotLensLiveModal.jsx'
@@ -101,6 +101,34 @@ export function BotPanel() {
     [mergeBots],
   )
 
+  const upsertStrategy = useCallback((incoming) => {
+    if (!incoming?.id) {
+      return null
+    }
+    setStrategies((prev) => {
+      const next = Array.isArray(prev) ? [...prev] : []
+      const index = next.findIndex((strategy) => strategy?.id === incoming.id)
+      if (index === -1) {
+        next.push(incoming)
+        return next
+      }
+      next[index] = { ...next[index], ...incoming }
+      return next
+    })
+    return incoming
+  }, [])
+
+  const loadStrategyDetail = useCallback(
+    async (strategyId) => {
+      if (!strategyId) {
+        return null
+      }
+      const detail = await fetchStrategy(strategyId)
+      return upsertStrategy(detail)
+    },
+    [upsertStrategy],
+  )
+
   const {
     form,
     walletError,
@@ -115,6 +143,7 @@ export function BotPanel() {
     submit: submitCreate,
   } = useBotCreateController({
     strategies,
+    fetchStrategyDetail: loadStrategyDetail,
     logger,
     defaults: {
       snapshotIntervalMs: Number(settings?.botDefaults?.snapshotIntervalMs || 1000),
@@ -240,11 +269,7 @@ export function BotPanel() {
     setStrategyError(null)
     logger.info('strategies_load_start')
     try {
-      const data = await fetchStrategiesWithVariants({
-        onVariantError: (strategyId, err) => {
-          logger.warn('bot_panel_strategy_variants_load_failed', { strategyId, message: err?.message || err })
-        },
-      })
+      const data = await fetchStrategies()
       setStrategies(data)
       logger.info('strategies_load_success', { count: Array.isArray(data) ? data.length : 0 })
     } catch (err) {
@@ -522,15 +547,20 @@ export function BotPanel() {
           </div>
           <button
             type="button"
-            onClick={() => {
+            onClick={async () => {
               logger.info('bot_create_modal_open')
               setCreateError(null)
-              prepareForCreate({
-                strategyId: form.strategy_id || '',
-                variantId: form.strategy_variant_id || '',
-                runType: form.run_type || 'backtest',
-              })
-              setCreateOpen(true)
+              try {
+                await prepareForCreate({
+                  strategyId: form.strategy_id || '',
+                  variantId: form.strategy_variant_id || '',
+                  runType: form.run_type || 'backtest',
+                })
+                setCreateOpen(true)
+              } catch (err) {
+                logger.error('bot_create_prepare_failed', { message: err?.message }, err)
+                setCreateError(err?.message || 'Unable to prepare bot create form')
+              }
             }}
             className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2.5 text-sm font-medium text-slate-200 backdrop-blur-sm transition-colors hover:border-slate-600 hover:bg-slate-800 hover:text-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-500"
           >

@@ -18,12 +18,16 @@ const parseEnvText = (text) => {
   return next
 }
 
-const normalizeVariantPayload = (variant) => ({
+const normalizeVariantPayload = (variant, strategy) => ({
   strategy_variant_id: String(variant?.id || '').trim(),
   strategy_variant_name: String(variant?.name || '').trim(),
   resolved_params:
     variant?.param_overrides && typeof variant.param_overrides === 'object'
       ? { ...variant.param_overrides }
+      : {},
+  risk_config:
+    strategy?.risk_config && typeof strategy.risk_config === 'object'
+      ? { ...strategy.risk_config }
       : {},
 })
 
@@ -43,6 +47,7 @@ const getVariantById = (strategy, variantId) => {
 
 export function useBotCreateController({
   strategies,
+  fetchStrategyDetail,
   logger,
   onCreated,
   defaults = {},
@@ -70,27 +75,48 @@ export function useBotCreateController({
     return map
   }, [strategies])
 
+  const resolveStrategy = useCallback(
+    async (strategyId) => {
+      const normalizedId = String(strategyId || '').trim()
+      if (!normalizedId) {
+        return null
+      }
+      const existing = strategiesById.get(normalizedId) || null
+      if (Array.isArray(existing?.variants)) {
+        return existing
+      }
+      if (typeof fetchStrategyDetail !== 'function') {
+        return existing
+      }
+      const detail = await fetchStrategyDetail(normalizedId)
+      return detail || existing
+    },
+    [fetchStrategyDetail, strategiesById],
+  )
+
   const applySelection = useCallback(
-    ({ strategyId = '', variantId = '', preserveName = false, base = {} } = {}) => {
-      const strategy = strategiesById.get(strategyId) || null
+    async ({ strategyId = '', variantId = '', preserveName = false, base = {} } = {}) => {
+      const strategy = await resolveStrategy(strategyId)
       const variant = getVariantById(strategy, variantId) || getDefaultVariant(strategy)
       resetForm({
         ...base,
         ...(preserveName ? { name: form.name } : {}),
         strategy_id: strategyId,
-        ...(variant ? normalizeVariantPayload(variant) : {
+        ...(variant ? normalizeVariantPayload(variant, strategy) : {
           strategy_variant_id: '',
           strategy_variant_name: '',
           resolved_params: {},
+          risk_config: strategy?.risk_config && typeof strategy.risk_config === 'object' ? { ...strategy.risk_config } : {},
         }),
       })
+      return strategy
     },
-    [form.name, resetForm, strategiesById],
+    [form.name, resetForm, resolveStrategy],
   )
 
   const prepareForCreate = useCallback(
-    ({ strategyId = '', variantId = '', runType = 'backtest' } = {}) => {
-      applySelection({
+    async ({ strategyId = '', variantId = '', runType = 'backtest' } = {}) => {
+      return applySelection({
         strategyId,
         variantId,
         base: {
@@ -104,8 +130,8 @@ export function useBotCreateController({
   )
 
   const handleStrategySelect = useCallback(
-    (strategyId) => {
-      applySelection({
+    async (strategyId) => {
+      return applySelection({
         strategyId,
         preserveName: true,
         base: {
@@ -123,11 +149,12 @@ export function useBotCreateController({
       setForm((prev) => ({
         ...prev,
         ...(variant
-          ? normalizeVariantPayload(variant)
+          ? normalizeVariantPayload(variant, strategy)
           : {
               strategy_variant_id: '',
               strategy_variant_name: '',
               resolved_params: {},
+              risk_config: strategy?.risk_config && typeof strategy.risk_config === 'object' ? { ...strategy.risk_config } : {},
             }),
       }))
     },
@@ -176,7 +203,7 @@ export function useBotCreateController({
       const payload = await createBot(payloadBody)
       logger?.info?.('bot_create_success', { bot_id: payload?.id, strategy_id: form.strategy_id })
       onCreated?.(payload)
-      prepareForCreate({
+      await prepareForCreate({
         strategyId: form.strategy_id,
         variantId: form.strategy_variant_id,
         runType: form.run_type,

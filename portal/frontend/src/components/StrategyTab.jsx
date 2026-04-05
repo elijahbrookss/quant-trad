@@ -60,10 +60,13 @@ const StrategyTab = ({ chartId }) => {
     strategies,
     indicators,
     setIndicators,
+    upsertStrategy,
+    removeStrategy,
     atmTemplates,
     loading,
     error: dataError,
     refreshStrategies,
+    refreshStrategyDetail,
     refreshTemplates,
   } = useStrategyData({ logger })
   const { selectedId, setSelectedId, selectedStrategy } = useStrategySelection(strategies)
@@ -75,6 +78,7 @@ const StrategyTab = ({ chartId }) => {
   const { instrumentRefreshStatus, refreshInstrumentMetadata } = useInstrumentMetadata({
     selectedStrategy,
     refreshStrategies,
+    refreshStrategyDetail,
     logger,
   })
   const selectedStrategyInstruments = useMemo(
@@ -126,6 +130,7 @@ const StrategyTab = ({ chartId }) => {
     submit: submitBotCreate,
   } = useBotCreateController({
     strategies,
+    fetchStrategyDetail: refreshStrategyDetail,
     logger,
     defaults: {
       snapshotIntervalMs: Number(settings?.botDefaults?.snapshotIntervalMs || 1000),
@@ -153,6 +158,15 @@ const StrategyTab = ({ chartId }) => {
   useEffect(() => {
     setBotCreateNotice(null)
   }, [selectedStrategy?.id])
+
+  useEffect(() => {
+    if (!selectedId) {
+      return
+    }
+    refreshStrategyDetail(selectedId).catch((err) => {
+      error('strategy_detail_refresh_failed', err)
+    })
+  }, [selectedId, refreshStrategyDetail, error])
 
   const displayError = errorMessage || dataError
 
@@ -318,7 +332,10 @@ const StrategyTab = ({ chartId }) => {
         saved = await createStrategy(payload)
         info('strategy_created', { name: payload.name })
       }
-      await refreshStrategies()
+      upsertStrategy(saved)
+      if (!strategyModal.strategy && saved?.id) {
+        setSelectedId(saved.id)
+      }
       await refreshTemplates()
       if (closeOnSuccess) {
         closeStrategyModal()
@@ -338,8 +355,8 @@ const StrategyTab = ({ chartId }) => {
       if (!selectedStrategy) return
       setQuickUpdateStatus({ saving: true, error: null, savedAt: null })
       try {
-        await updateStrategy(selectedStrategy.id, patch)
-        await refreshStrategies()
+        const saved = await updateStrategy(selectedStrategy.id, patch)
+        upsertStrategy(saved)
         setQuickUpdateStatus({ saving: false, error: null, savedAt: Date.now() })
         info('strategy_quick_updated', { strategyId: selectedStrategy.id, fields: Object.keys(patch || {}) })
       } catch (err) {
@@ -347,7 +364,7 @@ const StrategyTab = ({ chartId }) => {
         error('strategy_quick_update_failed', err)
       }
     },
-    [selectedStrategy, refreshStrategies, info, error],
+    [selectedStrategy, upsertStrategy, info, error],
   )
 
   const handleInstrumentSubmit = async (payload) => {
@@ -357,6 +374,9 @@ const StrategyTab = ({ chartId }) => {
       await createInstrument(payload)
       info('instrument_saved', { symbol: payload.symbol })
       await refreshStrategies()
+      if (selectedStrategy?.id) {
+        await refreshStrategyDetail(selectedStrategy.id)
+      }
       closeInstrumentModal()
     } catch (err) {
       setInstrumentError(err?.message || 'Failed to save instrument metadata')
@@ -372,10 +392,10 @@ const StrategyTab = ({ chartId }) => {
     try {
       await deleteStrategy(strategy.id)
       info('strategy_deleted', { strategyId: strategy.id })
+      removeStrategy(strategy.id)
       if (selectedId === strategy.id) {
         setSelectedId(null)
       }
-      await refreshStrategies()
     } catch (err) {
       setErrorMessage(err?.message || 'Failed to delete strategy')
       error('strategy_delete_failed', err)
@@ -386,9 +406,9 @@ const StrategyTab = ({ chartId }) => {
     if (!selectedStrategy) return
     setErrorMessage(null)
     try {
-      await attachStrategyIndicator(selectedStrategy.id, indicatorId)
+      const saved = await attachStrategyIndicator(selectedStrategy.id, indicatorId)
       info('strategy_indicator_attached', { strategyId: selectedStrategy.id, indicatorId })
-      await refreshStrategies()
+      upsertStrategy(saved)
     } catch (err) {
       setErrorMessage(err?.message || 'Failed to attach indicator')
       error('strategy_indicator_attach_failed', err)
@@ -399,9 +419,9 @@ const StrategyTab = ({ chartId }) => {
     if (!selectedStrategy) return
     setErrorMessage(null)
     try {
-      await detachStrategyIndicator(selectedStrategy.id, indicatorId)
+      const saved = await detachStrategyIndicator(selectedStrategy.id, indicatorId)
       info('strategy_indicator_detached', { strategyId: selectedStrategy.id, indicatorId })
-      await refreshStrategies()
+      upsertStrategy(saved)
     } catch (err) {
       setErrorMessage(err?.message || 'Failed to detach indicator')
       error('strategy_indicator_detach_failed', err)
@@ -413,14 +433,15 @@ const StrategyTab = ({ chartId }) => {
     setSavingRule(true)
     setErrorMessage(null)
     try {
+      let saved
       if (ruleModal.mode === 'edit' && ruleModal.rule?.id) {
-        await updateStrategyRule(selectedStrategy.id, ruleModal.rule.id, payload)
+        saved = await updateStrategyRule(selectedStrategy.id, ruleModal.rule.id, payload)
         info('strategy_rule_updated', { strategyId: selectedStrategy.id, ruleId: ruleModal.rule.id })
       } else {
-        await createStrategyRule(selectedStrategy.id, payload)
+        saved = await createStrategyRule(selectedStrategy.id, payload)
         info('strategy_rule_created', { strategyId: selectedStrategy.id })
       }
-      await refreshStrategies()
+      upsertStrategy(saved)
       closeRuleModal()
     } catch (err) {
       setErrorMessage(err?.message || 'Failed to save rule')
@@ -434,9 +455,9 @@ const StrategyTab = ({ chartId }) => {
     if (!selectedStrategy) return
     setErrorMessage(null)
     try {
-      await deleteStrategyRule(selectedStrategy.id, rule.id)
+      const saved = await deleteStrategyRule(selectedStrategy.id, rule.id)
       info('strategy_rule_deleted', { strategyId: selectedStrategy.id, ruleId: rule.id })
-      await refreshStrategies()
+      upsertStrategy(saved)
     } catch (err) {
       setErrorMessage(err?.message || 'Failed to delete rule')
       error('strategy_rule_delete_failed', err)
@@ -455,7 +476,7 @@ const StrategyTab = ({ chartId }) => {
         await createStrategyVariant(selectedStrategy.id, payload)
         info('strategy_variant_created', { strategyId: selectedStrategy.id, name: payload?.name })
       }
-      await refreshStrategies()
+      await refreshStrategyDetail(selectedStrategy.id)
       closeVariantModal()
     } catch (err) {
       setErrorMessage(err?.message || 'Failed to save variant')
@@ -472,13 +493,13 @@ const StrategyTab = ({ chartId }) => {
       try {
         await deleteStrategyVariant(selectedStrategy.id, variant.id)
         info('strategy_variant_deleted', { strategyId: selectedStrategy.id, variantId: variant.id })
-        await refreshStrategies()
+        await refreshStrategyDetail(selectedStrategy.id)
       } catch (err) {
         setErrorMessage(err?.message || 'Failed to delete variant')
         error('strategy_variant_delete_failed', err)
       }
     },
-    [selectedStrategy, refreshStrategies, info, error],
+    [selectedStrategy, refreshStrategyDetail, info, error],
   )
 
   const handleOpenBotCreate = useCallback(() => {
@@ -488,9 +509,13 @@ const StrategyTab = ({ chartId }) => {
     prepareBotCreate({
       strategyId: selectedStrategy.id,
       runType: 'backtest',
+    }).then(() => {
+      setBotCreateOpen(true)
+    }).catch((err) => {
+      error('strategy_bot_create_prepare_failed', err)
+      setBotCreateError(err?.message || 'Unable to prepare bot create form')
     })
-    setBotCreateOpen(true)
-  }, [prepareBotCreate, selectedStrategy])
+  }, [prepareBotCreate, selectedStrategy, error])
 
   const handleBotCreateSubmit = useCallback(
     async (event) => {
@@ -681,6 +706,7 @@ const StrategyTab = ({ chartId }) => {
         onCancel={closeVariantModal}
         submitting={savingVariant}
         error={errorMessage}
+        availableATMTemplates={availableATMTemplates}
       />
 
       <BotCreateModal

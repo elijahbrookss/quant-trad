@@ -3,6 +3,82 @@ import { createLogger } from '../utils/logger.js'
 import { API_ORIGIN as BASE } from '../config/appConfig.js'
 const adapterLogger = createLogger('StrategyAdapter')
 
+const normalizeStrategyCore = (strategy = {}) => ({
+  id: strategy?.id ?? null,
+  name: strategy?.name ?? '',
+  description: strategy?.description ?? null,
+  timeframe: strategy?.timeframe ?? '',
+  datasource: strategy?.datasource ?? '',
+  exchange: strategy?.exchange ?? '',
+  provider_id: strategy?.provider_id ?? null,
+  venue_id: strategy?.venue_id ?? null,
+  atm_template_id: strategy?.atm_template_id ?? null,
+  atm_template:
+    strategy?.atm_template && typeof strategy.atm_template === 'object'
+      ? { ...strategy.atm_template }
+      : {},
+  risk_config:
+    strategy?.risk_config && typeof strategy.risk_config === 'object'
+      ? { ...strategy.risk_config }
+      : {},
+  created_at: strategy?.created_at ?? null,
+  updated_at: strategy?.updated_at ?? null,
+})
+
+const normalizeStrategyBindings = (bindings = {}) => ({
+  symbols: Array.isArray(bindings?.symbols) ? bindings.symbols : [],
+  instrument_slots: Array.isArray(bindings?.instrument_slots) ? bindings.instrument_slots : [],
+  instruments: Array.isArray(bindings?.instruments) ? bindings.instruments : [],
+  indicator_ids: Array.isArray(bindings?.indicator_ids) ? bindings.indicator_ids : [],
+  indicators: Array.isArray(bindings?.indicators) ? bindings.indicators : [],
+})
+
+export function normalizeStrategySummary(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return null
+  }
+
+  const strategy = normalizeStrategyCore(payload.strategy)
+  const bindings = normalizeStrategyBindings(payload.bindings)
+
+  return {
+    ...strategy,
+    ...bindings,
+    strategy,
+    bindings,
+  }
+}
+
+export function normalizeStrategyDetail(payload) {
+  const summary = normalizeStrategySummary(payload)
+  if (!summary) {
+    return null
+  }
+
+  const decision = {
+    rules: Array.isArray(payload?.decision?.rules) ? payload.decision.rules : [],
+  }
+  const read_context = {
+    missing_indicators: Array.isArray(payload?.read_context?.missing_indicators)
+      ? payload.read_context.missing_indicators
+      : [],
+    instrument_messages: Array.isArray(payload?.read_context?.instrument_messages)
+      ? payload.read_context.instrument_messages
+      : [],
+  }
+  const variants = Array.isArray(payload?.variants) ? payload.variants : []
+
+  return {
+    ...summary,
+    rules: decision.rules,
+    missing_indicators: read_context.missing_indicators,
+    instrument_messages: read_context.instrument_messages,
+    variants,
+    decision,
+    read_context,
+  }
+}
+
 async function handleResponse(res) {
   if (res.ok) {
     return res.status === 204 ? null : res.json()
@@ -47,36 +123,15 @@ async function handleResponse(res) {
 /** Fetch all strategy records. */
 export async function fetchStrategies() {
   const res = await fetch(`${BASE}/api/strategies/`, { mode: 'cors' })
-  return handleResponse(res)
+  const payload = await handleResponse(res)
+  const list = Array.isArray(payload) ? payload : []
+  return list.map(normalizeStrategySummary).filter(Boolean)
 }
 
-/** Fetch all strategies and hydrate each one with its saved variants. */
-export async function fetchStrategiesWithVariants({ onVariantError } = {}) {
-  const payload = await fetchStrategies()
-  const list = Array.isArray(payload) ? payload : []
-  return Promise.all(
-    list.map(async (strategy) => {
-      const strategyId = strategy?.id
-      if (!strategyId) {
-        return { ...strategy, variants: [] }
-      }
-      try {
-        const variants = await fetchStrategyVariants(strategyId)
-        return {
-          ...strategy,
-          variants: Array.isArray(variants) ? variants : [],
-        }
-      } catch (err) {
-        if (typeof onVariantError === 'function') {
-          onVariantError(strategyId, err)
-        }
-        return {
-          ...strategy,
-          variants: [],
-        }
-      }
-    }),
-  )
+/** Fetch a single strategy detail record. */
+export async function fetchStrategy(strategyId) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}`, { mode: 'cors' })
+  return normalizeStrategyDetail(await handleResponse(res))
 }
 
 /** Create a new strategy. */
@@ -87,13 +142,7 @@ export async function createStrategy(payload) {
     body: JSON.stringify(payload),
     mode: 'cors',
   })
-  return handleResponse(res)
-}
-
-/** Fetch saved variants for a strategy. */
-export async function fetchStrategyVariants(strategyId) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/variants`, { mode: 'cors' })
-  return handleResponse(res)
+  return normalizeStrategyDetail(await handleResponse(res))
 }
 
 /** Create a saved strategy variant. */
@@ -135,7 +184,7 @@ export async function updateStrategy(strategyId, payload) {
     body: JSON.stringify(payload),
     mode: 'cors',
   })
-  return handleResponse(res)
+  return normalizeStrategyDetail(await handleResponse(res))
 }
 
 /** Delete a strategy. */
@@ -153,7 +202,7 @@ export async function attachStrategyIndicator(strategyId, indicatorId) {
     method: 'POST',
     mode: 'cors',
   })
-  return handleResponse(res)
+  return normalizeStrategyDetail(await handleResponse(res))
 }
 
 /** Detach an indicator instance from a strategy. */
@@ -162,7 +211,7 @@ export async function detachStrategyIndicator(strategyId, indicatorId) {
     method: 'DELETE',
     mode: 'cors',
   })
-  return handleResponse(res)
+  return normalizeStrategyDetail(await handleResponse(res))
 }
 
 /** Create a rule for a strategy. */
@@ -173,7 +222,7 @@ export async function createStrategyRule(strategyId, payload) {
     body: JSON.stringify(payload),
     mode: 'cors',
   })
-  return handleResponse(res)
+  return normalizeStrategyDetail(await handleResponse(res))
 }
 
 /** Update an existing strategy rule. */
@@ -184,7 +233,7 @@ export async function updateStrategyRule(strategyId, ruleId, payload) {
     body: JSON.stringify(payload),
     mode: 'cors',
   })
-  return handleResponse(res)
+  return normalizeStrategyDetail(await handleResponse(res))
 }
 
 /** Delete a strategy rule. */
@@ -193,7 +242,7 @@ export async function deleteStrategyRule(strategyId, ruleId) {
     method: 'DELETE',
     mode: 'cors',
   })
-  return handleResponse(res)
+  return normalizeStrategyDetail(await handleResponse(res))
 }
 
 /** Run a rule-logic preview for a strategy over the requested window. */
