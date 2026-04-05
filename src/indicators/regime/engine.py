@@ -37,6 +37,11 @@ class StructureEvidence:
     transition_score: float
     trend_direction: str
     trend_direction_value: int
+    directional_momentum_break: float
+    overlap_regime_shift: float
+    range_width_expansion: float
+    slope_reversal: float
+    score_divergence: float
 
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -174,6 +179,14 @@ def build_structure_snapshot(
     range_position: float,
     range_contraction: float,
     overlap_pct: float,
+    de_delta: float = 0.0,
+    overlap_delta: float = 0.0,
+    rc_delta: float = 0.0,
+    slope_delta: float = 0.0,
+    atr_short: float = 1.0,
+    prior_trend_score: float = 0.0,
+    prior_range_score: float = 0.0,
+    committed_state: Optional[str] = None,
 ) -> Dict[str, Any]:
     return build_structure_evidence(
         directional_efficiency=directional_efficiency,
@@ -182,6 +195,14 @@ def build_structure_snapshot(
         range_position=range_position,
         range_contraction=range_contraction,
         overlap_pct=overlap_pct,
+        de_delta=de_delta,
+        overlap_delta=overlap_delta,
+        rc_delta=rc_delta,
+        slope_delta=slope_delta,
+        atr_short=atr_short,
+        prior_trend_score=prior_trend_score,
+        prior_range_score=prior_range_score,
+        committed_state=committed_state,
     ).as_dict()
 
 
@@ -193,6 +214,14 @@ def build_structure_evidence(
     range_position: float,
     range_contraction: float,
     overlap_pct: float,
+    de_delta: float = 0.0,
+    overlap_delta: float = 0.0,
+    rc_delta: float = 0.0,
+    slope_delta: float = 0.0,
+    atr_short: float = 1.0,
+    prior_trend_score: float = 0.0,
+    prior_range_score: float = 0.0,
+    committed_state: Optional[str] = None,
 ) -> StructureEvidence:
     trend_efficiency = _clamp01((directional_efficiency - 0.48) / 0.28)
     range_efficiency = _clamp01((0.56 - directional_efficiency) / 0.28)
@@ -217,14 +246,34 @@ def build_structure_evidence(
         (centered_position, 0.22),
         (compression_support, 0.14),
     )
-    middle_efficiency = 1.0 - _clamp01(abs(directional_efficiency - 0.5) / 0.18)
-    overlap_mixed = 1.0 - _clamp01(abs(overlap_pct - 0.5) / 0.24)
-    score_contest = 1.0 - _clamp01(abs(trend_score - range_score) / 0.30)
+    directional_momentum_break = _clamp01(abs(de_delta) / 0.20)
+    overlap_regime_shift = _clamp01(abs(overlap_delta) / 0.18)
+    range_width_expansion = _clamp01(abs(rc_delta) / 0.08)
+    prior_slope = float(slope) - float(slope_delta)
+    sign_changed = (float(slope) > 0.0) != (prior_slope > 0.0)
+    slope_reversal = (
+        1.0
+        if sign_changed
+        else _clamp01(abs(slope_delta) / max(float(atr_short) * 2.0, 1e-6))
+    )
+    normalized_committed_state = str(committed_state or "").strip().lower() or None
+    if normalized_committed_state == "trend":
+        current_score = trend_score
+        prior_score = float(prior_trend_score)
+    elif normalized_committed_state == "range":
+        current_score = range_score
+        prior_score = float(prior_range_score)
+    else:
+        current_score = max(trend_score, range_score)
+        prior_score = max(float(prior_trend_score), float(prior_range_score))
+    score_drop = max(float(prior_score) - float(current_score), 0.0)
+    score_divergence = _clamp01(score_drop / 0.20)
     transition_score = _weighted_mean(
-        (middle_efficiency, 0.42),
-        (score_contest, 0.34),
-        (overlap_mixed, 0.14),
-        (1.0 - max(trend_score, range_score), 0.10),
+        (directional_momentum_break, 0.30),
+        (overlap_regime_shift, 0.25),
+        (range_width_expansion, 0.20),
+        (slope_reversal, 0.15),
+        (score_divergence, 0.10),
     )
 
     ranked = sorted(
@@ -254,6 +303,11 @@ def build_structure_evidence(
         transition_score=round(float(transition_score), 4),
         trend_direction=trend_direction,
         trend_direction_value=trend_direction_value,
+        directional_momentum_break=round(float(directional_momentum_break), 4),
+        overlap_regime_shift=round(float(overlap_regime_shift), 4),
+        range_width_expansion=round(float(range_width_expansion), 4),
+        slope_reversal=round(float(slope_reversal), 4),
+        score_divergence=round(float(score_divergence), 4),
     )
 
 

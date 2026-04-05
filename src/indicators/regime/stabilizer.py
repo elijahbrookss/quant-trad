@@ -67,6 +67,8 @@ class RegimeStabilizer:
         self._context_known_at_index: Optional[int] = None
         self._context_known_at_time: Optional[datetime] = None
         self._context_switch_indices: list[int] = []
+        self._prior_smoothed_snapshot: Dict[str, Optional[float]] = {}
+        self._prior_structure_scores: Dict[str, float] = {}
 
     @property
     def config(self) -> RegimeStabilizerConfig:
@@ -115,6 +117,27 @@ class RegimeStabilizer:
             else:
                 smoothed_features[key] = value
 
+        prior = self._prior_smoothed_snapshot or {}
+        de = smoothed_features.get("directional_efficiency") or 0.0
+        overlap = smoothed_features.get("overlap_pct") or 0.0
+        rc = smoothed_features.get("range_contraction") or 1.0
+        slope = smoothed_features.get("slope") or 0.0
+
+        de_prior = prior.get("directional_efficiency", de)
+        overlap_prior = prior.get("overlap_pct", overlap)
+        rc_prior = prior.get("range_contraction", rc)
+        slope_prior = prior.get("slope", slope)
+
+        feature_deltas = {
+            "de_delta": de - de_prior,
+            "overlap_delta": overlap - overlap_prior,
+            "rc_delta": rc - rc_prior,
+            "slope_delta": slope - slope_prior,
+            "prior_trend_score": self._prior_structure_scores.get("trend_score", 0.0),
+            "prior_range_score": self._prior_structure_scores.get("range_score", 0.0),
+            "committed_state": self._states["structure"].current_state,
+        }
+
         structure_features = self._select_features(
             raw_features,
             smoothed_features,
@@ -154,6 +177,8 @@ class RegimeStabilizer:
             range_position=float(structure_features["range_position"] or 0.5),
             range_contraction=float(structure_features["range_contraction"] or 1.0),
             overlap_pct=float(structure_features["overlap_pct"] or 0.5),
+            atr_short=float(expansion.get("atr_short") or 1.0),
+            **feature_deltas,
         )
         desired_structure = self._apply_structure_hysteresis(
             current_state=self._states["structure"].current_state,
@@ -281,6 +306,18 @@ class RegimeStabilizer:
                 for key, value in metrics.items()
                 if not isinstance(value, bool) and isinstance(value, (int, float))
             },
+            "transition_score": float(structure_snapshot["transition_score"]),
+            "transition_directional_momentum_break": float(
+                structure_snapshot["directional_momentum_break"]
+            ),
+            "transition_overlap_regime_shift": float(
+                structure_snapshot["overlap_regime_shift"]
+            ),
+            "transition_range_width_expansion": float(
+                structure_snapshot["range_width_expansion"]
+            ),
+            "transition_slope_reversal": float(structure_snapshot["slope_reversal"]),
+            "transition_score_divergence": float(structure_snapshot["score_divergence"]),
             "bars_in_regime": float(structure_context["bars_in_regime"]),
             "age_since_known_bars": float(structure_context["age_since_known_bars"]),
             "recent_switch_count": float(structure_context["recent_switch_count"]),
@@ -299,7 +336,7 @@ class RegimeStabilizer:
             "context_is_trustworthy": 1.0 if context_trust["context_is_trustworthy"] else 0.0,
         }
 
-        return {
+        result = {
             "structure": {
                 **structure,
                 "state": stabilized_structure,
@@ -396,6 +433,22 @@ class RegimeStabilizer:
                 "liquidity": liquidity_meta,
             },
         }
+
+        self._prior_smoothed_snapshot = {
+            key: smoothed_features.get(key)
+            for key in (
+                "directional_efficiency",
+                "slope",
+                "slope_stability",
+                "overlap_pct",
+                "range_contraction",
+            )
+        }
+        self._prior_structure_scores = {
+            "trend_score": float(structure_snapshot.get("trend_score") or 0.0),
+            "range_score": float(structure_snapshot.get("range_score") or 0.0),
+        }
+        return result
 
     def _select_features(
         self,
