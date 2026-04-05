@@ -18,8 +18,17 @@ const getSymbolDisplay = (symbol, strategy) => {
   return symbol.slice(0, 4) + '…'
 }
 
-export function StrategySelector({ strategies, selectedIds, onToggle, loading, error, compact = false }) {
+export function StrategySelector({
+  strategies,
+  selectedIds,
+  onToggle,
+  onSelect,
+  loading,
+  error,
+  compact = false,
+}) {
   const [query, setQuery] = useState('')
+  const handleSelect = onSelect || onToggle || (() => {})
 
   const filteredStrategies = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -71,7 +80,7 @@ export function StrategySelector({ strategies, selectedIds, onToggle, loading, e
                 <button
                   key={strategy.id}
                   type="button"
-                  onClick={() => onToggle(strategy.id)}
+                  onClick={() => handleSelect(strategy.id)}
                   className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-2 text-left transition-all ${
                     checked
                       ? 'border-emerald-800/50 bg-emerald-950/30 text-slate-100'
@@ -140,7 +149,7 @@ export function StrategySelector({ strategies, selectedIds, onToggle, loading, e
                   type="checkbox"
                   className="mt-0.5 size-4 shrink-0 rounded border border-slate-700 bg-slate-900 accent-slate-600"
                   checked={checked}
-                  onChange={() => onToggle(strategy.id)}
+                  onChange={() => handleSelect(strategy.id)}
                 />
                 <div className="min-w-0 flex-1 space-y-0.5">
                   <p className="truncate text-sm font-medium text-slate-200">{strategy.name}</p>
