@@ -32,10 +32,11 @@ const parseValue = (raw) => {
   return text
 }
 
-function VariantFormModal({ open, initialValues, onSubmit, onCancel, submitting, error }) {
+function VariantFormModal({ open, initialValues, onSubmit, onCancel, submitting, error, availableATMTemplates = [] }) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [isDefault, setIsDefault] = useState(false)
+  const [atmTemplateId, setAtmTemplateId] = useState('')
   const [rows, setRows] = useState([createRow()])
   const [localError, setLocalError] = useState(null)
 
@@ -44,6 +45,7 @@ function VariantFormModal({ open, initialValues, onSubmit, onCancel, submitting,
     setName(initialValues?.name || '')
     setDescription(initialValues?.description || '')
     setIsDefault(Boolean(initialValues?.is_default))
+    setAtmTemplateId(initialValues?.atm_template_id || '')
 
     const overrides = initialValues?.param_overrides
     const nextRows = overrides && typeof overrides === 'object'
@@ -116,6 +118,7 @@ function VariantFormModal({ open, initialValues, onSubmit, onCancel, submitting,
       name: trimmedName,
       description: String(description || '').trim() || null,
       param_overrides: paramOverrides,
+      atm_template_id: atmTemplateId || null,
       is_default: isDefault,
     })
   }
@@ -151,6 +154,23 @@ function VariantFormModal({ open, initialValues, onSubmit, onCancel, submitting,
                 placeholder="Optional"
               />
             </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">ATM Template</label>
+            <select
+              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+              value={atmTemplateId}
+              onChange={(event) => setAtmTemplateId(event.target.value)}
+            >
+              <option value="">Use strategy ATM</option>
+              {availableATMTemplates.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.name || template.id}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-slate-500">Optional ATM selection by reference for this variant.</p>
           </div>
 
           <label className="flex items-center gap-3 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-slate-300">

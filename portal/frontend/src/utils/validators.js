@@ -82,16 +82,17 @@ export function validateStrategy(strategy) {
     }
   }
 
-  // Validate risk parameters if present
-  if (strategy.base_risk_per_trade != null) {
-    const risk = Number(strategy.base_risk_per_trade)
+  const riskConfig = strategy?.risk_config && typeof strategy.risk_config === 'object' ? strategy.risk_config : {}
+
+  if (riskConfig.base_risk_per_trade != null) {
+    const risk = Number(riskConfig.base_risk_per_trade)
     if (!Number.isFinite(risk) || risk <= 0) {
       errors.base_risk_per_trade = 'Base risk must be a positive number'
     }
   }
 
-  if (strategy.global_risk_multiplier != null) {
-    const multiplier = Number(strategy.global_risk_multiplier)
+  if (riskConfig.global_risk_multiplier != null) {
+    const multiplier = Number(riskConfig.global_risk_multiplier)
     if (!Number.isFinite(multiplier) || multiplier <= 0) {
       errors.global_risk_multiplier = 'Risk multiplier must be a positive number'
     }

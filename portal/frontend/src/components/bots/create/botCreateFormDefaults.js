@@ -24,6 +24,7 @@ export function buildDefaultForm() {
     strategy_variant_id: '',
     strategy_variant_name: '',
     resolved_params: {},
+    risk_config: {},
     snapshot_interval_ms: 1000,
     bot_env: {},
     wallet_balances: [EMPTY_WALLET_ROW()],

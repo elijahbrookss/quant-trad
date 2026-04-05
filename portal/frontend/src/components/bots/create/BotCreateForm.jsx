@@ -194,6 +194,18 @@ export function BotCreateForm({
     return Object.entries(overrides)
   }, [selectedVariant])
 
+  const selectedATMLabel = useMemo(() => {
+    if (!selectedStrategy) return 'Select a strategy'
+    const variantAtmTemplateId = String(selectedVariant?.atm_template_id || '').trim()
+    if (!variantAtmTemplateId) {
+      return selectedStrategy?.atm_template?.name || 'Strategy ATM'
+    }
+    if (variantAtmTemplateId === selectedStrategy?.atm_template_id) {
+      return selectedStrategy?.atm_template?.name || variantAtmTemplateId
+    }
+    return variantAtmTemplateId
+  }, [selectedStrategy, selectedVariant])
+
   const suggestedName = useMemo(() => {
     if (!selectedStrategy) return ''
     const modeLabel =
@@ -345,6 +357,7 @@ export function BotCreateForm({
                     ) : (
                       <p className="mt-2 text-xs text-slate-500">Uses strategy defaults.</p>
                     )}
+                    <p className="mt-3 text-xs text-slate-400">ATM: {selectedATMLabel}</p>
                   </div>
                 ) : (
                   <p className="text-xs text-slate-500">Uses strategy defaults.</p>
@@ -509,6 +522,7 @@ export function BotCreateForm({
           <div className="grid gap-3 sm:grid-cols-2">
             <ReviewItem label="Strategy" value={selectedStrategy?.name || 'Select a strategy'} />
             <ReviewItem label="Variant" value={selectedVariant?.name || 'Strategy defaults'} />
+            <ReviewItem label="ATM" value={selectedATMLabel} />
             <ReviewItem label="Run mode" value={reviewMode} />
             <ReviewItem label="Funding" value={fundingSummary} />
             <ReviewItem label="Date range" value={reviewRange} />

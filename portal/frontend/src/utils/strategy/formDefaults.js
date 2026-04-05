@@ -49,8 +49,6 @@ const MIN_RISK_MULTIPLIER = 0.01
 const MIN_BASE_RISK = 1
 
 const RISK_DEFAULTS = Object.freeze({
-  atrPeriod: 14,
-  atrMultiplier: 1,
   baseRiskPerTrade: '',
   globalRiskMultiplier: 1,
 })

@@ -15,6 +15,18 @@ const formatVariantSummary = (variant) => {
   return Object.entries(overrides)
 }
 
+const resolveATMLabel = (variant, strategy) => {
+  const variantAtmTemplateId = String(variant?.atm_template_id || '').trim()
+  const strategyAtmTemplateId = String(strategy?.atm_template_id || '').trim()
+  if (!variantAtmTemplateId) {
+    return strategy?.atm_template?.name?.trim() || 'Uses strategy ATM'
+  }
+  if (variantAtmTemplateId === strategyAtmTemplateId) {
+    return strategy?.atm_template?.name?.trim() || variantAtmTemplateId
+  }
+  return variantAtmTemplateId
+}
+
 export const VariantsTab = ({
   strategy,
   onAddVariant,
@@ -83,6 +95,13 @@ export const VariantsTab = ({
                       Delete
                     </ActionButton>
                   </div>
+                </div>
+
+                <div className="mt-3 rounded-lg border border-white/8 bg-white/[0.03] p-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.28em] text-slate-500">
+                    ATM Selection
+                  </p>
+                  <p className="mt-2 text-xs text-slate-300">{resolveATMLabel(variant, strategy)}</p>
                 </div>
 
                 <div className="mt-3 rounded-lg border border-white/8 bg-white/[0.03] p-3">

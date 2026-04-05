@@ -22,6 +22,48 @@ const defaultVariantForType = (type) => {
   return 'match'
 }
 
+const isGuardComplete = (guard) => {
+  if (!guard || typeof guard !== 'object') return false
+  const contextValues = Array.isArray(guard.value_text) ? guard.value_text.filter(Boolean) : [guard.value_text].filter(Boolean)
+  const numericValue = guard.value === '' ? null : Number(guard.value)
+  const bars = Number(guard.bars)
+
+  if (guard.type === 'ctx' && guard.variant === 'match') {
+    return Boolean(guard.indicator_id && guard.output_name && guard.field && contextValues.length)
+  }
+  if (guard.type === 'ctx' && guard.variant === 'held') {
+    return Boolean(guard.indicator_id && guard.output_name && guard.field && contextValues.length && Number.isFinite(bars) && bars > 0)
+  }
+  if (guard.type === 'metric' && guard.variant === 'match') {
+    return Boolean(
+      guard.indicator_id
+      && guard.output_name
+      && guard.field
+      && guard.operator
+      && guard.value !== ''
+      && numericValue !== null
+      && !Number.isNaN(numericValue)
+    )
+  }
+  if (guard.type === 'metric' && guard.variant === 'held') {
+    return Boolean(
+      guard.indicator_id
+      && guard.output_name
+      && guard.field
+      && guard.operator
+      && guard.value !== ''
+      && numericValue !== null
+      && !Number.isNaN(numericValue)
+      && Number.isFinite(bars)
+      && bars > 0
+    )
+  }
+  if (guard.type === 'signal' && (guard.variant === 'seen' || guard.variant === 'absent')) {
+    return Boolean(guard.indicator_id && guard.output_name && guard.event_key && Number.isFinite(bars) && bars > 0)
+  }
+  return false
+}
+
 const mapInitialGuardToForm = (guard) => {
   if (!guard || typeof guard !== 'object') return { ...EMPTY_GUARD }
 
@@ -136,6 +178,8 @@ const useRuleForm = ({
         name: initialValues.name || '',
         description: initialValues.description || '',
         intent: initialValues.intent || (initialValues.action === 'sell' ? 'enter_short' : 'enter_long'),
+        priority: Number(initialValues.priority ?? 0) || 0,
+        enabled: initialValues.enabled ?? true,
         trigger: {
           indicator_id: flow.trigger?.indicator_id || '',
           output_name: flow.trigger?.output_name || '',
@@ -164,6 +208,12 @@ const useRuleForm = ({
     form.trigger?.indicator_id
     && form.trigger?.output_name
     && form.trigger?.event_key,
+  )
+  const incompleteGuardIndexes = useMemo(
+    () => (form.guards || [])
+      .map((guard, index) => (isGuardComplete(guard) ? null : index))
+      .filter((value) => value !== null),
+    [form.guards],
   )
 
   const updateTrigger = useCallback((updates) => {
@@ -333,7 +383,7 @@ const useRuleForm = ({
       const bars = Number(guard.bars)
 
       if (guard.type === 'ctx' && guard.variant === 'match') {
-        if (!(guard.indicator_id && guard.output_name && guard.field && contextValues.length)) return null
+        if (!isGuardComplete(guard)) return null
         return {
           type: 'context_match',
           indicator_id: guard.indicator_id,
@@ -344,7 +394,7 @@ const useRuleForm = ({
       }
 
       if (guard.type === 'ctx' && guard.variant === 'held') {
-        if (!(guard.indicator_id && guard.output_name && guard.field && contextValues.length && Number.isFinite(bars) && bars > 0)) return null
+        if (!isGuardComplete(guard)) return null
         return {
           type: 'holds_for_bars',
           bars,
@@ -359,7 +409,7 @@ const useRuleForm = ({
       }
 
       if (guard.type === 'metric' && guard.variant === 'match') {
-        if (!(guard.indicator_id && guard.output_name && guard.field && guard.operator && guard.value !== '' && numericValue !== null && !Number.isNaN(numericValue))) return null
+        if (!isGuardComplete(guard)) return null
         return {
           type: 'metric_match',
           indicator_id: guard.indicator_id,
@@ -371,7 +421,7 @@ const useRuleForm = ({
       }
 
       if (guard.type === 'metric' && guard.variant === 'held') {
-        if (!(guard.indicator_id && guard.output_name && guard.field && guard.operator && guard.value !== '' && numericValue !== null && !Number.isNaN(numericValue) && Number.isFinite(bars) && bars > 0)) return null
+        if (!isGuardComplete(guard)) return null
         return {
           type: 'holds_for_bars',
           bars,
@@ -387,7 +437,7 @@ const useRuleForm = ({
       }
 
       if (guard.type === 'signal' && guard.variant === 'seen') {
-        if (!(guard.indicator_id && guard.output_name && guard.event_key && Number.isFinite(bars) && bars > 0)) return null
+        if (!isGuardComplete(guard)) return null
         return {
           type: 'signal_seen_within_bars',
           indicator_id: guard.indicator_id,
@@ -398,7 +448,7 @@ const useRuleForm = ({
       }
 
       if (guard.type === 'signal' && guard.variant === 'absent') {
-        if (!(guard.indicator_id && guard.output_name && guard.event_key && Number.isFinite(bars) && bars > 0)) return null
+        if (!isGuardComplete(guard)) return null
         return {
           type: 'signal_absent_within_bars',
           indicator_id: guard.indicator_id,
@@ -422,8 +472,10 @@ const useRuleForm = ({
       name: resolvedName,
       description: form.description.trim() || null,
       intent: form.intent,
+      priority: Number.isFinite(Number(form.priority)) ? Number(form.priority) : 0,
       trigger,
       guards,
+      enabled: Boolean(form.enabled),
     }
   }
 
@@ -433,6 +485,7 @@ const useRuleForm = ({
     signalIndicators,
     guardFieldFilters,
     canSubmit,
+    incompleteGuardIndexes,
     addGuard,
     duplicateGuard,
     removeGuard,
