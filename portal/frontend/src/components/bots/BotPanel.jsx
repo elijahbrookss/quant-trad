@@ -15,12 +15,10 @@ import { useBotCreateController } from './create/useBotCreateController.js'
 import { getBotStatus } from './botStatusModel.js'
 import { BotCard, sortBots } from './BotCard.jsx'
 import { useBotStream } from './useBotStream.js'
-import { usePortalSettings } from '../../contexts/PortalSettingsContext.jsx'
 
 export function BotPanel() {
   const [bots, setBots] = useState([])
   const [loading, setLoading] = useState(false)
-  const { settings } = usePortalSettings()
   const [createOpen, setCreateOpen] = useState(false)
   const [createError, setCreateError] = useState(null)
   const [lensBotId, setLensBotId] = useState(null)
@@ -145,10 +143,6 @@ export function BotPanel() {
     strategies,
     fetchStrategyDetail: loadStrategyDetail,
     logger,
-    defaults: {
-      snapshotIntervalMs: Number(settings?.botDefaults?.snapshotIntervalMs || 1000),
-      envText: settings?.botDefaults?.envText || '',
-    },
     onCreated: (payload) => {
       upsertBot(payload)
       setCreateOpen(false)

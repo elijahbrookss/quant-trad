@@ -149,6 +149,29 @@ body {
   background-attachment: fixed;
 }
 
+.app-density-comfortable {
+  --app-shell-header-px: 1rem;
+  --app-shell-header-py: 0.7rem;
+  --app-shell-main-px: 0.85rem;
+  --app-shell-main-px-lg: 1rem;
+  --app-shell-main-px-xl: 1.15rem;
+  --app-shell-main-py: 1.2rem;
+  --app-section-gap: 1.85rem;
+  --qt-chart-height: 700px;
+  --qt-chart-height-2xl: 760px;
+  --qt-rail-width-xl: 320px;
+  --qt-rail-width-2xl: 350px;
+}
+
+.app-motion-reduced *,
+.app-motion-reduced *::before,
+.app-motion-reduced *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  scroll-behavior: auto !important;
+  transition-duration: 0.01ms !important;
+}
+
 .app-shell-header {
   padding-left: var(--app-shell-header-px);
   padding-right: var(--app-shell-header-px);

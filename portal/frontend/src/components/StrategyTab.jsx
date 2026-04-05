@@ -22,7 +22,6 @@ import InstrumentFormModal from './strategy/modals/InstrumentFormModal.jsx'
 import VariantFormModal from './strategy/modals/VariantFormModal.jsx'
 import ActionButton from './strategy/ui/ActionButton.jsx'
 import { useChartState } from '../contexts/ChartStateContext.jsx'
-import { usePortalSettings } from '../contexts/PortalSettingsContext.jsx'
 import { createLogger } from '../utils/logger.js'
 import { templateKey, cloneATMTemplateSafe } from '../utils/strategy/atmTemplate.js'
 import useStrategyData from '../hooks/strategy/useStrategyData.js'
@@ -36,7 +35,6 @@ import { useBotCreateController } from './bots/create/useBotCreateController.js'
 
 const StrategyTab = ({ chartId }) => {
   const { getChart, updateChart } = useChartState()
-  const { settings } = usePortalSettings()
   const chartSnapshot = getChart(chartId)
   const logger = useMemo(() => createLogger('StrategyTab', { chartId }), [chartId])
   const { info, error } = logger
@@ -132,10 +130,6 @@ const StrategyTab = ({ chartId }) => {
     strategies,
     fetchStrategyDetail: refreshStrategyDetail,
     logger,
-    defaults: {
-      snapshotIntervalMs: Number(settings?.botDefaults?.snapshotIntervalMs || 1000),
-      envText: settings?.botDefaults?.envText || '',
-    },
     onCreated: (payload) => {
       const createdStrategyName =
         strategies.find((strategy) => strategy.id === payload?.strategy_id)?.name

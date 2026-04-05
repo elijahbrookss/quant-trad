@@ -219,13 +219,16 @@ function AppShell({ chartId }) {
   const [checkingHealth, setCheckingHealth] = useState(false)
   const healthErrorRef = useRef(null)
   const mountedRef = useRef(true)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(true)
+  const { settings, updateSettings } = usePortalSettings()
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => Boolean(settings?.sidebarCollapsed ?? true))
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const { settings } = usePortalSettings()
   const { setAccentColor } = useAccentColor()
   const location = useLocation()
   const isQuantLabRoute = location.pathname.startsWith('/quantlab')
+  const landingPage = settings?.landingPage || '/quantlab'
+  const densityClass = settings?.uiDensity === 'comfortable' ? 'app-density-comfortable' : 'app-density-compact'
+  const motionClass = settings?.motion === 'reduced' ? 'app-motion-reduced' : 'app-motion-full'
 
   useEffect(() => {
     info('app_mounted')
@@ -305,6 +308,10 @@ function AppShell({ chartId }) {
   }, [location.pathname])
 
   useEffect(() => {
+    setSidebarCollapsed(Boolean(settings?.sidebarCollapsed ?? true))
+  }, [settings?.sidebarCollapsed])
+
+  useEffect(() => {
     if (settings?.accentColor) {
       setAccentColor(settings.accentColor)
     }
@@ -319,13 +326,19 @@ function AppShell({ chartId }) {
   }, [location.pathname])
 
   return (
-    <div className="app-density-terminal min-h-screen bg-[#14171f] bg-[radial-gradient(circle_at_top,_var(--accent-gradient-spot)_0%,_rgba(20,23,31,1)_55%)] text-slate-100">
+    <div className={`${densityClass} ${motionClass} min-h-screen bg-[#14171f] bg-[radial-gradient(circle_at_top,_var(--accent-gradient-spot)_0%,_rgba(20,23,31,1)_55%)] text-slate-100`}>
       <div className="flex min-h-screen">
         <Sidebar
           collapsed={sidebarCollapsed}
           open={sidebarOpen}
           onClose={() => setSidebarOpen(false)}
-          onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
+          onToggleCollapse={() => {
+            setSidebarCollapsed((prev) => {
+              const next = !prev
+              updateSettings({ sidebarCollapsed: next })
+              return next
+            })
+          }}
         />
 
         <div className="flex min-w-0 flex-1 flex-col">
@@ -360,7 +373,7 @@ function AppShell({ chartId }) {
           <main className="app-shell-main flex-1">
             <div className={`app-section-stack flex w-full flex-col ${isQuantLabRoute ? 'max-w-none' : 'mx-auto max-w-[1600px]'}`}>
               <Routes>
-                <Route path="/" element={<Navigate to="/quantlab" replace />} />
+                <Route path="/" element={<Navigate to={landingPage} replace />} />
                 <Route
                   path="/quantlab"
                   element={
@@ -472,7 +485,7 @@ function AppShell({ chartId }) {
                     </div>
                   }
                 />
-                <Route path="*" element={<Navigate to="/quantlab" replace />} />
+                <Route path="*" element={<Navigate to={landingPage} replace />} />
               </Routes>
             </div>
           </main>
