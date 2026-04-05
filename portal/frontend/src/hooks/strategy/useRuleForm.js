@@ -5,13 +5,91 @@ import { extractRuleFlow } from '../../components/strategy/rules/ruleUtils.js'
 import { indicatorHasAuthorableOutputs } from '../../utils/indicatorOutputs.js'
 
 const EMPTY_GUARD = {
-  type: 'context_match',
+  type: 'ctx',
+  variant: 'match',
   indicator_id: '',
   output_name: '',
   field: '',
   value_text: [],
   operator: '>',
   value: '',
+  bars: '',
+  event_key: '',
+}
+
+const defaultVariantForType = (type) => {
+  if (type === 'signal') return 'seen'
+  return 'match'
+}
+
+const mapInitialGuardToForm = (guard) => {
+  if (!guard || typeof guard !== 'object') return { ...EMPTY_GUARD }
+
+  if (guard.type === 'context_match') {
+    return {
+      ...EMPTY_GUARD,
+      type: 'ctx',
+      variant: 'match',
+      indicator_id: guard.indicator_id || '',
+      output_name: guard.output_name || '',
+      field: guard.field || 'state',
+      value_text: Array.isArray(guard.value) ? guard.value : guard.value ? [guard.value] : [],
+    }
+  }
+
+  if (guard.type === 'metric_match') {
+    return {
+      ...EMPTY_GUARD,
+      type: 'metric',
+      variant: 'match',
+      indicator_id: guard.indicator_id || '',
+      output_name: guard.output_name || '',
+      field: guard.field || '',
+      operator: guard.operator || '>',
+      value: guard.value ?? '',
+    }
+  }
+
+  if (guard.type === 'holds_for_bars' && guard.guard?.type === 'context_match') {
+    return {
+      ...EMPTY_GUARD,
+      type: 'ctx',
+      variant: 'held',
+      indicator_id: guard.guard.indicator_id || '',
+      output_name: guard.guard.output_name || '',
+      field: guard.guard.field || 'state',
+      value_text: Array.isArray(guard.guard.value) ? guard.guard.value : guard.guard.value ? [guard.guard.value] : [],
+      bars: guard.bars ?? '',
+    }
+  }
+
+  if (guard.type === 'holds_for_bars' && guard.guard?.type === 'metric_match') {
+    return {
+      ...EMPTY_GUARD,
+      type: 'metric',
+      variant: 'held',
+      indicator_id: guard.guard.indicator_id || '',
+      output_name: guard.guard.output_name || '',
+      field: guard.guard.field || '',
+      operator: guard.guard.operator || '>',
+      value: guard.guard.value ?? '',
+      bars: guard.bars ?? '',
+    }
+  }
+
+  if (guard.type === 'signal_seen_within_bars' || guard.type === 'signal_absent_within_bars') {
+    return {
+      ...EMPTY_GUARD,
+      type: 'signal',
+      variant: guard.type === 'signal_seen_within_bars' ? 'seen' : 'absent',
+      indicator_id: guard.indicator_id || '',
+      output_name: guard.output_name || '',
+      event_key: guard.event_key || '',
+      bars: guard.lookback_bars ?? '',
+    }
+  }
+
+  return { ...EMPTY_GUARD }
 }
 
 const useRuleForm = ({
@@ -53,13 +131,7 @@ const useRuleForm = ({
     }
     if (initialValues) {
       const flow = extractRuleFlow(initialValues)
-      const guards = Array.isArray(flow.guards) ? flow.guards.map((guard) => ({
-        ...EMPTY_GUARD,
-        ...guard,
-        field: guard?.type === 'context_match' ? guard?.field || 'state' : guard?.field || '',
-        value: guard?.value ?? '',
-        value_text: Array.isArray(guard?.value) ? guard.value : guard?.value ? [guard.value] : [],
-      })) : []
+      const guards = Array.isArray(flow.guards) ? flow.guards.map((guard) => mapInitialGuardToForm(guard)) : []
       setForm({
         name: initialValues.name || '',
         description: initialValues.description || '',
@@ -175,22 +247,41 @@ const useRuleForm = ({
   }
 
   const handleGuardTypeChange = (index, type) => {
+    const nextType = type || 'ctx'
     updateGuard(index, {
       ...EMPTY_GUARD,
-      type: type || 'context_match',
-      field: (type || 'context_match') === 'context_match' ? 'state' : '',
+      type: nextType,
+      variant: defaultVariantForType(nextType),
+      field: nextType === 'ctx' ? 'state' : '',
     })
     setGuardFieldFilters((prev) => prev.map((entry, guardIndex) => (guardIndex === index ? '' : entry)))
   }
 
-  const handleGuardIndicatorChange = (index, indicatorId) => {
+  const handleGuardVariantChange = useCallback((index, variant) => {
     updateGuard(index, {
-      indicator_id: indicatorId || '',
-      output_name: '',
-      field: '',
-      value_text: [],
-      value: '',
+      variant: variant || 'match',
+      bars: '',
+      event_key: '',
     })
+  }, [updateGuard])
+
+  const handleGuardIndicatorChange = (index, indicatorId) => {
+    setForm((prev) => ({
+      ...prev,
+      guards: prev.guards.map((guard, guardIndex) => (
+        guardIndex === index
+          ? {
+            ...guard,
+            indicator_id: indicatorId || '',
+            output_name: '',
+            field: guard.type === 'ctx' ? 'state' : '',
+            value_text: [],
+            value: '',
+            event_key: '',
+          }
+          : guard
+      )),
+    }))
     setGuardFieldFilters((prev) => prev.map((entry, guardIndex) => (guardIndex === index ? '' : entry)))
     if (indicatorId && typeof ensureIndicatorMeta === 'function') {
       ensureIndicatorMeta(indicatorId)
@@ -205,9 +296,10 @@ const useRuleForm = ({
           ? {
             ...guard,
             output_name: outputName || '',
-            field: guard.type === 'context_match' ? 'state' : '',
+            field: guard.type === 'ctx' ? 'state' : '',
             value_text: [],
             value: '',
+            event_key: '',
           }
           : guard
       )),
@@ -236,29 +328,88 @@ const useRuleForm = ({
       event_key: form.trigger.event_key,
     }
     const guards = (form.guards || []).map((guard) => {
-      if (guard.type === 'context_match') {
+      const contextValues = Array.isArray(guard.value_text) ? guard.value_text.filter(Boolean) : [guard.value_text].filter(Boolean)
+      const numericValue = guard.value === '' ? null : Number(guard.value)
+      const bars = Number(guard.bars)
+
+      if (guard.type === 'ctx' && guard.variant === 'match') {
+        if (!(guard.indicator_id && guard.output_name && guard.field && contextValues.length)) return null
         return {
           type: 'context_match',
           indicator_id: guard.indicator_id,
           output_name: guard.output_name,
-          field: guard.field || 'state',
-          value: Array.isArray(guard.value_text) ? guard.value_text.filter(Boolean) : [guard.value_text].filter(Boolean),
+          field: guard.field,
+          value: contextValues,
         }
       }
-      return {
-        type: 'metric_match',
-        indicator_id: guard.indicator_id,
-        output_name: guard.output_name,
-        field: guard.field,
-        operator: guard.operator,
-        value: guard.value === '' ? null : Number(guard.value),
+
+      if (guard.type === 'ctx' && guard.variant === 'held') {
+        if (!(guard.indicator_id && guard.output_name && guard.field && contextValues.length && Number.isFinite(bars) && bars > 0)) return null
+        return {
+          type: 'holds_for_bars',
+          bars,
+          guard: {
+            type: 'context_match',
+            indicator_id: guard.indicator_id,
+            output_name: guard.output_name,
+            field: guard.field,
+            value: contextValues,
+          },
+        }
       }
-    }).filter((guard) => {
-      if (guard.type === 'context_match') {
-        return guard.indicator_id && guard.output_name && guard.field && guard.value_text?.length
+
+      if (guard.type === 'metric' && guard.variant === 'match') {
+        if (!(guard.indicator_id && guard.output_name && guard.field && guard.operator && guard.value !== '' && numericValue !== null && !Number.isNaN(numericValue))) return null
+        return {
+          type: 'metric_match',
+          indicator_id: guard.indicator_id,
+          output_name: guard.output_name,
+          field: guard.field,
+          operator: guard.operator,
+          value: numericValue,
+        }
       }
-      return guard.indicator_id && guard.output_name && guard.field && guard.operator && guard.value !== null && !Number.isNaN(guard.value)
-    })
+
+      if (guard.type === 'metric' && guard.variant === 'held') {
+        if (!(guard.indicator_id && guard.output_name && guard.field && guard.operator && guard.value !== '' && numericValue !== null && !Number.isNaN(numericValue) && Number.isFinite(bars) && bars > 0)) return null
+        return {
+          type: 'holds_for_bars',
+          bars,
+          guard: {
+            type: 'metric_match',
+            indicator_id: guard.indicator_id,
+            output_name: guard.output_name,
+            field: guard.field,
+            operator: guard.operator,
+            value: numericValue,
+          },
+        }
+      }
+
+      if (guard.type === 'signal' && guard.variant === 'seen') {
+        if (!(guard.indicator_id && guard.output_name && guard.event_key && Number.isFinite(bars) && bars > 0)) return null
+        return {
+          type: 'signal_seen_within_bars',
+          indicator_id: guard.indicator_id,
+          output_name: guard.output_name,
+          event_key: guard.event_key,
+          lookback_bars: bars,
+        }
+      }
+
+      if (guard.type === 'signal' && guard.variant === 'absent') {
+        if (!(guard.indicator_id && guard.output_name && guard.event_key && Number.isFinite(bars) && bars > 0)) return null
+        return {
+          type: 'signal_absent_within_bars',
+          indicator_id: guard.indicator_id,
+          output_name: guard.output_name,
+          event_key: guard.event_key,
+          lookback_bars: bars,
+        }
+      }
+
+      return null
+    }).filter(Boolean)
 
     const resolvedName = form.name.trim() || getDefaultName?.({
       intent: form.intent,
@@ -291,6 +442,7 @@ const useRuleForm = ({
     handleTriggerOutputChange,
     handleTriggerEventChange,
     handleGuardTypeChange,
+    handleGuardVariantChange,
     handleGuardIndicatorChange,
     handleGuardOutputChange,
     handleGuardFieldChange,

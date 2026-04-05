@@ -90,6 +90,7 @@ export const RuleDrawer = ({
     handleTriggerOutputChange,
     handleTriggerEventChange,
     handleGuardTypeChange,
+    handleGuardVariantChange,
     handleGuardIndicatorChange,
     handleGuardOutputChange,
     handleGuardFieldChange,
@@ -113,6 +114,79 @@ export const RuleDrawer = ({
     selectedOutputName: form.trigger.output_name,
   })
   const triggerEventOptions = eventOptions(triggerIndicator, form.trigger.output_name)
+  const previewGuards = useMemo(() => (
+    (form.guards || []).map((guard) => {
+      const contextValues = Array.isArray(guard.value_text) ? guard.value_text.filter(Boolean) : [guard.value_text].filter(Boolean)
+      const numericValue = guard.value === '' ? null : Number(guard.value)
+      const bars = Number(guard.bars)
+
+      if (guard.type === 'ctx' && guard.variant === 'match' && guard.indicator_id && guard.output_name) {
+        return {
+          type: 'context_match',
+          indicator_id: guard.indicator_id,
+          output_name: guard.output_name,
+          field: guard.field || 'state',
+          value: contextValues,
+        }
+      }
+      if (guard.type === 'ctx' && guard.variant === 'held' && guard.indicator_id && guard.output_name) {
+        return {
+          type: 'holds_for_bars',
+          bars: Number.isFinite(bars) && bars > 0 ? bars : 0,
+          guard: {
+            type: 'context_match',
+            indicator_id: guard.indicator_id,
+            output_name: guard.output_name,
+            field: guard.field || 'state',
+            value: contextValues,
+          },
+        }
+      }
+      if (guard.type === 'metric' && guard.variant === 'match' && guard.indicator_id && guard.output_name) {
+        return {
+          type: 'metric_match',
+          indicator_id: guard.indicator_id,
+          output_name: guard.output_name,
+          field: guard.field,
+          operator: guard.operator,
+          value: numericValue,
+        }
+      }
+      if (guard.type === 'metric' && guard.variant === 'held' && guard.indicator_id && guard.output_name) {
+        return {
+          type: 'holds_for_bars',
+          bars: Number.isFinite(bars) && bars > 0 ? bars : 0,
+          guard: {
+            type: 'metric_match',
+            indicator_id: guard.indicator_id,
+            output_name: guard.output_name,
+            field: guard.field,
+            operator: guard.operator,
+            value: numericValue,
+          },
+        }
+      }
+      if (guard.type === 'signal' && guard.variant === 'seen' && guard.indicator_id && guard.output_name) {
+        return {
+          type: 'signal_seen_within_bars',
+          indicator_id: guard.indicator_id,
+          output_name: guard.output_name,
+          event_key: guard.event_key,
+          lookback_bars: Number.isFinite(bars) && bars > 0 ? bars : 0,
+        }
+      }
+      if (guard.type === 'signal' && guard.variant === 'absent' && guard.indicator_id && guard.output_name) {
+        return {
+          type: 'signal_absent_within_bars',
+          indicator_id: guard.indicator_id,
+          output_name: guard.output_name,
+          event_key: guard.event_key,
+          lookback_bars: Number.isFinite(bars) && bars > 0 ? bars : 0,
+        }
+      }
+      return null
+    }).filter(Boolean)
+  ), [form.guards])
   const conditionSummary = useMemo(
     () => buildRuleConditionSummary({
       rule: {
@@ -122,11 +196,11 @@ export const RuleDrawer = ({
           output_name: form.trigger.output_name,
           event_key: form.trigger.event_key,
         },
-        guards: (form.guards || []).filter(Boolean).filter((entry) => entry?.indicator_id),
+        guards: previewGuards,
       },
       indicatorLookup: indicatorMap,
     }),
-    [form.trigger, form.guards, indicatorMap],
+    [form.trigger, previewGuards, indicatorMap],
   )
 
   if (!open) return null
@@ -149,7 +223,7 @@ export const RuleDrawer = ({
                 {initialValues ? 'Edit strategy rule' : 'Create strategy rule'}
               </DialogTitle>
               <p className="mt-1 text-sm text-slate-400">
-                One signal trigger is required. Add optional context or metric guards.
+                One signal trigger is required. Add optional context, metric, or signal guards.
               </p>
             </div>
             <button
@@ -221,12 +295,15 @@ export const RuleDrawer = ({
                     ) : (
                       form.guards.map((guard, index) => {
                         const indicator = indicatorMap.get(guard.indicator_id)
-                        const outputType = guard.type === 'context_match' ? 'context' : 'metric'
+                        const outputType = guard.type === 'ctx' ? 'context' : guard.type === 'metric' ? 'metric' : 'signal'
                         const indicatorOptions = indicatorOptionsForGuards(indicators, outputType)
-                        const outputOptions = outputOptionsForType(indicator, outputType)
+                        const outputOptions = outputOptionsForType(indicator, outputType, {
+                          selectedOutputName: guard.output_name,
+                        })
                         const contextOptions = contextFieldOptions(indicator, guard.output_name)
                         const metricOptions = metricFieldOptions(indicator, guard.output_name)
                         const valueOptions = contextValueOptions(indicator, guard.output_name, guard.field || 'state')
+                        const signalEventOptions = eventOptions(indicator, guard.output_name)
                         const selectedValues = Array.isArray(guard.value_text)
                           ? guard.value_text.filter(Boolean)
                           : [guard.value_text].filter(Boolean)
@@ -253,8 +330,33 @@ export const RuleDrawer = ({
                               onChange={(e) => handleGuardTypeChange(index, e.target.value)}
                               className="shrink-0 rounded border border-white/10 bg-black/40 px-2 py-1.5 text-xs text-slate-300 focus:outline-none"
                             >
-                              <option value="context_match">ctx</option>
-                              <option value="metric_match">metric</option>
+                              <option value="ctx">ctx</option>
+                              <option value="metric">metric</option>
+                              <option value="signal">signal</option>
+                            </select>
+                            <select
+                              value={guard.variant}
+                              onChange={(e) => handleGuardVariantChange(index, e.target.value)}
+                              className="shrink-0 rounded border border-white/10 bg-black/40 px-2 py-1.5 text-xs text-slate-300 focus:outline-none"
+                            >
+                              {guard.type === 'ctx' && (
+                                <>
+                                  <option value="match">match</option>
+                                  <option value="held">held</option>
+                                </>
+                              )}
+                              {guard.type === 'metric' && (
+                                <>
+                                  <option value="match">match</option>
+                                  <option value="held">held</option>
+                                </>
+                              )}
+                              {guard.type === 'signal' && (
+                                <>
+                                  <option value="seen">seen</option>
+                                  <option value="absent">absent</option>
+                                </>
+                              )}
                             </select>
                             <div className="w-36 shrink-0">
                               <DropdownSelect
@@ -273,7 +375,7 @@ export const RuleDrawer = ({
                                 disabled={!guard.indicator_id}
                               />
                             </div>
-                            {guard.type === 'context_match' && (
+                            {guard.type === 'ctx' && (
                               <>
                                 <div className="min-w-[14rem] flex-1">
                                   <input
@@ -377,9 +479,22 @@ export const RuleDrawer = ({
                                     />
                                   )}
                                 </div>
+                                {guard.variant === 'held' && (
+                                  <>
+                                    <span className="self-center text-xs text-slate-500">for</span>
+                                    <input
+                                      className="w-14 rounded border border-white/10 bg-black/40 px-2 py-1.5 text-xs text-slate-200 focus:outline-none"
+                                      type="number"
+                                      min="1"
+                                      value={guard.bars}
+                                      onChange={(e) => handleGuardFieldChange(index, 'bars', e.target.value)}
+                                      placeholder="bars"
+                                    />
+                                  </>
+                                )}
                               </>
                             )}
-                            {guard.type === 'metric_match' && (
+                            {guard.type === 'metric' && (
                               <>
                                 <div className="w-32 shrink-0">
                                   <DropdownSelect
@@ -408,6 +523,41 @@ export const RuleDrawer = ({
                                   onChange={(e) => handleGuardFieldChange(index, 'value', e.target.value)}
                                   placeholder="0.0"
                                   inputMode="decimal"
+                                />
+                                {guard.variant === 'held' && (
+                                  <>
+                                    <span className="self-center text-xs text-slate-500">for</span>
+                                    <input
+                                      className="w-14 rounded border border-white/10 bg-black/40 px-2 py-1.5 text-xs text-slate-200 focus:outline-none"
+                                      type="number"
+                                      min="1"
+                                      value={guard.bars}
+                                      onChange={(e) => handleGuardFieldChange(index, 'bars', e.target.value)}
+                                      placeholder="bars"
+                                    />
+                                  </>
+                                )}
+                              </>
+                            )}
+                            {guard.type === 'signal' && (
+                              <>
+                                <div className="w-40 shrink-0">
+                                  <DropdownSelect
+                                    value={guard.event_key}
+                                    onChange={(v) => handleGuardFieldChange(index, 'event_key', v)}
+                                    placeholder="Event"
+                                    options={signalEventOptions}
+                                    disabled={!guard.output_name}
+                                  />
+                                </div>
+                                <span className="self-center text-xs text-slate-500">within</span>
+                                <input
+                                  className="w-14 rounded border border-white/10 bg-black/40 px-2 py-1.5 text-xs text-slate-200 focus:outline-none"
+                                  type="number"
+                                  min="1"
+                                  value={guard.bars}
+                                  onChange={(e) => handleGuardFieldChange(index, 'bars', e.target.value)}
+                                  placeholder="bars"
                                 />
                               </>
                             )}
@@ -466,19 +616,19 @@ export const RuleDrawer = ({
                       <label className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Name</label>
                       <input
                         className="mt-2 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-slate-200"
-                        value={form.name}
-                        onChange={handleFieldChange('name')}
-                        placeholder={buildRuleDefaultName({
-                          intent: form.intent,
+                      value={form.name}
+                      onChange={handleFieldChange('name')}
+                      placeholder={buildRuleDefaultName({
+                        intent: form.intent,
                           trigger: {
                             type: 'signal_match',
                             indicator_id: form.trigger.indicator_id,
-                            output_name: form.trigger.output_name,
-                            event_key: form.trigger.event_key,
-                          },
-                          guards: form.guards,
-                          indicatorLookup: indicatorMap,
-                        })}
+                          output_name: form.trigger.output_name,
+                          event_key: form.trigger.event_key,
+                        },
+                        guards: previewGuards,
+                        indicatorLookup: indicatorMap,
+                      })}
                       />
                     </div>
                     <div>
