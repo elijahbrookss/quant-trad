@@ -14,7 +14,9 @@ tags:
 code_paths:
   - src/strategies
   - portal/backend/service/strategies
+  - portal/backend/controller/strategies.py
   - src/engines/bot_runtime/strategy
+  - portal/backend/service/bots/config_service.py
   - src/engines/bot_runtime/runtime/mixins/execution_loop.py
   - portal/backend/service/bots/strategy_loader.py
 ---
@@ -101,6 +103,12 @@ It is a normalized object contract, not a YAML document and not a loose dict blo
 - position policy,
 - risk policy references,
 - execution policy references.
+
+Saved strategy variants are an authoring-layer persistence concern above compile time.
+
+- A strategy may persist named parameter variant presets as `param_overrides`.
+- Variant resolution still happens before compile; the compiler/evaluator consume only concrete `rules` plus resolved `params`.
+- A bot remains one concrete strategy instance and may carry variant provenance plus the resolved params used to materialize that instance.
 
 ### 4.2 CompiledStrategySpec
 

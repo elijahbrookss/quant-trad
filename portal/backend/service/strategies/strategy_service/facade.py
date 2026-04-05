@@ -52,6 +52,11 @@ storage_upsert_strategy_indicator = persistence.upsert_strategy_indicator
 storage_delete_strategy_indicator = persistence.delete_strategy_indicator
 storage_upsert_strategy_rule = persistence.upsert_strategy_rule
 storage_delete_strategy_rule = persistence.delete_strategy_rule
+storage_list_strategy_variants = persistence.list_strategy_variants
+storage_get_strategy_variant = persistence.get_strategy_variant
+storage_ensure_default_strategy_variant = persistence.ensure_default_strategy_variant
+storage_upsert_strategy_variant = persistence.upsert_strategy_variant
+storage_delete_strategy_variant = persistence.delete_strategy_variant
 list_symbol_presets = persistence.list_symbol_presets
 upsert_symbol_preset = persistence.upsert_symbol_preset
 delete_symbol_preset = persistence.delete_symbol_preset
@@ -767,6 +772,7 @@ class StrategyRegistry:
                     snapshot=instrument_rec,
                 )
         logger.info("strategy_created | id=%s name=%s", strategy_id, clean_name)
+        storage_ensure_default_strategy_variant(strategy_id)
         return record.to_dict()
 
     def update(self, strategy_id: str, **fields: Any) -> Dict[str, Any]:
@@ -1079,6 +1085,73 @@ def get_strategy(strategy_id: str) -> Dict[str, Any]:
     """Return the serialised strategy record."""
 
     return _REGISTRY.get(strategy_id).to_dict()
+
+
+def list_strategy_variants(strategy_id: str) -> List[Dict[str, Any]]:
+    """Return persisted variants for a strategy, ensuring the default exists."""
+
+    _REGISTRY.get(strategy_id)
+    storage_ensure_default_strategy_variant(strategy_id)
+    return storage_list_strategy_variants(strategy_id)
+
+
+def get_strategy_variant(strategy_id: str, variant_id: str) -> Dict[str, Any]:
+    """Return one strategy variant scoped to a strategy."""
+
+    _REGISTRY.get(strategy_id)
+    variant = storage_get_strategy_variant(variant_id)
+    if not variant or str(variant.get("strategy_id") or "") != strategy_id:
+        raise KeyError("Strategy variant not found")
+    return variant
+
+
+def create_strategy_variant(
+    strategy_id: str,
+    *,
+    name: str,
+    description: Optional[str] = None,
+    param_overrides: Optional[Mapping[str, Any]] = None,
+    is_default: bool = False,
+) -> Dict[str, Any]:
+    """Create a saved variant for a strategy."""
+
+    _REGISTRY.get(strategy_id)
+    storage_ensure_default_strategy_variant(strategy_id)
+    return storage_upsert_strategy_variant(
+        {
+            "strategy_id": strategy_id,
+            "name": name,
+            "description": description,
+            "param_overrides": dict(param_overrides or {}),
+            "is_default": is_default,
+        }
+    )
+
+
+def update_strategy_variant(
+    strategy_id: str,
+    variant_id: str,
+    **fields: Any,
+) -> Dict[str, Any]:
+    """Update a saved strategy variant."""
+
+    current = get_strategy_variant(strategy_id, variant_id)
+    payload = {
+        "id": variant_id,
+        "strategy_id": strategy_id,
+        "name": fields.get("name", current.get("name")),
+        "description": fields.get("description", current.get("description")),
+        "param_overrides": fields.get("param_overrides", current.get("param_overrides") or {}),
+        "is_default": fields.get("is_default", current.get("is_default", False)),
+    }
+    return storage_upsert_strategy_variant(payload)
+
+
+def delete_strategy_variant(strategy_id: str, variant_id: str) -> None:
+    """Delete a saved non-default strategy variant."""
+
+    get_strategy_variant(strategy_id, variant_id)
+    storage_delete_strategy_variant(variant_id)
 
 
 def create_strategy(

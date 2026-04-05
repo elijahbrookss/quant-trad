@@ -43,6 +43,9 @@ class BotConfigService:
             "id": bot_id,
             "name": name,
             "strategy_id": strategy_id,
+            "strategy_variant_id": str(payload.get("strategy_variant_id") or "").strip() or None,
+            "strategy_variant_name": str(payload.get("strategy_variant_name") or "").strip() or None,
+            "resolved_params": self.validate_resolved_params(payload.get("resolved_params")),
             "timeframe": None,
             "mode": (payload.get("mode") or "instant").lower(),
             "run_type": run_type,
@@ -71,6 +74,12 @@ class BotConfigService:
 
         if "strategy_id" in payload and payload["strategy_id"] is not None:
             record["strategy_id"] = self.validate_strategy_id(payload.get("strategy_id"))
+        if "strategy_variant_id" in payload:
+            record["strategy_variant_id"] = str(payload.get("strategy_variant_id") or "").strip() or None
+        if "strategy_variant_name" in payload:
+            record["strategy_variant_name"] = str(payload.get("strategy_variant_name") or "").strip() or None
+        if "resolved_params" in payload:
+            record["resolved_params"] = self.validate_resolved_params(payload.get("resolved_params"))
         if "name" in payload and payload["name"] is not None:
             record["name"] = payload["name"]
         if "instrument_type" in payload:
@@ -193,6 +202,14 @@ class BotConfigService:
         if total < MIN_STARTING_WALLET:
             raise ValueError(f"wallet_config balances must sum to at least {MIN_STARTING_WALLET}")
         return {"balances": normalized}
+
+    @staticmethod
+    def validate_resolved_params(value: Optional[object]) -> Dict[str, Any]:
+        if value in (None, ""):
+            return {}
+        if not isinstance(value, Mapping):
+            raise ValueError("resolved_params must be an object map")
+        return {str(key): item for key, item in value.items()}
 
     @staticmethod
     def validate_bot_env(value: Optional[Mapping[str, Any]]) -> Dict[str, str]:

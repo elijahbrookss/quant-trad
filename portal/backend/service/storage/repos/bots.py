@@ -53,6 +53,14 @@ def upsert_bot(payload: Dict[str, Any]) -> None:
                     if candidate:
                         first_strategy = candidate
             record.strategy_id = first_strategy
+            if "strategy_variant_id" in payload:
+                variant_id = payload.get("strategy_variant_id")
+                record.strategy_variant_id = str(variant_id).strip() if variant_id else None
+            if "strategy_variant_name" in payload:
+                variant_name = payload.get("strategy_variant_name")
+                record.strategy_variant_name = str(variant_name).strip() if variant_name else None
+            if "resolved_params" in payload:
+                record.resolved_params = dict(_json_safe(payload.get("resolved_params") or {}))
             # datasource/exchange/timeframe are no longer stored on bots; derive from strategy at runtime
             record.mode = payload.get("mode") or record.mode
             record.run_type = payload.get("run_type") or record.run_type
@@ -228,7 +236,6 @@ def delete_bot(bot_id: str) -> None:
                 session.delete(record)
     except SQLAlchemyError as exc:
         logger.warning("bot_delete_failed | id=%s | error=%s", bot_id, exc)
-
 
 
 

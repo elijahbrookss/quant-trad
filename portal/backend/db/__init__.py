@@ -17,6 +17,7 @@ from .models import (
     StrategyInstrumentLink,
     StrategyRecord,
     StrategyRuleRecord,
+    StrategyVariantRecord,
     SymbolPresetRecord,
 )
 from .session import Database, db
@@ -39,6 +40,7 @@ __all__ = [
     "StrategyInstrumentLink",
     "StrategyRecord",
     "StrategyRuleRecord",
+    "StrategyVariantRecord",
     "SymbolPresetRecord",
     "db",
 ]

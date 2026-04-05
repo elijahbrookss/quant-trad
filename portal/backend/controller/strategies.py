@@ -159,6 +159,37 @@ class StrategyRuleUpdateRequest(BaseModel):
     enabled: Optional[bool] = None
 
 
+class StrategyVariantRequest(BaseModel):
+    """Payload for creating a saved strategy variant."""
+
+    name: str
+    description: Optional[str] = None
+    param_overrides: Dict[str, Any] = Field(default_factory=dict)
+    is_default: bool = False
+
+
+class StrategyVariantUpdateRequest(BaseModel):
+    """Patch payload for updating a saved strategy variant."""
+
+    name: Optional[str] = None
+    description: Optional[str] = None
+    param_overrides: Optional[Dict[str, Any]] = None
+    is_default: Optional[bool] = None
+
+
+class StrategyVariantOut(BaseModel):
+    """Response model representing a saved strategy variant."""
+
+    id: str
+    strategy_id: str
+    name: str
+    description: Optional[str] = None
+    param_overrides: Dict[str, Any] = Field(default_factory=dict)
+    is_default: bool
+    created_at: str
+    updated_at: str
+
+
 class ATMTemplateRequest(BaseModel):
     """Payload for saving an ATM template."""
 
@@ -336,6 +367,69 @@ async def delete_symbol_preset(preset_id: str) -> Response:
 
     strategy_service.delete_symbol_preset_service(preset_id)
 
+    return Response(status_code=204)
+
+
+@router.get("/{strategy_id}/variants", response_model=List[StrategyVariantOut])
+async def list_strategy_variants(strategy_id: str) -> List[Dict[str, Any]]:
+    """Return saved parameter variants for a strategy."""
+
+    try:
+        return strategy_service.list_strategy_variants(strategy_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/{strategy_id}/variants", response_model=StrategyVariantOut, status_code=201)
+async def create_strategy_variant(strategy_id: str, body: StrategyVariantRequest) -> Dict[str, Any]:
+    """Create a saved parameter variant for a strategy."""
+
+    try:
+        return strategy_service.create_strategy_variant(
+            strategy_id,
+            name=body.name,
+            description=body.description,
+            param_overrides=body.param_overrides,
+            is_default=body.is_default,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("strategy_variant_create_failed")
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.put("/{strategy_id}/variants/{variant_id}", response_model=StrategyVariantOut)
+async def update_strategy_variant(
+    strategy_id: str,
+    variant_id: str,
+    body: StrategyVariantUpdateRequest,
+) -> Dict[str, Any]:
+    """Update a saved strategy variant."""
+
+    try:
+        return strategy_service.update_strategy_variant(
+            strategy_id,
+            variant_id,
+            **body.dict(exclude_unset=True),
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("strategy_variant_update_failed")
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.delete("/{strategy_id}/variants/{variant_id}", status_code=204, response_class=Response)
+async def delete_strategy_variant(strategy_id: str, variant_id: str) -> Response:
+    """Delete a saved non-default strategy variant."""
+
+    try:
+        strategy_service.delete_strategy_variant(strategy_id, variant_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return Response(status_code=204)
 
 

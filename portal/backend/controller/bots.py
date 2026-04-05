@@ -51,10 +51,13 @@ class BotBase(BaseModel):
 
     name: str
     strategy_id: str
+    strategy_variant_id: Optional[str] = None
+    strategy_variant_name: Optional[str] = None
+    resolved_params: Dict[str, Any] = Field(default_factory=dict)
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     mode: str = Field(default="instant", pattern="^(instant|walk-forward)$")
-    run_type: str = Field(default="backtest", pattern="^(backtest|sim_trade)$")
+    run_type: str = Field(default="backtest", pattern="^(backtest|sim_trade|paper|live)$")
     playback_speed: float = Field(default=0.0, ge=0)
     backtest_start: Optional[str] = None
     backtest_end: Optional[str] = None
@@ -73,8 +76,12 @@ class BotUpdateRequest(BaseModel):
 
     name: Optional[str] = None
     strategy_id: Optional[str] = None
+    strategy_variant_id: Optional[str] = None
+    strategy_variant_name: Optional[str] = None
+    resolved_params: Optional[Dict[str, Any]] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
+    run_type: Optional[str] = Field(default=None, pattern="^(backtest|sim_trade|paper|live)$")
     mode: Optional[str] = Field(default=None, pattern="^(instant|walk-forward)$")
     playback_speed: Optional[float] = Field(default=None, ge=0)
     focus_symbol: Optional[str] = None
