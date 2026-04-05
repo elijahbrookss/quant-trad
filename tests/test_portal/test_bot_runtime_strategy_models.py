@@ -16,8 +16,7 @@ def test_strategy_to_dict_includes_rules_for_runtime_meta() -> None:
         exchange="demo",
         atm_template_id=None,
         atm_template={},
-        base_risk_per_trade=None,
-        global_risk_multiplier=None,
+        risk_config={},
         indicator_links=[
             StrategyIndicatorLink(
                 id="link-1",
@@ -64,8 +63,7 @@ def test_strategy_to_dict_rules_are_copied() -> None:
         exchange="demo",
         atm_template_id=None,
         atm_template={},
-        base_risk_per_trade=None,
-        global_risk_multiplier=None,
+        risk_config={},
         indicator_links=[],
         instrument_links=[],
         rules={"rule-1": {"id": "rule-1", "intent": "enter_long", "trigger": {"type": "signal_match", "indicator_id": "ind-1", "output_name": "signal", "event_key": "breakout_long"}, "guards": []}},

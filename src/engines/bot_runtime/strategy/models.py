@@ -78,8 +78,7 @@ class Strategy:
     exchange: str
     atm_template_id: Optional[str]
     atm_template: Optional[Dict[str, Any]]
-    base_risk_per_trade: Optional[float]
-    global_risk_multiplier: Optional[float]
+    risk_config: Dict[str, Any]
 
     # Relationships
     indicator_links: List[StrategyIndicatorLink]
@@ -104,8 +103,7 @@ class Strategy:
         param_overrides: Optional[Mapping[str, Any]] = None,
         atm_template_id: Optional[str] = None,
         atm_template: Optional[Dict[str, Any]] = None,
-        base_risk_per_trade: Optional[float] = None,
-        global_risk_multiplier: Optional[float] = None,
+        risk_config: Optional[Mapping[str, Any]] = None,
     ) -> Strategy:
         if variant_name:
             rules, resolved_params = template.instantiate_variant(
@@ -124,8 +122,7 @@ class Strategy:
             exchange=exchange,
             atm_template_id=atm_template_id,
             atm_template=atm_template,
-            base_risk_per_trade=base_risk_per_trade,
-            global_risk_multiplier=global_risk_multiplier,
+            risk_config=dict(risk_config or {}),
             indicator_links=list(indicator_links or []),
             instrument_links=list(instrument_links or []),
             rules=dict(rules),
@@ -167,8 +164,7 @@ class Strategy:
             "exchange": self.exchange,
             "atm_template_id": self.atm_template_id,
             "atm_template": self.atm_template,
-            "base_risk_per_trade": self.base_risk_per_trade,
-            "global_risk_multiplier": self.global_risk_multiplier,
+            "risk_config": deepcopy(self.risk_config),
             "indicator_links": [
                 {
                     "id": link.id,

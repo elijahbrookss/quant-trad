@@ -197,8 +197,7 @@ def test_existing_non_template_strategy_flow_still_compiles() -> None:
         exchange="demo",
         atm_template_id=None,
         atm_template={},
-        base_risk_per_trade=None,
-        global_risk_multiplier=None,
+        risk_config={},
         indicator_links=[
             StrategyIndicatorLink(
                 id="link-1",

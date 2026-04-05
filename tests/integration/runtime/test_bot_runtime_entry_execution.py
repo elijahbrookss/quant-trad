@@ -21,7 +21,6 @@ def _build_spot_engine(
         "contract_size": 1.0,
         "tick_value": 1.0,
         "initial_stop": {"atr_multiplier": 2.0},
-        "risk": {"base_risk_per_trade": base_risk_per_trade},
         "take_profit_orders": [{"id": "tp-1", "ticks": 10}],
         "execution_mode": execution_mode,
     }
@@ -40,7 +39,11 @@ def _build_spot_engine(
             "info": {"base_increment": "1"},
         },
     }
-    return LadderRiskEngine(config=config, instrument=instrument)
+    return LadderRiskEngine(
+        config=config,
+        instrument=instrument,
+        risk_config={"base_risk_per_trade": base_risk_per_trade},
+    )
 
 
 def _build_future_engine() -> LadderRiskEngine:
@@ -49,7 +52,6 @@ def _build_future_engine() -> LadderRiskEngine:
         "contract_size": 0.01,
         "tick_value": 0.05,
         "initial_stop": {"atr_multiplier": 1.0},
-        "risk": {"base_risk_per_trade": 1000},
         "take_profit_orders": [{"id": "tp-1", "ticks": 10}],
         "execution_mode": "market",
     }
@@ -74,7 +76,11 @@ def _build_future_engine() -> LadderRiskEngine:
             },
         },
     }
-    return LadderRiskEngine(config=config, instrument=instrument)
+    return LadderRiskEngine(
+        config=config,
+        instrument=instrument,
+        risk_config={"base_risk_per_trade": 1000},
+    )
 
 
 def _build_candle(*, close: float, atr: float) -> Candle:

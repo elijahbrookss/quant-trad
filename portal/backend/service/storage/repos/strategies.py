@@ -21,6 +21,7 @@ def _normalize_variant_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "name": name,
         "description": str(description).strip() if description else None,
         "param_overrides": dict(_json_safe(payload.get("param_overrides") or {})),
+        "atm_template_id": str(payload.get("atm_template_id") or "").strip() or None,
         "is_default": bool(payload.get("is_default", False)),
     }
 
@@ -112,6 +113,7 @@ def ensure_default_strategy_variant(strategy_id: str) -> Dict[str, Any]:
             "name": "default",
             "description": None,
             "param_overrides": {},
+            "atm_template_id": None,
             "is_default": True,
             "created_at": now,
             "updated_at": now,
@@ -138,6 +140,7 @@ def ensure_default_strategy_variant(strategy_id: str) -> Dict[str, Any]:
                 name="default",
                 description=None,
                 param_overrides={},
+                atm_template_id=None,
                 is_default=True,
                 created_at=now,
                 updated_at=now,
@@ -179,6 +182,7 @@ def upsert_strategy_variant(payload: Dict[str, Any]) -> Dict[str, Any]:
         record.name = normalized["name"]
         record.description = normalized["description"]
         record.param_overrides = normalized["param_overrides"]
+        record.atm_template_id = normalized["atm_template_id"]
         record.is_default = normalized["is_default"]
         record.updated_at = now
         if record.created_at is None:
@@ -224,9 +228,7 @@ def upsert_strategy(payload: Dict[str, Any]) -> None:
             record.exchange = payload.get("exchange")
             # indicator attachments are persisted in portal_strategy_indicators
             record.atm_template_id = payload.get("atm_template_id")
-            record.base_risk_per_trade = payload.get("base_risk_per_trade")
-            record.global_risk_multiplier = payload.get("global_risk_multiplier")
-            record.risk_overrides = payload.get("risk_overrides") or {}
+            record.risk_config = payload.get("risk_config") or {}
             record.updated_at = now
             if record.created_at is None:
                 record.created_at = now
@@ -453,7 +455,7 @@ def upsert_strategy_rule(payload: Dict[str, Any]) -> None:
             record.match = payload.get("match") or record.match
             record.description = payload.get("description")
             record.enabled = bool(payload.get("enabled", True))
-            record.conditions = list(payload.get("conditions") or [])
+            record.conditions = dict(_json_safe(payload.get("conditions") or {}))
             record.updated_at = now
             if record.created_at is None:
                 record.created_at = now
@@ -473,4 +475,3 @@ def delete_strategy_rule(rule_id: str) -> None:
                 session.delete(record)
     except SQLAlchemyError as exc:
         logger.warning("strategy_rule_delete_failed | id=%s | error=%s", rule_id, exc)
-
