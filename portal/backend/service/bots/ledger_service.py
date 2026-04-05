@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, Sequence
 
+from engines.bot_runtime.core.domain import StrategySignal
 from engines.bot_runtime.runtime.event_types import RUNTIME_PREFIX
 from ..storage.storage import list_bot_runtime_events
 
@@ -86,6 +87,9 @@ def _project_runtime_row(row: Mapping[str, Any]) -> Dict[str, Any]:
 
     context_payload = event_payload.get("context")
     context = dict(context_payload) if isinstance(context_payload, Mapping) else None
+    signal_id = str(event_payload.get("signal_id") or event_payload.get("decision_id") or "").strip() or None
+    source_type = str(event_payload.get("source_type") or ("runtime" if signal_id else "")).strip() or None
+    source_id = str(event_payload.get("source_id") or row.get("run_id") or "").strip() or None
 
     return {
         "event_id": payload_root.get("event_id") or row.get("event_id"),
@@ -110,6 +114,9 @@ def _project_runtime_row(row: Mapping[str, Any]) -> Dict[str, Any]:
         "symbol": payload_root.get("symbol"),
         "timeframe": payload_root.get("timeframe"),
         "trade_id": event_payload.get("trade_id"),
+        "signal_id": signal_id,
+        "source_type": source_type,
+        "source_id": source_id,
         "side": side,
         "qty": event_payload.get("qty"),
         "price": price,
@@ -152,4 +159,80 @@ def list_run_ledger_events(
     }
 
 
-__all__ = ["list_run_ledger_events"]
+def _list_all_run_runtime_rows(*, bot_id: str, run_id: str) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    after_seq = 0
+    while True:
+        batch = list_bot_runtime_events(
+            bot_id=str(bot_id),
+            run_id=str(run_id),
+            after_seq=after_seq,
+            limit=5000,
+            event_type_prefixes=[RUNTIME_PREFIX],
+        )
+        if not batch:
+            break
+        rows.extend(batch)
+        after_seq = max(int(batch[-1].get("seq") or after_seq), after_seq)
+        if len(batch) < 5000:
+            break
+    return rows
+
+
+def get_run_signal_detail(*, bot_id: str, run_id: str, signal_id: str) -> Dict[str, Any]:
+    target_signal_id = str(signal_id or "").strip()
+    if not target_signal_id:
+        raise ValueError("signal_id is required")
+    rows = _list_all_run_runtime_rows(bot_id=bot_id, run_id=run_id)
+    signal_row: Optional[Dict[str, Any]] = None
+    signal_payload: Dict[str, Any] = {}
+    signal_root: Dict[str, Any] = {}
+    for row in rows:
+        payload_root = _to_mapping(row.get("payload"))
+        event_payload = _to_mapping(payload_root.get("payload"))
+        event_name = str(payload_root.get("event_name") or row.get("event_type") or "").strip().upper()
+        if event_name != "SIGNAL_EMITTED":
+            continue
+        row_signal_id = str(event_payload.get("signal_id") or event_payload.get("decision_id") or "").strip()
+        if row_signal_id != target_signal_id:
+            continue
+        signal_row = dict(row)
+        signal_payload = event_payload
+        signal_root = payload_root
+        break
+    if signal_row is None:
+        raise KeyError("Runtime signal not found")
+
+    projected_signal_event = _project_runtime_row(signal_row)
+    signal_event_id = str(projected_signal_event.get("event_id") or "").strip()
+    related_events = [
+        _project_runtime_row(row)
+        for row in rows
+        if (
+            str(_to_mapping(row.get("payload")).get("root_id") or "").strip() == signal_event_id
+            or str(row.get("event_id") or "").strip() == signal_event_id
+        )
+    ]
+    related_events.sort(key=lambda item: int(item.get("seq") or 0))
+    signal = StrategySignal.from_runtime_event_payload(
+        signal_payload,
+        default_source_id=str(run_id),
+    ).to_dict()
+    if not signal.get("signal_id"):
+        signal["signal_id"] = target_signal_id
+    signal["source_type"] = signal.get("source_type") or "runtime"
+    signal["source_id"] = signal.get("source_id") or str(run_id)
+    return {
+        "bot_id": str(bot_id),
+        "run_id": str(run_id),
+        "signal": signal,
+        "audit": {
+            "signal_event": projected_signal_event,
+            "decision_artifact": _to_mapping(signal_payload.get("decision_artifact")),
+            "related_events": related_events,
+            "correlation_id": signal_root.get("correlation_id"),
+        },
+    }
+
+
+__all__ = ["get_run_signal_detail", "list_run_ledger_events"]

@@ -19,6 +19,7 @@ def _variant_payload(
     name: str = "aggressive",
     description: str | None = None,
     param_overrides: dict[str, Any] | None = None,
+    atm_template_id: str | None = None,
     is_default: bool = False,
 ) -> dict[str, Any]:
     return {
@@ -27,6 +28,7 @@ def _variant_payload(
         "name": name,
         "description": description,
         "param_overrides": dict(param_overrides or {"conviction_min": 0.5}),
+        "atm_template_id": atm_template_id,
         "is_default": is_default,
         "created_at": "2026-04-04T00:00:00Z",
         "updated_at": "2026-04-04T00:00:00Z",
@@ -65,6 +67,7 @@ def test_strategy_variant_crud_routes_are_thin_service_wrappers(monkeypatch) -> 
             name=payload.get("name", "aggressive"),
             description=payload.get("description"),
             param_overrides=payload.get("param_overrides"),
+            atm_template_id=payload.get("atm_template_id"),
             is_default=payload.get("is_default", False),
         )
 
@@ -85,6 +88,7 @@ def test_strategy_variant_crud_routes_are_thin_service_wrappers(monkeypatch) -> 
             "name": "aggressive",
             "description": "Looser threshold",
             "param_overrides": {"conviction_min": 0.5},
+            "atm_template_id": "atm-fast",
             "is_default": False,
         },
     )
@@ -94,6 +98,7 @@ def test_strategy_variant_crud_routes_are_thin_service_wrappers(monkeypatch) -> 
         "name": "aggressive",
         "description": "Looser threshold",
         "param_overrides": {"conviction_min": 0.5},
+        "atm_template_id": "atm-fast",
         "is_default": False,
     }
 
@@ -102,6 +107,7 @@ def test_strategy_variant_crud_routes_are_thin_service_wrappers(monkeypatch) -> 
         json={
             "description": "Updated",
             "param_overrides": {"conviction_min": 0.55},
+            "atm_template_id": "atm-slower",
         },
     )
     assert response.status_code == 200
@@ -110,6 +116,7 @@ def test_strategy_variant_crud_routes_are_thin_service_wrappers(monkeypatch) -> 
         "variant_id": "variant-1",
         "description": "Updated",
         "param_overrides": {"conviction_min": 0.55},
+        "atm_template_id": "atm-slower",
     }
 
     response = client.delete("/api/strategies/strategy-1/variants/variant-1")
@@ -132,3 +139,49 @@ def test_strategy_variant_delete_returns_400_for_default_variant_guard(monkeypat
 
     assert response.status_code == 400
     assert "Default strategy variant cannot be deleted" in str(response.json()["detail"])
+
+
+def test_strategy_preview_and_compile_routes_forward_variant_id(monkeypatch) -> None:
+    client = _client()
+    captured: dict[str, Any] = {}
+
+    def _preview(strategy_id: str, **payload: Any) -> dict[str, Any]:
+        captured["preview"] = {"strategy_id": strategy_id, **payload}
+        return {"preview_id": "preview-1"}
+
+    def _compile(strategy_id: str, **payload: Any) -> dict[str, Any]:
+        captured["compile"] = {"strategy_id": strategy_id, **payload}
+        return {"strategy_id": strategy_id, "variant": {"id": payload.get("variant_id")}}
+
+    monkeypatch.setattr(controller.strategy_service, "run_strategy_preview", _preview)
+    monkeypatch.setattr(controller.strategy_service, "compile_strategy_contract", _compile)
+
+    response = client.post(
+        "/api/strategies/strategy-1/preview",
+        json={
+            "start": "2026-02-01T00:00:00Z",
+            "end": "2026-02-01T01:00:00Z",
+            "interval": "1h",
+            "instrument_ids": ["instrument-1"],
+            "variant_id": "variant-1",
+        },
+    )
+    assert response.status_code == 200
+    assert captured["preview"] == {
+        "strategy_id": "strategy-1",
+        "start": "2026-02-01T00:00:00Z",
+        "end": "2026-02-01T01:00:00Z",
+        "interval": "1h",
+        "instrument_ids": ["instrument-1"],
+        "variant_id": "variant-1",
+    }
+
+    response = client.post(
+        "/api/strategies/strategy-1/compile",
+        json={"variant_id": "variant-1"},
+    )
+    assert response.status_code == 200
+    assert captured["compile"] == {
+        "strategy_id": "strategy-1",
+        "variant_id": "variant-1",
+    }

@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..service.bots import bot_service
-from ..service.bots.ledger_service import list_run_ledger_events
+from ..service.bots.ledger_service import get_run_signal_detail, list_run_ledger_events
 from ..service.bots.telemetry_stream import telemetry_hub
 from ..service.bots.botlens_series_service import get_series_history, get_series_window, list_series_keys
 router = APIRouter()
@@ -54,6 +54,7 @@ class BotBase(BaseModel):
     strategy_variant_id: Optional[str] = None
     strategy_variant_name: Optional[str] = None
     resolved_params: Dict[str, Any] = Field(default_factory=dict)
+    risk_config: Dict[str, Any] = Field(default_factory=dict)
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     mode: str = Field(default="instant", pattern="^(instant|walk-forward)$")
@@ -79,6 +80,7 @@ class BotUpdateRequest(BaseModel):
     strategy_variant_id: Optional[str] = None
     strategy_variant_name: Optional[str] = None
     resolved_params: Optional[Dict[str, Any]] = None
+    risk_config: Optional[Dict[str, Any]] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     run_type: Optional[str] = Field(default=None, pattern="^(backtest|sim_trade|paper|live)$")
@@ -95,6 +97,7 @@ class BotResponse(BotBase):
     """Response payload describing a bot."""
 
     id: str
+    atm_template_id: Optional[str] = None
     status: str
     last_run_at: Optional[str] = None
     last_stats: Dict[str, Any] = Field(default_factory=dict)
@@ -248,6 +251,24 @@ async def bot_run_ledger_events(
             limit=max(1, int(limit or 500)),
             event_names=event_name or None,
         )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/{bot_id}/runs/{run_id}/signals/{signal_id}")
+async def bot_run_signal_detail(
+    bot_id: str,
+    run_id: str,
+    signal_id: str,
+) -> Dict[str, Any]:
+    try:
+        return get_run_signal_detail(
+            bot_id=str(bot_id),
+            run_id=str(run_id),
+            signal_id=str(signal_id),
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 

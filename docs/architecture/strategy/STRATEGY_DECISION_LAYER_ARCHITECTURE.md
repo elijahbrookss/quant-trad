@@ -107,8 +107,18 @@ It is a normalized object contract, not a YAML document and not a loose dict blo
 Saved strategy variants are an authoring-layer persistence concern above compile time.
 
 - A strategy may persist named parameter variant presets as `param_overrides`.
+- The saved default variant is the base parameter set for the strategy.
+- Non-default variants resolve as `default param_overrides + selected param_overrides` before compile.
 - Variant resolution still happens before compile; the compiler/evaluator consume only concrete `rules` plus resolved `params`.
 - A bot remains one concrete strategy instance and may carry variant provenance plus the resolved params used to materialize that instance.
+
+Authoring/read API shape:
+- `GET /api/strategies/{strategy_id}` returns one nested strategy read contract, not a flat mixed-provenance blob,
+- `strategy` contains authored core state and execution/risk references,
+- `bindings` contains instrument and indicator attachments,
+- `decision` contains rule authoring state,
+- `read_context` contains derived resolution facts such as missing indicators and instrument messages,
+- `variants` exposes persisted variant records for the strategy.
 
 ### 4.2 CompiledStrategySpec
 
@@ -159,6 +169,19 @@ Preview is not allowed to implement a parallel decision grammar or reconstruct d
 
 Preview derives its read models from the same decision artifacts and selected decision candidates that bot runtime uses.
 
+Preview now exposes one explicit retained parent identity per preview execution:
+- `preview_id` is the parent producer identity for retrievable strategy preview signals,
+- `machine.signals` is the machine-first preview signal contract,
+- `ui.overlays` is the companion preview rendering payload.
+- `machine.decision_artifacts` remains the rich audit contract and may carry audit-only `observed_outputs` and `referenced_outputs` snapshots derived from the current-bar engine frame.
+- Preview compilation resolves through the selected strategy variant when `variant_id` is provided, otherwise through the saved default variant.
+
+Strategy preview retrieval remains under the strategy route family; it does not reuse bot `run_id`.
+
+The strategy route family also exposes an explicit compile/validation surface:
+- `POST /api/strategies/{strategy_id}/compile` validates and compiles the selected-or-default variant into one concrete `CompiledStrategySpec`,
+- `POST /api/strategies/{strategy_id}/preview` reuses that same variant resolution and compiled contract before replay begins.
+
 ### 4.5 Bot runtime integration
 
 Bot runtime remains responsible for:
@@ -167,7 +190,18 @@ Bot runtime remains responsible for:
 - execution realism,
 - fills, costs, and lifecycle events.
 
-Bot runtime consumes the selected decision candidate and may reject it downstream for explicit reasons represented by a canonical rejection artifact.
+Bot runtime does not consume the full selected decision artifact directly as its execution contract.
+
+Bot runtime consumes an explicit engine-facing `StrategySignal` mapped from the selected decision artifact.
+
+Boundary rules:
+- the selected decision artifact remains the canonical audit/preview object,
+- audit-only output world state such as `observed_outputs` and `referenced_outputs` belongs on the decision artifact path, not on the engine signal,
+- the engine signal is immutable and limited to execution-facing fields,
+- the mapper is the only allowed transformation from selected decision artifact to execution-driving signal,
+- downstream rejection artifacts still reference the originating decision artifact.
+
+Bot runtime may reject the selected decision candidate downstream for explicit reasons represented by a canonical rejection artifact.
 
 ## 5) State model
 
@@ -221,7 +255,10 @@ Representative shape:
   },
   "risk_policy": {
     "base_risk_per_trade": 250.0,
-    "global_risk_multiplier": 1.0
+    "global_risk_multiplier": 1.0,
+    "instrument_multipliers": {
+      "ES": 1.0
+    }
   },
   "execution_policy": {
     "atm_template_id": "atm-template-id"
@@ -619,7 +656,30 @@ Exit management in v1 remains outside the decision layer and stays owned by exec
 
 That keeps the strategy layer aligned with the current ladder/ATM runtime model instead of introducing speculative abstraction.
 
-The selected decision candidate exposes the emitted intent plus the originating `decision_id`.
+The selected decision candidate exposes the emitted intent, the originating `decision_id`, and a machine-meaningful `strategy_hash` derived from the compiled strategy semantics.
+
+The engine-facing `StrategySignal` is the minimal projection of that selected artifact and currently carries:
+- `epoch`
+- `direction`
+- `signal_id`
+- `source_type`
+- `source_id`
+- `decision_id`
+- `rule_id`
+- `intent`
+- `event_key`
+- `strategy_hash`
+
+It intentionally excludes preview-only richness such as:
+- full trigger traces,
+- guard evaluation details,
+- suppression/debug metadata,
+- display labels or rule descriptions.
+
+Current source identity rules:
+- runtime `StrategySignal`: `source_type=runtime`, `source_id=<run_id>`,
+- strategy preview signal read model: `source_type=strategy_preview`, `source_id=<preview_id>`,
+- indicator preview signals stay ephemeral response data and do not introduce retained retrieval state.
 
 ## 6.6 PositionPolicySpec
 
@@ -643,10 +703,15 @@ It is not left as an accidental runtime behavior.
 
 Risk policy remains separate from decision rules.
 
-V1 risk policy should keep using the current canonical fields already supported by runtime:
+Current v1 runtime contract uses a dedicated `risk_config` payload resolved before engine init:
 - `base_risk_per_trade`
 - `global_risk_multiplier`
-- instrument-scoped overrides only where a canonical runtime field already exists
+- `instrument_multipliers`
+
+Runtime resolution materializes one concrete per-series risk contract:
+- base risk per trade,
+- global risk multiplier,
+- per-instrument multiplier.
 
 Risk policy does not decide whether a rule matched.
 It decides how much can be sized once an intent exists.
@@ -660,8 +725,11 @@ For v1, the existing ATM template contract remains the execution-policy surface.
 That means:
 - ATM templates are kept,
 - ATM normalization is kept,
+- ATM no longer carries money-risk sizing fields,
 - trade lifecycle management remains in bot runtime,
-- decision rules do not embed stop/target/execution details.
+- decision rules do not embed stop/target/execution details,
+- variants may select ATM templates by reference,
+- bots persist the selected ATM provenance and concrete risk config before runtime starts.
 
 ## 6.9 RejectionArtifact
 
@@ -677,6 +745,7 @@ Canonical shape:
   "rejection_id": "strategy-1:instrument-es:1712083200:rule-1:position_policy",
   "decision_id": "strategy-1:instrument-es:1712083200:rule-1",
   "strategy_id": "strategy-1",
+  "strategy_hash": "7f4a5b...",
   "instrument_id": "instrument-es",
   "symbol": "ES",
   "bar_epoch": 1712083200,
