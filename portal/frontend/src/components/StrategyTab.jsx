@@ -3,11 +3,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   attachStrategyIndicator,
   createStrategy,
+  createStrategyVariant,
   createStrategyRule,
+  deleteStrategyVariant,
   deleteStrategy,
   deleteStrategyRule,
   detachStrategyIndicator,
   updateStrategy,
+  updateStrategyVariant,
   updateStrategyRule,
 } from '../adapters/strategy.adapter.js'
 import { createInstrument } from '../adapters/instrument.adapter.js'
@@ -16,8 +19,10 @@ import StrategyDetails from './strategy/StrategyDetails.jsx'
 import StrategyFormModal from './strategy/modals/StrategyFormModal.jsx'
 import { RuleDrawer } from './strategy/rules/RuleDrawer.jsx'
 import InstrumentFormModal from './strategy/modals/InstrumentFormModal.jsx'
+import VariantFormModal from './strategy/modals/VariantFormModal.jsx'
 import ActionButton from './strategy/ui/ActionButton.jsx'
 import { useChartState } from '../contexts/ChartStateContext.jsx'
+import { usePortalSettings } from '../contexts/PortalSettingsContext.jsx'
 import { createLogger } from '../utils/logger.js'
 import { templateKey, cloneATMTemplateSafe } from '../utils/strategy/atmTemplate.js'
 import useStrategyData from '../hooks/strategy/useStrategyData.js'
@@ -26,18 +31,26 @@ import useIndicatorCache from '../hooks/strategy/useIndicatorCache.js'
 import useInstrumentMetadata from '../hooks/strategy/useInstrumentMetadata.js'
 import useStrategyPreview from '../hooks/strategy/useStrategyPreview.js'
 import { extractRuleFlow } from './strategy/rules/ruleUtils.js'
+import { BotCreateModal } from './bots/create/BotCreateModal.jsx'
+import { useBotCreateController } from './bots/create/useBotCreateController.js'
 
 const StrategyTab = ({ chartId }) => {
   const { getChart, updateChart } = useChartState()
+  const { settings } = usePortalSettings()
   const chartSnapshot = getChart(chartId)
   const logger = useMemo(() => createLogger('StrategyTab', { chartId }), [chartId])
   const { info, error } = logger
 
   const [errorMessage, setErrorMessage] = useState(null)
+  const [botCreateOpen, setBotCreateOpen] = useState(false)
+  const [botCreateError, setBotCreateError] = useState(null)
+  const [botCreateNotice, setBotCreateNotice] = useState(null)
   const [strategyModal, setStrategyModal] = useState({ open: false, strategy: null })
   const [ruleModal, setRuleModal] = useState({ open: false, rule: null, mode: 'create' })
+  const [variantModal, setVariantModal] = useState({ open: false, variant: null, mode: 'create' })
   const [savingStrategy, setSavingStrategy] = useState(false)
   const [savingRule, setSavingRule] = useState(false)
+  const [savingVariant, setSavingVariant] = useState(false)
   const [instrumentModal, setInstrumentModal] = useState({ open: false, defaults: null })
   const [savingInstrument, setSavingInstrument] = useState(false)
   const [instrumentError, setInstrumentError] = useState(null)
@@ -99,9 +112,46 @@ const StrategyTab = ({ chartId }) => {
     })
     return map
   }, [selectedStrategyInstruments])
+  const {
+    form: botCreateForm,
+    walletError: botWalletError,
+    handleChange: handleBotCreateChange,
+    handleBacktestRangeChange: handleBotBacktestRangeChange,
+    handleStrategySelect: handleBotStrategySelect,
+    handleVariantSelect: handleBotVariantSelect,
+    handleWalletBalanceChange: handleBotWalletBalanceChange,
+    handleWalletBalanceAdd: handleBotWalletBalanceAdd,
+    handleWalletBalanceRemove: handleBotWalletBalanceRemove,
+    prepareForCreate: prepareBotCreate,
+    submit: submitBotCreate,
+  } = useBotCreateController({
+    strategies,
+    logger,
+    defaults: {
+      snapshotIntervalMs: Number(settings?.botDefaults?.snapshotIntervalMs || 1000),
+      envText: settings?.botDefaults?.envText || '',
+    },
+    onCreated: (payload) => {
+      const createdStrategyName =
+        strategies.find((strategy) => strategy.id === payload?.strategy_id)?.name
+        || selectedStrategy?.name
+        || 'the selected strategy'
+      setBotCreateOpen(false)
+      setBotCreateError(null)
+      setBotCreateNotice(
+        payload?.name
+          ? `Bot '${payload.name}' created from ${createdStrategyName}.`
+          : 'Bot created.',
+      )
+    },
+  })
 
   useEffect(() => {
     setQuickUpdateStatus({ saving: false, error: null, savedAt: null })
+  }, [selectedStrategy?.id])
+
+  useEffect(() => {
+    setBotCreateNotice(null)
   }, [selectedStrategy?.id])
 
   const displayError = errorMessage || dataError
@@ -241,6 +291,20 @@ const StrategyTab = ({ chartId }) => {
   }
   const closeRuleModal = () => setRuleModal({ open: false, rule: null, mode: 'create' })
 
+  const openCreateVariant = useCallback(() => {
+    setErrorMessage(null)
+    setVariantModal({ open: true, variant: null, mode: 'create' })
+  }, [])
+
+  const openEditVariant = useCallback((variant) => {
+    setErrorMessage(null)
+    setVariantModal({ open: true, variant, mode: 'edit' })
+  }, [])
+
+  const closeVariantModal = useCallback(() => {
+    setVariantModal({ open: false, variant: null, mode: 'create' })
+  }, [])
+
   const handleStrategySubmit = async (payload, options = {}) => {
     const { closeOnSuccess = true } = options || {}
     setSavingStrategy(true)
@@ -379,6 +443,68 @@ const StrategyTab = ({ chartId }) => {
     }
   }
 
+  const handleVariantSubmit = async (payload) => {
+    if (!selectedStrategy) return
+    setSavingVariant(true)
+    setErrorMessage(null)
+    try {
+      if (variantModal.mode === 'edit' && variantModal.variant?.id) {
+        await updateStrategyVariant(selectedStrategy.id, variantModal.variant.id, payload)
+        info('strategy_variant_updated', { strategyId: selectedStrategy.id, variantId: variantModal.variant.id })
+      } else {
+        await createStrategyVariant(selectedStrategy.id, payload)
+        info('strategy_variant_created', { strategyId: selectedStrategy.id, name: payload?.name })
+      }
+      await refreshStrategies()
+      closeVariantModal()
+    } catch (err) {
+      setErrorMessage(err?.message || 'Failed to save variant')
+      error('strategy_variant_save_failed', err)
+    } finally {
+      setSavingVariant(false)
+    }
+  }
+
+  const handleDeleteVariant = useCallback(
+    async (variant) => {
+      if (!selectedStrategy || !variant?.id || variant?.is_default) return
+      setErrorMessage(null)
+      try {
+        await deleteStrategyVariant(selectedStrategy.id, variant.id)
+        info('strategy_variant_deleted', { strategyId: selectedStrategy.id, variantId: variant.id })
+        await refreshStrategies()
+      } catch (err) {
+        setErrorMessage(err?.message || 'Failed to delete variant')
+        error('strategy_variant_delete_failed', err)
+      }
+    },
+    [selectedStrategy, refreshStrategies, info, error],
+  )
+
+  const handleOpenBotCreate = useCallback(() => {
+    if (!selectedStrategy?.id) return
+    setBotCreateNotice(null)
+    setBotCreateError(null)
+    prepareBotCreate({
+      strategyId: selectedStrategy.id,
+      runType: 'backtest',
+    })
+    setBotCreateOpen(true)
+  }, [prepareBotCreate, selectedStrategy])
+
+  const handleBotCreateSubmit = useCallback(
+    async (event) => {
+      setBotCreateError(null)
+      try {
+        await submitBotCreate(event)
+      } catch (err) {
+        error('strategy_page_bot_create_failed', err)
+        setBotCreateError(err?.message || 'Unable to create bot')
+      }
+    },
+    [submitBotCreate, error],
+  )
+
   return (
     <div className="space-y-5">
       {/* Header */}
@@ -404,6 +530,12 @@ const StrategyTab = ({ chartId }) => {
           <p className="text-xs text-rose-200">{displayError}</p>
         </div>
       )}
+
+      {botCreateNotice ? (
+        <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2">
+          <p className="text-xs text-emerald-200">{botCreateNotice}</p>
+        </div>
+      ) : null}
 
       <div className={`grid gap-5 ${strategyListCollapsed ? 'lg:grid-cols-[56px_minmax(0,1fr)]' : 'lg:grid-cols-[320px_minmax(0,1fr)]'}`}>
         <div className="space-y-3">
@@ -482,6 +614,9 @@ const StrategyTab = ({ chartId }) => {
               onEditRule={(rule) => openRuleModal(rule)}
               onDuplicateRule={(rule) => openRuleModal({ ...rule, name: `${rule?.name || 'Rule'} copy` }, { mode: 'create' })}
               onDeleteRule={handleDeleteRule}
+              onAddVariant={openCreateVariant}
+              onEditVariant={openEditVariant}
+              onDeleteVariant={handleDeleteVariant}
               onRunPreview={runPreview}
               previewWindow={previewWindow}
               setPreviewWindow={setPreviewWindow}
@@ -495,6 +630,7 @@ const StrategyTab = ({ chartId }) => {
               atmTemplates={atmTemplates}
               onQuickUpdate={handleQuickUpdate}
               quickUpdateStatus={quickUpdateStatus}
+              onLaunchBot={handleOpenBotCreate}
             />
           ) : (
             <div className="flex items-center justify-center rounded-xl border border-dashed border-white/[0.06] bg-black/30 p-12 text-center">
@@ -536,6 +672,37 @@ const StrategyTab = ({ chartId }) => {
         onCancel={closeInstrumentModal}
         submitting={savingInstrument}
         error={instrumentError}
+      />
+
+      <VariantFormModal
+        open={variantModal.open}
+        initialValues={variantModal.variant}
+        onSubmit={handleVariantSubmit}
+        onCancel={closeVariantModal}
+        submitting={savingVariant}
+        error={errorMessage}
+      />
+
+      <BotCreateModal
+        open={botCreateOpen}
+        onClose={() => {
+          setBotCreateOpen(false)
+          setBotCreateError(null)
+        }}
+        form={botCreateForm}
+        strategies={strategies}
+        strategiesLoading={loading}
+        strategyError={dataError}
+        walletError={botWalletError}
+        onSubmit={handleBotCreateSubmit}
+        onChange={handleBotCreateChange}
+        onBacktestRangeChange={handleBotBacktestRangeChange}
+        onStrategySelect={handleBotStrategySelect}
+        onVariantSelect={handleBotVariantSelect}
+        onWalletBalanceChange={handleBotWalletBalanceChange}
+        onWalletBalanceAdd={handleBotWalletBalanceAdd}
+        onWalletBalanceRemove={handleBotWalletBalanceRemove}
+        error={botCreateError}
       />
     </div>
   )

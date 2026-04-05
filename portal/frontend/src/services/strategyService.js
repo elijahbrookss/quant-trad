@@ -27,6 +27,34 @@ export const strategyService = {
   },
 
   /**
+   * List saved variants for a strategy.
+   */
+  async getVariants(strategyId) {
+    return api.get(`/strategies/${strategyId}/variants`)
+  },
+
+  /**
+   * Create a saved strategy variant.
+   */
+  async createVariant(strategyId, data) {
+    return api.post(`/strategies/${strategyId}/variants`, data)
+  },
+
+  /**
+   * Update a saved strategy variant.
+   */
+  async updateVariant(strategyId, variantId, data) {
+    return api.put(`/strategies/${strategyId}/variants/${variantId}`, data)
+  },
+
+  /**
+   * Delete a saved strategy variant.
+   */
+  async deleteVariant(strategyId, variantId) {
+    return api.delete(`/strategies/${strategyId}/variants/${variantId}`)
+  },
+
+  /**
    * Update an existing strategy.
    */
   async update(id, data) {

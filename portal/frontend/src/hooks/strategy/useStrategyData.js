@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 
-import { fetchATMTemplates, fetchStrategies } from '../../adapters/strategy.adapter.js'
+import {
+  fetchATMTemplates,
+  fetchStrategiesWithVariants,
+} from '../../adapters/strategy.adapter.js'
 import { fetchIndicators } from '../../adapters/indicator.adapter.js'
 
 const useStrategyData = ({ logger } = {}) => {
@@ -14,10 +17,15 @@ const useStrategyData = ({ logger } = {}) => {
     setLoading(true)
     setError(null)
     try {
-      const payload = await fetchStrategies()
-      const list = Array.isArray(payload) ? payload : []
-      setStrategies(list)
-      return list
+      const withVariants = await fetchStrategiesWithVariants({
+        onVariantError: (strategyId, variantErr) => {
+          if (logger?.warn) {
+            logger.warn('strategy_variants_load_failed', { strategyId, error: variantErr?.message || variantErr })
+          }
+        },
+      })
+      setStrategies(withVariants)
+      return withVariants
     } catch (err) {
       const message = err?.message || 'Unable to load strategies'
       setError(message)

@@ -43,13 +43,6 @@ export const AttachedIndicators = ({
     setSelected('')
   }
 
-  const handleFocusAttach = () => {
-    if (!attachRef.current) return
-    attachRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    const focusTarget = attachRef.current.querySelector('button')
-    focusTarget?.focus()
-  }
-
   const handleDetachRequest = (entry) => {
     const impact = usageMap.get(entry.id) || 0
     if (requiresDetachConfirm(entry.id, strategy?.rules)) {
@@ -108,13 +101,9 @@ export const AttachedIndicators = ({
       </div>
 
       {entries.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-white/10 bg-black/30 p-4 text-sm text-slate-400">
-          <p>No indicators attached. Add indicators from QuantLab, then compose rule flows from their typed outputs.</p>
-          <div className="mt-3">
-            <ActionButton variant="ghost" onClick={handleFocusAttach}>
-              Attach indicator
-            </ActionButton>
-          </div>
+        <div className="rounded-xl border border-dashed border-white/8 bg-black/20 px-4 py-5">
+          <p className="text-sm text-slate-400">No indicators attached yet.</p>
+          <p className="mt-1 text-xs text-slate-600">Use the attach control above to bring typed outputs into this strategy.</p>
         </div>
       ) : (
         <div className="divide-y divide-white/5 rounded-xl border border-white/10 bg-black/30">

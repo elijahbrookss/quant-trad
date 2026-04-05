@@ -50,12 +50,78 @@ export async function fetchStrategies() {
   return handleResponse(res)
 }
 
+/** Fetch all strategies and hydrate each one with its saved variants. */
+export async function fetchStrategiesWithVariants({ onVariantError } = {}) {
+  const payload = await fetchStrategies()
+  const list = Array.isArray(payload) ? payload : []
+  return Promise.all(
+    list.map(async (strategy) => {
+      const strategyId = strategy?.id
+      if (!strategyId) {
+        return { ...strategy, variants: [] }
+      }
+      try {
+        const variants = await fetchStrategyVariants(strategyId)
+        return {
+          ...strategy,
+          variants: Array.isArray(variants) ? variants : [],
+        }
+      } catch (err) {
+        if (typeof onVariantError === 'function') {
+          onVariantError(strategyId, err)
+        }
+        return {
+          ...strategy,
+          variants: [],
+        }
+      }
+    }),
+  )
+}
+
 /** Create a new strategy. */
 export async function createStrategy(payload) {
   const res = await fetch(`${BASE}/api/strategies/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
+/** Fetch saved variants for a strategy. */
+export async function fetchStrategyVariants(strategyId) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}/variants`, { mode: 'cors' })
+  return handleResponse(res)
+}
+
+/** Create a saved strategy variant. */
+export async function createStrategyVariant(strategyId, payload) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}/variants`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
+/** Update a saved strategy variant. */
+export async function updateStrategyVariant(strategyId, variantId, payload) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}/variants/${variantId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
+/** Delete a saved non-default strategy variant. */
+export async function deleteStrategyVariant(strategyId, variantId) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}/variants/${variantId}`, {
+    method: 'DELETE',
     mode: 'cors',
   })
   return handleResponse(res)
