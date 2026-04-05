@@ -107,11 +107,13 @@ class BotResponse(BotBase):
     runtime: Optional[Dict[str, Any]] = None
 
 
+@router.get("", response_model=List[BotResponse], include_in_schema=False)
 @router.get("/", response_model=List[BotResponse])
 async def list_bots() -> List[Dict[str, Any]]:
     return bot_service.list_bots()
 
 
+@router.post("", response_model=BotResponse, status_code=201, include_in_schema=False)
 @router.post("/", response_model=BotResponse, status_code=201)
 async def create_bot(body: BotCreateRequest) -> Dict[str, Any]:
     try:

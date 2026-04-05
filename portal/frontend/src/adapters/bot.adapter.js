@@ -33,7 +33,7 @@ async function request(path, options = {}) {
 }
 
 export async function listBots() {
-  return request('/api/bots')
+  return request('/api/bots/')
 }
 
 export async function fetchBotRuntimeCapacity() {
@@ -42,7 +42,7 @@ export async function fetchBotRuntimeCapacity() {
 
 export async function createBot(payload) {
   log.info('create_bot', payload)
-  return request('/api/bots', {
+  return request('/api/bots/', {
     method: 'POST',
     body: JSON.stringify(payload),
   })
@@ -76,13 +76,6 @@ export function openBotsStream() {
   }
   return source
 }
-
-
-
-export async function fetchBotSettingsCatalog() {
-  return request('/api/bots/settings-catalog')
-}
-
 
 export async function fetchBotActiveRun(botId) {
   return request(`/api/bots/${encodeURIComponent(botId)}/active-run`)
