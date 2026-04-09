@@ -52,7 +52,12 @@ class LiveSeriesStream:
             "seq": self._coerce_int(window.get("seq"), default=0),
             "event_time": window.get("event_time"),
             "stream_session_id": str(window.get("stream_session_id") or ""),
-            "payload": {"window": self._sanitize_json(window.get("window") or {})},
+            "payload": {
+                "cursor": self._sanitize_json(window.get("cursor") or {}),
+                "continuity": self._sanitize_json(window.get("continuity") or {}),
+                "lifecycle": self._sanitize_json(window.get("lifecycle") or {}),
+                "window": self._sanitize_json(window.get("window") or {}),
+            },
         }
 
     @staticmethod
@@ -85,37 +90,43 @@ class LiveSeriesStream:
             "payload": payload,
         }
 
-    def live_delta_envelope(
+    def projection_update_envelope(self, *, window: Dict[str, Any], stream_session_id: str) -> Dict[str, Any]:
+        return {
+            "type": "botlens_live_tail",
+            "run_id": str(window.get("run_id") or ""),
+            "series_key": str(window.get("series_key") or ""),
+            "schema_version": int(window.get("schema_version") or self._schema_version),
+            "seq": self._coerce_int(window.get("seq"), default=0),
+            "event_time": window.get("event_time"),
+            "stream_session_id": str(stream_session_id or ""),
+            "message_type": "projection_update",
+            "payload": {
+                "cursor": self._sanitize_json(window.get("cursor") or {}),
+                "continuity": self._sanitize_json(window.get("continuity") or {}),
+                "lifecycle": self._sanitize_json(window.get("lifecycle") or {}),
+                "window": self._sanitize_json(window.get("window") or {}),
+            },
+        }
+
+    def lifecycle_update_envelope(
         self,
         *,
         run_id: str,
         series_key: str,
+        lifecycle: Dict[str, Any],
         seq: int,
-        known_at: Any,
-        runtime_delta: AbcMapping[str, Any],
+        stream_session_id: str,
     ) -> Dict[str, Any]:
-        series_entries = runtime_delta.get("series") if isinstance(runtime_delta.get("series"), list) else []
-        series_delta = None
-        for entry in series_entries:
-            if not isinstance(entry, AbcMapping):
-                continue
-            series_delta = dict(entry)
-            break
         return {
             "type": "botlens_live_tail",
             "run_id": str(run_id),
             "series_key": str(series_key),
             "schema_version": self._schema_version,
             "seq": int(seq),
-            "known_at": known_at,
-            "message_type": "series_delta",
+            "stream_session_id": str(stream_session_id or ""),
+            "message_type": "lifecycle_update",
             "payload": {
-                "event": str(runtime_delta.get("event") or ""),
-                "runtime": self._sanitize_json(runtime_delta.get("runtime") or {}),
-                "stats": self._sanitize_json(runtime_delta.get("stats") or {}),
-                "logs": self._sanitize_json(runtime_delta.get("logs") or []),
-                "decisions": self._sanitize_json(runtime_delta.get("decisions") or []),
-                "series_delta": self._sanitize_json(series_delta or {}),
+                "lifecycle": self._sanitize_json(lifecycle or {}),
             },
         }
 
@@ -178,6 +189,12 @@ class LiveSeriesStream:
     async def add_series_viewer(self, *, run_id: str, series_key: str, ws: WebSocket, limit: int = 320) -> None:
         await ws.accept()
         key = (str(run_id), str(series_key))
+        logger.info(
+            "bot_telemetry_series_viewer_subscribe_started | run_id=%s | series_key=%s | limit=%s",
+            key[0],
+            key[1],
+            max(1, min(int(limit or 320), 2000)),
+        )
         try:
             window = await asyncio.to_thread(
                 get_series_window,
@@ -213,12 +230,22 @@ class LiveSeriesStream:
             baseline_seq = cursor
             bootstrap = self.series_bootstrap_envelope({**dict(window), "stream_session_id": stream_session_id})
             self._series_viewers[key][ws] = {"last_seq": cursor, "replaying": True}
+            viewer_count = len(self._series_viewers.get(key, {}))
 
         try:
             await ws.send_text(json.dumps(bootstrap))
         except Exception:
             await self.remove_series_viewer(run_id=str(run_id), series_key=str(series_key), ws=ws)
             return
+        logger.info(
+            "bot_telemetry_series_viewer_bootstrap_sent | run_id=%s | series_key=%s | seq=%s | stream_session_id=%s | continuity_status=%s | viewer_count=%s",
+            key[0],
+            key[1],
+            cursor,
+            stream_session_id,
+            str((window.get("continuity") or {}).get("status") or "").strip() or "unknown",
+            viewer_count,
+        )
 
         replayed_messages = 0
         while True:
@@ -283,15 +310,6 @@ class LiveSeriesStream:
                         pass
                 return
 
-            logger.debug(
-                "bot_telemetry_series_viewer_replay_start | run_id=%s | series_key=%s | cursor_seq=%s | replay_count=%s | first_seq=%s | last_seq=%s",
-                key[0],
-                key[1],
-                cursor,
-                len(buffered),
-                first_seq,
-                self._coerce_int(buffered[-1].get("seq"), default=0),
-            )
             try:
                 for message in buffered:
                     await ws.send_text(json.dumps(message))
@@ -309,54 +327,96 @@ class LiveSeriesStream:
 
     async def remove_series_viewer(self, *, run_id: str, series_key: str, ws: WebSocket) -> None:
         key = (str(run_id), str(series_key))
+        removed = False
+        remaining = 0
         async with self._lock:
             viewers = self._series_viewers.get(key)
             if not viewers:
                 return
-            viewers.pop(ws, None)
+            removed = viewers.pop(ws, None) is not None
             if not viewers:
                 self._series_viewers.pop(key, None)
+                remaining = 0
+            else:
+                remaining = len(viewers)
+        if removed:
+            logger.info(
+                "bot_telemetry_series_viewer_removed | run_id=%s | series_key=%s | remaining_viewers=%s",
+                key[0],
+                key[1],
+                remaining,
+            )
 
-    async def broadcast_series_delta(
-        self,
-        *,
-        run_id: str,
-        series_key: str,
-        seq: int,
-        known_at: Any,
-        runtime_delta: AbcMapping[str, Any],
-    ) -> None:
-        key = (str(run_id), str(series_key))
+    async def broadcast_projection_update(self, *, window: Dict[str, Any]) -> None:
+        run_id = str(window.get("run_id") or "")
+        series_key = str(window.get("series_key") or "")
+        key = (run_id, series_key)
         async with self._lock:
-            stream_session_id = self._ensure_run_stream_session_id_locked(str(run_id))
-            message = {
-                **self.live_delta_envelope(
-                    run_id=str(run_id),
-                    series_key=str(series_key),
-                    seq=int(seq),
-                    known_at=known_at,
-                    runtime_delta=runtime_delta,
-                ),
-                "stream_session_id": stream_session_id,
-            }
+            stream_session_id = self._ensure_run_stream_session_id_locked(run_id)
+            message = self.projection_update_envelope(window=window, stream_session_id=stream_session_id)
             self._series_live_tail_ring[key].append(message)
             viewers = list(self._series_viewers.get(key, {}).items())
+            ring_depth = len(self._series_live_tail_ring.get(key, ()))
+
+        logger.debug(
+            "bot_telemetry_series_projection_update_fanout | run_id=%s | series_key=%s | seq=%s | stream_session_id=%s | viewer_count=%s | ring_depth=%s",
+            run_id,
+            series_key,
+            self._coerce_int(message.get("seq"), default=0),
+            stream_session_id,
+            len(viewers),
+            ring_depth,
+        )
 
         for ws, state in viewers:
             last_seq = int(state.get("last_seq") or 0)
             if state.get("replaying") or state.get("invalidated"):
                 continue
-            if int(seq) <= last_seq:
+            if self._coerce_int(message.get("seq"), default=0) <= last_seq:
                 continue
             try:
                 await ws.send_text(json.dumps(message))
             except Exception:
-                await self.remove_series_viewer(run_id=str(run_id), series_key=str(series_key), ws=ws)
+                await self.remove_series_viewer(run_id=run_id, series_key=series_key, ws=ws)
                 continue
             async with self._lock:
                 slot = self._series_viewers.get(key, {}).get(ws)
                 if slot is not None and not slot.get("replaying"):
-                    slot["last_seq"] = int(seq)
+                    slot["last_seq"] = self._coerce_int(message.get("seq"), default=0)
+
+    async def broadcast_run_lifecycle(self, *, run_id: str, lifecycle: Dict[str, Any]) -> None:
+        targets: list[tuple[Tuple[str, str], WebSocket, Dict[str, Any], str]] = []
+        async with self._lock:
+            stream_session_id = self._ensure_run_stream_session_id_locked(str(run_id))
+            for key, viewers in list(self._series_viewers.items()):
+                if key[0] != str(run_id):
+                    continue
+                for ws, state in list(viewers.items()):
+                    targets.append((key, ws, dict(state), stream_session_id))
+
+        logger.debug(
+            "bot_telemetry_run_lifecycle_fanout | run_id=%s | stream_session_id=%s | viewer_count=%s | phase=%s | status=%s",
+            run_id,
+            stream_session_id,
+            len(targets),
+            str(lifecycle.get("phase") or "").strip(),
+            str(lifecycle.get("status") or "").strip(),
+        )
+
+        for key, ws, state, stream_session_id in targets:
+            if state.get("replaying") or state.get("invalidated"):
+                continue
+            try:
+                message = self.lifecycle_update_envelope(
+                    run_id=key[0],
+                    series_key=key[1],
+                    lifecycle=lifecycle,
+                    seq=int(state.get("last_seq") or 0),
+                    stream_session_id=stream_session_id,
+                )
+                await ws.send_text(json.dumps(message))
+            except Exception:
+                await self.remove_series_viewer(run_id=key[0], series_key=key[1], ws=ws)
 
 
 __all__ = ["LiveSeriesStream"]
