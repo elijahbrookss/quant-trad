@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from ..service.bots import bot_service
 from ..service.bots.bot_run_diagnostics_projection import project_bot_run_diagnostics
+from ..service.bots.botlens_session_service import get_active_botlens_session, resolve_active_botlens_stream
 from ..service.bots.ledger_service import get_run_signal_detail, list_run_ledger_events
 from ..service.storage.repos.lifecycle import get_bot_run_lifecycle, list_bot_run_lifecycle_events
 from ..service.bots.telemetry_stream import telemetry_hub
@@ -309,6 +310,25 @@ async def bot_lens_series_catalog(run_id: str) -> Dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
+
+@router.get("/{bot_id}/botlens/session")
+async def bot_lens_active_session(
+    bot_id: str,
+    series_key: Optional[str] = None,
+    limit: int = 320,
+) -> Dict[str, Any]:
+    try:
+        return get_active_botlens_session(
+            bot_id=str(bot_id),
+            series_key=series_key,
+            limit=max(1, min(int(limit or 320), 2000)),
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.get("/runs/{run_id}/series/{series_key}/window")
 async def bot_lens_series_window(
     run_id: str,
@@ -372,3 +392,46 @@ async def bot_lens_series_live(
         pass
     finally:
         await telemetry_hub.remove_series_viewer(run_id=str(run_id), series_key=str(series_key), ws=websocket)
+
+
+@router.websocket("/ws/{bot_id}/botlens/live")
+async def bot_lens_active_live(
+    bot_id: str,
+    websocket: WebSocket,
+    series_key: Optional[str] = None,
+    limit: int = 320,
+) -> None:
+    try:
+        resolved = resolve_active_botlens_stream(
+            bot_id=str(bot_id),
+            series_key=series_key,
+            limit=max(1, min(int(limit or 320), 2000)),
+        )
+    except (KeyError, ValueError) as exc:
+        await websocket.accept()
+        await websocket.send_json(
+            {
+                "type": "botlens_live_error",
+                "run_id": "",
+                "series_key": str(series_key or ""),
+                "payload": {"message": str(exc)},
+            }
+        )
+        await websocket.close(code=1011)
+        return
+
+    run_id = str(resolved.get("run_id") or "")
+    resolved_series_key = str(resolved.get("series_key") or "")
+    await telemetry_hub.add_series_viewer(
+        run_id=run_id,
+        series_key=resolved_series_key,
+        ws=websocket,
+        limit=max(1, min(int(limit or 320), 2000)),
+    )
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await telemetry_hub.remove_series_viewer(run_id=run_id, series_key=resolved_series_key, ws=websocket)
