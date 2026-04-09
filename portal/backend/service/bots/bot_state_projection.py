@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from .botlens_contract import projection_only
 from .runner import DockerBotRunner
 from .startup_lifecycle import ACTIVE_PHASES, BACKEND_OWNED_PHASES, TERMINAL_PHASES
 
@@ -89,6 +90,12 @@ def _resolve_status(
     container_running: bool,
     heartbeat_state: str,
 ) -> str:
+    if lifecycle_status in _TERMINAL_STATUSES and container_running:
+        if engine_status in _ACTIVE_STATUSES:
+            return engine_status
+        if persisted_status in _ACTIVE_STATUSES:
+            return persisted_status
+        return "degraded"
     if lifecycle_status in _ACTIVE_STATUSES | _TERMINAL_STATUSES:
         if lifecycle_status in {"starting", "running", "degraded", "telemetry_degraded"} and container_status in {"exited", "dead"}:
             return "crashed"
@@ -214,7 +221,7 @@ def project_bot_state(
         or str(selected_run.get("run_id") or "").strip()
         or None
     )
-    view_payload = _mapping(_mapping(view_row).get("payload"))
+    view_payload = projection_only(_mapping(view_row).get("payload"))
     snapshot_runtime = _mapping(view_payload.get("runtime"))
     warnings = _sequence(view_payload.get("warnings"))
     engine_status = _normalize_status(snapshot_runtime.get("status"), default="")
@@ -235,10 +242,13 @@ def project_bot_state(
         container_running=bool(container.get("running")),
         heartbeat_state=str(heartbeat.get("state") or ""),
     )
-    phase = (
-        str(lifecycle_row.get("phase") or "").strip()
-        or _default_phase_for_status(status, container_running=bool(container.get("running")), has_view_state=bool(view_row))
+    lifecycle_phase = str(lifecycle_row.get("phase") or "").strip()
+    default_phase = _default_phase_for_status(
+        status,
+        container_running=bool(container.get("running")),
+        has_view_state=bool(view_row),
     )
+    phase = default_phase if lifecycle_phase in TERMINAL_PHASES and status in _ACTIVE_STATUSES else (lifecycle_phase or default_phase)
     reason = _resolve_reason(
         status=status,
         phase=phase,

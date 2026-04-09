@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, Optional, Protocol
 
 from core.settings import get_settings
 
+from .botlens_lifecycle_bridge import emit_lifecycle_event
 from .bot_state_projection import project_bot_state
 from .bot_stream import BotStreamManager
 from .bot_watchdog import get_watchdog
@@ -236,7 +237,18 @@ class BotRuntimeControlService:
                 owner=LifecycleOwner.BACKEND.value,
                 message="Bot stop requested from backend control service.",
             )
-            self._storage_gateway().record_bot_run_lifecycle_checkpoint(checkpoint)
+            lifecycle_state = self._storage_gateway().record_bot_run_lifecycle_checkpoint(checkpoint)
+            emit_lifecycle_event(
+                {
+                    **dict(lifecycle_state or {}),
+                    "bot_id": bot_id,
+                    "run_id": run_id,
+                    "phase": BotLifecyclePhase.STOPPED.value,
+                    "status": BotLifecycleStatus.STOPPED.value,
+                    "owner": LifecycleOwner.BACKEND.value,
+                    "message": "Bot stop requested from backend control service.",
+                }
+            )
             self._storage_gateway().update_bot_runtime_status(
                 bot_id=bot_id,
                 run_id=run_id,

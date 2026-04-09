@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Mapping
 
 from core.settings import get_settings
 
+from .botlens_contract import projection_only
 from .bot_state_projection import project_bot_state
 from .runner import DockerBotRunner
 from .runtime_composition import get_runtime_composition
@@ -186,7 +187,7 @@ def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
         if not run_id:
             continue
         view_row = _composition().storage.get_latest_bot_run_view_state(bot_id=bot_id, run_id=run_id)
-        view_payload = dict(view_row.get("payload") or {}) if isinstance(view_row, Mapping) else {}
+        view_payload = projection_only(view_row.get("payload")) if isinstance(view_row, Mapping) else {}
         runtime_payload = dict(view_payload.get("runtime") or {}) if isinstance(view_payload.get("runtime"), Mapping) else {}
         summary = dict(run.get("summary") or {})
         if not summary and isinstance(runtime_payload.get("stats"), Mapping):
@@ -237,11 +238,10 @@ def runtime_capacity() -> Dict[str, Any]:
             series_key=None,
         )
         if isinstance(view_row, Mapping):
-            payload = view_row.get("payload")
-            if isinstance(payload, Mapping):
-                maybe_runtime = payload.get("runtime")
-                if isinstance(maybe_runtime, Mapping):
-                    runtime_payload = maybe_runtime
+            payload = projection_only(view_row.get("payload"))
+            maybe_runtime = payload.get("runtime")
+            if isinstance(maybe_runtime, Mapping):
+                runtime_payload = maybe_runtime
         try:
             active_workers = int(runtime_payload.get("active_workers") or 0)
         except (TypeError, ValueError):
