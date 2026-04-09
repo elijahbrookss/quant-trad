@@ -21,6 +21,8 @@ code_paths:
   - portal/backend/service/bots/container_runtime_telemetry.py
   - portal/backend/service/bots/runtime_dependencies.py
   - portal/backend/service/bots/strategy_loader.py
+  - portal/backend/service/bots/botlens_contract.py
+  - portal/backend/service/bots/botlens_lifecycle_bridge.py
   - portal/backend/service/bots/telemetry_stream.py
   - portal/backend/service/bots/live_series_stream.py
   - portal/backend/service/bots/botlens_series_service.py
@@ -68,12 +70,13 @@ flowchart LR
     E --> F[BotRuntime worker]
     F --> G[Series timeline initialize/apply_bar/snapshot]
     G --> H[Runtime events + trades + reports]
-    G --> I[Per-series bootstrap and delta stream]
+    G --> I[Canonical runtime facts + bridge payloads]
     I --> J[telemetry_stream.py]
-    J --> K[Append-only BotLens series events]
-    J --> L[Latest per-series view-state rows]
+    D --> J
+    J --> K[Append-only BotLens raw events]
+    J --> L[Backend-owned latest per-series view-state rows]
     J --> M[Atomic websocket bootstrap + live tail]
-    D --> N[Run status + container step traces]
+    D --> N[Run status + lifecycle checkpoints + container step traces]
 ```
 
 ## 3) Service entrypoints
@@ -165,8 +168,9 @@ The launched process is:
 - supervising child workers,
 - reporting startup checkpoints back into the lifecycle tables,
 - maintaining per-series startup progress metadata,
-- assigning run-scoped and series-scoped BotLens sequence numbers,
-- forwarding per-series bootstrap/delta telemetry envelopes,
+- bridging per-series bootstrap/fact-batch telemetry envelopes across the process boundary,
+- emitting lifecycle/process bridge events,
+- detecting bridge backpressure and forcing rebootstrap instead of inventing continuity,
 - writing bot runtime status and container step traces.
 
 Supporting helpers are split explicitly:
@@ -195,9 +199,11 @@ Each child worker process:
 - resolves the attached indicator set into a dependency-closed runtime graph,
 - computes typed indicator outputs, indicator-owned overlays, strategy decisions, and trades on the same series timeline,
 - persists `series_bar.telemetry` ledger events asynchronously from that same series timeline,
-- emits one `botlens_series_bootstrap` after warm-up,
-- emits ordered `botlens_series_delta` messages from the runtime subscriber queue,
-- emits `worker_error` messages when runtime execution fails.
+- emits one `botlens_runtime_bootstrap_facts` bridge payload after warm-up,
+- emits ordered `botlens_runtime_facts` bridge payloads from the runtime subscriber queue,
+- uses explicit subscriber gap signaling when BotLens transport consumers fall behind,
+- marks the runtime `degraded` when a series is degraded inside the worker runtime,
+- emits `worker_error` messages when runtime execution fails or finishes degraded.
 
 The parent process treats worker failures as degraded-symbol events:
 - failed worker symbols are added to `degraded_symbols`,
@@ -240,15 +246,17 @@ Container/runtime telemetry persistence:
 - run status via `update_bot_runtime_status(...)`,
 - current lifecycle state via `record_bot_run_lifecycle_checkpoint(...)` into `portal_bot_run_lifecycle`,
 - append-only lifecycle checkpoint trail via `portal_bot_run_lifecycle_events`,
-- container loop step traces via `record_bot_run_step(...)`.
-- append-only BotLens series events via `record_bot_runtime_event(...)` with:
-  - `event_type=botlens.series_bootstrap`
-  - `event_type=botlens.series_delta`
+- container loop step traces via `record_bot_run_step(...)`,
+- append-only BotLens raw facts via `record_bot_runtime_event(...)` with:
+  - `event_type=botlens.runtime_bootstrap_facts`
+  - `event_type=botlens.runtime_facts`
+  - `event_type=botlens.lifecycle_event`
 - latest per-series BotLens materializations via `upsert_bot_run_view_state(...)`.
 
 Important semantics:
 - startup truth now lives in the lifecycle tables first, not in container inference or Docker inspect,
 - the latest BotLens row is a materialized cache, not the execution source of truth,
+- BotLens lifecycle diagnostics and chart/runtime state are now derived from the same fact path,
 - BotLens bootstrap can read the materialized rows,
 - but live execution never reads DB-backed BotLens projections back into the worker timeline.
 - BotLens persistence only accepts canonical per-series keys of the form `instrument_id|timeframe`; legacy merged `series_key=bot` rows are not part of the runtime contract.
@@ -271,24 +279,23 @@ This preserves the system contract:
 
 ## 9) Telemetry contract
 
-The container runtime emits BotLens telemetry with per-series message ownership.
+The service stack now separates bridge transport from canonical BotLens truth.
 
-Envelope types:
-- `botlens_series_bootstrap`
-- `botlens_series_delta`
+Supervisor/worker bridge envelope types:
+- `botlens_runtime_bootstrap_facts`
+- `botlens_runtime_facts`
+- `botlens_lifecycle_event`
 
-Each envelope carries:
-- `run_id`
-- `bot_id`
-- `series_key`
-- monotonic `run_seq`
-- monotonic per-series `series_seq`
-- event timing fields
-- either a bounded per-series `projection` bootstrap or a typed `runtime_delta`
+Bridge payload ownership:
+- runtime owns canonical fact batches (`runtime_state_observed`, `candle_upserted`, `overlay_ops_emitted`, `trade_upserted`, `decision_emitted`, `log_emitted`, `series_stats_updated`) plus enough data to project downstream,
+- supervisor/container runtime attaches transport metadata such as `bridge_session_id` and `bridge_seq`,
+- backend validates bridge continuity before advancing BotLens state,
+- backend assigns canonical `projection_seq` for client-visible BotLens ordering.
 
 Transport:
 - websocket push to `BACKEND_TELEMETRY_WS_URL` when configured,
-- bounded FIFO queueing inside `TelemetryEmitter` to preserve in-order per-series delivery semantics.
+- bounded FIFO queueing inside `TelemetryEmitter` and the local process bridge,
+- explicit resync/bootstrap recovery when bridge continuity is not trustworthy.
 
 Service split:
 - `telemetry_stream.py`: ingest queue, projection application, durable `botlens.*` writes, latest per-series view-state cache, and runtime-status rebroadcast.
@@ -296,27 +303,26 @@ Service split:
 
 Durability:
 - telemetry transport is supplemental,
-- `botlens.*` rows in `portal_bot_run_events` are the durable BotLens artifact ledger,
+- `botlens.*` rows in `portal_bot_run_events` are the durable BotLens raw-fact ledger,
+- `portal_bot_run_view_state.seq` is the canonical latest BotLens projection cursor,
 - `series_bar.telemetry` rows are the durable per-bar runtime telemetry source,
 - runtime/trade/status/step-trace rows remain the rest of the durable execution record.
 
-### 9.1) BotLens series delivery semantics
+### 9.1) BotLens continuity and ordering semantics
 
-BotLens `series_seq` is continuity-sensitive.
-
-That means transport is not allowed to silently compact away intermediate `series_seq` values if downstream consumers treat missing sequences as continuity failure.
+Bridge continuity and canonical projection ordering are separate concerns.
 
 Required semantics:
-- `series_seq` is emitted in ascending order per `run_id` / `series_key`,
-- the emitter preserves FIFO order,
+- `bridge_seq` is emitted in ascending order per `run_id` / `series_key` / `bridge_session_id`,
+- the bridge preserves FIFO order,
 - a failed send does not advance the queue head,
-- later snapshots must not bypass an older undelivered snapshot,
-- BotLens series websocket subscribe must send the baseline snapshot on that same channel and replay buffered live-tail messages newer than `baseline_seq` before enabling future-only fanout,
-- one continuity epoch is identified by `stream_session_id`, and continuity invalidation rotates that id before future live fanout resumes,
+- later bootstraps may reset bridge continuity through a new `bridge_session_id`, but they do not redefine durable BotLens ordering,
+- the backend only advances `projection_seq` after bridge continuity is valid,
+- a continuity gap marks the persisted projection `resync_required` instead of merging unknown state,
+- BotLens websocket subscribe sends the baseline snapshot on that same channel and replays buffered live-tail messages newer than `baseline_seq` before enabling future-only fanout,
+- one live websocket continuity epoch is identified by `stream_session_id`, and continuity invalidation rotates that id before future live fanout resumes,
 - the backend may emit `botlens_live_resync_required` and close active sockets when run continuity is no longer trusted,
 - and any backlog must be surfaced as explicit backpressure rather than silent compaction.
-
-This is important because the ingest path and BotLens frontend both treat missing `series_seq` values as a resync condition.
 
 ### 9.2) Producer backpressure
 
@@ -324,8 +330,10 @@ Producer backpressure means per-series update production is forced to observe tr
 
 In the current service implementation this entails:
 - `TelemetryEmitter` has a bounded queue,
+- the supervisor process bridge queue is bounded,
+- runtime subscriber queues may signal a gap instead of crashing runtime execution,
 - `send_message(...)` blocks up to `BOT_TELEMETRY_EMIT_QUEUE_TIMEOUT_MS` when the queue is full,
-- if capacity does not free within that window, the emitter logs `bot_telemetry_emit_queue_backpressure` and returns failure,
+- if capacity does not free within that window, the emitter logs backpressure and the bridge schedules a fresh bootstrap requirement,
 - container runtime marks telemetry degraded when send fails,
 - and operators can inspect queue depth, retry timing, payload size, and send latency through telemetry logs.
 

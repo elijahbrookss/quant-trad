@@ -21,7 +21,7 @@ code_paths:
 
 ## 1) Problem and scope
 
-This document describes how the current container runtime fans one bot run out across symbols while keeping one shared wallet and one merged BotLens-facing read model.
+This document describes how the current container runtime fans one bot run out across symbols while keeping one shared wallet and one supervisor bridge for BotLens/runtime facts.
 
 In scope:
 - symbol-to-worker assignment,
@@ -52,8 +52,8 @@ flowchart LR
     C1 --> E[event_queue]
     C2 --> E
     C3 --> E
-    E --> F[parent merge loop]
-    F --> G[merged view_state]
+    E --> F[parent bridge + supervision loop]
+    F --> G[bridge events + lifecycle checkpoints]
     F --> H[telemetry + status + container step traces]
 ```
 
@@ -102,32 +102,27 @@ Each worker process receives:
 Each worker forces these runtime settings:
 - `degrade_series_on_error=True`
 - `series_runner="inline"`
+- degraded worker-runtime completion is terminal and must not be reported as `completed`
 
 Each worker emits messages back to the parent over an `mp.Queue`:
-- `view_state`: compact BotLens-style payload plus worker status
+- `botlens_runtime_bootstrap_facts` / `botlens_runtime_facts`: canonical BotLens bridge payloads
 - `worker_error`: explicit worker failure payload
+- `startup_status`: explicit worker lifecycle/status payloads
 
-## 6) View-state merge model
+## 6) Supervisor bridge model
 
-The parent process keeps only the latest view-state per worker and merges it into one bot-level read model.
+The parent process is no longer the canonical BotLens read-model owner.
 
-Merged sections:
-- `series`
-- `trades`
-- `logs`
-- `decisions`
-- `warnings`
-- `runtime`
-
-Merge rules:
-- series/trades/logs/decisions are de-duplicated by derived keys,
-- warnings are appended and trimmed,
-- runtime stats are aggregated across worker runtime payloads,
-- `degraded_symbols` is carried into the merged runtime payload.
+Instead it keeps only lightweight operational state needed to:
+- supervise workers,
+- track startup/live/degraded process status,
+- bridge worker BotLens payloads across the process boundary,
+- emit lifecycle/process events,
+- and trigger rebootstrap when bridge continuity is no longer trustworthy.
 
 Important boundary:
-- this merged payload is a read model for telemetry and BotLens,
-- it is not the canonical execution ledger.
+- the parent may keep transient compact snapshots to seed the next bridge bootstrap,
+- but backend `telemetry_stream.py` owns canonical BotLens ordering, continuity, and projection semantics.
 
 ## 7) Runtime status semantics
 
@@ -158,8 +153,9 @@ Container-owned persistence:
 - `record_bot_run_step(...)`
 
 Current non-persistence:
-- merged `view_state` is not durably stored by the parent process,
-- the latest merged state exists to drive telemetry and live inspection.
+- supervisor-local bridge state is not durably stored by the parent process,
+- the parent does not own durable BotLens latest-state truth,
+- backend view-state persistence is the only canonical BotLens projection cache.
 
 ## 9) Failure and degrade behavior
 
@@ -167,7 +163,8 @@ There are two layers of failure handling.
 
 Series-level in worker runtime:
 - `_safe_step(...)` degrades the series when `degrade_series_on_error=True`,
-- the worker emits `SYMBOL_DEGRADED` runtime events and runtime warnings for degraded series.
+- the worker emits `SYMBOL_DEGRADED` runtime events and runtime warnings for degraded series,
+- the worker runtime status becomes `degraded`, so the worker cannot terminate as `completed` after a degraded series.
 
 Worker-process level in container runtime:
 - `worker_error` queue messages mark the worker's symbols degraded,
@@ -183,12 +180,12 @@ This is degrade-isolated, not self-healing:
 
 - One worker per symbol gives the clearest failure boundary.
 - One shared wallet proxy preserves capital safety across workers.
-- One merged view-state keeps BotLens aligned to the deployed bot without inventing a second execution path.
-- Keeping merged state ephemeral avoids conflating observability payloads with execution truth.
+- One supervisor bridge keeps worker/runtime execution decoupled from backend projection ownership.
+- Keeping supervisor state ephemeral avoids conflating process transport with execution truth.
 
 ## 11) Strict contract
 
 - Symbol sharding must not create an alternate execution semantics path; worker runtime events remain the source of truth.
 - Shared wallet checks must happen against the shared runtime-event/reservation model, not worker-local mutable balances.
-- The parent process may merge view-state, but it must not invent fills, decisions, or wallet transitions.
+- The parent process may bridge events and emit lifecycle/process metadata, but it must not invent fills, decisions, wallet transitions, or durable BotLens projection state.
 - Degradation must be explicit through degraded-symbol tracking, warnings, and runtime events.
