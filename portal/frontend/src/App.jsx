@@ -442,20 +442,12 @@ function AppShell({ chartId }) {
                 <Route
                   path="/bots"
                   element={
-                    <div className="space-y-8">
+                    <div className="space-y-5">
                       <SectionHeading
                         title="Bots"
-                        kicker="Execution Lens"
-                        description="Run walk-forward backtests, paper sims, or live runs with realistic execution constraints."
-                        actions={
-                          <div className="rounded-2xl border border-white/10 bg-white/5 p-3.5 text-[11px] text-slate-300">
-                            <div className="uppercase tracking-[0.28em] text-slate-500">Playback</div>
-                            <p className="mt-2 text-[13px] text-slate-200">Trade lifecycles, stops, and targets.</p>
-                            <p className="mt-1 text-[10px] text-slate-500">All runs respect walk-forward timing.</p>
-                          </div>
-                        }
+                        description="Run walk-forward bots, monitor runtime state, and investigate failures."
                       />
-                      <section className="rounded-[26px] border border-white/8 bg-[#1a1d27]/80 p-5 shadow-[0_40px_120px_-70px_rgba(0,0,0,0.85)]">
+                      <section className="rounded-[8px] border border-white/8 bg-[#171b24]/70 p-3.5">
                         <Suspense fallback={<RouteSectionFallback title="bot panel" />}>
                           <BotPanel />
                         </Suspense>

@@ -6,7 +6,7 @@ import { openBotsStream } from '../../adapters/bot.adapter.js'
  * Subscribes to the bots SSE stream and falls back to polling when unavailable.
  * Consumers supply merge/upsert helpers so this hook stays presentationally agnostic.
  */
-export function useBotStream({ mergeBots, upsertBot, removeBot, applyRuntime, loadBots }) {
+export function useBotStream({ mergeBots, upsertBot, removeBot, loadBots }) {
   const [botStreamState, setBotStreamState] = useState('idle')
   const [connectKey, setConnectKey] = useState(0)
   const botStreamRef = useRef(null)
@@ -14,7 +14,6 @@ export function useBotStream({ mergeBots, upsertBot, removeBot, applyRuntime, lo
   const mergeBotsRef = useRef(mergeBots)
   const upsertBotRef = useRef(upsertBot)
   const removeBotRef = useRef(removeBot)
-  const applyRuntimeRef = useRef(applyRuntime)
   const loadBotsRef = useRef(loadBots)
 
   // Keep refs up to date
@@ -22,7 +21,6 @@ export function useBotStream({ mergeBots, upsertBot, removeBot, applyRuntime, lo
     mergeBotsRef.current = mergeBots
     upsertBotRef.current = upsertBot
     removeBotRef.current = removeBot
-    applyRuntimeRef.current = applyRuntime
     loadBotsRef.current = loadBots
   })
 
@@ -58,34 +56,12 @@ export function useBotStream({ mergeBots, upsertBot, removeBot, applyRuntime, lo
             mergeBotsRef.current(data.bots, { replace: eventType === 'snapshot' })
           } else if (data?.bot) {
             upsertBotRef.current(data.bot)
-            if (data.bot?.id && data.bot?.runtime) {
-              applyRuntimeRef.current(data.bot.id, data.bot.runtime)
-            }
           } else if (data?.id) {
             upsertBotRef.current(data)
-            if (data?.id && data?.runtime) {
-              applyRuntimeRef.current(data.id, data.runtime)
-            }
-          } else if (data?.bot_id && data?.runtime) {
-            applyRuntimeRef.current(data.bot_id, data.runtime)
           }
           setBotStreamState('open')
         } catch (err) {
           loggerRef.current.warn('bot_stream_payload_parse_failed', { message: err?.message }, err)
-        }
-      }
-
-      const handleRuntime = (event) => {
-        try {
-          const data = JSON.parse(event.data)
-          const botId = data?.bot_id || data?.bot?.id
-          const runtime = data?.runtime || data?.bot?.runtime
-          if (botId && runtime) {
-            applyRuntimeRef.current(botId, runtime)
-            setBotStreamState('open')
-          }
-        } catch (err) {
-          loggerRef.current.warn('bot_stream_runtime_parse_failed', { message: err?.message }, err)
         }
       }
 
@@ -101,7 +77,6 @@ export function useBotStream({ mergeBots, upsertBot, removeBot, applyRuntime, lo
       source.addEventListener('bot', handlePayload)
       source.addEventListener('bot_status', handlePayload)
       source.addEventListener('bot_deleted', handlePayload)
-      source.addEventListener('bot_runtime', handleRuntime)
       source.onerror = handleError
       source.onopen = () => {
         loggerRef.current.info('bot_stream_open')

@@ -111,6 +111,10 @@ export async function fetchBotRunLedgerEvents(botId, runId, { afterSeq = 0, limi
   )
 }
 
+export async function fetchBotRunLifecycleEvents(botId, runId) {
+  return request(`/api/bots/${encodeURIComponent(botId)}/runs/${encodeURIComponent(runId)}/lifecycle-events`)
+}
+
 
 export async function fetchBotLensSeriesWindow(runId, seriesKey, { to = 'now', limit = 320 } = {}) {
   const params = new URLSearchParams()

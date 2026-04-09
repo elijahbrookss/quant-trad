@@ -116,6 +116,137 @@ body {
   font-feature-settings: "calt" 1, "liga" 1;
 }
 
+.qt-scrollbar-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.qt-scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.qt-console-stream-mask {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%);
+}
+
+.qt-console-caret {
+  animation: qt-console-caret 1.15s steps(1, end) infinite;
+}
+
+.qt-console-scan {
+  animation: qt-console-scan 2.8s ease-in-out infinite;
+}
+
+.qt-bot-card-grid {
+  background-image:
+    linear-gradient(90deg, rgba(148, 163, 184, 0.045) 0, rgba(148, 163, 184, 0.045) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(148, 163, 184, 0.035) 0, rgba(148, 163, 184, 0.035) 1px, transparent 1px);
+  background-size: 36px 36px;
+  opacity: 0.22;
+  -webkit-mask-image: linear-gradient(100deg, transparent 0%, rgba(0, 0, 0, 0.42) 16%, black 44%, rgba(0, 0, 0, 0.28) 76%, transparent 100%);
+  mask-image: linear-gradient(100deg, transparent 0%, rgba(0, 0, 0, 0.42) 16%, black 44%, rgba(0, 0, 0, 0.28) 76%, transparent 100%);
+}
+
+.qt-bot-status-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.72;
+}
+
+.qt-bot-status-badge-starting {
+  animation: qt-bot-status-badge-starting 2s ease-in-out infinite;
+}
+
+.qt-bot-status-dot-starting {
+  animation: qt-bot-status-dot-starting 1.15s ease-in-out infinite;
+}
+
+.qt-bot-status-dot-running {
+  animation: qt-bot-status-dot-running 2.8s ease-in-out infinite;
+}
+
+.qt-bot-ellipsis::after {
+  content: '...';
+  display: inline-block;
+  overflow: hidden;
+  width: 0;
+  vertical-align: bottom;
+  animation: qt-bot-ellipsis 1.35s steps(4, end) infinite;
+}
+
+.qt-bot-trace-shell {
+  position: relative;
+  display: flex;
+  min-height: 5.5rem;
+  align-items: flex-end;
+  justify-content: stretch;
+  overflow: hidden;
+}
+
+.qt-bot-trace-shell::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.015), rgba(255, 255, 255, 0)),
+    radial-gradient(circle at 88% 42%, rgba(56, 189, 248, 0.09), transparent 55%);
+  opacity: 0.75;
+  pointer-events: none;
+}
+
+.qt-bot-trace-shell-empty::before {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.01), rgba(255, 255, 255, 0)),
+    radial-gradient(circle at 88% 42%, rgba(148, 163, 184, 0.08), transparent 55%);
+}
+
+.qt-bot-trace-placeholder {
+  position: relative;
+  display: flex;
+  width: 100%;
+  min-height: 5.5rem;
+  align-items: flex-end;
+  justify-content: stretch;
+}
+
+.qt-bot-trace-placeholder-line {
+  position: absolute;
+  right: 0;
+  left: 0;
+  top: 52%;
+  height: 1px;
+  background:
+    linear-gradient(90deg, transparent 0%, rgba(148, 163, 184, 0.24) 18%, rgba(148, 163, 184, 0.12) 100%);
+}
+
+.qt-bot-trace-placeholder-line::before {
+  content: '';
+  position: absolute;
+  inset: -7px 0;
+  background:
+    linear-gradient(90deg, transparent 0%, rgba(56, 189, 248, 0.08) 42%, transparent 72%);
+  opacity: 0;
+}
+
+.qt-bot-trace-placeholder-label {
+  position: relative;
+  margin-top: auto;
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(148, 163, 184, 0.65);
+}
+
+.qt-bot-trace-placeholder-active .qt-bot-trace-placeholder-line::before {
+  animation: qt-bot-trace-placeholder-sweep 2s ease-in-out infinite;
+}
+
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--accent-base) rgba(255, 255, 255, 0.04);
@@ -170,6 +301,11 @@ body {
   animation-iteration-count: 1 !important;
   scroll-behavior: auto !important;
   transition-duration: 0.01ms !important;
+}
+
+.app-motion-reduced .qt-console-caret,
+.app-motion-reduced .qt-console-scan {
+  animation: none !important;
 }
 
 .app-shell-header {
@@ -243,4 +379,109 @@ body {
 
 #tv-attr-logo {
   display: none !important;
+}
+
+@keyframes qt-console-caret {
+  0%,
+  48% {
+    opacity: 1;
+  }
+
+  49%,
+  100% {
+    opacity: 0.18;
+  }
+}
+
+@keyframes qt-console-scan {
+  0% {
+    transform: translateY(12px);
+    opacity: 0.08;
+  }
+
+  50% {
+    transform: translateY(0);
+    opacity: 0.2;
+  }
+
+  100% {
+    transform: translateY(-10px);
+    opacity: 0.1;
+  }
+}
+
+@keyframes qt-bot-status-badge-starting {
+  0%,
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(251, 191, 36, 0), 0 0 0 0 rgba(251, 191, 36, 0);
+  }
+
+  50% {
+    box-shadow: inset 0 0 0 1px rgba(251, 191, 36, 0.12), 0 0 16px rgba(251, 191, 36, 0.08);
+  }
+}
+
+@keyframes qt-bot-status-dot-starting {
+  0%,
+  100% {
+    opacity: 0.48;
+    transform: scale(0.88);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.3);
+  }
+}
+
+@keyframes qt-bot-status-dot-running {
+  0%,
+  100% {
+    opacity: 0.42;
+    transform: scale(0.94);
+  }
+
+  50% {
+    opacity: 0.82;
+    transform: scale(1.08);
+  }
+}
+
+@keyframes qt-bot-ellipsis {
+  0%,
+  20% {
+    width: 0;
+  }
+
+  40% {
+    width: 1ch;
+  }
+
+  65% {
+    width: 2ch;
+  }
+
+  100% {
+    width: 3ch;
+  }
+}
+
+@keyframes qt-bot-trace-placeholder-sweep {
+  0% {
+    transform: translateX(-32%);
+    opacity: 0;
+  }
+
+  24% {
+    opacity: 0.32;
+  }
+
+  65% {
+    opacity: 0.16;
+  }
+
+  100% {
+    transform: translateX(24%);
+    opacity: 0;
+  }
 }
