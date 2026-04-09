@@ -297,6 +297,64 @@ def test_process_ingest_delta_invalidates_run_on_series_gap(monkeypatch: pytest.
     asyncio.run(scenario())
 
 
+def test_process_ingest_projection_refresh_publishes_projected_bot_without_container_inspect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        hub = BotTelemetryHub()
+        published: list[tuple[str, bool]] = []
+
+        monkeypatch.setattr(
+            stream,
+            "publish_projected_bot",
+            lambda bot_id, *, inspect_container=True: published.append((str(bot_id), bool(inspect_container))),
+        )
+
+        await hub._process_ingest(
+            {
+                "payload": {
+                    "kind": "bot_projection_refresh",
+                    "bot_id": "bot-1",
+                    "run_id": "run-1",
+                    "phase": "startup_failed",
+                    "status": "startup_failed",
+                }
+            }
+        )
+
+        assert published == [("bot-1", False)]
+
+    asyncio.run(scenario())
+
+
+def test_process_ingest_projection_refresh_broadcasts_projected_bot(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        hub = BotTelemetryHub()
+        refreshed: list[dict] = []
+
+        def fake_publish_projected_bot(bot_id: str, inspect_container: bool = True) -> None:
+            refreshed.append({"bot_id": bot_id, "inspect_container": inspect_container})
+
+        monkeypatch.setattr(stream, "publish_projected_bot", fake_publish_projected_bot)
+
+        await hub._process_ingest(
+            {
+                "payload": {
+                    "kind": "bot_projection_refresh",
+                    "bot_id": "bot-1",
+                    "run_id": "run-1",
+                    "phase": "startup_failed",
+                    "status": "startup_failed",
+                    "known_at": "2026-04-09T04:21:43Z",
+                }
+            }
+        )
+
+        assert refreshed == [{"bot_id": "bot-1", "inspect_container": False}]
+
+    asyncio.run(scenario())
+
+
 def test_add_series_viewer_sends_atomic_bootstrap_then_replays_buffered_delta(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         hub = BotTelemetryHub()

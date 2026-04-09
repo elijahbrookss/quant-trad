@@ -35,6 +35,24 @@ class _FakeStorage:
     def upsert_bot(self, payload):
         self.saved.append(dict(payload))
 
+    def upsert_bot_run(self, payload):
+        return dict(payload)
+
+    def get_bot_run(self, run_id):
+        return {"run_id": run_id} if run_id else None
+
+    def get_latest_bot_runtime_run_id(self, bot_id):
+        return None
+
+    def get_latest_bot_run_lifecycle(self, bot_id):
+        return None
+
+    def record_bot_run_lifecycle_checkpoint(self, payload):
+        return dict(payload)
+
+    def update_bot_runtime_status(self, *, bot_id, run_id, status, telemetry_degraded=False):
+        return None
+
     def list_bot_runs(self, *, bot_id=None, limit=None):
         return []
 
@@ -65,7 +83,8 @@ class _FakeWatchdog:
 
 
 class _FakeRunner:
-    def start_bot(self, *, bot):
+    def start_bot(self, *, bot, run_id):
+        _ = run_id
         return f"container-{bot['id']}"
 
     def stop_bot(self, *, bot_id):
