@@ -577,6 +577,80 @@ class BotRunRecord(Base):
         }
 
 
+class BotRunLifecycleRecord(Base):
+    """Current durable lifecycle state for one bot run."""
+
+    __tablename__ = "portal_bot_run_lifecycle"
+
+    run_id = Column(String(64), ForeignKey("portal_bot_runs.run_id", ondelete="CASCADE"), primary_key=True)
+    bot_id = Column(String(64), ForeignKey("portal_bots.id", ondelete="CASCADE"), nullable=False)
+    phase = Column(String(64), nullable=False, default="start_requested")
+    status = Column(String(32), nullable=False, default="starting")
+    owner = Column(String(32), nullable=False, default="backend")
+    message = Column(String(1024), nullable=True)
+    lifecycle_metadata = Column("metadata", JSONB, nullable=False, default=dict)
+    failure = Column(JSONB, nullable=True)
+    checkpoint_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "bot_id": self.bot_id,
+            "phase": self.phase,
+            "status": self.status,
+            "owner": self.owner,
+            "message": self.message,
+            "metadata": dict(self.lifecycle_metadata or {}),
+            "failure": dict(self.failure or {}),
+            "checkpoint_at": (self.checkpoint_at or datetime.utcnow()).isoformat() + "Z",
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class BotRunLifecycleEventRecord(Base):
+    """Append-only lifecycle checkpoints for one bot run."""
+
+    __tablename__ = "portal_bot_run_lifecycle_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_portal_bot_run_lifecycle_events_event_id"),
+        UniqueConstraint("run_id", "seq", name="uq_portal_bot_run_lifecycle_events_run_seq"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(String(128), nullable=False)
+    run_id = Column(String(64), ForeignKey("portal_bot_runs.run_id", ondelete="CASCADE"), nullable=False)
+    bot_id = Column(String(64), ForeignKey("portal_bots.id", ondelete="CASCADE"), nullable=False)
+    seq = Column(Integer, nullable=False)
+    phase = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False)
+    owner = Column(String(32), nullable=False)
+    message = Column(String(1024), nullable=True)
+    lifecycle_metadata = Column("metadata", JSONB, nullable=False, default=dict)
+    failure = Column(JSONB, nullable=True)
+    checkpoint_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": int(self.id or 0),
+            "event_id": self.event_id,
+            "run_id": self.run_id,
+            "bot_id": self.bot_id,
+            "seq": int(self.seq or 0),
+            "phase": self.phase,
+            "status": self.status,
+            "owner": self.owner,
+            "message": self.message,
+            "metadata": dict(self.lifecycle_metadata or {}),
+            "failure": dict(self.failure or {}),
+            "checkpoint_at": (self.checkpoint_at or datetime.utcnow()).isoformat() + "Z",
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
 class BotRunStepRecord(Base):
     """Timed runtime step trace entry for bot-run profiling."""
 
