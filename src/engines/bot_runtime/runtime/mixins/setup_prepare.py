@@ -14,6 +14,7 @@ from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence
 from indicators.config import IndicatorExecutionContext
 from engines.bot_runtime.deps import BotRuntimeDeps
 from engines.bot_runtime.core.domain import normalize_epoch
+from engines.bot_runtime.core.runtime_events import ReasonCode, RuntimeEventName
 from engines.bot_runtime.runtime.reporting import (
     TRADE_OVERLAY_SOURCE,
     TRADE_RAY_MIN_SECONDS,
@@ -183,14 +184,12 @@ class RuntimeSetupPrepareMixin:
             strategy_key_fn=self._strategy_key,
         )
         self._phase: Optional[str] = None
-        # Stream payload cache: keep last derived slices so push_update emits true deltas.
+        # Stream payload cache: keep last derived slices so push_update emits true fact batches.
         self._push_series_cache: Dict[str, Dict[str, Any]] = {}
-        self._push_logs_fingerprint: Optional[Tuple[int, Optional[str], Optional[str]]] = None
-        self._push_decisions_fingerprint: Optional[Tuple[int, Optional[str], Optional[str]]] = None
         self._log_revision: int = 0
         self._decision_revision: int = 0
-        self._push_logs_revision: int = -1
-        self._push_decisions_revision: int = -1
+        self._push_log_marker: Optional[str] = None
+        self._push_decision_marker: Optional[str] = None
         self._push_payload_size_probe_count: int = 0
         self._push_payload_bytes_sample_every: int = self._coerce_positive_int(
             self.config.get("push_payload_bytes_sample_every")
@@ -341,6 +340,15 @@ class RuntimeSetupPrepareMixin:
         logger.exception(with_log_context(message, context))
         if message == "series_step_degraded":
             series = state.series if state is not None else None
+            error_message = (extra or {}).get("error") if isinstance(extra, Mapping) else None
+            if not error_message:
+                error_message = "Series execution degraded due to runtime error."
+            self._set_degraded_state(
+                error_message,
+                strategy_id=getattr(series, "strategy_id", None),
+                symbol=getattr(series, "symbol", None),
+                timeframe=getattr(series, "timeframe", None),
+            )
             try:
                 if series is not None and self._run_context is not None:
                     self._emit_runtime_event(
@@ -350,7 +358,7 @@ class RuntimeSetupPrepareMixin:
                         reason_code=ReasonCode.SYMBOL_DEGRADED,
                         payload={
                             "message": "Series execution degraded due to runtime error.",
-                            "error": (extra or {}).get("error") if isinstance(extra, Mapping) else None,
+                            "error": error_message,
                         },
                     )
             except Exception:
@@ -363,7 +371,7 @@ class RuntimeSetupPrepareMixin:
                         "strategy_id": getattr(series, "strategy_id", None),
                         "symbol": getattr(series, "symbol", None),
                         "timeframe": getattr(series, "timeframe", None),
-                        "error": (extra or {}).get("error") if isinstance(extra, Mapping) else None,
+                        "error": error_message,
                     },
                 }
             )
@@ -459,6 +467,32 @@ class RuntimeSetupPrepareMixin:
             },
         )
         return error_payload
+
+    def _set_degraded_state(
+        self,
+        message: str,
+        *,
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        degraded_payload: Dict[str, Any] = {"message": message}
+        if strategy_id:
+            degraded_payload["strategy_id"] = strategy_id
+        if symbol:
+            degraded_payload["symbol"] = symbol
+        if timeframe:
+            degraded_payload["timeframe"] = timeframe
+        with self._lock:
+            self.state.update(
+                {
+                    "status": "degraded",
+                    "progress": 0.0,
+                    "paused": False,
+                    "degradation": degraded_payload,
+                }
+            )
+        return degraded_payload
 
     def _ensure_prepared(self) -> None:
         with self._prepare_lock:
@@ -882,11 +916,11 @@ class RuntimeSetupPrepareMixin:
 
     @staticmethod
     def _build_candles(df: Any, timeframe: Optional[str] = None) -> List[Candle]:
-        return _series_builder_cls()._build_candles(df, timeframe)
+        return SeriesBuilder._build_candles(df, timeframe)
 
     @staticmethod
     def _build_signals_from_decision_artifacts(artifacts: Sequence[Mapping[str, Any]]) -> Deque[StrategySignal]:
-        return _series_builder_cls()._build_signals_from_decision_artifacts(artifacts)
+        return SeriesBuilder._build_signals_from_decision_artifacts(artifacts)
 
     @staticmethod
     def _strategy_key(series: StrategySeries) -> str:

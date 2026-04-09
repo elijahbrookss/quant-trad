@@ -19,6 +19,7 @@ from utils.log_context import with_log_context
 from utils.perf_log import perf_log, should_sample
 
 from ..components import SignalConsumption, consume_signals
+from ..components.overlay_delta import count_overlay_points, overlay_change_metrics
 from ..core import (
     INTRABAR_BASE_SECONDS,
     OVERLAY_SUMMARY_INTERVAL,
@@ -62,12 +63,10 @@ class RuntimeExecutionLoopMixin:
             self._run_context = None
             self._runner = None
             self._push_series_cache = {}
-            self._push_logs_fingerprint = None
-            self._push_decisions_fingerprint = None
             self._log_revision = 0
             self._decision_revision = 0
-            self._push_logs_revision = -1
-            self._push_decisions_revision = -1
+            self._push_log_marker = None
+            self._push_decision_marker = None
             self._push_payload_size_probe_count = 0
             self._report_artifact_bundle = None
             self.state = {"status": "idle", "progress": 0.0, "paused": False}
@@ -82,7 +81,7 @@ class RuntimeExecutionLoopMixin:
         """Return True when the runtime finished and can be rerun."""
 
         status = str(self.state.get("status") or "").lower()
-        finished = status in {"completed", "stopped", "error"}
+        finished = status in {"completed", "stopped", "error", "degraded"}
         exhausted = bool(self._series_states) and all(
             state.done or state.bar_index >= state.total_bars for state in self._series_states
         )
@@ -199,6 +198,8 @@ class RuntimeExecutionLoopMixin:
         runtime_status = str(self.state.get("status") or "").lower()
         if runtime_status == "error":
             status = "error"
+        elif runtime_status == "degraded":
+            status = "degraded"
         elif self._stop.is_set():
             status = "stopped"
         elif not self._live_mode:
@@ -215,7 +216,7 @@ class RuntimeExecutionLoopMixin:
             },
         )
         self._log_event(status, message=f"Bot runtime {status}")
-        if status in {"completed", "stopped"}:
+        if status in {"completed", "stopped", "degraded"}:
             duration_seconds = None
             if self._run_started_at is not None:
                 duration_seconds = (datetime.now(timezone.utc) - self._run_started_at).total_seconds()
@@ -1094,7 +1095,7 @@ class RuntimeExecutionLoopMixin:
         signal_eval_ms = max((time.perf_counter() - signal_started) * 1000.0, 0.0)
 
         previous_overlay_count = float(len(series.overlays or []))
-        previous_overlay_points = float(self._count_overlay_points(series.overlays or []))
+        previous_overlay_points = float(count_overlay_points(series.overlays or []))
         overlay_projection_ms = 0.0
         overlay_projection_skipped_count = 0
         overlay_projection_projector_ms = 0.0
@@ -1126,7 +1127,7 @@ class RuntimeExecutionLoopMixin:
             overlay_runtime_metrics.get("series_overlay_regime_mode_rebuild") or 0.0
         )
         overlays_update_ms = overlay_projection_ms + series_overlay_entries_ms
-        overlays_changed_count, overlay_points_changed = self._overlay_change_metrics(series.overlays or [], overlays)
+        overlays_changed_count, overlay_points_changed = overlay_change_metrics(series.overlays or [], overlays)
         series.overlays = overlays
 
         append_started = time.perf_counter()
@@ -1183,7 +1184,7 @@ class RuntimeExecutionLoopMixin:
             "overlay_count_before": previous_overlay_count,
             "overlay_count_after": float(len(overlays)),
             "overlay_points_before": previous_overlay_points,
-            "overlay_points_after": float(self._count_overlay_points(overlays)),
+            "overlay_points_after": float(count_overlay_points(overlays)),
         }
 
         next_last_evaluated = epoch
