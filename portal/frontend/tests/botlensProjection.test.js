@@ -3,8 +3,6 @@ import assert from 'node:assert/strict'
 
 import {
   applyHistoryPage,
-  applyLiveTail,
-  assessLiveContinuity,
   buildProjectionFromWindow,
   canonicalSeriesKey,
   mergeCanonicalCandles,
@@ -91,10 +89,10 @@ test('history paging prepends overlapping candles without duplication', () => {
   assert.equal(next.series[0].candles[1].close, 1)
 })
 
-test('applyLiveTail materializes typed series_delta payloads incrementally', () => {
-  const seeded = buildProjectionFromWindow({
+test('buildProjectionFromWindow accepts backend-owned projection_update windows', () => {
+  const next = buildProjectionFromWindow({
     runId: 'run-1',
-    seq: 10,
+    seq: 11,
     seriesKey: 'instrument-btc|1m',
     window: {
       projection: {
@@ -103,49 +101,19 @@ test('applyLiveTail materializes typed series_delta payloads incrementally', () 
             instrument_id: 'instrument-btc',
             symbol: 'BTC',
             timeframe: '1m',
-            candles: [{ time: 1767225600, open: 1, high: 1, low: 1, close: 1 }],
-            overlays: [],
-            stats: { total_trades: 0 },
+            candles: [
+              { time: 1767225600, open: 1, high: 1, low: 1, close: 1 },
+              { time: 1767225660, open: 2, high: 2, low: 2, close: 2 },
+            ],
+            overlays: [{ overlay_id: 'overlay:regime', type: 'regime_overlay', payload: { state: 'risk_on' } }],
+            stats: { total_trades: 1 },
           },
         ],
-        runtime: { status: 'running' },
-        trades: [],
-        logs: [],
-        decisions: [],
-      },
-    },
-  })
-
-  const next = applyLiveTail({
-    projection: seeded,
-    seriesKey: 'instrument-btc|1m',
-    message: {
-      runId: 'run-1',
-      seriesKey: 'instrument-btc|1m',
-      seq: 11,
-      messageType: 'series_delta',
-      payload: {
-        runtime: { status: 'running', warnings: ['slow consumer'] },
+        runtime: { status: 'running', warnings: ['slow consumer'], last_bar: { time: 1767225660 } },
+        warnings: ['slow consumer'],
+        trades: [{ trade_id: 't-1', symbol: 'BTC' }],
         logs: [{ message: 'delta log' }],
         decisions: [{ event: 'decision' }],
-        seriesDelta: {
-          instrument_id: 'instrument-btc',
-          series_key: 'instrument-btc|1m',
-          symbol: 'BTC',
-          timeframe: '1m',
-          candle: { time: 1767225660, open: 2, high: 2, low: 2, close: 2 },
-          overlay_delta: {
-            ops: [
-              {
-                op: 'upsert',
-                key: 'overlay:regime',
-                overlay: { type: 'regime_overlay', payload: { state: 'risk_on' } },
-              },
-            ],
-          },
-          stats: { total_trades: 1 },
-          trades: [{ trade_id: 't-1', symbol: 'BTC' }],
-        },
       },
     },
   })
@@ -159,28 +127,6 @@ test('applyLiveTail materializes typed series_delta payloads incrementally', () 
   assert.equal(next.decisions[0].event, 'decision')
   assert.deepEqual(next.warnings, ['slow consumer'])
   assert.equal(next.runtime.last_bar.time, 1767225660)
-})
-
-test('live continuity check forces resync on sequence gaps', () => {
-  const seeded = buildProjectionFromWindow({
-    runId: 'run-1',
-    seq: 10,
-    seriesKey: 'instrument-btc|1m',
-    window: {
-      projection: {
-        series: [{ instrument_id: 'instrument-btc', symbol: 'BTC', timeframe: '1m', candles: [] }],
-      },
-    },
-  })
-
-  const continuity = assessLiveContinuity({
-    projection: seeded,
-    message: { runId: 'run-1', seriesKey: 'instrument-btc|1m', seq: 13 },
-    seriesKey: 'instrument-btc|1m',
-  })
-
-  assert.equal(continuity.action, 'resync')
-  assert.equal(continuity.reason, 'seq_gap')
 })
 
 test('series identity helpers reject non-canonical legacy keys', () => {
