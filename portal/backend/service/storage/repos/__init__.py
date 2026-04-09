@@ -13,6 +13,12 @@ from .bots import (
     update_bot_run_artifact,
     upsert_bot,
 )
+from .lifecycle import (
+    get_bot_run_lifecycle,
+    get_latest_bot_run_lifecycle,
+    list_bot_run_lifecycle_events,
+    record_bot_run_lifecycle_checkpoint,
+)
 from .indicators import (
     delete_indicator,
     get_indicator,
@@ -89,14 +95,17 @@ __all__ = [
     "find_orphaned_bots",
     "get_atm_template",
     "get_bot",
+    "get_bot_run_lifecycle",
     "get_bot_run",
     "get_indicator",
     "get_instrument",
+    "get_latest_bot_run_lifecycle",
     "get_strategy_variant",
     "get_latest_bot_run_view_state",
     "get_latest_bot_runtime_event",
     "get_latest_bot_runtime_run_id",
     "list_bot_run_view_states",
+    "list_bot_run_lifecycle_events",
     "list_bot_runs",
     "list_bot_runtime_events",
     "list_bot_trade_events_for_trades",
@@ -113,6 +122,7 @@ __all__ = [
     "mark_bot_crashed",
     "record_bot_run_step",
     "record_bot_run_steps_batch",
+    "record_bot_run_lifecycle_checkpoint",
     "record_bot_runtime_event",
     "record_bot_runtime_events_batch",
     "upsert_bot_run_view_state",
