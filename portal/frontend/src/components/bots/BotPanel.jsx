@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { PlusCircle, RefreshCw, Search } from 'lucide-react'
 import {
   listBots,
@@ -9,10 +9,13 @@ import {
 } from '../../adapters/bot.adapter.js'
 import { fetchStrategies, fetchStrategy } from '../../adapters/strategy.adapter.js'
 import { createLogger } from '../../utils/logger.js'
+import ActionButton from '../strategy/ui/ActionButton.jsx'
 import { BotCreateModal } from './create/BotCreateModal.jsx'
 import { BotLensLiveModal } from './BotLensLiveModal.jsx'
+import { BotDiagnosticsModal } from './BotDiagnosticsModal.jsx'
 import { useBotCreateController } from './create/useBotCreateController.js'
-import { getBotStatus } from './botStatusModel.js'
+import { getBotCardDisplayState } from './botStatusModel.js'
+import { buildBotFleetSummary } from './botControlSurfaceModel.js'
 import { BotCard, sortBots } from './BotCard.jsx'
 import { useBotStream } from './useBotStream.js'
 
@@ -22,6 +25,7 @@ export function BotPanel() {
   const [createOpen, setCreateOpen] = useState(false)
   const [createError, setCreateError] = useState(null)
   const [lensBotId, setLensBotId] = useState(null)
+  const [diagnosticsBotId, setDiagnosticsBotId] = useState(null)
   const [error, setError] = useState(null)
   const [strategies, setStrategies] = useState([])
   const [strategiesLoading, setStrategiesLoading] = useState(false)
@@ -32,8 +36,6 @@ export function BotPanel() {
   const [runtimeCapacity, setRuntimeCapacity] = useState(null)
   const [nowEpochMs, setNowEpochMs] = useState(() => Date.now())
   const logger = useMemo(() => createLogger('BotPanel'), [])
-  const runtimeQueueRef = useRef(new Map())
-  const runtimeFrame = useRef(null)
   const shallowEqualRuntime = useCallback((next = {}, prev = {}) => {
     if (next === prev) return true
     const keys = new Set([...Object.keys(next || {}), ...Object.keys(prev || {})])
@@ -155,80 +157,6 @@ export function BotPanel() {
     setBots((prev) => prev.filter((bot) => bot.id !== botId))
   }, [])
 
-  const flushRuntimeQueue = useCallback(() => {
-    setBots((prev) => {
-      let nextState = prev
-      runtimeQueueRef.current.forEach((runtime, botId) => {
-        const index = nextState.findIndex((bot) => bot.id === botId)
-        if (index === -1) return
-        const bot = nextState[index]
-        const mergedRuntime = { ...(bot.runtime || {}), ...runtime }
-        if (shallowEqualRuntime(mergedRuntime, bot.runtime)) return
-        const nextStatus = String(runtime?.status || '').trim().toLowerCase()
-        const nextLifecycle = { ...(bot.lifecycle || {}) }
-        const nextControls = { ...(bot.controls || {}) }
-        if (nextStatus) {
-          nextLifecycle.status = nextStatus
-          if (nextStatus === 'running') {
-            nextLifecycle.phase = Number(runtime?.seq || 0) > 0 ? 'live' : 'awaiting_snapshot'
-            nextLifecycle.reason = Number(runtime?.seq || 0) > 0 ? 'live_runtime' : 'awaiting_first_snapshot'
-            nextLifecycle.live = Number(runtime?.seq || 0) > 0
-            nextControls.can_start = false
-            nextControls.can_stop = true
-          } else if (nextStatus === 'starting') {
-            nextLifecycle.phase = 'starting_container'
-            nextLifecycle.reason = 'container_start_pending'
-            nextLifecycle.live = false
-            nextControls.can_start = false
-            nextControls.can_stop = true
-          } else if (['completed', 'stopped'].includes(nextStatus)) {
-            nextLifecycle.phase = nextStatus === 'completed' ? 'completed' : 'stopped'
-            nextLifecycle.reason = nextStatus === 'completed' ? 'run_completed' : 'run_stopped'
-            nextLifecycle.live = false
-            nextControls.can_start = true
-            nextControls.can_stop = false
-          } else if (['degraded', 'telemetry_degraded'].includes(nextStatus)) {
-            nextLifecycle.phase = 'degraded'
-            nextLifecycle.reason = 'runtime_degraded'
-            nextLifecycle.live = true
-            nextControls.can_start = true
-            nextControls.can_stop = true
-          } else if (['error', 'failed', 'crashed'].includes(nextStatus)) {
-            nextLifecycle.phase = 'failed'
-            nextLifecycle.reason = 'runtime_failed'
-            nextLifecycle.live = false
-            nextControls.can_start = true
-            nextControls.can_stop = false
-          }
-        }
-        if (nextState === prev) nextState = [...prev]
-        nextState[index] = {
-          ...bot,
-          status: nextStatus || bot.status,
-          active_run_id: runtime?.run_id || bot.active_run_id,
-          controls: nextControls,
-          lifecycle: nextLifecycle,
-          runtime: mergedRuntime,
-        }
-      })
-      runtimeQueueRef.current.clear()
-      return nextState
-    })
-    runtimeFrame.current = null
-  }, [shallowEqualRuntime])
-
-  const applyRuntime = useCallback(
-    (botId, runtime) => {
-      if (!botId || !runtime) return
-      const existing = runtimeQueueRef.current.get(botId) || {}
-      runtimeQueueRef.current.set(botId, { ...existing, ...runtime })
-      if (!runtimeFrame.current) {
-        runtimeFrame.current = requestAnimationFrame(flushRuntimeQueue)
-      }
-    },
-    [flushRuntimeQueue],
-  )
-
   const loadRuntimeCapacity = useCallback(async () => {
     try {
       const payload = await fetchBotRuntimeCapacity()
@@ -276,8 +204,9 @@ export function BotPanel() {
 
   useEffect(() => {
     loadStrategies()
+    loadBots()
     logger.info('bot_panel_mounted')
-  }, [loadStrategies, logger])
+  }, [loadBots, loadStrategies, logger])
 
   useEffect(() => {
     loadRuntimeCapacity()
@@ -307,15 +236,10 @@ export function BotPanel() {
     }
   }, [createOpen, logger])
 
-  useEffect(() => () => {
-    if (runtimeFrame.current) cancelAnimationFrame(runtimeFrame.current)
-  }, [])
-
   const { state: botStreamState, reconnect: reconnectBotStream } = useBotStream({
     mergeBots,
     upsertBot,
     removeBot,
-    applyRuntime,
     loadBots,
   })
 
@@ -344,26 +268,28 @@ export function BotPanel() {
     }
     logger.info('bot_start_requested', { bot_id: botId })
     setPendingStart(botId)
+    // Keep fleet control responsive while the authoritative lifecycle stream catches up.
     setBots((prev) =>
       prev.map((bot) =>
         bot.id === botId
           ? {
               ...bot,
               status: 'starting',
-              controls: {
-                ...(bot.controls || {}),
-                can_start: false,
-                can_stop: true,
-                start_label: 'Starting',
-              },
               lifecycle: {
                 ...(bot.lifecycle || {}),
                 status: 'starting',
-                phase: 'starting_container',
+                phase: 'preparing_run',
                 reason: 'container_start_pending',
-                live: false,
+                message: 'Preparing run',
+                updated_at: new Date().toISOString(),
               },
-              runtime: { ...(bot.runtime || {}), status: 'starting' },
+              controls: {
+                ...(bot.controls || {}),
+                can_start: false,
+                can_stop: false,
+                can_delete: false,
+                start_label: 'Starting',
+              },
             }
           : bot,
       ),
@@ -375,38 +301,7 @@ export function BotPanel() {
     } catch (err) {
       logger.error('bot_start_failed', { bot_id: botId, message: err?.message }, err)
       setError(err?.message || 'Unable to start bot')
-      setBots((prev) =>
-        prev.map((bot) =>
-          bot.id === botId
-            ? {
-                ...bot,
-                status: 'error',
-                controls: {
-                  ...(bot.controls || {}),
-                  can_start: true,
-                  can_stop: false,
-                  start_label: 'Restart',
-                },
-                lifecycle: {
-                  ...(bot.lifecycle || {}),
-                  status: 'error',
-                  phase: 'failed',
-                  reason: 'runtime_failed',
-                  live: false,
-                },
-                last_run_artifact: {
-                  ...(bot.last_run_artifact || {}),
-                  error: { message: err?.message || 'Container start failed', phase: 'container_start' },
-                },
-                runtime: {
-                  ...(bot.runtime || {}),
-                  status: 'error',
-                  error: { message: err?.message || 'Container start failed', phase: 'container_start' },
-                },
-              }
-            : bot,
-        ),
-      )
+      loadBots(false)
     } finally {
       setPendingStart(null)
     }
@@ -450,6 +345,7 @@ export function BotPanel() {
     try {
       await deleteBotApi(botId)
       if (lensBotId === botId) setLensBotId(null)
+      if (diagnosticsBotId === botId) setDiagnosticsBotId(null)
       setBots((prev) => prev.filter((bot) => bot.id !== botId))
     } catch (err) {
       logger.error('bot_delete_failed', { bot_id: botId, message: err?.message }, err)
@@ -482,16 +378,38 @@ export function BotPanel() {
     return 'Execution run'
   }, [])
 
-    const sortedBots = useMemo(() => sortBots(bots), [bots])
+  const sortedBots = useMemo(() => sortBots(bots), [bots])
 
   const sortedStrategies = useMemo(() => {
     return [...strategies].sort((a, b) => (a.name || '').localeCompare(b.name || ''))
   }, [strategies])
 
-  const lensBot = useMemo(
-    () => bots.find((bot) => bot.id === lensBotId) || null,
-    [bots, lensBotId],
+  const lensBot = useMemo(() => {
+    const selectedBot = bots.find((bot) => bot.id === lensBotId) || null
+    if (!selectedBot) return null
+    const display = getBotCardDisplayState(selectedBot, {
+      nowEpochMs,
+      pendingStart: pendingStart === selectedBot.id,
+    })
+    return display.controls.canOpenLens ? selectedBot : null
+  }, [bots, lensBotId, nowEpochMs, pendingStart])
+
+  const diagnosticsBot = useMemo(
+    () => bots.find((bot) => bot.id === diagnosticsBotId) || null,
+    [bots, diagnosticsBotId],
   )
+
+  useEffect(() => {
+    if (lensBotId && !lensBot) {
+      setLensBotId(null)
+    }
+  }, [lensBot, lensBotId])
+
+  useEffect(() => {
+    if (diagnosticsBotId && !diagnosticsBot) {
+      setDiagnosticsBotId(null)
+    }
+  }, [diagnosticsBot, diagnosticsBotId])
 
   const strategyLookup = useMemo(() => {
     const map = new Map()
@@ -524,23 +442,24 @@ export function BotPanel() {
     })
   }, [describeRange, search, sortedBots, strategyLookup])
 
+  const fleetSummary = useMemo(
+    () => buildBotFleetSummary(sortedBots, { nowEpochMs, pendingStartId: pendingStart }),
+    [nowEpochMs, pendingStart, sortedBots],
+  )
+
   return (
-    <section className="space-y-5">
-      <header className="space-y-4">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="space-y-1.5">
-            <div className="flex items-baseline gap-3">
-              <h3 className="text-2xl font-medium tracking-tight text-slate-50">Bots</h3>
-              <span className="text-xs font-medium tabular-nums text-slate-500">
-                {strategiesLoading ? 'Loading…' : `${strategies.length} ${strategies.length === 1 ? 'strategy' : 'strategies'}`}
-              </span>
-            </div>
-            <p className="text-sm leading-relaxed text-slate-400">
-              Monitor and control backtest, paper, and live-ready bots across all configured strategies
+    <section className="mx-auto max-w-[1320px] space-y-4">
+      <header className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold text-white">Monitor runs and intervene quickly</h2>
+            <p className="mt-0.5 text-xs text-slate-500">
+              Keep startup, live runtime, and failures visible from one control surface.
             </p>
           </div>
-          <button
-            type="button"
+          <ActionButton
+            variant="ghost"
+            className="inline-flex items-center"
             onClick={async () => {
               logger.info('bot_create_modal_open')
               setCreateError(null)
@@ -556,15 +475,26 @@ export function BotPanel() {
                 setCreateError(err?.message || 'Unable to prepare bot create form')
               }
             }}
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2.5 text-sm font-medium text-slate-200 backdrop-blur-sm transition-colors hover:border-slate-600 hover:bg-slate-800 hover:text-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-500"
           >
-            <PlusCircle className="size-4" /> New Bot
-          </button>
+            <PlusCircle className="mr-1 size-3.5" /> New Bot
+          </ActionButton>
         </div>
 
-        <div className="flex flex-col gap-3 rounded-lg border border-slate-800 bg-slate-900/50 p-3 backdrop-blur-sm lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex flex-1 flex-wrap items-center gap-2.5">
-            <label className="flex min-w-[240px] flex-1 items-center gap-2.5 rounded-md border border-slate-800 bg-slate-950/80 px-3 py-2 text-slate-200 focus-within:border-slate-700 focus-within:bg-slate-950">
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-white/[0.06] bg-black/30 px-3 py-2">
+          {fleetSummary.items.map((item) => (
+            <SummaryPill key={item.key} label={item.label} value={item.value} />
+          ))}
+          {runtimeCapacity ? (
+            <SummaryPill
+              label="CPU"
+              value={`${Number(runtimeCapacity.workers_in_use || 0)}/${Number(runtimeCapacity.host_cpu_cores || 0)}`}
+            />
+          ) : null}
+        </div>
+
+        <div className="flex flex-col gap-2 rounded-lg border border-white/[0.06] bg-black/20 px-3 py-2 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-1 flex-wrap items-center gap-2">
+            <label className="flex min-w-[240px] flex-1 items-center gap-2 rounded-md border border-white/[0.06] bg-black/40 px-3 py-2 text-slate-200 focus-within:border-white/[0.12] focus-within:bg-black/50">
               <Search className="size-3.5 shrink-0 text-slate-600" />
               <input
                 type="search"
@@ -574,8 +504,9 @@ export function BotPanel() {
                 className="min-w-0 flex-1 bg-transparent text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none"
               />
             </label>
-            <button
-              type="button"
+            <ActionButton
+              variant="ghost"
+              className="inline-flex items-center disabled:cursor-not-allowed disabled:opacity-50"
               onClick={() => {
                 if (botStreamState === 'open') {
                   logger.info('bot_stream_refresh_requested')
@@ -584,28 +515,21 @@ export function BotPanel() {
                 }
                 loadBots()
               }}
-              className="inline-flex items-center gap-2 rounded-md border border-slate-800 bg-slate-950/80 px-3.5 py-2 text-sm font-medium text-slate-400 transition-colors hover:border-slate-700 hover:bg-slate-950 hover:text-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
               disabled={loading}
             >
               <RefreshCw className={`size-3.5 ${loading ? 'animate-spin' : ''}`} />
               <span className="hidden sm:inline">Refresh</span>
-            </button>
+            </ActionButton>
           </div>
-          <div className="flex flex-col items-end gap-1 text-xs tabular-nums">
-            <div className="flex items-center gap-2">
-              <span className="font-medium text-slate-400">{filteredBots.length}</span>
-              <span className="text-slate-600">of</span>
-              <span className="font-medium text-slate-500">{sortedBots.length}</span>
-            </div>
+          <div className="flex items-center gap-2 text-[11px] tabular-nums text-slate-500">
+            <span>{filteredBots.length}</span>
+            <span className="text-slate-700">shown</span>
+            <span className="text-slate-700">/</span>
+            <span>{sortedBots.length}</span>
             {runtimeCapacity ? (
-              <div className="text-[11px] text-slate-600">
-                <span>
-                  CPU {Number(runtimeCapacity.workers_in_use || 0)}/{Number(runtimeCapacity.host_cpu_cores || 0)}
-                </span>
-                <span className="ml-1 text-slate-700">({Number(runtimeCapacity.in_use_pct || 0)}%)</span>
-                <span className="mx-1.5 text-slate-700">•</span>
-                <span>{Number(runtimeCapacity.running_bots || 0)} running</span>
-              </div>
+              <span className="text-slate-700">
+                • {Number(runtimeCapacity.running_bots || 0)} active
+              </span>
             ) : null}
           </div>
         </div>
@@ -641,7 +565,8 @@ export function BotPanel() {
                 onStart={handleStart}
                 onStop={handleStop}
                 onDelete={handleDelete}
-                onOpen={(selectedBot) => setLensBotId(selectedBot?.id || null)}
+                onOpenLens={(selectedBot) => setLensBotId(selectedBot?.id || null)}
+                onOpenDiagnostics={(selectedBot) => setDiagnosticsBotId(selectedBot?.id || null)}
                 pendingStart={pendingStart}
                 pendingDelete={pendingDelete}
               />
@@ -650,6 +575,7 @@ export function BotPanel() {
         </div>
 
         <BotLensLiveModal bot={lensBot} open={Boolean(lensBot)} onClose={() => setLensBotId(null)} />
+        <BotDiagnosticsModal bot={diagnosticsBot} open={Boolean(diagnosticsBot)} onClose={() => setDiagnosticsBotId(null)} />
         <BotCreateModal
           open={createOpen}
           onClose={closeCreateModal}
@@ -671,3 +597,12 @@ export function BotPanel() {
       </section>
     )
   }
+
+function SummaryPill({ label, value }) {
+  return (
+    <div className="inline-flex items-center gap-2 rounded-md border border-white/[0.06] bg-black/35 px-2.5 py-1.5">
+      <span className="qt-mono text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">{label}</span>
+      <span className="qt-mono text-[12px] font-semibold text-slate-200">{value}</span>
+    </div>
+  )
+}
