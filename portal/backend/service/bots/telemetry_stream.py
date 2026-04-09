@@ -21,7 +21,7 @@ from ..storage.storage import (
     upsert_bot_run_view_state,
 )
 from .live_series_stream import LiveSeriesStream
-from .bot_service import publish_runtime_update
+from .bot_service import publish_projected_bot, publish_runtime_update
 from .botlens_projection import apply_series_runtime_delta, canonicalize_projection, normalize_series_key
 
 logger = logging.getLogger(__name__)
@@ -130,6 +130,16 @@ class BotTelemetryHub:
                 bot_id,
                 run_id,
                 seq,
+                exc,
+            )
+
+    async def _publish_projected_bot(self, *, bot_id: str) -> None:
+        try:
+            await asyncio.to_thread(publish_projected_bot, bot_id, inspect_container=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "bot_telemetry_projected_bot_broadcast_failed | bot_id=%s | error=%s",
+                bot_id,
                 exc,
             )
 
@@ -357,6 +367,18 @@ class BotTelemetryHub:
             return
         if kind == "botlens_series_delta":
             await self._process_series_delta(payload)
+            return
+        if kind == "bot_projection_refresh":
+            bot_id = str(payload.get("bot_id") or "").strip()
+            if bot_id:
+                logger.info(
+                    "bot_telemetry_projection_refresh_ingested | bot_id=%s | run_id=%s | phase=%s | status=%s",
+                    bot_id,
+                    str(payload.get("run_id") or "").strip(),
+                    str(payload.get("phase") or "").strip(),
+                    str(payload.get("status") or "").strip(),
+                )
+                await self._publish_projected_bot(bot_id=bot_id)
             return
         logger.warning("bot_telemetry_ingest_unknown_kind | kind=%s", kind)
 

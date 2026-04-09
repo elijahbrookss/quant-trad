@@ -37,6 +37,7 @@ from __future__ import annotations
 import logging
 import socket
 import threading
+from datetime import datetime, timedelta
 from typing import Callable, Dict, List, Optional, Set
 
 from core.settings import get_settings
@@ -57,6 +58,28 @@ _SETTINGS = get_settings().bot_runtime.watchdog
 HEARTBEAT_INTERVAL_SECONDS = _SETTINGS.heartbeat_interval_seconds
 STALE_THRESHOLD_SECONDS = _SETTINGS.stale_threshold_seconds
 MONITOR_INTERVAL_SECONDS = _SETTINGS.monitor_interval_seconds
+STARTUP_CONTAINER_GRACE_SECONDS = max(float(HEARTBEAT_INTERVAL_SECONDS * 2), float(MONITOR_INTERVAL_SECONDS))
+
+
+def _parse_bot_timestamp(value: object) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        normalized = text.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.replace(tzinfo=None)
+    return parsed
+
+
+def _startup_launch_grace_active(bot: Dict[str, object]) -> bool:
+    started_at = _parse_bot_timestamp(bot.get("last_run_at"))
+    if started_at is None:
+        return False
+    return datetime.utcnow() - started_at < timedelta(seconds=STARTUP_CONTAINER_GRACE_SECONDS)
 
 
 def _generate_runner_id() -> str:
@@ -269,14 +292,16 @@ class BotWatchdog:
                 "telemetry_degraded",
             }:
                 continue
-            if status == "starting" and not bot.get("heartbeat_at"):
-                continue
             bot_id = str(bot.get("id") or "").strip()
             if not bot_id:
                 continue
             container = DockerBotRunner.inspect_bot_container(bot_id)
             if bool(container.get("running")):
                 continue
+            container_status = str(container.get("status") or "").strip().lower()
+            if status == "starting" and not bot.get("heartbeat_at"):
+                if container_status in {"missing", "unknown", "created", "restarting"} and _startup_launch_grace_active(bot):
+                    continue
             container_name = str(container.get("name") or "").strip()
             if mark_bot_crashed(bot_id, reason=f"container_not_running:{container_name}"):
                 failed.append(bot_id)
@@ -287,6 +312,15 @@ class BotWatchdog:
                     container.get("status"),
                     container.get("error"),
                 )
+                if self._on_orphan_detected:
+                    try:
+                        self._on_orphan_detected(bot_id, bot)
+                    except Exception as exc:
+                        logger.warning(
+                            "bot_watchdog_orphan_callback_failed | bot_id=%s | error=%s",
+                            bot_id,
+                            exc,
+                        )
         return failed
 
     def start_background_monitor(self) -> None:

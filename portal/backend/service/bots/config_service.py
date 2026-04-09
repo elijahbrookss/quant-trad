@@ -10,11 +10,11 @@ from core.settings import env_is_set, env_value, get_settings
 from engines.bot_runtime.core.execution_profile import compile_runtime_profile_or_error
 
 from .strategy_loader import StrategyLoader
+from .startup_validation import validate_wallet_config as normalize_wallet_config
 from ..market import instrument_service
 from ..storage.storage import delete_bot, get_strategy_variant, load_bots, load_strategies, upsert_bot
 from risk import normalise_risk_config
 
-MIN_STARTING_WALLET = 10.0
 _DERIVATIVE_TYPES = {"perp", "perps", "swap", "future", "futures", "derivative", "derivatives"}
 _RUNTIME_ALLOWED_DERIVATIVE_TYPES = {"future", "futures", "perp", "perps"}
 _SETTINGS = get_settings()
@@ -214,28 +214,7 @@ class BotConfigService:
 
     @staticmethod
     def validate_wallet_config(wallet_config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
-        if not isinstance(wallet_config, Mapping):
-            raise ValueError("wallet_config is required and must be an object")
-        balances = wallet_config.get("balances")
-        if not isinstance(balances, Mapping) or not balances:
-            raise ValueError("wallet_config.balances is required and cannot be empty")
-        normalized: Dict[str, float] = {}
-        total = 0.0
-        for currency, amount in balances.items():
-            code = str(currency).strip().upper()
-            if not code:
-                raise ValueError("wallet_config.balances contains an empty currency key")
-            try:
-                numeric = float(amount)
-            except (TypeError, ValueError):
-                raise ValueError(f"wallet_config.balances[{code}] must be numeric")
-            if numeric < 0:
-                raise ValueError(f"wallet_config.balances[{code}] must be non-negative")
-            normalized[code] = numeric
-            total += numeric
-        if total < MIN_STARTING_WALLET:
-            raise ValueError(f"wallet_config balances must sum to at least {MIN_STARTING_WALLET}")
-        return {"balances": normalized}
+        return normalize_wallet_config(wallet_config)
 
     @staticmethod
     def validate_resolved_params(value: Optional[object]) -> Dict[str, Any]:
@@ -387,35 +366,120 @@ class BotConfigService:
         if not StrategyLoader.strategy_exists(strategy_id):
             raise ValueError(f"Strategy not found: {strategy_id}")
 
-    def validate_instrument_policy(self, bot: Mapping[str, object]) -> None:
-        policy = self.instrument_policy_from_bot(bot)
-        if not policy:
-            return
+    @staticmethod
+    def _runtime_loader_config(bot: Mapping[str, object]) -> Dict[str, Any]:
+        return {
+            "strategy_variant_id": str(bot.get("strategy_variant_id") or "").strip() or None,
+            "strategy_variant_name": str(bot.get("strategy_variant_name") or "").strip() or None,
+            "resolved_params": dict(bot.get("resolved_params") or {}) if isinstance(bot.get("resolved_params"), Mapping) else {},
+            "risk_config": dict(bot.get("risk_config") or {}) if isinstance(bot.get("risk_config"), Mapping) else {},
+        }
 
-        strategy_id = str(bot.get("strategy_id") or "").strip()
-        if not strategy_id:
-            raise ValueError("Bots require a strategy_id.")
-        strategy = StrategyLoader.fetch_strategy(strategy_id)
+    @staticmethod
+    def _resolve_runtime_instrument(strategy: Any, link: Any) -> Dict[str, Any]:
+        snapshot = dict(getattr(link, "instrument_snapshot", {}) or {})
+        symbol = str(
+            snapshot.get("symbol")
+            or getattr(link, "symbol", "")
+            or getattr(link, "instrument_id", "")
+            or ""
+        ).strip()
+        resolved = (
+            instrument_service.resolve_instrument(strategy.datasource, strategy.exchange, symbol)
+            if symbol
+            else None
+        )
+        return dict(resolved or snapshot or {})
+
+    def prepare_startup_artifacts(self, bot: Mapping[str, object]) -> Dict[str, Any]:
+        strategy_id = self.validate_strategy_id(bot.get("strategy_id"))
+        wallet_config = self.validate_wallet_config(bot.get("wallet_config"))
+        self.validate_backtest_window(bot)
+
+        strategy = StrategyLoader.fetch_strategy(
+            strategy_id,
+            runtime_config=self._runtime_loader_config(bot),
+        )
+        if not strategy.instrument_links:
+            raise ValueError("Strategy has no instruments attached. Add at least one instrument before bot start.")
+
+        policy = self.instrument_policy_from_bot(bot)
+        symbols: List[str] = []
+        readiness_entries: List[Dict[str, Any]] = []
+        errors: List[str] = []
+
         for link in strategy.instrument_links:
-            snapshot = link.instrument_snapshot or {}
-            instrument_type = str(snapshot.get("instrument_type") or "").lower()
-            symbol = snapshot.get("symbol") or link.symbol
-            if not instrument_type:
-                resolved = instrument_service.resolve_instrument(strategy.datasource, strategy.exchange, symbol or "")
-                instrument_type = str((resolved or {}).get("instrument_type") or "").lower()
-            if not instrument_type:
-                raise ValueError(
-                    f"Instrument type missing for {symbol or link.instrument_id}. Validate the instrument before running this bot."
+            instrument = self._resolve_runtime_instrument(strategy, link)
+            symbol = str(
+                instrument.get("symbol")
+                or getattr(link, "symbol", "")
+                or getattr(link, "instrument_id", "")
+                or ""
+            ).strip()
+            if symbol and symbol not in symbols:
+                symbols.append(symbol)
+            instrument_type = self._normalize_runtime_instrument_type(instrument.get("instrument_type"))
+            if policy:
+                if not instrument_type:
+                    raise ValueError(
+                        f"Instrument type missing for {symbol or getattr(link, 'instrument_id', None)}. "
+                        "Validate the instrument before running this bot."
+                    )
+                is_spot = instrument_type == "spot"
+                if policy == "derivatives" and is_spot:
+                    raise ValueError(
+                        f"Derivatives-only bot cannot run on spot instrument {symbol or getattr(link, 'instrument_id', None)}."
+                    )
+                if policy == "spot" and not is_spot:
+                    raise ValueError(
+                        f"Spot-only bot cannot run on derivatives instrument {symbol or getattr(link, 'instrument_id', None)}."
+                    )
+
+            if not instrument:
+                errors.append(
+                    f"{symbol or getattr(link, 'instrument_id', None)}: instrument metadata missing. Refresh instrument metadata in Strategy."
                 )
-            is_spot = instrument_type == "spot"
-            if policy == "derivatives" and is_spot:
-                raise ValueError(
-                    f"Derivatives-only bot cannot run on spot instrument {symbol or link.instrument_id}."
+                continue
+            try:
+                profile = compile_runtime_profile_or_error(
+                    instrument,
+                    allowed_derivative_types=_RUNTIME_ALLOWED_DERIVATIVE_TYPES,
                 )
-            if policy == "spot" and not is_spot:
-                raise ValueError(
-                    f"Spot-only bot cannot run on derivatives instrument {symbol or link.instrument_id}."
+                readiness_entries.append(
+                    {
+                        "symbol": symbol or None,
+                        "instrument_id": getattr(link, "instrument_id", None),
+                        "instrument_type": instrument_type or None,
+                        "profile": profile.to_dict() if hasattr(profile, "to_dict") else {"instrument_type": instrument_type or None},
+                    }
                 )
+            except ValueError as exc:
+                message = str(exc)
+                prefix = f"{symbol}:".lower() if symbol else ""
+                if prefix and message.lower().startswith(prefix):
+                    errors.append(message)
+                else:
+                    errors.append(f"{symbol or getattr(link, 'instrument_id', None)}: {message}")
+
+        if errors:
+            raise ValueError("Bot startup preflight failed: " + " | ".join(errors))
+
+        return {
+            "strategy_id": strategy_id,
+            "strategy": strategy,
+            "wallet_config": wallet_config,
+            "symbols": symbols,
+            "runtime_readiness": {
+                "datasource": strategy.datasource,
+                "exchange": strategy.exchange,
+                "timeframe": strategy.timeframe,
+                "symbols": symbols,
+                "profiles": readiness_entries,
+            },
+        }
+
+    def validate_instrument_policy(self, bot: Mapping[str, object]) -> None:
+        self.prepare_startup_artifacts(bot)
 
     @staticmethod
     def _normalize_runtime_instrument_type(value: Optional[object]) -> str:
@@ -428,43 +492,4 @@ class BotConfigService:
 
     def validate_runtime_readiness(self, bot: Mapping[str, object]) -> None:
         """Validate bot runtime prerequisites for v1 derivatives execution."""
-
-        strategy_id = str(bot.get("strategy_id") or "").strip()
-        if not strategy_id:
-            raise ValueError("Bots require a strategy_id.")
-
-        strategy = StrategyLoader.fetch_strategy(strategy_id)
-        errors: List[str] = []
-
-        if not strategy.instrument_links:
-            raise ValueError("Strategy has no instruments attached. Add at least one instrument before bot start.")
-
-        for link in strategy.instrument_links:
-            snapshot = dict(link.instrument_snapshot or {})
-            symbol = str(snapshot.get("symbol") or link.symbol or link.instrument_id or "").strip()
-            resolved = (
-                instrument_service.resolve_instrument(strategy.datasource, strategy.exchange, symbol)
-                if symbol
-                else None
-            )
-            instrument = dict(resolved or snapshot or {})
-            if not instrument:
-                errors.append(
-                    f"{symbol or link.instrument_id}: instrument metadata missing. Refresh instrument metadata in Strategy."
-                )
-                continue
-            try:
-                compile_runtime_profile_or_error(
-                    instrument,
-                    allowed_derivative_types=_RUNTIME_ALLOWED_DERIVATIVE_TYPES,
-                )
-            except ValueError as exc:
-                message = str(exc)
-                prefix = f"{symbol}:".lower() if symbol else ""
-                if prefix and message.lower().startswith(prefix):
-                    errors.append(message)
-                else:
-                    errors.append(f"{symbol or link.instrument_id}: {message}")
-
-        if errors:
-            raise ValueError("Bot startup preflight failed: " + " | ".join(errors))
+        self.prepare_startup_artifacts(bot)
