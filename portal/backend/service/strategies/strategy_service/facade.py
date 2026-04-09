@@ -1147,8 +1147,10 @@ class StrategyRegistry:
         interval: str,
         instrument_ids: Optional[List[str]] = None,
         variant_id: Optional[str] = None,
+        config: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Run a rule-logic strategy preview against typed indicator outputs."""
+        _ = config
         record = self.get(strategy_id)
         requested_ids = [str(item).strip() for item in (instrument_ids or []) if str(item).strip()]
         preview_id = str(uuid.uuid4())
@@ -1506,6 +1508,7 @@ def run_strategy_preview(
     interval: str,
     instrument_ids: Optional[List[str]] = None,
     variant_id: Optional[str] = None,
+    config: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run a strategy preview for the requested window."""
 
@@ -1516,6 +1519,30 @@ def run_strategy_preview(
         interval=interval,
         instrument_ids=instrument_ids,
         variant_id=variant_id,
+        config=config,
+    )
+
+
+def evaluate(
+    strategy_id: str,
+    *,
+    start: str,
+    end: str,
+    interval: str,
+    instrument_ids: Optional[List[str]] = None,
+    variant_id: Optional[str] = None,
+    config: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Compatibility wrapper for callers that import the facade-level evaluate function."""
+
+    return run_strategy_preview(
+        strategy_id,
+        start=start,
+        end=end,
+        interval=interval,
+        instrument_ids=instrument_ids,
+        variant_id=variant_id,
+        config=config,
     )
 
 
