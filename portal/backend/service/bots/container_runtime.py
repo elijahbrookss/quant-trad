@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-from collections import deque
 import json
 import logging
 import multiprocessing as mp
@@ -20,18 +18,13 @@ from engines.bot_runtime.runtime.runtime import BotRuntime
 from engines.bot_runtime.core.runtime_events import RuntimeEventName, build_correlation_id, new_runtime_event
 from portal.backend.db.session import db
 from portal.backend.service.bots.container_runtime_projection import (
-    compact_view_state_payload,
     coerce_float,
-    coerce_int,
     json_safe,
-    merge_worker_view_state,
-    runtime_bar_marker,
-    runtime_trade_count,
     utc_now_iso,
 )
 from portal.backend.service.bots.container_runtime_telemetry import TelemetryEmitter
 from portal.backend.service.bots.container_runtime_telemetry import emit_telemetry_ephemeral_message
-from portal.backend.service.bots.botlens_projection import canonical_series_key_from_entry, normalize_series_key
+from portal.backend.service.bots.botlens_projection import normalize_series_key
 from portal.backend.service.bots.runtime_dependencies import build_bot_runtime_deps
 from portal.backend.service.bots.startup_lifecycle import (
     BotLifecyclePhase,
@@ -273,12 +266,18 @@ def _persist_lifecycle_phase(
         status=resolved_status,
         telemetry_degraded=resolved_status == BotLifecycleStatus.TELEMETRY_DEGRADED.value,
     )
-    projection_refresh_delivered = _notify_backend_projection_refresh(
-        bot_id=bot_id,
-        run_id=run_id,
-        phase=phase,
-        status=resolved_status,
-        known_at=lifecycle_state.get("checkpoint_at") or lifecycle_state.get("updated_at"),
+    projection_refresh_delivered = _notify_backend_lifecycle_event(
+        lifecycle_state={
+            **dict(lifecycle_state or {}),
+            "bot_id": bot_id,
+            "run_id": run_id,
+            "phase": phase,
+            "owner": owner,
+            "message": message,
+            "status": resolved_status,
+            "metadata": dict(metadata or lifecycle_state.get("metadata") or {}),
+            "failure": dict(failure or lifecycle_state.get("failure") or {}),
+        }
     )
     log_fn = logger.info if phase in _INFO_LIFECYCLE_PHASES or resolved_status in _INFO_LIFECYCLE_STATUSES else logger.debug
     log_fn(
@@ -294,15 +293,12 @@ def _persist_lifecycle_phase(
     return lifecycle_state
 
 
-def _notify_backend_projection_refresh(
-    *,
-    bot_id: str,
-    run_id: str,
-    phase: str,
-    status: str,
-    known_at: Any,
-) -> bool:
+def _notify_backend_lifecycle_event(*, lifecycle_state: Mapping[str, Any]) -> bool:
     telemetry_url = str(_TELEMETRY_SETTINGS.ws_url or "").strip()
+    bot_id = str(lifecycle_state.get("bot_id") or "").strip()
+    run_id = str(lifecycle_state.get("run_id") or "").strip()
+    phase = str(lifecycle_state.get("phase") or "").strip()
+    status = str(lifecycle_state.get("status") or "").strip()
     if not telemetry_url:
         logger.warning(
             "bot_runtime_projection_refresh_skipped | bot_id=%s | run_id=%s | phase=%s | status=%s | reason=telemetry_url_missing",
@@ -313,12 +309,19 @@ def _notify_backend_projection_refresh(
         )
         return False
     payload = {
-        "kind": "bot_projection_refresh",
-        "bot_id": str(bot_id),
-        "run_id": str(run_id),
-        "phase": str(phase),
-        "status": str(status),
-        "known_at": known_at or utc_now_iso(),
+        "kind": "botlens_lifecycle_event",
+        "bot_id": bot_id,
+        "run_id": run_id,
+        "seq": int(lifecycle_state.get("seq") or 0),
+        "phase": phase,
+        "owner": str(lifecycle_state.get("owner") or "").strip() or None,
+        "message": str(lifecycle_state.get("message") or "").strip() or None,
+        "status": status,
+        "metadata": dict(lifecycle_state.get("metadata") or {}),
+        "failure": dict(lifecycle_state.get("failure") or {}),
+        "checkpoint_at": lifecycle_state.get("checkpoint_at") or lifecycle_state.get("updated_at"),
+        "updated_at": lifecycle_state.get("updated_at") or lifecycle_state.get("checkpoint_at"),
+        "known_at": lifecycle_state.get("checkpoint_at") or lifecycle_state.get("updated_at") or utc_now_iso(),
     }
     delivered = emit_telemetry_ephemeral_message(telemetry_url, json.dumps(json_safe(payload)))
     if not delivered:
@@ -522,7 +525,7 @@ def spawn_workers(ctx: ContainerStartupContext) -> None:
     )
     for index, symbols in enumerate(ctx.symbol_shards):
         worker_id = f"worker-{index + 1}"
-        event_queue: "mp.Queue[Dict[str, Any]]" = mp.Queue()
+        event_queue: "mp.Queue[Dict[str, Any]]" = mp.Queue(maxsize=max(8, _TELEMETRY_EMIT_QUEUE_MAX))
         ctx.child_queues[worker_id] = event_queue
         ctx.worker_symbols[worker_id] = list(symbols)
         for symbol in symbols:
@@ -591,16 +594,76 @@ def _series_worker(
     ):
         child_config["BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY"] = _PUSH_SETTINGS.payload_bytes_sample_every
     runtime_error: Dict[str, str] = {}
-    stream_max_series = _BOTLENS_SETTINGS.max_series
-    stream_max_candles = _BOTLENS_SETTINGS.max_candles
-    stream_max_overlays = _BOTLENS_SETTINGS.max_overlays
-    stream_max_overlay_points = _BOTLENS_SETTINGS.max_overlay_points
-    stream_max_closed_trades = _BOTLENS_SETTINGS.max_closed_trades
-    stream_max_logs = _BOTLENS_SETTINGS.max_logs
-    stream_max_decisions = _BOTLENS_SETTINGS.max_decisions
-    stream_max_warnings = _BOTLENS_SETTINGS.max_warnings
     runtime = BotRuntime(bot_id=bot_id, config=child_config, deps=build_bot_runtime_deps())
-    event_queue.put(
+
+    def _queue_worker_event(payload: Mapping[str, Any], *, timeout_s: float = 0.25) -> bool:
+        try:
+            event_queue.put(dict(payload), timeout=timeout_s)
+            return True
+        except queue.Full:
+            logger.warning(
+                "bot_runtime_worker_bridge_queue_full | bot_id=%s | run_id=%s | worker_id=%s | kind=%s | queue_max=%s",
+                bot_id,
+                run_id,
+                worker_id,
+                str(payload.get("kind") or ""),
+                max(8, _TELEMETRY_EMIT_QUEUE_MAX),
+            )
+            return False
+
+    def _build_bootstrap_facts() -> tuple[list[Dict[str, Any]], str, str]:
+        bootstrap_payload = runtime.botlens_bootstrap_payload()
+        facts = bootstrap_payload.get("facts") if isinstance(bootstrap_payload.get("facts"), list) else []
+        series_key_local = normalize_series_key(bootstrap_payload.get("series_key"))
+        known_at_local = str(bootstrap_payload.get("known_at") or "").strip() or utc_now_iso()
+        if not facts:
+            raise RuntimeError(f"worker bootstrap missing facts | worker_id={worker_id} | symbols={list(symbols)}")
+        if not series_key_local:
+            raise RuntimeError(f"worker bootstrap missing series key | worker_id={worker_id} | symbols={list(symbols)}")
+        return [dict(fact) for fact in facts if isinstance(fact, Mapping)], series_key_local, known_at_local
+
+    bridge_session_id = uuid.uuid4().hex
+    bridge_seq = 0
+    bridge_resync_reason: str | None = None
+
+    def _schedule_bridge_resync(reason: str) -> None:
+        nonlocal bridge_session_id, bridge_seq, bridge_resync_reason
+        logger.warning(
+            "bot_runtime_bridge_resync_scheduled | bot_id=%s | run_id=%s | worker_id=%s | reason=%s | previous_bridge_session_id=%s | previous_bridge_seq=%s",
+            bot_id,
+            run_id,
+            worker_id,
+            reason,
+            bridge_session_id,
+            bridge_seq,
+        )
+        bridge_session_id = uuid.uuid4().hex
+        bridge_seq = 0
+        bridge_resync_reason = str(reason or "bridge_resync")
+
+    def _emit_series_bootstrap(*, reason: str | None = None) -> bool:
+        nonlocal bridge_seq, bridge_resync_reason
+        facts, series_key_local, known_at_local = _build_bootstrap_facts()
+        bridge_seq += 1
+        emitted = _queue_worker_event(
+            {
+                "kind": "series_bootstrap",
+                "worker_id": worker_id,
+                "symbols": list(symbols),
+                "series_key": series_key_local,
+                "bridge_session_id": bridge_session_id,
+                "bridge_seq": bridge_seq,
+                "reason": reason or bridge_resync_reason,
+                "facts": facts,
+                "known_at": known_at_local,
+                "event_time": utc_now_iso(),
+            }
+        )
+        if emitted:
+            bridge_resync_reason = None
+        return emitted
+
+    if not _queue_worker_event(
         {
             "kind": "worker_phase",
             "worker_id": worker_id,
@@ -609,77 +672,76 @@ def _series_worker(
             "message": "Worker warming runtime state.",
             "event_time": utc_now_iso(),
         }
-    )
+    ):
+        raise RuntimeError(f"worker lifecycle bridge unavailable during warm-up | worker_id={worker_id}")
     runtime.reset_if_finished()
     runtime.warm_up()
-    initial_chart_snapshot = runtime.chart_payload()
-    compact_snapshot = compact_view_state_payload(
-        initial_chart_snapshot if isinstance(initial_chart_snapshot, Mapping) else {},
-        max_series=stream_max_series,
-        max_candles=stream_max_candles,
-        max_overlays=stream_max_overlays,
-        max_overlay_points=stream_max_overlay_points,
-        max_closed_trades=stream_max_closed_trades,
-        max_logs=stream_max_logs,
-        max_decisions=stream_max_decisions,
-        max_warnings=stream_max_warnings,
-    )
-    series_entries = compact_snapshot.get("series") if isinstance(compact_snapshot.get("series"), list) else []
-    primary_series = series_entries[0] if series_entries else {}
-    if not isinstance(primary_series, Mapping):
-        raise RuntimeError(f"worker bootstrap missing series payload | worker_id={worker_id} | symbols={list(symbols)}")
-    series_key = canonical_series_key_from_entry(primary_series)
-    if not series_key:
-        raise RuntimeError(f"worker bootstrap missing series key | worker_id={worker_id} | symbols={list(symbols)}")
-    event_queue.put(
-        {
-            "kind": "series_bootstrap",
-            "worker_id": worker_id,
-            "symbols": list(symbols),
-            "series_key": series_key,
-            "projection": compact_snapshot,
-            "known_at": utc_now_iso(),
-            "event_time": utc_now_iso(),
-        }
-    )
-    event_queue.put(
+    if not _emit_series_bootstrap():
+        raise RuntimeError(f"worker bootstrap bridge unavailable | worker_id={worker_id}")
+    _facts, series_key, _known_at = _build_bootstrap_facts()
+    if not _queue_worker_event(
         {
             "kind": "worker_phase",
             "worker_id": worker_id,
             "symbols": list(symbols),
             "phase": BotLifecyclePhase.RUNTIME_SUBSCRIBING.value,
-            "message": "Worker runtime subscribing to live delta stream.",
+            "message": "Worker runtime subscribing to live facts stream.",
             "event_time": utc_now_iso(),
         }
-    )
-    subscription_token, subscription_queue = runtime.subscribe()
+    ):
+        raise RuntimeError(f"worker lifecycle bridge unavailable during subscription | worker_id={worker_id}")
+    subscription_token, subscription_queue = runtime.subscribe(overflow_policy="drop_and_signal")
     stream_stop = threading.Event()
 
-    def _runtime_delta_loop() -> None:
+    def _runtime_facts_loop() -> None:
+        nonlocal bridge_seq
         while not stream_stop.is_set() or not subscription_queue.empty():
+            if bridge_resync_reason:
+                if not _emit_series_bootstrap(reason=bridge_resync_reason):
+                    time.sleep(0.01)
+                    continue
             try:
                 message = subscription_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
             if not isinstance(message, Mapping):
                 continue
-            if str(message.get("type") or "").strip().lower() != "delta":
+            message_type = str(message.get("type") or "").strip().lower()
+            if message_type == "gap":
+                try:
+                    while True:
+                        subscription_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                _schedule_bridge_resync(str(message.get("reason") or "subscriber_gap"))
                 continue
-            runtime_payload = message.get("runtime") if isinstance(message.get("runtime"), Mapping) else {}
-            known_at = runtime_payload.get("last_snapshot_at") or runtime_payload.get("known_at") or utc_now_iso()
-            event_queue.put(
+            if message_type != "facts":
+                continue
+            facts = message.get("facts") if isinstance(message.get("facts"), list) else []
+            if not facts:
+                continue
+            known_at = message.get("known_at") or utc_now_iso()
+            bridge_seq_local = bridge_seq + 1
+            emitted = _queue_worker_event(
                 {
-                    "kind": "runtime_delta",
+                    "kind": "runtime_facts",
                     "worker_id": worker_id,
                     "symbols": list(symbols),
                     "series_key": series_key,
-                    "runtime_delta": json_safe(dict(message)),
+                    "bridge_session_id": bridge_session_id,
+                    "bridge_seq": bridge_seq_local,
+                    "facts": json_safe(list(facts)),
                     "known_at": known_at,
                     "event_time": utc_now_iso(),
-                }
+                },
+                timeout_s=0.02,
             )
+            if emitted:
+                bridge_seq = bridge_seq_local
+                continue
+            _schedule_bridge_resync("bridge_queue_backpressure")
 
-    emitter_thread = threading.Thread(target=_runtime_delta_loop, name=f"bot-delta-stream-{worker_id}", daemon=True)
+    emitter_thread = threading.Thread(target=_runtime_facts_loop, name=f"bot-facts-stream-{worker_id}", daemon=True)
     emitter_thread.start()
     try:
         runtime.start()
@@ -709,7 +771,7 @@ def _series_worker(
         raise RuntimeError(
             f"symbol worker failed | worker_id={worker_id} | symbols={list(symbols)} | error={runtime_error.get('message')}"
         )
-    if status in {"error", "failed", "crashed"}:
+    if status in {"error", "failed", "crashed", "degraded"}:
         raise RuntimeError(
             f"symbol worker runtime status failed | worker_id={worker_id} | symbols={list(symbols)} | status={status}"
         )
@@ -743,7 +805,6 @@ def _handle_series_bootstrap_event(
     event: Mapping[str, Any],
     *,
     telemetry_sender: TelemetryEmitter,
-    series_seq_by_key: Dict[str, int],
 ) -> tuple[int, float, int, bool]:
     worker_id = str(event.get("worker_id") or "").strip()
     run_seq = _next_run_event_seq(ctx.shared_wallet_proxy)
@@ -757,23 +818,23 @@ def _handle_series_bootstrap_event(
             status="bootstrapped",
             worker_id=worker_id or None,
             series_key=str(event.get("series_key") or "").strip() or None,
-            message="Worker produced bootstrap projection.",
+            message="Worker produced bootstrap fact batch.",
         )
     series_key = normalize_series_key(event.get("series_key"))
+    facts = event.get("facts") if isinstance(event.get("facts"), list) else []
     if series_key:
-        series_seq = series_seq_by_key.get(series_key, 0) + 1
-        series_seq_by_key[series_key] = series_seq
         telemetry_payload = {
-            "kind": "botlens_series_bootstrap",
+            "kind": "botlens_runtime_bootstrap_facts",
             "bot_id": ctx.bot_id,
             "run_id": ctx.run_id,
             "worker_id": worker_id,
             "run_seq": run_seq,
-            "series_seq": series_seq,
             "series_key": series_key,
+            "bridge_session_id": str(event.get("bridge_session_id") or "").strip() or None,
+            "bridge_seq": int(event.get("bridge_seq") or 0),
             "known_at": event.get("known_at") or utc_now_iso(),
             "event_time": event.get("event_time") or utc_now_iso(),
-            "projection": dict(event.get("projection") or {}),
+            "facts": list(facts),
             "summary": {},
         }
         telemetry_message = json.dumps(json_safe(telemetry_payload))
@@ -793,21 +854,18 @@ def _handle_series_bootstrap_event(
     return run_seq, telemetry_emit_ms, payload_bytes, sent
 
 
-def _handle_runtime_delta_event(
+def _handle_runtime_facts_event(
     ctx: ContainerStartupContext,
     event: Mapping[str, Any],
     *,
     telemetry_sender: TelemetryEmitter,
-    series_seq_by_key: Dict[str, int],
 ) -> tuple[int, float, int, bool]:
     series_key = normalize_series_key(event.get("series_key"))
-    runtime_delta = event.get("runtime_delta") if isinstance(event.get("runtime_delta"), Mapping) else {}
-    if not series_key or not runtime_delta:
+    facts = event.get("facts") if isinstance(event.get("facts"), list) else []
+    if not series_key or not facts:
         return 0, 0.0, 0, True
     worker_id = str(event.get("worker_id") or "").strip()
     run_seq = _next_run_event_seq(ctx.shared_wallet_proxy)
-    series_seq = series_seq_by_key.get(series_key, 0) + 1
-    series_seq_by_key[series_key] = series_seq
     for symbol in ctx.worker_symbols.get(worker_id) or []:
         _set_series_state(
             ctx,
@@ -819,16 +877,17 @@ def _handle_runtime_delta_event(
         )
         ctx.first_snapshot_series.add(str(symbol).strip().upper())
     telemetry_payload = {
-        "kind": "botlens_series_delta",
+        "kind": "botlens_runtime_facts",
         "bot_id": ctx.bot_id,
         "run_id": ctx.run_id,
         "worker_id": worker_id,
         "run_seq": run_seq,
-        "series_seq": series_seq,
         "series_key": series_key,
+        "bridge_session_id": str(event.get("bridge_session_id") or "").strip() or None,
+        "bridge_seq": int(event.get("bridge_seq") or 0),
         "known_at": event.get("known_at") or utc_now_iso(),
         "event_time": event.get("event_time") or utc_now_iso(),
-        "runtime_delta": dict(runtime_delta),
+        "facts": list(facts),
         "summary": {},
     }
     telemetry_message = json.dumps(json_safe(telemetry_payload))
@@ -872,8 +931,13 @@ def _handle_worker_error(
             error=error or "worker_error",
             message="Worker reported startup/runtime failure.",
         )
-    failure_phase = BotLifecyclePhase.DEGRADED.value if ctx.startup_live_emitted else BotLifecyclePhase.STARTUP_FAILED.value
-    failure_status = BotLifecycleStatus.DEGRADED.value if ctx.startup_live_emitted else BotLifecycleStatus.STARTUP_FAILED.value
+    remaining_live_workers = any(
+        candidate_id != worker_id and getattr(proc, "exitcode", None) is None
+        for candidate_id, proc in ctx.children.items()
+    )
+    partial_runtime_alive = ctx.startup_live_emitted or bool(ctx.first_snapshot_series) or remaining_live_workers
+    failure_phase = BotLifecyclePhase.DEGRADED.value if partial_runtime_alive else BotLifecyclePhase.STARTUP_FAILED.value
+    failure_status = BotLifecycleStatus.DEGRADED.value if partial_runtime_alive else BotLifecycleStatus.STARTUP_FAILED.value
     if worker_id in ctx.reported_worker_failures:
         return
     ctx.reported_worker_failures.add(worker_id)
@@ -913,7 +977,6 @@ def _handle_worker_error(
 
 def supervise_startup_and_runtime(ctx: ContainerStartupContext) -> None:
     run_seq = 0
-    series_seq_by_key: Dict[str, int] = {}
     telemetry_url = str(_TELEMETRY_SETTINGS.ws_url or "").strip()
     telemetry_sender = TelemetryEmitter(
         telemetry_url,
@@ -950,7 +1013,6 @@ def supervise_startup_and_runtime(ctx: ContainerStartupContext) -> None:
                             ctx,
                             event,
                             telemetry_sender=telemetry_sender,
-                            series_seq_by_key=series_seq_by_key,
                         )
                         telemetry_emit_ms += emitted_ms
                         payload_bytes = event_payload_bytes
@@ -958,12 +1020,11 @@ def supervise_startup_and_runtime(ctx: ContainerStartupContext) -> None:
                             telemetry_degraded = True
                         emitted_events_in_cycle += 1
                         continue
-                    if kind == "runtime_delta":
-                        run_seq, emitted_ms, event_payload_bytes, sent = _handle_runtime_delta_event(
+                    if kind == "runtime_facts":
+                        run_seq, emitted_ms, event_payload_bytes, sent = _handle_runtime_facts_event(
                             ctx,
                             event,
                             telemetry_sender=telemetry_sender,
-                            series_seq_by_key=series_seq_by_key,
                         )
                         telemetry_emit_ms += emitted_ms
                         payload_bytes = event_payload_bytes

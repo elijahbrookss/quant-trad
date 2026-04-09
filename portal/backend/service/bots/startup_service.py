@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Protocol
 
+from .botlens_lifecycle_bridge import emit_lifecycle_event
 from .startup_lifecycle import (
     BotLifecyclePhase,
     BotLifecycleStatus,
@@ -230,6 +231,19 @@ class BotStartupOrchestrator:
             status=status,
         )
         lifecycle_state = self.storage.record_bot_run_lifecycle_checkpoint(checkpoint)
+        emit_lifecycle_event(
+            {
+                **dict(lifecycle_state or {}),
+                "bot_id": ctx.bot_id,
+                "run_id": ctx.run_id,
+                "phase": ctx.current_phase,
+                "owner": owner,
+                "message": message,
+                "metadata": merged_metadata,
+                "failure": dict(failure or lifecycle_state.get("failure") or {}),
+                "status": str(lifecycle_state.get("status") or checkpoint["status"]).strip(),
+            }
+        )
         lifecycle_status = str(lifecycle_state.get("status") or checkpoint["status"]).strip()
         self.storage.update_bot_runtime_status(
             bot_id=ctx.bot_id,
