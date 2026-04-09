@@ -14,7 +14,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..service.bots import bot_service
+from ..service.bots.bot_run_diagnostics_projection import project_bot_run_diagnostics
 from ..service.bots.ledger_service import get_run_signal_detail, list_run_ledger_events
+from ..service.storage.repos.lifecycle import get_bot_run_lifecycle, list_bot_run_lifecycle_events
 from ..service.bots.telemetry_stream import telemetry_hub
 from ..service.bots.botlens_series_service import get_series_history, get_series_window, list_series_keys
 router = APIRouter()
@@ -105,6 +107,10 @@ class BotResponse(BotBase):
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     runtime: Optional[Dict[str, Any]] = None
+    lifecycle: Optional[Dict[str, Any]] = None
+    controls: Optional[Dict[str, Any]] = None
+    active_run_id: Optional[str] = None
+    run: Optional[Dict[str, Any]] = None
 
 
 @router.get("", response_model=List[BotResponse], include_in_schema=False)
@@ -213,9 +219,9 @@ async def stop_bot(bot_id: str) -> Dict[str, Any]:
 
 
 @router.get("/{bot_id}/active-run")
-async def bot_active_run(bot_id: str) -> Dict[str, Any]:
+def bot_active_run(bot_id: str) -> Dict[str, Any]:
     try:
-        bot = await asyncio.to_thread(bot_service.get_bot, str(bot_id))
+        bot = bot_service.get_bot(str(bot_id))
         run_id = bot.get("active_run_id")
         return {"bot_id": str(bot_id), "run_id": run_id}
     except KeyError as exc:
@@ -223,13 +229,12 @@ async def bot_active_run(bot_id: str) -> Dict[str, Any]:
 
 
 @router.get("/{bot_id}/runs")
-async def bot_runs(
+def bot_runs(
     bot_id: str,
     limit: int = 25,
 ) -> Dict[str, Any]:
     try:
-        return await asyncio.to_thread(
-            bot_service.list_bot_runs_for_bot,
+        return bot_service.list_bot_runs_for_bot(
             str(bot_id),
             limit=max(1, min(int(limit or 25), 100)),
         )
@@ -255,6 +260,24 @@ async def bot_run_ledger_events(
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/{bot_id}/runs/{run_id}/lifecycle-events")
+def bot_run_lifecycle_events(bot_id: str, run_id: str) -> Dict[str, Any]:
+    normalized_run_id = str(run_id)
+    diagnostics = project_bot_run_diagnostics(
+        run_id=normalized_run_id,
+        lifecycle=get_bot_run_lifecycle(normalized_run_id),
+        events=list_bot_run_lifecycle_events(normalized_run_id),
+    )
+    return {
+        "bot_id": str(bot_id),
+        "run_id": normalized_run_id,
+        "run_status": diagnostics.get("run_status"),
+        "summary": diagnostics.get("summary"),
+        "checkpoints": diagnostics.get("checkpoints"),
+        "events": diagnostics.get("events"),
+    }
 
 
 @router.get("/{bot_id}/runs/{run_id}/signals/{signal_id}")

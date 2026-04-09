@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from core.settings import get_settings
 from .controller import bots, candles, indicators as ind_controller, instruments, providers, reports, strategies
+from .service.bots import bot_service
 from .service.bots.bot_watchdog import get_watchdog
 from .service.db.postgres_extensions import ensure_postgres_extensions
 
@@ -52,6 +53,7 @@ def _configure_logging() -> None:
 def _startup_watchdog() -> None:
     ensure_builtin_overlays_registered()
     ensure_postgres_extensions()
+    bot_service.ensure_watchdog_stream_bridge()
     watchdog = get_watchdog()
     watchdog.recover_local_orphans()
     watchdog.start_background_monitor()
