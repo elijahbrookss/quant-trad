@@ -520,6 +520,18 @@ def get_latest_bot_runtime_run_id(bot_id: str) -> Optional[str]:
         )
         if row:
             return str(row)
+        lifecycle_row = (
+            session.execute(
+                select(BotRunLifecycleRecord.run_id)
+                .where(BotRunLifecycleRecord.bot_id == str(bot_id))
+                .order_by(BotRunLifecycleRecord.checkpoint_at.desc(), BotRunLifecycleRecord.updated_at.desc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+        if lifecycle_row:
+            return str(lifecycle_row)
         fallback = (
             session.execute(
                 select(BotRunEventRecord.run_id)
@@ -591,7 +603,7 @@ def update_bot_runtime_status(*, bot_id: str, run_id: str, status: str, telemetr
                 run.backtest_end = bot.backtest_end
             run.status = "telemetry_degraded" if telemetry_degraded else status
             run.updated_at = _utcnow()
-            if status in {"stopped", "failed"}:
+            if status in {"stopped", "failed", "startup_failed", "crashed", "completed"}:
                 run.ended_at = _utcnow()
 
     _execute_write_with_retry(

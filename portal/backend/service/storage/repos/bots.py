@@ -3,6 +3,18 @@
 from __future__ import annotations
 
 from ._shared import *
+from ....service.bots.startup_lifecycle import build_failure_payload
+
+
+def _watchdog_reason_code(reason: str) -> str:
+    normalized = str(reason or "").strip().lower()
+    if normalized.startswith("container_not_running:"):
+        return "container_not_running"
+    if normalized.startswith("stale_heartbeat:"):
+        return "stale_heartbeat"
+    if normalized.startswith("server_restart:"):
+        return "server_restart"
+    return "watchdog_orphaned"
 
 def load_bots() -> List[Dict[str, Any]]:
     """Return all persisted bot configurations."""
@@ -134,7 +146,11 @@ def mark_bot_crashed(bot_id: str, reason: str = "orphaned") -> bool:
 
     if not db.available:
         return False
+    latest_run_id = ""
     try:
+        from ....service.bots.startup_lifecycle import BotLifecyclePhase, BotLifecycleStatus, LifecycleOwner
+        from .lifecycle import record_bot_run_lifecycle_checkpoint
+
         with db.session() as session:
             record = session.get(BotRecord, bot_id)
             if record is None:
@@ -144,13 +160,48 @@ def mark_bot_crashed(bot_id: str, reason: str = "orphaned") -> bool:
             record.runner_id = None
             record.heartbeat_at = None
             record.updated_at = _utcnow()
+            latest_lifecycle = (
+                session.execute(
+                    select(BotRunLifecycleRecord)
+                    .where(BotRunLifecycleRecord.bot_id == bot_id)
+                    .order_by(BotRunLifecycleRecord.checkpoint_at.desc(), BotRunLifecycleRecord.updated_at.desc())
+                    .limit(1)
+                )
+                .scalars()
+                .first()
+            )
+            latest_run_id = str(latest_lifecycle.run_id or "").strip() if latest_lifecycle is not None else ""
+            latest_run = session.get(BotRunRecord, latest_run_id) if latest_run_id else None
+            if latest_run is not None:
+                latest_run.status = BotLifecycleStatus.CRASHED.value
+                latest_run.ended_at = _utcnow()
+                latest_run.updated_at = _utcnow()
             logger.info(
                 "bot_marked_crashed | id=%s | reason=%s | previous_runner=%s",
                 bot_id,
                 reason,
                 previous_runner,
             )
-            return True
+        if latest_run_id:
+            record_bot_run_lifecycle_checkpoint(
+                {
+                    "bot_id": bot_id,
+                    "run_id": latest_run_id,
+                    "phase": BotLifecyclePhase.CRASHED.value,
+                    "status": BotLifecycleStatus.CRASHED.value,
+                    "owner": LifecycleOwner.WATCHDOG.value,
+                    "message": f"Bot marked crashed by watchdog: {reason}",
+                    "failure": build_failure_payload(
+                        phase=BotLifecyclePhase.CRASHED.value,
+                        message=f"Bot marked crashed by watchdog: {reason}",
+                        type="watchdog_crash",
+                        reason_code=_watchdog_reason_code(reason),
+                        owner=LifecycleOwner.WATCHDOG.value,
+                    )
+                    | {"reason": reason},
+                }
+            )
+        return True
     except SQLAlchemyError as exc:
         logger.warning("bot_mark_crashed_failed | id=%s | error=%s", bot_id, exc)
         return False
@@ -177,7 +228,7 @@ def find_orphaned_bots(
         with db.session() as session:
             cutoff = _utcnow() - timedelta(seconds=stale_threshold_seconds)
             query = select(BotRecord).where(
-                BotRecord.status.in_(["running", "paused", "starting"])
+                BotRecord.status.in_(["running", "paused", "starting", "degraded", "telemetry_degraded"])
             )
             if runner_id:
                 query = query.where(BotRecord.runner_id == runner_id)
@@ -241,5 +292,3 @@ def delete_bot(bot_id: str) -> None:
                 session.delete(record)
     except SQLAlchemyError as exc:
         logger.warning("bot_delete_failed | id=%s | error=%s", bot_id, exc)
-
-
