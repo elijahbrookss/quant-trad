@@ -8,7 +8,16 @@ import pytest
 pytest.importorskip("sqlalchemy")
 
 from portal.backend.service.bots import telemetry_stream as stream
-from engines.bot_runtime.runtime.event_types import BOTLENS_SERIES_BOOTSTRAP, BOTLENS_SERIES_DELTA
+from portal.backend.service.bots.container_runtime import ContainerStartupContext, _handle_worker_error
+from portal.backend.service.bots.botlens_contract import (
+    BRIDGE_BOOTSTRAP_KIND,
+    BRIDGE_FACTS_KIND,
+    CONTINUITY_RESYNC_REQUIRED,
+    EVENT_TYPE_LIFECYCLE,
+    EVENT_TYPE_RUNTIME_FACTS,
+    EVENT_TYPE_RUNTIME_BOOTSTRAP,
+    LIFECYCLE_KIND,
+)
 
 BotTelemetryHub = stream.BotTelemetryHub
 
@@ -67,44 +76,58 @@ def _projection(*, candle_time: int, series_key: str = "instrument-btc|1m", symb
     }
 
 
-def _runtime_delta(*, candle_time: int, series_key: str = "instrument-btc|1m", symbol: str = "BTC") -> dict:
+def _facts_batch(*, candle_time: int, series_key: str = "instrument-btc|1m", symbol: str = "BTC") -> list[dict]:
     instrument_id, timeframe = str(series_key).split("|", 1)
-    return {
-        "event": "bar_closed",
-        "runtime": {"status": "running", "warnings": ["runtime warning"]},
-        "stats": {"latency_ms": 12},
-        "logs": [{"message": "delta log"}],
-        "decisions": [{"event": "decision"}],
-        "series": [
-            {
-                "series_key": series_key,
-                "instrument_id": instrument_id,
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "candle": {
-                    "time": candle_time,
-                    "open": float(candle_time),
-                    "high": float(candle_time),
-                    "low": float(candle_time),
-                    "close": float(candle_time),
-                },
-                "overlay_delta": {
-                    "ops": [
-                        {
-                            "op": "upsert",
-                            "key": "overlay:regime",
-                            "overlay": {
-                                "type": "regime_overlay",
-                                "payload": {"state": "risk_on"},
-                            },
-                        }
-                    ]
-                },
-                "stats": {"total_trades": 1},
-                "trades": [{"trade_id": "trade-1", "symbol": symbol}],
-            }
-        ],
-    }
+    return [
+        {"fact_type": "runtime_state_observed", "runtime": {"status": "running", "warnings": ["runtime warning"]}},
+        {
+            "fact_type": "series_state_observed",
+            "series_key": series_key,
+            "instrument_id": instrument_id,
+            "symbol": symbol,
+            "timeframe": timeframe,
+        },
+        {
+            "fact_type": "candle_upserted",
+            "series_key": series_key,
+            "candle": {
+                "time": candle_time,
+                "open": float(candle_time),
+                "high": float(candle_time),
+                "low": float(candle_time),
+                "close": float(candle_time),
+            },
+            "replace_last": False,
+        },
+        {
+            "fact_type": "overlay_ops_emitted",
+            "series_key": series_key,
+            "overlay_delta": {
+                "ops": [
+                    {
+                        "op": "upsert",
+                        "key": "overlay:regime",
+                        "overlay": {
+                            "type": "regime_overlay",
+                            "payload": {"state": "risk_on"},
+                        },
+                    }
+                ]
+            },
+        },
+        {
+            "fact_type": "series_stats_updated",
+            "series_key": series_key,
+            "stats": {"total_trades": 1},
+        },
+        {
+            "fact_type": "trade_upserted",
+            "series_key": series_key,
+            "trade": {"trade_id": "trade-1", "symbol": symbol},
+        },
+        {"fact_type": "log_emitted", "log": {"id": "log-1", "message": "delta log"}},
+        {"fact_type": "decision_emitted", "decision": {"event_id": "decision-1", "event": "decision"}},
+    ]
 
 
 def _window(*, seq: int, series_key: str = "instrument-btc|1m") -> dict:
@@ -148,13 +171,14 @@ def test_process_ingest_bootstrap_persists_latest_projection(monkeypatch: pytest
         await hub._process_ingest(
             {
                 "payload": {
-                    "kind": "botlens_series_bootstrap",
+                    "kind": BRIDGE_BOOTSTRAP_KIND,
                     "bot_id": "bot-1",
                     "run_id": "run-1",
                     "series_key": "instrument-btc|1m",
                     "run_seq": 1,
-                    "series_seq": 1,
-                    "projection": _projection(candle_time=1),
+                    "bridge_session_id": "bridge-1",
+                    "bridge_seq": 1,
+                    "facts": _facts_batch(candle_time=1),
                     "event_time": "2026-01-01T00:00:00Z",
                     "known_at": "2026-01-01T00:00:00Z",
                 }
@@ -163,16 +187,16 @@ def test_process_ingest_bootstrap_persists_latest_projection(monkeypatch: pytest
 
         latest = hub._latest_view_state[("bot-1", "run-1", "instrument-btc|1m")]
         assert latest["seq"] == 1
-        assert latest["payload"]["series"][0]["series_key"] == "instrument-btc|1m"
+        assert latest["payload"]["projection"]["series"][0]["series_key"] == "instrument-btc|1m"
         assert persisted_rows[0]["series_key"] == "instrument-btc|1m"
-        assert persisted_events[0]["event_type"] == BOTLENS_SERIES_BOOTSTRAP
-        assert persisted_events[0]["payload"]["projection"]["series"][0]["series_key"] == "instrument-btc|1m"
+        assert persisted_events[0]["event_type"] == EVENT_TYPE_RUNTIME_BOOTSTRAP
+        assert persisted_events[0]["payload"]["facts"][0]["fact_type"] == "runtime_state_observed"
         assert published_updates[0]["seq"] == 1
 
     asyncio.run(scenario())
 
 
-def test_process_ingest_delta_materializes_projection_and_broadcasts(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_ingest_facts_materializes_projection_and_broadcasts(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         hub = BotTelemetryHub()
         persisted_rows: list[dict] = []
@@ -194,13 +218,14 @@ def test_process_ingest_delta_materializes_projection_and_broadcasts(monkeypatch
         await hub._process_ingest(
             {
                 "payload": {
-                    "kind": "botlens_series_bootstrap",
+                    "kind": BRIDGE_BOOTSTRAP_KIND,
                     "bot_id": "bot-1",
                     "run_id": "run-1",
                     "series_key": "instrument-btc|1m",
                     "run_seq": 1,
-                    "series_seq": 1,
-                    "projection": _projection(candle_time=1),
+                    "bridge_session_id": "bridge-1",
+                    "bridge_seq": 1,
+                    "facts": _facts_batch(candle_time=1),
                     "event_time": "2026-01-01T00:00:00Z",
                     "known_at": "2026-01-01T00:00:00Z",
                 }
@@ -209,13 +234,14 @@ def test_process_ingest_delta_materializes_projection_and_broadcasts(monkeypatch
         await hub._process_ingest(
             {
                 "payload": {
-                    "kind": "botlens_series_delta",
+                    "kind": BRIDGE_FACTS_KIND,
                     "bot_id": "bot-1",
                     "run_id": "run-1",
                     "series_key": "instrument-btc|1m",
                     "run_seq": 2,
-                    "series_seq": 2,
-                    "runtime_delta": _runtime_delta(candle_time=2),
+                    "bridge_session_id": "bridge-1",
+                    "bridge_seq": 2,
+                    "facts": _facts_batch(candle_time=2),
                     "event_time": "2026-01-01T00:01:00Z",
                     "known_at": "2026-01-01T00:01:00Z",
                 }
@@ -224,21 +250,22 @@ def test_process_ingest_delta_materializes_projection_and_broadcasts(monkeypatch
 
         latest = hub._latest_view_state[("bot-1", "run-1", "instrument-btc|1m")]
         assert latest["seq"] == 2
-        assert [row["time"] for row in latest["payload"]["series"][0]["candles"]] == [1, 2]
-        assert latest["payload"]["series"][0]["overlays"][0]["overlay_id"] == "overlay:regime"
-        assert latest["payload"]["series"][0]["stats"]["total_trades"] == 1
-        assert latest["payload"]["trades"][0]["trade_id"] == "trade-1"
-        assert latest["payload"]["warnings"] == ["runtime warning"]
+        assert [row["time"] for row in latest["payload"]["projection"]["series"][0]["candles"]] == [1, 2]
+        assert latest["payload"]["projection"]["series"][0]["overlays"][0]["overlay_id"] == "overlay:regime"
+        assert latest["payload"]["projection"]["series"][0]["stats"]["total_trades"] == 1
+        assert latest["payload"]["projection"]["trades"][0]["trade_id"] == "trade-1"
+        assert latest["payload"]["projection"]["warnings"] == ["runtime warning"]
         assert ws.messages[-1]["type"] == "botlens_live_tail"
-        assert ws.messages[-1]["message_type"] == "series_delta"
+        assert ws.messages[-1]["message_type"] == "projection_update"
         assert ws.messages[-1]["stream_session_id"] == "session-1"
-        assert persisted_events[-1]["event_type"] == BOTLENS_SERIES_DELTA
+        assert ws.messages[-1]["payload"]["window"]["projection"]["series"][0]["candles"][-1]["time"] == 2
+        assert persisted_events[-1]["event_type"] == EVENT_TYPE_RUNTIME_FACTS
         assert persisted_rows[-1]["seq"] == 2
 
     asyncio.run(scenario())
 
 
-def test_process_ingest_delta_invalidates_run_on_series_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_ingest_facts_invalidates_run_on_series_gap(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         hub = BotTelemetryHub()
         invalidations: list[dict] = []
@@ -260,7 +287,10 @@ def test_process_ingest_delta_invalidates_run_on_series_gap(monkeypatch: pytest.
             "series_key": "instrument-btc|1m",
             "seq": 2,
             "schema_version": 1,
-            "payload": _projection(candle_time=2),
+            "payload": {
+                "projection": _projection(candle_time=2),
+                "continuity": {"status": "ready", "bridge_session_id": "bridge-1", "last_bridge_seq": 2, "details": {}},
+            },
             "event_time": "2026-01-01T00:01:00Z",
             "known_at": "2026-01-01T00:01:00Z",
         }
@@ -268,13 +298,14 @@ def test_process_ingest_delta_invalidates_run_on_series_gap(monkeypatch: pytest.
         await hub._process_ingest(
             {
                 "payload": {
-                    "kind": "botlens_series_delta",
+                    "kind": BRIDGE_FACTS_KIND,
                     "bot_id": "bot-1",
                     "run_id": "run-1",
                     "series_key": "instrument-btc|1m",
                     "run_seq": 4,
-                    "series_seq": 4,
-                    "runtime_delta": _runtime_delta(candle_time=4),
+                    "bridge_session_id": "bridge-1",
+                    "bridge_seq": 4,
+                    "facts": _facts_batch(candle_time=4),
                     "event_time": "2026-01-01T00:03:00Z",
                     "known_at": "2026-01-01T00:03:00Z",
                 }
@@ -284,12 +315,73 @@ def test_process_ingest_delta_invalidates_run_on_series_gap(monkeypatch: pytest.
         assert invalidations == [
             {
                 "run_id": "run-1",
-                "reason": "seq_gap",
+                "reason": "bridge_seq_gap",
                 "details": {
                     "series_key": "instrument-btc|1m",
-                    "previous_seq": 2,
-                    "incoming_seq": 4,
-                    "seq_gap": 1,
+                    "previous_bridge_seq": 2,
+                    "incoming_bridge_seq": 4,
+                    "bridge_gap": 1,
+                },
+            }
+        ]
+        latest = hub._latest_view_state[("bot-1", "run-1", "instrument-btc|1m")]
+        assert latest["payload"]["continuity"]["status"] == CONTINUITY_RESYNC_REQUIRED
+        assert [row["time"] for row in latest["payload"]["projection"]["series"][0]["candles"]] == [2]
+
+    asyncio.run(scenario())
+
+
+def test_process_ingest_lifecycle_event_persists_and_broadcasts(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        hub = BotTelemetryHub()
+        persisted_events: list[dict] = []
+        refreshed: list[str] = []
+        lifecycle_updates: list[dict] = []
+
+        monkeypatch.setattr(stream, "record_bot_runtime_event", lambda row: persisted_events.append(dict(row)) or dict(row))
+
+        async def fake_publish_projected_bot(*, bot_id: str) -> None:
+            refreshed.append(bot_id)
+
+        async def fake_broadcast_run_lifecycle(*, run_id: str, lifecycle: dict) -> None:
+            lifecycle_updates.append({"run_id": run_id, "lifecycle": dict(lifecycle)})
+
+        hub._publish_projected_bot = fake_publish_projected_bot  # type: ignore[method-assign]
+        hub._live_series.broadcast_run_lifecycle = fake_broadcast_run_lifecycle  # type: ignore[method-assign]
+
+        await hub._process_ingest(
+            {
+                "payload": {
+                    "kind": LIFECYCLE_KIND,
+                    "bot_id": "bot-1",
+                    "run_id": "run-1",
+                    "seq": 7,
+                    "phase": "live",
+                    "status": "running",
+                    "owner": "supervisor",
+                    "message": "runtime entered live mode",
+                    "checkpoint_at": "2026-01-01T00:02:00Z",
+                    "metadata": {"source": "startup"},
+                }
+            }
+        )
+
+        assert persisted_events[0]["event_type"] == EVENT_TYPE_LIFECYCLE
+        assert persisted_events[0]["payload"]["phase"] == "live"
+        assert refreshed == ["bot-1"]
+        assert lifecycle_updates == [
+            {
+                "run_id": "run-1",
+                "lifecycle": {
+                    "run_id": "run-1",
+                    "phase": "live",
+                    "status": "running",
+                    "owner": "supervisor",
+                    "message": "runtime entered live mode",
+                    "checkpoint_at": "2026-01-01T00:02:00Z",
+                    "updated_at": "2026-01-01T00:02:00Z",
+                    "metadata": {"source": "startup"},
+                    "live": True,
                 },
             }
         ]
@@ -355,7 +447,107 @@ def test_process_ingest_projection_refresh_broadcasts_projected_bot(monkeypatch:
     asyncio.run(scenario())
 
 
-def test_add_series_viewer_sends_atomic_bootstrap_then_replays_buffered_delta(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_lifecycle_event_seq_stays_monotonic_and_within_int32(monkeypatch: pytest.MonkeyPatch) -> None:
+    hub = BotTelemetryHub()
+    persisted_events: list[dict] = []
+
+    monkeypatch.setattr(
+        stream,
+        "get_latest_bot_runtime_event",
+        lambda **_kwargs: {
+            "seq": 1_000_000_123,
+            "event_type": EVENT_TYPE_LIFECYCLE,
+        },
+    )
+    monkeypatch.setattr(stream, "record_bot_runtime_event", lambda row: persisted_events.append(dict(row)) or dict(row))
+
+    asyncio.run(
+        hub._persist_lifecycle_event(
+            bot_id="bot-1",
+            run_id="run-1",
+            lifecycle={
+                "phase": "runtime_subscribing",
+                "status": "starting",
+                "checkpoint_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            },
+        )
+    )
+    asyncio.run(
+        hub._persist_lifecycle_event(
+            bot_id="bot-1",
+            run_id="run-1",
+            lifecycle={
+                "phase": "degraded",
+                "status": "degraded",
+                "checkpoint_at": "2026-01-01T00:01:00Z",
+                "updated_at": "2026-01-01T00:01:00Z",
+            },
+        )
+    )
+
+    assert persisted_events[0]["seq"] == 1_000_000_124
+    assert persisted_events[1]["seq"] == 1_000_000_125
+    assert persisted_events[1]["seq"] < 2_147_483_647
+
+
+def test_series_event_id_is_deterministic_and_fits_storage_limit() -> None:
+    event_id = stream._series_event_id(
+        bot_id="83bd32b2-79e7-4c05-ab3d-d7f3fbb7ca4d",
+        run_id="b88fbd56-edac-4a4d-b951-e3b0aa64edf8",
+        event_type=EVENT_TYPE_RUNTIME_FACTS,
+        series_key="c209795e-1c91-4562-9b1d-ac6ffcbaf63c|1h",
+        bridge_session_id="f3c9e829a2fe840a0ee56da2c18ad6a8a55a89b68c67-extra-padding-to-force-overflow",
+        bridge_seq=1775728240754846,
+        projection_seq=400,
+    )
+
+    assert len(event_id) <= 128
+    assert event_id == stream._series_event_id(
+        bot_id="83bd32b2-79e7-4c05-ab3d-d7f3fbb7ca4d",
+        run_id="b88fbd56-edac-4a4d-b951-e3b0aa64edf8",
+        event_type=EVENT_TYPE_RUNTIME_FACTS,
+        series_key="c209795e-1c91-4562-9b1d-ac6ffcbaf63c|1h",
+        bridge_session_id="f3c9e829a2fe840a0ee56da2c18ad6a8a55a89b68c67-extra-padding-to-force-overflow",
+        bridge_seq=1775728240754846,
+        projection_seq=400,
+    )
+
+
+def test_worker_failure_with_surviving_runtime_marks_lifecycle_degraded(monkeypatch: pytest.MonkeyPatch) -> None:
+    persisted: list[dict] = []
+
+    monkeypatch.setattr(
+        "portal.backend.service.bots.container_runtime._persist_lifecycle_phase",
+        lambda **kwargs: persisted.append(dict(kwargs)) or dict(kwargs),
+    )
+
+    ctx = ContainerStartupContext(
+        bot_id="bot-1",
+        run_id="run-1",
+        bot={},
+        runtime_bot_config={},
+        strategy_id="strategy-1",
+        symbols=["BTCUSDT", "ETHUSDT"],
+        symbol_shards=[["BTCUSDT"], ["ETHUSDT"]],
+        wallet_config={},
+        manager=type("Manager", (), {"shutdown": lambda self: None})(),
+        shared_wallet_proxy={},
+        worker_symbols={"worker-1": ["BTCUSDT"], "worker-2": ["ETHUSDT"]},
+        children={
+            "worker-1": type("Proc", (), {"exitcode": 1})(),
+            "worker-2": type("Proc", (), {"exitcode": None})(),
+        },
+    )
+
+    _handle_worker_error(ctx, "worker-1", error="worker-1 exited with code 1", exit_code=1)
+
+    assert ctx.series_states["BTCUSDT"]["status"] == "failed"
+    assert persisted[-1]["phase"] == "degraded"
+    assert persisted[-1]["status"] == "degraded"
+
+
+def test_add_series_viewer_sends_atomic_bootstrap_then_replays_buffered_facts(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         hub = BotTelemetryHub()
         hub._ensure_workers = _noop  # type: ignore[method-assign]
@@ -368,20 +560,23 @@ def test_add_series_viewer_sends_atomic_bootstrap_then_replays_buffered_delta(mo
                 "schema_version": 1,
                 "seq": 11,
                 "known_at": "2026-01-01T00:01:00Z",
-                "message_type": "series_delta",
+                "message_type": "projection_update",
                 "stream_session_id": "session-a",
                 "payload": {
-                    "event": "bar_closed",
-                    "runtime": {"status": "running"},
-                    "stats": {},
-                    "logs": [],
-                    "decisions": [],
-                    "series_delta": {
-                        "series_key": "instrument-btc|1m",
-                        "instrument_id": "instrument-btc",
-                        "symbol": "BTC",
-                        "timeframe": "1m",
-                        "candle": {"time": 11, "open": 11, "high": 11, "low": 11, "close": 11},
+                    "cursor": {"projection_seq": 11},
+                    "continuity": {"status": "ready", "bridge_session_id": "bridge-1", "last_bridge_seq": 11, "details": {}},
+                    "lifecycle": {"phase": "live", "status": "running", "live": True},
+                    "window": {
+                        "projection": _projection(candle_time=11),
+                        "selected_series": _projection(candle_time=11)["series"][0],
+                        "candles": _projection(candle_time=11)["series"][0]["candles"],
+                        "trades": [],
+                        "logs": [],
+                        "decisions": [],
+                        "warnings": [],
+                        "runtime": {"status": "running"},
+                        "markers": [],
+                        "status": "running",
                     },
                 },
             }
@@ -410,20 +605,23 @@ def test_add_series_viewer_emits_resync_when_replay_buffer_has_gap(monkeypatch: 
                 "schema_version": 1,
                 "seq": 7,
                 "known_at": "2026-01-01T00:01:00Z",
-                "message_type": "series_delta",
+                "message_type": "projection_update",
                 "stream_session_id": "session-a",
                 "payload": {
-                    "event": "bar_closed",
-                    "runtime": {"status": "running"},
-                    "stats": {},
-                    "logs": [],
-                    "decisions": [],
-                    "series_delta": {
-                        "series_key": "instrument-btc|1m",
-                        "instrument_id": "instrument-btc",
-                        "symbol": "BTC",
-                        "timeframe": "1m",
-                        "candle": {"time": 7, "open": 7, "high": 7, "low": 7, "close": 7},
+                    "cursor": {"projection_seq": 7},
+                    "continuity": {"status": "ready", "bridge_session_id": "bridge-1", "last_bridge_seq": 7, "details": {}},
+                    "lifecycle": {"phase": "live", "status": "running", "live": True},
+                    "window": {
+                        "projection": _projection(candle_time=7),
+                        "selected_series": _projection(candle_time=7)["series"][0],
+                        "candles": _projection(candle_time=7)["series"][0]["candles"],
+                        "trades": [],
+                        "logs": [],
+                        "decisions": [],
+                        "warnings": [],
+                        "runtime": {"status": "running"},
+                        "markers": [],
+                        "status": "running",
                     },
                 },
             }

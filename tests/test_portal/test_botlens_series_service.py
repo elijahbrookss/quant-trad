@@ -43,49 +43,55 @@ def _projection(
     }
 
 
-def _delta(
+def _facts_batch(
     *,
     series_key: str = "instrument-btc|1m",
     symbol: str = "BTC",
     candle_time: int,
     trade_id: str = "trade-1",
-) -> dict:
+) -> list[dict]:
     instrument_id, timeframe = str(series_key).split("|", 1)
-    return {
-        "event": "bar_closed",
-        "runtime": {"status": "running", "warnings": ["runtime warning"]},
-        "logs": [{"message": "delta log"}],
-        "decisions": [{"event": "decision"}],
-        "series": [
-            {
-                "series_key": series_key,
-                "instrument_id": instrument_id,
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "candle": {
-                    "time": candle_time,
-                    "open": float(candle_time),
-                    "high": float(candle_time),
-                    "low": float(candle_time),
-                    "close": float(candle_time),
-                },
-                "overlay_delta": {
-                    "ops": [
-                        {
-                            "op": "upsert",
-                            "key": "overlay:regime",
-                            "overlay": {
-                                "type": "regime_overlay",
-                                "payload": {"state": "risk_on"},
-                            },
-                        }
-                    ]
-                },
-                "stats": {"total_trades": 1},
-                "trades": [{"trade_id": trade_id, "symbol": symbol}],
-            }
-        ],
-    }
+    return [
+        {"fact_type": "runtime_state_observed", "runtime": {"status": "running", "warnings": ["runtime warning"]}},
+        {
+            "fact_type": "series_state_observed",
+            "series_key": series_key,
+            "instrument_id": instrument_id,
+            "symbol": symbol,
+            "timeframe": timeframe,
+        },
+        {
+            "fact_type": "candle_upserted",
+            "series_key": series_key,
+            "candle": {
+                "time": candle_time,
+                "open": float(candle_time),
+                "high": float(candle_time),
+                "low": float(candle_time),
+                "close": float(candle_time),
+            },
+        },
+        {
+            "fact_type": "overlay_ops_emitted",
+            "series_key": series_key,
+            "overlay_delta": {
+                "ops": [
+                    {
+                        "op": "upsert",
+                        "key": "overlay:regime",
+                        "overlay": {
+                            "type": "regime_overlay",
+                            "payload": {"state": "risk_on"},
+                        },
+                    }
+                ]
+            },
+        },
+        {"fact_type": "series_stats_updated", "series_key": series_key, "stats": {"total_trades": 1}},
+        {"fact_type": "trade_upserted", "series_key": series_key, "trade": {"trade_id": trade_id, "symbol": symbol}},
+        {"fact_type": "log_emitted", "log": {"id": "log-1", "message": "delta log"}},
+        {"fact_type": "decision_emitted", "decision": {"event_id": "decision-1", "event": "decision"}},
+    ]
 
 
 def test_get_series_window_reads_latest_per_series_view_row(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,7 +176,7 @@ def test_list_series_keys_ignores_legacy_merged_bot_rows(monkeypatch: pytest.Mon
     assert result == {"run_id": "run-1", "series": []}
 
 
-def test_get_series_history_reconstructs_from_bootstrap_and_delta_events(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_series_history_reconstructs_from_bootstrap_and_fact_events(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(svc, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
     monkeypatch.setattr(
         svc,
@@ -188,20 +194,20 @@ def test_get_series_history_reconstructs_from_bootstrap_and_delta_events(monkeyp
             {
                 "payload": {
                     "series_key": "instrument-btc|1m",
-                    "projection": _projection(series_key="instrument-btc|1m", candle_times=[1, 2]),
+                    "facts": _facts_batch(series_key="instrument-btc|1m", candle_time=1)
+                    + _facts_batch(series_key="instrument-btc|1m", candle_time=2),
                 }
             },
             {
                 "payload": {
                     "series_key": "instrument-btc|1m",
-                    "series_seq": 3,
-                    "runtime_delta": _delta(candle_time=3),
+                    "facts": _facts_batch(candle_time=3),
                 }
             },
             {
                 "payload": {
                     "series_key": "instrument-eth|5m",
-                    "projection": _projection(series_key="instrument-eth|5m", symbol="ETH", candle_times=[20]),
+                    "facts": _facts_batch(series_key="instrument-eth|5m", symbol="ETH", candle_time=20),
                 }
             },
         ],
@@ -219,7 +225,7 @@ def test_get_series_history_reconstructs_from_bootstrap_and_delta_events(monkeyp
     assert result["next_before_ts"] == 1
 
 
-def test_get_series_history_uses_latest_projection_when_delta_log_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_series_history_uses_latest_projection_when_fact_log_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(svc, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
     monkeypatch.setattr(
         svc,

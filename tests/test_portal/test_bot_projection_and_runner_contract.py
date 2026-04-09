@@ -72,3 +72,68 @@ def test_runner_runtime_env_includes_backend_owned_run_id(monkeypatch):
     assert env["QT_BOT_RUNTIME_RUN_ID"] == "run-1"
     assert env["PG_DSN"] == "postgresql://example"
     assert env["QT_SECURITY_PROVIDER_CREDENTIAL_KEY"] == "secret-key"
+
+
+def test_project_bot_state_prefers_active_runtime_over_stale_startup_failed_lifecycle():
+    projected = project_bot_state(
+        {
+            "id": "bot-1",
+            "name": "Bot 1",
+            "status": "telemetry_degraded",
+            "runner_id": "runner-test",
+            "heartbeat_at": "2026-01-01T00:00:02Z",
+        },
+        run={"run_id": "run-1", "status": "running", "started_at": "2026-01-01T00:00:00Z"},
+        lifecycle={
+            "run_id": "run-1",
+            "phase": "startup_failed",
+            "status": "startup_failed",
+            "owner": "runtime",
+            "message": "Worker failed before initial lifecycle reconciliation.",
+        },
+        view_row={
+            "seq": 7,
+            "event_time": "2026-01-01T00:00:10Z",
+            "known_at": "2026-01-01T00:00:10Z",
+            "payload": {
+                "projection": {
+                    "runtime": {
+                        "status": "running",
+                        "worker_count": 2,
+                        "active_workers": 1,
+                    },
+                    "series": [{"series_key": "instrument-btc|1m"}],
+                    "trades": [],
+                    "logs": [],
+                    "decisions": [],
+                    "warnings": [],
+                },
+                "runtime": {
+                    "status": "running",
+                    "worker_count": 2,
+                    "active_workers": 1,
+                },
+                "series": [{"series_key": "instrument-btc|1m"}],
+                "trades": [],
+                "logs": [],
+                "decisions": [],
+                "warnings": [],
+            },
+        },
+        container_state={
+            "name": "quant-trad-bots-bot-1",
+            "status": "running",
+            "running": True,
+            "id": "container-1",
+            "started_at": "2026-01-01T00:00:01Z",
+            "finished_at": None,
+            "exit_code": None,
+            "error": None,
+        },
+    )
+
+    assert projected["status"] == "running"
+    assert projected["runtime"]["status"] == "running"
+    assert projected["runtime"]["phase"] == "live"
+    assert projected["lifecycle"]["status"] == "running"
+    assert projected["lifecycle"]["phase"] == "live"
