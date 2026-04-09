@@ -65,7 +65,7 @@ export function WalletBalancesSection({
         <button
           type="button"
           onClick={onWalletBalanceAdd}
-          className="inline-flex items-center gap-1.5 rounded-md border border-slate-800 bg-slate-950/50 px-2.5 py-1.5 text-xs font-medium text-slate-400 transition-colors hover:border-slate-700 hover:bg-slate-950 hover:text-slate-300"
+          className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.06] bg-black/30 px-2.5 py-1.5 text-xs font-medium text-slate-400 transition-colors hover:border-white/[0.1] hover:bg-black/40 hover:text-slate-300"
         >
           <PlusCircle className="size-3.5" /> Add Currency
         </button>
@@ -77,7 +77,7 @@ export function WalletBalancesSection({
               type="text"
               value={row.currency}
               onChange={(event) => onWalletBalanceChange(index, { currency: event.target.value })}
-              className="w-28 rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-xs font-medium uppercase text-slate-200 transition-colors focus:border-slate-700 focus:bg-slate-950 focus:outline-none"
+              className="w-28 rounded-lg border border-white/[0.06] bg-black/30 px-3 py-2 text-xs font-medium uppercase text-slate-200 transition-colors focus:border-white/[0.12] focus:bg-black/40 focus:outline-none"
               placeholder="USDC"
             />
             <input
@@ -85,7 +85,7 @@ export function WalletBalancesSection({
               step="any"
               value={row.amount}
               onChange={(event) => onWalletBalanceChange(index, { amount: event.target.value })}
-              className="flex-1 min-w-[140px] rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-xs tabular-nums text-slate-200 transition-colors focus:border-slate-700 focus:bg-slate-950 focus:outline-none"
+              className="flex-1 min-w-[140px] rounded-lg border border-white/[0.06] bg-black/30 px-3 py-2 text-xs tabular-nums text-slate-200 transition-colors focus:border-white/[0.12] focus:bg-black/40 focus:outline-none"
               placeholder="10000.00"
             />
             <button

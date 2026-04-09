@@ -54,7 +54,7 @@ export function StrategySelector({
           </div>
         )}
         {strategies.length > 6 && (
-          <label className="flex items-center gap-2 rounded-md border border-slate-800 bg-slate-950/50 px-2.5 py-1.5 text-sm text-slate-200 transition-colors focus-within:border-slate-700">
+          <label className="flex items-center gap-2 rounded-md border border-white/[0.06] bg-black/30 px-2.5 py-1.5 text-sm text-slate-200 transition-colors focus-within:border-white/[0.12]">
             <Search className="size-3 shrink-0 text-slate-600" />
             <input
               type="search"
@@ -84,7 +84,7 @@ export function StrategySelector({
                   className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-2 text-left transition-all ${
                     checked
                       ? 'border-emerald-800/50 bg-emerald-950/30 text-slate-100'
-                      : 'border-slate-800 bg-slate-950/50 text-slate-400 hover:border-slate-700 hover:bg-slate-900/50 hover:text-slate-300'
+                      : 'border-white/[0.06] bg-black/30 text-slate-400 hover:border-white/[0.1] hover:bg-black/40 hover:text-slate-300'
                   }`}
                 >
                   <div className={`flex size-4 shrink-0 items-center justify-center rounded ${
@@ -114,7 +114,7 @@ export function StrategySelector({
         <label className="text-xs font-medium text-slate-400">Strategies</label>
         {loading ? <span className="text-xs text-slate-500">Loading…</span> : null}
       </div>
-      <label className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-sm text-slate-200 transition-colors focus-within:border-slate-700 focus-within:bg-slate-950">
+      <label className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-black/30 px-3 py-2 text-sm text-slate-200 transition-colors focus-within:border-white/[0.12] focus-within:bg-black/40">
         <Search className="size-3.5 shrink-0 text-slate-600" />
         <input
           type="search"
@@ -129,7 +129,7 @@ export function StrategySelector({
           {error}
         </div>
       ) : null}
-      <div className="max-h-72 space-y-2 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/50 p-2">
+      <div className="max-h-72 space-y-2 overflow-y-auto rounded-lg border border-white/[0.06] bg-black/24 p-2">
         {strategies.length === 0 ? (
           <p className="px-2 py-2 text-sm text-slate-500">No strategies configured</p>
         ) : filteredStrategies.length === 0 ? (
@@ -143,11 +143,11 @@ export function StrategySelector({
             return (
               <label
                 key={strategy.id}
-                className="flex cursor-pointer items-start gap-3 rounded-md border border-transparent px-2 py-2 transition-colors hover:border-slate-800 hover:bg-slate-900/50"
+                className="flex cursor-pointer items-start gap-3 rounded-md border border-transparent px-2 py-2 transition-colors hover:border-white/[0.06] hover:bg-black/35"
               >
                 <input
                   type="checkbox"
-                  className="mt-0.5 size-4 shrink-0 rounded border border-slate-700 bg-slate-900 accent-slate-600"
+                  className="mt-0.5 size-4 shrink-0 rounded border border-white/[0.08] bg-black/35 accent-slate-600"
                   checked={checked}
                   onChange={() => handleSelect(strategy.id)}
                 />

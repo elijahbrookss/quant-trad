@@ -32,7 +32,7 @@ const formatVariantValue = (value) => {
 
 function StepCard({ title, hint, children }) {
   return (
-    <section className="rounded-lg border border-slate-800/80 bg-slate-950/40 p-5">
+    <section className="rounded-lg border border-white/[0.06] bg-black/24 p-5">
       <div className="mb-4 space-y-1">
         <h3 className="text-base font-semibold text-slate-100">{title}</h3>
         {hint ? <p className="text-sm text-slate-500">{hint}</p> : null}
@@ -62,7 +62,7 @@ function RunTypeSelector({ value, onChange }) {
             className={`rounded-lg border px-4 py-3 text-left transition ${
               isActive
                 ? 'border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] text-slate-100'
-                : 'border-slate-800 bg-slate-950/50 text-slate-400 hover:border-slate-700 hover:bg-slate-900/60 hover:text-slate-200'
+                : 'border-white/[0.06] bg-black/30 text-slate-400 hover:border-white/[0.1] hover:bg-black/40 hover:text-slate-200'
             }`}
           >
             <div className="flex items-center gap-2">
@@ -96,7 +96,7 @@ function PlaybackModeSelector({ value, onChange }) {
               className={`rounded-lg border px-3 py-3 text-left text-sm transition ${
                 isActive
                   ? 'border-slate-600 bg-slate-800/80 text-slate-100'
-                  : 'border-slate-800 bg-slate-950/50 text-slate-400 hover:border-slate-700 hover:bg-slate-900/60'
+                  : 'border-white/[0.06] bg-black/30 text-slate-400 hover:border-white/[0.1] hover:bg-black/40'
               }`}
             >
               {opt.label}
@@ -275,7 +275,7 @@ export function BotCreateForm({
               className={`rounded-lg border px-3 py-2 text-left transition ${
                 isActive
                   ? 'border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] text-slate-100'
-                  : 'border-slate-800 bg-slate-950/40 text-slate-400 hover:border-slate-700 hover:bg-slate-900/50'
+                  : 'border-white/[0.06] bg-black/24 text-slate-400 hover:border-white/[0.1] hover:bg-black/35'
               }`}
             >
               <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">
@@ -310,7 +310,7 @@ export function BotCreateForm({
                   value={form.name}
                   onChange={onChange}
                   placeholder={suggestedName || 'My Strategy Bot'}
-                  className="w-full rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2.5 text-sm text-slate-200 placeholder:text-slate-600 focus:border-slate-700 focus:outline-none"
+                  className="w-full rounded-lg border border-white/[0.06] bg-black/30 px-3 py-2.5 text-sm text-slate-200 placeholder:text-slate-600 focus:border-white/[0.12] focus:outline-none"
                 />
               </div>
               <div className="space-y-1.5">
@@ -319,7 +319,7 @@ export function BotCreateForm({
                   value={form.strategy_variant_id || ''}
                   onChange={(event) => onVariantSelect(event.target.value)}
                   disabled={!selectedStrategy || !strategyVariants.length}
-                  className="w-full rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2.5 text-sm text-slate-200 focus:border-slate-700 focus:outline-none disabled:cursor-not-allowed disabled:text-slate-600"
+                  className="w-full rounded-lg border border-white/[0.06] bg-black/30 px-3 py-2.5 text-sm text-slate-200 focus:border-white/[0.12] focus:outline-none disabled:cursor-not-allowed disabled:text-slate-600"
                 >
                   {!strategyVariants.length ? (
                     <option value="">Strategy defaults</option>
@@ -384,7 +384,7 @@ export function BotCreateForm({
                           key={preset.label}
                           type="button"
                           onClick={() => handleDatePreset(preset.days)}
-                          className="rounded px-2 py-0.5 text-[10px] font-medium text-slate-500 transition hover:bg-slate-800 hover:text-slate-300"
+                          className="rounded px-2 py-0.5 text-[10px] font-medium text-slate-500 transition hover:bg-white/[0.06] hover:text-slate-300"
                         >
                           {preset.label}
                         </button>
@@ -424,7 +424,7 @@ export function BotCreateForm({
                     name="snapshot_interval_ms"
                     value={form.snapshot_interval_ms || 1000}
                     onChange={(event) => onChange('snapshot_interval_ms', Number(event.target.value) || 1000)}
-                    className="w-full rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2.5 text-sm text-slate-200 focus:border-slate-700 focus:outline-none"
+                    className="w-full rounded-lg border border-white/[0.06] bg-black/30 px-3 py-2.5 text-sm text-slate-200 focus:border-white/[0.12] focus:outline-none"
                   />
                 </div>
                 <div className="space-y-1.5 md:col-span-2">
@@ -434,7 +434,7 @@ export function BotCreateForm({
                     onChange={(event) => handleEnvTextChange(event.target.value)}
                     rows={4}
                     placeholder={'KEY=value\nANOTHER_KEY=value'}
-                    className="w-full rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2.5 font-mono text-xs text-slate-200 placeholder:text-slate-600 focus:border-slate-700 focus:outline-none"
+                    className="w-full rounded-lg border border-white/[0.06] bg-black/30 px-3 py-2.5 font-mono text-xs text-slate-200 placeholder:text-slate-600 focus:border-white/[0.12] focus:outline-none"
                   />
                 </div>
               </div>
@@ -454,7 +454,7 @@ export function BotCreateForm({
                   value={fundingCurrency}
                   onChange={(event) => onWalletBalanceChange(0, { currency: event.target.value.toUpperCase() })}
                   placeholder="USD"
-                  className="w-full rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2.5 text-sm font-medium uppercase text-slate-200 placeholder:text-slate-600 focus:border-slate-700 focus:outline-none"
+                  className="w-full rounded-lg border border-white/[0.06] bg-black/30 px-3 py-2.5 text-sm font-medium uppercase text-slate-200 placeholder:text-slate-600 focus:border-white/[0.12] focus:outline-none"
                 />
               </div>
               <div className="space-y-1.5">
@@ -466,7 +466,7 @@ export function BotCreateForm({
                         key={preset.label}
                         type="button"
                         onClick={() => handleWalletPreset(preset)}
-                        className="rounded px-2 py-0.5 text-[10px] font-medium text-slate-500 transition hover:bg-slate-800 hover:text-slate-300"
+                        className="rounded px-2 py-0.5 text-[10px] font-medium text-slate-500 transition hover:bg-white/[0.06] hover:text-slate-300"
                       >
                         {preset.label}
                       </button>
@@ -479,13 +479,13 @@ export function BotCreateForm({
                   value={fundingAmount}
                   onChange={(event) => onWalletBalanceChange(0, { amount: event.target.value })}
                   placeholder="10000"
-                  className="w-full rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2.5 text-sm text-slate-200 placeholder:text-slate-600 focus:border-slate-700 focus:outline-none"
+                  className="w-full rounded-lg border border-white/[0.06] bg-black/30 px-3 py-2.5 text-sm text-slate-200 placeholder:text-slate-600 focus:border-white/[0.12] focus:outline-none"
                 />
               </div>
             </div>
 
             <div className="flex items-center gap-3 rounded-lg border border-white/8 bg-black/20 px-3 py-3">
-              <span className="inline-flex size-8 items-center justify-center rounded-lg bg-slate-900/80 text-slate-300">
+              <span className="inline-flex size-8 items-center justify-center rounded-lg bg-black/35 text-slate-300">
                 <Wallet className="size-4" />
               </span>
               <div className="min-w-0 flex-1">
@@ -536,7 +536,7 @@ export function BotCreateForm({
         </StepCard>
       ) : null}
 
-      <div className="flex items-center justify-between gap-3 border-t border-slate-800 pt-4">
+      <div className="flex items-center justify-between gap-3 border-t border-white/[0.06] pt-4">
         <div className="text-xs text-slate-500">
           {isFinalStep ? 'Ready to create the bot.' : canAdvance ? 'Ready for the next step.' : 'Complete this step to continue.'}
         </div>
@@ -545,14 +545,14 @@ export function BotCreateForm({
             type="button"
             onClick={() => setStepIndex((prev) => Math.max(prev - 1, 0))}
             disabled={stepIndex === 0}
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/60 px-4 py-2 text-sm font-medium text-slate-300 transition hover:border-slate-600 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-40"
+            className="inline-flex items-center gap-2 rounded-md border border-white/[0.06] bg-black/30 px-4 py-2 text-sm font-medium text-slate-300 transition hover:border-white/[0.1] hover:bg-black/45 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <ChevronLeft className="size-4" /> Back
           </button>
           {isFinalStep ? (
             <button
               type="submit"
-              className="inline-flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-700/80 px-4 py-2 text-sm font-medium text-slate-100 transition hover:border-slate-500 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+              className="inline-flex items-center gap-2 rounded-md border border-slate-600 bg-slate-800/80 px-4 py-2 text-sm font-medium text-slate-100 transition hover:border-slate-500 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
               disabled={submitDisabled}
             >
               <PlusCircle className="size-4" /> Create Bot
@@ -565,7 +565,7 @@ export function BotCreateForm({
                 setStepIndex((prev) => Math.min(prev + 1, steps.length - 1))
               }}
               disabled={!canAdvance}
-              className="inline-flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-700/80 px-4 py-2 text-sm font-medium text-slate-100 transition hover:border-slate-500 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+              className="inline-flex items-center gap-2 rounded-md border border-slate-600 bg-slate-800/80 px-4 py-2 text-sm font-medium text-slate-100 transition hover:border-slate-500 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
             >
               Next <ChevronRight className="size-4" />
             </button>
