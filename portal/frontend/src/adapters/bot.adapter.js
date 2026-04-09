@@ -91,6 +91,14 @@ export async function fetchBotLensSeriesCatalog(runId) {
   return request(`/api/bots/runs/${encodeURIComponent(runId)}/series`)
 }
 
+export async function fetchBotLensSession(botId, { seriesKey, limit = 320 } = {}) {
+  const params = new URLSearchParams()
+  params.set('limit', String(Math.max(1, Number(limit) || 320)))
+  if (seriesKey) params.set('series_key', String(seriesKey))
+  const query = params.toString()
+  return request(`/api/bots/${encodeURIComponent(botId)}/botlens/session${query ? `?${query}` : ''}`)
+}
+
 
 
 export async function fetchBotRunLedgerEvents(botId, runId, { afterSeq = 0, limit = 500, eventNames } = {}) {
@@ -134,5 +142,13 @@ export function openBotLensSeriesLiveStream(runId, seriesKey, { limit = 320 } = 
   const params = new URLSearchParams()
   params.set('limit', String(Math.max(1, Number(limit) || 320)))
   const path = `/api/bots/ws/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/live?${params.toString()}`
+  return openWebSocket(path, { base: BASE })
+}
+
+export function openBotLensLiveStream(botId, { seriesKey, limit = 320 } = {}) {
+  const params = new URLSearchParams()
+  params.set('limit', String(Math.max(1, Number(limit) || 320)))
+  if (seriesKey) params.set('series_key', String(seriesKey))
+  const path = `/api/bots/ws/${encodeURIComponent(botId)}/botlens/live?${params.toString()}`
   return openWebSocket(path, { base: BASE })
 }

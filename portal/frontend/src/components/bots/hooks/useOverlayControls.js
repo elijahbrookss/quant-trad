@@ -19,6 +19,13 @@ const resolveOverlayColor = (overlay) => {
   return overlay?.color || overlay?.ui?.color || null
 }
 
+const isSuppressedOverlay = (overlay) => {
+  const type = String(overlay?.type || '').trim().toLowerCase()
+  const label = String(resolveOverlayLabel(overlay) || '').trim().toLowerCase()
+  const tokens = `${type} ${label}`
+  return /previous[\s_-]*zones?/.test(tokens)
+}
+
 const resolveOverlayGroup = (overlay) => {
   const explicit = overlay?.ui?.group || overlay?.group
   if (explicit) return explicit
@@ -43,6 +50,7 @@ export const useOverlayControls = ({ overlays = [], extraOptions = [] } = {}) =>
   const overlayOptions = useMemo(() => {
     const seen = new Map()
     const push = (overlay) => {
+      if (isSuppressedOverlay(overlay)) return
       const type = overlay?.type
       if (!type || seen.has(type)) return
       seen.set(type, {
@@ -94,6 +102,7 @@ export const useOverlayControls = ({ overlays = [], extraOptions = [] } = {}) =>
 
   const visibleOverlays = useMemo(() => {
     const visible = overlays.filter((overlay) => {
+      if (isSuppressedOverlay(overlay)) return false
       const type = overlay?.type
       if (!type) return false
       return visibility[type] !== false
