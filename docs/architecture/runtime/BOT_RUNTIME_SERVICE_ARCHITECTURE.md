@@ -10,7 +10,12 @@ tags:
   - orchestration
 code_paths:
   - portal/backend/service/bots/bot_service.py
+  - portal/backend/service/bots/bot_run_diagnostics_projection.py
+  - portal/backend/service/bots/startup_lifecycle.py
+  - portal/backend/service/bots/startup_service.py
+  - portal/backend/service/bots/startup_validation.py
   - portal/backend/service/bots/runtime_control_service.py
+  - portal/backend/service/bots/runner.py
   - portal/backend/service/bots/container_runtime.py
   - portal/backend/service/bots/container_runtime_projection.py
   - portal/backend/service/bots/container_runtime_telemetry.py
@@ -30,8 +35,8 @@ code_paths:
 
 - `Component`: Bot runtime service orchestration
 - `Owner/Domain`: Bot Runtime / Portal Backend
-- `Doc Version`: 3.1
-- `Related Contracts`: [[BOT_RUNTIME_DOCS_HUB]], [[01_runtime_contract]], [[BOT_RUNTIME_ENGINE_ARCHITECTURE]], [[BOT_RUNTIME_SYMBOL_SHARDING_ARCHITECTURE]], `portal/backend/service/bots/runtime_control_service.py`, `portal/backend/service/bots/runner.py`, `portal/backend/service/bots/container_runtime.py`
+- `Doc Version`: 4.0
+- `Related Contracts`: [[BOT_RUNTIME_DOCS_HUB]], [[BOT_STARTUP_LIFECYCLE_CONTRACT]], [[01_runtime_contract]], [[BOT_RUNTIME_ENGINE_ARCHITECTURE]], [[BOT_RUNTIME_SYMBOL_SHARDING_ARCHITECTURE]], `portal/backend/service/bots/runtime_control_service.py`, `portal/backend/service/bots/runner.py`, `portal/backend/service/bots/container_runtime.py`
 
 ## 1) Problem and scope
 
@@ -47,7 +52,7 @@ In scope:
 Non-goals:
 - per-bar strategy execution details,
 - indicator/runtime engine internals,
-- UI rendering details beyond emitted service payloads.
+- UI rendering details beyond emitted service payloads and diagnostics projections.
 
 Deep execution semantics live in [[BOT_RUNTIME_ENGINE_ARCHITECTURE]].
 Deep event and wallet contracts live in [[RUNTIME_EVENT_MODEL_V1]] and [[WALLET_GATEWAY_ARCHITECTURE]].
@@ -97,27 +102,35 @@ This keeps start/stop behavior stable while making runtime wiring explicit and t
 
 ## 4) Start flow
 
-`BotRuntimeControlService.start_bot(bot_id)` performs the current service-side checks in this order:
-1. Load the bot from config storage.
-2. Validate wallet config.
-3. Validate strategy id and backtest window.
-4. Validate strategy existence.
-5. Validate instrument policy.
-6. Validate runtime readiness.
-7. Resolve the runner target.
-8. Launch the runtime container through `DockerBotRunner.start_bot(...)`.
+`BotRuntimeControlService.start_bot(bot_id)` now delegates to `BotStartupOrchestrator`.
 
-If container startup fails:
-- bot status is set to `error`,
-- `last_run_artifact.error` is written,
-- the failure is broadcast to stream subscribers,
-- the exception is re-raised.
+Backend-owned startup order:
+1. Load the bot record.
+2. Generate the backend-owned `run_id`.
+3. Record `start_requested`.
+4. Create the run row immediately so run ownership exists before launch.
+5. Record `validating_configuration`.
+6. Resolve one startup snapshot through `prepare_startup_artifacts(...)`:
+   - normalized wallet config,
+   - strategy snapshot,
+   - runtime readiness/profile facts,
+   - symbol list for startup planning.
+7. Record `resolving_strategy`.
+8. Record `resolving_runtime_dependencies`.
+9. Record `preparing_run` and persist the startup snapshot into `portal_bot_runs`.
+10. Record `stamping_starting_state` and persist bot status/runner ownership.
+11. Record `launching_container`.
+12. Launch the runtime container through `DockerBotRunner.start_bot(bot=..., run_id=...)`.
+13. Record `container_launched`.
+14. Register the bot with the watchdog.
+15. Record `awaiting_container_boot`.
+16. Return the projected bot state with `active_run_id` and lifecycle detail.
 
-If startup succeeds:
-- bot status becomes `running`,
-- `runner_id` is set to the container id,
-- `last_run_at` is updated,
-- the updated bot payload is broadcast.
+If startup fails before the container boot contract is handed off:
+- the backend persists `startup_failed`,
+- the backend preserves the `run_id`,
+- `last_run_artifact.error` carries the failed phase/message payload,
+- the failed lifecycle state is broadcast instead of leaving the bot vaguely `starting`.
 
 ## 5) Docker runner contract
 
@@ -125,12 +138,14 @@ If startup succeeds:
 - `BOT_RUNTIME_IMAGE` must be set,
 - `BOT_RUNTIME_NETWORK` must resolve to an existing docker network,
 - `PROVIDER_CREDENTIAL_KEY` must be present in backend env,
-- `snapshot_interval_ms` must be configured on the bot before launch.
+- `snapshot_interval_ms` must be configured on the bot before launch,
+- backend-owned `run_id` must be supplied to `start_bot(...)`.
 
 The runner passes through:
 - `PG_DSN`,
 - `PROVIDER_CREDENTIAL_KEY`,
 - `BOT_ID`,
+- `RUN_ID`,
 - snapshot cadence env vars,
 - BotLens stream sizing env vars,
 - step-trace buffer env vars,
@@ -143,11 +158,13 @@ The launched process is:
 
 `container_runtime.py` is the service-layer runtime supervisor. It is responsible for:
 - loading the bot row and its strategy id,
-- generating the shared `run_id`,
+- claiming the backend-injected `run_id`,
 - enforcing strategy symbol limits,
 - assigning symbols to worker processes,
 - creating the shared-wallet multiprocessing proxy,
 - supervising child workers,
+- reporting startup checkpoints back into the lifecycle tables,
+- maintaining per-series startup progress metadata,
 - assigning run-scoped and series-scoped BotLens sequence numbers,
 - forwarding per-series bootstrap/delta telemetry envelopes,
 - writing bot runtime status and container step traces.
@@ -160,6 +177,13 @@ Important current limits:
 - default maximum symbols per strategy is 10,
 - one worker process is required per symbol,
 - startup fails loudly if `BOT_SYMBOL_PROCESS_MAX < symbol_count`.
+
+Container startup is now decomposed into explicit functions:
+- `load_container_startup_context()`
+- `spawn_workers()`
+- `supervise_startup_and_runtime()`
+
+These functions consume the backend-owned contract instead of inventing run ownership locally.
 
 ## 7) Worker model
 
@@ -180,6 +204,16 @@ The parent process treats worker failures as degraded-symbol events:
 - healthy workers continue,
 - telemetry is marked degraded,
 - container execution only hard-fails on parent-level exceptions.
+- if no series ever reached `live`, final supervision resolves to `startup_failed` instead of `degraded`.
+
+Worker failure checkpoints now include structured failure detail when available:
+- worker id and symbol,
+- exit code,
+- exception type,
+- traceback,
+- owner / phase / reason code.
+
+`bot_run_diagnostics_projection.py` derives a frontend-ready diagnostics contract from the raw lifecycle trail so the UI can render root cause, last successful checkpoint, worker breakdown, and the supporting event trail without reinterpreting backend semantics client-side.
 
 Dependency semantics:
 - attached indicators are the root set for the series,
@@ -204,6 +238,8 @@ Worker runtime persistence:
 
 Container/runtime telemetry persistence:
 - run status via `update_bot_runtime_status(...)`,
+- current lifecycle state via `record_bot_run_lifecycle_checkpoint(...)` into `portal_bot_run_lifecycle`,
+- append-only lifecycle checkpoint trail via `portal_bot_run_lifecycle_events`,
 - container loop step traces via `record_bot_run_step(...)`.
 - append-only BotLens series events via `record_bot_runtime_event(...)` with:
   - `event_type=botlens.series_bootstrap`
@@ -211,6 +247,7 @@ Container/runtime telemetry persistence:
 - latest per-series BotLens materializations via `upsert_bot_run_view_state(...)`.
 
 Important semantics:
+- startup truth now lives in the lifecycle tables first, not in container inference or Docker inspect,
 - the latest BotLens row is a materialized cache, not the execution source of truth,
 - BotLens bootstrap can read the materialized rows,
 - but live execution never reads DB-backed BotLens projections back into the worker timeline.
