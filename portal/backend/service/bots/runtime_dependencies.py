@@ -25,7 +25,7 @@ from ..storage.storage import (
     record_bot_trade_event,
     update_bot_run_artifact,
 )
-from ..strategies.strategy_service.facade import evaluate, run_strategy_preview
+from ..strategies.strategy_service.facade import run_strategy_preview
 
 
 def _build_indicator_context(bot_id: str, overlay_cache: Any) -> Any:
@@ -104,7 +104,7 @@ def build_bot_runtime_deps() -> BotRuntimeDeps:
         fetch_strategy=StrategyLoader.fetch_strategy,
         fetch_ohlcv=fetch_ohlcv,
         resolve_instrument=resolve_instrument,
-        strategy_evaluate=evaluate,
+        strategy_evaluate=run_strategy_preview,
         strategy_run_preview=run_strategy_preview,
         indicator_get_instance_meta=_get_indicator_instance_meta,
         indicator_build_runtime_graph=_build_runtime_indicator_graph,

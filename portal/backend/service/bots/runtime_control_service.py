@@ -1,18 +1,20 @@
-"""Bot runtime control service: start/stop/runner/watchdog boundaries."""
+"""Bot runtime control service: explicit backend-owned start/stop lifecycle orchestration."""
 
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
-from typing import Any, Callable, Dict, Mapping, Optional, Protocol
+from typing import Any, Callable, Dict, Optional, Protocol
 
 from core.settings import get_settings
-from .bot_stream import BotStreamManager
+
 from .bot_state_projection import project_bot_state
+from .bot_stream import BotStreamManager
 from .bot_watchdog import get_watchdog
 from .config_service import BotConfigService
-from .runner import BotRunner
-from .runner import DockerBotRunner
+from .runner import BotRunner, DockerBotRunner
+from .startup_lifecycle import BotLifecyclePhase, BotLifecycleStatus, LifecycleOwner, lifecycle_checkpoint_payload
+from .startup_service import BotStartupOrchestrator
+from ..storage import storage as storage_module
 from ..storage.storage import upsert_bot
 
 logger = logging.getLogger(__name__)
@@ -20,12 +22,24 @@ _BOT_RUNTIME_SETTINGS = get_settings().bot_runtime
 
 
 class BotControlStorage(Protocol):
-    def upsert_bot(self, payload: Mapping[str, Any]) -> None: ...
+    def upsert_bot(self, payload: Dict[str, Any]) -> None: ...
+    def upsert_bot_run(self, payload: Dict[str, Any]) -> Dict[str, Any]: ...
+    def get_bot_run(self, run_id: str) -> Optional[Dict[str, Any]]: ...
+    def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]: ...
+    def get_latest_bot_run_lifecycle(self, bot_id: str) -> Optional[Dict[str, Any]]: ...
+    def get_latest_bot_run_view_state(
+        self,
+        *,
+        bot_id: str,
+        run_id: Optional[str] = None,
+        series_key: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]: ...
+    def record_bot_run_lifecycle_checkpoint(self, payload: Dict[str, Any]) -> Dict[str, Any]: ...
+    def update_bot_runtime_status(self, *, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None: ...
 
 
-def _default_upsert_bot(payload: Mapping[str, Any]) -> None:
+def _default_upsert_bot(payload: Dict[str, Any]) -> None:
     upsert_bot(dict(payload))
-
 
 
 class BotRuntimeControlService:
@@ -44,11 +58,7 @@ class BotRuntimeControlService:
         self._watchdog = watchdog
         self._runner_factory = runner_factory
 
-    @staticmethod
-    def _now_iso() -> str:
-        return datetime.now(UTC).isoformat().replace("+00:00", "Z")
-
-    def _broadcast(self, event: str, payload: Mapping[str, Any]) -> None:
+    def _broadcast(self, event: str, payload: Dict[str, Any]) -> None:
         self._stream_manager.broadcast(event, payload)
 
     @staticmethod
@@ -66,7 +76,49 @@ class BotRuntimeControlService:
             "Set QT_BOT_RUNTIME_TARGET=docker."
         )
 
-    def _upsert_bot(self, payload: Mapping[str, Any]) -> None:
+    def _storage_gateway(self) -> BotControlStorage:
+        if self._storage is not None:
+            return self._storage
+
+        class _DefaultStorage:
+            def upsert_bot(self, payload: Dict[str, Any]) -> None:
+                storage_module.upsert_bot(dict(payload))
+
+            def upsert_bot_run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+                return storage_module.upsert_bot_run(dict(payload))
+
+            def get_bot_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+                return storage_module.get_bot_run(str(run_id))
+
+            def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]:
+                return storage_module.get_latest_bot_runtime_run_id(str(bot_id))
+
+            def get_latest_bot_run_lifecycle(self, bot_id: str) -> Optional[Dict[str, Any]]:
+                return storage_module.get_latest_bot_run_lifecycle(str(bot_id))
+
+            def get_latest_bot_run_view_state(
+                self,
+                *,
+                bot_id: str,
+                run_id: Optional[str] = None,
+                series_key: Optional[str] = None,
+            ) -> Optional[Dict[str, Any]]:
+                return storage_module.get_latest_bot_run_view_state(bot_id=bot_id, run_id=run_id, series_key=series_key)
+
+            def record_bot_run_lifecycle_checkpoint(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+                return storage_module.record_bot_run_lifecycle_checkpoint(dict(payload))
+
+            def update_bot_runtime_status(self, *, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None:
+                storage_module.update_bot_runtime_status(
+                    bot_id=bot_id,
+                    run_id=run_id,
+                    status=status,
+                    telemetry_degraded=telemetry_degraded,
+                )
+
+        return _DefaultStorage()
+
+    def _upsert_bot(self, payload: Dict[str, Any]) -> None:
         if self._storage is not None:
             self._storage.upsert_bot(payload)
             return
@@ -75,87 +127,129 @@ class BotRuntimeControlService:
     def _watchdog_instance(self):
         return self._watchdog if self._watchdog is not None else get_watchdog()
 
+    def _container_state_for_bot(
+        self,
+        bot: Dict[str, Any],
+        lifecycle: Optional[Dict[str, Any]],
+        *,
+        inspect_container: bool,
+    ) -> Dict[str, Any]:
+        bot_id = str(bot.get("id") or "").strip()
+        default_state = {
+            "name": DockerBotRunner.container_name_for(bot_id),
+            "status": "missing",
+            "running": False,
+            "id": None,
+            "started_at": None,
+            "finished_at": None,
+            "exit_code": None,
+            "error": None,
+        }
+        if not inspect_container:
+            return default_state
+        lifecycle_status = str((lifecycle or {}).get("status") or "").strip().lower()
+        persisted_status = str(bot.get("status") or "").strip().lower()
+        should_inspect = bool(
+            bot.get("runner_id")
+            or bot.get("heartbeat_at")
+            or lifecycle_status in {"starting", "running", "degraded", "telemetry_degraded"}
+            or persisted_status in {"starting", "running", "degraded", "telemetry_degraded"}
+        )
+        if not should_inspect:
+            return default_state
+        try:
+            return DockerBotRunner.inspect_bot_container(bot_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("bot_container_inspect_failed | bot_id=%s | error=%s", bot_id, exc)
+            return {**default_state, "status": "unknown", "error": str(exc)}
+
+    def _project_bot_from_storage(self, bot: Dict[str, Any], *, inspect_container: bool = True) -> Dict[str, Any]:
+        storage = self._storage_gateway()
+        bot_id = str(bot.get("id") or "").strip()
+        lifecycle = storage.get_latest_bot_run_lifecycle(bot_id)
+        run_id = (
+            str((lifecycle or {}).get("run_id") or "").strip()
+            or storage.get_latest_bot_runtime_run_id(bot_id)
+        )
+        run = storage.get_bot_run(run_id) if run_id else None
+        view_row = storage.get_latest_bot_run_view_state(bot_id=bot_id, run_id=run_id) if run_id else None
+        container_state = self._container_state_for_bot(bot, lifecycle, inspect_container=inspect_container)
+        return project_bot_state(
+            bot,
+            run=run,
+            lifecycle=lifecycle,
+            view_row=view_row,
+            container_state=container_state,
+            heartbeat_stale_ms=_BOT_RUNTIME_SETTINGS.status_heartbeat_stale_ms,
+        )
+
+    def _project_all_bots_from_storage(self) -> list[Dict[str, Any]]:
+        return [self._project_bot_from_storage(bot) for bot in self._config.list_bots()]
+
     def start_bot(self, bot_id: str) -> Dict[str, object]:
-        bots = {bot["id"]: bot for bot in self._config.list_bots()}
-        if bot_id not in bots:
-            raise KeyError(f"Bot {bot_id} was not found")
-        bot = bots[bot_id]
-
-        bot["wallet_config"] = self._config.validate_wallet_config(bot.get("wallet_config"))
-        bot["strategy_id"] = self._config.validate_strategy_id(bot.get("strategy_id"))
-        self._config.validate_backtest_window(bot)
-        self._config.validate_strategy_existence(bot)
-        self._config.validate_instrument_policy(bot)
-        self._config.validate_runtime_readiness(bot)
-
         runner = self._resolve_runner()
         watchdog = self._watchdog_instance()
-        bot["status"] = "starting"
-        bot["runner_id"] = watchdog.runner_id
-        bot["last_run_at"] = self._now_iso()
-        self._upsert_bot(bot)
-        self._broadcast("bot", {"bot": project_bot_state(bot)})
-
+        orchestrator = BotStartupOrchestrator(
+            config_service=self._config,
+            storage=self._storage_gateway(),
+            runner=runner,
+            watchdog=watchdog,
+        )
         try:
-            container_id = runner.start_bot(bot=bot)
-        except Exception as exc:
-            now = self._now_iso()
-            error_payload = {
-                "message": str(exc),
-                "phase": "container_start",
-                "at": now,
-            }
-            bot["status"] = "error"
-            bot["runner_id"] = None
-            bot["last_run_artifact"] = {"error": error_payload}
-            self._upsert_bot(bot)
-            projected = project_bot_state(bot)
-            projected["runtime"] = {
-                **dict(projected.get("runtime") or {}),
-                "status": "error",
-                "error": error_payload,
-            }
-            self._broadcast(
-                "bot",
-                {
-                    "bot": projected
-                },
-            )
-            logger.error("bot_container_start_failed | bot_id=%s | error=%s", bot_id, exc)
+            ctx = orchestrator.start_bot(bot_id)
+        except Exception:
+            bot = self._config.get_bot(bot_id)
+            projected = self._project_bot_from_storage(bot, inspect_container=False)
+            self._broadcast("bot", {"bot": projected})
             raise
 
-        watchdog.register_bot(bot_id)
-        refreshed = self._config.get_bot(bot_id)
         logger.info(
-            "bot_container_started | bot_id=%s | container_id=%s | runner_id=%s",
-            bot_id,
-            container_id,
+            "bot_startup_contract_stamped | bot_id=%s | run_id=%s | container_id=%s | runner_id=%s",
+            ctx.bot_id,
+            ctx.run_id,
+            ctx.container_id,
             watchdog.runner_id,
         )
-        projected = project_bot_state(refreshed)
+        bot = self._config.get_bot(bot_id)
+        projected = self._project_bot_from_storage(bot)
         self._broadcast("bot", {"bot": projected})
         return projected
 
     def stop_bot(self, bot_id: str) -> Dict[str, object]:
         runner = self._resolve_runner()
         runner.stop_bot(bot_id=bot_id)
-        self._watchdog_instance().unregister_bot(bot_id)
+        watchdog = self._watchdog_instance()
+        watchdog.unregister_bot(bot_id)
 
-        bots = {bot["id"]: bot for bot in self._config.list_bots()}
-        if bot_id not in bots:
-            raise KeyError(f"Bot {bot_id} was not found")
-        bot = bots[bot_id]
-        bot["status"] = "stopped"
-        bot["runner_id"] = None
-        self._upsert_bot(bot)
-        logger.info("bot_container_stopped | bot_id=%s", bot_id)
-        projected = project_bot_state(bot)
+        bot = self._config.get_bot(bot_id)
+        payload = dict(bot)
+        payload["status"] = BotLifecycleStatus.STOPPED.value
+        payload["runner_id"] = None
+        self._upsert_bot(payload)
+        run_id = self._storage_gateway().get_latest_bot_runtime_run_id(bot_id)
+        if run_id:
+            checkpoint = lifecycle_checkpoint_payload(
+                bot_id=bot_id,
+                run_id=run_id,
+                phase=BotLifecyclePhase.STOPPED.value,
+                status=BotLifecycleStatus.STOPPED.value,
+                owner=LifecycleOwner.BACKEND.value,
+                message="Bot stop requested from backend control service.",
+            )
+            self._storage_gateway().record_bot_run_lifecycle_checkpoint(checkpoint)
+            self._storage_gateway().update_bot_runtime_status(
+                bot_id=bot_id,
+                run_id=run_id,
+                status=BotLifecycleStatus.STOPPED.value,
+            )
+        logger.info("bot_container_stopped | bot_id=%s | run_id=%s", bot_id, run_id)
+        refreshed = self._config.get_bot(bot_id)
+        projected = self._project_bot_from_storage(refreshed, inspect_container=True)
         self._broadcast("bot", {"bot": projected})
         return projected
 
-
     def bots_stream(self):
-        return self._stream_manager.subscribe_all(self._config.list_bots)
+        return self._stream_manager.subscribe_all(self._project_all_bots_from_storage)
 
     def watchdog_status(self) -> Dict[str, Any]:
         watchdog = self._watchdog_instance()

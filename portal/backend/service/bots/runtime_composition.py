@@ -33,6 +33,12 @@ class BotStorageGateway(Protocol):
     """Storage boundary used by bot service/runtime control composition."""
 
     def upsert_bot(self, payload: Mapping[str, Any]) -> None: ...
+    def upsert_bot_run(self, payload: Mapping[str, Any]) -> Dict[str, Any]: ...
+    def get_bot_run(self, run_id: str) -> Optional[Dict[str, Any]]: ...
+    def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]: ...
+    def get_latest_bot_run_lifecycle(self, bot_id: str) -> Optional[Mapping[str, Any]]: ...
+    def record_bot_run_lifecycle_checkpoint(self, payload: Mapping[str, Any]) -> Dict[str, Any]: ...
+    def update_bot_runtime_status(self, *, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None: ...
 
     def list_bot_runs(self, *, bot_id: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]: ...
 
@@ -80,6 +86,29 @@ def _build_storage_gateway() -> BotStorageGateway:
     class _Gateway:
         def upsert_bot(self, payload: Mapping[str, Any]) -> None:
             storage_module.upsert_bot(dict(payload))
+
+        def upsert_bot_run(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+            return storage_module.upsert_bot_run(dict(payload))
+
+        def get_bot_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+            return storage_module.get_bot_run(str(run_id))
+
+        def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]:
+            return storage_module.get_latest_bot_runtime_run_id(str(bot_id))
+
+        def get_latest_bot_run_lifecycle(self, bot_id: str) -> Optional[Mapping[str, Any]]:
+            return storage_module.get_latest_bot_run_lifecycle(str(bot_id))
+
+        def record_bot_run_lifecycle_checkpoint(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+            return storage_module.record_bot_run_lifecycle_checkpoint(dict(payload))
+
+        def update_bot_runtime_status(self, *, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None:
+            storage_module.update_bot_runtime_status(
+                bot_id=str(bot_id),
+                run_id=str(run_id),
+                status=str(status),
+                telemetry_degraded=bool(telemetry_degraded),
+            )
 
         def list_bot_runs(self, *, bot_id: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
             rows = storage_module.list_bot_runs(bot_id=bot_id)

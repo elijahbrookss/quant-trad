@@ -18,7 +18,7 @@ _SECURITY_SETTINGS = _SETTINGS.security
 
 
 class BotRunner(Protocol):
-    def start_bot(self, *, bot: Mapping[str, object]) -> str: ...
+    def start_bot(self, *, bot: Mapping[str, object], run_id: str) -> str: ...
 
     def stop_bot(self, *, bot_id: str) -> None: ...
 
@@ -73,7 +73,7 @@ class DockerBotRunner:
         )
 
     @staticmethod
-    def _runtime_process_env(bot_id: str) -> Dict[str, str]:
+    def _runtime_process_env(bot_id: str, run_id: str) -> Dict[str, str]:
         env_map = {key: str(value) for key, value in os.environ.items() if key.startswith("QT_")}
         if _DATABASE_SETTINGS.dsn:
             env_map["PG_DSN"] = str(_DATABASE_SETTINGS.dsn)
@@ -81,6 +81,7 @@ class DockerBotRunner:
         if provider_key:
             env_map["QT_SECURITY_PROVIDER_CREDENTIAL_KEY"] = provider_key
         env_map["QT_BOT_RUNTIME_BOT_ID"] = str(bot_id)
+        env_map["QT_BOT_RUNTIME_RUN_ID"] = str(run_id)
         return env_map
 
     @classmethod
@@ -133,10 +134,13 @@ class DockerBotRunner:
             "error": str(state.get("Error") or "").strip() or None,
         }
 
-    def start_bot(self, *, bot: Mapping[str, object]) -> str:
+    def start_bot(self, *, bot: Mapping[str, object], run_id: str) -> str:
         bot_id = str(bot.get("id") or "").strip()
         if not bot_id:
             raise RuntimeError("bot id is required to start docker runtime")
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            raise RuntimeError("run_id is required to start docker runtime")
         snapshot_interval = bot.get("snapshot_interval_ms")
         if not isinstance(snapshot_interval, int) or snapshot_interval <= 0:
             raise RuntimeError("snapshot_interval_ms is required and must be a positive integer")
@@ -149,7 +153,7 @@ class DockerBotRunner:
         name = self._container_name(bot_id)
         self.stop_bot(bot_id=bot_id)
         network = self._resolve_runtime_network()
-        runtime_env = self._runtime_process_env(bot_id)
+        runtime_env = self._runtime_process_env(bot_id, normalized_run_id)
         cmd = [
             "docker",
             "run",
@@ -169,7 +173,13 @@ class DockerBotRunner:
                 "portal.backend.service.bots.container_runtime",
             ]
         )
-        logger.info("docker_bot_runner_start | bot_id=%s | image=%s | network=%s", bot_id, self.image, network)
+        logger.info(
+            "docker_bot_runner_start | bot_id=%s | run_id=%s | image=%s | network=%s",
+            bot_id,
+            normalized_run_id,
+            self.image,
+            network,
+        )
         proc = self._run_docker(cmd)
         if proc.returncode != 0:
             raise RuntimeError(f"docker start failed: {proc.stderr.strip() or proc.stdout.strip()}")
