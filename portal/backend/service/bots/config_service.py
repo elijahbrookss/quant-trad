@@ -309,6 +309,42 @@ class BotConfigService:
                         "key": "BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY",
                         "default": _SETTINGS.bot_runtime.push.payload_bytes_sample_every,
                     },
+                    {
+                        "key": "BOT_RUNTIME_INDICATOR_GUARD_ENABLED",
+                        "default": _SETTINGS.bot_runtime.indicator_guard.enabled,
+                    },
+                    {
+                        "key": "BOT_RUNTIME_INDICATOR_GUARD_TIME_SOFT_LIMIT_MS",
+                        "default": _SETTINGS.bot_runtime.indicator_guard.time_soft_limit_ms,
+                    },
+                    {
+                        "key": "BOT_RUNTIME_INDICATOR_GUARD_TIME_CONSECUTIVE_BARS",
+                        "default": _SETTINGS.bot_runtime.indicator_guard.time_consecutive_bars,
+                    },
+                    {
+                        "key": "BOT_RUNTIME_INDICATOR_GUARD_TIME_WINDOW_BARS",
+                        "default": _SETTINGS.bot_runtime.indicator_guard.time_window_bars,
+                    },
+                    {
+                        "key": "BOT_RUNTIME_INDICATOR_GUARD_TIME_WINDOW_BREACH_COUNT",
+                        "default": _SETTINGS.bot_runtime.indicator_guard.time_window_breach_count,
+                    },
+                    {
+                        "key": "BOT_RUNTIME_INDICATOR_GUARD_OVERLAY_POINTS_SOFT_LIMIT",
+                        "default": _SETTINGS.bot_runtime.indicator_guard.overlay_points_soft_limit,
+                    },
+                    {
+                        "key": "BOT_RUNTIME_INDICATOR_GUARD_OVERLAY_POINTS_HARD_LIMIT",
+                        "default": _SETTINGS.bot_runtime.indicator_guard.overlay_points_hard_limit,
+                    },
+                    {
+                        "key": "BOT_RUNTIME_INDICATOR_GUARD_OVERLAY_PAYLOAD_SOFT_LIMIT_BYTES",
+                        "default": _SETTINGS.bot_runtime.indicator_guard.overlay_payload_soft_limit_bytes,
+                    },
+                    {
+                        "key": "BOT_RUNTIME_INDICATOR_GUARD_OVERLAY_PAYLOAD_HARD_LIMIT_BYTES",
+                        "default": _SETTINGS.bot_runtime.indicator_guard.overlay_payload_hard_limit_bytes,
+                    },
                     {"key": "BOTLENS_STREAM_MAX_SERIES", "default": _SETTINGS.bot_runtime.botlens.max_series},
                     {"key": "BOTLENS_STREAM_MAX_CANDLES", "default": _SETTINGS.bot_runtime.botlens.max_candles},
                     {"key": "BOTLENS_STREAM_MAX_OVERLAYS", "default": _SETTINGS.bot_runtime.botlens.max_overlays},

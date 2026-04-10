@@ -16,10 +16,10 @@ from pydantic import BaseModel, Field
 from ..service.bots import bot_service
 from ..service.bots.bot_run_diagnostics_projection import project_bot_run_diagnostics
 from ..service.bots.botlens_session_service import get_active_botlens_session, resolve_active_botlens_stream
+from ..service.bots.botlens_symbol_service import get_symbol_detail, get_symbol_history, list_run_symbols
 from ..service.bots.ledger_service import get_run_signal_detail, list_run_ledger_events
-from ..service.storage.repos.lifecycle import get_bot_run_lifecycle, list_bot_run_lifecycle_events
 from ..service.bots.telemetry_stream import telemetry_hub
-from ..service.bots.botlens_series_service import get_series_history, get_series_window, list_series_keys
+from ..service.storage.repos.lifecycle import get_bot_run_lifecycle, list_bot_run_lifecycle_events
 router = APIRouter()
 
 
@@ -304,9 +304,9 @@ async def bot_run_signal_detail(
 
 
 @router.get("/runs/{run_id}/series")
-async def bot_lens_series_catalog(run_id: str) -> Dict[str, Any]:
+async def bot_lens_symbol_catalog(run_id: str) -> Dict[str, Any]:
     try:
-        return list_series_keys(run_id=str(run_id))
+        return list_run_symbols(run_id=str(run_id))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -314,13 +314,13 @@ async def bot_lens_series_catalog(run_id: str) -> Dict[str, Any]:
 @router.get("/{bot_id}/botlens/session")
 async def bot_lens_active_session(
     bot_id: str,
-    series_key: Optional[str] = None,
+    symbol_key: Optional[str] = None,
     limit: int = 320,
 ) -> Dict[str, Any]:
     try:
         return get_active_botlens_session(
             bot_id=str(bot_id),
-            series_key=series_key,
+            symbol_key=symbol_key,
             limit=max(1, min(int(limit or 320), 2000)),
         )
     except KeyError as exc:
@@ -329,15 +329,14 @@ async def bot_lens_active_session(
         raise HTTPException(400, str(exc)) from exc
 
 
-@router.get("/runs/{run_id}/series/{series_key}/window")
-async def bot_lens_series_window(
+@router.get("/runs/{run_id}/series/{series_key}/detail")
+async def bot_lens_symbol_detail(
     run_id: str,
     series_key: str,
-    to: Optional[str] = "now",
     limit: int = 320,
 ) -> Dict[str, Any]:
     try:
-        return get_series_window(run_id=str(run_id), series_key=str(series_key), to=to, limit=max(1, min(int(limit or 320), 2000)))
+        return get_symbol_detail(run_id=str(run_id), symbol_key=str(series_key), limit=max(1, min(int(limit or 320), 2000)))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -350,9 +349,9 @@ async def bot_lens_series_history(
     limit: int = 320,
 ) -> Dict[str, Any]:
     try:
-        return get_series_history(
+        return get_symbol_history(
             run_id=str(run_id),
-            series_key=str(series_key),
+            symbol_key=str(series_key),
             before_ts=before_ts,
             limit=max(1, min(int(limit or 320), 2000)),
         )
@@ -372,66 +371,44 @@ async def bot_telemetry_ingest(websocket: WebSocket) -> None:
 
 
 
-@router.websocket("/ws/runs/{run_id}/series/{series_key}/live")
-async def bot_lens_series_live(
-    run_id: str,
-    series_key: str,
-    websocket: WebSocket,
-    limit: int = 320,
-) -> None:
-    await telemetry_hub.add_series_viewer(
-        run_id=str(run_id),
-        series_key=str(series_key),
-        ws=websocket,
-        limit=max(1, min(int(limit or 320), 2000)),
-    )
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        await telemetry_hub.remove_series_viewer(run_id=str(run_id), series_key=str(series_key), ws=websocket)
-
-
 @router.websocket("/ws/{bot_id}/botlens/live")
 async def bot_lens_active_live(
     bot_id: str,
     websocket: WebSocket,
-    series_key: Optional[str] = None,
-    limit: int = 320,
+    symbol_key: Optional[str] = None,
+    cursor_seq: int = 0,
 ) -> None:
     try:
         resolved = resolve_active_botlens_stream(
             bot_id=str(bot_id),
-            series_key=series_key,
-            limit=max(1, min(int(limit or 320), 2000)),
+            symbol_key=symbol_key,
         )
     except (KeyError, ValueError) as exc:
         await websocket.accept()
         await websocket.send_json(
             {
-                "type": "botlens_live_error",
+                "type": "botlens_run_resync_required",
                 "run_id": "",
-                "series_key": str(series_key or ""),
-                "payload": {"message": str(exc)},
+                "payload": {"reason": "bootstrap_failed", "details": {"message": str(exc)}},
             }
         )
         await websocket.close(code=1011)
         return
 
     run_id = str(resolved.get("run_id") or "")
-    resolved_series_key = str(resolved.get("series_key") or "")
-    await telemetry_hub.add_series_viewer(
+    selected_symbol_key = str(resolved.get("selected_symbol_key") or "")
+    await telemetry_hub.add_run_viewer(
         run_id=run_id,
-        series_key=resolved_series_key,
         ws=websocket,
-        limit=max(1, min(int(limit or 320), 2000)),
+        cursor_seq=max(0, int(cursor_seq or 0)),
+        selected_symbol_key=selected_symbol_key or None,
     )
     try:
         while True:
-            await websocket.receive_text()
+            payload = await websocket.receive_json()
+            if isinstance(payload, dict):
+                await telemetry_hub.update_run_viewer(run_id=run_id, ws=websocket, payload=payload)
     except WebSocketDisconnect:
         pass
     finally:
-        await telemetry_hub.remove_series_viewer(run_id=run_id, series_key=resolved_series_key, ws=websocket)
+        await telemetry_hub.remove_run_viewer(run_id=run_id, ws=websocket)

@@ -24,7 +24,7 @@ from portal.backend.service.bots.container_runtime_projection import (
 )
 from portal.backend.service.bots.container_runtime_telemetry import TelemetryEmitter
 from portal.backend.service.bots.container_runtime_telemetry import emit_telemetry_ephemeral_message
-from portal.backend.service.bots.botlens_projection import normalize_series_key
+from portal.backend.service.bots.botlens_contract import normalize_series_key
 from portal.backend.service.bots.runtime_dependencies import build_bot_runtime_deps
 from portal.backend.service.bots.startup_lifecycle import (
     BotLifecyclePhase,

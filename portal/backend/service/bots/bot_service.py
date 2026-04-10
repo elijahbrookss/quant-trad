@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Mapping
 
 from core.settings import get_settings
 
-from .botlens_contract import projection_only
+from .botlens_state import read_run_summary_state
 from .bot_state_projection import project_bot_state
 from .runner import DockerBotRunner
 from .runtime_composition import get_runtime_composition
@@ -187,11 +187,23 @@ def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
         if not run_id:
             continue
         view_row = _composition().storage.get_latest_bot_run_view_state(bot_id=bot_id, run_id=run_id)
-        view_payload = projection_only(view_row.get("payload")) if isinstance(view_row, Mapping) else {}
-        runtime_payload = dict(view_payload.get("runtime") or {}) if isinstance(view_payload.get("runtime"), Mapping) else {}
+        summary_state = read_run_summary_state(
+            view_row.get("payload") if isinstance(view_row, Mapping) else {},
+            bot_id=bot_id,
+            run_id=run_id,
+        )
+        runtime_payload = dict(summary_state.get("health") or {}) if isinstance(summary_state.get("health"), Mapping) else {}
         summary = dict(run.get("summary") or {})
-        if not summary and isinstance(runtime_payload.get("stats"), Mapping):
-            summary = dict(runtime_payload.get("stats") or {})
+        if not summary:
+            symbol_index = summary_state.get("symbol_index") if isinstance(summary_state.get("symbol_index"), Mapping) else {}
+            total_trades = 0
+            for item in symbol_index.values():
+                if not isinstance(item, Mapping):
+                    continue
+                stats = item.get("stats") if isinstance(item.get("stats"), Mapping) else {}
+                total_trades += int(stats.get("total_trades") or 0)
+            if total_trades > 0:
+                summary = {"total_trades": total_trades}
         projected_runs.append(
             {
                 **dict(run),
@@ -238,8 +250,12 @@ def runtime_capacity() -> Dict[str, Any]:
             series_key=None,
         )
         if isinstance(view_row, Mapping):
-            payload = projection_only(view_row.get("payload"))
-            maybe_runtime = payload.get("runtime")
+            summary_state = read_run_summary_state(
+                view_row.get("payload"),
+                bot_id=str(bot.get("id") or ""),
+                run_id=str(view_row.get("run_id") or ""),
+            )
+            maybe_runtime = summary_state.get("health")
             if isinstance(maybe_runtime, Mapping):
                 runtime_payload = maybe_runtime
         try:
