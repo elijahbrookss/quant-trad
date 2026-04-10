@@ -942,3 +942,63 @@ def test_regime_overlay_uses_context_regime_not_committed_structure() -> None:
 
     assert regime_payload["regime_blocks"][0]["structure"]["state"] == "range"
     assert marker_payload["markers"][-1]["text"] == "Range"
+
+
+def test_regime_runtime_bounds_retained_candle_history() -> None:
+    indicator = _runtime_indicator()
+    indicator.configure_replay_window(history_bars=5)
+
+    for index in range(12):
+        candle = _candle(index, close=100_000.0 + index * 15.0)
+        indicator.apply_bar(
+            candle,
+            {_dependency_ref(): _dependency_output(candle.time, _trend_stats())},
+        )
+
+    retained_candles = list(indicator._candles)
+
+    assert len(retained_candles) == 5
+    assert retained_candles[0].time == _candle(7, close=100_000.0).time
+    assert retained_candles[-1].time == _candle(11, close=100_000.0).time
+
+
+def test_regime_runtime_prunes_regime_rows_with_retained_window() -> None:
+    indicator = _runtime_indicator()
+    indicator.configure_replay_window(history_bars=5)
+
+    for index in range(12):
+        candle = _candle(index, close=100_000.0 + index * 12.0)
+        indicator.apply_bar(
+            candle,
+            {_dependency_ref(): _dependency_output(candle.time, _trend_stats())},
+        )
+
+    retained_times = {
+        candle.time.replace(tzinfo=None)
+        for candle in list(indicator._candles)
+    }
+
+    assert len(indicator._regime_rows) == 5
+    assert set(indicator._regime_rows.keys()) == retained_times
+    assert _candle(6, close=100_000.0).time.replace(tzinfo=None) not in indicator._regime_rows
+
+
+def test_regime_overlay_payload_stays_bounded_after_history_limit() -> None:
+    indicator = _runtime_indicator()
+    indicator.configure_replay_window(history_bars=6)
+
+    for index in range(24):
+        candle = _candle(index, close=100_000.0 + index * 20.0)
+        indicator.apply_bar(
+            candle,
+            {_dependency_ref(): _dependency_output(candle.time, _trend_stats())},
+        )
+
+    overlays = indicator.overlay_snapshot()
+    regime_payload = overlays["regime"].value["payload"]
+    retained_candles = list(indicator._candles)
+    oldest_retained_epoch = int(retained_candles[0].time.timestamp())
+
+    assert len(retained_candles) == 6
+    assert len(regime_payload["regime_points"]) <= 6
+    assert all(int(point["time"]) >= oldest_retained_epoch for point in regime_payload["regime_points"])

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
+import engines.indicator_engine.runtime_engine as runtime_engine_module
 from engines.bot_runtime.core.domain import Candle
 from engines.indicator_engine.contracts import (
     Indicator,
@@ -13,7 +14,7 @@ from engines.indicator_engine.contracts import (
     RuntimeOverlay,
     RuntimeOutput,
 )
-from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
+from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine, IndicatorGuardConfig
 from indicators.candle_stats.runtime import TypedCandleStatsIndicator
 from overlays.builders import build_line_overlay
 from overlays.registry import register_overlay_type
@@ -202,6 +203,52 @@ class _OverlayCountIndicator(Indicator):
         }
 
 
+class _GuardedOverlayIndicator(Indicator):
+    def __init__(self, *, marker_count: int, note_size: int = 0) -> None:
+        self.runtime_spec = IndicatorRuntimeSpec(
+            instance_id="guarded",
+            manifest_type="guarded",
+            version="v1",
+            dependencies=(),
+            outputs=(OutputDefinition(name="metric", type="metric"),),
+            overlays=(OverlayDefinition(name="markers", overlay_type="test_indicator_overlay"),),
+        )
+        self._marker_count = int(marker_count)
+        self._note_size = int(note_size)
+
+    def apply_bar(self, bar: Any, inputs: Mapping[OutputRef, RuntimeOutput]) -> None:
+        _ = bar, inputs
+
+    def snapshot(self) -> Mapping[str, RuntimeOutput]:
+        return {
+            "metric": RuntimeOutput(
+                bar_time=BAR_TIME,
+                ready=True,
+                value={"value": 1.0},
+            )
+        }
+
+    def overlay_snapshot(self) -> Mapping[str, RuntimeOverlay]:
+        markers = []
+        for index in range(self._marker_count):
+            markers.append(
+                {
+                    "time": int(BAR_TIME.timestamp()) + index,
+                    "price": 100.0 + float(index),
+                    "shape": "circle",
+                    "color": "#38bdf8",
+                    "note": "x" * self._note_size,
+                }
+            )
+        return {
+            "markers": RuntimeOverlay(
+                bar_time=BAR_TIME,
+                ready=True,
+                value=build_overlay("test_indicator_overlay", {"markers": markers}),
+            )
+        }
+
+
 BAR_TIME = datetime(2026, 3, 17, 12, 0, tzinfo=timezone.utc)
 
 
@@ -281,6 +328,100 @@ def test_indicator_engine_can_skip_overlay_snapshot_on_intermediate_steps() -> N
 
     assert "counted.markers" in frame.overlays
     assert indicator.overlay_snapshot_calls == 1
+
+
+def test_indicator_guard_emits_time_budget_warning_after_repeated_breaches() -> None:
+    indicator = _OverlayCountIndicator()
+    engine = IndicatorExecutionEngine(
+        [indicator],
+        guard_config=IndicatorGuardConfig(
+            enabled=True,
+            time_soft_limit_ms=10.0,
+            time_consecutive_bars=2,
+            time_window_bars=4,
+            time_window_breach_count=3,
+            overlay_points_soft_limit=1000,
+            overlay_points_hard_limit=0,
+            overlay_payload_soft_limit_bytes=100000,
+            overlay_payload_hard_limit_bytes=0,
+        ),
+    )
+
+    original_perf_counter = runtime_engine_module.time.perf_counter
+    perf_samples = iter([0.0, 0.020, 0.030, 0.050])
+    runtime_engine_module.time.perf_counter = lambda: next(perf_samples)
+    try:
+        first = engine.step(bar=object(), bar_time=BAR_TIME, include_overlays=False)
+        second = engine.step(bar=object(), bar_time=BAR_TIME, include_overlays=False)
+    finally:
+        runtime_engine_module.time.perf_counter = original_perf_counter
+
+    assert first.guard_warnings == ()
+    assert second.guard_warnings[-1].warning_type == "indicator_time_budget_exceeded"
+    assert second.guard_warnings[-1].context["execution_time_ms"] == 20.0
+
+
+def test_indicator_guard_emits_overlay_point_warning_without_suppression() -> None:
+    engine = IndicatorExecutionEngine(
+        [_GuardedOverlayIndicator(marker_count=7)],
+        guard_config=IndicatorGuardConfig(
+            enabled=True,
+            time_soft_limit_ms=1000.0,
+            time_consecutive_bars=3,
+            time_window_bars=20,
+            time_window_breach_count=5,
+            overlay_points_soft_limit=5,
+            overlay_points_hard_limit=20,
+            overlay_payload_soft_limit_bytes=100000,
+            overlay_payload_hard_limit_bytes=0,
+        ),
+    )
+
+    frame = engine.step(bar=object(), bar_time=BAR_TIME)
+
+    assert frame.overlays["guarded.markers"].ready is True
+    assert any(warning.warning_type == "indicator_overlay_points_exceeded" for warning in frame.guard_warnings)
+
+
+def test_indicator_guard_emits_payload_warning_and_can_suppress_overlay_emission() -> None:
+    soft_engine = IndicatorExecutionEngine(
+        [_GuardedOverlayIndicator(marker_count=2, note_size=120)],
+        guard_config=IndicatorGuardConfig(
+            enabled=True,
+            time_soft_limit_ms=1000.0,
+            time_consecutive_bars=3,
+            time_window_bars=20,
+            time_window_breach_count=5,
+            overlay_points_soft_limit=1000,
+            overlay_points_hard_limit=0,
+            overlay_payload_soft_limit_bytes=150,
+            overlay_payload_hard_limit_bytes=5000,
+        ),
+    )
+
+    soft_frame = soft_engine.step(bar=object(), bar_time=BAR_TIME)
+    assert soft_frame.overlays["guarded.markers"].ready is True
+    assert any(warning.warning_type == "indicator_overlay_payload_exceeded" for warning in soft_frame.guard_warnings)
+
+    hard_engine = IndicatorExecutionEngine(
+        [_GuardedOverlayIndicator(marker_count=12)],
+        guard_config=IndicatorGuardConfig(
+            enabled=True,
+            time_soft_limit_ms=1000.0,
+            time_consecutive_bars=3,
+            time_window_bars=20,
+            time_window_breach_count=5,
+            overlay_points_soft_limit=5,
+            overlay_points_hard_limit=10,
+            overlay_payload_soft_limit_bytes=100000,
+            overlay_payload_hard_limit_bytes=0,
+        ),
+    )
+
+    hard_frame = hard_engine.step(bar=object(), bar_time=BAR_TIME)
+
+    assert hard_frame.overlays["guarded.markers"].ready is False
+    assert any(warning.warning_type == "indicator_overlay_suppressed" for warning in hard_frame.guard_warnings)
 
 
 def test_candle_stats_atr_overlays_are_emitted_in_their_declared_panes() -> None:

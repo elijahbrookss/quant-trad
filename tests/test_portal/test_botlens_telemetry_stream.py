@@ -2,208 +2,126 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import pytest
 
 pytest.importorskip("sqlalchemy")
 
 from portal.backend.service.bots import telemetry_stream as stream
-from portal.backend.service.bots.container_runtime import ContainerStartupContext, _handle_worker_error
 from portal.backend.service.bots.botlens_contract import (
     BRIDGE_BOOTSTRAP_KIND,
     BRIDGE_FACTS_KIND,
-    CONTINUITY_RESYNC_REQUIRED,
-    EVENT_TYPE_LIFECYCLE,
-    EVENT_TYPE_RUNTIME_FACTS,
-    EVENT_TYPE_RUNTIME_BOOTSTRAP,
-    LIFECYCLE_KIND,
+    RUN_SCOPE_KEY,
 )
 
 BotTelemetryHub = stream.BotTelemetryHub
 
 
 class FakeWebSocket:
-    def __init__(self, *, send_delay_s: float = 0.0) -> None:
+    def __init__(self) -> None:
         self.accepted = False
-        self.closed = False
-        self.closed_code = None
-        self.send_delay_s = float(send_delay_s)
         self.messages: list[dict] = []
+        self.closed = False
 
     async def accept(self) -> None:
         self.accepted = True
 
     async def send_text(self, payload: str) -> None:
-        if self.send_delay_s > 0:
-            await asyncio.sleep(self.send_delay_s)
         self.messages.append(json.loads(payload))
 
     async def close(self, code: int = 1000) -> None:
         self.closed = True
-        self.closed_code = int(code)
 
 
-async def _noop() -> None:
-    return
-
-
-def _projection(*, candle_time: int, series_key: str = "instrument-btc|1m", symbol: str = "BTC") -> dict:
-    instrument_id, timeframe = str(series_key).split("|", 1)
-    return {
-        "series": [
-            {
-                "instrument_id": instrument_id,
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "candles": [
-                    {
-                        "time": candle_time,
-                        "open": float(candle_time),
-                        "high": float(candle_time),
-                        "low": float(candle_time),
-                        "close": float(candle_time),
-                    }
-                ],
-                "overlays": [],
-                "stats": {"total_trades": 0},
-            }
-        ],
-        "trades": [],
-        "logs": [],
-        "decisions": [],
-        "warnings": [],
-        "runtime": {"status": "running"},
-    }
-
-
-def _facts_batch(*, candle_time: int, series_key: str = "instrument-btc|1m", symbol: str = "BTC") -> list[dict]:
-    instrument_id, timeframe = str(series_key).split("|", 1)
+def _facts_batch(
+    *,
+    candle_time: int,
+    symbol_key: str = "instrument-btc|1m",
+    symbol: str = "BTC",
+    warnings: list[dict] | None = None,
+) -> list[dict]:
+    instrument_id, timeframe = str(symbol_key).split("|", 1)
     return [
-        {"fact_type": "runtime_state_observed", "runtime": {"status": "running", "warnings": ["runtime warning"]}},
+        {
+            "fact_type": "runtime_state_observed",
+            "runtime": {
+                "status": "running",
+                "worker_count": 2,
+                "active_workers": 1,
+                "warnings": list(warnings or []),
+            },
+        },
         {
             "fact_type": "series_state_observed",
-            "series_key": series_key,
+            "series_key": symbol_key,
             "instrument_id": instrument_id,
             "symbol": symbol,
             "timeframe": timeframe,
         },
         {
             "fact_type": "candle_upserted",
-            "series_key": series_key,
-            "candle": {
-                "time": candle_time,
-                "open": float(candle_time),
-                "high": float(candle_time),
-                "low": float(candle_time),
-                "close": float(candle_time),
-            },
-            "replace_last": False,
-        },
-        {
-            "fact_type": "overlay_ops_emitted",
-            "series_key": series_key,
-            "overlay_delta": {
-                "ops": [
-                    {
-                        "op": "upsert",
-                        "key": "overlay:regime",
-                        "overlay": {
-                            "type": "regime_overlay",
-                            "payload": {"state": "risk_on"},
-                        },
-                    }
-                ]
-            },
-        },
-        {
-            "fact_type": "series_stats_updated",
-            "series_key": series_key,
-            "stats": {"total_trades": 1},
+            "series_key": symbol_key,
+            "candle": {"time": candle_time, "open": float(candle_time), "high": float(candle_time), "low": float(candle_time), "close": float(candle_time)},
         },
         {
             "fact_type": "trade_upserted",
-            "series_key": series_key,
+            "series_key": symbol_key,
             "trade": {"trade_id": "trade-1", "symbol": symbol},
         },
-        {"fact_type": "log_emitted", "log": {"id": "log-1", "message": "delta log"}},
-        {"fact_type": "decision_emitted", "decision": {"event_id": "decision-1", "event": "decision"}},
     ]
 
 
-def _window(*, seq: int, series_key: str = "instrument-btc|1m") -> dict:
-    projection = _projection(candle_time=seq, series_key=series_key)
-    return {
-        "run_id": "run-1",
-        "series_key": series_key,
-        "schema_version": 1,
-        "seq": seq,
-        "event_time": "2026-01-01T00:00:00Z",
-        "window": {
-            "projection": projection,
-            "selected_series": projection["series"][0],
-            "candles": projection["series"][0]["candles"],
-            "trades": [],
-            "logs": [],
-            "decisions": [],
-            "warnings": [],
-            "runtime": {"status": "running"},
-            "markers": [],
-            "status": "running",
-        },
-    }
-
-
-def test_process_ingest_bootstrap_persists_latest_projection(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_bootstrap_persists_run_summary_and_symbol_detail(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         hub = BotTelemetryHub()
         persisted_rows: list[dict] = []
         persisted_events: list[dict] = []
-        published_updates: list[dict] = []
 
         monkeypatch.setattr(stream, "upsert_bot_run_view_state", lambda row: persisted_rows.append(dict(row)) or dict(row))
         monkeypatch.setattr(stream, "record_bot_runtime_event", lambda row: persisted_events.append(dict(row)) or dict(row))
+        monkeypatch.setattr(stream, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1", "strategy_name": "Momentum"})
 
         async def fake_publish_runtime_update(**kwargs) -> None:
-            published_updates.append(dict(kwargs))
+            return None
 
         hub._publish_runtime_update = fake_publish_runtime_update  # type: ignore[method-assign]
 
         await hub._process_ingest(
-            {
-                "payload": {
-                    "kind": BRIDGE_BOOTSTRAP_KIND,
-                    "bot_id": "bot-1",
-                    "run_id": "run-1",
-                    "series_key": "instrument-btc|1m",
-                    "run_seq": 1,
-                    "bridge_session_id": "bridge-1",
-                    "bridge_seq": 1,
-                    "facts": _facts_batch(candle_time=1),
-                    "event_time": "2026-01-01T00:00:00Z",
-                    "known_at": "2026-01-01T00:00:00Z",
-                }
-            }
+          {
+              "payload": {
+                  "kind": BRIDGE_BOOTSTRAP_KIND,
+                  "bot_id": "bot-1",
+                  "run_id": "run-1",
+                  "series_key": "instrument-btc|1m",
+                  "run_seq": 1,
+                  "bridge_session_id": "bridge-1",
+                  "bridge_seq": 1,
+                  "facts": _facts_batch(candle_time=1),
+                  "event_time": "2026-01-01T00:00:00Z",
+                  "known_at": "2026-01-01T00:00:00Z",
+              }
+          }
         )
 
-        latest = hub._latest_view_state[("bot-1", "run-1", "instrument-btc|1m")]
-        assert latest["seq"] == 1
-        assert latest["payload"]["projection"]["series"][0]["series_key"] == "instrument-btc|1m"
-        assert persisted_rows[0]["series_key"] == "instrument-btc|1m"
-        assert persisted_events[0]["event_type"] == EVENT_TYPE_RUNTIME_BOOTSTRAP
-        assert persisted_events[0]["payload"]["facts"][0]["fact_type"] == "runtime_state_observed"
-        assert published_updates[0]["seq"] == 1
+        summary_row = next(row for row in persisted_rows if row["series_key"] == RUN_SCOPE_KEY)
+        detail_row = next(row for row in persisted_rows if row["series_key"] == "instrument-btc|1m")
+        assert summary_row["seq"] == 1
+        assert detail_row["payload"]["detail"]["symbol_key"] == "instrument-btc|1m"
+        assert summary_row["payload"]["summary"]["symbol_index"]["instrument-btc|1m"]["symbol"] == "BTC"
+        assert summary_row["payload"]["summary"]["open_trades_index"]["trade-1"]["symbol_key"] == "instrument-btc|1m"
+        assert summary_row["payload"]["summary"]["health"]["warnings"] == []
+        assert persisted_events[0]["event_type"] == "botlens.runtime_bootstrap_facts"
 
     asyncio.run(scenario())
 
 
-def test_process_ingest_facts_materializes_projection_and_broadcasts(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_facts_broadcasts_run_scoped_deltas(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         hub = BotTelemetryHub()
-        persisted_rows: list[dict] = []
-        persisted_events: list[dict] = []
-
-        monkeypatch.setattr(stream, "upsert_bot_run_view_state", lambda row: persisted_rows.append(dict(row)) or dict(row))
-        monkeypatch.setattr(stream, "record_bot_runtime_event", lambda row: persisted_events.append(dict(row)) or dict(row))
+        monkeypatch.setattr(stream, "upsert_bot_run_view_state", lambda row: dict(row))
+        monkeypatch.setattr(stream, "record_bot_runtime_event", lambda row: dict(row))
+        monkeypatch.setattr(stream, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1", "strategy_name": "Momentum"})
 
         async def fake_publish_runtime_update(**kwargs) -> None:
             return None
@@ -211,9 +129,7 @@ def test_process_ingest_facts_materializes_projection_and_broadcasts(monkeypatch
         hub._publish_runtime_update = fake_publish_runtime_update  # type: ignore[method-assign]
         ws = FakeWebSocket()
 
-        async with hub._lock:
-            hub._run_stream_session_id["run-1"] = "session-1"
-            hub._series_viewers[("run-1", "instrument-btc|1m")][ws] = {"last_seq": 1, "replaying": False}
+        await hub.add_run_viewer(run_id="run-1", ws=ws, cursor_seq=0, selected_symbol_key="instrument-btc|1m")
 
         await hub._process_ingest(
             {
@@ -248,394 +164,204 @@ def test_process_ingest_facts_materializes_projection_and_broadcasts(monkeypatch
             }
         )
 
-        latest = hub._latest_view_state[("bot-1", "run-1", "instrument-btc|1m")]
-        assert latest["seq"] == 2
-        assert [row["time"] for row in latest["payload"]["projection"]["series"][0]["candles"]] == [1, 2]
-        assert latest["payload"]["projection"]["series"][0]["overlays"][0]["overlay_id"] == "overlay:regime"
-        assert latest["payload"]["projection"]["series"][0]["stats"]["total_trades"] == 1
-        assert latest["payload"]["projection"]["trades"][0]["trade_id"] == "trade-1"
-        assert latest["payload"]["projection"]["warnings"] == ["runtime warning"]
-        assert ws.messages[-1]["type"] == "botlens_live_tail"
-        assert ws.messages[-1]["message_type"] == "projection_update"
-        assert ws.messages[-1]["stream_session_id"] == "session-1"
-        assert ws.messages[-1]["payload"]["window"]["projection"]["series"][0]["candles"][-1]["time"] == 2
-        assert persisted_events[-1]["event_type"] == EVENT_TYPE_RUNTIME_FACTS
-        assert persisted_rows[-1]["seq"] == 2
+        message_types = [message["type"] for message in ws.messages]
+        assert "botlens_run_connected" in message_types
+        assert "botlens_run_summary_delta" in message_types
+        assert "botlens_open_trades_delta" in message_types
+        assert "botlens_symbol_detail_delta" in message_types
+        detail_messages = [message for message in ws.messages if message["type"] == "botlens_symbol_detail_delta"]
+        assert detail_messages[-1]["payload"]["candle"]["time"] == 2
+        summary_messages = [message for message in ws.messages if message["type"] == "botlens_run_summary_delta"]
+        assert summary_messages[-1]["payload"]["health"]["warnings"] == []
 
     asyncio.run(scenario())
 
 
-def test_process_ingest_facts_invalidates_run_on_series_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_facts_carries_grouped_runtime_warnings_into_summary_health(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         hub = BotTelemetryHub()
-        invalidations: list[dict] = []
+        persisted_rows: list[dict] = []
 
-        monkeypatch.setattr(stream, "upsert_bot_run_view_state", lambda row: dict(row))
+        monkeypatch.setattr(stream, "upsert_bot_run_view_state", lambda row: persisted_rows.append(dict(row)) or dict(row))
         monkeypatch.setattr(stream, "record_bot_runtime_event", lambda row: dict(row))
+        monkeypatch.setattr(stream, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1", "strategy_name": "Momentum"})
 
         async def fake_publish_runtime_update(**kwargs) -> None:
             return None
 
-        async def fake_invalidate_run_live_continuity(**kwargs) -> None:
-            invalidations.append(dict(kwargs))
-
         hub._publish_runtime_update = fake_publish_runtime_update  # type: ignore[method-assign]
-        hub._invalidate_run_live_continuity = fake_invalidate_run_live_continuity  # type: ignore[method-assign]
-        hub._latest_view_state[("bot-1", "run-1", "instrument-btc|1m")] = {
-            "run_id": "run-1",
-            "bot_id": "bot-1",
-            "series_key": "instrument-btc|1m",
-            "seq": 2,
-            "schema_version": 1,
-            "payload": {
-                "projection": _projection(candle_time=2),
-                "continuity": {"status": "ready", "bridge_session_id": "bridge-1", "last_bridge_seq": 2, "details": {}},
-            },
-            "event_time": "2026-01-01T00:01:00Z",
-            "known_at": "2026-01-01T00:01:00Z",
+
+        warning = {
+            "warning_id": "indicator_overlay_payload_exceeded::typed_regime::instrument-btc|1m::indicator_guard",
+            "warning_type": "indicator_overlay_payload_exceeded",
+            "indicator_id": "typed_regime",
+            "title": "Overlay payload budget exceeded",
+            "message": "typed_regime exceeded the overlay payload budget.",
+            "count": 4,
+            "first_seen_at": "2026-01-01T00:00:00Z",
+            "last_seen_at": "2026-01-01T00:04:00Z",
         }
 
         await hub._process_ingest(
             {
                 "payload": {
-                    "kind": BRIDGE_FACTS_KIND,
+                    "kind": BRIDGE_BOOTSTRAP_KIND,
                     "bot_id": "bot-1",
                     "run_id": "run-1",
                     "series_key": "instrument-btc|1m",
-                    "run_seq": 4,
+                    "run_seq": 1,
                     "bridge_session_id": "bridge-1",
-                    "bridge_seq": 4,
-                    "facts": _facts_batch(candle_time=4),
-                    "event_time": "2026-01-01T00:03:00Z",
-                    "known_at": "2026-01-01T00:03:00Z",
+                    "bridge_seq": 1,
+                    "facts": _facts_batch(candle_time=1, warnings=[warning]),
+                    "event_time": "2026-01-01T00:00:00Z",
+                    "known_at": "2026-01-01T00:00:00Z",
                 }
             }
         )
 
-        assert invalidations == [
-            {
-                "run_id": "run-1",
-                "reason": "bridge_seq_gap",
-                "details": {
-                    "series_key": "instrument-btc|1m",
-                    "previous_bridge_seq": 2,
-                    "incoming_bridge_seq": 4,
-                    "bridge_gap": 1,
-                },
-            }
-        ]
-        latest = hub._latest_view_state[("bot-1", "run-1", "instrument-btc|1m")]
-        assert latest["payload"]["continuity"]["status"] == CONTINUITY_RESYNC_REQUIRED
-        assert [row["time"] for row in latest["payload"]["projection"]["series"][0]["candles"]] == [2]
+        summary_row = next(row for row in persisted_rows if row["series_key"] == RUN_SCOPE_KEY)
+        health = summary_row["payload"]["summary"]["health"]
+        assert health["warning_count"] == 1
+        assert health["warnings"][0]["warning_id"] == warning["warning_id"]
+        assert health["warnings"][0]["count"] == 4
 
     asyncio.run(scenario())
 
 
-def test_process_ingest_lifecycle_event_persists_and_broadcasts(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_add_run_viewer_replays_buffered_messages_after_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         hub = BotTelemetryHub()
-        persisted_events: list[dict] = []
-        refreshed: list[str] = []
-        lifecycle_updates: list[dict] = []
-
-        monkeypatch.setattr(stream, "record_bot_runtime_event", lambda row: persisted_events.append(dict(row)) or dict(row))
-
-        async def fake_publish_projected_bot(*, bot_id: str) -> None:
-            refreshed.append(bot_id)
-
-        async def fake_broadcast_run_lifecycle(*, run_id: str, lifecycle: dict) -> None:
-            lifecycle_updates.append({"run_id": run_id, "lifecycle": dict(lifecycle)})
-
-        hub._publish_projected_bot = fake_publish_projected_bot  # type: ignore[method-assign]
-        hub._live_series.broadcast_run_lifecycle = fake_broadcast_run_lifecycle  # type: ignore[method-assign]
-
-        await hub._process_ingest(
-            {
-                "payload": {
-                    "kind": LIFECYCLE_KIND,
-                    "bot_id": "bot-1",
+        ws = FakeWebSocket()
+        async with hub._run_stream._lock:  # type: ignore[attr-defined]
+            hub._run_stream._run_stream_session_id["run-1"] = "session-1"  # type: ignore[attr-defined]
+            hub._run_stream._run_tail_ring["run-1"].append(  # type: ignore[attr-defined]
+                {
+                    "type": "botlens_run_summary_delta",
                     "run_id": "run-1",
-                    "seq": 7,
-                    "phase": "live",
-                    "status": "running",
-                    "owner": "supervisor",
-                    "message": "runtime entered live mode",
-                    "checkpoint_at": "2026-01-01T00:02:00Z",
-                    "metadata": {"source": "startup"},
+                    "seq": 2,
+                    "stream_session_id": "session-1",
+                    "payload": {"health": {"status": "running"}, "lifecycle": {}, "symbol_upserts": [], "symbol_removals": []},
                 }
-            }
-        )
+            )
 
-        assert persisted_events[0]["event_type"] == EVENT_TYPE_LIFECYCLE
-        assert persisted_events[0]["payload"]["phase"] == "live"
-        assert refreshed == ["bot-1"]
-        assert lifecycle_updates == [
-            {
-                "run_id": "run-1",
-                "lifecycle": {
-                    "run_id": "run-1",
-                    "phase": "live",
-                    "status": "running",
-                    "owner": "supervisor",
-                    "message": "runtime entered live mode",
-                    "checkpoint_at": "2026-01-01T00:02:00Z",
-                    "updated_at": "2026-01-01T00:02:00Z",
-                    "metadata": {"source": "startup"},
-                    "live": True,
-                },
-            }
-        ]
+        await hub.add_run_viewer(run_id="run-1", ws=ws, cursor_seq=1, selected_symbol_key="instrument-btc|1m")
+
+        assert [message["type"] for message in ws.messages] == ["botlens_run_connected", "botlens_run_summary_delta"]
 
     asyncio.run(scenario())
 
 
-def test_process_ingest_projection_refresh_publishes_projected_bot_without_container_inspect(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_run_meta_loaded_once_per_run_when_summary_state_is_hot(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         hub = BotTelemetryHub()
-        published: list[tuple[str, bool]] = []
+        run_meta_calls: list[str] = []
 
+        monkeypatch.setattr(stream, "upsert_bot_run_view_state", lambda row: dict(row))
+        monkeypatch.setattr(stream, "record_bot_runtime_event", lambda row: dict(row))
         monkeypatch.setattr(
             stream,
-            "publish_projected_bot",
-            lambda bot_id, *, inspect_container=True: published.append((str(bot_id), bool(inspect_container))),
+            "get_bot_run",
+            lambda run_id: run_meta_calls.append(str(run_id)) or {"run_id": run_id, "bot_id": "bot-1", "strategy_name": "Momentum"},
         )
 
-        await hub._process_ingest(
+        async def fake_publish_runtime_update(**kwargs) -> None:
+            return None
+
+        hub._publish_runtime_update = fake_publish_runtime_update  # type: ignore[method-assign]
+
+        for payload in (
             {
-                "payload": {
-                    "kind": "bot_projection_refresh",
-                    "bot_id": "bot-1",
-                    "run_id": "run-1",
-                    "phase": "startup_failed",
-                    "status": "startup_failed",
-                }
-            }
-        )
-
-        assert published == [("bot-1", False)]
-
-    asyncio.run(scenario())
-
-
-def test_process_ingest_projection_refresh_broadcasts_projected_bot(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def scenario() -> None:
-        hub = BotTelemetryHub()
-        refreshed: list[dict] = []
-
-        def fake_publish_projected_bot(bot_id: str, inspect_container: bool = True) -> None:
-            refreshed.append({"bot_id": bot_id, "inspect_container": inspect_container})
-
-        monkeypatch.setattr(stream, "publish_projected_bot", fake_publish_projected_bot)
-
-        await hub._process_ingest(
-            {
-                "payload": {
-                    "kind": "bot_projection_refresh",
-                    "bot_id": "bot-1",
-                    "run_id": "run-1",
-                    "phase": "startup_failed",
-                    "status": "startup_failed",
-                    "known_at": "2026-04-09T04:21:43Z",
-                }
-            }
-        )
-
-        assert refreshed == [{"bot_id": "bot-1", "inspect_container": False}]
-
-    asyncio.run(scenario())
-
-
-def test_lifecycle_event_seq_stays_monotonic_and_within_int32(monkeypatch: pytest.MonkeyPatch) -> None:
-    hub = BotTelemetryHub()
-    persisted_events: list[dict] = []
-
-    monkeypatch.setattr(
-        stream,
-        "get_latest_bot_runtime_event",
-        lambda **_kwargs: {
-            "seq": 1_000_000_123,
-            "event_type": EVENT_TYPE_LIFECYCLE,
-        },
-    )
-    monkeypatch.setattr(stream, "record_bot_runtime_event", lambda row: persisted_events.append(dict(row)) or dict(row))
-
-    asyncio.run(
-        hub._persist_lifecycle_event(
-            bot_id="bot-1",
-            run_id="run-1",
-            lifecycle={
-                "phase": "runtime_subscribing",
-                "status": "starting",
-                "checkpoint_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-01-01T00:00:00Z",
-            },
-        )
-    )
-    asyncio.run(
-        hub._persist_lifecycle_event(
-            bot_id="bot-1",
-            run_id="run-1",
-            lifecycle={
-                "phase": "degraded",
-                "status": "degraded",
-                "checkpoint_at": "2026-01-01T00:01:00Z",
-                "updated_at": "2026-01-01T00:01:00Z",
-            },
-        )
-    )
-
-    assert persisted_events[0]["seq"] == 1_000_000_124
-    assert persisted_events[1]["seq"] == 1_000_000_125
-    assert persisted_events[1]["seq"] < 2_147_483_647
-
-
-def test_series_event_id_is_deterministic_and_fits_storage_limit() -> None:
-    event_id = stream._series_event_id(
-        bot_id="83bd32b2-79e7-4c05-ab3d-d7f3fbb7ca4d",
-        run_id="b88fbd56-edac-4a4d-b951-e3b0aa64edf8",
-        event_type=EVENT_TYPE_RUNTIME_FACTS,
-        series_key="c209795e-1c91-4562-9b1d-ac6ffcbaf63c|1h",
-        bridge_session_id="f3c9e829a2fe840a0ee56da2c18ad6a8a55a89b68c67-extra-padding-to-force-overflow",
-        bridge_seq=1775728240754846,
-        projection_seq=400,
-    )
-
-    assert len(event_id) <= 128
-    assert event_id == stream._series_event_id(
-        bot_id="83bd32b2-79e7-4c05-ab3d-d7f3fbb7ca4d",
-        run_id="b88fbd56-edac-4a4d-b951-e3b0aa64edf8",
-        event_type=EVENT_TYPE_RUNTIME_FACTS,
-        series_key="c209795e-1c91-4562-9b1d-ac6ffcbaf63c|1h",
-        bridge_session_id="f3c9e829a2fe840a0ee56da2c18ad6a8a55a89b68c67-extra-padding-to-force-overflow",
-        bridge_seq=1775728240754846,
-        projection_seq=400,
-    )
-
-
-def test_worker_failure_with_surviving_runtime_marks_lifecycle_degraded(monkeypatch: pytest.MonkeyPatch) -> None:
-    persisted: list[dict] = []
-
-    monkeypatch.setattr(
-        "portal.backend.service.bots.container_runtime._persist_lifecycle_phase",
-        lambda **kwargs: persisted.append(dict(kwargs)) or dict(kwargs),
-    )
-
-    ctx = ContainerStartupContext(
-        bot_id="bot-1",
-        run_id="run-1",
-        bot={},
-        runtime_bot_config={},
-        strategy_id="strategy-1",
-        symbols=["BTCUSDT", "ETHUSDT"],
-        symbol_shards=[["BTCUSDT"], ["ETHUSDT"]],
-        wallet_config={},
-        manager=type("Manager", (), {"shutdown": lambda self: None})(),
-        shared_wallet_proxy={},
-        worker_symbols={"worker-1": ["BTCUSDT"], "worker-2": ["ETHUSDT"]},
-        children={
-            "worker-1": type("Proc", (), {"exitcode": 1})(),
-            "worker-2": type("Proc", (), {"exitcode": None})(),
-        },
-    )
-
-    _handle_worker_error(ctx, "worker-1", error="worker-1 exited with code 1", exit_code=1)
-
-    assert ctx.series_states["BTCUSDT"]["status"] == "failed"
-    assert persisted[-1]["phase"] == "degraded"
-    assert persisted[-1]["status"] == "degraded"
-
-
-def test_add_series_viewer_sends_atomic_bootstrap_then_replays_buffered_facts(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def scenario() -> None:
-        hub = BotTelemetryHub()
-        hub._ensure_workers = _noop  # type: ignore[method-assign]
-        monkeypatch.setattr(stream, "get_series_window", lambda **kwargs: _window(seq=10))
-        hub._series_live_tail_ring[("run-1", "instrument-btc|1m")].append(
-            {
-                "type": "botlens_live_tail",
+                "kind": BRIDGE_BOOTSTRAP_KIND,
+                "bot_id": "bot-1",
                 "run_id": "run-1",
                 "series_key": "instrument-btc|1m",
-                "schema_version": 1,
-                "seq": 11,
+                "run_seq": 1,
+                "bridge_session_id": "bridge-1",
+                "bridge_seq": 1,
+                "facts": _facts_batch(candle_time=1),
+                "event_time": "2026-01-01T00:00:00Z",
+                "known_at": "2026-01-01T00:00:00Z",
+            },
+            {
+                "kind": BRIDGE_FACTS_KIND,
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "series_key": "instrument-btc|1m",
+                "run_seq": 2,
+                "bridge_session_id": "bridge-1",
+                "bridge_seq": 2,
+                "facts": _facts_batch(candle_time=2),
+                "event_time": "2026-01-01T00:01:00Z",
                 "known_at": "2026-01-01T00:01:00Z",
-                "message_type": "projection_update",
-                "stream_session_id": "session-a",
-                "payload": {
-                    "cursor": {"projection_seq": 11},
-                    "continuity": {"status": "ready", "bridge_session_id": "bridge-1", "last_bridge_seq": 11, "details": {}},
-                    "lifecycle": {"phase": "live", "status": "running", "live": True},
-                    "window": {
-                        "projection": _projection(candle_time=11),
-                        "selected_series": _projection(candle_time=11)["series"][0],
-                        "candles": _projection(candle_time=11)["series"][0]["candles"],
-                        "trades": [],
-                        "logs": [],
-                        "decisions": [],
-                        "warnings": [],
-                        "runtime": {"status": "running"},
-                        "markers": [],
-                        "status": "running",
-                    },
-                },
-            }
-        )
-        ws = FakeWebSocket()
+            },
+        ):
+            await hub._process_ingest({"payload": payload})
 
-        await hub.add_series_viewer(run_id="run-1", series_key="instrument-btc|1m", ws=ws)
-
-        assert ws.accepted is True
-        assert [message["type"] for message in ws.messages] == ["botlens_live_bootstrap", "botlens_live_tail"]
-        assert [message["seq"] for message in ws.messages] == [10, 11]
+        assert run_meta_calls == ["run-1"]
 
     asyncio.run(scenario())
 
 
-def test_add_series_viewer_emits_resync_when_replay_buffer_has_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prune_pass_cleans_all_run_scoped_state(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         hub = BotTelemetryHub()
-        hub._ensure_workers = _noop  # type: ignore[method-assign]
-        monkeypatch.setattr(stream, "get_series_window", lambda **kwargs: _window(seq=4))
-        hub._series_live_tail_ring[("run-1", "instrument-btc|1m")].append(
-            {
-                "type": "botlens_live_tail",
-                "run_id": "run-1",
-                "series_key": "instrument-btc|1m",
-                "schema_version": 1,
-                "seq": 7,
-                "known_at": "2026-01-01T00:01:00Z",
-                "message_type": "projection_update",
-                "stream_session_id": "session-a",
-                "payload": {
-                    "cursor": {"projection_seq": 7},
-                    "continuity": {"status": "ready", "bridge_session_id": "bridge-1", "last_bridge_seq": 7, "details": {}},
-                    "lifecycle": {"phase": "live", "status": "running", "live": True},
-                    "window": {
-                        "projection": _projection(candle_time=7),
-                        "selected_series": _projection(candle_time=7)["series"][0],
-                        "candles": _projection(candle_time=7)["series"][0]["candles"],
-                        "trades": [],
-                        "logs": [],
-                        "decisions": [],
-                        "warnings": [],
-                        "runtime": {"status": "running"},
-                        "markers": [],
-                        "status": "running",
-                    },
-                },
-            }
-        )
-        ws = FakeWebSocket()
+        evicted_runs: list[str] = []
 
-        await hub.add_series_viewer(run_id="run-1", series_key="instrument-btc|1m", ws=ws)
+        async def fake_evict_run(*, run_id: str) -> None:
+            evicted_runs.append(run_id)
 
-        assert [message["type"] for message in ws.messages] == [
-            "botlens_live_bootstrap",
-            "botlens_live_resync_required",
-        ]
-        assert ws.closed is True
-        assert ws.closed_code == 1013
-        assert ("run-1", "instrument-btc|1m") not in hub._series_viewers
+        hub._run_stream.evict_run = fake_evict_run  # type: ignore[method-assign]
+
+        async with hub._lock:
+            hub._latest_summary_state[("bot-1", "run-1")] = {"seq": 1}
+            hub._latest_detail_state[("bot-1", "run-1", "instrument-btc|1m")] = {"seq": 1}
+            hub._latest_run_by_bot["bot-1"] = "run-1"
+            hub._latest_run_lifecycle["run-1"] = {"phase": "completed"}
+            hub._latest_lifecycle_seq["run-1"] = 1_000_000_001
+            hub._run_last_activity["run-1"] = time.monotonic() - (stream._ACTIVE_RUN_TTL_S + 10.0)
+            hub._run_terminal_at["run-1"] = time.monotonic() - (stream._TERMINAL_RUN_TTL_S + 10.0)
+
+        await hub._run_prune_pass(reason="test")
+
+        async with hub._lock:
+            assert ("bot-1", "run-1") not in hub._latest_summary_state
+            assert ("bot-1", "run-1", "instrument-btc|1m") not in hub._latest_detail_state
+            assert "run-1" not in hub._latest_run_lifecycle
+            assert "run-1" not in hub._latest_lifecycle_seq
+            assert "run-1" not in hub._run_last_activity
+            assert "run-1" not in hub._run_terminal_at
+            assert "bot-1" not in hub._latest_run_by_bot
+        assert evicted_runs == ["run-1"]
+
+    asyncio.run(scenario())
+
+
+def test_schedule_prune_throttles_repeated_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        hub = BotTelemetryHub()
+        calls: list[str] = []
+
+        async def fake_run_prune_pass(*, reason: str) -> None:
+            calls.append(reason)
+
+        hub._run_prune_pass = fake_run_prune_pass  # type: ignore[method-assign]
+
+        await hub._schedule_prune(reason="first")
+        if hub._prune_task is not None:
+            await hub._prune_task
+
+        await hub._schedule_prune(reason="second")
+        await asyncio.sleep(0)
+        if hub._prune_task is not None:
+            hub._prune_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await hub._prune_task
+
+        hub._last_prune_started_monotonic = time.monotonic() - (stream._PRUNE_INTERVAL_S + 1.0)
+        await hub._schedule_prune(reason="third")
+        if hub._prune_task is not None:
+            await hub._prune_task
+
+        assert calls == ["first", "third"]
 
     asyncio.run(scenario())

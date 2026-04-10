@@ -4,188 +4,97 @@ import pytest
 
 pytest.importorskip("sqlalchemy")
 
-from portal.backend.service.bots import botlens_series_service as svc
+from portal.backend.service.bots import botlens_symbol_service as svc
+from portal.backend.service.bots.botlens_contract import RUN_SCOPE_KEY
 
 
-def _projection(
-    *,
-    series_key: str = "instrument-btc|1m",
-    symbol: str = "BTC",
-    candle_times: list[int] | None = None,
-) -> dict:
-    instrument_id, timeframe = str(series_key).split("|", 1)
+def _detail_payload(*, symbol_key: str = "instrument-btc|1m", symbol: str = "BTC", candle_times: list[int] | None = None) -> dict:
+    instrument_id, timeframe = str(symbol_key).split("|", 1)
     candles = [
         {
-            "time": time_value,
-            "open": float(time_value),
-            "high": float(time_value),
-            "low": float(time_value),
-            "close": float(time_value),
+            "time": value,
+            "open": float(value),
+            "high": float(value),
+            "low": float(value),
+            "close": float(value),
         }
-        for time_value in (candle_times or [1])
+        for value in (candle_times or [1])
     ]
     return {
-        "series": [
-            {
-                "instrument_id": instrument_id,
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "candles": candles,
-                "overlays": [],
-                "stats": {"total_trades": len(candles)},
-            }
-        ],
-        "trades": [],
-        "logs": [],
-        "decisions": [],
-        "warnings": [],
-        "runtime": {"status": "running"},
-    }
-
-
-def _facts_batch(
-    *,
-    series_key: str = "instrument-btc|1m",
-    symbol: str = "BTC",
-    candle_time: int,
-    trade_id: str = "trade-1",
-) -> list[dict]:
-    instrument_id, timeframe = str(series_key).split("|", 1)
-    return [
-        {"fact_type": "runtime_state_observed", "runtime": {"status": "running", "warnings": ["runtime warning"]}},
-        {
-            "fact_type": "series_state_observed",
-            "series_key": series_key,
+        "detail": {
+            "symbol_key": symbol_key,
             "instrument_id": instrument_id,
             "symbol": symbol,
             "timeframe": timeframe,
-        },
-        {
-            "fact_type": "candle_upserted",
-            "series_key": series_key,
-            "candle": {
-                "time": candle_time,
-                "open": float(candle_time),
-                "high": float(candle_time),
-                "low": float(candle_time),
-                "close": float(candle_time),
-            },
-        },
-        {
-            "fact_type": "overlay_ops_emitted",
-            "series_key": series_key,
-            "overlay_delta": {
-                "ops": [
-                    {
-                        "op": "upsert",
-                        "key": "overlay:regime",
-                        "overlay": {
-                            "type": "regime_overlay",
-                            "payload": {"state": "risk_on"},
-                        },
-                    }
-                ]
-            },
-        },
-        {"fact_type": "series_stats_updated", "series_key": series_key, "stats": {"total_trades": 1}},
-        {"fact_type": "trade_upserted", "series_key": series_key, "trade": {"trade_id": trade_id, "symbol": symbol}},
-        {"fact_type": "log_emitted", "log": {"id": "log-1", "message": "delta log"}},
-        {"fact_type": "decision_emitted", "decision": {"event_id": "decision-1", "event": "decision"}},
-    ]
+            "candles": candles,
+            "overlays": [],
+            "recent_trades": [],
+            "logs": [],
+            "decisions": [],
+            "stats": {"total_trades": len(candles)},
+            "runtime": {"status": "running"},
+        }
+    }
 
 
-def test_get_series_window_reads_latest_per_series_view_row(monkeypatch: pytest.MonkeyPatch) -> None:
+def _summary_payload() -> dict:
+    return {
+        "summary": {
+            "symbol_index": {
+                "instrument-btc|1m": {
+                    "symbol_key": "instrument-btc|1m",
+                    "symbol": "BTC",
+                    "timeframe": "1m",
+                    "display_label": "BTC · 1m",
+                },
+                "instrument-eth|5m": {
+                    "symbol_key": "instrument-eth|5m",
+                    "symbol": "ETH",
+                    "timeframe": "5m",
+                    "display_label": "ETH · 5m",
+                },
+            }
+        }
+    }
+
+
+def test_get_symbol_detail_reads_symbol_row(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(svc, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
     monkeypatch.setattr(
         svc,
         "get_latest_bot_run_view_state",
-        lambda **kwargs: {
-            "seq": 8,
-            "event_time": "2026-01-01T00:03:00Z",
-            "payload": _projection(candle_times=[1, 2, 3]),
-        },
+        lambda **kwargs: {"payload": _detail_payload(candle_times=[1, 2, 3])},
     )
 
-    result = svc.get_series_window(run_id="run-1", series_key="instrument-btc|1m", to="now", limit=2)
+    result = svc.get_symbol_detail(run_id="run-1", symbol_key="instrument-btc|1m", limit=2)
 
-    assert result["seq"] == 8
-    assert [row["time"] for row in result["window"]["candles"]] == [2, 3]
-    assert result["window"]["selected_series"]["series_key"] == "instrument-btc|1m"
-    assert result["window"]["runtime"]["status"] == "running"
+    assert result["symbol_key"] == "instrument-btc|1m"
+    assert [row["time"] for row in result["detail"]["candles"]] == [2, 3]
+    assert result["detail"]["runtime"]["status"] == "running"
 
 
-def test_get_series_window_raises_when_requested_series_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_symbol_detail_uses_summary_catalog_when_detail_row_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(svc, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
-    monkeypatch.setattr(svc, "get_latest_bot_run_view_state", lambda **kwargs: None)
-    monkeypatch.setattr(
-        svc,
-        "list_bot_run_view_states",
-        lambda **kwargs: [
-            {
-                "series_key": "instrument-eth|5m",
-                "seq": 4,
-                "payload": _projection(series_key="instrument-eth|5m", symbol="ETH", candle_times=[10, 11]),
-            }
-        ],
-    )
 
-    with pytest.raises(ValueError, match="series 'instrument-btc\\|1m' was not found for run_id=run-1"):
-        svc.get_series_window(run_id="run-1", series_key="instrument-btc|1m", to="now", limit=5)
+    def _latest(**kwargs):
+        if kwargs.get("series_key") == RUN_SCOPE_KEY:
+            return {"payload": _summary_payload()}
+        return None
+
+    monkeypatch.setattr(svc, "get_latest_bot_run_view_state", _latest)
+
+    result = svc.get_symbol_detail(run_id="run-1", symbol_key="instrument-btc|1m", limit=5)
+
+    assert result["symbol_key"] == "instrument-btc|1m"
+    assert result["detail"]["candles"] == []
 
 
-def test_list_series_keys_uses_latest_per_series_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(svc, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
-    monkeypatch.setattr(
-        svc,
-        "list_bot_run_view_states",
-        lambda **kwargs: [
-            {
-                "series_key": "instrument-btc|1m",
-                "seq": 8,
-                "payload": _projection(series_key="instrument-btc|1m", candle_times=[1, 2]),
-            },
-            {
-                "series_key": "instrument-eth|5m",
-                "seq": 4,
-                "payload": _projection(series_key="instrument-eth|5m", symbol="ETH", candle_times=[3, 4]),
-            },
-        ],
-    )
-
-    result = svc.list_series_keys(run_id="run-1")
-
-    assert result == {"run_id": "run-1", "series": ["instrument-btc|1m", "instrument-eth|5m"]}
-
-
-def test_list_series_keys_ignores_legacy_merged_bot_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(svc, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
-    monkeypatch.setattr(
-        svc,
-        "list_bot_run_view_states",
-        lambda **kwargs: [
-            {
-                "series_key": "bot",
-                "seq": 8,
-                "payload": _projection(series_key="instrument-btc|1m", candle_times=[1, 2]),
-            }
-        ],
-    )
-
-    result = svc.list_series_keys(run_id="run-1")
-
-    assert result == {"run_id": "run-1", "series": []}
-
-
-def test_get_series_history_reconstructs_from_bootstrap_and_fact_events(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_symbol_history_reconstructs_from_runtime_events(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(svc, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
     monkeypatch.setattr(
         svc,
         "get_latest_bot_run_view_state",
-        lambda **kwargs: {
-            "seq": 3,
-            "known_at": "2026-01-01T00:03:00Z",
-            "payload": _projection(candle_times=[1, 2, 3]),
-        },
+        lambda **kwargs: {"payload": _detail_payload(candle_times=[1, 2, 3])},
     )
     monkeypatch.setattr(
         svc,
@@ -194,55 +103,60 @@ def test_get_series_history_reconstructs_from_bootstrap_and_fact_events(monkeypa
             {
                 "payload": {
                     "series_key": "instrument-btc|1m",
-                    "facts": _facts_batch(series_key="instrument-btc|1m", candle_time=1)
-                    + _facts_batch(series_key="instrument-btc|1m", candle_time=2),
+                    "facts": [
+                        {"fact_type": "candle_upserted", "candle": {"time": 1, "open": 1, "high": 1, "low": 1, "close": 1}},
+                        {"fact_type": "candle_upserted", "candle": {"time": 2, "open": 2, "high": 2, "low": 2, "close": 2}},
+                    ],
                 }
             },
             {
                 "payload": {
                     "series_key": "instrument-btc|1m",
-                    "facts": _facts_batch(candle_time=3),
-                }
-            },
-            {
-                "payload": {
-                    "series_key": "instrument-eth|5m",
-                    "facts": _facts_batch(series_key="instrument-eth|5m", symbol="ETH", candle_time=20),
+                    "facts": [
+                        {"fact_type": "candle_upserted", "candle": {"time": 3, "open": 3, "high": 3, "low": 3, "close": 3}},
+                    ],
                 }
             },
         ],
     )
 
-    result = svc.get_series_history(
+    result = svc.get_symbol_history(
         run_id="run-1",
-        series_key="instrument-btc|1m",
+        symbol_key="instrument-btc|1m",
         before_ts="1970-01-01T00:00:04Z",
         limit=10,
     )
 
-    assert [row["time"] for row in result["history"]["candles"]] == [1, 2, 3]
+    assert [row["time"] for row in result["candles"]] == [1, 2, 3]
     assert result["has_more"] is False
     assert result["next_before_ts"] == 1
 
 
-def test_get_series_history_uses_latest_projection_when_fact_log_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_list_run_symbols_reads_run_summary_row(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(svc, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
     monkeypatch.setattr(
         svc,
         "get_latest_bot_run_view_state",
-        lambda **kwargs: {
-            "seq": 9,
-            "known_at": "2026-01-01T00:09:00Z",
-            "payload": _projection(candle_times=[7, 8, 9]),
-        },
-    )
-    monkeypatch.setattr(svc, "list_bot_runtime_events", lambda **kwargs: [])
-
-    result = svc.get_series_history(
-        run_id="run-1",
-        series_key="instrument-btc|1m",
-        before_ts="1970-01-01T00:00:10Z",
-        limit=5,
+        lambda **kwargs: {"payload": _summary_payload()},
     )
 
-    assert [row["time"] for row in result["history"]["candles"]] == [7, 8, 9]
+    result = svc.list_run_symbols(run_id="run-1")
+
+    assert result == {
+        "schema_version": 4,
+        "run_id": "run-1",
+        "symbols": [
+            {
+                "symbol_key": "instrument-btc|1m",
+                "symbol": "BTC",
+                "timeframe": "1m",
+                "display_label": "BTC · 1m",
+            },
+            {
+                "symbol_key": "instrument-eth|5m",
+                "symbol": "ETH",
+                "timeframe": "5m",
+                "display_label": "ETH · 5m",
+            },
+        ],
+    }

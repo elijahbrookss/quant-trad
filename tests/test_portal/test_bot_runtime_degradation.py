@@ -89,6 +89,41 @@ def test_execute_loop_preserves_degraded_status_instead_of_completed(monkeypatch
     assert runtime.state["status"] == "degraded"
 
 
+def test_runtime_warning_store_aggregates_repeated_indicator_warnings():
+    runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=_runtime_deps())
+
+    runtime._record_runtime_warning(
+        {
+            "warning_type": "indicator_time_budget_exceeded",
+            "indicator_id": "typed_regime",
+            "symbol_key": "instrument-btc|1m",
+            "symbol": "BTC",
+            "timeframe": "1m",
+            "message": "typed_regime exceeded the indicator execution budget repeatedly.",
+            "source": "indicator_guard",
+        }
+    )
+    runtime._record_runtime_warning(
+        {
+            "warning_type": "indicator_time_budget_exceeded",
+            "indicator_id": "typed_regime",
+            "symbol_key": "instrument-btc|1m",
+            "symbol": "BTC",
+            "timeframe": "1m",
+            "message": "typed_regime exceeded the indicator execution budget repeatedly.",
+            "source": "indicator_guard",
+        }
+    )
+
+    warnings = runtime.warnings()
+
+    assert len(warnings) == 1
+    assert warnings[0]["warning_id"] == "indicator_time_budget_exceeded::typed_regime::instrument-btc|1m::btc::1m::indicator_guard"
+    assert warnings[0]["count"] == 2
+    assert warnings[0]["first_seen_at"] is not None
+    assert warnings[0]["last_seen_at"] is not None
+
+
 def test_runtime_signal_artifact_helper_delegates_without_name_error():
     runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=_runtime_deps())
 
