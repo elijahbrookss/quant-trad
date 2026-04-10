@@ -73,6 +73,15 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_BOT_RUNTIME_SNAPSHOT_IDLE_INTERVAL_MS", ("bot_runtime", "snapshot", "idle_interval_ms")),
     ("QT_BOT_RUNTIME_SNAPSHOT_IDLE_CYCLES", ("bot_runtime", "snapshot", "idle_cycles")),
     ("QT_BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY", ("bot_runtime", "push", "payload_bytes_sample_every")),
+    ("QT_BOT_RUNTIME_INDICATOR_GUARD_ENABLED", ("bot_runtime", "indicator_guard", "enabled")),
+    ("QT_BOT_RUNTIME_INDICATOR_GUARD_TIME_SOFT_LIMIT_MS", ("bot_runtime", "indicator_guard", "time_soft_limit_ms")),
+    ("QT_BOT_RUNTIME_INDICATOR_GUARD_TIME_CONSECUTIVE_BARS", ("bot_runtime", "indicator_guard", "time_consecutive_bars")),
+    ("QT_BOT_RUNTIME_INDICATOR_GUARD_TIME_WINDOW_BARS", ("bot_runtime", "indicator_guard", "time_window_bars")),
+    ("QT_BOT_RUNTIME_INDICATOR_GUARD_TIME_WINDOW_BREACH_COUNT", ("bot_runtime", "indicator_guard", "time_window_breach_count")),
+    ("QT_BOT_RUNTIME_INDICATOR_GUARD_OVERLAY_POINTS_SOFT_LIMIT", ("bot_runtime", "indicator_guard", "overlay_points_soft_limit")),
+    ("QT_BOT_RUNTIME_INDICATOR_GUARD_OVERLAY_POINTS_HARD_LIMIT", ("bot_runtime", "indicator_guard", "overlay_points_hard_limit")),
+    ("QT_BOT_RUNTIME_INDICATOR_GUARD_OVERLAY_PAYLOAD_SOFT_LIMIT_BYTES", ("bot_runtime", "indicator_guard", "overlay_payload_soft_limit_bytes")),
+    ("QT_BOT_RUNTIME_INDICATOR_GUARD_OVERLAY_PAYLOAD_HARD_LIMIT_BYTES", ("bot_runtime", "indicator_guard", "overlay_payload_hard_limit_bytes")),
     ("QT_BOT_RUNTIME_BOTLENS_MAX_SERIES", ("bot_runtime", "botlens", "max_series")),
     ("QT_BOT_RUNTIME_BOTLENS_MAX_CANDLES", ("bot_runtime", "botlens", "max_candles")),
     ("QT_BOT_RUNTIME_BOTLENS_MAX_OVERLAYS", ("bot_runtime", "botlens", "max_overlays")),
@@ -401,6 +410,19 @@ class PushSettings:
 
 
 @dataclass(frozen=True)
+class IndicatorGuardSettings:
+    enabled: bool
+    time_soft_limit_ms: float
+    time_consecutive_bars: int
+    time_window_bars: int
+    time_window_breach_count: int
+    overlay_points_soft_limit: int
+    overlay_points_hard_limit: int
+    overlay_payload_soft_limit_bytes: int
+    overlay_payload_hard_limit_bytes: int
+
+
+@dataclass(frozen=True)
 class BotlensSettings:
     max_series: int
     max_candles: int
@@ -451,6 +473,7 @@ class BotRuntimeSettings:
     status_heartbeat_stale_ms: int
     snapshot: SnapshotSettings
     push: PushSettings
+    indicator_guard: IndicatorGuardSettings
     botlens: BotlensSettings
     step_trace: StepTraceSettings
     telemetry: TelemetrySettings
@@ -574,6 +597,7 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
     bot_runtime_payload = _coerce_mapping(payload.get("bot_runtime"))
     snapshot_payload = _coerce_mapping(bot_runtime_payload.get("snapshot"))
     push_payload = _coerce_mapping(bot_runtime_payload.get("push"))
+    indicator_guard_payload = _coerce_mapping(bot_runtime_payload.get("indicator_guard"))
     botlens_payload = _coerce_mapping(bot_runtime_payload.get("botlens"))
     step_trace_payload = _coerce_mapping(bot_runtime_payload.get("step_trace"))
     telemetry_payload = _coerce_mapping(bot_runtime_payload.get("telemetry"))
@@ -684,6 +708,33 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                 payload_bytes_sample_every=_coerce_int(
                     push_payload.get("payload_bytes_sample_every"), 10, minimum=1
                 )
+            ),
+            indicator_guard=IndicatorGuardSettings(
+                enabled=_coerce_bool(indicator_guard_payload.get("enabled"), True),
+                time_soft_limit_ms=_coerce_float(
+                    indicator_guard_payload.get("time_soft_limit_ms"), 35.0, minimum=0.1
+                ),
+                time_consecutive_bars=_coerce_int(
+                    indicator_guard_payload.get("time_consecutive_bars"), 3, minimum=1
+                ),
+                time_window_bars=_coerce_int(
+                    indicator_guard_payload.get("time_window_bars"), 20, minimum=1
+                ),
+                time_window_breach_count=_coerce_int(
+                    indicator_guard_payload.get("time_window_breach_count"), 5, minimum=1
+                ),
+                overlay_points_soft_limit=_coerce_int(
+                    indicator_guard_payload.get("overlay_points_soft_limit"), 400, minimum=1
+                ),
+                overlay_points_hard_limit=_coerce_int(
+                    indicator_guard_payload.get("overlay_points_hard_limit"), 1200, minimum=0
+                ),
+                overlay_payload_soft_limit_bytes=_coerce_int(
+                    indicator_guard_payload.get("overlay_payload_soft_limit_bytes"), 131072, minimum=1
+                ),
+                overlay_payload_hard_limit_bytes=_coerce_int(
+                    indicator_guard_payload.get("overlay_payload_hard_limit_bytes"), 262144, minimum=0
+                ),
             ),
             botlens=BotlensSettings(
                 max_series=_coerce_int(botlens_payload.get("max_series"), 12, minimum=1),

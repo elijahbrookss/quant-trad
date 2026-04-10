@@ -65,6 +65,16 @@ bot_runtime:
     idle_cycles: 2
   push:
     payload_bytes_sample_every: 10
+  indicator_guard:
+    enabled: true
+    time_soft_limit_ms: 35.0
+    time_consecutive_bars: 3
+    time_window_bars: 20
+    time_window_breach_count: 5
+    overlay_points_soft_limit: 400
+    overlay_points_hard_limit: 1200
+    overlay_payload_soft_limit_bytes: 131072
+    overlay_payload_hard_limit_bytes: 262144
   telemetry:
     ws_url: ws://backend.quanttrad:8000/api/bots/ws/telemetry/ingest
     event_poll_ms: 50
