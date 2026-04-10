@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from queue import Queue
 from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
+from core.settings import get_settings
 from indicators.config import IndicatorExecutionContext
 from engines.bot_runtime.deps import BotRuntimeDeps
 from engines.bot_runtime.core.domain import normalize_epoch
@@ -24,7 +25,7 @@ from engines.bot_runtime.runtime.reporting import (
 )
 from engines.bot_runtime.runtime.overlay_types import ensure_runtime_overlay_types_registered
 from engines.bot_runtime.strategy.series_builder import SeriesBuilder, StrategySeries
-from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
+from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine, IndicatorGuardConfig
 from indicators.runtime.indicator_overlay_cache import default_overlay_cache
 from overlays.builtins import ensure_builtin_overlays_registered
 from overlays.schema import build_overlay
@@ -60,6 +61,7 @@ from ..core import (
 )
 
 logger = logging.getLogger(__name__)
+_SETTINGS = get_settings()
 
 
 class RuntimeSetupPrepareMixin:
@@ -114,7 +116,9 @@ class RuntimeSetupPrepareMixin:
         self._series_runner_type = self._resolve_series_runner_type(self.config.get("series_runner"))
         self._degrade_series_on_error = bool(self.config.get("degrade_series_on_error", False))
         self._logs: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOG_ENTRIES)
-        self._warnings: Deque[Dict[str, Any]] = deque(maxlen=MAX_WARNING_ENTRIES)
+        warning_limit = max(1, int(_SETTINGS.bot_runtime.botlens.max_warnings or MAX_WARNING_ENTRIES))
+        self._warnings: Deque[Dict[str, Any]] = deque(maxlen=warning_limit)
+        self._warning_limit = warning_limit
         self._decision_events: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOG_ENTRIES)
         self._event_sinks: List[RuntimeEventSink] = [
             InMemoryEventSink(
@@ -201,6 +205,7 @@ class RuntimeSetupPrepareMixin:
             or self.config.get("BOT_RUNTIME_REGIME_OVERLAY_REBUILD"),
             default=False,
         )
+        self._indicator_guard_config = self._build_indicator_guard_config()
 
     def _ensure_series_builder(self):
         if self._series_builder is None:
@@ -687,7 +692,10 @@ class RuntimeSetupPrepareMixin:
             execution_context=execution_context,
             ctx=self._indicator_ctx,
         )
-        state.indicator_engine = IndicatorExecutionEngine(indicators)
+        state.indicator_engine = IndicatorExecutionEngine(
+            indicators,
+            guard_config=self._indicator_guard_config,
+        )
         state.indicator_output_types = state.indicator_engine.output_types
         state.indicator_outputs = {}
         state.indicator_overlays = {}
@@ -716,6 +724,93 @@ class RuntimeSetupPrepareMixin:
                     order=list(state.indicator_engine.order if state.indicator_engine else ()),
                 ),
             )
+        )
+
+    def _build_indicator_guard_config(self) -> IndicatorGuardConfig:
+        defaults = _SETTINGS.bot_runtime.indicator_guard
+
+        def resolve(*keys: str, default: Any) -> Any:
+            for key in keys:
+                if key in self.config and self.config.get(key) is not None:
+                    return self.config.get(key)
+            return default
+
+        return IndicatorGuardConfig(
+            enabled=self._coerce_bool(
+                resolve(
+                    "indicator_guard_enabled",
+                    "BOT_RUNTIME_INDICATOR_GUARD_ENABLED",
+                    default=defaults.enabled,
+                ),
+                default=bool(defaults.enabled),
+            ),
+            time_soft_limit_ms=float(
+                resolve(
+                    "indicator_guard_time_soft_limit_ms",
+                    "BOT_RUNTIME_INDICATOR_GUARD_TIME_SOFT_LIMIT_MS",
+                    default=defaults.time_soft_limit_ms,
+                )
+            ),
+            time_consecutive_bars=self._coerce_positive_int(
+                resolve(
+                    "indicator_guard_time_consecutive_bars",
+                    "BOT_RUNTIME_INDICATOR_GUARD_TIME_CONSECUTIVE_BARS",
+                    default=int(defaults.time_consecutive_bars),
+                ),
+                default=int(defaults.time_consecutive_bars),
+            ),
+            time_window_bars=self._coerce_positive_int(
+                resolve(
+                    "indicator_guard_time_window_bars",
+                    "BOT_RUNTIME_INDICATOR_GUARD_TIME_WINDOW_BARS",
+                    default=int(defaults.time_window_bars),
+                ),
+                default=int(defaults.time_window_bars),
+            ),
+            time_window_breach_count=self._coerce_positive_int(
+                resolve(
+                    "indicator_guard_time_window_breach_count",
+                    "BOT_RUNTIME_INDICATOR_GUARD_TIME_WINDOW_BREACH_COUNT",
+                    default=int(defaults.time_window_breach_count),
+                ),
+                default=int(defaults.time_window_breach_count),
+            ),
+            overlay_points_soft_limit=self._coerce_positive_int(
+                resolve(
+                    "indicator_guard_overlay_points_soft_limit",
+                    "BOT_RUNTIME_INDICATOR_GUARD_OVERLAY_POINTS_SOFT_LIMIT",
+                    default=int(defaults.overlay_points_soft_limit),
+                ),
+                default=int(defaults.overlay_points_soft_limit),
+            ),
+            overlay_points_hard_limit=max(
+                int(
+                    resolve(
+                        "indicator_guard_overlay_points_hard_limit",
+                        "BOT_RUNTIME_INDICATOR_GUARD_OVERLAY_POINTS_HARD_LIMIT",
+                        default=defaults.overlay_points_hard_limit,
+                    )
+                ),
+                0,
+            ),
+            overlay_payload_soft_limit_bytes=self._coerce_positive_int(
+                resolve(
+                    "indicator_guard_overlay_payload_soft_limit_bytes",
+                    "BOT_RUNTIME_INDICATOR_GUARD_OVERLAY_PAYLOAD_SOFT_LIMIT_BYTES",
+                    default=int(defaults.overlay_payload_soft_limit_bytes),
+                ),
+                default=int(defaults.overlay_payload_soft_limit_bytes),
+            ),
+            overlay_payload_hard_limit_bytes=max(
+                int(
+                    resolve(
+                        "indicator_guard_overlay_payload_hard_limit_bytes",
+                        "BOT_RUNTIME_INDICATOR_GUARD_OVERLAY_PAYLOAD_HARD_LIMIT_BYTES",
+                        default=defaults.overlay_payload_hard_limit_bytes,
+                    )
+                ),
+                0,
+            ),
         )
 
     def _series_state_for(self, series: Optional[StrategySeries]) -> Optional[SeriesExecutionState]:

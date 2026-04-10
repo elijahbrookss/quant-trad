@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -117,18 +118,46 @@ class RuntimeEventsMixin:
         if not warning:
             return
         entry: Dict[str, object] = dict(warning)
-        entry.setdefault("level", "warning")
-        entry.setdefault("type", entry.get("type") or "runtime_warning")
+        warning_type = str(entry.get("warning_type") or entry.get("type") or "runtime_warning").strip() or "runtime_warning"
+        entry["warning_type"] = warning_type
+        entry["type"] = warning_type
+        severity = str(entry.get("severity") or entry.get("level") or "warning").strip().lower() or "warning"
+        entry["severity"] = severity
+        entry["level"] = severity
         entry.setdefault("message", entry.get("message") or "Runtime warning")
         entry.setdefault("source", entry.get("source") or "runtime")
         entry.setdefault("bot_id", self.bot_id)
         entry.setdefault("bot_mode", self.run_type)
-        entry.setdefault("timestamp", _isoformat(datetime.now(timezone.utc)))
-        entry.setdefault("id", str(uuid.uuid4()))
+        now_iso = _isoformat(datetime.now(timezone.utc))
+        entry.setdefault("timestamp", now_iso)
         context = dict(entry.get("context") or {})
         entry["context"] = context
+        warning_id = str(entry.get("warning_id") or "").strip() or self._warning_identity(entry, context)
+        entry["warning_id"] = warning_id
+        entry["id"] = warning_id
         with self._lock:
-            self._warnings.append(entry)
+            warnings = list(self._warnings)
+            match_index = next(
+                (index for index, existing in enumerate(warnings) if str(existing.get("warning_id") or "") == warning_id),
+                None,
+            )
+            if match_index is None:
+                entry.setdefault("count", 1)
+                entry.setdefault("first_seen_at", entry.get("timestamp") or now_iso)
+                entry["last_seen_at"] = entry.get("timestamp") or now_iso
+                entry["updated_at"] = entry["last_seen_at"]
+                if len(warnings) >= self._warning_limit:
+                    warnings = warnings[-(self._warning_limit - 1) :] if self._warning_limit > 1 else []
+                warnings.append(entry)
+            else:
+                existing = dict(warnings.pop(match_index))
+                existing.update(entry)
+                existing["count"] = int(existing.get("count") or 1) + 1
+                existing["first_seen_at"] = existing.get("first_seen_at") or existing.get("timestamp") or now_iso
+                existing["last_seen_at"] = entry.get("timestamp") or now_iso
+                existing["updated_at"] = existing["last_seen_at"]
+                warnings.append(existing)
+            self._warnings = deque(warnings, maxlen=self._warning_limit)
             self.state["warnings"] = list(self._warnings)
 
     def warnings(self) -> List[Dict[str, object]]:
@@ -136,6 +165,19 @@ class RuntimeEventsMixin:
 
         with self._lock:
             return list(self._warnings)
+
+    @staticmethod
+    def _warning_identity(entry: Mapping[str, object], context: Mapping[str, object]) -> str:
+        fields = (
+            str(entry.get("warning_type") or entry.get("type") or "runtime_warning").strip().lower(),
+            str(entry.get("indicator_id") or context.get("indicator_id") or "").strip().lower(),
+            str(entry.get("symbol_key") or context.get("symbol_key") or "").strip().lower(),
+            str(entry.get("symbol") or context.get("symbol") or "").strip().lower(),
+            str(entry.get("timeframe") or context.get("timeframe") or "").strip().lower(),
+            str(entry.get("source") or "runtime").strip().lower(),
+        )
+        compact = [field for field in fields if field]
+        return "::".join(compact) or str(uuid.uuid4())
 
     @staticmethod
     def _runtime_event_time(value: Any) -> Optional[datetime]:

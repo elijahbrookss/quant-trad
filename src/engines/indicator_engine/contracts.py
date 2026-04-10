@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, Mapping, Sequence, Tuple
 
@@ -77,6 +77,33 @@ class RuntimeOverlay:
 class EngineFrame:
     outputs: dict[str, RuntimeOutput]
     overlays: dict[str, RuntimeOverlay]
+    guard_metrics: Tuple["IndicatorGuardMetric", ...] = ()
+    guard_warnings: Tuple["IndicatorGuardWarning", ...] = ()
+
+
+@dataclass(frozen=True)
+class IndicatorGuardMetric:
+    indicator_id: str
+    manifest_type: str
+    version: str
+    execution_time_ms: float
+    overlay_time_ms: float
+    overlay_count: int
+    overlay_points: int
+    overlay_payload_bytes: int
+    overlay_suppressed: bool = False
+
+
+@dataclass(frozen=True)
+class IndicatorGuardWarning:
+    warning_type: str
+    severity: str
+    indicator_id: str
+    manifest_type: str
+    version: str
+    title: str
+    message: str
+    context: dict[str, Any] = field(default_factory=dict)
 
 
 class Indicator(ABC):
@@ -310,3 +337,23 @@ def _validate_canonical_overlay(
             f"indicator_overlay_invalid: overlay spec missing overlay={overlay_name} type={overlay_type}"
         )
     validate_overlay_payload(overlay_type, payload)
+
+
+__all__ = [
+    "EngineFrame",
+    "Indicator",
+    "IndicatorGuardMetric",
+    "IndicatorGuardWarning",
+    "IndicatorRuntimeSpec",
+    "OverlayDefinition",
+    "OutputDefinition",
+    "OutputRef",
+    "OutputType",
+    "RuntimeOverlay",
+    "RuntimeOutput",
+    "output_ref_key",
+    "validate_overlay_definitions",
+    "validate_output_definitions",
+    "validate_runtime_output",
+    "validate_runtime_overlay",
+]

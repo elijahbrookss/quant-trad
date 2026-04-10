@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict, deque
 from datetime import datetime
 from typing import Any, Mapping
 
@@ -20,6 +21,8 @@ from .engine import RegimeEngine
 from .manifest import MANIFEST
 from .overlays import build_regime_overlays
 from .stabilizer import RegimeStabilizer
+
+HISTORY_LIMIT = 320
 
 
 def resolve_regime_dependency(
@@ -140,13 +143,32 @@ class TypedRegimeIndicator(Indicator):
         self._stabilizer = RegimeStabilizer(config)
         self._context_output = RuntimeOutput(bar_time=datetime.min, ready=False, value={})
         self._metric_output = RuntimeOutput(bar_time=datetime.min, ready=False, value={})
-        self._candles: list[Candle] = []
-        self._regime_rows: dict[datetime, Mapping[str, Any]] = {}
+        self._overlay_history_limit_bars = HISTORY_LIMIT
+        self._candles = deque(maxlen=self._overlay_history_limit_bars)
+        self._regime_rows: OrderedDict[datetime, dict[str, Any]] = OrderedDict()
         self._timeframe_seconds = 60
         self._current_bar_time = datetime.min
         self._overlay_ready = False
         self._overlay_cache_bar_time: datetime | None = None
         self._overlay_cache: dict[str, RuntimeOverlay] | None = None
+
+    def configure_replay_window(self, *, history_bars: int | None = None) -> None:
+        if history_bars is None:
+            return
+        try:
+            parsed = int(history_bars)
+        except (TypeError, ValueError):
+            return
+        if parsed <= 0:
+            return
+        self._overlay_history_limit_bars = max(parsed, 1)
+        self._candles = deque(
+            list(self._candles)[-self._overlay_history_limit_bars :],
+            maxlen=self._overlay_history_limit_bars,
+        )
+        self._prune_regime_rows()
+        self._overlay_cache = None
+        self._overlay_cache_bar_time = None
 
     def apply_bar(self, bar: Any, inputs: Mapping[OutputRef, RuntimeOutput]) -> None:
         if not isinstance(bar, Candle):
@@ -187,7 +209,8 @@ class TypedRegimeIndicator(Indicator):
             bar_time=bar.time,
             timeframe_seconds=self._timeframe_seconds,
         )
-        self._regime_rows[bar.time.replace(tzinfo=None) if bar.time.tzinfo is not None else bar.time] = dict(stabilized)
+        self._regime_rows[self._normalized_bar_time(bar.time)] = dict(stabilized)
+        self._prune_regime_rows()
         structure = stabilized.get("structure") or {}
         volatility = stabilized.get("volatility") or {}
         liquidity = stabilized.get("liquidity") or {}
@@ -374,6 +397,21 @@ class TypedRegimeIndicator(Indicator):
             }
             self._overlay_cache_bar_time = self._current_bar_time
         return dict(self._overlay_cache)
+
+    @staticmethod
+    def _normalized_bar_time(bar_time: datetime) -> datetime:
+        return bar_time.replace(tzinfo=None) if bar_time.tzinfo is not None else bar_time
+
+    def _prune_regime_rows(self) -> None:
+        if not self._candles:
+            self._regime_rows.clear()
+            return
+        cutoff = self._normalized_bar_time(self._candles[0].time)
+        while self._regime_rows:
+            first_key = next(iter(self._regime_rows))
+            if first_key >= cutoff:
+                break
+            self._regime_rows.popitem(last=False)
 
 
 __all__ = ["TypedRegimeIndicator", "resolve_regime_dependency"]

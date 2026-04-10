@@ -10,6 +10,8 @@ from engines.bot_runtime.core.series_identity import normalize_series_key as nor
 from sqlalchemy import or_
 from sqlalchemy.exc import DBAPIError, OperationalError
 
+from ...bots.botlens_contract import RUN_SCOPE_KEY
+
 from ._shared import *
 
 _T = TypeVar("_T")
@@ -18,6 +20,8 @@ _DB_WRITE_RETRY_ATTEMPTS = max(1, int(_DATABASE_SETTINGS.write_retry_attempts))
 
 
 def _normalize_botlens_series_key(value: Any) -> str:
+    if str(value or "").strip() == RUN_SCOPE_KEY:
+        return RUN_SCOPE_KEY
     return normalize_public_series_key(value)
 
 
@@ -240,9 +244,7 @@ def get_latest_bot_run_view_state(
             return None
         query = query.where(BotRunViewStateRecord.series_key == normalized_series_key)
     else:
-        query = query.where(BotRunViewStateRecord.series_key.like("%|%"))
-        query = query.where(~BotRunViewStateRecord.series_key.like("%|"))
-        query = query.where(~BotRunViewStateRecord.series_key.like("|%"))
+        query = query.where(BotRunViewStateRecord.series_key == RUN_SCOPE_KEY)
     if run_id is not None:
         query = query.where(BotRunViewStateRecord.run_id == str(run_id))
     query = query.order_by(BotRunViewStateRecord.seq.desc(), BotRunViewStateRecord.id.desc()).limit(1)

@@ -10,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from engines.bot_runtime.core.domain import Candle, StrategySignal, isoformat
+from engines.bot_runtime.core.series_identity import canonical_series_key
 from strategies.evaluator import (
     build_rejection_artifact,
     classify_rejection_stage,
@@ -1070,6 +1071,54 @@ class RuntimeExecutionLoopMixin:
         outputs = frame.outputs
         state.indicator_outputs = outputs
         state.indicator_overlays = frame.overlays
+        series_symbol_key = canonical_series_key(
+            str(series.instrument.get("id") if isinstance(series.instrument, Mapping) else ""),
+            series.timeframe,
+        )
+        for guard_warning in frame.guard_warnings:
+            warning_context = dict(guard_warning.context or {})
+            warning_context.update(
+                {
+                    "indicator_id": guard_warning.indicator_id,
+                    "indicator_type": guard_warning.manifest_type,
+                    "indicator_version": guard_warning.version,
+                    "symbol_key": series_symbol_key or None,
+                    "symbol": series.symbol,
+                    "timeframe": series.timeframe,
+                    "bar_time": bar_time,
+                }
+            )
+            self._record_runtime_warning(
+                {
+                    "warning_type": guard_warning.warning_type,
+                    "severity": guard_warning.severity,
+                    "title": guard_warning.title,
+                    "message": guard_warning.message,
+                    "source": "indicator_guard",
+                    "indicator_id": guard_warning.indicator_id,
+                    "indicator_type": guard_warning.manifest_type,
+                    "indicator_version": guard_warning.version,
+                    "symbol_key": series_symbol_key or None,
+                    "symbol": series.symbol,
+                    "timeframe": series.timeframe,
+                    "bar_time": bar_time,
+                    "context": warning_context,
+                }
+            )
+            if guard_warning.warning_type == "indicator_overlay_suppressed":
+                logger.warning(
+                    with_log_context(
+                        "indicator_overlay_suppressed",
+                        self._series_log_context(
+                            series,
+                            indicator_id=guard_warning.indicator_id,
+                            warning_type=guard_warning.warning_type,
+                            overlay_points=warning_context.get("overlay_points"),
+                            overlay_payload_bytes=warning_context.get("overlay_payload_bytes"),
+                            hard_breach_reasons=warning_context.get("hard_breach_reasons"),
+                        ),
+                    )
+                )
         if self._report_artifact_bundle is not None:
             self._report_artifact_bundle.record_indicator_frame(state=state, candle=candle)
         indicator_state_update_ms = max((time.perf_counter() - indicator_started) * 1000.0, 0.0)
