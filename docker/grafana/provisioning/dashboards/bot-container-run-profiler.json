@@ -1,0 +1,883 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Bot container run profiler — step latency breakdown, signal eval cost, push update cost, step trace buffer health, telemetry pipeline, and BotLens backend. Set the time range to cover the full run duration. Filter by run_id to focus on a single run.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Run Status",
+      "description": "Current status of the selected run from portal_bot_runs.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(status, 'unknown') AS value FROM portal_bot_runs WHERE run_id = '${run_id}' LIMIT 1;"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "completed": { "text": "COMPLETED", "color": "green", "index": 0 },
+                "running":   { "text": "RUNNING",   "color": "blue",  "index": 1 },
+                "failed":    { "text": "FAILED",     "color": "red",   "index": 2 }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Run Duration (min)",
+      "description": "Elapsed minutes from started_at to ended_at (or now if still running).",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT ROUND(EXTRACT(EPOCH FROM (COALESCE(ended_at, now()) - started_at)) / 60.0, 1)::double precision AS value FROM portal_bot_runs WHERE run_id = '${run_id}' LIMIT 1;"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "none", "suffix": " min" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Total Bars Processed",
+      "description": "Count of step_series_state entries for this run in the selected time window.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND run_id = '${run_id}' AND step_name = 'step_series_state' AND ('${symbol:raw}' = '__all' OR symbol = '${symbol:raw}') AND ('${timeframe:raw}' = '__all' OR timeframe = '${timeframe:raw}');"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Bars / sec",
+      "description": "Effective throughput: bars processed per second across the selected time window.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH s AS ( SELECT count(*)::double precision AS bars, EXTRACT(EPOCH FROM (max(started_at) - min(started_at)))::double precision AS span_s FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND run_id = '${run_id}' AND step_name = 'step_series_state' AND ('${symbol:raw}' = '__all' OR symbol = '${symbol:raw}') AND ('${timeframe:raw}' = '__all' OR timeframe = '${timeframe:raw}') ) SELECT CASE WHEN COALESCE(span_s, 0) <= 0 THEN NULL ELSE bars / span_s END AS value FROM s;"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "ops" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Failed Steps",
+      "description": "Count of step trace entries where ok=false. Any value above zero warrants investigation.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND run_id = '${run_id}' AND NOT ok AND ('${symbol:raw}' = '__all' OR symbol = '${symbol:raw}');"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Trace Drops",
+      "description": "Sum of step_trace_dropped_count from step_finalize_bar context. Non-zero means step trace entries were lost due to buffer overflow.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(SUM(NULLIF(context->>'step_trace_dropped_count','')::double precision), 0)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND run_id = '${run_id}' AND step_name = 'step_finalize_bar' AND (context->>'step_trace_dropped_count') IS NOT NULL;"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 10 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+
+    {
+      "id": 7,
+      "type": "row",
+      "title": "Per-Step Hotspot Breakdown",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 4 },
+      "panels": []
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Step Latency Table — p50 / p95 / p99 / max",
+      "description": "All step names for the run, sorted by p95 descending. The top row is your hotspot. 'samples' reflects 1% step sampling rate — multiply by ~100 for true bar count.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT step_name, count(*) AS samples, round(avg(duration_ms)::numeric, 2) AS avg_ms, round(percentile_cont(0.50) WITHIN GROUP (ORDER BY duration_ms)::numeric, 2) AS p50_ms, round(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::numeric, 2) AS p95_ms, round(percentile_cont(0.99) WITHIN GROUP (ORDER BY duration_ms)::numeric, 2) AS p99_ms, round(max(duration_ms)::numeric, 2) AS max_ms, count(*) FILTER (WHERE NOT ok) AS errors FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND run_id = '${run_id}' AND ('${symbol:raw}' = '__all' OR symbol = '${symbol:raw}') AND ('${timeframe:raw}' = '__all' OR timeframe = '${timeframe:raw}') GROUP BY step_name ORDER BY p95_ms DESC NULLS LAST;"
+        }
+      ],
+      "options": {
+        "footer": { "show": false },
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "left", "displayMode": "auto" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "p95_ms" },
+            "properties": [
+              { "id": "custom.displayMode", "value": "color-background" },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "yellow", "value": 50 },
+                    { "color": "red", "value": 250 }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "errors" },
+            "properties": [
+              { "id": "custom.displayMode", "value": "color-background" },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "red", "value": 1 }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byNames", "options": { "names": ["avg_ms","p50_ms","p95_ms","p99_ms","max_ms"] } },
+            "properties": [{ "id": "unit", "value": "ms" }]
+          }
+        ]
+      }
+    },
+
+    {
+      "id": 9,
+      "type": "row",
+      "title": "Step Latency Trends",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+      "panels": []
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "All Steps — p95 Over Time",
+      "description": "One line per step_name. Use this to spot which step degraded during a specific time window of the run.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), step_name AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND run_id = '${run_id}' AND ('${symbol:raw}' = '__all' OR symbol = '${symbol:raw}') GROUP BY 1, 2 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "step_series_state — p95 by Symbol",
+      "description": "Per-symbol bar processing latency. The symbol with the highest p95 is your hot series.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), concat(COALESCE(symbol,'?'), '|', COALESCE(timeframe,'?')) AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND run_id = '${run_id}' AND step_name = 'step_series_state' GROUP BY 1, 2 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+
+    {
+      "id": 12,
+      "type": "row",
+      "title": "Signal Eval & Push Update Cost",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "panels": []
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Signal Eval — Total vs Overlay Projection (p95)",
+      "description": "step_signal_eval total duration vs the overlay_projection_ms sub-cost. If overlay_proj is close to total, overlays are the bottleneck inside signal eval.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'signal_eval_p95' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND run_id = '${run_id}' AND step_name = 'step_signal_eval' AND ('${symbol:raw}' = '__all' OR symbol = '${symbol:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'overlay_proj_p95' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'overlay_projection_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND run_id = '${run_id}' AND step_name = 'step_signal_eval' AND (context->>'overlay_projection_ms') IS NOT NULL AND ('${symbol:raw}' = '__all' OR symbol = '${symbol:raw}') GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "step_push_update — p95 by Symbol",
+      "description": "Time to build and push the WS state update to the backend per bar, split by symbol. High values indicate push serialization or network cost.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), COALESCE(symbol, '?') AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND run_id = '${run_id}' AND step_name = 'step_push_update' AND ('${symbol:raw}' = '__all' OR symbol = '${symbol:raw}') GROUP BY 1, 2 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+
+    {
+      "id": 15,
+      "type": "row",
+      "title": "Step Trace Buffer Health",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 33 },
+      "panels": []
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Trace Buffer Queue Depth",
+      "description": "step_trace_queue_depth from step_finalize_bar context. Sustained high values mean the buffer is filling faster than it flushes — drops will follow.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 34 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'queue_depth' AS metric, avg(NULLIF(context->>'step_trace_queue_depth','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND run_id = '${run_id}' AND step_name = 'step_finalize_bar' AND (context->>'step_trace_queue_depth') IS NOT NULL GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "red", "value": 200 }
+            ]
+          },
+          "custom": { "thresholdsStyle": { "mode": "line" } }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Trace Persist Lag & Batch Duration",
+      "description": "step_trace_persist_lag_ms (time from step trace enqueue to DB write) and step_trace_persist_batch_ms (batch write duration). Rising lag means the writer can't keep up.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 34 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'persist_lag_ms' AS metric, avg(NULLIF(context->>'step_trace_persist_lag_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND run_id = '${run_id}' AND step_name = 'step_finalize_bar' AND (context->>'step_trace_persist_lag_ms') IS NOT NULL GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'batch_write_ms' AS metric, avg(NULLIF(context->>'step_trace_persist_batch_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND run_id = '${run_id}' AND step_name = 'step_finalize_bar' AND (context->>'step_trace_persist_batch_ms') IS NOT NULL GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Trace Enqueue Time (step_trace_enqueue_ms)",
+      "description": "Time the runtime spends handing a step trace entry to the background buffer. Should be sub-millisecond. Spikes mean buffer contention.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 34 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'enqueue_ms_p95' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'step_trace_enqueue_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND run_id = '${run_id}' AND step_name IN ('step_series_state','step_finalize_bar') AND (context->>'step_trace_enqueue_ms') IS NOT NULL GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+
+    {
+      "id": 19,
+      "type": "row",
+      "title": "Telemetry Pipeline (Container → Backend)",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 },
+      "panels": []
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Telemetry Send Latency — p95 (ms)",
+      "description": "From Loki: bot_telemetry_send_succeeded send_ms. Time for the container to synchronously push one payload to the backend WS endpoint. High values indicate network or backend pressure.",
+      "datasource": { "type": "loki", "uid": "quanttrad-loki" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 43 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "quantile_over_time(0.95, {app=\"quant_trad\"} |= \"bot_telemetry_send_succeeded\" |= \"${run_id}\" | regexp \"send_ms=(?P<send_ms>[0-9.]+)\" | unwrap send_ms [$__interval]) by ()",
+          "instant": false,
+          "range": true,
+          "legendFormat": "p95 send_ms"
+        },
+        {
+          "refId": "B",
+          "expr": "avg_over_time({app=\"quant_trad\"} |= \"bot_telemetry_send_succeeded\" |= \"${run_id}\" | regexp \"send_ms=(?P<send_ms>[0-9.]+)\" | unwrap send_ms [$__interval]) by ()",
+          "instant": false,
+          "range": true,
+          "legendFormat": "avg send_ms"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Emit Queue Wait — p95 (ms)",
+      "description": "From Loki: bot_telemetry_emit_dequeued queue_wait_ms. Time a payload spent waiting in the emit queue before being sent. Rising values mean the sender thread is falling behind.",
+      "datasource": { "type": "loki", "uid": "quanttrad-loki" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 43 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "quantile_over_time(0.95, {app=\"quant_trad\"} |= \"bot_telemetry_emit_dequeued\" |= \"${run_id}\" | regexp \"queue_wait_ms=(?P<queue_wait_ms>[0-9.]+)\" | unwrap queue_wait_ms [$__interval]) by ()",
+          "instant": false,
+          "range": true,
+          "legendFormat": "p95 queue_wait_ms"
+        },
+        {
+          "refId": "B",
+          "expr": "avg_over_time({app=\"quant_trad\"} |= \"bot_telemetry_emit_dequeued\" |= \"${run_id}\" | regexp \"queue_wait_ms=(?P<queue_wait_ms>[0-9.]+)\" | unwrap queue_wait_ms [$__interval]) by ()",
+          "instant": false,
+          "range": true,
+          "legendFormat": "avg queue_wait_ms"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Backpressure Events & Send Failures",
+      "description": "From Loki: bot_telemetry_emit_queue_backpressure (queue full, payload dropped at enqueue) and bot_telemetry_send_failed (WS send error). Either non-zero means data loss.",
+      "datasource": { "type": "loki", "uid": "quanttrad-loki" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 43 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count_over_time({app=\"quant_trad\"} |= \"bot_telemetry_emit_queue_backpressure\" |= \"${run_id}\" [$__interval])",
+          "instant": false,
+          "range": true,
+          "legendFormat": "backpressure events"
+        },
+        {
+          "refId": "B",
+          "expr": "count_over_time({app=\"quant_trad\"} |= \"bot_telemetry_send_failed\" |= \"${run_id}\" [$__interval])",
+          "instant": false,
+          "range": true,
+          "legendFormat": "send failures"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10,
+            "thresholdsStyle": { "mode": "line" }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+
+    {
+      "id": 23,
+      "type": "row",
+      "title": "BotLens Backend Ingest",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 51 },
+      "panels": []
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "BotLens Ingest — Process Time p95 (ms)",
+      "description": "From Loki: botlens_ingest_processed process_ms. Time the backend spends applying one ingest payload (fact batch / bootstrap) to in-memory state and fanout. High values stall the ingest queue.",
+      "datasource": { "type": "loki", "uid": "quanttrad-loki" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 52 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "quantile_over_time(0.95, {app=\"quant_trad\"} |= \"botlens_ingest_processed\" |= \"${run_id}\" | regexp \"process_ms=(?P<process_ms>[0-9.]+)\" | unwrap process_ms [$__interval]) by ()",
+          "instant": false,
+          "range": true,
+          "legendFormat": "p95 process_ms"
+        },
+        {
+          "refId": "B",
+          "expr": "avg_over_time({app=\"quant_trad\"} |= \"botlens_ingest_processed\" |= \"${run_id}\" | regexp \"process_ms=(?P<process_ms>[0-9.]+)\" | unwrap process_ms [$__interval]) by ()",
+          "instant": false,
+          "range": true,
+          "legendFormat": "avg process_ms"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "BotLens Ingest Queue Depth",
+      "description": "From Loki: botlens_ingest_processed queue_depth. How many payloads are waiting when each one is processed. Sustained depth > 0 means the async ingest loop is behind.",
+      "datasource": { "type": "loki", "uid": "quanttrad-loki" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 52 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max_over_time({app=\"quant_trad\"} |= \"botlens_ingest_processed\" |= \"${run_id}\" | regexp \"queue_depth=(?P<queue_depth>[0-9]+)\" | unwrap queue_depth [$__interval]) by ()",
+          "instant": false,
+          "range": true,
+          "legendFormat": "max queue_depth"
+        },
+        {
+          "refId": "B",
+          "expr": "avg_over_time({app=\"quant_trad\"} |= \"botlens_ingest_processed\" |= \"${run_id}\" | regexp \"queue_depth=(?P<queue_depth>[0-9]+)\" | unwrap queue_depth [$__interval]) by ()",
+          "instant": false,
+          "range": true,
+          "legendFormat": "avg queue_depth"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 50 }
+            ]
+          },
+          "custom": { "thresholdsStyle": { "mode": "line" } }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "WS Viewer Count & Ring Depth",
+      "description": "From Loki: botlens_stream_broadcast viewer_count and ring_depth per broadcast. viewer_count=0 during a backtest is expected. ring_depth climbing means replay buffer is growing.",
+      "datasource": { "type": "loki", "uid": "quanttrad-loki" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 52 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max_over_time({app=\"quant_trad\"} |= \"botlens_stream_broadcast\" |= \"${run_id}\" | regexp \"viewer_count=(?P<viewer_count>[0-9]+)\" | unwrap viewer_count [$__interval]) by ()",
+          "instant": false,
+          "range": true,
+          "legendFormat": "viewer_count"
+        },
+        {
+          "refId": "B",
+          "expr": "max_over_time({app=\"quant_trad\"} |= \"botlens_stream_broadcast\" |= \"${run_id}\" | regexp \"ring_depth=(?P<ring_depth>[0-9]+)\" | unwrap ring_depth [$__interval]) by ()",
+          "instant": false,
+          "range": true,
+          "legendFormat": "ring_depth"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+
+    {
+      "id": 27,
+      "type": "row",
+      "title": "Error Logs",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 60 },
+      "panels": []
+    },
+    {
+      "id": 28,
+      "type": "logs",
+      "title": "Step Trace Persist Failures",
+      "description": "From Loki: bot_run_step_persist_failed for this run. Each entry is a step trace row that failed to write to portal_bot_run_steps — the hotspot table may be missing data.",
+      "datasource": { "type": "loki", "uid": "quanttrad-loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 61 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{app=\"quant_trad\"} |= \"bot_run_step_persist_failed\" |= \"${run_id}\"",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      }
+    },
+    {
+      "id": 29,
+      "type": "logs",
+      "title": "BotLens Ingest Errors & Warnings",
+      "description": "From Loki: WARNING or ERROR log lines related to botlens for this run. Covers state fanout failures, DB write errors, and WS disconnect events.",
+      "datasource": { "type": "loki", "uid": "quanttrad-loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 61 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{app=\"quant_trad\"} |= \"${run_id}\" |~ \"WARNING|ERROR\" |~ \"botlens\"",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 36,
+  "style": "dark",
+  "tags": ["bots", "profiling", "runtime"],
+  "templating": {
+    "list": [
+      {
+        "name": "bot_id",
+        "type": "query",
+        "label": "Bot",
+        "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+        "definition": "SELECT DISTINCT bot_id FROM portal_bot_runs WHERE bot_id IS NOT NULL ORDER BY 1",
+        "query": "SELECT DISTINCT bot_id FROM portal_bot_runs WHERE bot_id IS NOT NULL ORDER BY 1",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "hide": 0,
+        "options": [],
+        "current": {}
+      },
+      {
+        "name": "run_id",
+        "type": "query",
+        "label": "Run",
+        "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+        "definition": "SELECT run_id || ' (' || COALESCE(status,'?') || ' ' || to_char(started_at,'MM-DD HH24:MI') || ')' AS __text, run_id AS __value FROM portal_bot_runs WHERE ('${bot_id:raw}' = '__all' OR bot_id = '${bot_id:raw}') ORDER BY started_at DESC LIMIT 100",
+        "query": "SELECT run_id || ' (' || COALESCE(status,'?') || ' ' || to_char(started_at,'MM-DD HH24:MI') || ')' AS __text, run_id AS __value FROM portal_bot_runs WHERE ('${bot_id:raw}' = '__all' OR bot_id = '${bot_id:raw}') ORDER BY started_at DESC LIMIT 100",
+        "refresh": 2,
+        "sort": 0,
+        "includeAll": false,
+        "multi": false,
+        "hide": 0,
+        "options": [],
+        "current": {}
+      },
+      {
+        "name": "symbol",
+        "type": "query",
+        "label": "Symbol",
+        "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+        "definition": "SELECT DISTINCT symbol FROM portal_bot_run_steps WHERE run_id = '${run_id}' AND symbol IS NOT NULL ORDER BY 1",
+        "query": "SELECT DISTINCT symbol FROM portal_bot_run_steps WHERE run_id = '${run_id}' AND symbol IS NOT NULL ORDER BY 1",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "hide": 0,
+        "options": [],
+        "current": {}
+      },
+      {
+        "name": "timeframe",
+        "type": "query",
+        "label": "Timeframe",
+        "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+        "definition": "SELECT DISTINCT timeframe FROM portal_bot_run_steps WHERE run_id = '${run_id}' AND timeframe IS NOT NULL ORDER BY 1",
+        "query": "SELECT DISTINCT timeframe FROM portal_bot_run_steps WHERE run_id = '${run_id}' AND timeframe IS NOT NULL ORDER BY 1",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "hide": 0,
+        "options": [],
+        "current": {}
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Bot Container Run Profiler",
+  "uid": "bot-container-profiler",
+  "version": 1
+}
