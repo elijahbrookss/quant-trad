@@ -22,11 +22,18 @@ code_paths:
   - portal/backend/service/bots/runtime_dependencies.py
   - portal/backend/service/bots/strategy_loader.py
   - portal/backend/service/bots/botlens_contract.py
+  - portal/backend/service/bots/botlens_state.py
+  - portal/backend/service/bots/botlens_session_service.py
+  - portal/backend/service/bots/botlens_symbol_service.py
   - portal/backend/service/bots/botlens_lifecycle_bridge.py
   - portal/backend/service/bots/telemetry_stream.py
-  - portal/backend/service/bots/live_series_stream.py
-  - portal/backend/service/bots/botlens_series_service.py
+  - portal/backend/service/bots/botlens_run_stream.py
   - portal/backend/service/market/candle_service.py
+  - src/core/settings.py
+  - src/engines/indicator_engine/runtime_engine.py
+  - src/engines/bot_runtime/runtime/mixins/execution_loop.py
+  - src/engines/bot_runtime/runtime/mixins/runtime_events.py
+  - src/engines/bot_runtime/runtime/mixins/setup_prepare.py
   - src/engines/bot_runtime/runtime/mixins/runtime_projection.py
   - src/engines/bot_runtime/runtime/mixins/runtime_persistence.py
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
@@ -74,8 +81,8 @@ flowchart LR
     I --> J[telemetry_stream.py]
     D --> J
     J --> K[Append-only BotLens raw events]
-    J --> L[Backend-owned latest per-series view-state rows]
-    J --> M[Atomic websocket bootstrap + live tail]
+    J --> L[Backend-owned run summary + symbol detail rows]
+    J --> M[Run-scoped websocket summary/open-trades/detail fanout]
     D --> N[Run status + lifecycle checkpoints + container step traces]
 ```
 
@@ -84,8 +91,8 @@ flowchart LR
 Current entrypoints:
 - `portal/backend/service/bots/runtime_control_service.py`: API-facing start/stop and watchdog status surface.
 - `portal/backend/service/bots/runner.py`: runner abstraction plus `DockerBotRunner`.
-- `portal/backend/service/bots/container_runtime.py`: launched process that owns symbol sharding, worker supervision, per-series BotLens transport emission, and container-level status/step traces.
-- `portal/backend/service/bots/telemetry_stream.py`: ingest/projection hub for BotLens live delivery and durable latest-view materialization.
+- `portal/backend/service/bots/container_runtime.py`: launched process that owns symbol sharding, worker supervision, symbol-scoped BotLens fact emission, and container-level status/step traces.
+- `portal/backend/service/bots/telemetry_stream.py`: ingest/projection hub for BotLens run summary, open-trades, symbol-detail materialization, and live rebroadcast.
 
 Current target support:
 - only `BOT_RUNTIME_TARGET=docker` is implemented.
@@ -173,6 +180,14 @@ The launched process is:
 - detecting bridge backpressure and forcing rebootstrap instead of inventing continuity,
 - writing bot runtime status and container step traces.
 
+The worker runtime now also owns a minimal indicator guard at the indicator execution boundary:
+
+- per-indicator execution time is measured per bar,
+- per-indicator overlay point count and serialized payload bytes are measured when overlays are requested,
+- repeated soft-budget breaches become structured runtime warnings,
+- optional hard overlay budgets suppress only that indicator's overlay emission for the current bar,
+- and trading/decision outputs remain untouched.
+
 Supporting helpers are split explicitly:
 - `container_runtime_projection.py`: compact view-state shaping plus worker/runtime payload merge helpers.
 - `container_runtime_telemetry.py`: bounded outbound telemetry emission and message-context helpers.
@@ -198,12 +213,20 @@ Each child worker process:
 - forces `series_runner="inline"`,
 - resolves the attached indicator set into a dependency-closed runtime graph,
 - computes typed indicator outputs, indicator-owned overlays, strategy decisions, and trades on the same series timeline,
+- applies a lightweight indicator guard that detects repeated slow indicators and bulky overlays before they silently poison runtime transport,
 - persists `series_bar.telemetry` ledger events asynchronously from that same series timeline,
 - emits one `botlens_runtime_bootstrap_facts` bridge payload after warm-up,
 - emits ordered `botlens_runtime_facts` bridge payloads from the runtime subscriber queue,
 - uses explicit subscriber gap signaling when BotLens transport consumers fall behind,
 - marks the runtime `degraded` when a series is degraded inside the worker runtime,
 - emits `worker_error` messages when runtime execution fails or finishes degraded.
+
+Indicator-guard warnings stay run-scoped and bounded:
+
+- warnings are grouped by warning type, indicator id, and symbol scope,
+- repeated occurrences increment `count` and update `last_seen_at`,
+- the runtime snapshot carries those grouped rows,
+- and BotLens projects them into summary health rather than creating a separate observability channel.
 
 The parent process treats worker failures as degraded-symbol events:
 - failed worker symbols are added to `degraded_symbols`,
@@ -251,7 +274,7 @@ Container/runtime telemetry persistence:
   - `event_type=botlens.runtime_bootstrap_facts`
   - `event_type=botlens.runtime_facts`
   - `event_type=botlens.lifecycle_event`
-- latest per-series BotLens materializations via `upsert_bot_run_view_state(...)`.
+- latest BotLens run summary and symbol detail materializations via `upsert_bot_run_view_state(...)`.
 
 Important semantics:
 - startup truth now lives in the lifecycle tables first, not in container inference or Docker inspect,
@@ -259,7 +282,7 @@ Important semantics:
 - BotLens lifecycle diagnostics and chart/runtime state are now derived from the same fact path,
 - BotLens bootstrap can read the materialized rows,
 - but live execution never reads DB-backed BotLens projections back into the worker timeline.
-- BotLens persistence only accepts canonical per-series keys of the form `instrument_id|timeframe`; legacy merged `series_key=bot` rows are not part of the runtime contract.
+- BotLens persistence now uses one run summary row (`series_key=__run__`) plus canonical symbol detail keys of the form `instrument_id|timeframe`; legacy merged `series_key=bot` rows are not part of the runtime contract.
 - report/deepdive consumers read `portal_bot_run_events` directly and project what they need from `runtime.*`, `series_bar.*`, and `botlens.*`.
 
 ## 8.1) Indicator-owned analytics and report capture
@@ -290,7 +313,7 @@ Bridge payload ownership:
 - runtime owns canonical fact batches (`runtime_state_observed`, `candle_upserted`, `overlay_ops_emitted`, `trade_upserted`, `decision_emitted`, `log_emitted`, `series_stats_updated`) plus enough data to project downstream,
 - supervisor/container runtime attaches transport metadata such as `bridge_session_id` and `bridge_seq`,
 - backend validates bridge continuity before advancing BotLens state,
-- backend assigns canonical `projection_seq` for client-visible BotLens ordering.
+- backend assigns run-scoped BotLens ordering for summary/open-trade/detail delivery.
 
 Transport:
 - websocket push to `BACKEND_TELEMETRY_WS_URL` when configured,
@@ -298,13 +321,13 @@ Transport:
 - explicit resync/bootstrap recovery when bridge continuity is not trustworthy.
 
 Service split:
-- `telemetry_stream.py`: ingest queue, projection application, durable `botlens.*` writes, latest per-series view-state cache, and runtime-status rebroadcast.
-- `live_series_stream.py`: websocket viewer attachment, bounded replay ring, stream-session continuity, resync invalidation, and live-tail fanout.
+- `telemetry_stream.py`: ingest queue, projection application, durable `botlens.*` writes, latest run-summary/symbol-detail cache, and runtime-status rebroadcast.
+- `botlens_run_stream.py`: run-scoped websocket viewer attachment, bounded replay ring, viewer hot-symbol tracking, and summary/open-trades/detail fanout.
 
 Durability:
 - telemetry transport is supplemental,
 - `botlens.*` rows in `portal_bot_run_events` are the durable BotLens raw-fact ledger,
-- `portal_bot_run_view_state.seq` is the canonical latest BotLens projection cursor,
+- `portal_bot_run_view_state.seq` is the canonical latest BotLens summary/detail cursor,
 - `series_bar.telemetry` rows are the durable per-bar runtime telemetry source,
 - runtime/trade/status/step-trace rows remain the rest of the durable execution record.
 
@@ -317,11 +340,12 @@ Required semantics:
 - the bridge preserves FIFO order,
 - a failed send does not advance the queue head,
 - later bootstraps may reset bridge continuity through a new `bridge_session_id`, but they do not redefine durable BotLens ordering,
-- the backend only advances `projection_seq` after bridge continuity is valid,
-- a continuity gap marks the persisted projection `resync_required` instead of merging unknown state,
-- BotLens websocket subscribe sends the baseline snapshot on that same channel and replays buffered live-tail messages newer than `baseline_seq` before enabling future-only fanout,
-- one live websocket continuity epoch is identified by `stream_session_id`, and continuity invalidation rotates that id before future live fanout resumes,
-- the backend may emit `botlens_live_resync_required` and close active sockets when run continuity is no longer trusted,
+- the backend only advances BotLens state after bridge continuity is valid,
+- a continuity gap marks the affected symbol detail `resync_required` instead of merging unknown state,
+- BotLens websocket subscribe attaches to the run once and replays buffered run deltas newer than the client cursor before future-only fanout,
+- one live websocket continuity epoch is identified by `stream_session_id`,
+- symbol switching updates viewer subscription state instead of tearing down the websocket,
+- the backend may emit `botlens_run_resync_required` when replay continuity is no longer trustworthy,
 - and any backlog must be surfaced as explicit backpressure rather than silent compaction.
 
 ### 9.2) Producer backpressure
