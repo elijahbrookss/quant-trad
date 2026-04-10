@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from .botlens_contract import projection_only
+from .botlens_state import read_run_summary_state
 from .runner import DockerBotRunner
 from .startup_lifecycle import ACTIVE_PHASES, BACKEND_OWNED_PHASES, TERMINAL_PHASES
 
@@ -221,9 +221,18 @@ def project_bot_state(
         or str(selected_run.get("run_id") or "").strip()
         or None
     )
-    view_payload = projection_only(_mapping(view_row).get("payload"))
-    snapshot_runtime = _mapping(view_payload.get("runtime"))
-    warnings = _sequence(view_payload.get("warnings"))
+    summary_state = read_run_summary_state(
+        _mapping(view_row).get("payload"),
+        bot_id=bot_id,
+        run_id=str(selected_run_id or ""),
+    ) if view_row else {}
+    health_payload = _mapping(_mapping(summary_state).get("health"))
+    snapshot_runtime = {
+        "status": health_payload.get("status"),
+        "worker_count": int(health_payload.get("worker_count") or 0),
+        "active_workers": int(health_payload.get("active_workers") or 0),
+    }
+    warnings = [dict(entry) for entry in _sequence(health_payload.get("warnings")) if isinstance(entry, Mapping)]
     engine_status = _normalize_status(snapshot_runtime.get("status"), default="")
     persisted_status = _normalize_status(payload.get("status"))
     lifecycle_status = _normalize_status(lifecycle_row.get("status"), default="")
@@ -266,9 +275,9 @@ def project_bot_state(
         "available": bool(view_row),
         "known_at": _mapping(view_row).get("known_at") if view_row else None,
         "last_snapshot_at": _mapping(view_row).get("event_time") if view_row else None,
-        "warning_count": len(warnings),
-        "series_count": len(_sequence(view_payload.get("series"))),
-        "trade_count": len(_sequence(view_payload.get("trades"))),
+        "warning_count": int(health_payload.get("warning_count") or 0),
+        "series_count": len(_mapping(summary_state).get("symbol_index") or {}),
+        "trade_count": len(_mapping(summary_state).get("open_trades_index") or {}),
         "engine_status": engine_status or None,
         "worker_count": int(snapshot_runtime.get("worker_count") or 0),
         "active_workers": int(snapshot_runtime.get("active_workers") or 0),

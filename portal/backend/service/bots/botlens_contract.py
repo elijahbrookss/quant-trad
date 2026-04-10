@@ -3,9 +3,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Dict
 
-from .botlens_projection import bounded_projection, canonicalize_projection, find_series, normalize_series_key
+from engines.bot_runtime.core.series_identity import normalize_series_key as normalize_public_series_key
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+RUN_SCOPE_KEY = "__run__"
 
 BRIDGE_BOOTSTRAP_KIND = "botlens_runtime_bootstrap_facts"
 BRIDGE_FACTS_KIND = "botlens_runtime_facts"
@@ -29,9 +30,29 @@ CONTINUITY_READY = "ready"
 CONTINUITY_BOOTSTRAP_REQUIRED = "bootstrap_required"
 CONTINUITY_RESYNC_REQUIRED = "resync_required"
 
+STREAM_CONNECTED_TYPE = "botlens_run_connected"
+STREAM_RESYNC_REQUIRED_TYPE = "botlens_run_resync_required"
+STREAM_SUMMARY_DELTA_TYPE = "botlens_run_summary_delta"
+STREAM_OPEN_TRADES_DELTA_TYPE = "botlens_open_trades_delta"
+STREAM_DETAIL_DELTA_TYPE = "botlens_symbol_detail_delta"
+
 
 def _mapping(value: Any) -> Dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def normalize_series_key(value: Any) -> str:
+    return normalize_public_series_key(value)
+
+
+def is_run_scope_key(value: Any) -> bool:
+    return str(value or "").strip() == RUN_SCOPE_KEY
+
+
+def normalize_view_scope_key(value: Any) -> str:
+    if is_run_scope_key(value):
+        return RUN_SCOPE_KEY
+    return normalize_series_key(value)
 
 
 def normalize_ingest_kind(value: Any) -> str:
@@ -95,7 +116,7 @@ def normalize_lifecycle_payload(payload: Any) -> Dict[str, Any]:
     return {key: value for key, value in lifecycle.items() if value not in (None, "", [])}
 
 
-def default_continuity(
+def continuity_payload(
     *,
     status: str = CONTINUITY_BOOTSTRAP_REQUIRED,
     reason: str | None = None,
@@ -117,99 +138,6 @@ def default_continuity(
     return payload
 
 
-def projection_state_payload(
-    *,
-    projection: Mapping[str, Any],
-    lifecycle: Mapping[str, Any] | None = None,
-    continuity: Mapping[str, Any] | None = None,
-) -> Dict[str, Any]:
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "projection": canonicalize_projection(projection),
-        "lifecycle": normalize_lifecycle_payload(lifecycle),
-        "continuity": dict(continuity or default_continuity()),
-    }
-
-
-def read_projection_state(payload: Any) -> Dict[str, Any]:
-    source = _mapping(payload)
-    if "projection" in source or "continuity" in source or "lifecycle" in source:
-        projection = canonicalize_projection(source.get("projection"))
-        continuity = _mapping(source.get("continuity")) or default_continuity(
-            status=CONTINUITY_READY if projection.get("series") else CONTINUITY_BOOTSTRAP_REQUIRED
-        )
-        lifecycle = normalize_lifecycle_payload(source.get("lifecycle"))
-        return {
-            "schema_version": int(source.get("schema_version") or SCHEMA_VERSION),
-            "projection": projection,
-            "continuity": continuity,
-            "lifecycle": lifecycle,
-        }
-    projection = canonicalize_projection(source)
-    return {
-        "schema_version": int(source.get("schema_version") or 1),
-        "projection": projection,
-        "continuity": default_continuity(
-            status=CONTINUITY_READY if projection.get("series") else CONTINUITY_BOOTSTRAP_REQUIRED
-        ),
-        "lifecycle": {},
-    }
-
-
-def projection_only(payload: Any) -> Dict[str, Any]:
-    return read_projection_state(payload)["projection"]
-
-
-def continuity_only(payload: Any) -> Dict[str, Any]:
-    return read_projection_state(payload)["continuity"]
-
-
-def lifecycle_only(payload: Any) -> Dict[str, Any]:
-    return read_projection_state(payload)["lifecycle"]
-
-
-def build_window_payload(
-    *,
-    run_id: str,
-    series_key: str,
-    seq: int,
-    event_time: Any,
-    payload: Any,
-    limit: int,
-) -> Dict[str, Any]:
-    state = read_projection_state(payload)
-    bounded = bounded_projection(state["projection"], candle_limit=limit)
-    selected_series = find_series(bounded, series_key) or {}
-    candles = list(selected_series.get("candles") or []) if isinstance(selected_series.get("candles"), list) else []
-    trades = [dict(trade) for trade in bounded.get("trades") if isinstance(trade, Mapping)] if isinstance(bounded.get("trades"), list) else []
-    logs = list(bounded.get("logs") or []) if isinstance(bounded.get("logs"), list) else []
-    decisions = list(bounded.get("decisions") or []) if isinstance(bounded.get("decisions"), list) else []
-    warnings = list(bounded.get("warnings") or []) if isinstance(bounded.get("warnings"), list) else []
-    runtime = dict(bounded.get("runtime") or {}) if isinstance(bounded.get("runtime"), Mapping) else {}
-    return {
-        "run_id": str(run_id),
-        "series_key": normalize_series_key(series_key),
-        "schema_version": SCHEMA_VERSION,
-        "seq": int(seq),
-        "event_time": event_time,
-        "cursor": {"projection_seq": int(seq)},
-        "continuity": dict(state["continuity"] or {}),
-        "lifecycle": dict(state["lifecycle"] or {}),
-        "window": {
-            "projection": bounded,
-            "selected_series": dict(selected_series) if isinstance(selected_series, Mapping) else {},
-            "candles": candles,
-            "trades": trades,
-            "logs": logs,
-            "decisions": decisions,
-            "warnings": warnings,
-            "runtime": runtime,
-            "markers": [],
-            "status": str(runtime.get("status") or "waiting"),
-        },
-    }
-
-
 __all__ = [
     "BRIDGE_BOOTSTRAP_KIND",
     "BRIDGE_FACTS_KIND",
@@ -217,8 +145,8 @@ __all__ = [
     "CONTINUITY_READY",
     "CONTINUITY_RESYNC_REQUIRED",
     "EVENT_TYPE_LIFECYCLE",
-    "EVENT_TYPE_RUNTIME_FACTS",
     "EVENT_TYPE_RUNTIME_BOOTSTRAP",
+    "EVENT_TYPE_RUNTIME_FACTS",
     "FACT_TYPE_CANDLE_UPSERTED",
     "FACT_TYPE_DECISION_EMITTED",
     "FACT_TYPE_LOG_EMITTED",
@@ -229,17 +157,20 @@ __all__ = [
     "FACT_TYPE_TRADE_UPSERTED",
     "LIFECYCLE_KIND",
     "PROJECTION_REFRESH_KIND",
+    "RUN_SCOPE_KEY",
     "SCHEMA_VERSION",
-    "build_window_payload",
-    "continuity_only",
-    "default_continuity",
-    "lifecycle_only",
-    "normalize_fact_entries",
+    "STREAM_CONNECTED_TYPE",
+    "STREAM_DETAIL_DELTA_TYPE",
+    "STREAM_OPEN_TRADES_DELTA_TYPE",
+    "STREAM_RESYNC_REQUIRED_TYPE",
+    "STREAM_SUMMARY_DELTA_TYPE",
+    "continuity_payload",
+    "is_run_scope_key",
     "normalize_bridge_seq",
     "normalize_bridge_session_id",
+    "normalize_fact_entries",
     "normalize_ingest_kind",
     "normalize_lifecycle_payload",
-    "projection_only",
-    "projection_state_payload",
-    "read_projection_state",
+    "normalize_series_key",
+    "normalize_view_scope_key",
 ]
