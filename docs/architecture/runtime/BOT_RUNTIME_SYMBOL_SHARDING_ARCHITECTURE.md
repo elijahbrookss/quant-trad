@@ -49,7 +49,7 @@ flowchart LR
     C1 --> D[shared_wallet_proxy]
     C2 --> D
     C3 --> D
-    C1 --> E[event_queue]
+    C1 --> E[shared parent fan-in queue]
     C2 --> E
     C3 --> E
     E --> F[parent bridge + supervision loop]
@@ -118,11 +118,11 @@ Instead it keeps only lightweight operational state needed to:
 - track startup/live/degraded process status,
 - bridge worker BotLens payloads across the process boundary,
 - emit lifecycle/process events,
-- and trigger rebootstrap when bridge continuity is no longer trustworthy.
+- and seed fresh BotLens bootstraps for newly attached viewers.
 
 Important boundary:
 - the parent may keep transient compact snapshots to seed the next bridge bootstrap,
-- but backend `telemetry_stream.py` owns canonical BotLens ordering, continuity, and projection semantics.
+- but backend `telemetry_stream.py` owns canonical BotLens ordering and projection semantics.
 
 ## 7) Runtime status semantics
 
@@ -167,7 +167,7 @@ Series-level in worker runtime:
 - the worker runtime status becomes `degraded`, so the worker cannot terminate as `completed` after a degraded series.
 
 Worker-process level in container runtime:
-- `worker_error` queue messages mark the worker's symbols degraded,
+- `worker_error` messages on the shared parent fan-in queue mark the worker's symbols degraded,
 - non-zero worker exit codes also mark symbols degraded,
 - healthy workers continue running,
 - parent runtime only moves to `failed` on supervisor-level exceptions.
@@ -180,7 +180,7 @@ This is degrade-isolated, not self-healing:
 
 - One worker per symbol gives the clearest failure boundary.
 - One shared wallet proxy preserves capital safety across workers.
-- One supervisor bridge keeps worker/runtime execution decoupled from backend projection ownership.
+- One supervisor bridge with a shared fan-in queue keeps worker/runtime execution decoupled from backend projection ownership without forcing per-worker drain order.
 - Keeping supervisor state ephemeral avoids conflating process transport with execution truth.
 
 ## 11) Strict contract

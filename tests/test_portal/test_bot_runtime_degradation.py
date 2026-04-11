@@ -1,10 +1,14 @@
+from collections import deque
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
+from engines.bot_runtime.core.domain import Candle
 from engines.bot_runtime.core.runtime_events import RuntimeEventName
 from engines.bot_runtime.deps import BotRuntimeDeps
 from engines.bot_runtime.runtime.components.overlay_delta import count_overlay_points
 from engines.bot_runtime.runtime.components.run_context import RunContext
 from engines.bot_runtime.runtime.runtime import BotRuntime
+from engines.indicator_engine.contracts import EngineFrame, IndicatorGuardWarning
 
 
 def _runtime_deps() -> BotRuntimeDeps:
@@ -141,3 +145,141 @@ def test_runtime_signal_artifact_helper_delegates_without_name_error():
     )
 
     assert len(out) == 1
+
+
+def test_next_signal_for_records_guard_warning_without_bar_time_name_error(monkeypatch):
+    runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=_runtime_deps())
+    warnings_recorded: list[dict] = []
+    monkeypatch.setattr(runtime, "_record_runtime_warning", lambda payload: warnings_recorded.append(dict(payload)))
+    monkeypatch.setattr(runtime, "_series_overlay_entries", lambda _state: [])
+    monkeypatch.setattr(
+        "engines.bot_runtime.runtime.mixins.execution_loop.evaluate_strategy_bar",
+        lambda **_kwargs: SimpleNamespace(artifacts=[], selected_artifact=None),
+    )
+
+    candle = Candle(
+        time=datetime(2026, 4, 10, 0, 40, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=42.0,
+    )
+    indicator_engine = SimpleNamespace(
+        order=("typed-regime",),
+        step=lambda **_kwargs: EngineFrame(
+            outputs={},
+            overlays={},
+            guard_warnings=(
+                IndicatorGuardWarning(
+                    warning_type="indicator_overlay_payload_exceeded",
+                    severity="warning",
+                    indicator_id="typed_regime",
+                    manifest_type="regime",
+                    version="v1",
+                    title="overlay payload exceeded budget",
+                    message="typed_regime emitted an oversized overlay payload.",
+                    context={"overlay_payload_bytes": 2048},
+                ),
+            ),
+        ),
+    )
+    series = SimpleNamespace(
+        instrument={"id": "instrument-btc"},
+        timeframe="1h",
+        symbol="BTCUSD",
+        overlays=[],
+        meta={"compiled_strategy": object()},
+    )
+    state = SimpleNamespace(
+        last_evaluated_epoch=0,
+        last_consumed_epoch=0,
+        indicator_engine=indicator_engine,
+        indicator_outputs={},
+        indicator_overlays={},
+        overlay_runtime_metrics={},
+        pending_signals=deque(),
+        decision_evaluation_state=SimpleNamespace(),
+        indicator_output_types={},
+        decision_artifacts=[],
+    )
+
+    runtime._next_signal_for(state, series, candle, int(candle.time.timestamp()))
+
+    assert len(warnings_recorded) == 1
+    assert warnings_recorded[0]["warning_type"] == "indicator_overlay_payload_exceeded"
+    assert warnings_recorded[0]["bar_time"] == "2026-04-10T00:40:00Z"
+    assert warnings_recorded[0]["context"]["bar_time"] == "2026-04-10T00:40:00Z"
+
+
+def test_aggregate_stats_reuses_cached_trade_summary_until_trade_revision_changes():
+    runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=_runtime_deps())
+
+    class FakeRiskEngine:
+        def __init__(self):
+            self.trade_revision = 1
+            self.stats_calls = 0
+            self.serialise_calls = 0
+
+        def stats(self):
+            self.stats_calls += 1
+            return {
+                "total_trades": 2,
+                "completed_trades": 2,
+                "legs_closed": 2,
+                "wins": 1,
+                "losses": 1,
+                "breakeven_trades": 0,
+                "win_rate": 0.5,
+                "long_trades": 1,
+                "short_trades": 1,
+                "gross_pnl": 4.0,
+                "fees_paid": 1.0,
+                "net_pnl": 3.0,
+                "quote_currency": "USDC",
+            }
+
+        def serialise_trades(self):
+            self.serialise_calls += 1
+            return [
+                {
+                    "trade_id": "trade-2",
+                    "closed_at": "2026-04-10T00:02:00+00:00",
+                    "net_pnl": -1.0,
+                },
+                {
+                    "trade_id": "trade-1",
+                    "closed_at": "2026-04-10T00:01:00+00:00",
+                    "net_pnl": 4.0,
+                },
+            ]
+
+    engine = FakeRiskEngine()
+    runtime._series = [
+        SimpleNamespace(
+            strategy_id="strategy-1",
+            symbol="BTCUSDT",
+            timeframe="1h",
+            risk_engine=engine,
+        )
+    ]
+
+    first = runtime._aggregate_stats()
+    second = runtime._aggregate_stats()
+
+    assert first == second
+    assert first["avg_win"] == 4.0
+    assert first["avg_loss"] == -1.0
+    assert first["largest_win"] == 4.0
+    assert first["largest_loss"] == -1.0
+    assert first["max_drawdown"] == 1.0
+    assert first["total_fees"] == 1.0
+    assert engine.stats_calls == 1
+    assert engine.serialise_calls == 1
+
+    engine.trade_revision = 2
+    refreshed = runtime._aggregate_stats()
+
+    assert refreshed == first
+    assert engine.stats_calls == 2
+    assert engine.serialise_calls == 2

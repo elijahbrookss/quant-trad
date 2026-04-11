@@ -312,17 +312,17 @@ Supervisor/worker bridge envelope types:
 Bridge payload ownership:
 - runtime owns canonical fact batches (`runtime_state_observed`, `candle_upserted`, `overlay_ops_emitted`, `trade_upserted`, `decision_emitted`, `log_emitted`, `series_stats_updated`) plus enough data to project downstream,
 - supervisor/container runtime attaches transport metadata such as `bridge_session_id` and `bridge_seq`,
-- backend validates bridge continuity before advancing BotLens state,
+- backend projects canonical BotLens state from bootstrap plus fact batches,
 - backend assigns run-scoped BotLens ordering for summary/open-trade/detail delivery.
 
 Transport:
 - websocket push to `BACKEND_TELEMETRY_WS_URL` when configured,
-- bounded FIFO queueing inside `TelemetryEmitter` and the local process bridge,
-- explicit resync/bootstrap recovery when bridge continuity is not trustworthy.
+- bounded FIFO queueing inside `TelemetryEmitter` and the shared parent fan-in bridge queue,
+- snapshot rehydration plus typed delta replay for viewer recovery when live transport is interrupted.
 
 Service split:
 - `telemetry_stream.py`: ingest queue, projection application, durable `botlens.*` writes, latest run-summary/symbol-detail cache, and runtime-status rebroadcast.
-- `botlens_run_stream.py`: run-scoped websocket viewer attachment, bounded replay ring, viewer hot-symbol tracking, and summary/open-trades/detail fanout.
+- `botlens_run_stream.py`: run-scoped websocket viewer attachment, selected-symbol fanout, and summary/open-trades/detail fanout.
 
 Durability:
 - telemetry transport is supplemental,
@@ -331,21 +331,19 @@ Durability:
 - `series_bar.telemetry` rows are the durable per-bar runtime telemetry source,
 - runtime/trade/status/step-trace rows remain the rest of the durable execution record.
 
-### 9.1) BotLens continuity and ordering semantics
+### 9.1) BotLens ordering and recovery semantics
 
-Bridge continuity and canonical projection ordering are separate concerns.
+Canonical projection ordering and live websocket delivery are separate concerns.
 
 Required semantics:
 - `bridge_seq` is emitted in ascending order per `run_id` / `series_key` / `bridge_session_id`,
 - the bridge preserves FIFO order,
 - a failed send does not advance the queue head,
-- later bootstraps may reset bridge continuity through a new `bridge_session_id`, but they do not redefine durable BotLens ordering,
-- the backend only advances BotLens state after bridge continuity is valid,
-- a continuity gap marks the affected symbol detail `resync_required` instead of merging unknown state,
-- BotLens websocket subscribe attaches to the run once and replays buffered run deltas newer than the client cursor before future-only fanout,
-- one live websocket continuity epoch is identified by `stream_session_id`,
+- bootstraps define the current snapshot baseline for a symbol, but they do not redefine durable BotLens ordering,
+- the backend continues advancing canonical BotLens state from accepted bootstrap and fact batches instead of latching symbol state behind transport continuity,
+- BotLens websocket subscribe attaches to the run once and receives future-only live fanout from that point onward,
 - symbol switching updates viewer subscription state instead of tearing down the websocket,
-- the backend may emit `botlens_run_resync_required` when replay continuity is no longer trustworthy,
+- selected-symbol hydration for live viewers uses a server-sent `botlens_symbol_snapshot` plus replay of queued typed deltas with `seq > snapshot.seq`,
 - and any backlog must be surfaced as explicit backpressure rather than silent compaction.
 
 ### 9.2) Producer backpressure
@@ -354,7 +352,7 @@ Producer backpressure means per-series update production is forced to observe tr
 
 In the current service implementation this entails:
 - `TelemetryEmitter` has a bounded queue,
-- the supervisor process bridge queue is bounded,
+- worker processes publish into one bounded shared parent fan-in bridge queue,
 - runtime subscriber queues may signal a gap instead of crashing runtime execution,
 - `send_message(...)` blocks up to `BOT_TELEMETRY_EMIT_QUEUE_TIMEOUT_MS` when the queue is full,
 - if capacity does not free within that window, the emitter logs backpressure and the bridge schedules a fresh bootstrap requirement,
@@ -368,17 +366,17 @@ Backpressure is therefore an explicit signal that:
 
 It is not a license to silently skip state.
 
-### 9.3) Continuity invalidation and retry semantics
+### 9.3) Snapshot-based recovery semantics
 
-BotLens live recovery is explicit.
+BotLens live recovery is snapshot-based.
 
-When continuity is broken:
-- the backend rotates `stream_session_id`,
-- clears incompatible live-tail replay buffers,
-- emits `botlens_live_resync_required` to current viewers,
-- and closes those sockets so the client must establish a new atomic subscribe.
+When a viewer loses continuity or reconnects after missing live updates:
+- the client refreshes the BotLens session,
+- the server sends a fresh selected-symbol snapshot over the websocket for the active viewer,
+- any typed deltas queued for that viewer/symbol are replayed only for `seq > snapshot.seq`,
+- and the live stream resumes from the new hydrated baseline.
 
-The frontend is expected to retry within a bounded budget and surface a terminal continuity-unavailable state if that budget is exhausted.
+The backend does not persist a `resync_required` latch in canonical symbol state and does not depend on a separate resync event to unblock projection.
 
 ### 9.4) Important non-goal
 
