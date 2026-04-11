@@ -1,6 +1,7 @@
 """Typed-output indicator engine exports."""
 
 from .contracts import (
+    DetailDefinition,
     EngineFrame,
     Indicator,
     IndicatorRuntimeSpec,
@@ -8,9 +9,12 @@ from .contracts import (
     OutputDefinition,
     OutputRef,
     OutputType,
+    RuntimeDetail,
     RuntimeOverlay,
     RuntimeOutput,
+    validate_detail_definitions,
     validate_overlay_definitions,
+    validate_runtime_detail,
     validate_runtime_overlay,
     validate_output_definitions,
     validate_runtime_output,
@@ -27,16 +31,20 @@ from .signal_output import (
 
 __all__ = [
     "EngineFrame",
+    "DetailDefinition",
     "Indicator",
     "IndicatorRuntimeSpec",
     "OverlayDefinition",
     "OutputDefinition",
     "OutputRef",
     "OutputType",
+    "RuntimeDetail",
     "RuntimeOverlay",
     "RuntimeOutput",
     "IndicatorExecutionEngine",
+    "validate_detail_definitions",
     "validate_overlay_definitions",
+    "validate_runtime_detail",
     "validate_runtime_overlay",
     "validate_output_definitions",
     "validate_runtime_output",

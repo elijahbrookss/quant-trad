@@ -36,6 +36,11 @@ class OverlayDefinition:
 
 
 @dataclass(frozen=True)
+class DetailDefinition:
+    name: str
+
+
+@dataclass(frozen=True)
 class IndicatorRuntimeSpec:
     instance_id: str
     manifest_type: str
@@ -43,6 +48,7 @@ class IndicatorRuntimeSpec:
     dependencies: Tuple[OutputRef, ...]
     outputs: Tuple[OutputDefinition, ...]
     overlays: Tuple[OverlayDefinition, ...] = ()
+    details: Tuple[DetailDefinition, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -74,9 +80,24 @@ class RuntimeOverlay:
 
 
 @dataclass(frozen=True)
+class RuntimeDetail:
+    bar_time: datetime
+    ready: bool
+    value: dict[str, Any]
+
+    def copy(self) -> "RuntimeDetail":
+        return RuntimeDetail(
+            bar_time=self.bar_time,
+            ready=bool(self.ready),
+            value=deepcopy(dict(self.value or {})),
+        )
+
+
+@dataclass(frozen=True)
 class EngineFrame:
     outputs: dict[str, RuntimeOutput]
     overlays: dict[str, RuntimeOverlay]
+    details: dict[str, RuntimeDetail] = field(default_factory=dict)
     guard_metrics: Tuple["IndicatorGuardMetric", ...] = ()
     guard_warnings: Tuple["IndicatorGuardWarning", ...] = ()
 
@@ -125,6 +146,10 @@ class Indicator(ABC):
         """Return all declared overlays for the current bar."""
         return {}
 
+    def detail_snapshot(self) -> Mapping[str, RuntimeDetail]:
+        """Return all declared detail payloads for the current bar."""
+        return {}
+
     def configure_replay_window(self, *, history_bars: int | None = None) -> None:
         """Allow walk-forward window consumers to provide execution hints."""
         _ = history_bars
@@ -162,6 +187,17 @@ def validate_overlay_definitions(definitions: Sequence[OverlayDefinition]) -> No
             raise RuntimeError(
                 f"indicator_manifest_invalid: overlay type required name={name}"
             )
+        seen.add(name)
+
+
+def validate_detail_definitions(definitions: Sequence[DetailDefinition]) -> None:
+    seen: set[str] = set()
+    for definition in definitions:
+        name = str(definition.name or "").strip()
+        if not name:
+            raise RuntimeError("indicator_manifest_invalid: detail name is required")
+        if name in seen:
+            raise RuntimeError(f"indicator_manifest_invalid: duplicate detail name={name}")
         seen.add(name)
 
 
@@ -240,6 +276,36 @@ def validate_runtime_overlay(
     if not overlay.ready:
         return
     _validate_canonical_overlay(definition.name, definition.overlay_type, overlay.value)
+
+
+def validate_runtime_detail(
+    *,
+    definition: DetailDefinition,
+    detail: RuntimeDetail,
+    bar_time: datetime,
+    dependency_inputs: Mapping[OutputRef, RuntimeOutput],
+) -> None:
+    if not isinstance(detail, RuntimeDetail):
+        raise RuntimeError(
+            f"indicator_detail_invalid: detail={definition.name} runtime detail required"
+        )
+    if detail.bar_time != bar_time:
+        raise RuntimeError(
+            "indicator_detail_invalid: bar_time mismatch "
+            f"detail={definition.name} expected={bar_time} actual={detail.bar_time}"
+        )
+    if not isinstance(detail.ready, bool):
+        raise RuntimeError(
+            f"indicator_detail_invalid: detail={definition.name} ready must be bool"
+        )
+    if not isinstance(detail.value, dict):
+        raise RuntimeError(
+            f"indicator_detail_invalid: detail={definition.name} value must be dict"
+        )
+    if any(not dep.ready for dep in dependency_inputs.values()) and detail.ready:
+        raise RuntimeError(
+            f"indicator_detail_invalid: dependency_not_ready detail={definition.name}"
+        )
 
 
 def _validate_signal_output(output_name: str, value: Mapping[str, Any]) -> None:
@@ -340,6 +406,7 @@ def _validate_canonical_overlay(
 
 
 __all__ = [
+    "DetailDefinition",
     "EngineFrame",
     "Indicator",
     "IndicatorGuardMetric",
@@ -349,10 +416,13 @@ __all__ = [
     "OutputDefinition",
     "OutputRef",
     "OutputType",
+    "RuntimeDetail",
     "RuntimeOverlay",
     "RuntimeOutput",
     "output_ref_key",
+    "validate_detail_definitions",
     "validate_overlay_definitions",
+    "validate_runtime_detail",
     "validate_output_definitions",
     "validate_runtime_output",
     "validate_runtime_overlay",

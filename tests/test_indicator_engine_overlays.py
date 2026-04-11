@@ -6,11 +6,13 @@ from typing import Any, Mapping
 import engines.indicator_engine.runtime_engine as runtime_engine_module
 from engines.bot_runtime.core.domain import Candle
 from engines.indicator_engine.contracts import (
+    DetailDefinition,
     Indicator,
     IndicatorRuntimeSpec,
     OverlayDefinition,
     OutputDefinition,
     OutputRef,
+    RuntimeDetail,
     RuntimeOverlay,
     RuntimeOutput,
 )
@@ -249,6 +251,39 @@ class _GuardedOverlayIndicator(Indicator):
         }
 
 
+class _DetailIndicator(Indicator):
+    def __init__(self) -> None:
+        self.runtime_spec = IndicatorRuntimeSpec(
+            instance_id="detailed",
+            manifest_type="detailed",
+            version="v1",
+            dependencies=(),
+            outputs=(OutputDefinition(name="metric", type="metric"),),
+            details=(DetailDefinition(name="readout"),),
+        )
+
+    def apply_bar(self, bar: Any, inputs: Mapping[OutputRef, RuntimeOutput]) -> None:
+        _ = bar, inputs
+
+    def snapshot(self) -> Mapping[str, RuntimeOutput]:
+        return {
+            "metric": RuntimeOutput(
+                bar_time=BAR_TIME,
+                ready=True,
+                value={"value": 1.0},
+            )
+        }
+
+    def detail_snapshot(self) -> Mapping[str, RuntimeDetail]:
+        return {
+            "readout": RuntimeDetail(
+                bar_time=BAR_TIME,
+                ready=True,
+                value={"blocks": [{"x1": 1, "x2": 2}]},
+            )
+        }
+
+
 BAR_TIME = datetime(2026, 3, 17, 12, 0, tzinfo=timezone.utc)
 
 
@@ -261,6 +296,15 @@ def test_indicator_engine_returns_outputs_and_overlays() -> None:
     assert frame.outputs["source.signal"].value == {"events": [{"key": "go"}]}
     assert frame.overlays["source.markers"].ready is True
     assert frame.overlays["source.markers"].value["type"] == "test_indicator_overlay"
+
+
+def test_indicator_engine_returns_declared_details() -> None:
+    engine = IndicatorExecutionEngine([_DetailIndicator()])
+
+    frame = engine.step(bar=object(), bar_time=BAR_TIME)
+
+    assert frame.details["detailed.readout"].ready is True
+    assert frame.details["detailed.readout"].value["blocks"][0]["x1"] == 1
 
 
 def test_build_line_overlay_emits_single_polyline_payload() -> None:
@@ -348,7 +392,7 @@ def test_indicator_guard_emits_time_budget_warning_after_repeated_breaches() -> 
     )
 
     original_perf_counter = runtime_engine_module.time.perf_counter
-    perf_samples = iter([0.0, 0.020, 0.030, 0.050])
+    perf_samples = iter([0.0, 0.020, 0.020, 0.020, 0.030, 0.050, 0.050, 0.050])
     runtime_engine_module.time.perf_counter = lambda: next(perf_samples)
     try:
         first = engine.step(bar=object(), bar_time=BAR_TIME, include_overlays=False)

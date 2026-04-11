@@ -10,6 +10,7 @@ import time
 from typing import Any, Deque, Dict, Iterable, Mapping
 
 from .contracts import (
+    DetailDefinition,
     EngineFrame,
     Indicator,
     IndicatorGuardMetric,
@@ -18,12 +19,15 @@ from .contracts import (
     OverlayDefinition,
     OutputRef,
     OutputType,
+    RuntimeDetail,
     RuntimeOverlay,
     RuntimeOutput,
     output_ref_key,
+    validate_detail_definitions,
     validate_overlay_definitions,
-    validate_runtime_overlay,
     validate_output_definitions,
+    validate_runtime_detail,
+    validate_runtime_overlay,
     validate_runtime_output,
 )
 
@@ -70,6 +74,7 @@ class IndicatorExecutionEngine:
         self._runtime_specs_by_id: Dict[str, IndicatorRuntimeSpec] = {}
         self._output_defs: Dict[OutputRef, OutputType] = {}
         self._overlay_defs: Dict[str, Dict[str, OverlayDefinition]] = {}
+        self._detail_defs: Dict[str, Dict[str, DetailDefinition]] = {}
         self._guard_config = guard_config or IndicatorGuardConfig.disabled()
         self._guard_state_by_id: Dict[str, Dict[str, Any]] = {}
         for indicator in indicators:
@@ -83,10 +88,14 @@ class IndicatorExecutionEngine:
                 raise RuntimeError(f"indicator_engine_invalid: duplicate indicator id={indicator_id}")
             validate_output_definitions(runtime_spec.outputs)
             validate_overlay_definitions(runtime_spec.overlays)
+            validate_detail_definitions(runtime_spec.details)
             self._indicators_by_id[indicator_id] = indicator
             self._runtime_specs_by_id[indicator_id] = runtime_spec
             self._overlay_defs[indicator_id] = {
                 overlay.name: overlay for overlay in runtime_spec.overlays
+            }
+            self._detail_defs[indicator_id] = {
+                detail.name: detail for detail in runtime_spec.details
             }
             for output in runtime_spec.outputs:
                 ref = OutputRef(indicator_id=indicator_id, output_name=output.name)
@@ -116,6 +125,7 @@ class IndicatorExecutionEngine:
         by_ref: Dict[OutputRef, RuntimeOutput] = {}
         flat: Dict[str, RuntimeOutput] = {}
         flat_overlays: Dict[str, RuntimeOverlay] = {}
+        flat_details: Dict[str, RuntimeDetail] = {}
         guard_metrics: list[IndicatorGuardMetric] = []
         guard_warnings: list[IndicatorGuardWarning] = []
         for indicator_id in self._order:
@@ -144,6 +154,25 @@ class IndicatorExecutionEngine:
                 ref = OutputRef(indicator_id=indicator_id, output_name=output_name)
                 by_ref[ref] = copied
                 flat[output_ref_key(indicator_id, output_name)] = copied
+
+            detail_started = time.perf_counter()
+            details = dict(indicator.detail_snapshot())
+            detail_time_ms = max((time.perf_counter() - detail_started) * 1000.0, 0.0)
+            declared_details = self._detail_defs[indicator_id]
+            if set(details.keys()) != set(declared_details.keys()):
+                raise RuntimeError(
+                    "indicator_detail_invalid: detail presence mismatch "
+                    f"indicator_id={indicator_id} declared={sorted(declared_details.keys())} returned={sorted(details.keys())}"
+                )
+            for detail_name, definition in declared_details.items():
+                runtime_detail = details[detail_name]
+                validate_runtime_detail(
+                    definition=definition,
+                    detail=runtime_detail,
+                    bar_time=bar_time,
+                    dependency_inputs=inputs,
+                )
+                flat_details[output_ref_key(indicator_id, detail_name)] = runtime_detail.copy()
 
             overlay_time_ms = 0.0
             overlay_count = 0
@@ -223,7 +252,7 @@ class IndicatorExecutionEngine:
                             )
                         )
 
-            total_time_ms = execution_time_ms + overlay_time_ms
+            total_time_ms = execution_time_ms + detail_time_ms + overlay_time_ms
             guard_metrics.append(
                 IndicatorGuardMetric(
                     indicator_id=indicator_id,
@@ -247,6 +276,7 @@ class IndicatorExecutionEngine:
         return EngineFrame(
             outputs=flat,
             overlays=flat_overlays,
+            details=flat_details,
             guard_metrics=tuple(guard_metrics),
             guard_warnings=tuple(guard_warnings),
         )

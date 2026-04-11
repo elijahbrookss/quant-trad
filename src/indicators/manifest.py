@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Literal, Mapping, Sequence
 
 from engines.indicator_engine.contracts import (
+    DetailDefinition,
     IndicatorRuntimeSpec,
     OutputDefinition,
     OutputRef,
@@ -72,6 +73,13 @@ class IndicatorOverlay:
 
 
 @dataclass(frozen=True)
+class IndicatorDetail:
+    name: str
+    label: str
+    description: str = ""
+
+
+@dataclass(frozen=True)
 class IndicatorColorPalette:
     key: str
     label: str
@@ -109,6 +117,7 @@ class IndicatorManifest:
     params: tuple[IndicatorParam, ...] = ()
     outputs: tuple[IndicatorOutput, ...] = ()
     overlays: tuple[IndicatorOverlay, ...] = ()
+    details: tuple[IndicatorDetail, ...] = ()
     dependencies: tuple[IndicatorDependency, ...] = ()
     runtime_inputs: tuple[IndicatorRuntimeInput, ...] = ()
 
@@ -186,6 +195,19 @@ def validate_indicator_manifest(manifest: IndicatorManifest) -> None:
                 f"indicator_manifest_invalid: duplicate overlay name type={manifest_type} name={name}"
             )
         seen_overlays.add(name)
+
+    seen_details: set[str] = set()
+    for detail in manifest.details:
+        name = str(detail.name or "").strip()
+        if not name:
+            raise RuntimeError(
+                f"indicator_manifest_invalid: detail name required type={manifest_type}"
+            )
+        if name in seen_details:
+            raise RuntimeError(
+                f"indicator_manifest_invalid: duplicate detail name type={manifest_type} name={name}"
+            )
+        seen_details.add(name)
 
     seen_palettes: set[str] = set()
     for palette in manifest.color_palettes:
@@ -280,6 +302,17 @@ def manifest_overlay_catalog(manifest: IndicatorManifest) -> list[dict[str, Any]
     ]
 
 
+def manifest_detail_catalog(manifest: IndicatorManifest) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": detail.name,
+            "label": detail.label,
+            "description": detail.description,
+        }
+        for detail in manifest.details
+    ]
+
+
 def manifest_color_palette_catalog(manifest: IndicatorManifest) -> list[dict[str, Any]]:
     return [
         {
@@ -357,6 +390,7 @@ def serialize_indicator_manifest(manifest: IndicatorManifest) -> dict[str, Any]:
         ],
         "outputs": manifest_output_catalog(manifest),
         "overlays": manifest_overlay_catalog(manifest),
+        "details": manifest_detail_catalog(manifest),
         "dependencies": [
             {
                 "indicator_type": dependency.indicator_type,
@@ -405,6 +439,10 @@ def build_runtime_spec(
         overlays=tuple(
             OverlayDefinition(name=overlay.name, overlay_type=overlay.overlay_type)
             for overlay in manifest.overlays
+        ),
+        details=tuple(
+            DetailDefinition(name=detail.name)
+            for detail in manifest.details
         ),
     )
 
