@@ -137,9 +137,8 @@ export async function fetchBotLensSeriesHistory(runId, seriesKey, { beforeTs, li
   return request(`/api/bots/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/history?${params.toString()}`)
 }
 
-export function openBotLensLiveStream(botId, { symbolKey, cursorSeq = 0 } = {}) {
+export function openBotLensLiveStream(botId, { symbolKey } = {}) {
   const params = new URLSearchParams()
-  params.set('cursor_seq', String(Math.max(0, Number(cursorSeq) || 0)))
   if (symbolKey) params.set('symbol_key', String(symbolKey))
   const path = `/api/bots/ws/${encodeURIComponent(botId)}/botlens/live?${params.toString()}`
   return openWebSocket(path, { base: BASE })

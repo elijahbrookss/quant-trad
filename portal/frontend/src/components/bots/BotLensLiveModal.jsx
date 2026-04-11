@@ -17,14 +17,15 @@ import {
 } from '../../adapters/bot.adapter.js'
 import { describeBotLifecycle, getBotRunId, getBotStatus, normalizeBotStatus } from './botStatusModel.js'
 import {
-  applyDetailDelta,
-  applyDetailSnapshot,
+  applySymbolSnapshot,
   applyHistoryPage,
   applyOpenTradesDelta,
   applySummaryDelta,
-  canonicalSeriesKey,
+  applyTypedSymbolDelta,
   createRunStore,
-  getSelectedDetail,
+  getSelectedSymbolSlices,
+  isSymbolSnapshotMessage,
+  isTypedSymbolDeltaMessage,
   normalizeSeriesKey,
   selectSymbol,
 } from './botlensProjection.js'
@@ -153,7 +154,8 @@ export function BotLensLiveModal({ open, bot, onClose }) {
   const reconnectRef = useRef(0)
   const bootstrapTokenRef = useRef(0)
   const ledgerTokenRef = useRef(0)
-  const detailLoadRef = useRef(new Set())
+  const snapshotLoadRef = useRef(new Set())
+  const socketSubscriptionRef = useRef({ socket: null, symbolKey: null })
   const symbolSwitchRef = useRef({ symbolKey: null, requestedAt: 0, cacheHit: false, resolved: false })
   const [runStore, setRunStore] = useState(null)
   const [statusMessage, setStatusMessage] = useState('')
@@ -177,28 +179,29 @@ export function BotLensLiveModal({ open, bot, onClose }) {
         socketRef.current.close()
       } catch {}
     }
+    socketSubscriptionRef.current = { socket: null, symbolKey: null }
     socketRef.current = null
   }, [])
 
   const syncSocketSubscription = useCallback((socket, store) => {
     if (!socket || socket.readyState !== WebSocket.OPEN || !store) return
     const selectedSymbolKey = normalizeSeriesKey(store.selectedSymbolKey || '')
-    const hotSymbols = Object.keys(store.detailCache || {})
-      .map((entry) => normalizeSeriesKey(entry))
-      .filter(Boolean)
-    if (selectedSymbolKey) {
-      socket.send(JSON.stringify({ type: 'set_selected_symbol', symbol_key: selectedSymbolKey }))
-    }
-    socket.send(JSON.stringify({ type: 'set_hot_symbols', symbol_keys: hotSymbols }))
+    if (!selectedSymbolKey) return
+    const current = socketSubscriptionRef.current
+    if (current.socket === socket && current.symbolKey === selectedSymbolKey) return
+    socket.send(JSON.stringify({ type: 'set_selected_symbol', symbol_key: selectedSymbolKey }))
+    socketSubscriptionRef.current = { socket, symbolKey: selectedSymbolKey }
   }, [])
 
   const refreshSession = useCallback(() => {
+    snapshotLoadRef.current.clear()
     setReloadTick((value) => value + 1)
   }, [])
 
   useEffect(() => {
     if (!open || !bot?.id) {
       closeSocket()
+      snapshotLoadRef.current.clear()
       setRunStore(null)
       setStatusMessage('')
       setError(null)
@@ -234,7 +237,7 @@ export function BotLensLiveModal({ open, bot, onClose }) {
           run_id: store.runMeta?.run_id || null,
           symbol_count: Object.keys(store.symbolIndex || {}).length,
           open_trade_count: Object.keys(store.openTradesIndex || {}).length,
-          detail_cache_size: Object.keys(store.detailCache || {}).length,
+          snapshot_cache_size: Object.keys(store.symbolSnapshots || {}).length,
           bootstrap_ms: Math.round((performance.now() - bootstrapStartedAt) * 1000) / 1000,
         })
         if (!session.live) {
@@ -245,19 +248,17 @@ export function BotLensLiveModal({ open, bot, onClose }) {
         setStreamState('connecting')
         const socket = openBotLensLiveStream(bot.id, {
           symbolKey: store.selectedSymbolKey,
-          cursorSeq: store.seq || 0,
         })
         socketRef.current = socket
 
         socket.onopen = () => {
           if (cancelled || token !== bootstrapTokenRef.current) return
           setStreamState('open')
-          syncSocketSubscription(socket, store)
+          socketSubscriptionRef.current = { socket, symbolKey: normalizeSeriesKey(store.selectedSymbolKey || '') || null }
           logger.info('botlens_run_ws_open', {
             bot_id: bot.id,
             run_id: store.runMeta?.run_id || null,
             selected_symbol_key: store.selectedSymbolKey || null,
-            cursor_seq: store.seq || 0,
           })
         }
 
@@ -270,13 +271,6 @@ export function BotLensLiveModal({ open, bot, onClose }) {
               setStreamState('open')
               return
             }
-            if (type === 'botlens_run_resync_required') {
-              setStatusMessage(`BotLens resync required: ${message?.payload?.reason || 'stream continuity changed'}`)
-              setStreamState('resyncing')
-              closeSocket()
-              refreshSession()
-              return
-            }
             if (type === 'botlens_run_summary_delta') {
               setRunStore((current) => (current ? applySummaryDelta(current, message) : current))
               return
@@ -285,8 +279,34 @@ export function BotLensLiveModal({ open, bot, onClose }) {
               setRunStore((current) => (current ? applyOpenTradesDelta(current, message) : current))
               return
             }
-            if (type === 'botlens_symbol_detail_delta') {
-              setRunStore((current) => (current ? applyDetailDelta(current, message) : current))
+            if (isSymbolSnapshotMessage(message)) {
+              const symbolKey = normalizeSeriesKey(message?.symbol_key || message?.payload?.symbol_key || '')
+              setRunStore((current) => (
+                current
+                  ? applySymbolSnapshot(current, {
+                    symbol_key: message?.symbol_key,
+                    seq: message?.seq,
+                    detail: message?.payload,
+                  })
+                  : current
+              ))
+              setLoadingDetailSymbolKey((current) => (current === symbolKey ? null : current))
+              const snapshotLabel = String(message?.payload?.display_label || symbolKey || 'selected symbol')
+              setStatusMessage(`Viewing ${snapshotLabel}`)
+              const switchState = symbolSwitchRef.current
+              if (switchState.symbolKey === symbolKey) {
+                switchState.resolved = true
+              }
+              logger.info('botlens_symbol_snapshot_streamed', {
+                bot_id: bot.id,
+                run_id: store.runMeta?.run_id || null,
+                symbol_key: symbolKey || null,
+                seq: Number(message?.seq || 0),
+              })
+              return
+            }
+            if (isTypedSymbolDeltaMessage(message)) {
+              setRunStore((current) => (current ? applyTypedSymbolDelta(current, message) : current))
             }
           } catch (err) {
             logger.warn('botlens_run_ws_parse_failed', { bot_id: bot.id }, err)
@@ -301,6 +321,7 @@ export function BotLensLiveModal({ open, bot, onClose }) {
 
         socket.onclose = () => {
           if (cancelled || token !== bootstrapTokenRef.current) return
+          socketSubscriptionRef.current = { socket: null, symbolKey: null }
           socketRef.current = null
           const liveRunId = store.runMeta?.run_id || null
           const shouldRetry = liveRunId && reconnectRef.current < 2
@@ -325,57 +346,64 @@ export function BotLensLiveModal({ open, bot, onClose }) {
     load()
     return () => {
       cancelled = true
+      snapshotLoadRef.current.clear()
       closeSocket()
     }
-  }, [bot?.id, closeSocket, logger, open, refreshSession, reloadTick, syncSocketSubscription])
+  }, [bot?.id, closeSocket, logger, open, refreshSession, reloadTick])
 
   const selectedSymbolKey = normalizeSeriesKey(runStore?.selectedSymbolKey || '')
-  const selectedDetail = useMemo(() => getSelectedDetail(runStore), [runStore])
+  const selectedSymbolSlices = useMemo(() => getSelectedSymbolSlices(runStore), [runStore])
+  const selectedSnapshot = selectedSymbolSlices?.snapshot || null
   const selectedSummary = selectedSymbolKey ? runStore?.symbolIndex?.[selectedSymbolKey] || null : null
-  const selectedLabel = selectedDetail?.display_label || selectedSummary?.display_label || selectedSymbolKey || '—'
+  const selectedLabel = selectedSymbolSlices?.metadata?.display_label || selectedSummary?.display_label || selectedSymbolKey || '—'
 
   useEffect(() => {
     if (!open || !runStore || !runStore.runMeta?.run_id || !selectedSymbolKey) return
     const socket = socketRef.current
     syncSocketSubscription(socket, runStore)
-    if (runStore.detailCache?.[selectedSymbolKey]) {
-      const switchState = symbolSwitchRef.current
+    const selectedCachedSnapshot = runStore.symbolSnapshots?.[selectedSymbolKey] || null
+    const switchState = symbolSwitchRef.current
+    if (selectedCachedSnapshot) {
       if (switchState.symbolKey === selectedSymbolKey && !switchState.resolved) {
         switchState.resolved = true
-        logger.info('botlens_symbol_detail_cache_hit', {
+        logger.info('botlens_symbol_snapshot_cache_hit', {
           bot_id: bot?.id || null,
           run_id: runStore.runMeta.run_id,
           symbol_key: selectedSymbolKey,
           switch_ms: Math.round((performance.now() - Number(switchState.requestedAt || performance.now())) * 1000) / 1000,
-          detail_cache_size: Object.keys(runStore.detailCache || {}).length,
+          snapshot_cache_size: Object.keys(runStore.symbolSnapshots || {}).length,
         })
       }
+      if (runStore.live) return
+    } else if (runStore.live) {
+      setLoadingDetailSymbolKey(selectedSymbolKey)
+      setStatusMessage(`Loading symbol snapshot for ${selectedLabel}...`)
       return
     }
-    if (detailLoadRef.current.has(selectedSymbolKey)) return
+    if (snapshotLoadRef.current.has(selectedSymbolKey)) return
 
     let cancelled = false
     const fetchStartedAt = performance.now()
-    detailLoadRef.current.add(selectedSymbolKey)
+    snapshotLoadRef.current.add(selectedSymbolKey)
     setLoadingDetailSymbolKey(selectedSymbolKey)
-    setStatusMessage(`Loading detail for ${selectedLabel}...`)
-    logger.info('botlens_symbol_detail_fetch_started', {
+    setStatusMessage(`Loading symbol snapshot for ${selectedLabel}...`)
+    logger.info('botlens_symbol_snapshot_fetch_started', {
       bot_id: bot?.id || null,
       run_id: runStore.runMeta.run_id,
       symbol_key: selectedSymbolKey,
-      detail_cache_size: Object.keys(runStore.detailCache || {}).length,
+      reason: 'cache_miss',
+      snapshot_cache_size: Object.keys(runStore.symbolSnapshots || {}).length,
     })
 
     fetchBotLensSymbolDetail(runStore.runMeta.run_id, selectedSymbolKey, { limit: 320 })
       .then((detail) => {
         if (cancelled) return
-        setRunStore((current) => (current ? applyDetailSnapshot(current, detail) : current))
+        setRunStore((current) => (current ? applySymbolSnapshot(current, detail) : current))
         setStatusMessage(`Viewing ${selectedLabel}`)
-        const switchState = symbolSwitchRef.current
         if (switchState.symbolKey === selectedSymbolKey) {
           switchState.resolved = true
         }
-        logger.info('botlens_symbol_detail_fetch_succeeded', {
+        logger.info('botlens_symbol_snapshot_fetch_succeeded', {
           bot_id: bot?.id || null,
           run_id: runStore.runMeta.run_id,
           symbol_key: selectedSymbolKey,
@@ -389,8 +417,8 @@ export function BotLensLiveModal({ open, bot, onClose }) {
       })
       .catch((err) => {
         if (cancelled) return
-        setError(err?.message || `Failed to load detail for ${selectedLabel}`)
-        logger.warn('botlens_symbol_detail_failed', {
+        setError(err?.message || `Failed to load symbol snapshot for ${selectedLabel}`)
+        logger.warn('botlens_symbol_snapshot_failed', {
           bot_id: bot?.id || null,
           run_id: runStore.runMeta.run_id,
           symbol_key: selectedSymbolKey,
@@ -398,8 +426,10 @@ export function BotLensLiveModal({ open, bot, onClose }) {
         }, err)
       })
       .finally(() => {
-        detailLoadRef.current.delete(selectedSymbolKey)
-        if (!cancelled) setLoadingDetailSymbolKey(null)
+        snapshotLoadRef.current.delete(selectedSymbolKey)
+        if (!cancelled) {
+          setLoadingDetailSymbolKey(null)
+        }
       })
 
     return () => {
@@ -490,10 +520,10 @@ export function BotLensLiveModal({ open, bot, onClose }) {
     return byKey
   }, [runStore?.symbolIndex])
 
-  const chartCandles = Array.isArray(selectedDetail?.candles) ? selectedDetail.candles : []
-  const chartTrades = Array.isArray(selectedDetail?.recent_trades) ? selectedDetail.recent_trades : []
-  const chartOverlays = Array.isArray(selectedDetail?.overlays) ? selectedDetail.overlays : []
-  const logs = Array.isArray(selectedDetail?.logs) ? selectedDetail.logs : []
+  const chartCandles = selectedSymbolSlices?.candles || []
+  const chartTrades = selectedSymbolSlices?.recentTrades || []
+  const chartOverlays = selectedSymbolSlices?.overlays || []
+  const logs = selectedSymbolSlices?.logs || []
   const { overlayOptions, visibility, visibleOverlays, toggleOverlay } = useOverlayControls({ overlays: chartOverlays })
   const botLifecycle = describeBotLifecycle(bot)
   const activeRunId = runStore?.runMeta?.run_id || getBotRunId(bot)
@@ -521,7 +551,11 @@ export function BotLensLiveModal({ open, bot, onClose }) {
   const changeSelectedSymbol = useCallback((symbolKey) => {
     const normalizedSymbolKey = normalizeSeriesKey(symbolKey)
     if (!normalizedSymbolKey) return
-    const cacheHit = Boolean(runStore?.detailCache?.[normalizedSymbolKey])
+    const previousSelectedSymbolKey = normalizeSeriesKey(runStore?.selectedSymbolKey || '')
+    if (previousSelectedSymbolKey && previousSelectedSymbolKey !== normalizedSymbolKey) {
+      snapshotLoadRef.current.delete(previousSelectedSymbolKey)
+    }
+    const cacheHit = Boolean(runStore?.symbolSnapshots?.[normalizedSymbolKey])
     symbolSwitchRef.current = {
       symbolKey: normalizedSymbolKey,
       requestedAt: performance.now(),
@@ -533,14 +567,18 @@ export function BotLensLiveModal({ open, bot, onClose }) {
       run_id: runStore?.runMeta?.run_id || null,
       symbol_key: normalizedSymbolKey,
       cache_hit: cacheHit,
-      detail_cache_size: Object.keys(runStore?.detailCache || {}).length,
+      snapshot_cache_size: Object.keys(runStore?.symbolSnapshots || {}).length,
     })
+    if (runStore?.live && !cacheHit) {
+      setLoadingDetailSymbolKey(normalizedSymbolKey)
+      setStatusMessage(`Loading symbol snapshot for ${normalizedSymbolKey}...`)
+    }
     setRunStore((current) => (current ? selectSymbol(current, symbolKey) : current))
   }, [bot?.id, logger, runStore])
 
   const loadOlderHistory = useCallback(async () => {
-    if (!runStore?.runMeta?.run_id || !selectedSymbolKey || !selectedDetail?.candles?.length) return
-    const oldest = selectedDetail.candles[0]
+    if (!runStore?.runMeta?.run_id || !selectedSymbolKey || !selectedSnapshot?.candles?.length) return
+    const oldest = selectedSnapshot.candles[0]
     const beforeTs = oldest?.time ? new Date(Number(oldest.time) * 1000).toISOString() : undefined
     try {
       const historyStartedAt = performance.now()
@@ -562,7 +600,7 @@ export function BotLensLiveModal({ open, bot, onClose }) {
         symbol_key: selectedSymbolKey,
       }, err)
     }
-  }, [bot?.id, logger, runStore, selectedDetail?.candles, selectedSymbolKey])
+  }, [bot?.id, logger, runStore, selectedSnapshot?.candles, selectedSymbolKey])
 
   useEffect(() => {
     if (!hoveredTradeId) return
@@ -703,7 +741,7 @@ export function BotLensLiveModal({ open, bot, onClose }) {
                     <button
                       type="button"
                       onClick={loadOlderHistory}
-                      disabled={!selectedDetail?.candles?.length}
+                      disabled={!selectedSnapshot?.candles?.length}
                       className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-slate-300 transition hover:border-[color:var(--accent-alpha-30)] hover:text-[color:var(--accent-text-strong)] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       Load older
@@ -763,7 +801,7 @@ export function BotLensLiveModal({ open, bot, onClose }) {
               </div>
 
               <div className="mb-4 rounded-2xl border border-white/10 bg-black/20 p-3">
-                {selectedDetail ? (
+                {selectedSnapshot ? (
                   <BotLensChart
                     chartId={`botlens-live-${bot.id}`}
                     candles={chartCandles}
@@ -771,14 +809,16 @@ export function BotLensLiveModal({ open, bot, onClose }) {
                     overlays={visibleOverlays}
                     mode={bot.mode}
                     playbackSpeed={Number(bot.playback_speed || 0)}
-                    timeframe={selectedDetail?.timeframe || null}
+                    timeframe={selectedSnapshot?.timeframe || null}
                     overlayVisibility={visibility}
                     followLive={followLive}
                     heightClass="h-[430px]"
                   />
                 ) : (
                   <div className="flex h-[430px] items-center justify-center rounded-xl border border-dashed border-white/10 text-sm text-slate-400">
-                    {loadingDetailSymbolKey === selectedSymbolKey ? `Loading detail for ${selectedLabel}...` : 'Select a symbol to load detail.'}
+                    {loadingDetailSymbolKey === selectedSymbolKey
+                      ? `Loading symbol snapshot for ${selectedLabel}...`
+                      : 'Select a symbol to load its snapshot.'}
                   </div>
                 )}
               </div>
@@ -818,15 +858,14 @@ export function BotLensLiveModal({ open, bot, onClose }) {
                         />
                       </div>
                       <div>
-                        <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.32em] text-slate-500">Selected Detail</p>
+                        <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.32em] text-slate-500">Selected Symbol Snapshot</p>
                         <DataRows
                           rows={[
-                            { key: 'detail-status', label: 'Detail Status', value: selectedDetail?.status || selectedSummary?.status || '—' },
-                            { key: 'continuity', label: 'Continuity', value: selectedDetail?.continuity?.status || selectedSummary?.continuity_status || '—' },
-                            { key: 'last-event', label: 'Last Event', value: formatMoment(selectedDetail?.last_event_at || selectedSummary?.last_event_at) },
+                            { key: 'snapshot-status', label: 'Snapshot Status', value: selectedSnapshot?.status || selectedSummary?.status || '—' },
+                            { key: 'last-event', label: 'Last Event', value: formatMoment(selectedSnapshot?.last_event_at || selectedSummary?.last_event_at) },
                             { key: 'candles', label: 'Recent Candles', value: String(chartCandles.length) },
                             { key: 'recent-trades', label: 'Recent Trades', value: String(chartTrades.length) },
-                            { key: 'net-pnl', label: 'Net P&L', value: formatNumber(Number(selectedDetail?.stats?.net_pnl || selectedSummary?.stats?.net_pnl || 0)) },
+                            { key: 'net-pnl', label: 'Net P&L', value: formatNumber(Number(selectedSymbolSlices?.stats?.net_pnl || selectedSummary?.stats?.net_pnl || 0)) },
                           ]}
                         />
                       </div>
@@ -930,8 +969,8 @@ export function BotLensLiveModal({ open, bot, onClose }) {
                           { key: 'stream-state', label: 'Stream State', value: streamState },
                           { key: 'cursor', label: 'Cursor', value: String(runStore.seq || 0) },
                           { key: 'selected', label: 'Selected Symbol', value: selectedLabel },
-                          { key: 'cache-size', label: 'Detail Cache', value: String(Object.keys(runStore.detailCache || {}).length) },
-                          { key: 'loading', label: 'Loading Detail', value: loadingDetailSymbolKey || '—' },
+                          { key: 'cache-size', label: 'Snapshot Cache', value: String(Object.keys(runStore.symbolSnapshots || {}).length) },
+                          { key: 'loading', label: 'Loading Snapshot', value: loadingDetailSymbolKey || '—' },
                         ]}
                       />
                     </div>

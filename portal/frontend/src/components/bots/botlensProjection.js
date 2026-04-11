@@ -1,13 +1,30 @@
 import { toFiniteNumber, toSec } from './chartDataUtils.js'
 import { createLogger } from '../../utils/logger.js'
 
-const DEFAULT_DETAIL_CACHE_LIMIT = 6
+const DEFAULT_SYMBOL_SNAPSHOT_LIMIT = 6
 const MAX_LOGS = 300
 const MAX_DECISIONS = 600
 const MAX_TRADES = 240
-const DETAIL_DELTA_DROP_WARN_INTERVAL_MS = 10000
+const SYMBOL_DELTA_DROP_WARN_INTERVAL_MS = 10000
 const logger = createLogger('botlensProjection')
-const detailDeltaDropWarnings = new Map()
+const symbolDeltaDropWarnings = new Map()
+
+export const SYMBOL_CANDLE_DELTA_TYPE = 'symbol_candle_delta'
+export const SYMBOL_OVERLAY_DELTA_TYPE = 'symbol_overlay_delta'
+export const SYMBOL_TRADE_DELTA_TYPE = 'symbol_trade_delta'
+export const SYMBOL_LOG_DELTA_TYPE = 'symbol_log_delta'
+export const SYMBOL_DECISION_DELTA_TYPE = 'symbol_decision_delta'
+export const SYMBOL_RUNTIME_DELTA_TYPE = 'symbol_runtime_delta'
+export const SYMBOL_SNAPSHOT_MESSAGE_TYPE = 'botlens_symbol_snapshot'
+
+const SYMBOL_DELTA_TYPES = new Set([
+  SYMBOL_CANDLE_DELTA_TYPE,
+  SYMBOL_OVERLAY_DELTA_TYPE,
+  SYMBOL_TRADE_DELTA_TYPE,
+  SYMBOL_LOG_DELTA_TYPE,
+  SYMBOL_DECISION_DELTA_TYPE,
+  SYMBOL_RUNTIME_DELTA_TYPE,
+])
 
 export function canonicalSeriesKey(instrumentId, timeframe) {
   const normalizedInstrumentId = String(instrumentId || '').trim()
@@ -233,8 +250,8 @@ function normalizeHealth(health) {
   }
 }
 
-export function normalizeDetail(detail, { symbolKey = null, seq = 0 } = {}) {
-  const source = detail && typeof detail === 'object' ? detail : {}
+export function normalizeSymbolSnapshot(snapshot, { symbolKey = null, seq = 0 } = {}) {
+  const source = snapshot && typeof snapshot === 'object' ? snapshot : {}
   const normalizedSymbolKey = normalizeSeriesKey(source.symbol_key || symbolKey || '')
   const [instrumentId, timeframe] = normalizedSymbolKey.split('|')
   return {
@@ -245,7 +262,6 @@ export function normalizeDetail(detail, { symbolKey = null, seq = 0 } = {}) {
     display_label: String(source.display_label || '').trim() || null,
     status: String(source.status || 'waiting').trim(),
     last_event_at: source.last_event_at || null,
-    continuity: source.continuity && typeof source.continuity === 'object' ? { ...source.continuity } : {},
     seq: Number(source.seq ?? seq ?? 0) || 0,
     candles: mergeCanonicalCandles(source.candles || []),
     overlays: projectOverlayState(source.overlays || []),
@@ -259,37 +275,46 @@ export function normalizeDetail(detail, { symbolKey = null, seq = 0 } = {}) {
   }
 }
 
-function touchCacheOrder(order = [], symbolKey, limit = DEFAULT_DETAIL_CACHE_LIMIT) {
+function touchSymbolSnapshotOrder(order = [], symbolKey, limit = DEFAULT_SYMBOL_SNAPSHOT_LIMIT) {
   const next = order.filter((entry) => entry !== symbolKey)
   if (symbolKey) next.unshift(symbolKey)
   return next.slice(0, Math.max(1, limit))
 }
 
-function trimDetailCache(detailCache, order, selectedSymbolKey, limit = DEFAULT_DETAIL_CACHE_LIMIT) {
+function trimSymbolSnapshots(symbolSnapshots = {}, order, selectedSymbolKey, limit = DEFAULT_SYMBOL_SNAPSHOT_LIMIT) {
   const allowed = new Set((order || []).slice(0, Math.max(1, limit)))
   if (selectedSymbolKey) allowed.add(selectedSymbolKey)
   const next = {}
-  Object.entries(detailCache || {}).forEach(([key, value]) => {
+  Object.entries(symbolSnapshots || {}).forEach(([key, value]) => {
     if (allowed.has(key)) next[key] = value
   })
   return next
 }
 
-function warnDroppedDetailDelta(symbolKey, message, store) {
+function warnDroppedSymbolDelta(symbolKey, message, store) {
   const now = Date.now()
-  const last = Number(detailDeltaDropWarnings.get(symbolKey) || 0)
-  if (now - last < DETAIL_DELTA_DROP_WARN_INTERVAL_MS) return
-  detailDeltaDropWarnings.set(symbolKey, now)
-  logger.warn('botlens_detail_delta_dropped_missing_base', {
+  const warningKey = `${symbolKey}:${String(message?.type || '')}`
+  const last = Number(symbolDeltaDropWarnings.get(warningKey) || 0)
+  if (now - last < SYMBOL_DELTA_DROP_WARN_INTERVAL_MS) return
+  symbolDeltaDropWarnings.set(warningKey, now)
+  logger.warn('botlens_symbol_delta_dropped_missing_base', {
     symbol_key: symbolKey,
+    type: String(message?.type || ''),
     seq: Number(message?.seq || 0),
-    detail_seq: Number(message?.payload?.detail_seq || 0),
     selected_symbol_key: normalizeSeriesKey(store?.selectedSymbolKey || ''),
-    detail_cache_size: Object.keys(store?.detailCache || {}).length,
+    snapshot_cache_size: Object.keys(store?.symbolSnapshots || {}).length,
   })
 }
 
-export function createRunStore(session, { detailCacheLimit = DEFAULT_DETAIL_CACHE_LIMIT } = {}) {
+export function isTypedSymbolDeltaMessage(message) {
+  return SYMBOL_DELTA_TYPES.has(String(message?.type || ''))
+}
+
+export function isSymbolSnapshotMessage(message) {
+  return String(message?.type || '') === SYMBOL_SNAPSHOT_MESSAGE_TYPE
+}
+
+export function createRunStore(session, { symbolSnapshotLimit = DEFAULT_SYMBOL_SNAPSHOT_LIMIT } = {}) {
   const summaries = Array.isArray(session?.symbol_summaries) ? session.symbol_summaries : []
   const symbolIndex = summaries.reduce((acc, summary) => {
     const normalized = normalizeSummary(summary)
@@ -305,29 +330,31 @@ export function createRunStore(session, { detailCacheLimit = DEFAULT_DETAIL_CACH
     return acc
   }, {})
   const selectedSymbolKey = normalizeSeriesKey(session?.selected_symbol_key || '')
-  const detail = session?.detail && typeof session.detail === 'object'
-    ? normalizeDetail(session.detail, { symbolKey: selectedSymbolKey, seq: Number(session?.seq || 0) || 0 })
+  const symbolSnapshot = session?.detail && typeof session.detail === 'object'
+    ? normalizeSymbolSnapshot(session.detail, { symbolKey: selectedSymbolKey, seq: Number(session?.seq || 0) || 0 })
     : null
-  const detailCache = detail && detail.symbol_key ? { [detail.symbol_key]: detail } : {}
-  const detailCacheOrder = detail ? [detail.symbol_key] : []
+  const symbolSnapshots = symbolSnapshot && symbolSnapshot.symbol_key ? { [symbolSnapshot.symbol_key]: symbolSnapshot } : {}
+  const symbolSnapshotOrder = symbolSnapshot ? [symbolSnapshot.symbol_key] : []
   return {
     schemaVersion: Number(session?.schema_version || 4) || 4,
+    live: Boolean(session?.live),
     seq: Number(session?.seq || 0) || 0,
     runMeta: session?.run_meta && typeof session.run_meta === 'object' ? { ...session.run_meta } : null,
     lifecycle: session?.lifecycle && typeof session.lifecycle === 'object' ? { ...session.lifecycle } : {},
     health: normalizeHealth(session?.health),
     symbolIndex,
     openTradesIndex,
-    detailCache,
-    detailCacheOrder,
+    symbolSnapshots,
+    symbolSnapshotOrder,
     selectedSymbolKey: selectedSymbolKey || null,
-    detailCacheLimit: Math.max(1, Number(detailCacheLimit) || DEFAULT_DETAIL_CACHE_LIMIT),
+    symbolSnapshotLimit: Math.max(1, Number(symbolSnapshotLimit) || DEFAULT_SYMBOL_SNAPSHOT_LIMIT),
   }
 }
 
 export function applySummaryDelta(store, message) {
   const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {}
   const nextSymbolIndex = { ...(store?.symbolIndex || {}) }
+  const nextSymbolSnapshots = { ...(store?.symbolSnapshots || {}) }
   ;(Array.isArray(payload.symbol_upserts) ? payload.symbol_upserts : []).forEach((summary) => {
     const normalized = normalizeSummary(summary)
     if (!normalized) return
@@ -335,9 +362,25 @@ export function applySummaryDelta(store, message) {
       ...(nextSymbolIndex[normalized.symbol_key] || {}),
       ...normalized,
     }
+    if (nextSymbolSnapshots[normalized.symbol_key]) {
+      nextSymbolSnapshots[normalized.symbol_key] = {
+        ...nextSymbolSnapshots[normalized.symbol_key],
+        instrument_id: normalized.instrument_id || nextSymbolSnapshots[normalized.symbol_key].instrument_id,
+        symbol: normalized.symbol || nextSymbolSnapshots[normalized.symbol_key].symbol,
+        timeframe: normalized.timeframe || nextSymbolSnapshots[normalized.symbol_key].timeframe,
+        display_label: normalized.display_label || nextSymbolSnapshots[normalized.symbol_key].display_label,
+        status: normalized.status || nextSymbolSnapshots[normalized.symbol_key].status,
+        last_event_at: normalized.last_event_at || nextSymbolSnapshots[normalized.symbol_key].last_event_at,
+        stats: normalized.stats && typeof normalized.stats === 'object'
+          ? { ...normalized.stats }
+          : nextSymbolSnapshots[normalized.symbol_key].stats,
+      }
+    }
   })
   ;(Array.isArray(payload.symbol_removals) ? payload.symbol_removals : []).forEach((symbolKey) => {
-    delete nextSymbolIndex[normalizeSeriesKey(symbolKey)]
+    const normalizedSymbolKey = normalizeSeriesKey(symbolKey)
+    delete nextSymbolIndex[normalizedSymbolKey]
+    delete nextSymbolSnapshots[normalizedSymbolKey]
   })
   return {
     ...store,
@@ -347,6 +390,12 @@ export function applySummaryDelta(store, message) {
       : store.health,
     lifecycle: payload.lifecycle && typeof payload.lifecycle === 'object' ? { ...store.lifecycle, ...payload.lifecycle } : store.lifecycle,
     symbolIndex: nextSymbolIndex,
+    symbolSnapshots: trimSymbolSnapshots(
+      nextSymbolSnapshots,
+      store?.symbolSnapshotOrder,
+      store?.selectedSymbolKey,
+      store?.symbolSnapshotLimit,
+    ),
   }
 }
 
@@ -368,95 +417,165 @@ export function applyOpenTradesDelta(store, message) {
   }
 }
 
-export function applyDetailSnapshot(store, detailPayload) {
-  const detail = normalizeDetail(detailPayload?.detail || detailPayload, {
-    symbolKey: detailPayload?.symbol_key || detailPayload?.detail?.symbol_key || null,
-    seq: detailPayload?.seq || detailPayload?.detail?.seq || 0,
+export function applySymbolSnapshot(store, snapshotPayload) {
+  const symbolSnapshot = normalizeSymbolSnapshot(snapshotPayload?.detail || snapshotPayload, {
+    symbolKey: snapshotPayload?.symbol_key || snapshotPayload?.detail?.symbol_key || null,
+    seq: snapshotPayload?.seq || snapshotPayload?.detail?.seq || 0,
   })
-  if (!detail.symbol_key) return store
-  const detailCache = { ...(store?.detailCache || {}), [detail.symbol_key]: detail }
-  const detailCacheOrder = touchCacheOrder(store?.detailCacheOrder, detail.symbol_key, store?.detailCacheLimit)
+  if (!symbolSnapshot.symbol_key) return store
+  const symbolSnapshots = { ...(store?.symbolSnapshots || {}), [symbolSnapshot.symbol_key]: symbolSnapshot }
+  const symbolSnapshotOrder = touchSymbolSnapshotOrder(
+    store?.symbolSnapshotOrder,
+    symbolSnapshot.symbol_key,
+    store?.symbolSnapshotLimit,
+  )
   return {
     ...store,
-    seq: Math.max(Number(store?.seq || 0), Number(detail.seq || 0)),
-    detailCache: trimDetailCache(detailCache, detailCacheOrder, store?.selectedSymbolKey, store?.detailCacheLimit),
-    detailCacheOrder,
+    seq: Math.max(Number(store?.seq || 0), Number(symbolSnapshot.seq || 0)),
+    symbolSnapshots: trimSymbolSnapshots(
+      symbolSnapshots,
+      symbolSnapshotOrder,
+      store?.selectedSymbolKey,
+      store?.symbolSnapshotLimit,
+    ),
+    symbolSnapshotOrder,
     symbolIndex: {
       ...(store?.symbolIndex || {}),
-      [detail.symbol_key]: {
-        ...((store?.symbolIndex || {})[detail.symbol_key] || {}),
-        symbol_key: detail.symbol_key,
-        instrument_id: detail.instrument_id || null,
-        symbol: detail.symbol || null,
-        timeframe: detail.timeframe || null,
-        display_label: detail.display_label || null,
-        status: detail.status || null,
-        continuity_status: detail.continuity?.status || null,
-        last_event_at: detail.last_event_at || null,
-        candle_count: Array.isArray(detail.candles) ? detail.candles.length : 0,
-        stats: detail.stats || {},
+      [symbolSnapshot.symbol_key]: {
+        ...((store?.symbolIndex || {})[symbolSnapshot.symbol_key] || {}),
+        symbol_key: symbolSnapshot.symbol_key,
+        instrument_id: symbolSnapshot.instrument_id || null,
+        symbol: symbolSnapshot.symbol || null,
+        timeframe: symbolSnapshot.timeframe || null,
+        display_label: symbolSnapshot.display_label || null,
+        status: symbolSnapshot.status || null,
+        last_event_at: symbolSnapshot.last_event_at || null,
+        candle_count: Array.isArray(symbolSnapshot.candles) ? symbolSnapshot.candles.length : 0,
+        stats: symbolSnapshot.stats || {},
       },
     },
   }
 }
 
-export function applyDetailDelta(store, message) {
+function commitSymbolSnapshot(store, symbolKey, next) {
+  const symbolSnapshots = { ...(store?.symbolSnapshots || {}), [symbolKey]: next }
+  const symbolSnapshotOrder = touchSymbolSnapshotOrder(store?.symbolSnapshotOrder, symbolKey, store?.symbolSnapshotLimit)
+  return {
+    ...store,
+    seq: Math.max(Number(store?.seq || 0), Number(next?.seq || 0)),
+    symbolSnapshots: trimSymbolSnapshots(symbolSnapshots, symbolSnapshotOrder, store?.selectedSymbolKey, store?.symbolSnapshotLimit),
+    symbolSnapshotOrder,
+  }
+}
+
+function withSymbolSnapshot(store, message, applyChange) {
   const symbolKey = normalizeSeriesKey(message?.symbol_key || '')
   if (!symbolKey) return store
-  const current = store?.detailCache?.[symbolKey]
+  const current = store?.symbolSnapshots?.[symbolKey]
   if (!current) {
-    warnDroppedDetailDelta(symbolKey, message, store)
+    warnDroppedSymbolDelta(symbolKey, message, store)
     return store
   }
   const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {}
-  const next = {
+  const next = applyChange({
     ...current,
-    seq: Math.max(Number(current.seq || 0), Number(payload.detail_seq || message?.seq || 0)),
-    last_event_at: payload.event_time || current.last_event_at || null,
-    continuity: payload.continuity && typeof payload.continuity === 'object' ? { ...payload.continuity } : current.continuity,
-    runtime: payload.runtime && typeof payload.runtime === 'object' ? { ...current.runtime, ...payload.runtime } : current.runtime,
-    stats: payload.stats && typeof payload.stats === 'object' ? { ...payload.stats } : current.stats,
-  }
-  if (payload.candle && typeof payload.candle === 'object') {
-    next.candles = mergeCanonicalCandles(current.candles || [], [payload.candle])
-  }
-  if (payload.overlay_delta && typeof payload.overlay_delta === 'object') {
-    next.overlays = applyOverlayDelta(current.overlays || [], payload.overlay_delta)
-  }
-  ;(Array.isArray(payload.trade_upserts) ? payload.trade_upserts : []).forEach((trade) => {
-    const normalized = normalizeTrade(trade)
-    if (!normalized) return
-    next.recent_trades = upsertTail(next.recent_trades, normalized, ['trade_id', 'id'], MAX_TRADES)
+    seq: Math.max(Number(current.seq || 0), Number(message?.seq || 0)),
+    last_event_at: message?.event_time || current.last_event_at || null,
+  }, payload, current)
+  return commitSymbolSnapshot(store, symbolKey, next)
+}
+
+export function applyCandleDelta(store, message) {
+  return withSymbolSnapshot(store, message, (next, payload) => {
+    if (payload.candle && typeof payload.candle === 'object') {
+      next.candles = mergeCanonicalCandles(next.candles || [], [payload.candle])
+    }
+    return next
   })
-  ;(Array.isArray(payload.trade_removals) ? payload.trade_removals : []).forEach((tradeId) => {
-    next.recent_trades = (Array.isArray(next.recent_trades) ? next.recent_trades : []).filter(
-      (trade) => String(trade?.trade_id || '') !== String(tradeId),
-    )
+}
+
+export function applyOverlayDeltaMessage(store, message) {
+  return withSymbolSnapshot(store, message, (next, payload) => {
+    if (payload.overlay_delta && typeof payload.overlay_delta === 'object') {
+      next.overlays = applyOverlayDelta(next.overlays || [], payload.overlay_delta)
+    }
+    return next
   })
-  ;(Array.isArray(payload.log_append) ? payload.log_append : []).forEach((entry) => {
-    if (!entry || typeof entry !== 'object') return
-    next.logs = upsertTail(next.logs, entry, ['id', 'event_id'], MAX_LOGS)
+}
+
+export function applyTradeDelta(store, message) {
+  return withSymbolSnapshot(store, message, (next, payload) => {
+    ;(Array.isArray(payload.upserts) ? payload.upserts : []).forEach((trade) => {
+      const normalized = normalizeTrade(trade)
+      if (!normalized) return
+      next.recent_trades = upsertTail(next.recent_trades, normalized, ['trade_id', 'id'], MAX_TRADES)
+    })
+    ;(Array.isArray(payload.removals) ? payload.removals : []).forEach((tradeId) => {
+      next.recent_trades = (Array.isArray(next.recent_trades) ? next.recent_trades : []).filter(
+        (trade) => String(trade?.trade_id || '') !== String(tradeId),
+      )
+    })
+    return next
   })
-  ;(Array.isArray(payload.decision_append) ? payload.decision_append : []).forEach((entry) => {
-    if (!entry || typeof entry !== 'object') return
-    next.decisions = upsertTail(next.decisions, entry, ['event_id', 'id'], MAX_DECISIONS)
+}
+
+export function applyLogDelta(store, message) {
+  return withSymbolSnapshot(store, message, (next, payload) => {
+    ;(Array.isArray(payload.append) ? payload.append : []).forEach((entry) => {
+      if (!entry || typeof entry !== 'object') return
+      next.logs = upsertTail(next.logs, entry, ['id', 'event_id'], MAX_LOGS)
+    })
+    return next
   })
-  const detailCache = { ...(store?.detailCache || {}), [symbolKey]: next }
-  const detailCacheOrder = touchCacheOrder(store?.detailCacheOrder, symbolKey, store?.detailCacheLimit)
-  return {
-    ...store,
-    seq: Math.max(Number(store?.seq || 0), Number(message?.seq || 0)),
-    detailCache: trimDetailCache(detailCache, detailCacheOrder, store?.selectedSymbolKey, store?.detailCacheLimit),
-    detailCacheOrder,
+}
+
+export function applyDecisionDelta(store, message) {
+  return withSymbolSnapshot(store, message, (next, payload) => {
+    ;(Array.isArray(payload.append) ? payload.append : []).forEach((entry) => {
+      if (!entry || typeof entry !== 'object') return
+      next.decisions = upsertTail(next.decisions, entry, ['event_id', 'id'], MAX_DECISIONS)
+    })
+    return next
+  })
+}
+
+export function applyRuntimeDelta(store, message) {
+  return withSymbolSnapshot(store, message, (next, payload) => {
+    next.runtime = payload.runtime && typeof payload.runtime === 'object'
+      ? { ...next.runtime, ...payload.runtime }
+      : next.runtime
+    if (payload.runtime && typeof payload.runtime === 'object' && payload.runtime.status) {
+      next.status = String(payload.runtime.status || next.status || 'waiting').trim()
+    }
+    return next
+  })
+}
+
+export function applyTypedSymbolDelta(store, message) {
+  switch (String(message?.type || '')) {
+    case SYMBOL_CANDLE_DELTA_TYPE:
+      return applyCandleDelta(store, message)
+    case SYMBOL_OVERLAY_DELTA_TYPE:
+      return applyOverlayDeltaMessage(store, message)
+    case SYMBOL_TRADE_DELTA_TYPE:
+      return applyTradeDelta(store, message)
+    case SYMBOL_LOG_DELTA_TYPE:
+      return applyLogDelta(store, message)
+    case SYMBOL_DECISION_DELTA_TYPE:
+      return applyDecisionDelta(store, message)
+    case SYMBOL_RUNTIME_DELTA_TYPE:
+      return applyRuntimeDelta(store, message)
+    default:
+      return store
   }
 }
 
 export function applyHistoryPage(store, { symbolKey, candles }) {
   const normalizedSymbolKey = normalizeSeriesKey(symbolKey)
-  const current = store?.detailCache?.[normalizedSymbolKey]
+  const current = store?.symbolSnapshots?.[normalizedSymbolKey]
   if (!current) return store
-  const detailCache = {
-    ...(store?.detailCache || {}),
+  const symbolSnapshots = {
+    ...(store?.symbolSnapshots || {}),
     [normalizedSymbolKey]: {
       ...current,
       candles: mergeCanonicalCandles(candles || [], current.candles || []),
@@ -464,24 +583,54 @@ export function applyHistoryPage(store, { symbolKey, candles }) {
   }
   return {
     ...store,
-    detailCache,
+    symbolSnapshots,
   }
 }
 
 export function selectSymbol(store, symbolKey) {
   const normalized = normalizeSeriesKey(symbolKey)
   if (!normalized) return store
-  const detailCacheOrder = touchCacheOrder(store?.detailCacheOrder, normalized, store?.detailCacheLimit)
+  const symbolSnapshotOrder = touchSymbolSnapshotOrder(store?.symbolSnapshotOrder, normalized, store?.symbolSnapshotLimit)
   return {
     ...store,
     selectedSymbolKey: normalized,
-    detailCacheOrder,
-    detailCache: trimDetailCache(store?.detailCache || {}, detailCacheOrder, normalized, store?.detailCacheLimit),
+    symbolSnapshotOrder,
+    symbolSnapshots: trimSymbolSnapshots(
+      store?.symbolSnapshots || {},
+      symbolSnapshotOrder,
+      normalized,
+      store?.symbolSnapshotLimit,
+    ),
   }
 }
 
-export function getSelectedDetail(store) {
+export function getSelectedSymbolSnapshot(store) {
   const symbolKey = normalizeSeriesKey(store?.selectedSymbolKey || '')
   if (!symbolKey) return null
-  return store?.detailCache?.[symbolKey] || null
+  return store?.symbolSnapshots?.[symbolKey] || null
+}
+
+export function getSelectedSymbolSlices(store) {
+  const snapshot = getSelectedSymbolSnapshot(store)
+  if (!snapshot) return null
+  return {
+    snapshot,
+    metadata: {
+      symbol_key: snapshot.symbol_key,
+      instrument_id: snapshot.instrument_id,
+      symbol: snapshot.symbol,
+      timeframe: snapshot.timeframe,
+      display_label: snapshot.display_label,
+      status: snapshot.status,
+      seq: snapshot.seq,
+      last_event_at: snapshot.last_event_at,
+    },
+    candles: Array.isArray(snapshot.candles) ? snapshot.candles : [],
+    overlays: Array.isArray(snapshot.overlays) ? snapshot.overlays : [],
+    recentTrades: Array.isArray(snapshot.recent_trades) ? snapshot.recent_trades : [],
+    logs: Array.isArray(snapshot.logs) ? snapshot.logs : [],
+    decisions: Array.isArray(snapshot.decisions) ? snapshot.decisions : [],
+    runtime: snapshot.runtime && typeof snapshot.runtime === 'object' ? snapshot.runtime : {},
+    stats: snapshot.stats && typeof snapshot.stats === 'object' ? snapshot.stats : {},
+  }
 }

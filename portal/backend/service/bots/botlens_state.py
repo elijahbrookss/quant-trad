@@ -10,7 +10,6 @@ from typing import Any, Dict, Iterable, List, Optional
 from core.settings import get_settings
 
 from .botlens_contract import (
-    CONTINUITY_BOOTSTRAP_REQUIRED,
     FACT_TYPE_CANDLE_UPSERTED,
     FACT_TYPE_DECISION_EMITTED,
     FACT_TYPE_LOG_EMITTED,
@@ -21,7 +20,6 @@ from .botlens_contract import (
     FACT_TYPE_TRADE_UPSERTED,
     RUN_SCOPE_KEY,
     SCHEMA_VERSION,
-    continuity_payload,
     normalize_fact_entries,
     normalize_series_key,
 )
@@ -277,7 +275,6 @@ def empty_symbol_detail(symbol_key: str) -> Dict[str, Any]:
         "seq": 0,
         "status": "waiting",
         "last_event_at": None,
-        "continuity": continuity_payload(status=CONTINUITY_BOOTSTRAP_REQUIRED),
         "candles": [],
         "overlays": [],
         "recent_trades": [],
@@ -324,7 +321,6 @@ def read_symbol_detail_state(payload: Any, *, symbol_key: str) -> Dict[str, Any]
             "seq": int(detail.get("seq") or 0),
             "status": str(detail.get("status") or state["status"]).strip() or "waiting",
             "last_event_at": _iso_or_none(detail.get("last_event_at")),
-            "continuity": dict(detail.get("continuity") or state["continuity"]),
             "candles": merge_candles(detail.get("candles"), limit=_MAX_CANDLES),
             "overlays": project_overlay_state(detail.get("overlays")),
             "recent_trades": [dict(entry) for entry in detail.get("recent_trades") if isinstance(entry, Mapping)] if isinstance(detail.get("recent_trades"), list) else [],
@@ -388,7 +384,6 @@ def serialize_symbol_detail_state(detail: Mapping[str, Any]) -> Dict[str, Any]:
             "seq": int(detail.get("seq") or 0),
             "status": detail.get("status"),
             "last_event_at": detail.get("last_event_at"),
-            "continuity": dict(detail.get("continuity") or {}),
             "candles": list(detail.get("candles") or []) if isinstance(detail.get("candles"), list) else [],
             "overlays": list(detail.get("overlays") or []) if isinstance(detail.get("overlays"), list) else [],
             "recent_trades": list(detail.get("recent_trades") or []) if isinstance(detail.get("recent_trades"), list) else [],
@@ -442,7 +437,6 @@ def build_symbol_summary(detail: Mapping[str, Any], *, open_trades: Iterable[Map
         "timeframe": str(detail.get("timeframe") or "").strip().lower() or None,
         "display_label": str(detail.get("display_label") or "").strip() or None,
         "status": str(detail.get("status") or "waiting").strip() or "waiting",
-        "continuity_status": str((_mapping(detail.get("continuity"))).get("status") or "").strip() or None,
         "last_event_at": detail.get("last_event_at"),
         "last_bar_time": last_candle.get("time"),
         "last_price": last_candle.get("close"),
@@ -521,18 +515,15 @@ def apply_fact_batch(
     facts: Any,
     seq: int,
     event_time: Any,
-    continuity: Mapping[str, Any],
 ) -> Dict[str, Any]:
     next_detail = read_symbol_detail_state(detail, symbol_key=str(detail.get("symbol_key") or ""))
     next_detail["seq"] = int(seq)
     next_detail["last_event_at"] = _iso_or_none(event_time) or next_detail.get("last_event_at")
-    next_detail["continuity"] = dict(continuity or next_detail.get("continuity") or {})
 
     delta: Dict[str, Any] = {
         "symbol_key": next_detail["symbol_key"],
         "detail_seq": int(seq),
         "event_time": event_time,
-        "continuity": dict(next_detail["continuity"]),
         "runtime": None,
         "stats": None,
         "candle": None,
@@ -653,7 +644,6 @@ def detail_snapshot_contract(*, run_id: str, detail: Mapping[str, Any]) -> Dict[
             "display_label": detail.get("display_label"),
             "status": detail.get("status"),
             "last_event_at": detail.get("last_event_at"),
-            "continuity": dict(detail.get("continuity") or {}),
             "candles": list(detail.get("candles") or []) if isinstance(detail.get("candles"), list) else [],
             "overlays": list(detail.get("overlays") or []) if isinstance(detail.get("overlays"), list) else [],
             "recent_trades": list(detail.get("recent_trades") or []) if isinstance(detail.get("recent_trades"), list) else [],

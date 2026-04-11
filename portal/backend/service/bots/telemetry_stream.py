@@ -23,8 +23,6 @@ from ..storage.storage import (
 from .botlens_contract import (
     BRIDGE_BOOTSTRAP_KIND,
     BRIDGE_FACTS_KIND,
-    CONTINUITY_READY,
-    CONTINUITY_RESYNC_REQUIRED,
     EVENT_TYPE_LIFECYCLE,
     EVENT_TYPE_RUNTIME_FACTS,
     EVENT_TYPE_RUNTIME_BOOTSTRAP,
@@ -32,7 +30,6 @@ from .botlens_contract import (
     LIFECYCLE_KIND,
     PROJECTION_REFRESH_KIND,
     RUN_SCOPE_KEY,
-    continuity_payload,
     normalize_bridge_seq,
     normalize_bridge_session_id,
     normalize_fact_entries,
@@ -44,6 +41,7 @@ from .botlens_run_stream import BotLensRunStream
 from .botlens_state import (
     apply_fact_batch,
     build_symbol_summary,
+    detail_snapshot_contract,
     empty_run_summary,
     empty_symbol_detail,
     is_open_trade,
@@ -52,11 +50,11 @@ from .botlens_state import (
     serialize_run_summary_state,
     serialize_symbol_detail_state,
 )
+from .botlens_typed_deltas import SymbolTypedDeltaBuilder, TypedDeltaInstrumentation
 
 logger = logging.getLogger(__name__)
 
 _SETTINGS = get_settings()
-_RING_SIZE = _SETTINGS.bot_runtime.botlens.ring_size
 _INGEST_QUEUE_MAX = _SETTINGS.bot_runtime.botlens.ingest_queue_max
 _ACTIVE_RUN_TTL_S = 1800.0
 _TERMINAL_RUN_TTL_S = 300.0
@@ -140,7 +138,7 @@ class BotTelemetryHub:
         self._last_prune_started_monotonic = 0.0
         self._lock = asyncio.Lock()
         self._worker_lock = asyncio.Lock()
-        self._run_stream = BotLensRunStream(ring_size=_RING_SIZE)
+        self._run_stream = BotLensRunStream()
 
     async def _ensure_workers(self) -> None:
         async with self._worker_lock:
@@ -205,6 +203,42 @@ class BotTelemetryHub:
             logger.warning(
                 "bot_telemetry_projected_bot_broadcast_failed | bot_id=%s | error=%s",
                 bot_id,
+                exc,
+            )
+
+    async def _run_bot_id(self, *, run_id: str) -> str:
+        row = await asyncio.to_thread(get_bot_run, str(run_id))
+        bot_id = str(_mapping(row).get("bot_id") or "").strip()
+        if not bot_id:
+            raise ValueError(f"bot_id missing for run_id={run_id}")
+        return bot_id
+
+    async def _send_viewer_symbol_snapshot(self, *, run_id: str, ws: WebSocket, symbol_key: str) -> None:
+        normalized_symbol_key = normalize_series_key(symbol_key)
+        if not normalized_symbol_key:
+            return
+        try:
+            bot_id = await self._run_bot_id(run_id=run_id)
+            detail_state = await self._load_detail_state(bot_id=bot_id, run_id=run_id, symbol_key=normalized_symbol_key)
+            snapshot = detail_snapshot_contract(run_id=run_id, detail=detail_state)
+            delivered = await self._run_stream.deliver_symbol_snapshot(
+                run_id=run_id,
+                ws=ws,
+                snapshot=snapshot,
+            )
+            if delivered:
+                logger.info(
+                    "botlens_viewer_symbol_snapshot_delivered | bot_id=%s | run_id=%s | symbol_key=%s | seq=%s",
+                    bot_id,
+                    run_id,
+                    normalized_symbol_key,
+                    int(snapshot.get("seq") or 0),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "botlens_viewer_symbol_snapshot_failed | run_id=%s | symbol_key=%s | error=%s",
+                run_id,
+                normalized_symbol_key,
                 exc,
             )
 
@@ -315,6 +349,7 @@ class BotTelemetryHub:
         raw_payload: Mapping[str, Any],
         event_time: Any,
         known_at: Any,
+        typed_delta_metrics: Mapping[str, Any] | None = None,
     ) -> None:
         bridge_session_id = normalize_bridge_session_id(raw_payload)
         bridge_seq = normalize_bridge_seq(raw_payload)
@@ -327,6 +362,8 @@ class BotTelemetryHub:
         facts = normalize_fact_entries(raw_payload.get("facts"))
         if facts:
             event_payload["facts"] = facts
+        if isinstance(typed_delta_metrics, AbcMapping) and typed_delta_metrics:
+            event_payload["typed_delta_metrics"] = dict(typed_delta_metrics)
         await asyncio.to_thread(
             record_bot_runtime_event,
             {
@@ -520,6 +557,27 @@ class BotTelemetryHub:
         health["last_event_at"] = known_at
         summary_state["health"] = health
 
+    async def _emit_symbol_typed_deltas(
+        self,
+        *,
+        run_id: str,
+        symbol_key: str,
+        seq: int,
+        event_time: Any,
+        delta: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        prepared_deltas = SymbolTypedDeltaBuilder.build(
+            run_id=run_id,
+            symbol_key=symbol_key,
+            seq=seq,
+            event_time=event_time,
+            delta=delta,
+        )
+        deliveries = []
+        for prepared_delta in prepared_deltas:
+            deliveries.append(await self._run_stream.broadcast_typed_delta(prepared_delta))
+        return TypedDeltaInstrumentation.emission_summary(prepared_deltas, deliveries)
+
     async def _touch_run(self, *, bot_id: str, run_id: str, terminal: bool = False) -> None:
         now = time.monotonic()
         async with self._lock:
@@ -628,7 +686,7 @@ class BotTelemetryHub:
             await self._run_stream.evict_run(run_id=run_id)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         logger.info(
-            "botlens_prune_completed | reason=%s | considered_runs=%s | evicted_runs=%s | elapsed_ms=%.3f | summary_cache_size=%s | detail_cache_size=%s | lifecycle_cache_size=%s | lifecycle_seq_cache_size=%s | latest_run_by_bot_size=%s | viewer_runs=%s | viewer_count=%s | ring_runs=%s | ring_messages=%s",
+            "botlens_prune_completed | reason=%s | considered_runs=%s | evicted_runs=%s | elapsed_ms=%.3f | summary_cache_size=%s | detail_cache_size=%s | lifecycle_cache_size=%s | lifecycle_seq_cache_size=%s | latest_run_by_bot_size=%s | viewer_runs=%s | viewer_count=%s",
             reason,
             run_count_before,
             len(evictions),
@@ -640,8 +698,6 @@ class BotTelemetryHub:
             cache_after["latest_run_by_bot_size"],
             self._run_stream.viewer_run_count(),
             self._run_stream.viewer_count(),
-            self._run_stream.ring_run_count(),
-            self._run_stream.ring_message_count(),
         )
         if cache_before != cache_after:
             logger.debug(
@@ -676,18 +732,11 @@ class BotTelemetryHub:
         seq = self._raw_event_seq(payload, previous_seq=int(summary_state.get("seq") or 0))
         known_at = payload.get("known_at") or payload.get("event_time")
         event_time = payload.get("event_time") or known_at
-        continuity = continuity_payload(
-            status=CONTINUITY_READY,
-            bridge_session_id=normalize_bridge_session_id(payload),
-            bridge_seq=normalize_bridge_seq(payload),
-            details={"run_seq": _coerce_int(payload.get("run_seq"), default=0)},
-        )
         applied = apply_fact_batch(
             detail_state,
             facts=facts,
             seq=seq,
             event_time=known_at,
-            continuity=continuity,
         )
         detail_state = dict(applied["detail"])
         summary_state["seq"] = int(seq)
@@ -723,16 +772,6 @@ class BotTelemetryHub:
             event_time=event_time,
             known_at=known_at,
         )
-        await self._record_raw_runtime_event(
-            bot_id=bot_id,
-            run_id=run_id,
-            symbol_key=symbol_key,
-            seq=seq,
-            event_type=EVENT_TYPE_RUNTIME_BOOTSTRAP,
-            raw_payload=payload,
-            event_time=event_time,
-            known_at=known_at,
-        )
         await self._touch_run(bot_id=bot_id, run_id=run_id)
         if detail_state.get("runtime"):
             await self._publish_runtime_update(
@@ -756,11 +795,23 @@ class BotTelemetryHub:
                 upserts=applied["delta"]["trade_upserts"],
                 removals=applied["delta"]["trade_removals"],
             )
-        await self._run_stream.broadcast_detail_delta(
+        typed_delta_metrics = await self._emit_symbol_typed_deltas(
             run_id=run_id,
             symbol_key=symbol_key,
             seq=seq,
-            payload=_sanitize_json(applied["delta"]),
+            event_time=event_time,
+            delta=_sanitize_json(applied["delta"]),
+        )
+        await self._record_raw_runtime_event(
+            bot_id=bot_id,
+            run_id=run_id,
+            symbol_key=symbol_key,
+            seq=seq,
+            event_type=EVENT_TYPE_RUNTIME_BOOTSTRAP,
+            raw_payload=payload,
+            event_time=event_time,
+            known_at=known_at,
+            typed_delta_metrics=typed_delta_metrics,
         )
         logger.info(
             "botlens_bootstrap_applied | bot_id=%s | run_id=%s | symbol_key=%s | seq=%s | payload_bytes=%s",
@@ -789,116 +840,11 @@ class BotTelemetryHub:
         seq = self._raw_event_seq(payload, previous_seq=int(summary_state.get("seq") or 0))
         known_at = payload.get("known_at") or payload.get("event_time")
         event_time = payload.get("event_time") or known_at
-
-        previous_continuity = _mapping(detail_state.get("continuity"))
-        previous_bridge_session = str(previous_continuity.get("bridge_session_id") or "").strip()
-        previous_bridge_seq = _coerce_int(previous_continuity.get("last_bridge_seq"), default=0)
-        incoming_bridge_session = normalize_bridge_session_id(payload)
-        incoming_bridge_seq = normalize_bridge_seq(payload)
-
-        continuity = None
-        if previous_continuity.get("status") not in {None, "", CONTINUITY_READY}:
-            logger.warning(
-                "botlens_detail_waiting_for_rebootstrap | run_id=%s | symbol_key=%s | continuity_status=%s",
-                run_id,
-                symbol_key,
-                previous_continuity.get("status"),
-            )
-            return
-        if not previous_bridge_session or incoming_bridge_session != previous_bridge_session:
-            continuity = continuity_payload(
-                status=CONTINUITY_RESYNC_REQUIRED,
-                reason="bridge_session_changed",
-                bridge_session_id=incoming_bridge_session,
-                bridge_seq=incoming_bridge_seq,
-                details={
-                    "previous_bridge_session_id": previous_bridge_session or None,
-                    "incoming_bridge_session_id": incoming_bridge_session,
-                },
-                invalidated_at=known_at,
-            )
-        else:
-            expected_bridge_seq = previous_bridge_seq + 1 if previous_bridge_seq > 0 else incoming_bridge_seq
-            if previous_bridge_seq > 0 and incoming_bridge_seq != expected_bridge_seq:
-                continuity = continuity_payload(
-                    status=CONTINUITY_RESYNC_REQUIRED,
-                    reason="bridge_seq_gap",
-                    bridge_session_id=incoming_bridge_session,
-                    bridge_seq=incoming_bridge_seq,
-                    details={
-                        "previous_bridge_seq": previous_bridge_seq,
-                        "incoming_bridge_seq": incoming_bridge_seq,
-                    },
-                    invalidated_at=known_at,
-                )
-
-        if continuity is not None:
-            detail_state = dict(detail_state)
-            detail_state["seq"] = int(seq)
-            detail_state["last_event_at"] = known_at
-            detail_state["continuity"] = continuity
-            summary_state["seq"] = int(seq)
-            await self._ensure_run_meta(bot_id=bot_id, run_id=run_id, summary_state=summary_state)
-            summary_state["lifecycle"] = dict(self._latest_run_lifecycle.get(run_id) or summary_state.get("lifecycle") or {})
-            symbol_summary = self._refresh_summary_for_symbol(summary_state, detail_state)
-            self._refresh_summary_health(
-                summary_state,
-                runtime_payload=detail_state.get("runtime"),
-                lifecycle_payload=summary_state.get("lifecycle"),
-                known_at=known_at,
-            )
-            await self._persist_detail_state(
-                bot_id=bot_id,
-                run_id=run_id,
-                symbol_key=symbol_key,
-                seq=seq,
-                detail_state=detail_state,
-                event_time=event_time,
-                known_at=known_at,
-            )
-            await self._persist_summary_state(
-                bot_id=bot_id,
-                run_id=run_id,
-                seq=seq,
-                summary_state=summary_state,
-                event_time=event_time,
-                known_at=known_at,
-            )
-            await self._touch_run(bot_id=bot_id, run_id=run_id)
-            await self._run_stream.broadcast_summary_delta(
-                run_id=run_id,
-                seq=seq,
-                health=_mapping(summary_state.get("health")),
-                lifecycle=_mapping(summary_state.get("lifecycle")),
-                symbol_upserts=[symbol_summary],
-            )
-            await self._run_stream.broadcast_detail_delta(
-                run_id=run_id,
-                symbol_key=symbol_key,
-                seq=seq,
-                payload={"symbol_key": symbol_key, "detail_seq": seq, "event_time": event_time, "continuity": continuity},
-            )
-            logger.warning(
-                "botlens_detail_continuity_invalidated | bot_id=%s | run_id=%s | symbol_key=%s | reason=%s",
-                bot_id,
-                run_id,
-                symbol_key,
-                continuity.get("reason"),
-            )
-            return
-
-        continuity = continuity_payload(
-            status=CONTINUITY_READY,
-            bridge_session_id=incoming_bridge_session,
-            bridge_seq=incoming_bridge_seq,
-            details={"run_seq": _coerce_int(payload.get("run_seq"), default=0)},
-        )
         applied = apply_fact_batch(
             detail_state,
             facts=facts,
             seq=seq,
             event_time=known_at,
-            continuity=continuity,
         )
         detail_state = dict(applied["detail"])
         summary_state["seq"] = int(seq)
@@ -934,16 +880,6 @@ class BotTelemetryHub:
             event_time=event_time,
             known_at=known_at,
         )
-        await self._record_raw_runtime_event(
-            bot_id=bot_id,
-            run_id=run_id,
-            symbol_key=symbol_key,
-            seq=seq,
-            event_type=EVENT_TYPE_RUNTIME_FACTS,
-            raw_payload=payload,
-            event_time=event_time,
-            known_at=known_at,
-        )
         await self._touch_run(bot_id=bot_id, run_id=run_id)
         if detail_state.get("runtime"):
             await self._publish_runtime_update(
@@ -967,11 +903,23 @@ class BotTelemetryHub:
                 upserts=applied["delta"]["trade_upserts"],
                 removals=applied["delta"]["trade_removals"],
             )
-        await self._run_stream.broadcast_detail_delta(
+        typed_delta_metrics = await self._emit_symbol_typed_deltas(
             run_id=run_id,
             symbol_key=symbol_key,
             seq=seq,
-            payload=_sanitize_json(applied["delta"]),
+            event_time=event_time,
+            delta=_sanitize_json(applied["delta"]),
+        )
+        await self._record_raw_runtime_event(
+            bot_id=bot_id,
+            run_id=run_id,
+            symbol_key=symbol_key,
+            seq=seq,
+            event_type=EVENT_TYPE_RUNTIME_FACTS,
+            raw_payload=payload,
+            event_time=event_time,
+            known_at=known_at,
+            typed_delta_metrics=typed_delta_metrics,
         )
 
     async def _process_lifecycle_event(self, payload: Mapping[str, Any]) -> None:
@@ -1061,23 +1009,34 @@ class BotTelemetryHub:
         *,
         run_id: str,
         ws: WebSocket,
-        cursor_seq: int = 0,
         selected_symbol_key: str | None = None,
-        hot_symbols: list[str] | None = None,
     ) -> None:
         await self._ensure_workers()
+        normalized_selected_symbol_key = normalize_series_key(selected_symbol_key)
         await self._run_stream.add_run_viewer(
             run_id=str(run_id),
             ws=ws,
-            cursor_seq=cursor_seq,
-            selected_symbol_key=selected_symbol_key,
-            hot_symbols=hot_symbols or [],
+            selected_symbol_key=normalized_selected_symbol_key,
         )
+        if normalized_selected_symbol_key:
+            await self._send_viewer_symbol_snapshot(
+                run_id=str(run_id),
+                ws=ws,
+                symbol_key=normalized_selected_symbol_key,
+            )
         async with self._lock:
             self._run_last_activity[str(run_id)] = time.monotonic()
 
     async def update_run_viewer(self, *, run_id: str, ws: WebSocket, payload: Mapping[str, Any]) -> None:
         await self._run_stream.update_viewer_subscription(run_id=str(run_id), ws=ws, payload=payload)
+        if str(payload.get("type") or "").strip().lower() == "set_selected_symbol":
+            normalized_symbol_key = normalize_series_key(payload.get("symbol_key"))
+            if normalized_symbol_key:
+                await self._send_viewer_symbol_snapshot(
+                    run_id=str(run_id),
+                    ws=ws,
+                    symbol_key=normalized_symbol_key,
+                )
         async with self._lock:
             self._run_last_activity[str(run_id)] = time.monotonic()
 

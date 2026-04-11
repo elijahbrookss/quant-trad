@@ -26,15 +26,24 @@ FACT_TYPE_TRADE_UPSERTED = "trade_upserted"
 FACT_TYPE_LOG_EMITTED = "log_emitted"
 FACT_TYPE_DECISION_EMITTED = "decision_emitted"
 
-CONTINUITY_READY = "ready"
-CONTINUITY_BOOTSTRAP_REQUIRED = "bootstrap_required"
-CONTINUITY_RESYNC_REQUIRED = "resync_required"
-
 STREAM_CONNECTED_TYPE = "botlens_run_connected"
-STREAM_RESYNC_REQUIRED_TYPE = "botlens_run_resync_required"
+STREAM_SYMBOL_SNAPSHOT_TYPE = "botlens_symbol_snapshot"
 STREAM_SUMMARY_DELTA_TYPE = "botlens_run_summary_delta"
 STREAM_OPEN_TRADES_DELTA_TYPE = "botlens_open_trades_delta"
-STREAM_DETAIL_DELTA_TYPE = "botlens_symbol_detail_delta"
+STREAM_SYMBOL_CANDLE_DELTA_TYPE = "symbol_candle_delta"
+STREAM_SYMBOL_OVERLAY_DELTA_TYPE = "symbol_overlay_delta"
+STREAM_SYMBOL_TRADE_DELTA_TYPE = "symbol_trade_delta"
+STREAM_SYMBOL_LOG_DELTA_TYPE = "symbol_log_delta"
+STREAM_SYMBOL_DECISION_DELTA_TYPE = "symbol_decision_delta"
+STREAM_SYMBOL_RUNTIME_DELTA_TYPE = "symbol_runtime_delta"
+STREAM_SYMBOL_DELTA_TYPES = (
+    STREAM_SYMBOL_CANDLE_DELTA_TYPE,
+    STREAM_SYMBOL_OVERLAY_DELTA_TYPE,
+    STREAM_SYMBOL_TRADE_DELTA_TYPE,
+    STREAM_SYMBOL_LOG_DELTA_TYPE,
+    STREAM_SYMBOL_DECISION_DELTA_TYPE,
+    STREAM_SYMBOL_RUNTIME_DELTA_TYPE,
+)
 
 
 def _mapping(value: Any) -> Dict[str, Any]:
@@ -116,34 +125,9 @@ def normalize_lifecycle_payload(payload: Any) -> Dict[str, Any]:
     return {key: value for key, value in lifecycle.items() if value not in (None, "", [])}
 
 
-def continuity_payload(
-    *,
-    status: str = CONTINUITY_BOOTSTRAP_REQUIRED,
-    reason: str | None = None,
-    bridge_session_id: str | None = None,
-    bridge_seq: int = 0,
-    details: Mapping[str, Any] | None = None,
-    invalidated_at: Any = None,
-) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {
-        "status": str(status or CONTINUITY_BOOTSTRAP_REQUIRED),
-        "bridge_session_id": str(bridge_session_id or "").strip() or None,
-        "last_bridge_seq": int(bridge_seq or 0),
-        "details": _mapping(details),
-    }
-    if reason:
-        payload["reason"] = str(reason)
-    if invalidated_at is not None:
-        payload["invalidated_at"] = invalidated_at
-    return payload
-
-
 __all__ = [
     "BRIDGE_BOOTSTRAP_KIND",
     "BRIDGE_FACTS_KIND",
-    "CONTINUITY_BOOTSTRAP_REQUIRED",
-    "CONTINUITY_READY",
-    "CONTINUITY_RESYNC_REQUIRED",
     "EVENT_TYPE_LIFECYCLE",
     "EVENT_TYPE_RUNTIME_BOOTSTRAP",
     "EVENT_TYPE_RUNTIME_FACTS",
@@ -160,11 +144,16 @@ __all__ = [
     "RUN_SCOPE_KEY",
     "SCHEMA_VERSION",
     "STREAM_CONNECTED_TYPE",
-    "STREAM_DETAIL_DELTA_TYPE",
+    "STREAM_SYMBOL_SNAPSHOT_TYPE",
     "STREAM_OPEN_TRADES_DELTA_TYPE",
-    "STREAM_RESYNC_REQUIRED_TYPE",
+    "STREAM_SYMBOL_CANDLE_DELTA_TYPE",
+    "STREAM_SYMBOL_DELTA_TYPES",
+    "STREAM_SYMBOL_DECISION_DELTA_TYPE",
+    "STREAM_SYMBOL_LOG_DELTA_TYPE",
+    "STREAM_SYMBOL_OVERLAY_DELTA_TYPE",
+    "STREAM_SYMBOL_RUNTIME_DELTA_TYPE",
+    "STREAM_SYMBOL_TRADE_DELTA_TYPE",
     "STREAM_SUMMARY_DELTA_TYPE",
-    "continuity_payload",
     "is_run_scope_key",
     "normalize_bridge_seq",
     "normalize_bridge_session_id",

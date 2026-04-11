@@ -376,7 +376,6 @@ async def bot_lens_active_live(
     bot_id: str,
     websocket: WebSocket,
     symbol_key: Optional[str] = None,
-    cursor_seq: int = 0,
 ) -> None:
     try:
         resolved = resolve_active_botlens_stream(
@@ -385,13 +384,7 @@ async def bot_lens_active_live(
         )
     except (KeyError, ValueError) as exc:
         await websocket.accept()
-        await websocket.send_json(
-            {
-                "type": "botlens_run_resync_required",
-                "run_id": "",
-                "payload": {"reason": "bootstrap_failed", "details": {"message": str(exc)}},
-            }
-        )
+        logger.warning("botlens_live_ws_open_failed | bot_id=%s | error=%s", bot_id, str(exc))
         await websocket.close(code=1011)
         return
 
@@ -400,7 +393,6 @@ async def bot_lens_active_live(
     await telemetry_hub.add_run_viewer(
         run_id=run_id,
         ws=websocket,
-        cursor_seq=max(0, int(cursor_seq or 0)),
         selected_symbol_key=selected_symbol_key or None,
     )
     try:

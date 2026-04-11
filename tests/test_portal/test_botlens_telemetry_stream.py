@@ -40,9 +40,12 @@ def _facts_batch(
     symbol_key: str = "instrument-btc|1m",
     symbol: str = "BTC",
     warnings: list[dict] | None = None,
+    overlay_delta: dict | None = None,
+    log_entries: list[dict] | None = None,
+    decision_entries: list[dict] | None = None,
 ) -> list[dict]:
     instrument_id, timeframe = str(symbol_key).split("|", 1)
-    return [
+    facts = [
         {
             "fact_type": "runtime_state_observed",
             "runtime": {
@@ -70,6 +73,23 @@ def _facts_batch(
             "trade": {"trade_id": "trade-1", "symbol": symbol},
         },
     ]
+    if isinstance(overlay_delta, dict):
+        facts.append(
+            {
+                "fact_type": "overlay_ops_emitted",
+                "series_key": symbol_key,
+                "overlay_delta": dict(overlay_delta),
+            }
+        )
+    for entry in log_entries or []:
+        if not isinstance(entry, dict):
+            continue
+        facts.append({"fact_type": "log_emitted", "log": dict(entry)})
+    for entry in decision_entries or []:
+        if not isinstance(entry, dict):
+            continue
+        facts.append({"fact_type": "decision_emitted", "decision": dict(entry)})
+    return facts
 
 
 def test_process_bootstrap_persists_run_summary_and_symbol_detail(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -112,15 +132,19 @@ def test_process_bootstrap_persists_run_summary_and_symbol_detail(monkeypatch: p
         assert summary_row["payload"]["summary"]["open_trades_index"]["trade-1"]["symbol_key"] == "instrument-btc|1m"
         assert summary_row["payload"]["summary"]["health"]["warnings"] == []
         assert persisted_events[0]["event_type"] == "botlens.runtime_bootstrap_facts"
+        assert persisted_events[0]["payload"]["typed_delta_metrics"]["event_count"] >= 1
+        assert "symbol_candle_delta" in persisted_events[0]["payload"]["typed_delta_metrics"]["counts_by_type"]
 
     asyncio.run(scenario())
 
 
-def test_process_facts_broadcasts_run_scoped_deltas(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_facts_broadcasts_run_scoped_typed_symbol_deltas(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         hub = BotTelemetryHub()
-        monkeypatch.setattr(stream, "upsert_bot_run_view_state", lambda row: dict(row))
-        monkeypatch.setattr(stream, "record_bot_runtime_event", lambda row: dict(row))
+        persisted_rows: list[dict] = []
+        persisted_events: list[dict] = []
+        monkeypatch.setattr(stream, "upsert_bot_run_view_state", lambda row: persisted_rows.append(dict(row)) or dict(row))
+        monkeypatch.setattr(stream, "record_bot_runtime_event", lambda row: persisted_events.append(dict(row)) or dict(row))
         monkeypatch.setattr(stream, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1", "strategy_name": "Momentum"})
 
         async def fake_publish_runtime_update(**kwargs) -> None:
@@ -129,7 +153,7 @@ def test_process_facts_broadcasts_run_scoped_deltas(monkeypatch: pytest.MonkeyPa
         hub._publish_runtime_update = fake_publish_runtime_update  # type: ignore[method-assign]
         ws = FakeWebSocket()
 
-        await hub.add_run_viewer(run_id="run-1", ws=ws, cursor_seq=0, selected_symbol_key="instrument-btc|1m")
+        await hub.add_run_viewer(run_id="run-1", ws=ws, selected_symbol_key="instrument-btc|1m")
 
         await hub._process_ingest(
             {
@@ -157,7 +181,22 @@ def test_process_facts_broadcasts_run_scoped_deltas(monkeypatch: pytest.MonkeyPa
                     "run_seq": 2,
                     "bridge_session_id": "bridge-1",
                     "bridge_seq": 2,
-                    "facts": _facts_batch(candle_time=2),
+                    "facts": _facts_batch(
+                        candle_time=2,
+                        overlay_delta={
+                            "seq": 2,
+                            "base_seq": 1,
+                            "ops": [
+                                {
+                                    "op": "upsert",
+                                    "key": "overlay:regime",
+                                    "overlay": {"type": "regime_overlay", "payload": {"regime_blocks": [{"x1": 1, "x2": 2}]}},
+                                }
+                            ],
+                        },
+                        log_entries=[{"id": "log-1", "message": "runtime log"}],
+                        decision_entries=[{"event_id": "decision-1", "event": "decision"}],
+                    ),
                     "event_time": "2026-01-01T00:01:00Z",
                     "known_at": "2026-01-01T00:01:00Z",
                 }
@@ -168,11 +207,36 @@ def test_process_facts_broadcasts_run_scoped_deltas(monkeypatch: pytest.MonkeyPa
         assert "botlens_run_connected" in message_types
         assert "botlens_run_summary_delta" in message_types
         assert "botlens_open_trades_delta" in message_types
-        assert "botlens_symbol_detail_delta" in message_types
-        detail_messages = [message for message in ws.messages if message["type"] == "botlens_symbol_detail_delta"]
-        assert detail_messages[-1]["payload"]["candle"]["time"] == 2
+        assert "symbol_runtime_delta" in message_types
+        assert "symbol_candle_delta" in message_types
+        assert "symbol_overlay_delta" in message_types
+        assert "symbol_trade_delta" in message_types
+        assert "symbol_log_delta" in message_types
+        assert "symbol_decision_delta" in message_types
+        candle_messages = [message for message in ws.messages if message["type"] == "symbol_candle_delta"]
+        overlay_messages = [message for message in ws.messages if message["type"] == "symbol_overlay_delta"]
+        trade_messages = [message for message in ws.messages if message["type"] == "symbol_trade_delta"]
+        log_messages = [message for message in ws.messages if message["type"] == "symbol_log_delta"]
+        decision_messages = [message for message in ws.messages if message["type"] == "symbol_decision_delta"]
+        runtime_messages = [message for message in ws.messages if message["type"] == "symbol_runtime_delta"]
+        assert candle_messages[-1]["payload"]["candle"]["time"] == 2
+        assert overlay_messages[-1]["payload"]["overlay_delta"]["ops"][0]["key"] == "overlay:regime"
+        assert trade_messages[-1]["payload"]["upserts"][0]["trade_id"] == "trade-1"
+        assert log_messages[-1]["payload"]["append"][0]["id"] == "log-1"
+        assert decision_messages[-1]["payload"]["append"][0]["event_id"] == "decision-1"
+        assert runtime_messages[-1]["payload"]["runtime"]["status"] == "running"
         summary_messages = [message for message in ws.messages if message["type"] == "botlens_run_summary_delta"]
         assert summary_messages[-1]["payload"]["health"]["warnings"] == []
+        detail_row = next(row for row in persisted_rows if row["series_key"] == "instrument-btc|1m")
+        assert detail_row["payload"]["detail"]["candles"][-1]["time"] == 2
+        assert detail_row["payload"]["detail"]["overlays"][0]["overlay_id"] == "overlay:regime"
+        assert detail_row["payload"]["detail"]["logs"][0]["id"] == "log-1"
+        assert detail_row["payload"]["detail"]["decisions"][0]["event_id"] == "decision-1"
+        typed_delta_metrics = persisted_events[-1]["payload"]["typed_delta_metrics"]
+        assert typed_delta_metrics["counts_by_type"]["symbol_candle_delta"] == 1
+        assert typed_delta_metrics["counts_by_type"]["symbol_runtime_delta"] == 1
+        assert typed_delta_metrics["event_count"] == 6
+        assert typed_delta_metrics["total_payload_bytes"] > 0
 
     asyncio.run(scenario())
 
@@ -228,25 +292,105 @@ def test_process_facts_carries_grouped_runtime_warnings_into_summary_health(monk
     asyncio.run(scenario())
 
 
-def test_add_run_viewer_replays_buffered_messages_after_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_add_run_viewer_starts_future_only_stream(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         hub = BotTelemetryHub()
         ws = FakeWebSocket()
-        async with hub._run_stream._lock:  # type: ignore[attr-defined]
-            hub._run_stream._run_stream_session_id["run-1"] = "session-1"  # type: ignore[attr-defined]
-            hub._run_stream._run_tail_ring["run-1"].append(  # type: ignore[attr-defined]
-                {
-                    "type": "botlens_run_summary_delta",
+        monkeypatch.setattr(stream, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1", "strategy_name": "Momentum"})
+        await hub._process_ingest(
+            {
+                "payload": {
+                    "kind": BRIDGE_BOOTSTRAP_KIND,
+                    "bot_id": "bot-1",
                     "run_id": "run-1",
-                    "seq": 2,
-                    "stream_session_id": "session-1",
-                    "payload": {"health": {"status": "running"}, "lifecycle": {}, "symbol_upserts": [], "symbol_removals": []},
+                    "series_key": "instrument-btc|1m",
+                    "run_seq": 1,
+                    "bridge_session_id": "bridge-1",
+                    "bridge_seq": 1,
+                    "facts": _facts_batch(candle_time=1),
+                    "event_time": "2026-01-01T00:00:00Z",
+                    "known_at": "2026-01-01T00:00:00Z",
                 }
-            )
+            }
+        )
 
-        await hub.add_run_viewer(run_id="run-1", ws=ws, cursor_seq=1, selected_symbol_key="instrument-btc|1m")
+        await hub.add_run_viewer(run_id="run-1", ws=ws, selected_symbol_key="instrument-btc|1m")
 
-        assert [message["type"] for message in ws.messages] == ["botlens_run_connected", "botlens_run_summary_delta"]
+        assert [message["type"] for message in ws.messages] == [
+            "botlens_run_connected",
+            "botlens_symbol_snapshot",
+        ]
+        assert ws.messages[-1]["symbol_key"] == "instrument-btc|1m"
+
+    asyncio.run(scenario())
+
+
+def test_process_facts_bridge_gap_still_advances_symbol_projection_and_typed_deltas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        hub = BotTelemetryHub()
+        persisted_rows: list[dict] = []
+        persisted_events: list[dict] = []
+        monkeypatch.setattr(stream, "upsert_bot_run_view_state", lambda row: persisted_rows.append(dict(row)) or dict(row))
+        monkeypatch.setattr(stream, "record_bot_runtime_event", lambda row: persisted_events.append(dict(row)) or dict(row))
+        monkeypatch.setattr(stream, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1", "strategy_name": "Momentum"})
+
+        async def fake_publish_runtime_update(**kwargs) -> None:
+            return None
+
+        hub._publish_runtime_update = fake_publish_runtime_update  # type: ignore[method-assign]
+        ws = FakeWebSocket()
+
+        await hub.add_run_viewer(run_id="run-1", ws=ws, selected_symbol_key="instrument-btc|1m")
+
+        await hub._process_ingest(
+            {
+                "payload": {
+                    "kind": BRIDGE_BOOTSTRAP_KIND,
+                    "bot_id": "bot-1",
+                    "run_id": "run-1",
+                    "series_key": "instrument-btc|1m",
+                    "run_seq": 1,
+                    "bridge_session_id": "bridge-1",
+                    "bridge_seq": 1,
+                    "facts": _facts_batch(candle_time=1),
+                    "event_time": "2026-01-01T00:00:00Z",
+                    "known_at": "2026-01-01T00:00:00Z",
+                }
+            }
+        )
+
+        ws.messages.clear()
+
+        await hub._process_ingest(
+            {
+                "payload": {
+                    "kind": BRIDGE_FACTS_KIND,
+                    "bot_id": "bot-1",
+                    "run_id": "run-1",
+                    "series_key": "instrument-btc|1m",
+                    "run_seq": 2,
+                    "bridge_session_id": "bridge-1",
+                    "bridge_seq": 3,
+                    "facts": _facts_batch(candle_time=2),
+                    "event_time": "2026-01-01T00:01:00Z",
+                    "known_at": "2026-01-01T00:01:00Z",
+                }
+            }
+        )
+
+        message_types = [message["type"] for message in ws.messages]
+        assert "botlens_run_summary_delta" in message_types
+        assert "symbol_candle_delta" in message_types
+        assert "symbol_trade_delta" in message_types
+        assert "symbol_runtime_delta" in message_types
+        detail_row = next(row for row in persisted_rows if row["series_key"] == "instrument-btc|1m")
+        assert detail_row["payload"]["detail"]["candles"][-1]["time"] == 2
+        typed_delta_metrics = persisted_events[-1]["payload"]["typed_delta_metrics"]
+        assert typed_delta_metrics["counts_by_type"]["symbol_candle_delta"] == 1
+        assert typed_delta_metrics["counts_by_type"]["symbol_runtime_delta"] == 1
+        assert "resync_required_count" not in typed_delta_metrics
 
     asyncio.run(scenario())
 
