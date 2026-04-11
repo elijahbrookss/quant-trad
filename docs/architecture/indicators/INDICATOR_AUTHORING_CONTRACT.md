@@ -35,6 +35,7 @@ Quant-Trad indicators are now authored around one public contract:
 - one authored `IndicatorManifest` is the full public contract for the indicator type,
 - typed outputs are the only strategy-visible truth surface,
 - overlays are an optional chart-only surface owned by the indicator,
+- details are an optional operator/debug surface owned by the indicator,
 - the runtime engine executes indicators synchronously in dependency order from a derived `IndicatorRuntimeSpec`,
 - walk-forward runtime is the authoritative execution model for runtime-supported indicators across QuantLab, strategy preview, and BotLens.
 
@@ -43,6 +44,7 @@ In scope:
 - parameter authoring for create/edit flows,
 - typed output authoring,
 - optional indicator-owned overlay authoring,
+- optional indicator-owned detail authoring,
 - runtime execution rules shared by bot runtime and any future walk-forward/preview consumers.
 
 Out of scope:
@@ -56,18 +58,23 @@ flowchart LR
     A[Indicator internal state] --> B[apply_bar(bar, inputs)]
     B --> C[snapshot]
     B --> D[overlay_snapshot]
-    C --> E[Typed outputs]
-    D --> F[Canonical overlays]
-    E --> G[Strategy evaluator]
-    F --> H[BotLens / chart runtime]
+    B --> E[detail_snapshot]
+    C --> F[Typed outputs]
+    D --> G[Canonical overlays]
+    E --> H[Runtime details]
+    F --> I[Strategy evaluator]
+    G --> J[BotLens / chart runtime]
+    H --> J
 ```
 
 The indicator owns both surfaces, but they remain separate:
 
 - `snapshot()` publishes typed outputs for runtime truth,
 - `overlay_snapshot()` publishes canonical chart overlays as the complete current overlay state for that bar, not a visual delta,
+- `detail_snapshot()` publishes optional non-render inspection payloads for debugger/operator surfaces,
 - strategies consume outputs only,
-- overlay consumers consume overlays only.
+- chart consumers consume overlays only,
+- debugger/operator surfaces may consume details without treating them as render overlays.
 
 ## 3) Manifest contract
 
@@ -83,6 +90,7 @@ Optional authored manifest sections:
 - `params`
 - `outputs`
 - `overlays`
+- `details`
 - `dependencies`
 - `runtime_inputs`
 
@@ -91,6 +99,7 @@ Core authored semantics:
 - `params` declare indicator-owned configuration only,
 - `outputs` declare strategy-visible typed runtime outputs,
 - `overlays` declare chart-visible overlay surfaces,
+- `details` declare inspection payloads that should not bloat the live overlay contract,
 - `dependencies` declare logical indicator dependencies at the type level,
 - `runtime_inputs` declare only source-data requirements such as source timeframe and lookback policy.
 
@@ -260,9 +269,24 @@ Rules:
 - runtime and BotLens do visibility filtering, trimming, delta streaming, transport, and replay only,
 - overlays are not strategy inputs and are not dependency inputs.
 
+## 6.1) Detail contract
+
+Details are optional and inspection-only.
+
+Runtime shape:
+- `RuntimeDetail(bar_time, ready, value)`
+
+Rules:
+- details are declared in `manifest.details`,
+- if details are declared, `detail_snapshot()` must return exactly those names every bar,
+- details are not strategy inputs and are not dependency inputs,
+- details should carry operator/readout/debug data that would otherwise tempt authors to inflate overlay payloads,
+- details may be transported independently from overlays and may be consumed only by debugger/operator surfaces.
+
 If any dependency output is not ready:
 - all typed outputs must be `ready=False`,
-- all declared overlays must be `ready=False`.
+- all declared overlays must be `ready=False`,
+- all declared details must be `ready=False`.
 
 ## 7) Indicator implementation contract
 
@@ -274,6 +298,7 @@ Required methods:
 
 Optional method:
 - `overlay_snapshot()` returns all declared overlays
+- `detail_snapshot()` returns all declared details
 
 Authoring rules:
 - do not expose private state to strategies or runtime consumers,
@@ -281,6 +306,8 @@ Authoring rules:
 - do not publish unrelated outputs from one composite indicator,
 - do not materialize full chart-history overlays inside `apply_bar()`,
 - if a line or region overlay grows over time, append/advance indicator-owned overlay state incrementally and let `overlay_snapshot()` read that state when asked,
+- if a surface needs inspection-only state that is not coupled to the live overlay timeline, prefer `detail_snapshot()`,
+- if a chart readout depends on the same live overlay timeline, keep that payload in the canonical overlay contract instead of creating a parallel refetch channel,
 - if an indicator feels messy, split it at the computation boundary.
 
 ## 8) Composite indicators
@@ -315,7 +342,8 @@ The split rule is simple:
 - per-bar execution,
 - output validation,
 - overlay validation,
-- flattened output and overlay maps.
+- detail validation,
+- flattened output, overlay, and detail maps.
 
 Per bar:
 1. gather same-bar dependency outputs,
@@ -324,7 +352,9 @@ Per bar:
 4. validate exact output presence and shape,
 5. call `overlay_snapshot()`,
 6. validate exact overlay presence and canonical overlay payload,
-7. flatten outputs and overlays for downstream consumers.
+7. call `detail_snapshot()`,
+8. validate exact detail presence and shape,
+9. flatten outputs, overlays, and details for downstream consumers.
 
 The engine is synchronous and deterministic:
 - no waiting,

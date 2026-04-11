@@ -439,6 +439,7 @@ def _build_regime_payload(
     timeframe_seconds: int,
     regime_version: Optional[str],
     include_change_markers: bool,
+    include_regime_blocks: bool,
     include_regime_points: bool,
 ) -> Dict[str, Any]:
     regime_config = default_regime_runtime_config()
@@ -531,7 +532,6 @@ def _build_regime_payload(
     payload: Dict[str, Any] = {
         "boxes": boxes,
         "segments": segments,
-        "regime_blocks": regime_blocks,
         "summary": {
             "regime_version": regime_version,
             "points": len(points_with_blocks),
@@ -540,6 +540,8 @@ def _build_regime_payload(
             "current_regime_label": regime_label,
         },
     }
+    if include_regime_blocks:
+        payload["regime_blocks"] = regime_blocks
     if include_regime_points:
         payload["regime_points"] = list(points_with_blocks)
     return payload
@@ -615,6 +617,7 @@ def build_regime_overlay(
     timeframe_seconds: int,
     regime_version: Optional[str] = None,
     include_change_markers: bool = True,
+    include_regime_blocks: bool = True,
     include_regime_points: bool = False,
 ) -> Optional[Dict[str, Any]]:
     if not candles or not regime_rows:
@@ -629,6 +632,7 @@ def build_regime_overlay(
         timeframe_seconds=timeframe_seconds,
         regime_version=regime_version,
         include_change_markers=include_change_markers,
+        include_regime_blocks=include_regime_blocks,
         include_regime_points=include_regime_points,
     )
     return build_overlay("regime_overlay", payload)
@@ -662,7 +666,8 @@ def build_regime_overlays(
         timeframe_seconds=timeframe_seconds,
         regime_version=regime_version,
         include_change_markers=include_change_markers,
-        include_regime_points=True,
+        include_regime_blocks=True,
+        include_regime_points=False,
     )
     if include_change_markers:
         change_epochs = detect_regime_changes(blocks)

@@ -14,7 +14,6 @@ import { MarkerTooltip } from './MarkerTooltip.jsx'
 import { RegimeReadoutBar } from './RegimeReadoutBar.jsx'
 import { createLogger } from '../../utils/logger.js'
 import {
-  buildCandleSnapshots,
   buildReadoutSnapshot,
   buildRegimeBlockSnapshots,
   findNearestCandleTime,
@@ -310,9 +309,7 @@ export function BotLensChart({
     [resolvedOverlays],
   )
   const regimeBlocks = regimeOverlay?.payload?.regime_blocks || []
-  const regimePoints = regimeOverlay?.payload?.regime_points || []
   const blockSnapshots = useMemo(() => buildRegimeBlockSnapshots(regimeBlocks), [regimeBlocks])
-  const candleSnapshots = useMemo(() => buildCandleSnapshots(regimePoints), [regimePoints])
   const lastCandleEpoch = candleData[candleData.length - 1]?.time
   const lastReadoutSnapshotRef = useRef(null)
 
@@ -324,7 +321,6 @@ export function BotLensChart({
     const snapshot = buildReadoutSnapshot({
       focusTs: focusEpoch,
       blocks: blockSnapshots,
-      points: candleSnapshots,
       lastSnapshot: lastReadoutSnapshotRef.current,
     })
     if (snapshot) {
@@ -332,7 +328,7 @@ export function BotLensChart({
       return snapshot
     }
     return lastReadoutSnapshotRef.current
-  }, [blockSnapshots, candleSnapshots, hoveredEpoch, lastCandleEpoch, candleData, showRegimeReadout])
+  }, [blockSnapshots, hoveredEpoch, lastCandleEpoch, candleData, showRegimeReadout])
 
   useEffect(() => {
     const chart = chartRef.current

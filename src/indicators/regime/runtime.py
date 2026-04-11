@@ -370,7 +370,6 @@ class TypedRegimeIndicator(Indicator):
                         "boxes": [],
                         "segments": [],
                         "regime_blocks": [],
-                        "regime_points": [],
                         "summary": {},
                     },
                 ),

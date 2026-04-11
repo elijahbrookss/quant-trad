@@ -929,6 +929,14 @@ def test_regime_overlay_uses_context_regime_not_committed_structure() -> None:
             "regime_key": "range|normal|normal|stable",
         }
 
+    overlay = build_regime_overlay(
+        candles=candles,
+        regime_rows=regime_rows,
+        timeframe_seconds=60,
+        regime_version="v1",
+        include_change_markers=True,
+        include_regime_blocks=True,
+    )
     built = build_regime_overlays(
         candles=candles,
         regime_rows=regime_rows,
@@ -937,7 +945,8 @@ def test_regime_overlay_uses_context_regime_not_committed_structure() -> None:
         include_change_markers=True,
         include_marker_overlay=True,
     )
-    regime_payload = next(overlay["payload"] for overlay in built if overlay["type"] == "regime_overlay")
+    assert overlay is not None
+    regime_payload = overlay["payload"]
     marker_payload = next(overlay["payload"] for overlay in built if overlay["type"] == "regime_markers")
 
     assert regime_payload["regime_blocks"][0]["structure"]["state"] == "range"
@@ -983,7 +992,7 @@ def test_regime_runtime_prunes_regime_rows_with_retained_window() -> None:
     assert _candle(6, close=100_000.0).time.replace(tzinfo=None) not in indicator._regime_rows
 
 
-def test_regime_overlay_payload_stays_bounded_after_history_limit() -> None:
+def test_regime_overlay_payload_stays_render_only_after_history_limit() -> None:
     indicator = _runtime_indicator()
     indicator.configure_replay_window(history_bars=6)
 
@@ -1000,5 +1009,20 @@ def test_regime_overlay_payload_stays_bounded_after_history_limit() -> None:
     oldest_retained_epoch = int(retained_candles[0].time.timestamp())
 
     assert len(retained_candles) == 6
-    assert len(regime_payload["regime_points"]) <= 6
-    assert all(int(point["time"]) >= oldest_retained_epoch for point in regime_payload["regime_points"])
+    assert "regime_points" not in regime_payload
+    assert len(regime_payload["regime_blocks"]) <= 6
+    assert all(int(block["x1"]) >= oldest_retained_epoch for block in regime_payload["regime_blocks"])
+
+
+def test_regime_runtime_no_longer_emits_detail_snapshot() -> None:
+    indicator = _runtime_indicator()
+    indicator.configure_replay_window(history_bars=6)
+
+    for index in range(24):
+        candle = _candle(index, close=100_000.0 + index * 20.0)
+        indicator.apply_bar(
+            candle,
+            {_dependency_ref(): _dependency_output(candle.time, _trend_stats())},
+        )
+
+    assert indicator.detail_snapshot() == {}

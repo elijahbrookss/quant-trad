@@ -70,26 +70,10 @@ export const buildRegimeBlockSnapshots = (blocks = []) => {
       bars: block?.bars ?? null,
       regime_key: block?.regime_key,
       block_id: block?.block_id,
-      known_at: normalizeEpoch(block?.known_at ?? block?.x1),
       trend_direction: block?.structure?.trend_direction ?? 'neutral',
     }))
     .filter((block) => Number.isFinite(block?.x1) && Number.isFinite(block?.x2))
     .sort((a, b) => (a.x1 ?? 0) - (b.x1 ?? 0))
-}
-
-export const buildCandleSnapshots = (points = []) => {
-  if (!Array.isArray(points) || points.length === 0) return []
-  return points
-    .map((point) => ({
-      ts: normalizeEpoch(point?.time),
-      structure: point?.structure || {},
-      volatility: point?.volatility || {},
-      liquidity: point?.liquidity || {},
-      expansion: point?.expansion || {},
-      confidence: point?.confidence ?? null,
-    }))
-    .filter((point) => Number.isFinite(point?.ts))
-    .sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0))
 }
 
 export const getActiveRegimeBlock = (blocks, ts) => {
@@ -126,19 +110,10 @@ export const getActiveRegimeBlock = (blocks, ts) => {
   return null
 }
 
-export const getNearestCandleStats = (points, ts) => {
-  if (!Array.isArray(points) || points.length === 0 || !Number.isFinite(ts)) return null
-  const times = points.map((point) => point?.ts)
-  const idx = findNearestIndex(times, ts)
-  if (idx === null) return null
-  return points[idx] || null
-}
-
-export const buildReadoutSnapshot = ({ focusTs, blocks, points, lastSnapshot }) => {
+export const buildReadoutSnapshot = ({ focusTs, blocks, lastSnapshot }) => {
   if (!Number.isFinite(focusTs)) return lastSnapshot || null
   const block = getActiveRegimeBlock(blocks, focusTs)
-  const candle = getNearestCandleStats(points, focusTs)
-  if (!candle) return lastSnapshot || null
+  if (!block) return lastSnapshot || null
   const structureConfidence =
     block && Number.isFinite(block?.confidence)
       ? Number(block.confidence)
@@ -156,19 +131,19 @@ export const buildReadoutSnapshot = ({ focusTs, blocks, points, lastSnapshot }) 
         known_at: block?.known_at ?? null,
       },
     volatility: {
-      ...(candle?.volatility || {}),
-      state: candle?.volatility?.state ?? 'unknown',
-      confidence: candle?.volatility?.confidence ?? candle?.confidence ?? null,
+      ...(block?.volatility || {}),
+      state: block?.volatility?.state ?? 'unknown',
+      confidence: block?.volatility?.confidence ?? block?.confidence ?? null,
     },
     liquidity: {
-      ...(candle?.liquidity || {}),
-      state: candle?.liquidity?.state ?? 'unknown',
-      confidence: candle?.liquidity?.confidence ?? candle?.confidence ?? null,
+      ...(block?.liquidity || {}),
+      state: block?.liquidity?.state ?? 'unknown',
+      confidence: block?.liquidity?.confidence ?? block?.confidence ?? null,
     },
     expansion: {
-      ...(candle?.expansion || {}),
-      state: candle?.expansion?.state ?? 'unknown',
-      confidence: candle?.expansion?.confidence ?? candle?.confidence ?? null,
+      ...(block?.expansion || {}),
+      state: block?.expansion?.state ?? 'unknown',
+      confidence: block?.expansion?.confidence ?? block?.confidence ?? null,
     },
   }
 }

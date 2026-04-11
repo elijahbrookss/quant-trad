@@ -110,6 +110,10 @@ class RuntimeSetupPrepareMixin:
         # NOTE: Runtime-scoped overlay summary cache; key=strategy_key, no eviction.
         self._overlay_summary_cache: Dict[str, Dict[str, Any]] = {}
         self._last_stats: Dict[str, Any] = {}
+        self._aggregate_stats_cache: Dict[str, Any] = {}
+        self._aggregate_stats_cache_key: tuple[Any, ...] | None = None
+        self._aggregate_trades_cache: List[Dict[str, Any]] = []
+        self._aggregate_trades_cache_key: tuple[Any, ...] | None = None
         self._next_bar_at: Optional[datetime] = None
         self._policy = RuntimeModePolicy.for_run_type(self.run_type)
         self._live_mode = self._policy.allow_live_refresh

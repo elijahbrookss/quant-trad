@@ -55,6 +55,10 @@ class RuntimeExecutionLoopMixin:
             self._chart_overlays = []
             self._overlay_summary_cache = {}
             self._last_stats = {}
+            self._aggregate_stats_cache = {}
+            self._aggregate_stats_cache_key = None
+            self._aggregate_trades_cache = []
+            self._aggregate_trades_cache_key = None
             self._next_bar_at = None
             self._logs.clear()
             self._warnings.clear()
@@ -1065,6 +1069,7 @@ class RuntimeExecutionLoopMixin:
             )
 
         indicator_started = time.perf_counter()
+        bar_time = _isoformat(candle.time)
         if state.indicator_engine is None:
             raise RuntimeError("indicator_runtime_missing: series indicator engine is not initialized")
         frame = state.indicator_engine.step(bar=candle, bar_time=candle.time)
@@ -1401,7 +1406,23 @@ class RuntimeExecutionLoopMixin:
         self._log_event("stop", message="Bot stopped")
         self._push_update("stop")
 
+    def _trade_aggregate_cache_key(self) -> Tuple[Any, ...]:
+        members: List[Tuple[Any, ...]] = []
+        for series in self._series:
+            members.append(
+                (
+                    getattr(series, "strategy_id", None),
+                    getattr(series, "symbol", None),
+                    getattr(series, "timeframe", None),
+                    *self._trade_revision(series),
+                )
+            )
+        return tuple(members)
+
     def _aggregate_trades(self) -> List[Dict[str, Any]]:
+        cache_key = self._trade_aggregate_cache_key()
+        if self._aggregate_trades_cache_key == cache_key:
+            return self._aggregate_trades_cache
         trades: List[Dict[str, Any]] = []
         for series in self._series:
             for entry in series.risk_engine.serialise_trades():
@@ -1409,9 +1430,15 @@ class RuntimeExecutionLoopMixin:
                 payload.setdefault("strategy_id", series.strategy_id)
                 payload.setdefault("symbol", series.symbol)
                 trades.append(payload)
+        self._aggregate_trades_cache_key = cache_key
+        self._aggregate_trades_cache = trades
         return trades
 
     def _aggregate_stats(self) -> Dict[str, float]:
+        cache_key = self._trade_aggregate_cache_key()
+        if self._aggregate_stats_cache_key == cache_key and self._aggregate_stats_cache:
+            return dict(self._aggregate_stats_cache)
+
         summary = {
             "total_trades": 0,
             "completed_trades": 0,
@@ -1427,9 +1454,6 @@ class RuntimeExecutionLoopMixin:
         net = 0.0
         currency: Optional[str] = None
         multi_currency = False
-        win_pnls: List[float] = []
-        loss_pnls: List[float] = []
-        tolerance = 1e-8
 
         for series in self._series:
             stats = series.risk_engine.stats()
@@ -1448,15 +1472,18 @@ class RuntimeExecutionLoopMixin:
                 elif currency != series_currency:
                     multi_currency = True
 
-            # Collect individual trade PnLs for avg/largest calculations
-            for trade in series.risk_engine.trades:
-                if trade.is_active():
-                    continue
-                pnl = trade.net_pnl
-                if pnl > tolerance:
-                    win_pnls.append(pnl)
-                elif pnl < -tolerance:
-                    loss_pnls.append(pnl)
+        aggregated_trades = self._aggregate_trades()
+        tolerance = 1e-8
+        win_pnls = [
+            float(trade.get("net_pnl", 0.0) or 0.0)
+            for trade in aggregated_trades
+            if trade.get("closed_at") and float(trade.get("net_pnl", 0.0) or 0.0) > tolerance
+        ]
+        loss_pnls = [
+            float(trade.get("net_pnl", 0.0) or 0.0)
+            for trade in aggregated_trades
+            if trade.get("closed_at") and float(trade.get("net_pnl", 0.0) or 0.0) < -tolerance
+        ]
 
         total = summary.get("completed_trades") or (summary["wins"] + summary["losses"])
         summary["win_rate"] = round(summary["wins"] / total, 4) if total else 0.0
@@ -1474,16 +1501,22 @@ class RuntimeExecutionLoopMixin:
         summary["largest_loss"] = round(min(loss_pnls), 4) if loss_pnls else 0.0
 
         # Max drawdown
-        summary["max_drawdown"] = self._max_drawdown_from_trades()
+        summary["max_drawdown"] = self._max_drawdown_from_trades(aggregated_trades=aggregated_trades)
 
         if multi_currency:
             summary["quote_currency"] = "MULTI"
         elif currency:
             summary["quote_currency"] = currency
+        self._aggregate_stats_cache_key = cache_key
+        self._aggregate_stats_cache = dict(summary)
         return summary
 
-    def _max_drawdown_from_trades(self) -> float:
-        trades = self._aggregate_trades()
+    def _max_drawdown_from_trades(
+        self,
+        *,
+        aggregated_trades: Optional[Sequence[Mapping[str, Any]]] = None,
+    ) -> float:
+        trades = list(aggregated_trades) if aggregated_trades is not None else self._aggregate_trades()
         closed = []
         for trade in trades:
             closed_at = trade.get("closed_at")
