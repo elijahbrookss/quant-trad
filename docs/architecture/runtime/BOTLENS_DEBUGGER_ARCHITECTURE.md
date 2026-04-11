@@ -100,7 +100,7 @@ It contains only what the symbol detail surface needs:
 - logs,
 - decisions,
 - stats,
-- runtime/detail continuity status.
+- and runtime state.
 
 Symbol detail is persisted per canonical `instrument_id|timeframe` key.
 
@@ -122,7 +122,13 @@ The live session carries:
 
 - run summary deltas,
 - open trades deltas,
-- symbol detail deltas for selected or cached hot symbols.
+- typed symbol deltas for the selected symbol only:
+  - `symbol_candle_delta`
+  - `symbol_overlay_delta`
+  - `symbol_trade_delta`
+  - `symbol_log_delta`
+  - `symbol_decision_delta`
+  - `symbol_runtime_delta`
 
 The websocket does not change when the user switches symbols.
 
@@ -130,10 +136,11 @@ Symbol switching now works as:
 
 1. update `selectedSymbolKey` locally in the client store,
 2. keep the run websocket alive,
-3. tell the websocket which symbol is selected/hot,
+3. tell the websocket which symbol is selected,
 4. fetch symbol detail independently if the cache does not already have it.
 
 This eliminates the old per-series reconnect/bootstrap churn.
+If live deltas arrive while a viewer is switching symbols, the server sends a fresh `botlens_symbol_snapshot` for that viewer and replays only `seq > snapshot.seq` for that symbol after the snapshot is delivered.
 
 ## Backend Ownership
 
@@ -173,13 +180,18 @@ BotLens uses six explicit contracts:
    - trade removals
 4. Symbol detail snapshot:
    - one symbol only
-5. Symbol detail delta:
-   - candle/runtime/stats/overlay/trade/log/decision changes for one symbol only
+5. Typed symbol deltas:
+   - `symbol_candle_delta`
+   - `symbol_overlay_delta`
+   - `symbol_trade_delta`
+   - `symbol_log_delta`
+   - `symbol_decision_delta`
+   - `symbol_runtime_delta`
 6. Symbol history page:
    - one symbol only
    - paginated candles
 
-These contracts are narrow and typed so the frontend does not normalize a giant cross-symbol projection blob on every update.
+These contracts are narrow and typed so the frontend does not normalize a giant cross-symbol projection blob on every update, and live symbol state no longer depends on one composite `botlens_symbol_detail_delta`.
 
 ## Default Symbol Selection
 
@@ -197,11 +209,10 @@ No hidden first-row fallback is allowed.
 
 BotLens now uses explicit bounded ownership:
 
-- bounded run replay ring,
 - bounded grouped runtime warning list,
 - bounded per-symbol candle windows,
 - bounded recent trade/log/decision tails,
-- bounded frontend detail cache,
+- bounded frontend symbol snapshot cache,
 - run cache eviction after inactivity,
 - faster eviction for terminal runs.
 
@@ -228,8 +239,17 @@ Indicator guard warnings flow through the same run summary path instead of a sid
 Important rule:
 
 - durable runtime events remain the authoritative replay source,
+- overlays remain render contracts,
+- BotLens live symbol deltas should not force per-bar symbol re-fetches for chart-coupled readouts,
+- if a live readout depends on the same timeline as the overlay stream, that data should ride inside the canonical overlay payload instead of a parallel stale-detail channel,
 - latest BotLens view rows are caches for bootstrap/read performance,
 - and live execution never reads BotLens projections back into the runtime timeline.
+
+TypedDelta observability rides on the same runtime event ledger:
+
+- each raw BotLens bootstrap/facts event now persists a `typed_delta_metrics` summary,
+- that summary captures per-delta type, symbol, payload bytes, build time, emit time, and viewer filtering,
+- and Grafana reads those summaries directly from `portal_bot_run_events` for BotLens TypedDelta traffic and latency dashboards.
 
 ## Frontend Store
 
@@ -240,17 +260,27 @@ The frontend uses one normalized run store:
 - `health`
 - `symbolIndex`
 - `openTradesIndex`
-- `detailCache`
-- `detailCacheOrder`
+- `symbolSnapshots`
+- `symbolSnapshotOrder`
 - `selectedSymbolKey`
 
 Read rules:
 
 - symbol selector reads `symbolIndex` only,
 - live trades panel reads `openTradesIndex` only,
-- chart/detail reads `detailCache[selectedSymbolKey]` only,
+- chart/readout reads `symbolSnapshots[selectedSymbolKey]` only,
 - symbol switching mutates `selectedSymbolKey` locally,
-- cache misses fetch one symbol detail snapshot independently.
+- historical cache misses fetch one symbol snapshot independently,
+- selected-symbol rendering is composed from snapshot slices:
+  - metadata
+  - candles
+  - overlays
+  - recent trades
+  - logs
+  - decisions
+  - runtime / stats
+- live selected-symbol evolution applies typed reducers by concern instead of mutating one composite detail delta object,
+- and live selected-symbol hydration uses a server-side symbol snapshot handoff instead of a client-side delta buffer.
 
 ## Why This Matters
 

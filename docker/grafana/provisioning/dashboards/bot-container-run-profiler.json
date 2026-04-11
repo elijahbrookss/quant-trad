@@ -712,8 +712,8 @@
     {
       "id": 26,
       "type": "timeseries",
-      "title": "WS Viewer Count & Ring Depth",
-      "description": "From Loki: botlens_stream_broadcast viewer_count and ring_depth per broadcast. viewer_count=0 during a backtest is expected. ring_depth climbing means replay buffer is growing.",
+      "title": "WS Viewer Count",
+      "description": "From Loki: botlens_stream_broadcast viewer_count per broadcast. viewer_count=0 during a backtest is expected.",
       "datasource": { "type": "loki", "uid": "quanttrad-loki" },
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 52 },
       "targets": [
@@ -723,13 +723,6 @@
           "instant": false,
           "range": true,
           "legendFormat": "viewer_count"
-        },
-        {
-          "refId": "B",
-          "expr": "max_over_time({app=\"quant_trad\"} |= \"botlens_stream_broadcast\" |= \"${run_id}\" | regexp \"ring_depth=(?P<ring_depth>[0-9]+)\" | unwrap ring_depth [$__interval]) by ()",
-          "instant": false,
-          "range": true,
-          "legendFormat": "ring_depth"
         }
       ],
       "fieldConfig": {
