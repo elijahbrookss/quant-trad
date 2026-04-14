@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Mapping, Optional
 
+from ...observability import payload_size_bytes
 from ....service.bots.startup_lifecycle import deep_merge_dict
 from ._shared import *
+
+_OBSERVER = _STORAGE_OBSERVER
 
 
 def record_bot_run_lifecycle_checkpoint(
@@ -32,50 +36,42 @@ def record_bot_run_lifecycle_checkpoint(
     checkpoint_at = _parse_optional_timestamp(payload.get("checkpoint_at")) or _utcnow()
     event_id = str(payload.get("event_id") or "").strip() or str(uuid.uuid4())
 
-    with db.session() as session:
-        existing = (
-            session.execute(
-                select(BotRunLifecycleEventRecord)
-                .where(BotRunLifecycleEventRecord.event_id == event_id)
-                .limit(1)
+    started = time.perf_counter()
+    payload_bytes = payload_size_bytes({"metadata": metadata, "failure": failure, "message": message})
+    write_context = {"bot_id": bot_id, "run_id": run_id}
+
+    def _write() -> StorageWriteOutcome:
+        with db.session() as session:
+            existing = (
+                session.execute(
+                    select(BotRunLifecycleEventRecord)
+                    .where(BotRunLifecycleEventRecord.event_id == event_id)
+                    .limit(1)
+                )
+                .scalars()
+                .first()
             )
-            .scalars()
-            .first()
-        )
-        if existing is not None:
-            row = session.get(BotRunLifecycleRecord, run_id)
-            return row.to_dict() if row is not None else {}
+            if existing is not None:
+                row = session.get(BotRunLifecycleRecord, run_id)
+                return StorageWriteOutcome(
+                    result=row.to_dict() if row is not None else {},
+                    noop_reason="duplicate_skip",
+                    noop_count=1,
+                )
 
-        next_seq = int(
-            session.execute(
-                select(func.coalesce(func.max(BotRunLifecycleEventRecord.seq), 0))
-                .where(BotRunLifecycleEventRecord.run_id == run_id)
-            ).scalar_one()
-            or 0
-        ) + 1
+            next_seq = int(
+                session.execute(
+                    select(func.coalesce(func.max(BotRunLifecycleEventRecord.seq), 0))
+                    .where(BotRunLifecycleEventRecord.run_id == run_id)
+                ).scalar_one()
+                or 0
+            ) + 1
 
-        event_row = BotRunLifecycleEventRecord(
-            event_id=event_id,
-            run_id=run_id,
-            bot_id=bot_id,
-            seq=next_seq,
-            phase=phase,
-            status=status,
-            owner=owner,
-            message=message,
-            lifecycle_metadata=_json_safe(metadata),
-            failure=_json_safe(failure) if failure else None,
-            checkpoint_at=checkpoint_at,
-            created_at=_utcnow(),
-        )
-        session.add(event_row)
-
-        current = session.get(BotRunLifecycleRecord, run_id)
-        now = _utcnow()
-        if current is None:
-            current = BotRunLifecycleRecord(
+            event_row = BotRunLifecycleEventRecord(
+                event_id=event_id,
                 run_id=run_id,
                 bot_id=bot_id,
+                seq=next_seq,
                 phase=phase,
                 status=status,
                 owner=owner,
@@ -83,29 +79,64 @@ def record_bot_run_lifecycle_checkpoint(
                 lifecycle_metadata=_json_safe(metadata),
                 failure=_json_safe(failure) if failure else None,
                 checkpoint_at=checkpoint_at,
-                created_at=now,
-                updated_at=now,
+                created_at=_utcnow(),
             )
-            session.add(current)
-        else:
-            current.bot_id = bot_id
-            current.phase = phase
-            current.status = status
-            current.owner = owner
-            current.message = message
-            current.lifecycle_metadata = _json_safe(
-                metadata
-                if replace_metadata
-                else deep_merge_dict(
-                    current.lifecycle_metadata if isinstance(current.lifecycle_metadata, Mapping) else {},
-                    metadata,
-                )
-            )
-            current.failure = _json_safe(failure) if failure else None
-            current.checkpoint_at = checkpoint_at
-            current.updated_at = now
+            session.add(event_row)
 
-        return current.to_dict()
+            current = session.get(BotRunLifecycleRecord, run_id)
+            now = _utcnow()
+            if current is None:
+                current = BotRunLifecycleRecord(
+                    run_id=run_id,
+                    bot_id=bot_id,
+                    phase=phase,
+                    status=status,
+                    owner=owner,
+                    message=message,
+                    lifecycle_metadata=_json_safe(metadata),
+                    failure=_json_safe(failure) if failure else None,
+                    checkpoint_at=checkpoint_at,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(current)
+            else:
+                current.bot_id = bot_id
+                current.phase = phase
+                current.status = status
+                current.owner = owner
+                current.message = message
+                current.lifecycle_metadata = _json_safe(
+                    metadata
+                    if replace_metadata
+                    else deep_merge_dict(
+                        current.lifecycle_metadata if isinstance(current.lifecycle_metadata, Mapping) else {},
+                        metadata,
+                    )
+                )
+                current.failure = _json_safe(failure) if failure else None
+                current.checkpoint_at = checkpoint_at
+                current.updated_at = now
+
+            return StorageWriteOutcome(
+                result=current.to_dict(),
+                rows_written=2,
+                payload_bytes=payload_bytes,
+            )
+
+    outcome = _execute_write_with_retry(
+        operation="record_bot_run_lifecycle_checkpoint",
+        storage_target="portal_bot_run_lifecycle",
+        context=write_context,
+        action=_write,
+    )
+    _observe_db_write_outcome(
+        storage_target="portal_bot_run_lifecycle",
+        context=write_context,
+        started=started,
+        outcome=outcome,
+    )
+    return dict(outcome.result)
 
 
 def get_bot_run_lifecycle(run_id: str) -> Optional[Dict[str, Any]]:
