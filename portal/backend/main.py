@@ -13,6 +13,7 @@ from .controller import bots, candles, indicators as ind_controller, instruments
 from .service.bots import bot_service
 from .service.bots.bot_watchdog import get_watchdog
 from .service.db.postgres_extensions import ensure_postgres_extensions
+from .service.observability_exporter import start_observability_exporter, stop_observability_exporter
 
 # Auto-discover indicators via package imports.
 import indicators  # noqa: F401
@@ -53,6 +54,7 @@ def _configure_logging() -> None:
 def _startup_watchdog() -> None:
     ensure_builtin_overlays_registered()
     ensure_postgres_extensions()
+    start_observability_exporter()
     bot_service.ensure_watchdog_stream_bridge()
     watchdog = get_watchdog()
     watchdog.recover_local_orphans()
@@ -63,6 +65,7 @@ def _startup_watchdog() -> None:
 def _shutdown_watchdog() -> None:
     watchdog = get_watchdog()
     watchdog.stop_background_monitor()
+    stop_observability_exporter()
     logger.info("bot_watchdog_stopped | runner_id=%s", watchdog.runner_id)
 
 
