@@ -2,7 +2,27 @@
 
 from __future__ import annotations
 
-from ._shared import *
+from typing import Any, Dict, List, Optional
+
+from ._shared import (
+    ATMTemplateRecord,
+    BotRecord,
+    InstrumentRecord,
+    SQLAlchemyError,
+    StrategyIndicatorLink,
+    StrategyInstrumentLink,
+    StrategyRecord,
+    StrategyRuleRecord,
+    StrategyVariantRecord,
+    _json_safe,
+    _utcnow,
+    db,
+    logger,
+    normalise_template,
+    select,
+    text,
+    uuid,
+)
 
 
 def _normalize_variant_payload(payload: Dict[str, Any]) -> Dict[str, Any]:

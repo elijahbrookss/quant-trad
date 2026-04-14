@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from ._shared import *
+from typing import Any, Dict, List, Optional
+
+from ._shared import ATMTemplateRecord, SQLAlchemyError, _utcnow, db, logger, select, uuid
 
 def load_atm_templates() -> List[Dict[str, Any]]:
     """Return all persisted ATM templates."""
@@ -55,7 +57,6 @@ def upsert_atm_template(payload: Dict[str, Any]) -> Dict[str, Any]:
     except SQLAlchemyError as exc:
         logger.warning("atm_template_persist_failed | id=%s | error=%s", template_id, exc)
     return payload
-
 
 
 

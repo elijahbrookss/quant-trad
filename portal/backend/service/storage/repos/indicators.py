@@ -2,8 +2,20 @@
 
 from __future__ import annotations
 
+from typing import Any, Dict, List, Optional
+
 from ...indicators.persistence_payload import merge_indicator_payload, split_indicator_payload
-from ._shared import *
+from ._shared import (
+    IndicatorRecord,
+    SQLAlchemyError,
+    StrategyIndicatorLink,
+    StrategyRecord,
+    StrategyRuleRecord,
+    _utcnow,
+    db,
+    logger,
+    select,
+)
 
 
 def _record_to_indicator_payload(record: IndicatorRecord) -> Dict[str, Any]:
@@ -144,4 +156,3 @@ def strategies_for_indicator(indicator_id: str) -> List[Dict[str, Any]]:
             }
             for strategy in strategies
         ]
-
