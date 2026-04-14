@@ -1,9 +1,53 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any, Dict
 
 from engines.bot_runtime.core.series_identity import normalize_series_key as normalize_public_series_key
+
+_EVENT_ID_MAX_LEN = 128
+
+
+def _event_id(
+    *,
+    bot_id: str,
+    run_id: str,
+    event_type: str,
+    symbol_key: str,
+    bridge_session_id: str,
+    bridge_seq: int,
+    seq: int,
+) -> str:
+    base = f"{bot_id}:{run_id}:{event_type}"
+    raw_suffix = f"{symbol_key}:{bridge_session_id}:{max(int(bridge_seq), int(seq))}"
+    event_id = f"{base}:{raw_suffix}"
+    if len(event_id) <= _EVENT_ID_MAX_LEN:
+        return event_id
+    digest = hashlib.sha1(raw_suffix.encode("utf-8")).hexdigest()[:20]
+    compact = f"{base}:{digest}:{max(int(bridge_seq), int(seq))}"
+    if len(compact) <= _EVENT_ID_MAX_LEN:
+        return compact
+    overflow = len(compact) - _EVENT_ID_MAX_LEN
+    trimmed_base = base[: max(1, len(base) - overflow)]
+    return f"{trimmed_base}:{digest}:{max(int(bridge_seq), int(seq))}"
+
+
+def _sanitize_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(k): _sanitize_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_json(v) for v in value]
+    if isinstance(value, tuple):
+        return [_sanitize_json(v) for v in value]
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None).isoformat() + "Z"
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value
 
 SCHEMA_VERSION = 4
 RUN_SCOPE_KEY = "__run__"
@@ -11,6 +55,8 @@ RUN_SCOPE_KEY = "__run__"
 BRIDGE_BOOTSTRAP_KIND = "botlens_runtime_bootstrap_facts"
 BRIDGE_FACTS_KIND = "botlens_runtime_facts"
 LIFECYCLE_KIND = "botlens_lifecycle_event"
+# Legacy compatibility kind. Intake treats this as deprecated and does not
+# project it into the BotLens runtime state model.
 PROJECTION_REFRESH_KIND = "bot_projection_refresh"
 
 EVENT_TYPE_RUNTIME_BOOTSTRAP = "botlens.runtime_bootstrap_facts"
@@ -154,6 +200,8 @@ __all__ = [
     "STREAM_SYMBOL_RUNTIME_DELTA_TYPE",
     "STREAM_SYMBOL_TRADE_DELTA_TYPE",
     "STREAM_SUMMARY_DELTA_TYPE",
+    "_event_id",
+    "_sanitize_json",
     "is_run_scope_key",
     "normalize_bridge_seq",
     "normalize_bridge_session_id",
