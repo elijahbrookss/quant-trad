@@ -52,5 +52,5 @@ Runtime services consume storage through explicit service boundaries.
 BotLens backend observability now separates runtime truth from observability signals at the contract level:
 
 - runtime state and replay ledgers remain storage responsibilities,
-- metrics/events are emitted through the backend observability substrate instead of being embedded into hot-path logs,
+- metrics/events are emitted through the backend observability substrate and exported into dedicated observability schemas instead of being embedded into hot-path logs,
 - and manual schema cleanup for table ownership drift is tracked in `BOTLENS_OBSERVABILITY_MIGRATION_CHECKLIST.md`.
