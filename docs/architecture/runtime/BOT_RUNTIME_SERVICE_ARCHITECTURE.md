@@ -192,6 +192,16 @@ Supporting helpers are split explicitly:
 - `container_runtime_projection.py`: compact view-state shaping plus worker/runtime payload merge helpers.
 - `container_runtime_telemetry.py`: bounded outbound telemetry emission and message-context helpers.
 
+### BotLens ingest transport note
+
+The runtime container now owns one long-lived outbound telemetry websocket per container supervision session.
+
+- The previous bad behavior was lifecycle delivery bypassing the queued emitter and using an ephemeral connect/send/close helper, which reintroduced per-message websocket churn on the ingest path.
+- The steady-state model is now queue-first for lifecycle, bootstrap, and runtime facts alike: payloads enqueue into `TelemetryEmitter`, the worker drains them over one healthy websocket, and successful sends do not close the socket.
+- Reconnect happens only after initial connect failure, send failure, remote close, or explicit runtime shutdown. A failed send closes the poisoned socket, leaves the queued message in place, and retries after the configured backoff.
+- Bridge session resets still create a new bootstrap envelope and `bridge_session_id`, but they do not force a websocket reconnect unless the transport itself failed.
+- The run-level `live` lifecycle checkpoint is emitted once when all planned series report their first live snapshot; later facts stay on the same websocket session and do not duplicate that lifecycle event.
+
 Important current limits:
 - default maximum symbols per strategy is 10,
 - one worker process is required per symbol,
