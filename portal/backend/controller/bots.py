@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
+import time
 from collections.abc import Mapping as AbcMapping
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
@@ -19,8 +21,11 @@ from ..service.bots.botlens_session_service import get_active_botlens_session, r
 from ..service.bots.botlens_symbol_service import get_symbol_detail, get_symbol_history, list_run_symbols
 from ..service.bots.ledger_service import get_run_signal_detail, list_run_ledger_events
 from ..service.bots.telemetry_stream import telemetry_hub
+from ..service.observability import BackendObserver
 from ..service.storage.repos.lifecycle import get_bot_run_lifecycle, list_bot_run_lifecycle_events
 router = APIRouter()
+logger = logging.getLogger(__name__)
+_INGEST_OBSERVER = BackendObserver(component="botlens_ingest_ws", event_logger=logger)
 
 
 def _sanitize_json(value: Any) -> Any:
@@ -362,10 +367,33 @@ async def bot_lens_series_history(
 async def bot_telemetry_ingest(websocket: WebSocket) -> None:
     await websocket.accept()
     while True:
+        decode_started = time.perf_counter()
         try:
             payload = await websocket.receive_json()
         except WebSocketDisconnect:
             break
+        except Exception as exc:
+            _INGEST_OBSERVER.increment(
+                "ingest_messages_invalid_total",
+                failure_mode="decode_error",
+                message_kind="ingest_ws",
+            )
+            _INGEST_OBSERVER.event(
+                "intake_invalid_envelope",
+                level=logging.WARN,
+                failure_mode="decode_error",
+                message_kind="ingest_ws",
+                error=str(exc),
+            )
+            continue
+        _INGEST_OBSERVER.observe(
+            "ingest_decode_ms",
+            max((time.perf_counter() - decode_started) * 1000.0, 0.0),
+            message_kind=str(payload.get("kind") or "unknown") if isinstance(payload, dict) else "unknown",
+            run_id=str(payload.get("run_id") or "").strip() or None if isinstance(payload, dict) else None,
+            bot_id=str(payload.get("bot_id") or "").strip() or None if isinstance(payload, dict) else None,
+            worker_id=str(payload.get("worker_id") or "").strip() or None if isinstance(payload, dict) else None,
+        )
         await telemetry_hub.ingest(payload)
 
 
