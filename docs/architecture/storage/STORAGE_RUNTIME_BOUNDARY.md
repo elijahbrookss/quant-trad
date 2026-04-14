@@ -46,3 +46,11 @@ Runtime services consume storage through explicit service boundaries.
 - Startup truth must be durable enough to survive refresh/reconnect without depending on in-memory process state.
 - Frontend diagnostics contracts should be derived from durable lifecycle rows and append-only checkpoint trails, not from client-side reconstruction of raw event semantics.
 - FK-constrained write paths are authoritative; tests should build a valid parent graph instead of bypassing the contract with partial rows.
+
+## BotLens Observability Note
+
+BotLens backend observability now separates runtime truth from observability signals at the contract level:
+
+- runtime state and replay ledgers remain storage responsibilities,
+- metrics/events are emitted through the backend observability substrate instead of being embedded into hot-path logs,
+- and manual schema cleanup for table ownership drift is tracked in `BOTLENS_OBSERVABILITY_MIGRATION_CHECKLIST.md`.
