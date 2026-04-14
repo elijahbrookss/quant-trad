@@ -1,0 +1,670 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "BotLens diagnostics and RCA dashboard. Assumes observability_events.botlens_backend_events_v1 stores structured backend events, observability_metrics.botlens_backend_metric_samples_v1 stores failure counters, and Loki captures backend warn/error logs.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "title": "BotLens Overview",
+      "url": "/d/qt-botlens-overview",
+      "type": "link"
+    },
+    {
+      "title": "Queue Pressure & Backlog",
+      "url": "/d/qt-botlens-queues",
+      "type": "link"
+    },
+    {
+      "title": "Pipeline Latency & Throughput",
+      "url": "/d/qt-botlens-pipeline",
+      "type": "link"
+    },
+    {
+      "title": "Diagnostics & Failure Analysis",
+      "url": "/d/qt-botlens-diagnostics",
+      "type": "link"
+    },
+    {
+      "title": "Per-Run Deep Dive",
+      "url": "/d/qt-botlens-run-deep-dive",
+      "type": "link"
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "barchart",
+      "title": "Structured Event Counts By Event Name",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT e.event_name AS metric, count(*)::double precision AS value FROM observability_events.botlens_backend_events_v1 e WHERE $__timeFilter(e.observed_at)  AND COALESCE(e.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(e.run_id, '') ~ '${run_id:regex}' AND (COALESCE(e.series_key, '') = '' OR COALESCE(e.series_key, '') ~ '${series_key:regex}') AND (COALESCE(e.component, '') = '' OR COALESCE(e.component, '') ~ '${component:regex}') AND (COALESCE(e.queue_name, '') = '' OR COALESCE(e.queue_name, '') ~ '${queue_name:regex}') AND (COALESCE(e.storage_target, '') = '' OR COALESCE(e.storage_target, '') ~ '${storage_target:regex}') AND (COALESCE(e.failure_mode, '') = '' OR COALESCE(e.failure_mode, '') ~ '${failure_mode:regex}')  GROUP BY 1 ORDER BY value DESC LIMIT 15;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "description": "Most frequent structured events in the selected window."
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Warnings / Errors Over Time",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(count_over_time({app=\"quant_trad\"} |~ \"botlens|telemetry|fanout|viewer|db_write|ingest|queue\" |~ \"WARN|WARNING\" [$__interval]))",
+          "queryType": "range",
+          "editorMode": "code",
+          "legendFormat": "warnings"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(count_over_time({app=\"quant_trad\"} |~ \"botlens|telemetry|fanout|viewer|db_write|ingest|queue\" |~ \"ERROR|Exception|Traceback\" [$__interval]))",
+          "queryType": "range",
+          "editorMode": "code",
+          "legendFormat": "errors"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Warn/error log rate from Loki backend logs."
+    },
+    {
+      "id": 3,
+      "type": "barchart",
+      "title": "Top Failure Modes",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(e.failure_mode, 'unknown') AS metric, count(*)::double precision AS value FROM observability_events.botlens_backend_events_v1 e WHERE $__timeFilter(e.observed_at) AND COALESCE(e.failure_mode, '') <> ''  AND COALESCE(e.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(e.run_id, '') ~ '${run_id:regex}' AND (COALESCE(e.series_key, '') = '' OR COALESCE(e.series_key, '') ~ '${series_key:regex}') AND (COALESCE(e.component, '') = '' OR COALESCE(e.component, '') ~ '${component:regex}') AND (COALESCE(e.queue_name, '') = '' OR COALESCE(e.queue_name, '') ~ '${queue_name:regex}') AND (COALESCE(e.storage_target, '') = '' OR COALESCE(e.storage_target, '') ~ '${storage_target:regex}') AND (COALESCE(e.failure_mode, '') = '' OR COALESCE(e.failure_mode, '') ~ '${failure_mode:regex}')  GROUP BY 1 ORDER BY value DESC LIMIT 12;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "description": "Structured event failure modes ranked by frequency."
+    },
+    {
+      "id": 4,
+      "type": "barchart",
+      "title": "Queue Overflow Events By Stage",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(e.queue_name, e.event_name) AS metric, count(*)::double precision AS value FROM observability_events.botlens_backend_events_v1 e WHERE $__timeFilter(e.observed_at) AND e.event_name IN ('telemetry_backpressure_entered', 'symbol_fact_queue_overflow', 'run_lifecycle_queue_overflow_dropped_oldest', 'run_notification_queue_overflow', 'fanout_channel_overflow', 'viewer_snapshot_buffer_overflow')  AND COALESCE(e.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(e.run_id, '') ~ '${run_id:regex}' AND (COALESCE(e.series_key, '') = '' OR COALESCE(e.series_key, '') ~ '${series_key:regex}') AND (COALESCE(e.component, '') = '' OR COALESCE(e.component, '') ~ '${component:regex}') AND (COALESCE(e.queue_name, '') = '' OR COALESCE(e.queue_name, '') ~ '${queue_name:regex}') AND (COALESCE(e.storage_target, '') = '' OR COALESCE(e.storage_target, '') ~ '${storage_target:regex}') AND (COALESCE(e.failure_mode, '') = '' OR COALESCE(e.failure_mode, '') ~ '${failure_mode:regex}')  GROUP BY 1 ORDER BY value DESC;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "description": "Queue/slot overflow and backpressure events by stage."
+    },
+    {
+      "id": 5,
+      "type": "barchart",
+      "title": "Viewer Send Failures By Failure Mode",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(m.failure_mode, 'unknown') AS metric, ROUND(sum(m.value)::numeric, 2)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name = 'viewer_send_fail_total'  AND COALESCE(m.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(m.run_id, '') ~ '${run_id:regex}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.queue_name, '') = '' OR COALESCE(m.queue_name, '') ~ '${queue_name:regex}') AND (COALESCE(m.storage_target, '') = '' OR COALESCE(m.storage_target, '') ~ '${storage_target:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}')  GROUP BY 1 ORDER BY value DESC LIMIT 12;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "description": "Failure-mode breakdown for viewer send failures."
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "DB Failures / Retries / Seq Collisions",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(m.observed_at, $__interval), CASE WHEN metric_name = 'db_write_fail_total' THEN 'db_write_fail_total' WHEN metric_name = 'db_write_retry_total' THEN 'db_write_retry_total' WHEN metric_name = 'db_duplicate_skip_total' THEN 'db_duplicate_skip_total' WHEN metric_name = 'db_stale_update_total' THEN 'db_stale_update_total' ELSE COALESCE(queue_name, metric_name) END AS metric, sum(m.value)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name IN ('db_write_fail_total', 'db_write_retry_total', 'db_duplicate_skip_total', 'db_stale_update_total')  AND COALESCE(m.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(m.run_id, '') ~ '${run_id:regex}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.queue_name, '') = '' OR COALESCE(m.queue_name, '') ~ '${queue_name:regex}') AND (COALESCE(m.storage_target, '') = '' OR COALESCE(m.storage_target, '') ~ '${storage_target:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}')  GROUP BY 1, 2 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Storage failure/retry/no-op signals over time."
+    },
+    {
+      "id": 7,
+      "type": "barchart",
+      "title": "Snapshot Load Failures",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(e.failure_mode, e.event_name) AS metric, count(*)::double precision AS value FROM observability_events.botlens_backend_events_v1 e WHERE $__timeFilter(e.observed_at) AND e.event_name IN ('viewer_snapshot_load_failed', 'db_initial_state_load_failed')  AND COALESCE(e.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(e.run_id, '') ~ '${run_id:regex}' AND (COALESCE(e.series_key, '') = '' OR COALESCE(e.series_key, '') ~ '${series_key:regex}') AND (COALESCE(e.component, '') = '' OR COALESCE(e.component, '') ~ '${component:regex}') AND (COALESCE(e.queue_name, '') = '' OR COALESCE(e.queue_name, '') ~ '${queue_name:regex}') AND (COALESCE(e.storage_target, '') = '' OR COALESCE(e.storage_target, '') ~ '${storage_target:regex}') AND (COALESCE(e.failure_mode, '') = '' OR COALESCE(e.failure_mode, '') ~ '${failure_mode:regex}')  GROUP BY 1 ORDER BY value DESC;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "description": "Snapshot and initial-state load failures grouped by failure mode."
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Deprecated / Unknown Message Kinds",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(m.observed_at, $__interval), COALESCE(m.message_kind, 'unknown') AS metric, sum(m.value)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name = 'ingest_messages_unknown_kind_total' AND COALESCE(m.message_kind, 'unknown') IN ('unknown', 'deprecated')  AND COALESCE(m.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(m.run_id, '') ~ '${run_id:regex}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.queue_name, '') = '' OR COALESCE(m.queue_name, '') ~ '${queue_name:regex}') AND (COALESCE(m.storage_target, '') = '' OR COALESCE(m.storage_target, '') ~ '${storage_target:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}')  GROUP BY 1, 2 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Deprecated and unknown ingest message kinds over time."
+    },
+    {
+      "id": 9,
+      "type": "barchart",
+      "title": "Critical Event Families",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT e.event_name AS metric, count(*)::double precision AS value FROM observability_events.botlens_backend_events_v1 e WHERE $__timeFilter(e.observed_at) AND e.level IN ('WARN', 'ERROR')  AND COALESCE(e.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(e.run_id, '') ~ '${run_id:regex}' AND (COALESCE(e.series_key, '') = '' OR COALESCE(e.series_key, '') ~ '${series_key:regex}') AND (COALESCE(e.component, '') = '' OR COALESCE(e.component, '') ~ '${component:regex}') AND (COALESCE(e.queue_name, '') = '' OR COALESCE(e.queue_name, '') ~ '${queue_name:regex}') AND (COALESCE(e.storage_target, '') = '' OR COALESCE(e.storage_target, '') ~ '${storage_target:regex}') AND (COALESCE(e.failure_mode, '') = '' OR COALESCE(e.failure_mode, '') ~ '${failure_mode:regex}')  GROUP BY 1 ORDER BY value DESC LIMIT 12;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "description": "Most common WARN/ERROR structured event families."
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Recent Structured Events",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT e.observed_at AS \"Time\", e.level, e.event_name, e.bot_id, e.run_id, e.series_key, e.component, e.queue_name, e.storage_target, e.failure_mode, COALESCE(e.message, e.details::text, '') AS detail FROM observability_events.botlens_backend_events_v1 e WHERE $__timeFilter(e.observed_at)  AND COALESCE(e.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(e.run_id, '') ~ '${run_id:regex}' AND (COALESCE(e.series_key, '') = '' OR COALESCE(e.series_key, '') ~ '${series_key:regex}') AND (COALESCE(e.component, '') = '' OR COALESCE(e.component, '') ~ '${component:regex}') AND (COALESCE(e.queue_name, '') = '' OR COALESCE(e.queue_name, '') ~ '${queue_name:regex}') AND (COALESCE(e.storage_target, '') = '' OR COALESCE(e.storage_target, '') ~ '${storage_target:regex}') AND (COALESCE(e.failure_mode, '') = '' OR COALESCE(e.failure_mode, '') ~ '${failure_mode:regex}')  ORDER BY e.observed_at DESC LIMIT 100;"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false
+        }
+      },
+      "description": "Recent structured events across all levels."
+    },
+    {
+      "id": 11,
+      "type": "logs",
+      "title": "Recent Warning / Error Log Stream",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{app=\"quant_trad\"} |~ \"botlens|telemetry|fanout|viewer|db_write|ingest|queue\" |~ \"WARN|WARNING|ERROR|Exception|Traceback\"",
+          "queryType": "range",
+          "editorMode": "code"
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "description": "Raw warning/error backend log stream for RCA."
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "botlens",
+    "backend",
+    "observability",
+    "diagnostics",
+    "contract-v1"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "bot_id",
+        "type": "query",
+        "label": "Bot",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "definition": "SELECT DISTINCT bot_id AS __value, bot_id AS __text FROM portal_bot_runs WHERE COALESCE(bot_id, '') <> '' ORDER BY 1;",
+        "query": "SELECT DISTINCT bot_id AS __value, bot_id AS __text FROM portal_bot_runs WHERE COALESCE(bot_id, '') <> '' ORDER BY 1;",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": ".*"
+        }
+      },
+      {
+        "name": "run_id",
+        "type": "query",
+        "label": "Run",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "definition": "SELECT DISTINCT run_id AS __value, run_id AS __text FROM portal_bot_runs WHERE COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') <> '' ORDER BY 1 DESC;",
+        "query": "SELECT DISTINCT run_id AS __value, run_id AS __text FROM portal_bot_runs WHERE COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') <> '' ORDER BY 1 DESC;",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": ".*"
+        }
+      },
+      {
+        "name": "series_key",
+        "type": "query",
+        "label": "Series",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "definition": "SELECT DISTINCT series_key AS __value, series_key AS __text FROM portal_bot_run_view_state WHERE series_key <> '__run__' AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' ORDER BY 1;",
+        "query": "SELECT DISTINCT series_key AS __value, series_key AS __text FROM portal_bot_run_view_state WHERE series_key <> '__run__' AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' ORDER BY 1;",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": ".*"
+        }
+      },
+      {
+        "name": "component",
+        "type": "query",
+        "label": "Component",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "definition": "SELECT DISTINCT component AS __value, component AS __text FROM observability_events.botlens_backend_events_v1 WHERE COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' AND COALESCE(component, '') <> '' ORDER BY 1;",
+        "query": "SELECT DISTINCT component AS __value, component AS __text FROM observability_events.botlens_backend_events_v1 WHERE COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' AND COALESCE(component, '') <> '' ORDER BY 1;",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": ".*"
+        }
+      },
+      {
+        "name": "queue_name",
+        "type": "query",
+        "label": "Queue",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "definition": "SELECT DISTINCT queue_name AS __value, queue_name AS __text FROM observability_metrics.botlens_backend_metric_samples_v1 WHERE COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' AND COALESCE(queue_name, '') <> '' ORDER BY 1;",
+        "query": "SELECT DISTINCT queue_name AS __value, queue_name AS __text FROM observability_metrics.botlens_backend_metric_samples_v1 WHERE COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' AND COALESCE(queue_name, '') <> '' ORDER BY 1;",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": ".*"
+        }
+      },
+      {
+        "name": "storage_target",
+        "type": "query",
+        "label": "Storage",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "definition": "SELECT DISTINCT storage_target AS __value, storage_target AS __text FROM observability_events.botlens_backend_events_v1 WHERE COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' AND COALESCE(storage_target, '') <> '' ORDER BY 1;",
+        "query": "SELECT DISTINCT storage_target AS __value, storage_target AS __text FROM observability_events.botlens_backend_events_v1 WHERE COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' AND COALESCE(storage_target, '') <> '' ORDER BY 1;",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": ".*"
+        }
+      },
+      {
+        "name": "failure_mode",
+        "type": "query",
+        "label": "Failure",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "definition": "SELECT DISTINCT failure_mode AS __value, failure_mode AS __text FROM observability_events.botlens_backend_events_v1 WHERE COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' AND COALESCE(failure_mode, '') <> '' ORDER BY 1;",
+        "query": "SELECT DISTINCT failure_mode AS __value, failure_mode AS __text FROM observability_events.botlens_backend_events_v1 WHERE COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' AND COALESCE(failure_mode, '') <> '' ORDER BY 1;",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": ".*"
+        }
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Diagnostics & Failure Analysis",
+  "uid": "qt-botlens-diagnostics",
+  "version": 1,
+  "weekStart": ""
+}
