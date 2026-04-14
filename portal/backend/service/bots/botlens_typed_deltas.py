@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import json
-import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Mapping, Tuple
-
-from utils.log_context import with_log_context
 
 from .botlens_contract import (
     SCHEMA_VERSION,
@@ -227,32 +224,6 @@ class TypedDeltaInstrumentation:
             "stale_viewer_count": total_stale,
             "max_viewer_count": max_viewers,
         }
-
-    @staticmethod
-    def log_emission(
-        *,
-        logger: logging.Logger,
-        prepared_delta: PreparedTypedDelta,
-        delivery: TypedDeltaDeliveryStats,
-    ) -> None:
-        event = prepared_delta.event
-        logger.info(
-            with_log_context(
-                "botlens_typed_delta_emitted",
-                {
-                    "run_id": event.run_id,
-                    "symbol_key": event.symbol_key,
-                    "delta_type": event.delta_type,
-                    "seq": int(event.seq),
-                    "payload_bytes": int(prepared_delta.payload_bytes),
-                    "build_ms": round(float(prepared_delta.build_ms), 6),
-                    "emit_ms": round(float(delivery.emit_ms), 6),
-                    "viewer_count": int(delivery.viewer_count),
-                    "filtered_viewer_count": int(delivery.filtered_viewer_count),
-                    "stale_viewer_count": int(delivery.stale_viewer_count),
-                },
-            )
-        )
 
 __all__ = [
     "PreparedTypedDelta",
