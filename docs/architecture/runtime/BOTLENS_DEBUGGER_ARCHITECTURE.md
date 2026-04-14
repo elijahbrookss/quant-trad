@@ -11,9 +11,15 @@ tags:
   - read-model
   - playback
 code_paths:
+  - portal/backend/service/observability.py
   - portal/backend/service/bots/botlens_contract.py
+  - portal/backend/service/bots/botlens_intake_router.py
+  - portal/backend/service/bots/botlens_mailbox.py
+  - portal/backend/service/bots/botlens_projector_registry.py
+  - portal/backend/service/bots/botlens_run_projector.py
   - portal/backend/service/bots/botlens_state.py
   - portal/backend/service/bots/botlens_session_service.py
+  - portal/backend/service/bots/botlens_symbol_projector.py
   - portal/backend/service/bots/botlens_symbol_service.py
   - portal/backend/service/bots/botlens_run_stream.py
   - portal/backend/service/bots/botlens_lifecycle_bridge.py
@@ -149,8 +155,14 @@ Current ownership split:
 - worker runtime emits canonical BotLens bridge fact batches per symbol,
 - worker runtime also aggregates bounded indicator-guard warnings into the runtime snapshot before BotLens transport,
 - `container_runtime.py` owns worker supervision and bridge metadata,
-- `telemetry_stream.py` owns canonical BotLens read-model projection,
+- `telemetry_stream.py` is the public coordinator for ingest and viewer session calls,
+- `botlens_intake_router.py` owns ingest validation and routing,
+- `botlens_mailbox.py` owns bounded queue/slot semantics for symbol and run intake,
+- `botlens_symbol_projector.py` owns symbol-level canonical projection and symbol raw-event persistence,
+- `botlens_run_projector.py` owns run-level canonical projection and lifecycle persistence,
+- `botlens_projector_registry.py` owns projector lifecycle and run fanout delivery loops,
 - `botlens_run_stream.py` owns run-scoped websocket fanout and bounded replay,
+- `observability.py` owns the backend observability substrate used across those seams,
 - `botlens_session_service.py` owns run bootstrap reads,
 - `botlens_symbol_service.py` owns symbol detail and symbol history reads.
 
@@ -245,11 +257,14 @@ Important rule:
 - latest BotLens view rows are caches for bootstrap/read performance,
 - and live execution never reads BotLens projections back into the runtime timeline.
 
-TypedDelta observability rides on the same runtime event ledger:
+Backend observability is now a separate contract:
 
-- each raw BotLens bootstrap/facts event now persists a `typed_delta_metrics` summary,
-- that summary captures per-delta type, symbol, payload bytes, build time, emit time, and viewer filtering,
-- and Grafana reads those summaries directly from `portal_bot_run_events` for BotLens TypedDelta traffic and latency dashboards.
+- queue pressure, payload size, delivery latency, and persistence timing are emitted through the shared backend observability substrate,
+- structured operational events are emitted alongside metrics for transitions, anomalies, and recoveries,
+- hot-path typed-delta INFO logs are removed,
+- and `portal_bot_run_events` no longer persists `typed_delta_metrics` summaries inside raw BotLens event payloads.
+
+See `BOTLENS_BACKEND_OBSERVABILITY_CONTRACT.md` and `BOTLENS_OBSERVABILITY_MIGRATION_CHECKLIST.md` for the backend-only observability seam model and the manual schema cleanup plan.
 
 ## Frontend Store
 
