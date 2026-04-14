@@ -13,6 +13,7 @@ tags:
   - queues
 code_paths:
   - portal/backend/service/observability.py
+  - portal/backend/service/observability_exporter.py
   - portal/backend/service/bots/container_runtime_telemetry.py
   - portal/backend/controller/bots.py
   - portal/backend/service/bots/telemetry_stream.py
@@ -24,6 +25,7 @@ code_paths:
   - portal/backend/service/bots/botlens_run_stream.py
   - portal/backend/service/storage/repos/runtime_events.py
   - portal/backend/service/storage/repos/lifecycle.py
+  - portal/backend/service/storage/repos/observability.py
 ---
 # BotLens Backend Observability Contract
 
@@ -56,7 +58,7 @@ The substrate provides:
 - timed block utilities,
 - structured event emission,
 - normalization for event names and failure modes,
-- a process-local sink for tests and future exporter wiring.
+- a process-local sink for tests and bounded exporter drain.
 
 Metrics and structured events are separate on purpose:
 
@@ -258,4 +260,4 @@ The implementation normalizes names to concise snake_case and rejects one-off fr
 
 - No destructive schema migration is executed by the backend changes in this contract.
 - Manual storage cleanup and schema moves are tracked in `BOTLENS_OBSERVABILITY_MIGRATION_CHECKLIST.md`.
-- Exporter/dashboard wiring can be added later behind the shared substrate without changing call sites again.
+- DB-backed exporter/storage wiring now lives behind the shared substrate without changing call sites.
