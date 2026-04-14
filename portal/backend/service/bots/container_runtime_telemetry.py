@@ -183,61 +183,65 @@ class TelemetryEmitter:
     def _send_sync_message(self, message: str, context: Optional[Mapping[str, Any]] = None) -> bool:
         if self._sync_connect is None:
             return False
-        for attempt in range(2):
-            labels = self._base_labels(context, pipeline_stage="transport_send")
-            _OBSERVER.increment("telemetry_transport_send_total", **labels)
-            _OBSERVER.observe(
-                "telemetry_transport_payload_bytes",
-                float(payload_size_bytes(message)),
+        labels = self._base_labels(context, pipeline_stage="transport_send")
+        _OBSERVER.increment("telemetry_transport_send_total", **labels)
+        _OBSERVER.observe(
+            "telemetry_transport_payload_bytes",
+            float(payload_size_bytes(message)),
+            **labels,
+        )
+        started = time.monotonic()
+        opened_connection = False
+        try:
+            if self._sync_ws is None:
+                self._sync_ws = self._sync_connect(self.url, open_timeout=2, close_timeout=1)
+                opened_connection = True
+            self._sync_ws.send(message)
+        except Exception as exc:  # noqa: BLE001
+            failure_mode = normalize_failure_mode(exc)
+            elapsed_ms = max((time.monotonic() - started) * 1000.0, 0.0)
+            _OBSERVER.increment(
+                "telemetry_transport_send_fail_total",
+                failure_mode=failure_mode,
                 **labels,
             )
-            started = time.monotonic()
-            try:
-                if self._sync_ws is None:
-                    self._sync_ws = self._sync_connect(self.url, open_timeout=2, close_timeout=1)
-                self._sync_ws.send(message)
-                elapsed_ms = max((time.monotonic() - started) * 1000.0, 0.0)
-                _OBSERVER.observe("telemetry_transport_send_ms", elapsed_ms, **labels)
-                if not self._transport_connected and self._transport_seen_connected:
-                    _OBSERVER.event("telemetry_transport_connection_restored", **labels)
-                self._transport_connected = True
-                self._transport_seen_connected = True
-                if self._transport_retry_pending or self._backpressure_active:
-                    _OBSERVER.event("telemetry_transport_recovered", **labels)
-                self._transport_retry_pending = False
-                self._backpressure_active = False
-                return True
-            except Exception as exc:  # noqa: BLE001
-                failure_mode = normalize_failure_mode(exc)
-                elapsed_ms = max((time.monotonic() - started) * 1000.0, 0.0)
-                _OBSERVER.increment(
-                    "telemetry_transport_send_fail_total",
-                    failure_mode=failure_mode,
-                    **labels,
-                )
-                _OBSERVER.observe(
-                    "telemetry_transport_send_ms",
-                    elapsed_ms,
-                    failure_mode=failure_mode,
-                    **labels,
-                )
+            _OBSERVER.observe(
+                "telemetry_transport_send_ms",
+                elapsed_ms,
+                failure_mode=failure_mode,
+                **labels,
+            )
+            _OBSERVER.event(
+                "telemetry_transport_send_failed",
+                level=logging.WARN,
+                failure_mode=failure_mode,
+                **labels,
+            )
+            if self._transport_connected or self._sync_ws is not None:
                 _OBSERVER.event(
-                    "telemetry_transport_send_failed",
+                    "telemetry_transport_connection_lost",
                     level=logging.WARN,
                     failure_mode=failure_mode,
-                    attempt=attempt + 1,
                     **labels,
                 )
-                if self._transport_connected:
-                    _OBSERVER.event(
-                        "telemetry_transport_connection_lost",
-                        level=logging.WARN,
-                        failure_mode=failure_mode,
-                        **labels,
-                    )
-                self._transport_connected = False
-                self._close_sync_ws()
-        return False
+            self._transport_connected = False
+            self._close_sync_ws()
+            return False
+
+        elapsed_ms = max((time.monotonic() - started) * 1000.0, 0.0)
+        _OBSERVER.observe("telemetry_transport_send_ms", elapsed_ms, **labels)
+        if opened_connection:
+            if self._transport_seen_connected:
+                _OBSERVER.event("telemetry_transport_connection_restored", **labels)
+            else:
+                _OBSERVER.event("telemetry_transport_connection_established", **labels)
+        self._transport_connected = True
+        self._transport_seen_connected = True
+        if self._transport_retry_pending or self._backpressure_active:
+            _OBSERVER.event("telemetry_transport_recovered", **labels)
+        self._transport_retry_pending = False
+        self._backpressure_active = False
+        return True
 
     def _deliver_message(self, message: str, context: Optional[Mapping[str, Any]] = None) -> bool:
         if self._sync_connect is not None:
