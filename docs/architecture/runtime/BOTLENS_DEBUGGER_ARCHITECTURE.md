@@ -24,8 +24,10 @@ code_paths:
   - portal/backend/service/bots/botlens_run_stream.py
   - portal/backend/service/bots/botlens_lifecycle_bridge.py
   - portal/backend/service/bots/telemetry_stream.py
+  - portal/backend/service/observability_exporter.py
   - portal/backend/service/bots/container_runtime.py
   - portal/backend/service/storage/repos/runtime_events.py
+  - portal/backend/service/storage/repos/observability.py
   - portal/frontend/src/components/bots/BotLensLiveModal.jsx
   - portal/frontend/src/components/bots/BotLensChart.jsx
   - portal/frontend/src/components/bots/botlensProjection.js
@@ -260,11 +262,12 @@ Important rule:
 Backend observability is now a separate contract:
 
 - queue pressure, payload size, delivery latency, and persistence timing are emitted through the shared backend observability substrate,
+- the shared sink is drained into durable Postgres observability tables by a bounded exporter worker,
 - structured operational events are emitted alongside metrics for transitions, anomalies, and recoveries,
 - hot-path typed-delta INFO logs are removed,
 - and `portal_bot_run_events` no longer persists `typed_delta_metrics` summaries inside raw BotLens event payloads.
 
-See `BOTLENS_BACKEND_OBSERVABILITY_CONTRACT.md` and `BOTLENS_OBSERVABILITY_MIGRATION_CHECKLIST.md` for the backend-only observability seam model and the manual schema cleanup plan.
+See `BOTLENS_BACKEND_OBSERVABILITY_CONTRACT.md`, `BOTLENS_OBSERVABILITY_PERSISTENCE_ARCHITECTURE.md`, and `BOTLENS_OBSERVABILITY_MIGRATION_CHECKLIST.md` for the backend-only observability seam model, durable storage/query surfaces, and the manual schema cleanup plan.
 
 ## Frontend Store
 
