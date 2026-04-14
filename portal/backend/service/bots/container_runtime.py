@@ -266,7 +266,7 @@ def _persist_lifecycle_phase(
         status=resolved_status,
         telemetry_degraded=resolved_status == BotLifecycleStatus.TELEMETRY_DEGRADED.value,
     )
-    projection_refresh_delivered = _notify_backend_lifecycle_event(
+    lifecycle_event_delivered = _notify_backend_lifecycle_event(
         lifecycle_state={
             **dict(lifecycle_state or {}),
             "bot_id": bot_id,
@@ -281,13 +281,13 @@ def _persist_lifecycle_phase(
     )
     log_fn = logger.info if phase in _INFO_LIFECYCLE_PHASES or resolved_status in _INFO_LIFECYCLE_STATUSES else logger.debug
     log_fn(
-        "bot_runtime_lifecycle_checkpoint_persisted | bot_id=%s | run_id=%s | phase=%s | owner=%s | status=%s | projection_refresh_delivered=%s | message=%s",
+        "bot_runtime_lifecycle_checkpoint_persisted | bot_id=%s | run_id=%s | phase=%s | owner=%s | status=%s | lifecycle_event_delivered=%s | message=%s",
         bot_id,
         run_id,
         phase,
         owner,
         resolved_status,
-        projection_refresh_delivered,
+        lifecycle_event_delivered,
         message,
     )
     return lifecycle_state
@@ -301,7 +301,7 @@ def _notify_backend_lifecycle_event(*, lifecycle_state: Mapping[str, Any]) -> bo
     status = str(lifecycle_state.get("status") or "").strip()
     if not telemetry_url:
         logger.warning(
-            "bot_runtime_projection_refresh_skipped | bot_id=%s | run_id=%s | phase=%s | status=%s | reason=telemetry_url_missing",
+            "bot_runtime_lifecycle_event_skipped | bot_id=%s | run_id=%s | phase=%s | status=%s | reason=telemetry_url_missing",
             bot_id,
             run_id,
             phase,
@@ -326,7 +326,7 @@ def _notify_backend_lifecycle_event(*, lifecycle_state: Mapping[str, Any]) -> bo
     delivered = emit_telemetry_ephemeral_message(telemetry_url, json.dumps(json_safe(payload)))
     if not delivered:
         logger.warning(
-            "bot_runtime_projection_refresh_delivery_failed | bot_id=%s | run_id=%s | phase=%s | status=%s | telemetry_url=%s",
+            "bot_runtime_lifecycle_event_delivery_failed | bot_id=%s | run_id=%s | phase=%s | status=%s | telemetry_url=%s",
             bot_id,
             run_id,
             phase,
