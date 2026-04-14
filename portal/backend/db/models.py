@@ -15,6 +15,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     UniqueConstraint,
@@ -760,6 +761,130 @@ class BotRunEventRecord(Base):
             "payload": dict(self.payload or {}),
             "event_time": (self.event_time.isoformat() + "Z") if self.event_time else None,
             "known_at": (self.known_at or datetime.utcnow()).isoformat() + "Z",
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class BotlensBackendEventRecord(Base):
+    """Durable backend observability event row for BotLens/Grafana queries."""
+
+    __tablename__ = "botlens_backend_events_v1"
+    __table_args__ = (
+        Index("ix_botlens_backend_events_v1_observed_at", "observed_at"),
+        Index("ix_botlens_backend_events_v1_event_name_observed_at", "event_name", "observed_at"),
+        Index("ix_botlens_backend_events_v1_run_id_observed_at", "run_id", "observed_at"),
+        {"schema": "observability_events"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    observed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    component = Column(String(128), nullable=False)
+    event_name = Column(String(128), nullable=False)
+    level = Column(String(32), nullable=False, default="INFO")
+    bot_id = Column(String(64), nullable=True)
+    run_id = Column(String(64), nullable=True)
+    instrument_id = Column(String(128), nullable=True)
+    series_key = Column(String(255), nullable=True)
+    worker_id = Column(String(128), nullable=True)
+    queue_name = Column(String(128), nullable=True)
+    pipeline_stage = Column(String(128), nullable=True)
+    message_kind = Column(String(128), nullable=True)
+    delta_type = Column(String(128), nullable=True)
+    storage_target = Column(String(128), nullable=True)
+    failure_mode = Column(String(128), nullable=True)
+    phase = Column(String(128), nullable=True)
+    status = Column(String(128), nullable=True)
+    run_seq = Column(Integer, nullable=True)
+    bridge_session_id = Column(String(128), nullable=True)
+    bridge_seq = Column(Integer, nullable=True)
+    message = Column(String(2048), nullable=True)
+    details = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": int(self.id or 0),
+            "observed_at": (self.observed_at or datetime.utcnow()).isoformat() + "Z",
+            "component": self.component,
+            "event_name": self.event_name,
+            "level": self.level,
+            "bot_id": self.bot_id,
+            "run_id": self.run_id,
+            "instrument_id": self.instrument_id,
+            "series_key": self.series_key,
+            "worker_id": self.worker_id,
+            "queue_name": self.queue_name,
+            "pipeline_stage": self.pipeline_stage,
+            "message_kind": self.message_kind,
+            "delta_type": self.delta_type,
+            "storage_target": self.storage_target,
+            "failure_mode": self.failure_mode,
+            "phase": self.phase,
+            "status": self.status,
+            "run_seq": int(self.run_seq) if self.run_seq is not None else None,
+            "bridge_session_id": self.bridge_session_id,
+            "bridge_seq": int(self.bridge_seq) if self.bridge_seq is not None else None,
+            "message": self.message,
+            "details": dict(self.details or {}),
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class BotlensBackendMetricSampleRecord(Base):
+    """Durable backend observability metric sample row for BotLens/Grafana queries."""
+
+    __tablename__ = "botlens_backend_metric_samples_v1"
+    __table_args__ = (
+        Index("ix_botlens_backend_metric_samples_v1_observed_at", "observed_at"),
+        Index(
+            "ix_botlens_backend_metric_samples_v1_metric_name_observed_at",
+            "metric_name",
+            "observed_at",
+        ),
+        Index("ix_botlens_backend_metric_samples_v1_run_id_observed_at", "run_id", "observed_at"),
+        {"schema": "observability_metrics"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    observed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    component = Column(String(128), nullable=False)
+    metric_name = Column(String(128), nullable=False)
+    metric_kind = Column(String(32), nullable=False)
+    value = Column(Float, nullable=False)
+    bot_id = Column(String(64), nullable=True)
+    run_id = Column(String(64), nullable=True)
+    instrument_id = Column(String(128), nullable=True)
+    series_key = Column(String(255), nullable=True)
+    worker_id = Column(String(128), nullable=True)
+    queue_name = Column(String(128), nullable=True)
+    pipeline_stage = Column(String(128), nullable=True)
+    message_kind = Column(String(128), nullable=True)
+    delta_type = Column(String(128), nullable=True)
+    storage_target = Column(String(128), nullable=True)
+    failure_mode = Column(String(128), nullable=True)
+    labels = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": int(self.id or 0),
+            "observed_at": (self.observed_at or datetime.utcnow()).isoformat() + "Z",
+            "component": self.component,
+            "metric_name": self.metric_name,
+            "metric_kind": self.metric_kind,
+            "value": float(self.value or 0.0),
+            "bot_id": self.bot_id,
+            "run_id": self.run_id,
+            "instrument_id": self.instrument_id,
+            "series_key": self.series_key,
+            "worker_id": self.worker_id,
+            "queue_name": self.queue_name,
+            "pipeline_stage": self.pipeline_stage,
+            "message_kind": self.message_kind,
+            "delta_type": self.delta_type,
+            "storage_target": self.storage_target,
+            "failure_mode": self.failure_mode,
+            "labels": dict(self.labels or {}),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
         }
 
