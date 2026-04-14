@@ -35,6 +35,12 @@ from .instruments import (
     load_instruments,
     upsert_instrument,
 )
+from .observability import (
+    list_observability_events,
+    list_observability_metric_samples,
+    record_observability_events_batch,
+    record_observability_metric_samples_batch,
+)
 from .presets import delete_symbol_preset, list_symbol_presets, upsert_symbol_preset
 from .runs import get_bot_run, list_bot_runs, upsert_bot_run
 from .runtime_events import (
@@ -110,6 +116,8 @@ __all__ = [
     "list_bot_runtime_events",
     "list_bot_trade_events_for_trades",
     "list_bot_trades_for_run",
+    "list_observability_events",
+    "list_observability_metric_samples",
     "list_strategy_variants",
     "list_strategy_instrument_links",
     "list_strategy_instrument_symbols",
@@ -123,6 +131,8 @@ __all__ = [
     "record_bot_run_step",
     "record_bot_run_steps_batch",
     "record_bot_run_lifecycle_checkpoint",
+    "record_observability_events_batch",
+    "record_observability_metric_samples_batch",
     "record_bot_runtime_event",
     "record_bot_runtime_events_batch",
     "upsert_bot_run_view_state",
