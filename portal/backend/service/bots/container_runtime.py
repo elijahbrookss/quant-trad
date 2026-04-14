@@ -35,6 +35,10 @@ from portal.backend.service.bots.startup_lifecycle import (
     lifecycle_checkpoint_payload,
     terminal_status_after_supervision,
 )
+from portal.backend.service.observability_exporter import (
+    start_observability_exporter,
+    stop_observability_exporter,
+)
 from portal.backend.service.bots.startup_validation import validate_wallet_config
 from portal.backend.service.bots.strategy_loader import StrategyLoader
 from portal.backend.service.storage.storage import (
@@ -213,6 +217,7 @@ class ContainerStartupContext:
     wallet_config: Dict[str, Any]
     manager: Any
     shared_wallet_proxy: Dict[str, Any]
+    telemetry_sender: TelemetryEmitter | None = None
     parent_event_queue: "mp.Queue[Dict[str, Any]] | None" = None
     children: Dict[str, mp.Process] = field(default_factory=dict)
     worker_symbols: Dict[str, List[str]] = field(default_factory=dict)
@@ -247,6 +252,7 @@ def _persist_lifecycle_phase(
     metadata: Mapping[str, Any] | None = None,
     failure: Mapping[str, Any] | None = None,
     status: str | None = None,
+    telemetry_sender: TelemetryEmitter | None = None,
 ) -> Dict[str, Any]:
     checkpoint = lifecycle_checkpoint_payload(
         bot_id=bot_id,
@@ -277,7 +283,8 @@ def _persist_lifecycle_phase(
             "status": resolved_status,
             "metadata": dict(metadata or lifecycle_state.get("metadata") or {}),
             "failure": dict(failure or lifecycle_state.get("failure") or {}),
-        }
+        },
+        telemetry_sender=telemetry_sender,
     )
     log_fn = logger.info if phase in _INFO_LIFECYCLE_PHASES or resolved_status in _INFO_LIFECYCLE_STATUSES else logger.debug
     log_fn(
@@ -293,7 +300,11 @@ def _persist_lifecycle_phase(
     return lifecycle_state
 
 
-def _notify_backend_lifecycle_event(*, lifecycle_state: Mapping[str, Any]) -> bool:
+def _notify_backend_lifecycle_event(
+    *,
+    lifecycle_state: Mapping[str, Any],
+    telemetry_sender: TelemetryEmitter | None = None,
+) -> bool:
     telemetry_url = str(_TELEMETRY_SETTINGS.ws_url or "").strip()
     bot_id = str(lifecycle_state.get("bot_id") or "").strip()
     run_id = str(lifecycle_state.get("run_id") or "").strip()
@@ -323,7 +334,11 @@ def _notify_backend_lifecycle_event(*, lifecycle_state: Mapping[str, Any]) -> bo
         "updated_at": lifecycle_state.get("updated_at") or lifecycle_state.get("checkpoint_at"),
         "known_at": lifecycle_state.get("checkpoint_at") or lifecycle_state.get("updated_at") or utc_now_iso(),
     }
-    delivered = emit_telemetry_ephemeral_message(telemetry_url, json.dumps(json_safe(payload)))
+    safe_payload = json_safe(payload)
+    if telemetry_sender is not None:
+        delivered = telemetry_sender.send(safe_payload)
+    else:
+        delivered = emit_telemetry_ephemeral_message(telemetry_url, json.dumps(safe_payload))
     if not delivered:
         logger.warning(
             "bot_runtime_lifecycle_event_delivery_failed | bot_id=%s | run_id=%s | phase=%s | status=%s | telemetry_url=%s",
@@ -414,7 +429,11 @@ def _parent_event_queue_maxsize(*, worker_count: int) -> int:
     return per_worker_capacity * max(int(worker_count or 0), 1)
 
 
-def load_container_startup_context(bot_id: str) -> ContainerStartupContext:
+def load_container_startup_context(
+    bot_id: str,
+    *,
+    telemetry_sender: TelemetryEmitter | None = None,
+) -> ContainerStartupContext:
     run_id = _resolve_backend_run_id(bot_id)
     _persist_lifecycle_phase(
         bot_id=bot_id,
@@ -422,6 +441,7 @@ def load_container_startup_context(bot_id: str) -> ContainerStartupContext:
         phase=BotLifecyclePhase.CONTAINER_BOOTING.value,
         owner=LifecycleOwner.CONTAINER.value,
         message="Container process booting with backend-owned startup contract.",
+        telemetry_sender=telemetry_sender,
     )
 
     bot = next((b for b in load_bots() if b.get("id") == bot_id), None)
@@ -433,6 +453,7 @@ def load_container_startup_context(bot_id: str) -> ContainerStartupContext:
         phase=BotLifecyclePhase.LOADING_BOT_CONFIG.value,
         owner=LifecycleOwner.CONTAINER.value,
         message="Loading bot config snapshot in runtime container.",
+        telemetry_sender=telemetry_sender,
     )
 
     runtime_bot_config = _materialize_bot_config(bot)
@@ -443,6 +464,7 @@ def load_container_startup_context(bot_id: str) -> ContainerStartupContext:
         owner=LifecycleOwner.CONTAINER.value,
         message="Container claimed backend-owned run_id.",
         metadata={"run_id": run_id},
+        telemetry_sender=telemetry_sender,
     )
     strategy_id = str(bot.get("strategy_id") or "").strip()
     if not strategy_id:
@@ -454,6 +476,7 @@ def load_container_startup_context(bot_id: str) -> ContainerStartupContext:
         owner=LifecycleOwner.CONTAINER.value,
         message="Loading strategy snapshot for worker planning.",
         metadata={"strategy_id": strategy_id},
+        telemetry_sender=telemetry_sender,
     )
     all_symbols = _load_strategy_symbols(strategy_id)
     max_symbols = _MAX_SYMBOLS_PER_STRATEGY
@@ -469,6 +492,7 @@ def load_container_startup_context(bot_id: str) -> ContainerStartupContext:
         phase=BotLifecyclePhase.PREPARING_WALLET.value,
         owner=LifecycleOwner.CONTAINER.value,
         message="Preparing shared wallet for worker processes.",
+        telemetry_sender=telemetry_sender,
     )
     wallet_config = validate_wallet_config(bot.get("wallet_config") if isinstance(bot.get("wallet_config"), Mapping) else None)
     balances = wallet_config.get("balances")
@@ -487,6 +511,7 @@ def load_container_startup_context(bot_id: str) -> ContainerStartupContext:
         owner=LifecycleOwner.CONTAINER.value,
         message="Planning one worker shard per strategy symbol.",
         metadata={"symbols": list(all_symbols), "symbol_count": len(all_symbols)},
+        telemetry_sender=telemetry_sender,
     )
     default_max_workers = max(_MAX_SYMBOL_WORKERS, len(all_symbols))
     max_workers = (
@@ -512,6 +537,7 @@ def load_container_startup_context(bot_id: str) -> ContainerStartupContext:
         wallet_config=wallet_config,
         manager=manager,
         shared_wallet_proxy=shared_wallet_proxy,
+        telemetry_sender=telemetry_sender,
     )
     for symbols in ctx.symbol_shards:
         for symbol in symbols:
@@ -527,6 +553,7 @@ def spawn_workers(ctx: ContainerStartupContext) -> None:
         owner=LifecycleOwner.CONTAINER.value,
         message="Spawning runtime workers for planned symbol shards.",
         metadata=_series_progress_metadata(ctx),
+        telemetry_sender=ctx.telemetry_sender,
     )
     parent_event_queue: "mp.Queue[Dict[str, Any]]" = mp.Queue(
         maxsize=_parent_event_queue_maxsize(worker_count=len(ctx.symbol_shards))
@@ -561,6 +588,7 @@ def spawn_workers(ctx: ContainerStartupContext) -> None:
         owner=LifecycleOwner.CONTAINER.value,
         message="Waiting for all planned series workers to report bootstrap state.",
         metadata=_series_progress_metadata(ctx),
+        telemetry_sender=ctx.telemetry_sender,
     )
 
 
@@ -804,6 +832,7 @@ def _handle_worker_phase_event(ctx: ContainerStartupContext, event: Mapping[str,
             owner=LifecycleOwner.RUNTIME.value,
             message=message,
             metadata=_series_progress_metadata(ctx),
+            telemetry_sender=ctx.telemetry_sender,
         )
 
 
@@ -857,6 +886,7 @@ def _handle_series_bootstrap_event(
         owner=LifecycleOwner.RUNTIME.value,
         message="Series bootstrap completed; awaiting first live runtime snapshot.",
         metadata=_series_progress_metadata(ctx),
+        telemetry_sender=ctx.telemetry_sender,
     )
     return run_seq, telemetry_emit_ms, payload_bytes, sent
 
@@ -903,7 +933,7 @@ def _handle_runtime_facts_event(
     telemetry_started = time.monotonic()
     sent = telemetry_sender.send(telemetry_payload)
     telemetry_emit_ms = max((time.monotonic() - telemetry_started) * 1000.0, 0.0)
-    if len(ctx.first_snapshot_series) == len(ctx.symbols):
+    if len(ctx.first_snapshot_series) == len(ctx.symbols) and not ctx.startup_live_emitted:
         ctx.startup_live_emitted = True
         _persist_lifecycle_phase(
             bot_id=ctx.bot_id,
@@ -913,7 +943,8 @@ def _handle_runtime_facts_event(
             message="All planned series emitted first runtime snapshot; bot is live.",
             metadata=_series_progress_metadata(ctx),
             status=BotLifecycleStatus.RUNNING.value,
-    )
+            telemetry_sender=ctx.telemetry_sender,
+        )
     return run_seq, telemetry_emit_ms, payload_bytes, sent
 
 
@@ -987,6 +1018,7 @@ def _handle_worker_error(
             stderr_tail=stderr_tail,
         ),
         status=failure_status,
+        telemetry_sender=ctx.telemetry_sender,
     )
     logger.error(
         "bot_runtime_worker_failure_recorded | bot_id=%s | run_id=%s | worker_id=%s | symbols=%s | phase=%s | status=%s | exit_code=%s | exception_type=%s | message=%s",
@@ -1004,208 +1036,219 @@ def _handle_worker_error(
 
 def supervise_startup_and_runtime(ctx: ContainerStartupContext) -> None:
     run_seq = 0
-    telemetry_url = str(_TELEMETRY_SETTINGS.ws_url or "").strip()
-    telemetry_sender = TelemetryEmitter(
-        telemetry_url,
-        queue_max=_TELEMETRY_EMIT_QUEUE_MAX,
-        queue_timeout_ms=_TELEMETRY_EMIT_QUEUE_TIMEOUT_MS,
-        retry_ms=_TELEMETRY_EMIT_RETRY_MS,
-    )
+    telemetry_sender = ctx.telemetry_sender
+    owns_telemetry_sender = False
+    if telemetry_sender is None:
+        telemetry_url = str(_TELEMETRY_SETTINGS.ws_url or "").strip()
+        telemetry_sender = TelemetryEmitter(
+            telemetry_url,
+            queue_max=_TELEMETRY_EMIT_QUEUE_MAX,
+            queue_timeout_ms=_TELEMETRY_EMIT_QUEUE_TIMEOUT_MS,
+            retry_ms=_TELEMETRY_EMIT_RETRY_MS,
+        )
+        ctx.telemetry_sender = telemetry_sender
+        owns_telemetry_sender = True
     telemetry_degraded = False
     event_poll_ms = _TELEMETRY_SETTINGS.event_poll_ms
     try:
-        while ctx.children:
-            loop_started_at = datetime.now(timezone.utc)
-            loop_started = time.monotonic()
-            run_seq = 0
-            queue_drain_ms = 0.0
-            worker_reconcile_ms = 0.0
-            telemetry_emit_ms = 0.0
-            status_write_ms = 0.0
-            payload_bytes = 0
-            emitted_events_in_cycle = 0
-            cadence_mode = "event_driven"
-            queue_drain_started = time.monotonic()
-            def _handle_parent_queue_event(worker_id: str, event: Mapping[str, Any]) -> None:
-                nonlocal run_seq, telemetry_emit_ms, payload_bytes, telemetry_degraded, emitted_events_in_cycle
-                kind = str(event.get("kind") or "").strip().lower()
-                if kind == "worker_phase":
-                    _handle_worker_phase_event(ctx, event)
-                    return
-                if kind == "series_bootstrap":
-                    run_seq, emitted_ms, event_payload_bytes, sent = _handle_series_bootstrap_event(
-                        ctx,
-                        event,
-                        telemetry_sender=telemetry_sender,
-                    )
-                    telemetry_emit_ms += emitted_ms
-                    payload_bytes = event_payload_bytes
-                    if not sent:
+        try:
+            while ctx.children:
+                loop_started_at = datetime.now(timezone.utc)
+                loop_started = time.monotonic()
+                run_seq = 0
+                queue_drain_ms = 0.0
+                worker_reconcile_ms = 0.0
+                telemetry_emit_ms = 0.0
+                status_write_ms = 0.0
+                payload_bytes = 0
+                emitted_events_in_cycle = 0
+                cadence_mode = "event_driven"
+                queue_drain_started = time.monotonic()
+
+                def _handle_parent_queue_event(worker_id: str, event: Mapping[str, Any]) -> None:
+                    nonlocal run_seq, telemetry_emit_ms, payload_bytes, telemetry_degraded, emitted_events_in_cycle
+                    kind = str(event.get("kind") or "").strip().lower()
+                    if kind == "worker_phase":
+                        _handle_worker_phase_event(ctx, event)
+                        return
+                    if kind == "series_bootstrap":
+                        run_seq, emitted_ms, event_payload_bytes, sent = _handle_series_bootstrap_event(
+                            ctx,
+                            event,
+                            telemetry_sender=telemetry_sender,
+                        )
+                        telemetry_emit_ms += emitted_ms
+                        payload_bytes = event_payload_bytes
+                        if not sent:
+                            telemetry_degraded = True
+                        emitted_events_in_cycle += 1
+                        return
+                    if kind == "runtime_facts":
+                        run_seq, emitted_ms, event_payload_bytes, sent = _handle_runtime_facts_event(
+                            ctx,
+                            event,
+                            telemetry_sender=telemetry_sender,
+                        )
+                        telemetry_emit_ms += emitted_ms
+                        payload_bytes = event_payload_bytes
+                        if not sent:
+                            telemetry_degraded = True
+                        emitted_events_in_cycle += 1
+                        return
+                    if kind == "worker_error":
                         telemetry_degraded = True
-                    emitted_events_in_cycle += 1
-                    return
-                if kind == "runtime_facts":
-                    run_seq, emitted_ms, event_payload_bytes, sent = _handle_runtime_facts_event(
-                        ctx,
-                        event,
-                        telemetry_sender=telemetry_sender,
-                    )
-                    telemetry_emit_ms += emitted_ms
-                    payload_bytes = event_payload_bytes
-                    if not sent:
+                        _handle_worker_error(
+                            ctx,
+                            worker_id,
+                            error=str(event.get("error") or "").strip() or None,
+                            exception_type=str(event.get("exception_type") or "").strip() or None,
+                            traceback_text=str(event.get("traceback") or "").strip() or None,
+                        )
+
+                drained_counts = _drain_parent_event_queue(
+                    event_queue=ctx.parent_event_queue,
+                    handle_event=_handle_parent_queue_event,
+                )
+                queue_drain_ms = max((time.monotonic() - queue_drain_started) * 1000.0, 0.0)
+
+                worker_reconcile_started = time.monotonic()
+                for worker_id, proc in list(ctx.children.items()):
+                    if proc.exitcode is None:
+                        continue
+                    if proc.exitcode != 0:
                         telemetry_degraded = True
-                    emitted_events_in_cycle += 1
-                    return
-                if kind == "worker_error":
-                    telemetry_degraded = True
-                    _handle_worker_error(
-                        ctx,
-                        worker_id,
-                        error=str(event.get("error") or "").strip() or None,
-                        exception_type=str(event.get("exception_type") or "").strip() or None,
-                        traceback_text=str(event.get("traceback") or "").strip() or None,
-                    )
+                        _handle_worker_error(
+                            ctx,
+                            worker_id,
+                            error=f"Worker {worker_id} exited with code {proc.exitcode}",
+                            exit_code=proc.exitcode,
+                        )
+                    del ctx.children[worker_id]
+                worker_reconcile_ms = max((time.monotonic() - worker_reconcile_started) * 1000.0, 0.0)
 
-            drained_counts = _drain_parent_event_queue(
-                event_queue=ctx.parent_event_queue,
-                handle_event=_handle_parent_queue_event,
-            )
-            queue_drain_ms = max((time.monotonic() - queue_drain_started) * 1000.0, 0.0)
-
-            worker_reconcile_started = time.monotonic()
-            for worker_id, proc in list(ctx.children.items()):
-                if proc.exitcode is None:
-                    continue
-                if proc.exitcode != 0:
-                    telemetry_degraded = True
-                    _handle_worker_error(
-                        ctx,
-                        worker_id,
-                        error=f"Worker {worker_id} exited with code {proc.exitcode}",
-                        exit_code=proc.exitcode,
-                    )
-                del ctx.children[worker_id]
-            worker_reconcile_ms = max((time.monotonic() - worker_reconcile_started) * 1000.0, 0.0)
-
-            status = BotLifecycleStatus.RUNNING.value if ctx.children else BotLifecycleStatus.STOPPED.value
-            if telemetry_degraded and status == BotLifecycleStatus.RUNNING.value:
-                status = BotLifecycleStatus.TELEMETRY_DEGRADED.value
-            status_write_started = time.monotonic()
-            update_bot_runtime_status(
-                bot_id=ctx.bot_id,
-                run_id=ctx.run_id,
-                status=status,
-                telemetry_degraded=telemetry_degraded,
-            )
-            status_write_ms = max((time.monotonic() - status_write_started) * 1000.0, 0.0)
-            sleep_for = 0.0 if not ctx.children else max((event_poll_ms / 1000.0) - (time.monotonic() - loop_started), 0.005)
-            loop_ended_at = datetime.now(timezone.utc)
-            loop_total_ms = max((time.monotonic() - loop_started) * 1000.0, 0.0)
-            record_bot_run_step(
-                {
-                    "run_id": ctx.run_id,
-                    "bot_id": ctx.bot_id,
-                    "step_name": "container_runtime_event_cycle",
-                    "started_at": loop_started_at,
-                    "ended_at": loop_ended_at,
-                    "duration_ms": loop_total_ms,
-                    "ok": True,
-                    "context": {
-                        "run_seq": run_seq,
-                        "worker_count": len(ctx.symbol_shards),
-                        "active_workers": len(ctx.children),
-                        "degraded_symbols_count": len(ctx.degraded_symbols),
-                        "event_poll_ms": event_poll_ms,
-                        "emitted_events_in_cycle": emitted_events_in_cycle,
-                        "drained_events_in_cycle": sum(drained_counts.values()),
-                        "drain_worker_count": len(drained_counts),
-                        "drain_mode": "shared_fanin",
-                        "cadence_mode": cadence_mode,
-                        "queue_drain_ms": queue_drain_ms,
-                        "worker_reconcile_ms": worker_reconcile_ms,
-                        "telemetry_emit_ms": telemetry_emit_ms,
-                        "payload_bytes": payload_bytes,
-                        "status_write_ms": status_write_ms,
-                        "sleep_ms": sleep_for * 1000.0,
-                    },
-                }
-            )
-            sleep_started_at = datetime.now(timezone.utc)
-            sleep_ended_at = sleep_started_at + timedelta(seconds=max(sleep_for, 0.0))
-            try:
+                status = BotLifecycleStatus.RUNNING.value if ctx.children else BotLifecycleStatus.STOPPED.value
+                if telemetry_degraded and status == BotLifecycleStatus.RUNNING.value:
+                    status = BotLifecycleStatus.TELEMETRY_DEGRADED.value
+                status_write_started = time.monotonic()
+                update_bot_runtime_status(
+                    bot_id=ctx.bot_id,
+                    run_id=ctx.run_id,
+                    status=status,
+                    telemetry_degraded=telemetry_degraded,
+                )
+                status_write_ms = max((time.monotonic() - status_write_started) * 1000.0, 0.0)
+                sleep_for = 0.0 if not ctx.children else max((event_poll_ms / 1000.0) - (time.monotonic() - loop_started), 0.005)
+                loop_ended_at = datetime.now(timezone.utc)
+                loop_total_ms = max((time.monotonic() - loop_started) * 1000.0, 0.0)
                 record_bot_run_step(
                     {
                         "run_id": ctx.run_id,
                         "bot_id": ctx.bot_id,
-                        "step_name": "container_runtime_event_sleep",
-                        "started_at": sleep_started_at,
-                        "ended_at": sleep_ended_at,
-                        "duration_ms": max(sleep_for * 1000.0, 0.0),
+                        "step_name": "container_runtime_event_cycle",
+                        "started_at": loop_started_at,
+                        "ended_at": loop_ended_at,
+                        "duration_ms": loop_total_ms,
                         "ok": True,
                         "context": {
                             "run_seq": run_seq,
+                            "worker_count": len(ctx.symbol_shards),
+                            "active_workers": len(ctx.children),
+                            "degraded_symbols_count": len(ctx.degraded_symbols),
                             "event_poll_ms": event_poll_ms,
                             "emitted_events_in_cycle": emitted_events_in_cycle,
+                            "drained_events_in_cycle": sum(drained_counts.values()),
+                            "drain_worker_count": len(drained_counts),
+                            "drain_mode": "shared_fanin",
                             "cadence_mode": cadence_mode,
-                            "active_workers": len(ctx.children),
-                            "worker_count": len(ctx.symbol_shards),
+                            "queue_drain_ms": queue_drain_ms,
+                            "worker_reconcile_ms": worker_reconcile_ms,
+                            "telemetry_emit_ms": telemetry_emit_ms,
+                            "payload_bytes": payload_bytes,
+                            "status_write_ms": status_write_ms,
+                            "sleep_ms": sleep_for * 1000.0,
                         },
                     }
                 )
-            except Exception:
-                logger.exception(
-                    "bot_runtime_container_sleep_step_trace_failed | bot_id=%s | run_id=%s | seq=%s",
-                    ctx.bot_id,
-                    ctx.run_id,
-                    run_seq,
-                )
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-    except Exception as exc:  # noqa: BLE001
-        final_phase = BotLifecyclePhase.CRASHED.value if ctx.startup_live_emitted else BotLifecyclePhase.STARTUP_FAILED.value
-        final_status = BotLifecycleStatus.CRASHED.value if ctx.startup_live_emitted else BotLifecycleStatus.STARTUP_FAILED.value
+                sleep_started_at = datetime.now(timezone.utc)
+                sleep_ended_at = sleep_started_at + timedelta(seconds=max(sleep_for, 0.0))
+                try:
+                    record_bot_run_step(
+                        {
+                            "run_id": ctx.run_id,
+                            "bot_id": ctx.bot_id,
+                            "step_name": "container_runtime_event_sleep",
+                            "started_at": sleep_started_at,
+                            "ended_at": sleep_ended_at,
+                            "duration_ms": max(sleep_for * 1000.0, 0.0),
+                            "ok": True,
+                            "context": {
+                                "run_seq": run_seq,
+                                "event_poll_ms": event_poll_ms,
+                                "emitted_events_in_cycle": emitted_events_in_cycle,
+                                "cadence_mode": cadence_mode,
+                                "active_workers": len(ctx.children),
+                                "worker_count": len(ctx.symbol_shards),
+                            },
+                        }
+                    )
+                except Exception:
+                    logger.exception(
+                        "bot_runtime_container_sleep_step_trace_failed | bot_id=%s | run_id=%s | seq=%s",
+                        ctx.bot_id,
+                        ctx.run_id,
+                        run_seq,
+                    )
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+        except Exception as exc:  # noqa: BLE001
+            final_phase = BotLifecyclePhase.CRASHED.value if ctx.startup_live_emitted else BotLifecyclePhase.STARTUP_FAILED.value
+            final_status = BotLifecycleStatus.CRASHED.value if ctx.startup_live_emitted else BotLifecycleStatus.STARTUP_FAILED.value
+            _persist_lifecycle_phase(
+                bot_id=ctx.bot_id,
+                run_id=ctx.run_id,
+                phase=final_phase,
+                owner=LifecycleOwner.CONTAINER.value,
+                message=str(exc),
+                metadata=_series_progress_metadata(ctx),
+                failure=build_failure_payload(
+                    phase=final_phase,
+                    message=str(exc),
+                    error_type=type(exc).__name__,
+                    type="container_exception",
+                    reason_code="container_supervision_exception",
+                    owner=LifecycleOwner.CONTAINER.value,
+                    exception_type=type(exc).__name__,
+                    traceback=traceback.format_exc().strip(),
+                ),
+                status=final_status,
+                telemetry_sender=telemetry_sender,
+            )
+            raise
+        finally:
+            for proc in ctx.children.values():
+                if proc.is_alive():
+                    proc.terminate()
+                proc.join(timeout=0.5)
+            ctx.manager.shutdown()
+
+        final_phase, final_status = terminal_status_after_supervision(
+            startup_live_emitted=ctx.startup_live_emitted,
+            degraded_symbols_count=len(ctx.degraded_symbols),
+            telemetry_degraded=telemetry_degraded,
+        )
         _persist_lifecycle_phase(
             bot_id=ctx.bot_id,
             run_id=ctx.run_id,
             phase=final_phase,
             owner=LifecycleOwner.CONTAINER.value,
-            message=str(exc),
+            message="Container runtime supervision completed.",
             metadata=_series_progress_metadata(ctx),
-            failure=build_failure_payload(
-                phase=final_phase,
-                message=str(exc),
-                error_type=type(exc).__name__,
-                type="container_exception",
-                reason_code="container_supervision_exception",
-                owner=LifecycleOwner.CONTAINER.value,
-                exception_type=type(exc).__name__,
-                traceback=traceback.format_exc().strip(),
-            ),
             status=final_status,
+            telemetry_sender=telemetry_sender,
         )
-        raise
     finally:
-        telemetry_sender.close()
-        for proc in ctx.children.values():
-            if proc.is_alive():
-                proc.terminate()
-            proc.join(timeout=0.5)
-        ctx.manager.shutdown()
-
-    final_phase, final_status = terminal_status_after_supervision(
-        startup_live_emitted=ctx.startup_live_emitted,
-        degraded_symbols_count=len(ctx.degraded_symbols),
-        telemetry_degraded=telemetry_degraded,
-    )
-    _persist_lifecycle_phase(
-        bot_id=ctx.bot_id,
-        run_id=ctx.run_id,
-        phase=final_phase,
-        owner=LifecycleOwner.CONTAINER.value,
-        message="Container runtime supervision completed.",
-        metadata=_series_progress_metadata(ctx),
-        status=final_status,
-    )
+        if owns_telemetry_sender:
+            telemetry_sender.close()
 
 
 def main() -> int:
@@ -1214,11 +1257,23 @@ def main() -> int:
     if not bot_id:
         raise RuntimeError("QT_BOT_RUNTIME_BOT_ID is required")
 
-    ctx = load_container_startup_context(bot_id)
-    logger.info("bot_runtime_run_started | bot_id=%s | run_id=%s", ctx.bot_id, ctx.run_id)
-    spawn_workers(ctx)
-    supervise_startup_and_runtime(ctx)
-    return 0
+    telemetry_url = str(_TELEMETRY_SETTINGS.ws_url or "").strip()
+    telemetry_sender = TelemetryEmitter(
+        telemetry_url,
+        queue_max=_TELEMETRY_EMIT_QUEUE_MAX,
+        queue_timeout_ms=_TELEMETRY_EMIT_QUEUE_TIMEOUT_MS,
+        retry_ms=_TELEMETRY_EMIT_RETRY_MS,
+    )
+    try:
+        ctx = load_container_startup_context(bot_id, telemetry_sender=telemetry_sender)
+        logger.info("bot_runtime_run_started | bot_id=%s | run_id=%s", ctx.bot_id, ctx.run_id)
+        spawn_workers(ctx)
+        start_observability_exporter()
+        supervise_startup_and_runtime(ctx)
+        return 0
+    finally:
+        stop_observability_exporter()
+        telemetry_sender.close()
 
 
 if __name__ == "__main__":
