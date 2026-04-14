@@ -10,7 +10,7 @@ from core.settings import get_settings
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.schema import CreateTable
+from sqlalchemy.schema import CreateSchema, CreateTable
 
 from .models import Base
 
@@ -120,6 +120,14 @@ class Database:
             # Serialize schema DDL across backend + workers.
             conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _SCHEMA_LOCK_KEY})
             try:
+                for schema_name in sorted(
+                    {
+                        str(table.schema)
+                        for table in Base.metadata.sorted_tables
+                        if str(table.schema or "").strip()
+                    }
+                ):
+                    conn.execute(CreateSchema(schema_name, if_not_exists=True))
                 for table in Base.metadata.sorted_tables:
                     conn.execute(CreateTable(table, if_not_exists=True))
             finally:
@@ -150,25 +158,35 @@ class Database:
         if not self._engine:
             return
         inspector = inspect(self._engine)
-        table_names = set(inspector.get_table_names())
+        table_names_by_schema: Dict[Optional[str], set[str]] = {}
 
-        def require_table(name: str) -> None:
-            if name not in table_names:
-                Base.metadata.tables[name].create(self._engine, checkfirst=True)
-                logger.warning("portal_db_table_created | table=%s", name)
+        def _schema_table_names(schema: Optional[str]) -> set[str]:
+            key = str(schema).strip() if schema is not None else None
+            if key not in table_names_by_schema:
+                table_names_by_schema[key] = set(inspector.get_table_names(schema=key))
+            return table_names_by_schema[key]
 
-        def assert_columns(name: str) -> None:
-            expected = {column.name for column in Base.metadata.tables[name].columns}
-            existing = {col["name"] for col in inspector.get_columns(name)}
+        def require_table(name: str, *, schema: Optional[str] = None) -> None:
+            metadata_key = f"{schema}.{name}" if schema else name
+            if name not in _schema_table_names(schema):
+                Base.metadata.tables[metadata_key].create(self._engine, checkfirst=True)
+                logger.warning("portal_db_table_created | schema=%s | table=%s", schema or "public", name)
+                _schema_table_names(schema).add(name)
+
+        def assert_columns(name: str, *, schema: Optional[str] = None) -> None:
+            metadata_key = f"{schema}.{name}" if schema else name
+            expected = {column.name for column in Base.metadata.tables[metadata_key].columns}
+            existing = {col["name"] for col in inspector.get_columns(name, schema=schema)}
             missing = sorted(set(expected) - existing)
             if missing:
                 logger.error(
-                    "portal_db_column_mismatch | table=%s | missing=%s",
+                    "portal_db_column_mismatch | schema=%s | table=%s | missing=%s",
+                    schema or "public",
                     name,
                     ",".join(missing),
                 )
                 raise RuntimeError(
-                    f"Table '{name}' is missing columns: {', '.join(missing)}. "
+                    f"Table '{schema + '.' if schema else ''}{name}' is missing columns: {', '.join(missing)}. "
                     "Drop the table or rebuild the database to ensure a clean schema."
                 )
 
@@ -186,6 +204,8 @@ class Database:
         require_table("portal_async_jobs")
         require_table("portal_bot_run_events")
         require_table("portal_bot_run_view_state")
+        require_table("botlens_backend_events_v1", schema="observability_events")
+        require_table("botlens_backend_metric_samples_v1", schema="observability_metrics")
         assert_columns("portal_bot_run_steps")
         assert_columns("portal_bot_run_lifecycle")
         assert_columns("portal_bot_run_lifecycle_events")
@@ -199,6 +219,8 @@ class Database:
         assert_columns("portal_async_jobs")
         assert_columns("portal_bot_run_events")
         assert_columns("portal_bot_run_view_state")
+        assert_columns("botlens_backend_events_v1", schema="observability_events")
+        assert_columns("botlens_backend_metric_samples_v1", schema="observability_metrics")
 
     @property
     def available(self) -> bool:
