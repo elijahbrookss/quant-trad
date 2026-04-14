@@ -3,13 +3,37 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
+from typing import Any, Dict, List, Optional, Sequence
+
 from engines.bot_runtime.core.series_identity import normalize_series_key as normalize_public_series_key
 from sqlalchemy import or_
 
 from ...observability import payload_size_bytes
 from ...bots.botlens_contract import RUN_SCOPE_KEY
 
-from ._shared import *
+from ._shared import (
+    BotRecord,
+    BotRunEventRecord,
+    BotRunLifecycleRecord,
+    BotRunRecord,
+    BotRunStepRecord,
+    BotRunViewStateRecord,
+    SQLAlchemyError,
+    StorageWriteOutcome,
+    _STORAGE_OBSERVER,
+    _coerce_float,
+    _coerce_int,
+    _execute_write_with_retry,
+    _json_safe,
+    _observe_db_write_outcome,
+    _parse_optional_timestamp,
+    _utcnow,
+    db,
+    func,
+    logger,
+    select,
+)
 
 _OBSERVER = _STORAGE_OBSERVER
 
@@ -42,6 +66,28 @@ def _observe_seq_collision(
         failure_mode="seq_collision",
         error=str(exc),
     )
+
+
+def _project_runtime_event_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    projected = dict(row or {})
+    payload = projected.get("payload") if isinstance(projected.get("payload"), Mapping) else {}
+    series_key = _normalize_botlens_series_key(payload.get("series_key"))
+    if series_key:
+        projected["series_key"] = series_key
+    bridge_session_id = str(payload.get("bridge_session_id") or "").strip()
+    if bridge_session_id:
+        projected["bridge_session_id"] = bridge_session_id
+    bridge_seq = _coerce_int(payload.get("bridge_seq"))
+    if bridge_seq is not None:
+        projected["bridge_seq"] = int(bridge_seq)
+    run_seq = _coerce_int(payload.get("run_seq"))
+    if run_seq is not None:
+        projected["run_seq"] = int(run_seq)
+    for key in ("event_name", "category", "strategy_id", "instrument_id", "symbol", "timeframe", "bar_time"):
+        value = payload.get(key)
+        if value not in (None, ""):
+            projected[key] = value
+    return projected
 
 
 def record_bot_run_step(payload: Dict[str, Any]) -> None:
@@ -228,7 +274,7 @@ def upsert_bot_run_view_state(payload: Dict[str, Any]) -> Dict[str, Any]:
         started=started,
         outcome=outcome,
     )
-    return dict(outcome.result)
+    return _project_runtime_event_row(dict(outcome.result))
 
 
 def get_latest_bot_run_view_state(
@@ -398,6 +444,7 @@ def record_bot_runtime_events_batch(payloads: Sequence[Dict[str, Any]]) -> int:
     items = [dict(payload) for payload in (payloads or []) if isinstance(payload, dict)]
     if not items:
         return 0
+    started = time.perf_counter()
 
     normalized: List[Dict[str, Any]] = []
     for payload in items:
@@ -542,12 +589,14 @@ def list_bot_runtime_events(
     limit: int = 1000,
     event_types: Optional[Sequence[str]] = None,
     event_type_prefixes: Optional[Sequence[str]] = None,
+    series_key: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     if not db.available:
         return []
     max_rows = max(1, min(int(limit or 1000), 5000))
     filter_event_types = [str(value).strip() for value in (event_types or []) if str(value).strip()]
     filter_prefixes = [str(value).strip() for value in (event_type_prefixes or []) if str(value).strip()]
+    normalized_series_key = _normalize_botlens_series_key(series_key) if series_key is not None else None
     with db.session() as session:
         query = (
             select(BotRunEventRecord)
@@ -555,6 +604,8 @@ def list_bot_runtime_events(
             .where(BotRunEventRecord.run_id == str(run_id))
             .where(BotRunEventRecord.seq > int(after_seq or 0))
         )
+        if normalized_series_key:
+            query = query.where(BotRunEventRecord.payload["series_key"].astext == normalized_series_key)
         if filter_event_types or filter_prefixes:
             clauses = []
             if filter_event_types:
@@ -564,7 +615,7 @@ def list_bot_runtime_events(
             query = query.where(or_(*clauses))
         query = query.order_by(BotRunEventRecord.seq.asc(), BotRunEventRecord.id.asc()).limit(max_rows)
         rows = session.execute(query).scalars().all()
-        return [row.to_dict() for row in rows]
+        return [_project_runtime_event_row(row.to_dict()) for row in rows]
 
 
 def get_latest_bot_runtime_run_id(bot_id: str) -> Optional[str]:
@@ -631,7 +682,7 @@ def get_latest_bot_runtime_event(
         if filter_event_types:
             query = query.where(BotRunEventRecord.event_type.in_(filter_event_types))
         row = session.execute(query.limit(1)).scalars().first()
-        return row.to_dict() if row else None
+        return _project_runtime_event_row(row.to_dict()) if row else None
 
 
 def update_bot_runtime_status(*, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None:
