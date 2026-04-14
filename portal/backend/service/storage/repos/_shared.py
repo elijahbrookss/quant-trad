@@ -7,7 +7,7 @@ import math
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, TypeVar
 
 from core.settings import get_settings
@@ -23,6 +23,8 @@ from ....db import (
     BotRunRecord,
     BotRunViewStateRecord,
     BotRunStepRecord,
+    BotlensBackendEventRecord,
+    BotlensBackendMetricSampleRecord,
     BotTradeEventRecord,
     BotTradeRecord,
     IndicatorRecord,
@@ -111,7 +113,7 @@ def _json_safe(value: Any) -> Any:
         return value.astimezone(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     if isinstance(value, date):
         return value.isoformat()
-    if isinstance(value, time):
+    if isinstance(value, datetime_time):
         return value.isoformat()
     if isinstance(value, float) and not math.isfinite(value):
         return None
@@ -271,6 +273,8 @@ __all__ = [
     "BotRunRecord",
     "BotRunViewStateRecord",
     "BotRunStepRecord",
+    "BotlensBackendEventRecord",
+    "BotlensBackendMetricSampleRecord",
     "BotTradeEventRecord",
     "BotTradeRecord",
     "IndicatorRecord",
