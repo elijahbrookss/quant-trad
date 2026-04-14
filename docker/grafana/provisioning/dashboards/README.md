@@ -85,10 +85,17 @@ Each JSON file should contain a Grafana dashboard model. The filename will be us
 
 Example: `system-metrics.json` → Dashboard available at `/d/<uid>/system-metrics`
 
-## Recommended Entry Dashboard
+## Recommended Entry Dashboards
 
-For bot runtime process/thread health, start with:
+For BotLens backend observability contract v1, start with:
+
+- `botlens-overview.json` (`uid=qt-botlens-overview`)
+- `botlens-queue-pressure-backlog.json` (`uid=qt-botlens-queues`)
+- `botlens-pipeline-latency-throughput.json` (`uid=qt-botlens-pipeline`)
+- `botlens-diagnostics-failure-analysis.json` (`uid=qt-botlens-diagnostics`)
+
+For broader bot runtime process/thread health outside BotLens backend observability, start with:
 
 - `runtime-process-control-tower.json` (`uid=qt-runtime-control-tower`)
 
-This dashboard links to profiler, attribution, workers, IO/DB, overlay optimization, and Loki error deep-dive dashboards.
+That control-tower dashboard still links to profiler, attribution, workers, IO/DB, overlay optimization, and Loki error deep-dive dashboards.
