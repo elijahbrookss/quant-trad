@@ -12,17 +12,26 @@ tags:
   - botlens
 code_paths:
   - portal/backend/db/models.py
+  - portal/backend/db/session.py
+  - portal/backend/service/observability.py
+  - portal/backend/service/observability_exporter.py
+  - portal/backend/service/storage/repos/observability.py
   - portal/backend/service/storage/repos/runtime_events.py
   - portal/backend/service/storage/repos/lifecycle.py
   - portal/backend/service/bots/botlens_symbol_projector.py
   - portal/backend/service/bots/botlens_run_projector.py
   - portal/backend/service/bots/container_runtime.py
+  - scripts/db/manual_migration_botlens_observability_persistence_v1.sql
 ---
 # BotLens Observability Migration Checklist
 
-This checklist is the manual follow-up artifact for Observability Contract v1.
+This checklist is the manual follow-up artifact for the durable BotLens backend observability/export pass.
 
 The backend changes do **not** execute destructive DDL automatically.
+
+Owner-facing DDL artifact:
+
+- `scripts/db/manual_migration_botlens_observability_persistence_v1.sql`
 
 ## Target Ownership Model
 
@@ -31,9 +40,11 @@ Target schemas:
 - `public`: operator-facing domain rows and control-plane metadata
 - `runtime_state`: authoritative runtime state, read models, lifecycle checkpoints, replay/event ledgers
 - `observability_events`: append-only diagnostic/event records that are not domain truth
-- `observability_metrics`: optional persisted rollups if metrics are ever stored in Postgres instead of exported elsewhere
+- `observability_metrics`: append-only dashboard metric samples/measurements
 
-Current implementation still stores the affected tables in the default schema. The classifications below describe the intended ownership after manual migration.
+Current application code now persists backend observability into `observability_events` and `observability_metrics`.
+
+Runtime-state tables are still physically in the default schema until the owner performs the manual move/cutover.
 
 ## Table Classification
 
@@ -44,8 +55,10 @@ Current implementation still stores the affected tables in the default schema. T
 | `portal_bot_run_lifecycle` | `runtime_state` | move schema | Durable current run lifecycle state; consumed as runtime truth. |
 | `portal_bot_run_lifecycle_events` | `runtime_state` | move schema | Append-only lifecycle checkpoint trail; runtime replay/audit, not observability-only metrics. |
 | `portal_bot_run_view_state` | `runtime_state` | move schema | BotLens read-model cache for run/symbol latest state. |
-| `portal_bot_run_events` | mixed today | split / replace | Currently mixes raw runtime/BotLens replay facts and observability drift inside JSON payloads. |
-| `portal_bot_run_steps` | `observability_events` | deprecate or move schema | Legacy step-trace profiling table, not BotLens runtime truth. |
+| `portal_bot_run_events` | `runtime_state` | keep as runtime truth, then move schema manually | Runtime/BotLens replay ledger. Common routing fields are now projected out for app/query consumers, but the table is still physically in `public` until manual cutover. |
+| `portal_bot_run_steps` | `observability_events` | KEEP TEMPORARILY, then move or drop manually | Legacy step-trace profiling table. Not BotLens runtime truth. |
+| `observability_events.botlens_backend_events_v1` | `observability_events` | REPLACE IMMEDIATELY | Durable backend event store for Grafana and incident queries. |
+| `observability_metrics.botlens_backend_metric_samples_v1` | `observability_metrics` | REPLACE IMMEDIATELY | Durable backend metric sample store for Grafana. |
 
 ## Table Move / Rename Recommendations
 
@@ -63,9 +76,14 @@ Current implementation still stores the affected tables in the default schema. T
 ### Split / Replace
 
 - `portal_bot_run_events`
-  - keep raw runtime and BotLens replay facts as runtime truth in `runtime_state.bot_runtime_events` or an equivalent final name,
-  - remove observability summaries from the raw payload contract,
-  - do not reuse this ledger as a metrics warehouse.
+  - keep raw runtime and BotLens replay facts as runtime truth,
+  - do not reuse this ledger as the backend observability warehouse,
+  - expose migration-window compatibility through `runtime_state` views,
+  - and plan the eventual physical move to `runtime_state`.
+
+- Observability storage
+  - `observability_events.botlens_backend_events_v1`
+  - `observability_metrics.botlens_backend_metric_samples_v1`
 
 ### Deprecate
 
@@ -93,7 +111,8 @@ Retain as JSON for now:
 Recommendation:
 
 - keep `event_type`, `known_at`, `event_time`, `critical`, `schema_version`, `run_id`, `bot_id`, `seq` as typed columns,
-- add typed columns for the routing fields above before any large replay/query workload depends on JSON scans.
+- use the manual migration SQL to add `runtime_state.bot_runtime_events_v1` as the query-facing typed view during the migration window,
+- optionally promote the routing fields to real typed columns later if replay query pressure justifies it.
 
 ### `portal_bot_run_view_state`
 
@@ -140,6 +159,31 @@ Retain as JSON for now:
 
 - `context`
 
+### Durable observability tables
+
+Keep typed:
+
+- `observed_at`
+- `metric_name` / `event_name`
+- `metric_kind`
+- `value`
+- `level`
+- `component`
+- `bot_id`
+- `run_id`
+- `instrument_id`
+- `series_key`
+- `queue_name`
+- `pipeline_stage`
+- `message_kind`
+- `storage_target`
+- `failure_mode`
+
+Retain as JSON:
+
+- `labels` on metric samples
+- `details` on events
+
 ## Backfill / Compatibility Considerations
 
 | Change | Backfill needed | Data can be dropped | Dual-write needed | Coordinated release needed | Notes |
@@ -147,7 +191,9 @@ Retain as JSON for now:
 | Stop persisting `typed_delta_metrics` in raw BotLens event payloads | No | Yes, for the legacy field | No | No | New code already stops writing it. Existing rows can remain until cleanup. |
 | Move lifecycle tables into `runtime_state` schema | No | No | Prefer short temporary dual-read or table rename window | Yes | Readers and writers must switch together or use DB views during cutover. |
 | Move `portal_bot_run_view_state` into `runtime_state` schema | No | No | Prefer short temporary dual-read or view-based compatibility | Yes | Bootstraps and projector writes must see the same table. |
-| Split `portal_bot_run_events` into runtime truth vs observability storage | Maybe, depends on preserved history requirements | Observability-only payload fragments can be dropped | Possibly | Yes | If historical replay must survive intact, copy raw rows first and only then cut reads. |
+| Create `observability_events.botlens_backend_events_v1` | No | No | No | Yes | App now writes here; owner should create indexes/views first in production. |
+| Create `observability_metrics.botlens_backend_metric_samples_v1` | No | No | No | Yes | App now writes here; owner should create indexes/views first in production. |
+| Keep `portal_bot_run_events` as runtime truth and stop using it for observability | No | Observability-only payload fragments can be dropped | No | Yes | New backend observability writes no longer go here. |
 | Deprecate or move `portal_bot_run_steps` | No, unless external reports still depend on it | Yes, if profiling history is non-essential | No | Yes, if consumers still query it | Confirm dashboards/jobs before drop. |
 
 ## Destructive Actions To Plan Manually
@@ -158,7 +204,7 @@ Do **not** run these from application code:
 - rename or move `portal_bot_run_lifecycle`,
 - rename or move `portal_bot_run_lifecycle_events`,
 - rename or move `portal_bot_run_view_state`,
-- split and/or rename `portal_bot_run_events`,
+- move `portal_bot_run_events` into `runtime_state` or replace it with a final runtime-state table name,
 - move or drop `portal_bot_run_steps`,
 - create compatibility views only for the migration window and remove them after cutover.
 
@@ -170,13 +216,20 @@ Do **not** run these from application code:
 | `portal_bot_run_steps` as BotLens observability storage | DEPRECATE | Confirm consumers, then move to `observability_events` or drop. |
 | `bot_projection_refresh` compatibility envelope | DEPRECATE | Remove once worker/runtime stops sending it; active runtime logs should use lifecycle-event terminology only. |
 | Queue-full/drop log-only observability | REMOVE | No DB action; already replaced by structured events + metrics. |
+| Grafana reading payload-derived BotLens observability from `portal_bot_run_events` | REMOVE | Point dashboards to `observability_events.botlens_backend_events_v1` and `observability_metrics.botlens_backend_metric_samples_v1`. |
 
 ## Rollout Order
 
-1. Deploy the backend observability contract code without DDL changes.
-2. Confirm dashboards/alerting read the new metrics/events instead of legacy logs.
-3. Stop any downstream dependency on `typed_delta_metrics`.
-4. Plan manual schema moves for `portal_bot_run_lifecycle`, `portal_bot_run_lifecycle_events`, and `portal_bot_run_view_state`.
-5. Decide whether `portal_bot_run_events` is renamed in place or replaced with a new runtime-state ledger table.
-6. Confirm whether `portal_bot_run_steps` still has consumers before moving or dropping it.
-7. Remove temporary compatibility views or dual-read bridges after cutover.
+1. Apply `scripts/db/manual_migration_botlens_observability_persistence_v1.sql` in the target database.
+2. Deploy the backend code that includes the exporter and durable observability writers.
+3. Confirm new rows appear in `observability_events.botlens_backend_events_v1` and `observability_metrics.botlens_backend_metric_samples_v1`.
+4. Point Grafana/alerts at the new observability tables and stop querying payload-derived logic.
+5. Stop any downstream dependency on `typed_delta_metrics`.
+6. Use the `runtime_state.*_v1` compatibility views during the migration window while planning physical table moves for:
+   - `portal_bot_run_lifecycle`
+   - `portal_bot_run_lifecycle_events`
+   - `portal_bot_run_view_state`
+   - `portal_bot_run_events`
+7. Confirm whether `portal_bot_run_steps` still has consumers before moving or dropping it.
+8. Perform the physical runtime-state table moves or replacements manually.
+9. Remove temporary compatibility views after reads and writes are fully cut over.
