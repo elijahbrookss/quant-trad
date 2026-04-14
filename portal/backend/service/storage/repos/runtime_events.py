@@ -1,22 +1,17 @@
-"""Storage repository module."""
+"""Runtime-event and BotLens state storage repository module."""
 
 from __future__ import annotations
 
 import time
-from typing import Callable, TypeVar
-
-from core.settings import get_settings
 from engines.bot_runtime.core.series_identity import normalize_series_key as normalize_public_series_key
 from sqlalchemy import or_
-from sqlalchemy.exc import DBAPIError, OperationalError
 
+from ...observability import payload_size_bytes
 from ...bots.botlens_contract import RUN_SCOPE_KEY
 
 from ._shared import *
 
-_T = TypeVar("_T")
-_DATABASE_SETTINGS = get_settings().database
-_DB_WRITE_RETRY_ATTEMPTS = max(1, int(_DATABASE_SETTINGS.write_retry_attempts))
+_OBSERVER = _STORAGE_OBSERVER
 
 
 def _normalize_botlens_series_key(value: Any) -> str:
@@ -25,46 +20,28 @@ def _normalize_botlens_series_key(value: Any) -> str:
     return normalize_public_series_key(value)
 
 
-def _is_transient_connection_error(exc: Exception) -> bool:
-    if isinstance(exc, DBAPIError) and bool(getattr(exc, "connection_invalidated", False)):
-        return True
-    message = str(exc).lower()
-    transient_markers = (
-        "server closed the connection unexpectedly",
-        "connection reset by peer",
-        "connection refused",
-        "could not connect to server",
-        "terminating connection due to administrator command",
-        "closed the connection",
-    )
-    return any(marker in message for marker in transient_markers)
-
-
-def _execute_write_with_retry(
+def _observe_seq_collision(
     *,
-    operation: str,
+    storage_target: str,
     context: Dict[str, Any],
-    action: Callable[[], _T],
-) -> _T:
-    for attempt in range(1, _DB_WRITE_RETRY_ATTEMPTS + 1):
-        try:
-            return action()
-        except (OperationalError, DBAPIError, SQLAlchemyError) as exc:
-            retryable = attempt < _DB_WRITE_RETRY_ATTEMPTS and _is_transient_connection_error(exc)
-            logger.warning(
-                "portal_db_write_error | operation=%s | attempt=%s/%s | retry=%s | run_id=%s | bot_id=%s | error=%s",
-                operation,
-                attempt,
-                _DB_WRITE_RETRY_ATTEMPTS,
-                retryable,
-                context.get("run_id"),
-                context.get("bot_id"),
-                exc,
-            )
-            if not retryable:
-                raise
-            db.reset_connection_state()
-            time.sleep(min(0.05 * attempt, 0.25))
+    exc: Exception,
+) -> None:
+    _OBSERVER.increment(
+        "db_write_fail_total",
+        bot_id=context.get("bot_id"),
+        run_id=context.get("run_id"),
+        storage_target=storage_target,
+        failure_mode="seq_collision",
+    )
+    _OBSERVER.event(
+        "db_seq_collision",
+        level=logging.ERROR,
+        bot_id=context.get("bot_id"),
+        run_id=context.get("run_id"),
+        storage_target=storage_target,
+        failure_mode="seq_collision",
+        error=str(exc),
+    )
 
 
 def record_bot_run_step(payload: Dict[str, Any]) -> None:
@@ -181,7 +158,11 @@ def upsert_bot_run_view_state(payload: Dict[str, Any]) -> Dict[str, Any]:
     event_time = _parse_optional_timestamp(payload.get("event_time"))
     known_at = _parse_optional_timestamp(payload.get("known_at")) or _utcnow()
 
-    def _write() -> Dict[str, Any]:
+    started = time.perf_counter()
+    write_context = {"run_id": run_id, "bot_id": bot_id, "series_key": series_key}
+    payload_bytes = payload_size_bytes(view_payload)
+
+    def _write() -> StorageWriteOutcome:
         with db.session() as session:
             row = (
                 session.execute(
@@ -209,10 +190,19 @@ def upsert_bot_run_view_state(payload: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 session.add(row)
                 session.flush()
-                return row.to_dict()
+                return StorageWriteOutcome(
+                    result=row.to_dict(),
+                    rows_written=1,
+                    payload_bytes=payload_bytes,
+                )
             # Ignore stale or duplicate updates to preserve monotonic derived state.
-            if int(row.seq or 0) >= seq:
-                return row.to_dict()
+            current_seq = int(row.seq or 0)
+            if current_seq >= seq:
+                return StorageWriteOutcome(
+                    result=row.to_dict(),
+                    noop_reason="duplicate_skip" if current_seq == seq else "stale_update",
+                    noop_count=1,
+                )
             row.seq = seq
             row.schema_version = schema_version
             row.payload = view_payload
@@ -220,13 +210,25 @@ def upsert_bot_run_view_state(payload: Dict[str, Any]) -> Dict[str, Any]:
             row.known_at = known_at
             row.updated_at = now
             session.flush()
-            return row.to_dict()
+            return StorageWriteOutcome(
+                result=row.to_dict(),
+                rows_written=1,
+                payload_bytes=payload_bytes,
+            )
 
-    return _execute_write_with_retry(
+    outcome = _execute_write_with_retry(
         operation="upsert_bot_run_view_state",
-        context={"run_id": run_id, "bot_id": bot_id, "series_key": series_key},
+        storage_target="bot_run_view_state",
+        context=write_context,
         action=_write,
     )
+    _observe_db_write_outcome(
+        storage_target="bot_run_view_state",
+        context=write_context,
+        started=started,
+        outcome=outcome,
+    )
+    return dict(outcome.result)
 
 
 def get_latest_bot_run_view_state(
@@ -301,7 +303,12 @@ def record_bot_runtime_event(payload: Dict[str, Any]) -> Dict[str, Any]:
     if schema_version <= 0:
         raise ValueError("schema_version must be >= 1 for runtime event persistence")
 
-    def _write() -> Dict[str, Any]:
+    started = time.perf_counter()
+    write_context = {"run_id": run_id, "bot_id": bot_id, "event_id": event_id}
+    persisted_payload = _json_safe(dict(payload.get("payload") or {}))
+    persisted_payload_bytes = payload_size_bytes(persisted_payload)
+
+    def _write() -> StorageWriteOutcome:
         with db.session() as session:
             existing = (
                 session.execute(
@@ -313,7 +320,11 @@ def record_bot_runtime_event(payload: Dict[str, Any]) -> Dict[str, Any]:
                 .first()
             )
             if existing is not None:
-                return existing.to_dict()
+                return StorageWriteOutcome(
+                    result=existing.to_dict(),
+                    noop_reason="duplicate_skip",
+                    noop_count=1,
+                )
             existing_seq = (
                 session.execute(
                     select(BotRunEventRecord)
@@ -331,7 +342,11 @@ def record_bot_runtime_event(payload: Dict[str, Any]) -> Dict[str, Any]:
                     raise ValueError(
                         f"seq collision for bot/run (incoming={seq}, existing_event_id={existing_event_id}, event_id={event_id})"
                     )
-                return existing_seq.to_dict()
+                return StorageWriteOutcome(
+                    result=existing_seq.to_dict(),
+                    noop_reason="duplicate_skip",
+                    noop_count=1,
+                )
             row = BotRunEventRecord(
                 event_id=event_id,
                 bot_id=bot_id,
@@ -340,20 +355,41 @@ def record_bot_runtime_event(payload: Dict[str, Any]) -> Dict[str, Any]:
                 event_type=str(payload.get("event_type") or "state_delta"),
                 critical=bool(payload.get("critical", False)),
                 schema_version=schema_version,
-                payload=_json_safe(dict(payload.get("payload") or {})),
+                payload=persisted_payload,
                 event_time=_parse_optional_timestamp(payload.get("event_time")),
                 known_at=_parse_optional_timestamp(payload.get("known_at")) or _utcnow(),
                 created_at=_utcnow(),
             )
             session.add(row)
             session.flush()
-            return row.to_dict()
+            return StorageWriteOutcome(
+                result=row.to_dict(),
+                rows_written=1,
+                payload_bytes=persisted_payload_bytes,
+            )
 
-    return _execute_write_with_retry(
-        operation="record_bot_runtime_event",
-        context={"run_id": run_id, "bot_id": bot_id, "event_id": event_id},
-        action=_write,
+    try:
+        outcome = _execute_write_with_retry(
+            operation="record_bot_runtime_event",
+            storage_target="bot_runtime_events",
+            context=write_context,
+            action=_write,
+        )
+    except ValueError as exc:
+        if "seq collision" in str(exc).lower():
+            _observe_seq_collision(
+                storage_target="bot_runtime_events",
+                context=write_context,
+                exc=exc,
+            )
+        raise
+    _observe_db_write_outcome(
+        storage_target="bot_runtime_events",
+        context=write_context,
+        started=started,
+        outcome=outcome,
     )
+    return dict(outcome.result)
 
 
 def record_bot_runtime_events_batch(payloads: Sequence[Dict[str, Any]]) -> int:
@@ -398,8 +434,10 @@ def record_bot_runtime_events_batch(payloads: Sequence[Dict[str, Any]]) -> int:
     for row in normalized:
         grouped.setdefault((row["bot_id"], row["run_id"]), []).append(row)
 
-    def _write() -> int:
+    def _write() -> StorageWriteOutcome:
         inserted = 0
+        duplicate_skips = 0
+        inserted_payload_bytes = 0
         with db.session() as session:
             for (bot_id, run_id), rows in grouped.items():
                 rows.sort(key=lambda item: (int(item["seq"]), str(item["event_id"])))
@@ -429,6 +467,7 @@ def record_bot_runtime_events_batch(payloads: Sequence[Dict[str, Any]]) -> int:
                     seq = int(row["seq"])
                     existing = existing_by_event_id.get(event_id)
                     if existing is not None:
+                        duplicate_skips += 1
                         continue
                     conflict = existing_by_seq.get(seq)
                     if conflict is not None:
@@ -453,20 +492,46 @@ def record_bot_runtime_events_batch(payloads: Sequence[Dict[str, Any]]) -> int:
                             created_at=_utcnow(),
                         )
                     )
+                    inserted_payload_bytes += payload_size_bytes(row["payload"])
                 if pending:
                     session.add_all(pending)
                     inserted += len(pending)
-        return inserted
+        return StorageWriteOutcome(
+            result=inserted,
+            rows_written=inserted,
+            payload_bytes=inserted_payload_bytes,
+            noop_reason="duplicate_skip" if duplicate_skips > 0 else None,
+            noop_count=duplicate_skips,
+        )
 
-    return _execute_write_with_retry(
-        operation="record_bot_runtime_events_batch",
-        context={
-            "run_id": str(normalized[0].get("run_id") or ""),
-            "bot_id": str(normalized[0].get("bot_id") or ""),
-            "event_id": str(normalized[0].get("event_id") or ""),
-        },
-        action=_write,
+    write_context = {
+        "run_id": str(normalized[0].get("run_id") or ""),
+        "bot_id": str(normalized[0].get("bot_id") or ""),
+        "event_id": str(normalized[0].get("event_id") or ""),
+    }
+    try:
+        outcome = _execute_write_with_retry(
+            operation="record_bot_runtime_events_batch",
+            storage_target="bot_runtime_events",
+            context=write_context,
+            action=_write,
+        )
+    except ValueError as exc:
+        lowered = str(exc).lower()
+        if "seq collision" in lowered or "duplicate seq" in lowered:
+            _observe_seq_collision(
+                storage_target="bot_runtime_events",
+                context=write_context,
+                exc=exc,
+            )
+        raise
+    _observe_db_write_outcome(
+        storage_target="bot_runtime_events",
+        context=write_context,
+        started=started,
+        outcome=outcome,
     )
+    return int(outcome.result)
 
 
 def list_bot_runtime_events(
@@ -572,7 +637,13 @@ def get_latest_bot_runtime_event(
 def update_bot_runtime_status(*, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None:
     if not db.available:
         raise RuntimeError("database is required for bot status persistence")
-    def _write() -> None:
+    started = time.perf_counter()
+    payloads = {
+        "portal_bot_runs": payload_size_bytes({"status": status, "telemetry_degraded": telemetry_degraded}),
+        "portal_bots": payload_size_bytes({"status": status}),
+    }
+
+    def _write() -> StorageWriteOutcome:
         with db.session() as session:
             bot = session.get(BotRecord, bot_id)
             if bot is None:
@@ -607,9 +678,35 @@ def update_bot_runtime_status(*, bot_id: str, run_id: str, status: str, telemetr
             run.updated_at = _utcnow()
             if status in {"stopped", "failed", "startup_failed", "crashed", "completed"}:
                 run.ended_at = _utcnow()
+        return StorageWriteOutcome(
+            result=None,
+            rows_written=2,
+            payload_bytes=sum(payloads.values()),
+        )
 
-    _execute_write_with_retry(
+    outcome = _execute_write_with_retry(
         operation="update_bot_runtime_status",
+        storage_target="portal_bot_runs",
         context={"run_id": run_id, "bot_id": bot_id, "status": status},
         action=_write,
+    )
+    _observe_db_write_outcome(
+        storage_target="portal_bot_runs",
+        context={"run_id": run_id, "bot_id": bot_id, "status": status},
+        started=started,
+        outcome=StorageWriteOutcome(
+            result=None,
+            rows_written=1,
+            payload_bytes=payloads["portal_bot_runs"],
+        ),
+    )
+    _observe_db_write_outcome(
+        storage_target="portal_bots",
+        context={"run_id": run_id, "bot_id": bot_id, "status": status},
+        started=started,
+        outcome=StorageWriteOutcome(
+            result=None,
+            rows_written=1,
+            payload_bytes=payloads["portal_bots"],
+        ),
     )
