@@ -15,6 +15,7 @@ except ModuleNotFoundError:  # pragma: no cover - test environments may not inst
     class WebSocket:  # type: ignore[override]
         pass
 
+from ..observability import BackendObserver, normalize_failure_mode, payload_size_bytes
 from .botlens_contract import (
     SCHEMA_VERSION,
     STREAM_CONNECTED_TYPE,
@@ -24,19 +25,23 @@ from .botlens_contract import (
     STREAM_SUMMARY_DELTA_TYPE,
     normalize_series_key,
 )
-from .botlens_typed_deltas import PreparedTypedDelta, TypedDeltaDeliveryStats, TypedDeltaInstrumentation
+from .botlens_typed_deltas import PreparedTypedDelta, TypedDeltaDeliveryStats
 
 logger = logging.getLogger(__name__)
+_OBSERVER = BackendObserver(component="botlens_run_stream", event_logger=logger)
 _PENDING_SYMBOL_DELTA_LIMIT = 200
-
-
-def _payload_size_bytes(payload: str) -> int:
-    return len(payload.encode("utf-8"))
 
 
 class BotLensRunStream:
     def __init__(self, *, ring_size: int | None = None) -> None:
         self._run_viewers: DefaultDict[str, Dict[WebSocket, Dict[str, Any]]] = defaultdict(dict)
+        self._run_viewer_metrics: DefaultDict[str, Dict[str, int]] = defaultdict(
+            lambda: {
+                "active_viewers": 0,
+                "snapshot_pending_viewers": 0,
+                "buffered_deltas": 0,
+            }
+        )
         self._run_stream_session_id: Dict[str, str] = {}
         self._lock = asyncio.Lock()
 
@@ -61,11 +66,96 @@ class BotLensRunStream:
             "stream_session_id": str(stream_session_id),
         }
 
-    async def _send_message(self, ws: WebSocket, message: str) -> bool:
+    @staticmethod
+    def _viewer_metric_state(state: Mapping[str, Any]) -> Dict[str, int]:
+        return {
+            "snapshot_pending": 1 if normalize_series_key(state.get("snapshot_pending_symbol_key")) else 0,
+            "buffered_deltas": int(state.get("buffered_delta_count") or 0),
+        }
+
+    def _apply_viewer_metric_delta(
+        self,
+        *,
+        run_id: str,
+        previous_state: Mapping[str, Any] | None = None,
+        next_state: Mapping[str, Any] | None = None,
+        active_delta: int = 0,
+    ) -> None:
+        metrics = self._run_viewer_metrics[str(run_id)]
+        metrics["active_viewers"] = max(metrics["active_viewers"] + int(active_delta), 0)
+        if previous_state is not None:
+            previous = self._viewer_metric_state(previous_state)
+            metrics["snapshot_pending_viewers"] = max(
+                metrics["snapshot_pending_viewers"] - previous["snapshot_pending"],
+                0,
+            )
+            metrics["buffered_deltas"] = max(
+                metrics["buffered_deltas"] - previous["buffered_deltas"],
+                0,
+            )
+        if next_state is not None:
+            updated = self._viewer_metric_state(next_state)
+            metrics["snapshot_pending_viewers"] += updated["snapshot_pending"]
+            metrics["buffered_deltas"] += updated["buffered_deltas"]
+        if (
+            metrics["active_viewers"] == 0
+            and metrics["snapshot_pending_viewers"] == 0
+            and metrics["buffered_deltas"] == 0
+        ):
+            self._run_viewer_metrics.pop(str(run_id), None)
+
+    async def _send_message(
+        self,
+        ws: WebSocket,
+        message: str,
+        *,
+        run_id: str,
+        message_kind: str,
+        series_key: str | None = None,
+    ) -> bool:
+        started = time.perf_counter()
+        _OBSERVER.increment(
+            "viewer_send_total",
+            run_id=run_id,
+            series_key=series_key,
+            message_kind=message_kind,
+        )
         try:
             await ws.send_text(message)
+            _OBSERVER.observe(
+                "viewer_send_ms",
+                max((time.perf_counter() - started) * 1000.0, 0.0),
+                run_id=run_id,
+                series_key=series_key,
+                message_kind=message_kind,
+            )
             return True
-        except Exception:
+        except Exception as exc:
+            failure_mode = normalize_failure_mode(exc)
+            _OBSERVER.increment(
+                "viewer_send_fail_total",
+                run_id=run_id,
+                series_key=series_key,
+                message_kind=message_kind,
+                failure_mode=failure_mode,
+            )
+            _OBSERVER.observe(
+                "viewer_send_ms",
+                max((time.perf_counter() - started) * 1000.0, 0.0),
+                run_id=run_id,
+                series_key=series_key,
+                message_kind=message_kind,
+                failure_mode=failure_mode,
+            )
+            _OBSERVER.event(
+                "viewer_send_failed",
+                level=logging.WARN,
+                run_id=run_id,
+                series_key=series_key,
+                message_kind=message_kind,
+                failure_mode=failure_mode,
+                error=str(exc),
+            )
             return False
 
     @staticmethod
@@ -76,22 +166,65 @@ class BotLensRunStream:
         selected = normalize_series_key(viewer_state.get("selected_symbol_key"))
         return bool(selected) and selected == normalized
 
-    @staticmethod
-    def _buffer_viewer_symbol_delta(viewer_state: Dict[str, Any], message: Mapping[str, Any]) -> None:
+    def _buffer_viewer_symbol_delta(
+        self,
+        *,
+        run_id: str,
+        viewer_state: Dict[str, Any],
+        message: Mapping[str, Any],
+    ) -> None:
         pending = viewer_state.get("pending_symbol_deltas")
         if not isinstance(pending, list):
             pending = []
             viewer_state["pending_symbol_deltas"] = pending
+        previous_state = dict(viewer_state)
         pending.append(dict(message))
         if len(pending) > _PENDING_SYMBOL_DELTA_LIMIT:
             overflow = len(pending) - _PENDING_SYMBOL_DELTA_LIMIT
             del pending[:overflow]
-            logger.warning(
-                "botlens_stream_symbol_snapshot_overflow | symbol_key=%s | dropped_count=%s | max_buffered=%s",
-                normalize_series_key(message.get("symbol_key")),
-                overflow,
-                _PENDING_SYMBOL_DELTA_LIMIT,
+            _OBSERVER.increment(
+                "snapshot_buffer_drop_total",
+                value=float(overflow),
+                run_id=run_id,
+                series_key=normalize_series_key(message.get("symbol_key")),
+                message_kind="snapshot_buffer",
             )
+            _OBSERVER.event(
+                "viewer_snapshot_buffer_overflow",
+                level=logging.WARN,
+                log_to_logger=False,
+                run_id=run_id,
+                series_key=normalize_series_key(message.get("symbol_key")),
+                dropped_count=overflow,
+                max_buffered=_PENDING_SYMBOL_DELTA_LIMIT,
+            )
+        viewer_state["buffered_delta_count"] = len(pending)
+        self._apply_viewer_metric_delta(
+            run_id=run_id,
+            previous_state=previous_state,
+            next_state=viewer_state,
+        )
+
+    def _emit_viewer_gauges_locked(self, *, run_id: str) -> None:
+        metrics = self._run_viewer_metrics.get(str(run_id), {})
+        _OBSERVER.maybe_gauge(
+            f"viewer_active:{run_id}",
+            "viewer_active_count",
+            float(int(metrics.get("active_viewers") or 0)),
+            run_id=run_id,
+        )
+        _OBSERVER.maybe_gauge(
+            f"snapshot_pending:{run_id}",
+            "snapshot_pending_viewers",
+            float(int(metrics.get("snapshot_pending_viewers") or 0)),
+            run_id=run_id,
+        )
+        _OBSERVER.maybe_gauge(
+            f"snapshot_buffered:{run_id}",
+            "snapshot_buffered_deltas",
+            float(int(metrics.get("buffered_deltas") or 0)),
+            run_id=run_id,
+        )
 
     async def add_run_viewer(
         self,
@@ -108,11 +241,19 @@ class BotLensRunStream:
             stream_session_id = self._ensure_run_stream_session_id_locked(key)
             viewer_count = len(self._run_viewers[key]) + 1
             pending_symbol_key = normalized_selected or None
-            self._run_viewers[key][ws] = {
+            viewer_state = {
                 "selected_symbol_key": normalized_selected,
                 "snapshot_pending_symbol_key": pending_symbol_key,
                 "pending_symbol_deltas": [],
+                "buffered_delta_count": 0,
             }
+            self._run_viewers[key][ws] = viewer_state
+            self._apply_viewer_metric_delta(
+                run_id=key,
+                next_state=viewer_state,
+                active_delta=1,
+            )
+            self._emit_viewer_gauges_locked(run_id=key)
 
         connected_message = json.dumps(
             self._connected_envelope(run_id=key, stream_session_id=stream_session_id)
@@ -120,14 +261,17 @@ class BotLensRunStream:
         if not await self._send_message(
             ws,
             connected_message,
+            run_id=key,
+            message_kind="connected",
         ):
             await self.remove_run_viewer(run_id=key, ws=ws)
             return
-        logger.info(
-            "botlens_stream_viewer_added | run_id=%s | selected_symbol_key=%s | viewer_count=%s",
-            key,
-            normalized_selected or None,
-            viewer_count,
+        _OBSERVER.increment("viewer_added_total", run_id=key)
+        _OBSERVER.event(
+            "viewer_added",
+            run_id=key,
+            series_key=normalized_selected or None,
+            viewer_count=viewer_count,
         )
 
     async def update_viewer_subscription(self, *, run_id: str, ws: WebSocket, payload: Mapping[str, Any]) -> None:
@@ -136,18 +280,20 @@ class BotLensRunStream:
             state = self._run_viewers.get(key, {}).get(ws)
             if state is None:
                 return
+            previous_state = dict(state)
             message_type = str(payload.get("type") or "").strip().lower()
             if message_type == "set_selected_symbol":
                 normalized_symbol_key = normalize_series_key(payload.get("symbol_key"))
                 state["selected_symbol_key"] = normalized_symbol_key
                 state["snapshot_pending_symbol_key"] = normalized_symbol_key or None
                 state["pending_symbol_deltas"] = []
-            logger.debug(
-                "botlens_stream_viewer_subscription_updated | run_id=%s | type=%s | selected_symbol_key=%s",
-                key,
-                message_type,
-                state.get("selected_symbol_key"),
+                state["buffered_delta_count"] = 0
+            self._apply_viewer_metric_delta(
+                run_id=key,
+                previous_state=previous_state,
+                next_state=state,
             )
+            self._emit_viewer_gauges_locked(run_id=key)
 
     async def deliver_symbol_snapshot(
         self,
@@ -164,6 +310,7 @@ class BotLensRunStream:
             state = self._run_viewers.get(key, {}).get(ws)
             if state is None:
                 return False
+            previous_state = dict(state)
             pending = [
                 dict(message)
                 for message in (state.get("pending_symbol_deltas") or [])
@@ -171,6 +318,13 @@ class BotLensRunStream:
             ]
             state["snapshot_pending_symbol_key"] = None
             state["pending_symbol_deltas"] = []
+            state["buffered_delta_count"] = 0
+            self._apply_viewer_metric_delta(
+                run_id=key,
+                previous_state=previous_state,
+                next_state=state,
+            )
+            self._emit_viewer_gauges_locked(run_id=key)
 
         snapshot_message = json.dumps(
             {
@@ -182,7 +336,20 @@ class BotLensRunStream:
                 "payload": dict(snapshot.get("detail") or {}),
             }
         )
-        if not await self._send_message(ws, snapshot_message):
+        _OBSERVER.observe(
+            "viewer_payload_bytes",
+            float(payload_size_bytes(snapshot_message)),
+            run_id=key,
+            series_key=symbol_key,
+            message_kind="snapshot",
+        )
+        if not await self._send_message(
+            ws,
+            snapshot_message,
+            run_id=key,
+            message_kind="snapshot",
+            series_key=symbol_key,
+        ):
             await self.remove_run_viewer(run_id=key, ws=ws)
             return False
 
@@ -190,17 +357,30 @@ class BotLensRunStream:
         for message in sorted(pending, key=lambda entry: int(entry.get("seq") or 0)):
             if int(message.get("seq") or 0) <= snapshot_seq:
                 continue
-            if not await self._send_message(ws, json.dumps(message)):
+            serialized_message = json.dumps(message)
+            if not await self._send_message(
+                ws,
+                serialized_message,
+                run_id=key,
+                message_kind="snapshot_replay",
+                series_key=symbol_key,
+            ):
                 await self.remove_run_viewer(run_id=key, ws=ws)
                 return False
             replay_count += 1
-
-        logger.info(
-            "botlens_stream_symbol_snapshot_sent | run_id=%s | symbol_key=%s | seq=%s | replay_count=%s",
-            key,
-            symbol_key or None,
-            snapshot_seq,
-            replay_count,
+        _OBSERVER.observe(
+            "snapshot_replay_count",
+            float(replay_count),
+            run_id=key,
+            series_key=symbol_key,
+            message_kind="snapshot",
+        )
+        _OBSERVER.event(
+            "viewer_snapshot_sent",
+            run_id=key,
+            series_key=symbol_key,
+            seq=snapshot_seq,
+            replay_count=replay_count,
         )
         return True
 
@@ -210,38 +390,47 @@ class BotLensRunStream:
             viewers = self._run_viewers.get(str(run_id))
             if not viewers:
                 return
-            viewers.pop(ws, None)
+            removed_state = viewers.pop(ws, None)
+            if removed_state is not None:
+                self._apply_viewer_metric_delta(
+                    run_id=str(run_id),
+                    previous_state=removed_state,
+                    active_delta=-1,
+                )
             remaining = len(viewers)
+            self._emit_viewer_gauges_locked(run_id=str(run_id))
             if viewers:
-                logger.info(
-                    "botlens_stream_viewer_removed | run_id=%s | viewer_count=%s",
-                    run_id,
-                    remaining,
+                _OBSERVER.increment("viewer_removed_total", run_id=str(run_id))
+                _OBSERVER.event(
+                    "viewer_removed",
+                    run_id=str(run_id),
+                    viewer_count=remaining,
                 )
                 return
             self._run_viewers.pop(str(run_id), None)
-        logger.info(
-            "botlens_stream_viewer_removed | run_id=%s | viewer_count=%s",
-            run_id,
-            remaining,
+        _OBSERVER.increment("viewer_removed_total", run_id=str(run_id))
+        _OBSERVER.event(
+            "viewer_removed",
+            run_id=str(run_id),
+            viewer_count=remaining,
         )
 
     async def evict_run(self, *, run_id: str) -> None:
         async with self._lock:
             self._run_stream_session_id.pop(str(run_id), None)
             viewers = self._run_viewers.pop(str(run_id), {})
+            self._run_viewer_metrics.pop(str(run_id), None)
         for ws in list(viewers.keys()):
             try:
                 await ws.close(code=1001)
             except Exception:
                 pass
-        logger.info(
-            "botlens_stream_run_evicted | run_id=%s | viewer_count=%s",
-            run_id,
-            len(viewers),
-        )
+        _OBSERVER.gauge("viewer_active_count", 0.0, run_id=str(run_id))
+        _OBSERVER.gauge("snapshot_pending_viewers", 0.0, run_id=str(run_id))
+        _OBSERVER.gauge("snapshot_buffered_deltas", 0.0, run_id=str(run_id))
 
     async def _broadcast(self, *, run_id: str, message: Dict[str, Any]) -> Dict[str, int]:
+        started = time.perf_counter()
         serialized = json.dumps(message)
         targets: list[tuple[WebSocket, Dict[str, Any]]] = []
         filtered_viewer_count = 0
@@ -256,7 +445,11 @@ class BotLensRunStream:
                     and pending_symbol_key
                     and pending_symbol_key == normalize_series_key(message.get("symbol_key"))
                 ):
-                    self._buffer_viewer_symbol_delta(state, message)
+                    self._buffer_viewer_symbol_delta(
+                        run_id=key,
+                        viewer_state=state,
+                        message=message,
+                    )
                     continue
                 if message.get("type") in STREAM_SYMBOL_DELTA_TYPES and not self._viewer_wants_symbol(
                     state,
@@ -265,23 +458,44 @@ class BotLensRunStream:
                     filtered_viewer_count += 1
                     continue
                 targets.append((ws, dict(state)))
+            self._emit_viewer_gauges_locked(run_id=key)
 
         stale: list[WebSocket] = []
+        successful = 0
         for ws, state in targets:
-            sent = await self._send_message(ws, serialized)
+            sent = await self._send_message(
+                ws,
+                serialized,
+                run_id=str(run_id),
+                message_kind=str(message.get("type") or "broadcast"),
+                series_key=normalize_series_key(message.get("symbol_key")),
+            )
             if not sent:
                 stale.append(ws)
+                continue
+            successful += 1
         for ws in stale:
             await self.remove_run_viewer(run_id=str(run_id), ws=ws)
-        logger.debug(
-            "botlens_stream_broadcast | run_id=%s | type=%s | seq=%s | payload_bytes=%s | viewer_count=%s | filtered_viewers=%s | stale_viewers=%s",
-            run_id,
-            message.get("type"),
-            int(message.get("seq") or 0),
-            _payload_size_bytes(serialized),
-            len(targets),
-            filtered_viewer_count,
-            len(stale),
+        _OBSERVER.increment(
+            "viewer_broadcast_total",
+            value=float(successful),
+            run_id=str(run_id),
+            series_key=normalize_series_key(message.get("symbol_key")),
+            message_kind=str(message.get("type") or "broadcast"),
+        )
+        _OBSERVER.observe(
+            "viewer_broadcast_ms",
+            max((time.perf_counter() - started) * 1000.0, 0.0),
+            run_id=str(run_id),
+            series_key=normalize_series_key(message.get("symbol_key")),
+            message_kind=str(message.get("type") or "broadcast"),
+        )
+        _OBSERVER.observe(
+            "viewer_payload_bytes",
+            float(payload_size_bytes(serialized)),
+            run_id=str(run_id),
+            series_key=normalize_series_key(message.get("symbol_key")),
+            message_kind=str(message.get("type") or "broadcast"),
         )
         return {
             "viewer_count": len(targets),
@@ -356,11 +570,6 @@ class BotLensRunStream:
             viewer_count=int(stats.get("viewer_count") or 0),
             filtered_viewer_count=int(stats.get("filtered_viewer_count") or 0),
             stale_viewer_count=int(stats.get("stale_viewer_count") or 0),
-        )
-        TypedDeltaInstrumentation.log_emission(
-            logger=logger,
-            prepared_delta=prepared_delta,
-            delivery=delivery,
         )
         return delivery
 
