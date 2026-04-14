@@ -112,15 +112,12 @@ def get_symbol_history(*, run_id: str, symbol_key: str, before_ts: Optional[str]
         after_seq=0,
         limit=scan_limit,
         event_types=list(_BOTLENS_EVENT_TYPES),
+        series_key=normalized_symbol_key,
     )
     candle_map: Dict[int, Dict[str, Any]] = {}
     matching_rows = 0
-    # TODO: narrow this at the storage boundary when we have an indexed symbol-scoped runtime-event query.
-    # For now we keep the scan bounded and log how much broad filtering is still happening.
     for row in rows:
         payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
-        if normalize_series_key(payload.get("series_key")) != normalized_symbol_key:
-            continue
         matching_rows += 1
         for fact in payload.get("facts") if isinstance(payload.get("facts"), list) else []:
             if not isinstance(fact, Mapping):
