@@ -95,3 +95,92 @@ def test_list_bot_run_view_states_filters_noncanonical_series_keys(monkeypatch: 
         {"series_key": "instrument-btc|1m", "seq": 2},
         {"series_key": "instrument-eth|5m", "seq": 4},
     ]
+
+
+def test_record_bot_runtime_events_batch_records_observation_started_timer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _AvailableDb:
+        available = True
+
+    observed: dict[str, object] = {}
+
+    def _fake_execute_write_with_retry(**_kwargs):
+        return runtime_events.StorageWriteOutcome(
+            result=1,
+            rows_written=1,
+            payload_bytes=7,
+        )
+
+    def _fake_observe_db_write_outcome(*, storage_target, context, started, outcome):
+        observed["storage_target"] = storage_target
+        observed["context"] = context
+        observed["started"] = started
+        observed["outcome"] = outcome
+
+    monkeypatch.setattr(runtime_events, "db", _AvailableDb())
+    monkeypatch.setattr(runtime_events, "_execute_write_with_retry", _fake_execute_write_with_retry)
+    monkeypatch.setattr(runtime_events, "_observe_db_write_outcome", _fake_observe_db_write_outcome)
+
+    result = runtime_events.record_bot_runtime_events_batch(
+        [
+            {
+                "event_id": "evt-1",
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "seq": 1,
+                "event_type": "series_bar.telemetry",
+                "payload": {"bar_index": 1},
+            }
+        ]
+    )
+
+    assert result == 1
+    assert observed["storage_target"] == "bot_runtime_events"
+    assert observed["context"] == {"run_id": "run-1", "bot_id": "bot-1", "event_id": "evt-1"}
+    assert isinstance(observed["started"], float)
+    assert observed["started"] >= 0.0
+
+
+def test_list_bot_runtime_events_projects_common_payload_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_db = _FakeDb(
+        [[
+            _FakeViewStateRow(
+                {
+                    "event_id": "evt-1",
+                    "seq": 4,
+                    "payload": {
+                        "series_key": "instrument-btc|1M",
+                        "bridge_session_id": "bridge-1",
+                        "bridge_seq": "7",
+                        "run_seq": "9",
+                        "instrument_id": "instrument-btc",
+                    },
+                }
+            )
+        ]]
+    )
+    monkeypatch.setattr(runtime_events, "db", fake_db)
+
+    rows = runtime_events.list_bot_runtime_events(bot_id="bot-1", run_id="run-1")
+
+    assert rows == [
+        {
+            "event_id": "evt-1",
+            "seq": 4,
+            "payload": {
+                "series_key": "instrument-btc|1M",
+                "bridge_session_id": "bridge-1",
+                "bridge_seq": "7",
+                "run_seq": "9",
+                "instrument_id": "instrument-btc",
+            },
+            "series_key": "instrument-btc|1m",
+            "bridge_session_id": "bridge-1",
+            "bridge_seq": 7,
+            "run_seq": 9,
+            "instrument_id": "instrument-btc",
+        }
+    ]
