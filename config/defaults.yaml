@@ -34,6 +34,13 @@ observability:
   step_sample_rate: 0.01
   slow_ms: 250.0
   log_throttle_seconds: 30.0
+  persist_enabled: true
+  persist_metric_batch_size: 500
+  persist_event_batch_size: 250
+  persist_flush_interval_ms: 1000
+  persist_retry_interval_ms: 1000
+  persist_pending_metrics_max: 20000
+  persist_pending_events_max: 10000
 
 async_jobs:
   running_timeout_seconds: 1800

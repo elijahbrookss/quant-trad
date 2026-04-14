@@ -46,6 +46,13 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_OBSERVABILITY_STEP_SAMPLE_RATE", ("observability", "step_sample_rate")),
     ("QT_OBSERVABILITY_SLOW_MS", ("observability", "slow_ms")),
     ("QT_OBSERVABILITY_LOG_THROTTLE_SECONDS", ("observability", "log_throttle_seconds")),
+    ("QT_OBSERVABILITY_PERSIST_ENABLED", ("observability", "persist_enabled")),
+    ("QT_OBSERVABILITY_PERSIST_METRIC_BATCH_SIZE", ("observability", "persist_metric_batch_size")),
+    ("QT_OBSERVABILITY_PERSIST_EVENT_BATCH_SIZE", ("observability", "persist_event_batch_size")),
+    ("QT_OBSERVABILITY_PERSIST_FLUSH_INTERVAL_MS", ("observability", "persist_flush_interval_ms")),
+    ("QT_OBSERVABILITY_PERSIST_RETRY_INTERVAL_MS", ("observability", "persist_retry_interval_ms")),
+    ("QT_OBSERVABILITY_PERSIST_PENDING_METRICS_MAX", ("observability", "persist_pending_metrics_max")),
+    ("QT_OBSERVABILITY_PERSIST_PENDING_EVENTS_MAX", ("observability", "persist_pending_events_max")),
     ("QT_ASYNC_JOBS_RUNNING_TIMEOUT_SECONDS", ("async_jobs", "running_timeout_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_WAIT_TIMEOUT_SECONDS", ("async_jobs", "quantlab_job_wait_timeout_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_POLL_INTERVAL_SECONDS", ("async_jobs", "quantlab_job_poll_interval_seconds")),
@@ -359,6 +366,13 @@ class ObservabilitySettings:
     step_sample_rate: float
     slow_ms: float
     log_throttle_seconds: float
+    persist_enabled: bool
+    persist_metric_batch_size: int
+    persist_event_batch_size: int
+    persist_flush_interval_ms: int
+    persist_retry_interval_ms: int
+    persist_pending_metrics_max: int
+    persist_pending_events_max: int
 
 
 @dataclass(frozen=True)
@@ -656,6 +670,25 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             slow_ms=_coerce_float(observability_payload.get("slow_ms"), 250.0, minimum=0.0),
             log_throttle_seconds=_coerce_float(
                 observability_payload.get("log_throttle_seconds"), 30.0, minimum=0.0
+            ),
+            persist_enabled=_coerce_bool(observability_payload.get("persist_enabled"), True),
+            persist_metric_batch_size=_coerce_int(
+                observability_payload.get("persist_metric_batch_size"), 500, minimum=1
+            ),
+            persist_event_batch_size=_coerce_int(
+                observability_payload.get("persist_event_batch_size"), 250, minimum=1
+            ),
+            persist_flush_interval_ms=_coerce_int(
+                observability_payload.get("persist_flush_interval_ms"), 1000, minimum=10
+            ),
+            persist_retry_interval_ms=_coerce_int(
+                observability_payload.get("persist_retry_interval_ms"), 1000, minimum=10
+            ),
+            persist_pending_metrics_max=_coerce_int(
+                observability_payload.get("persist_pending_metrics_max"), 20000, minimum=100
+            ),
+            persist_pending_events_max=_coerce_int(
+                observability_payload.get("persist_pending_events_max"), 10000, minimum=100
             ),
         ),
         async_jobs=AsyncJobSettings(
