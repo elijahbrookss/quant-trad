@@ -6,8 +6,8 @@ separate:
     histograms, and gauges,
   - events are emitted into the same sink and logged as structured records.
 
-The sink is process-local and test-friendly. Dashboard/export wiring can be
-added later without changing call sites.
+The sink is process-local and test-friendly, but it also exposes a bounded
+drain surface for the DB-backed persistence/export worker.
 """
 
 from __future__ import annotations
@@ -23,9 +23,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, Mapping, MutableMapping, Optional
 
+from core.settings import get_settings
 from utils.log_context import build_log_context, with_log_context
 
 logger = logging.getLogger(__name__)
+_OBSERVABILITY_SETTINGS = get_settings().observability
 
 _NAME_RE = re.compile(r"[^a-z0-9]+")
 _DEFAULT_GAUGE_INTERVAL_S = 1.0
@@ -230,18 +232,58 @@ class QueueStateMetricOwner:
 class InMemoryObservabilitySink:
     """Thread-safe process-local sink used by backend instrumentation."""
 
-    def __init__(self, *, max_metrics: int = 50_000, max_events: int = 10_000) -> None:
+    def __init__(
+        self,
+        *,
+        max_metrics: int = 50_000,
+        max_events: int = 10_000,
+        pending_metrics_max: Optional[int] = None,
+        pending_events_max: Optional[int] = None,
+    ) -> None:
         self._metrics: deque[MetricRecord] = deque(maxlen=max_metrics)
         self._events: deque[EventRecord] = deque(maxlen=max_events)
         self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._pending_metrics: deque[MetricRecord] = deque(
+            maxlen=max(
+                int(
+                    pending_metrics_max
+                    or _OBSERVABILITY_SETTINGS.persist_pending_metrics_max
+                    or max_metrics
+                ),
+                1,
+            )
+        )
+        self._pending_events: deque[EventRecord] = deque(
+            maxlen=max(
+                int(
+                    pending_events_max
+                    or _OBSERVABILITY_SETTINGS.persist_pending_events_max
+                    or max_events
+                ),
+                1,
+            )
+        )
+        self._dropped_pending_metrics = 0
+        self._dropped_pending_events = 0
 
     def emit_metric(self, record: MetricRecord) -> None:
         with self._lock:
             self._metrics.append(record)
+            if len(self._pending_metrics) == self._pending_metrics.maxlen:
+                self._pending_metrics.popleft()
+                self._dropped_pending_metrics += 1
+            self._pending_metrics.append(record)
+            self._condition.notify_all()
 
     def emit_event(self, record: EventRecord) -> None:
         with self._lock:
             self._events.append(record)
+            if len(self._pending_events) == self._pending_events.maxlen:
+                self._pending_events.popleft()
+                self._dropped_pending_events += 1
+            self._pending_events.append(record)
+            self._condition.notify_all()
 
     def snapshot(self) -> Dict[str, list[Dict[str, Any]]]:
         with self._lock:
@@ -267,10 +309,56 @@ class InMemoryObservabilitySink:
                 ],
             }
 
+    def wait_for_pending(self, timeout_s: float) -> bool:
+        timeout = max(float(timeout_s), 0.0)
+        with self._condition:
+            if self._pending_metrics or self._pending_events or self._has_pending_drops_locked():
+                return True
+            self._condition.wait(timeout=timeout)
+            return bool(
+                self._pending_metrics or self._pending_events or self._has_pending_drops_locked()
+            )
+
+    def drain_pending(
+        self,
+        *,
+        metric_limit: int,
+        event_limit: int,
+    ) -> Dict[str, Any]:
+        metrics: list[MetricRecord] = []
+        events: list[EventRecord] = []
+        with self._lock:
+            while self._pending_metrics and len(metrics) < max(int(metric_limit), 0):
+                metrics.append(self._pending_metrics.popleft())
+            while self._pending_events and len(events) < max(int(event_limit), 0):
+                events.append(self._pending_events.popleft())
+            dropped = self._pending_drop_counts_locked()
+            self._dropped_pending_metrics = 0
+            self._dropped_pending_events = 0
+        return {
+            "metrics": metrics,
+            "events": events,
+            "dropped": dropped,
+        }
+
     def reset(self) -> None:
         with self._lock:
             self._metrics.clear()
             self._events.clear()
+            self._pending_metrics.clear()
+            self._pending_events.clear()
+            self._dropped_pending_metrics = 0
+            self._dropped_pending_events = 0
+            self._condition.notify_all()
+
+    def _pending_drop_counts_locked(self) -> Dict[str, int]:
+        return {
+            "metrics": int(self._dropped_pending_metrics),
+            "events": int(self._dropped_pending_events),
+        }
+
+    def _has_pending_drops_locked(self) -> bool:
+        return bool(self._dropped_pending_metrics or self._dropped_pending_events)
 
 
 _DEFAULT_SINK = InMemoryObservabilitySink()
