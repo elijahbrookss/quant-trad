@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import os
 import warnings
 
@@ -31,6 +32,26 @@ def _install_session_event_loop() -> None:
 
 
 _install_session_event_loop()
+
+
+def pytest_pyfunc_call(pyfuncitem):
+    if "asyncio" not in pyfuncitem.keywords or not inspect.iscoroutinefunction(pyfuncitem.obj):
+        return None
+    try:
+        import pytest_asyncio  # noqa: F401
+
+        return None
+    except ImportError:
+        pass
+
+    kwargs = {
+        name: pyfuncitem.funcargs[name]
+        for name in pyfuncitem._fixtureinfo.argnames
+        if name in pyfuncitem.funcargs
+    }
+    asyncio.run(pyfuncitem.obj(**kwargs))
+    _install_session_event_loop()
+    return True
 
 
 @pytest.fixture(scope="session", autouse=True)

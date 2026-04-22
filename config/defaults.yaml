@@ -97,7 +97,7 @@ bot_runtime:
     max_logs: 300
     max_decisions: 600
     max_warnings: 120
-    ring_size: 2048
+    ring_size: 8192
     ingest_queue_max: 4096
   step_trace:
     queue_max: 8192

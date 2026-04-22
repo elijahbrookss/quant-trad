@@ -778,7 +778,7 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                 max_logs=_coerce_int(botlens_payload.get("max_logs"), 300, minimum=50),
                 max_decisions=_coerce_int(botlens_payload.get("max_decisions"), 600, minimum=100),
                 max_warnings=_coerce_int(botlens_payload.get("max_warnings"), 120, minimum=20),
-                ring_size=_coerce_int(botlens_payload.get("ring_size"), 2048, minimum=32),
+                ring_size=_coerce_int(botlens_payload.get("ring_size"), 8192, minimum=32),
                 ingest_queue_max=_coerce_int(botlens_payload.get("ingest_queue_max"), 4096, minimum=64),
             ),
             step_trace=StepTraceSettings(
