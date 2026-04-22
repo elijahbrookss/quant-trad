@@ -9,15 +9,6 @@ from overlays.schema import build_overlay
 from utils.log_context import build_log_context
 
 
-class _RecordingSeriesBarTelemetryBuffer:
-    def __init__(self) -> None:
-        self.payloads: list[dict] = []
-
-    def record(self, payload: dict) -> float:
-        self.payloads.append(dict(payload))
-        return 1.25
-
-
 class _FailingStepTraceBuffer:
     def record(self, payload: dict) -> float:
         raise RuntimeError("step-trace write failed")
@@ -37,7 +28,6 @@ class _DummyRuntime(RuntimeStateStreamingMixin):
         self.bot_id = "bot-1"
         self.run_type = "backtest"
         self._run_context = SimpleNamespace(run_id="run-1")
-        self._series_bar_telemetry_buffer = _RecordingSeriesBarTelemetryBuffer()
         self._step_trace_buffer = _FailingStepTraceBuffer()
         self._seq = 0
 
@@ -75,26 +65,6 @@ def _series_with_runtime_state() -> tuple[SimpleNamespace, Candle]:
         instrument={"id": "instr-1"},
     )
     return series, candle
-
-
-def test_persist_series_bar_telemetry_does_not_duplicate_run_id_in_log_context() -> None:
-    runtime = _DummyRuntime()
-    series, candle = _series_with_runtime_state()
-
-    enqueue_ms = runtime._persist_series_bar_telemetry(
-        series=series,
-        candle=candle,
-        bar_index=12,
-    )
-
-    assert enqueue_ms == 1.25
-    assert len(runtime._series_bar_telemetry_buffer.payloads) == 1
-    payload = runtime._series_bar_telemetry_buffer.payloads[0]
-    assert payload["run_id"] == "run-1"
-    assert payload["event_type"] == "series_bar.telemetry"
-    assert payload["payload"]["series_key"] == "instr-1|1h"
-    assert payload["payload"]["bar_index"] == 12
-    assert payload["payload"]["candle"]["close"] == 100.5
 
 
 def test_record_step_trace_failure_does_not_duplicate_run_id_in_log_context() -> None:

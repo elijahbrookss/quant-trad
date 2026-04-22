@@ -4,7 +4,6 @@ from .engine import LadderRiskEngine
 from .models import (
     Candle,
     CandleSnapshot,
-    DecisionLedgerEvent,
     EntryFill,
     EntryFillResult,
     EntryRequest,
@@ -25,7 +24,6 @@ from .time_utils import (
 __all__ = [
     "Candle",
     "CandleSnapshot",
-    "DecisionLedgerEvent",
     "EntryFill",
     "EntryFillResult",
     "EntryRequest",

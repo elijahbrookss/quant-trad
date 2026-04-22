@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, TYPE_CHECKING
@@ -73,6 +75,23 @@ class StrategySignal:
     intent: Optional[str] = None
     event_key: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        signal_id = self._optional_text(self.signal_id)
+        decision_id = self._optional_text(self.decision_id)
+        object.__setattr__(self, "signal_id", signal_id)
+        object.__setattr__(self, "source_type", self._optional_text(self.source_type))
+        object.__setattr__(self, "source_id", self._optional_text(self.source_id))
+        object.__setattr__(self, "strategy_hash", self._optional_text(self.strategy_hash))
+        object.__setattr__(self, "decision_id", decision_id)
+        object.__setattr__(self, "rule_id", self._optional_text(self.rule_id))
+        object.__setattr__(self, "intent", self._optional_text(self.intent))
+        object.__setattr__(self, "event_key", self._optional_text(self.event_key))
+        if signal_id is not None and decision_id is not None and signal_id == decision_id:
+            raise RuntimeError(
+                "strategy_signal_invalid: signal_id must not equal decision_id "
+                f"decision_id={decision_id}"
+            )
+
     @classmethod
     def from_decision_artifact(
         cls,
@@ -83,6 +102,11 @@ class StrategySignal:
     ) -> "StrategySignal":
         decision_id = str(artifact.get("decision_id") or "").strip()
         rule_id = str(artifact.get("rule_id") or "").strip()
+        if not decision_id:
+            raise RuntimeError(
+                "strategy_signal_invalid: decision artifact missing decision_id "
+                f"rule_id={rule_id or '<missing>'}"
+            )
         raw_epoch = artifact.get("bar_epoch")
         try:
             epoch = int(raw_epoch)
@@ -96,7 +120,12 @@ class StrategySignal:
         return cls(
             epoch=epoch,
             direction="long" if intent == "enter_long" else "short",
-            signal_id=cls._optional_text(artifact.get("signal_id")) or decision_id or None,
+            signal_id=cls._resolve_signal_id(
+                artifact=artifact,
+                decision_id=decision_id,
+                source_type=source_type,
+                source_id=source_id,
+            ),
             source_type=cls._optional_text(source_type),
             source_id=cls._optional_text(source_id),
             strategy_hash=cls._optional_text(artifact.get("strategy_hash")),
@@ -107,32 +136,32 @@ class StrategySignal:
         )
 
     @classmethod
-    def from_runtime_event_payload(
+    def from_runtime_event_context(
         cls,
-        payload: Mapping[str, Any],
+        context: Mapping[str, Any],
         *,
         default_source_id: Optional[str] = None,
     ) -> "StrategySignal":
-        decision_artifact = payload.get("decision_artifact")
+        decision_artifact = context.get("decision_artifact")
         artifact = dict(decision_artifact) if isinstance(decision_artifact, Mapping) else {}
         if artifact.get("bar_epoch") in (None, ""):
-            bar = payload.get("bar")
+            bar = context.get("bar")
             bar_time = bar.get("time") if isinstance(bar, Mapping) else None
             if isinstance(bar_time, str):
                 artifact["bar_epoch"] = cls._epoch_from_iso(bar_time)
-        artifact.setdefault("decision_id", payload.get("decision_id"))
-        artifact.setdefault("rule_id", payload.get("rule_id"))
-        artifact.setdefault("strategy_hash", payload.get("strategy_hash"))
-        artifact.setdefault("signal_id", payload.get("signal_id"))
-        artifact.setdefault("emitted_intent", payload.get("intent"))
+        artifact.setdefault("decision_id", context.get("decision_id"))
+        artifact.setdefault("rule_id", context.get("rule_id"))
+        artifact.setdefault("strategy_hash", context.get("strategy_hash"))
+        artifact.setdefault("signal_id", context.get("signal_id"))
+        artifact.setdefault("emitted_intent", context.get("intent"))
         artifact.setdefault(
             "trigger",
-            {"event_key": payload.get("event_key")},
+            {"event_key": context.get("event_key")},
         )
         return cls.from_decision_artifact(
             artifact,
-            source_type=cls._optional_text(payload.get("source_type")) or "runtime",
-            source_id=cls._optional_text(payload.get("source_id")) or cls._optional_text(default_source_id),
+            source_type=cls._optional_text(context.get("source_type")) or "runtime",
+            source_id=cls._optional_text(context.get("source_id")) or cls._optional_text(default_source_id),
         )
 
     @staticmethod
@@ -148,6 +177,54 @@ class StrategySignal:
     def _optional_text(value: Any) -> Optional[str]:
         text = str(value or "").strip()
         return text or None
+
+    @classmethod
+    def build_signal_id(
+        cls,
+        *,
+        decision_id: str,
+        source_type: Optional[str] = None,
+        source_id: Optional[str] = None,
+    ) -> str:
+        resolved_decision_id = cls._optional_text(decision_id)
+        if resolved_decision_id is None:
+            raise RuntimeError("strategy_signal_invalid: decision_id is required to build signal_id")
+        return cls._resolve_signal_id(
+            artifact={},
+            decision_id=resolved_decision_id,
+            source_type=source_type,
+            source_id=source_id,
+        )
+
+    @classmethod
+    def _resolve_signal_id(
+        cls,
+        *,
+        artifact: Mapping[str, Any],
+        decision_id: str,
+        source_type: Optional[str],
+        source_id: Optional[str],
+    ) -> str:
+        signal_id = cls._optional_text(artifact.get("signal_id"))
+        if signal_id is not None:
+            if signal_id == decision_id:
+                raise RuntimeError(
+                    "strategy_signal_invalid: signal_id must not equal decision_id "
+                    f"decision_id={decision_id}"
+                )
+            return signal_id
+        digest = hashlib.sha1(
+            json.dumps(
+                {
+                    "decision_id": decision_id,
+                    "source_type": cls._optional_text(source_type),
+                    "source_id": cls._optional_text(source_id),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:24]
+        return f"signal:{digest}"
 
     @staticmethod
     def _epoch_from_iso(value: str) -> int:
@@ -198,6 +275,7 @@ class EntryRequest:
 
     trade_id: Optional[str]
     order_intent_id: Optional[str]
+    entry_request_id: str
     direction: str
     requested_qty: float
     qty_raw: float
@@ -269,87 +347,6 @@ class EntryFillResult:
 
 
 @dataclass
-class DecisionLedgerEvent:
-    """Represents a causal ledger event for BotLens explainability."""
-
-    event_id: str
-    event_ts: str
-    event_type: str
-    reason_code: str
-    event_subtype: Optional[str] = None
-    parent_event_id: Optional[str] = None
-    trade_id: Optional[str] = None
-    position_id: Optional[str] = None
-    strategy_id: Optional[str] = None
-    strategy_name: Optional[str] = None
-    symbol: Optional[str] = None
-    instrument_id: Optional[str] = None
-    timeframe: Optional[str] = None
-    side: Optional[str] = None
-    qty: Optional[float] = None
-    price: Optional[float] = None
-    event_impact_pnl: Optional[float] = None
-    trade_net_pnl: Optional[float] = None
-    reason_detail: Optional[str] = None
-    evidence_refs: Optional[List[Dict[str, Any]]] = None
-    context: Optional[Dict[str, Any]] = None
-    alternatives_rejected: Optional[List[Dict[str, Any]]] = None
-    created_at: Optional[str] = None
-
-    def __post_init__(self) -> None:
-        if not self.reason_code:
-            raise ValueError("reason_code is required for DecisionLedgerEvent")
-
-    def serialize(self) -> Dict[str, Any]:
-        """Return a JSON-serializable representation of the ledger event."""
-        payload: Dict[str, Any] = {
-            "event_id": self.event_id,
-            "event_ts": self.event_ts,
-            "event_type": self.event_type,
-            "reason_code": self.reason_code,
-        }
-        if self.event_subtype is not None:
-            payload["event_subtype"] = self.event_subtype
-        if self.parent_event_id is not None:
-            payload["parent_event_id"] = self.parent_event_id
-        if self.trade_id is not None:
-            payload["trade_id"] = self.trade_id
-        if self.position_id is not None:
-            payload["position_id"] = self.position_id
-        if self.strategy_id is not None:
-            payload["strategy_id"] = self.strategy_id
-        if self.strategy_name is not None:
-            payload["strategy_name"] = self.strategy_name
-        if self.symbol is not None:
-            payload["symbol"] = self.symbol
-        if self.instrument_id is not None:
-            payload["instrument_id"] = self.instrument_id
-        if self.timeframe is not None:
-            payload["timeframe"] = self.timeframe
-        if self.side is not None:
-            payload["side"] = self.side
-        if self.qty is not None:
-            payload["qty"] = round(float(self.qty), 6)
-        if self.price is not None:
-            payload["price"] = round(float(self.price), 4)
-        if self.event_impact_pnl is not None:
-            payload["event_impact_pnl"] = round(float(self.event_impact_pnl), 4)
-        if self.trade_net_pnl is not None:
-            payload["trade_net_pnl"] = round(float(self.trade_net_pnl), 4)
-        if self.reason_detail is not None:
-            payload["reason_detail"] = self.reason_detail
-        if self.evidence_refs is not None:
-            payload["evidence_refs"] = self.evidence_refs
-        if self.context is not None:
-            payload["context"] = self.context
-        if self.alternatives_rejected is not None:
-            payload["alternatives_rejected"] = self.alternatives_rejected
-        if self.created_at is not None:
-            payload["created_at"] = self.created_at
-        return payload
-
-
-@dataclass
 class Leg:
     """Take-profit leg metadata."""
 
@@ -382,7 +379,6 @@ class Leg:
 __all__ = [
     "Candle",
     "CandleSnapshot",
-    "DecisionLedgerEvent",
     "EntryFill",
     "EntryFillResult",
     "EntryRequest",

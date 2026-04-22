@@ -1,5 +1,7 @@
 from collections import deque
 
+import pytest
+
 from engines.bot_runtime.core.domain import StrategySignal
 from engines.bot_runtime.runtime.components.signal_consumption import SignalConsumption, consume_signals
 
@@ -20,11 +22,16 @@ def test_strategy_signal_builds_from_selected_decision_artifact():
         source_type="runtime",
         source_id="run-1",
     )
+    expected_signal_id = StrategySignal.build_signal_id(
+        decision_id="d-1",
+        source_type="runtime",
+        source_id="run-1",
+    )
 
     assert signal.to_dict() == {
         "epoch": 95,
         "direction": "short",
-        "signal_id": "d-1",
+        "signal_id": expected_signal_id,
         "source_type": "runtime",
         "source_id": "run-1",
         "strategy_hash": "hash-a",
@@ -118,3 +125,13 @@ def test_signal_consumption_skips_already_consumed_epochs():
         "event_key": None,
     }
     assert last_consumed == 105
+
+
+def test_strategy_signal_rejects_signal_id_aliasing_decision_id() -> None:
+    with pytest.raises(RuntimeError, match="signal_id must not equal decision_id"):
+        StrategySignal(
+            epoch=95,
+            direction="long",
+            signal_id="decision-1",
+            decision_id="decision-1",
+        )
