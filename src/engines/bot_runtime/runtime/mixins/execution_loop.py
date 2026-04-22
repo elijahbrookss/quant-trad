@@ -20,7 +20,7 @@ from utils.log_context import with_log_context
 from utils.perf_log import perf_log, should_sample
 
 from ..components import SignalConsumption, consume_signals
-from ..components.overlay_delta import count_overlay_points, overlay_change_metrics
+from ..components.overlay_delta import count_overlay_points
 from ..core import (
     INTRABAR_BASE_SECONDS,
     OVERLAY_SUMMARY_INTERVAL,
@@ -30,6 +30,7 @@ from ..core import (
 )
 
 logger = logging.getLogger(__name__)
+_OVERLAY_SUPPRESSION_LOG_EVERY = 25
 
 
 class RuntimeExecutionLoopMixin:
@@ -65,6 +66,12 @@ class RuntimeExecutionLoopMixin:
             self._decision_events.clear()
             self._intrabar_manager.clear_cache()
             self._run_started_at = None
+            self._runtime_loop_started_at = None
+            self._runtime_loop_ended_at = None
+            self._runtime_loop_duration_seconds = None
+            self._runtime_flush_drain_duration_seconds = None
+            self._overlay_suppression_log_state = {}
+            self._start_context = None
             self._run_context = None
             self._runner = None
             self._push_series_cache = {}
@@ -187,6 +194,10 @@ class RuntimeExecutionLoopMixin:
         self._require_prepared("execute_loop")
         status = "running"
         loop_started = datetime.now(timezone.utc)
+        self._runtime_loop_started_at = loop_started
+        self._runtime_loop_ended_at = None
+        self._runtime_loop_duration_seconds = None
+        self._runtime_flush_drain_duration_seconds = None
         self._set_phase("running", "bot_runtime_running")
         self._log_event(
             "running",
@@ -200,6 +211,9 @@ class RuntimeExecutionLoopMixin:
             self._runner.run()
         finally:
             self._stop_overlay_aggregator()
+        loop_ended = datetime.now(timezone.utc)
+        self._runtime_loop_ended_at = loop_ended
+        self._runtime_loop_duration_seconds = max((loop_ended - loop_started).total_seconds(), 0.0)
         runtime_status = str(self.state.get("status") or "").lower()
         if runtime_status == "error":
             status = "error"
@@ -235,6 +249,7 @@ class RuntimeExecutionLoopMixin:
                 fees=summary.get("fees_paid"),
                 drawdown=drawdown,
                 duration_seconds=duration_seconds,
+                runtime_loop_duration_seconds=self._runtime_loop_duration_seconds,
             )
             logger.info(with_log_context("bot_run_end_summary", context))
         # Update state with last candle from first series (backward compatibility)
@@ -243,11 +258,97 @@ class RuntimeExecutionLoopMixin:
         else:
             with self._lock:
                 self.state.update({"status": status})
+        drain_started = datetime.now(timezone.utc)
         self._flush_persistence_buffer("runtime_loop_complete")
         self._flush_step_trace_buffer("runtime_loop_complete", shutdown=True)
+        self._runtime_flush_drain_duration_seconds = max((datetime.now(timezone.utc) - drain_started).total_seconds(), 0.0)
+        self._flush_overlay_suppression_logs()
         self._push_update(status)
         self._persist_runtime_state(status)
         self._persist_run_artifact(status)
+
+    def _log_overlay_suppressed_warning(
+        self,
+        *,
+        series: Any,
+        indicator_id: Any,
+        warning_type: Any,
+        warning_context: Mapping[str, Any],
+    ) -> None:
+        series_key = canonical_series_key(
+            str(series.instrument.get("id") if isinstance(series.instrument, Mapping) else ""),
+            series.timeframe,
+        )
+        reasons = tuple(sorted(str(value) for value in warning_context.get("hard_breach_reasons", []) if str(value)))
+        key = (series_key, str(indicator_id or ""), reasons)
+        now = _isoformat(datetime.now(timezone.utc))
+        state = self._overlay_suppression_log_state.get(key)
+        if state is None:
+            state = {
+                "count": 0,
+                "last_logged_count": 0,
+                "first_seen_at": now,
+                "last_seen_at": now,
+                "max_overlay_payload_bytes": 0,
+                "max_overlay_points": 0,
+            }
+            self._overlay_suppression_log_state[key] = state
+        state["count"] = int(state.get("count") or 0) + 1
+        state["last_seen_at"] = now
+        state["max_overlay_payload_bytes"] = max(
+            int(state.get("max_overlay_payload_bytes") or 0),
+            int(warning_context.get("overlay_payload_bytes") or 0),
+        )
+        state["max_overlay_points"] = max(
+            int(state.get("max_overlay_points") or 0),
+            int(warning_context.get("overlay_points") or 0),
+        )
+        count = int(state["count"])
+        if count != 1 and count % _OVERLAY_SUPPRESSION_LOG_EVERY != 0:
+            return
+        suppressed_during_window = count - int(state.get("last_logged_count") or 0)
+        state["last_logged_count"] = count
+        logger.warning(
+            with_log_context(
+                "indicator_overlay_suppressed",
+                self._series_log_context(
+                    series,
+                    indicator_id=indicator_id,
+                    warning_type=warning_type,
+                    overlay_points=warning_context.get("overlay_points"),
+                    overlay_payload_bytes=warning_context.get("overlay_payload_bytes"),
+                    hard_breach_reasons=list(reasons),
+                    count=count,
+                    suppressed_during_window=suppressed_during_window,
+                    first_seen_at=state.get("first_seen_at"),
+                    last_seen_at=state.get("last_seen_at"),
+                ),
+            )
+        )
+
+    def _flush_overlay_suppression_logs(self) -> None:
+        for (series_key, indicator_id, reasons), state in sorted(self._overlay_suppression_log_state.items()):
+            count = int(state.get("count") or 0)
+            last_logged = int(state.get("last_logged_count") or 0)
+            if count <= 0 or count == last_logged:
+                continue
+            logger.warning(
+                with_log_context(
+                    "indicator_overlay_suppressed_summary",
+                    self._runtime_log_context(
+                        series_key=series_key,
+                        indicator_id=indicator_id,
+                        hard_breach_reasons=list(reasons),
+                        count=count,
+                        suppressed_during_window=count - last_logged,
+                        first_seen_at=state.get("first_seen_at"),
+                        last_seen_at=state.get("last_seen_at"),
+                        max_overlay_payload_bytes=state.get("max_overlay_payload_bytes"),
+                        max_overlay_points=state.get("max_overlay_points"),
+                    ),
+                )
+            )
+            state["last_logged_count"] = count
 
     def _step_series_state(self, state: SeriesExecutionState) -> None:
         if state.done:
@@ -551,6 +652,14 @@ class RuntimeExecutionLoopMixin:
                                 skip_series=series,
                             )
                             if blocking_trade is None:
+                                setattr(series.risk_engine, "last_signal_id", getattr(chosen_signal, "signal_id", None))
+                                setattr(series.risk_engine, "last_decision_id", getattr(chosen_signal, "decision_id", None))
+                                setattr(series.risk_engine, "strategy_id", getattr(series, "strategy_id", None))
+                                setattr(
+                                    series.risk_engine,
+                                    "run_id",
+                                    self._run_context.run_id if self._run_context is not None else None,
+                                )
                                 new_trade = series.risk_engine.maybe_enter(candle, direction)
                             trade_lock_hold_ms = max((time.perf_counter() - trade_lock_hold_started) * 1000.0, 0.0)
 
@@ -1072,58 +1181,22 @@ class RuntimeExecutionLoopMixin:
         bar_time = _isoformat(candle.time)
         if state.indicator_engine is None:
             raise RuntimeError("indicator_runtime_missing: series indicator engine is not initialized")
-        frame = state.indicator_engine.step(bar=candle, bar_time=candle.time)
+        frame = state.indicator_engine.step(
+            bar=candle,
+            bar_time=candle.time,
+            include_overlays=False,
+            include_details=False,
+        )
         outputs = frame.outputs
         state.indicator_outputs = outputs
         state.indicator_overlays = frame.overlays
-        series_symbol_key = canonical_series_key(
-            str(series.instrument.get("id") if isinstance(series.instrument, Mapping) else ""),
-            series.timeframe,
+        self._record_indicator_frame_warnings(
+            frame=frame,
+            state=state,
+            candle=candle,
+            source="trading_signal_eval",
+            series=series,
         )
-        for guard_warning in frame.guard_warnings:
-            warning_context = dict(guard_warning.context or {})
-            warning_context.update(
-                {
-                    "indicator_id": guard_warning.indicator_id,
-                    "indicator_type": guard_warning.manifest_type,
-                    "indicator_version": guard_warning.version,
-                    "symbol_key": series_symbol_key or None,
-                    "symbol": series.symbol,
-                    "timeframe": series.timeframe,
-                    "bar_time": bar_time,
-                }
-            )
-            self._record_runtime_warning(
-                {
-                    "warning_type": guard_warning.warning_type,
-                    "severity": guard_warning.severity,
-                    "title": guard_warning.title,
-                    "message": guard_warning.message,
-                    "source": "indicator_guard",
-                    "indicator_id": guard_warning.indicator_id,
-                    "indicator_type": guard_warning.manifest_type,
-                    "indicator_version": guard_warning.version,
-                    "symbol_key": series_symbol_key or None,
-                    "symbol": series.symbol,
-                    "timeframe": series.timeframe,
-                    "bar_time": bar_time,
-                    "context": warning_context,
-                }
-            )
-            if guard_warning.warning_type == "indicator_overlay_suppressed":
-                logger.warning(
-                    with_log_context(
-                        "indicator_overlay_suppressed",
-                        self._series_log_context(
-                            series,
-                            indicator_id=guard_warning.indicator_id,
-                            warning_type=guard_warning.warning_type,
-                            overlay_points=warning_context.get("overlay_points"),
-                            overlay_payload_bytes=warning_context.get("overlay_payload_bytes"),
-                            hard_breach_reasons=warning_context.get("hard_breach_reasons"),
-                        ),
-                    )
-                )
         if self._report_artifact_bundle is not None:
             self._report_artifact_bundle.record_indicator_frame(state=state, candle=candle)
         indicator_state_update_ms = max((time.perf_counter() - indicator_started) * 1000.0, 0.0)
@@ -1161,28 +1234,17 @@ class RuntimeExecutionLoopMixin:
         overlay_projection_ops_count = 0.0
         overlay_projection_normalize_cache_hits = 0.0
         overlay_projection_normalize_cache_misses = 0.0
-        overlays = self._series_overlay_entries(state)
-        overlay_runtime_metrics = state.overlay_runtime_metrics if isinstance(state.overlay_runtime_metrics, Mapping) else {}
-        series_overlay_entries_ms = float(overlay_runtime_metrics.get("series_overlay_entries_ms") or 0.0)
-        series_overlay_indicator_entries_ms = float(
-            overlay_runtime_metrics.get("series_overlay_indicator_entries_ms") or 0.0
-        )
-        series_overlay_regime_build_ms = float(overlay_runtime_metrics.get("series_overlay_regime_build_ms") or 0.0)
-        series_overlay_indicator_entries_count = float(
-            overlay_runtime_metrics.get("series_overlay_indicator_entries_count") or 0.0
-        )
-        series_overlay_regime_entries_count = float(
-            overlay_runtime_metrics.get("series_overlay_regime_entries_count") or 0.0
-        )
-        series_overlay_total_entries_count = float(
-            overlay_runtime_metrics.get("series_overlay_total_entries_count") or 0.0
-        )
-        series_overlay_regime_mode_rebuild = float(
-            overlay_runtime_metrics.get("series_overlay_regime_mode_rebuild") or 0.0
-        )
+        overlays = list(series.overlays or [])
+        series_overlay_entries_ms = 0.0
+        series_overlay_indicator_entries_ms = 0.0
+        series_overlay_regime_build_ms = 0.0
+        series_overlay_indicator_entries_count = 0.0
+        series_overlay_regime_entries_count = 0.0
+        series_overlay_total_entries_count = 0.0
+        series_overlay_regime_mode_rebuild = 0.0
         overlays_update_ms = overlay_projection_ms + series_overlay_entries_ms
-        overlays_changed_count, overlay_points_changed = overlay_change_metrics(series.overlays or [], overlays)
-        series.overlays = overlays
+        overlays_changed_count = 0.0
+        overlay_points_changed = 0.0
 
         append_started = time.perf_counter()
         if decision_result.selected_artifact is not None:

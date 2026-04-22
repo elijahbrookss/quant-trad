@@ -1,3 +1,4 @@
+from .canonical_facts import CanonicalFactAppender, LiveFactsBroadcastConsumer
 from .chart_state import ChartStateBuilder
 from .event_sink import InMemoryEventSink, RuntimeEventSink
 from .intrabar import IntrabarManager
@@ -8,9 +9,12 @@ from .series_bar_telemetry_buffer import SeriesBarTelemetryBuffer
 from .series_runner import InlineSeriesRunner, PoolSeriesRunner, SeriesRunnerContext
 from .settlement import SettlementApplier
 from .signal_consumption import SignalConsumption, consume_signals
+from .start_context import StartContext
 from .step_trace_buffer import StepTracePersistenceBuffer
 
 __all__ = [
+    "CanonicalFactAppender",
+    "LiveFactsBroadcastConsumer",
     "ChartStateBuilder",
     "InMemoryEventSink",
     "RuntimeEventSink",
@@ -26,4 +30,5 @@ __all__ = [
     "StepTracePersistenceBuffer",
     "SignalConsumption",
     "consume_signals",
+    "StartContext",
 ]

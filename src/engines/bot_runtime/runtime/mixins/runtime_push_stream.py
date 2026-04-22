@@ -32,12 +32,102 @@ BOTLENS_FACT_SERIES_STATE = "series_state_observed"
 BOTLENS_FACT_CANDLE_UPSERTED = "candle_upserted"
 BOTLENS_FACT_OVERLAY_OPS = "overlay_ops_emitted"
 BOTLENS_FACT_SERIES_STATS = "series_stats_updated"
-BOTLENS_FACT_TRADE_UPSERTED = "trade_upserted"
+BOTLENS_FACT_TRADE_OPENED = "trade_opened"
+BOTLENS_FACT_TRADE_UPDATED = "trade_updated"
+BOTLENS_FACT_TRADE_CLOSED = "trade_closed"
 BOTLENS_FACT_LOG_EMITTED = "log_emitted"
 BOTLENS_FACT_DECISION_EMITTED = "decision_emitted"
+BOTLENS_RUNTIME_BOOTSTRAP_KIND = "botlens_runtime_bootstrap_facts"
+BOTLENS_RUNTIME_FACTS_KIND = "botlens_runtime_facts"
+BOTLENS_SELECTED_SYMBOL_VISUAL_REFRESH_INTERVAL_MS = 4_000
+BOTLENS_RUNTIME_HEALTH_EMIT_INTERVAL_MS = 15_000
+BOTLENS_RUNTIME_HEALTH_DYNAMIC_FIELDS = frozenset(
+    {
+        "count",
+        "timestamp",
+        "updated_at",
+        "last_seen_at",
+        "last_snapshot_at",
+        "last_useful_progress_at",
+        "next_bar_at",
+        "next_bar_in_seconds",
+        "known_at",
+        "checkpoint_at",
+        "observed_at",
+    }
+)
 
 
 class RuntimePushStreamMixin:
+    def _canonical_start_context(self) -> Any:
+        start_context = getattr(self, "_start_context", None)
+        if start_context is not None:
+            return start_context
+        ensure_start_context = getattr(self, "_ensure_start_context", None)
+        if callable(ensure_start_context):
+            return ensure_start_context()
+        return None
+
+    def _canonical_run_id(self) -> str:
+        start_context = self._canonical_start_context()
+        if start_context is not None:
+            run_id = str(getattr(start_context, "run_id", "") or "").strip()
+            if run_id:
+                return run_id
+        if self._run_context is not None:
+            run_id = str(getattr(self._run_context, "run_id", "") or "").strip()
+            if run_id:
+                return run_id
+        config = self.config if isinstance(getattr(self, "config", None), AbcMapping) else {}
+        configured_run_id = str(config.get("run_id") or "").strip()
+        if configured_run_id:
+            return configured_run_id
+        raise ValueError("run_id is required before canonical BotLens fact append")
+
+    @staticmethod
+    def _broadcast_metrics_from_consumer_results(consumer_results: Sequence[Any]) -> tuple[Optional[int], Optional[int]]:
+        for result in consumer_results:
+            consumer_name = str(getattr(result, "consumer_name", "") or "")
+            if consumer_name != "LiveFactsBroadcastConsumer" or getattr(result, "error", None):
+                continue
+            value = getattr(result, "result", None)
+            if (
+                isinstance(value, tuple)
+                and len(value) == 2
+                and all(isinstance(entry, int) for entry in value)
+            ):
+                return int(value[0]), int(value[1])
+        return None, None
+
+    def commit_botlens_fact_payload(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        batch_kind: str,
+        dispatch: bool = True,
+    ) -> Any:
+        run_id = self._canonical_run_id()
+        start_context = self._canonical_start_context()
+        appender = getattr(self, "_canonical_fact_appender", None)
+        if appender is None:
+            raise RuntimeError("bot runtime canonical fact appender is not configured")
+        return appender.append_fact_batch(
+            bot_id=self.bot_id,
+            run_id=run_id,
+            batch_kind=batch_kind,
+            payload=payload,
+            context={
+                "worker_id": (
+                    getattr(start_context, "worker_id", None)
+                    if start_context is not None
+                    else self.config.get("worker_id")
+                ),
+                "source_emitter": "bot_runtime",
+                "source_reason": "producer",
+            },
+            dispatch=dispatch,
+        )
+
     def subscribe(self, *, overflow_policy: str = "fail") -> Tuple[str, Queue]:
         channel: Queue = Queue(maxsize=256)
         token = str(uuid.uuid4())
@@ -147,6 +237,154 @@ class RuntimePushStreamMixin:
         )
 
     @staticmethod
+    def _trade_payload_is_open(trade_payload: Mapping[str, Any]) -> bool:
+        if trade_payload.get("closed_at"):
+            return False
+        trade_state = str(trade_payload.get("trade_state") or "").strip().lower()
+        if trade_state:
+            return trade_state not in {"closed"}
+        status = str(trade_payload.get("status") or "").strip().lower()
+        if status in {"closed", "completed", "complete"}:
+            trade_id = str(trade_payload.get("trade_id") or "").strip() or "<missing>"
+            raise RuntimeError(
+                "bot_runtime_trade_snapshot_invalid: closed trade snapshot missing closed_at "
+                f"trade_id={trade_id} status={status}"
+            )
+        return True
+
+    @staticmethod
+    def _assert_trade_fact_completeness(
+        *,
+        trade_ids: set[str],
+        closed_trade_ids: set[str],
+        emitted_trade_ids: set[str],
+        emitted_open_trade_ids: set[str],
+        emitted_closed_trade_ids: set[str],
+        series: StrategySeries,
+    ) -> None:
+        missing_trade_ids = sorted(trade_ids - emitted_trade_ids)
+        if missing_trade_ids:
+            raise RuntimeError(
+                "bot_runtime_trade_fact_missing: runtime observed trades without any emitted canonical trade fact "
+                f"strategy_id={series.strategy_id} symbol={series.symbol} timeframe={series.timeframe} "
+                f"trade_ids={','.join(missing_trade_ids)}"
+            )
+        missing_open_trade_ids = sorted(trade_ids - emitted_open_trade_ids)
+        if missing_open_trade_ids:
+            raise RuntimeError(
+                "bot_runtime_trade_open_fact_missing: observed trades missing emitted TRADE_OPENED fact "
+                f"strategy_id={series.strategy_id} symbol={series.symbol} timeframe={series.timeframe} "
+                f"trade_ids={','.join(missing_open_trade_ids)}"
+            )
+        missing_closed_trade_ids = sorted(closed_trade_ids - emitted_closed_trade_ids)
+        if missing_closed_trade_ids:
+            raise RuntimeError(
+                "bot_runtime_trade_close_fact_missing: closed trades missing emitted TRADE_CLOSED fact "
+                f"strategy_id={series.strategy_id} symbol={series.symbol} timeframe={series.timeframe} "
+                f"trade_ids={','.join(missing_closed_trade_ids)}"
+            )
+
+    @staticmethod
+    def _trade_fact_type(
+        *,
+        trade_id: str,
+        trade_is_open: bool,
+        cached_trade_map: Mapping[str, str],
+        emitted_closed_trade_ids: set[str],
+    ) -> str:
+        if trade_is_open:
+            if trade_id not in cached_trade_map:
+                return BOTLENS_FACT_TRADE_OPENED
+            return BOTLENS_FACT_TRADE_UPDATED
+        if trade_id not in emitted_closed_trade_ids:
+            return BOTLENS_FACT_TRADE_CLOSED
+        return BOTLENS_FACT_TRADE_UPDATED
+
+    @staticmethod
+    def _trade_payload_timestamp(trade_payload: Mapping[str, Any], *keys: str) -> Optional[Any]:
+        for key in keys:
+            value = trade_payload.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    @staticmethod
+    def _open_trade_payload_from_closed_trade(trade_payload: Mapping[str, Any]) -> Dict[str, Any]:
+        opened = dict(trade_payload)
+        for key in (
+            "closed_at",
+            "exit_time",
+            "exit_price",
+            "realized_pnl",
+            "event_impact_pnl",
+            "trade_net_pnl",
+            "net_pnl",
+            "pnl",
+            "bars_held",
+            "close_reason",
+            "closed_reason",
+            "exit_kind",
+        ):
+            opened.pop(key, None)
+        status = str(opened.get("status") or "").strip().lower()
+        if status in {"closed", "completed", "complete"}:
+            opened["status"] = "open"
+        opened["trade_state"] = "open"
+        opened.pop("event_time", None)
+        entry_time = RuntimePushStreamMixin._trade_payload_timestamp(opened, "opened_at", "entry_time")
+        if entry_time not in (None, ""):
+            opened["bar_time"] = entry_time
+        return opened
+
+    def _trade_lineage_fields(self, *, trade_id: str, series: StrategySeries) -> Dict[str, Any]:
+        run_context = getattr(self, "_run_context", None)
+        if run_context is None:
+            return {}
+        for event in reversed(getattr(run_context, "runtime_events", ())):
+            if getattr(getattr(event, "event_name", None), "value", None) != "DECISION_ACCEPTED":
+                continue
+            context = getattr(event, "context", None)
+            if str(getattr(context, "trade_id", "") or "") != trade_id:
+                continue
+            return {
+                "strategy_id": getattr(context, "strategy_id", None),
+                "signal_id": getattr(context, "signal_id", None),
+                "decision_id": getattr(context, "decision_id", None),
+            }
+        return {"strategy_id": getattr(series, "strategy_id", None)}
+
+    def _enriched_trade_payload(
+        self,
+        *,
+        trade_payload: Mapping[str, Any],
+        fact_type: str,
+        series: StrategySeries,
+        bar_time: Optional[Any],
+    ) -> Dict[str, Any]:
+        enriched = dict(trade_payload)
+        trade_id = str(enriched.get("trade_id") or "").strip()
+        if fact_type == BOTLENS_FACT_TRADE_OPENED:
+            event_bar_time = self._trade_payload_timestamp(enriched, "opened_at", "entry_time", "bar_time") or bar_time
+        elif fact_type == BOTLENS_FACT_TRADE_CLOSED:
+            event_bar_time = self._trade_payload_timestamp(enriched, "closed_at", "exit_time", "bar_time") or bar_time
+        else:
+            event_bar_time = (
+                self._trade_payload_timestamp(enriched, "bar_time", "updated_at", "closed_at", "exit_time")
+                or bar_time
+                or self._trade_payload_timestamp(enriched, "opened_at", "entry_time")
+            )
+        if event_bar_time not in (None, ""):
+            enriched["bar_time"] = event_bar_time
+            enriched.setdefault("event_time", event_bar_time)
+        lineage = self._trade_lineage_fields(trade_id=trade_id, series=series) if trade_id else {}
+        enriched.setdefault("strategy_id", lineage.get("strategy_id") or getattr(series, "strategy_id", None))
+        if lineage.get("signal_id"):
+            enriched.setdefault("signal_id", lineage["signal_id"])
+        if lineage.get("decision_id"):
+            enriched.setdefault("decision_id", lineage["decision_id"])
+        return enriched
+
+    @staticmethod
     def _payload_size_bytes(payload: Mapping[str, Any]) -> int:
         total = 0
         encoder = json.JSONEncoder(separators=(",", ":"), default=str, ensure_ascii=False)
@@ -167,6 +405,13 @@ class RuntimePushStreamMixin:
         *,
         status: str,
     ) -> List[Dict[str, Any]]:
+        series_state = self._series_state_for(series)
+        refresh_overlays = getattr(self, "_refresh_indicator_overlays_for_state", None)
+        if series_state is not None and callable(refresh_overlays):
+            refresh_overlays(
+                series_state,
+                reason="visible_overlays",
+            )
         overlays = list(series.overlays or [])
         if series.trade_overlay:
             overlays.append(series.trade_overlay)
@@ -261,6 +506,103 @@ class RuntimePushStreamMixin:
             "runtime": dict(runtime_snapshot or {}),
         }
 
+    @staticmethod
+    def _is_empty_health_value(value: Any) -> bool:
+        return value in (None, "", [], {}, ())
+
+    def _stable_health_value(self, value: Any) -> Any:
+        if isinstance(value, AbcMapping):
+            normalized: Dict[str, Any] = {}
+            for raw_key in sorted(value.keys(), key=lambda entry: str(entry)):
+                key = str(raw_key or "")
+                if not key or key in BOTLENS_RUNTIME_HEALTH_DYNAMIC_FIELDS:
+                    continue
+                normalized_value = self._stable_health_value(value.get(raw_key))
+                if self._is_empty_health_value(normalized_value):
+                    continue
+                normalized[key] = normalized_value
+            return normalized
+        if isinstance(value, list):
+            normalized_items = [self._stable_health_value(entry) for entry in value]
+            normalized_items = [entry for entry in normalized_items if not self._is_empty_health_value(entry)]
+            if normalized_items and all(isinstance(entry, AbcMapping) for entry in normalized_items):
+                normalized_items.sort(key=lambda entry: json.dumps(entry, sort_keys=True, default=str, separators=(",", ":")))
+            return normalized_items
+        return value
+
+    def _normalized_runtime_warning(self, warning: Mapping[str, Any]) -> Dict[str, Any]:
+        normalized = {
+            "warning_id": str(warning.get("warning_id") or warning.get("id") or "").strip(),
+            "warning_type": str(warning.get("warning_type") or warning.get("type") or "").strip().lower() or "runtime_warning",
+            "severity": str(warning.get("severity") or warning.get("level") or "").strip().lower() or "warning",
+            "source": str(warning.get("source") or "runtime").strip().lower() or "runtime",
+            "indicator_id": str(warning.get("indicator_id") or "").strip(),
+            "symbol_key": str(warning.get("symbol_key") or "").strip(),
+            "symbol": str(warning.get("symbol") or "").strip(),
+            "timeframe": str(warning.get("timeframe") or "").strip(),
+            "title": str(warning.get("title") or "").strip(),
+            "message": str(warning.get("message") or "").strip(),
+        }
+        context = self._stable_health_value(warning.get("context"))
+        if not self._is_empty_health_value(context):
+            normalized["context"] = context
+        return {key: value for key, value in normalized.items() if not self._is_empty_health_value(value)}
+
+    def _runtime_health_fingerprint(self, runtime_snapshot: Mapping[str, Any]) -> str:
+        warnings = runtime_snapshot.get("warnings") if isinstance(runtime_snapshot.get("warnings"), list) else []
+        normalized_warnings = [
+            self._normalized_runtime_warning(entry)
+            for entry in warnings
+            if isinstance(entry, AbcMapping)
+        ]
+        normalized_warnings.sort(
+            key=lambda entry: (
+                str(entry.get("warning_id") or ""),
+                str(entry.get("warning_type") or ""),
+                str(entry.get("symbol_key") or ""),
+                str(entry.get("symbol") or ""),
+                str(entry.get("message") or ""),
+            )
+        )
+        payload: Dict[str, Any] = {
+            "status": str(runtime_snapshot.get("status") or "").strip().lower(),
+            "runtime_state": str(runtime_snapshot.get("runtime_state") or "").strip().lower(),
+            "progress_state": str(runtime_snapshot.get("progress_state") or "").strip().lower(),
+            "warning_count": len(normalized_warnings),
+            "warnings": normalized_warnings,
+        }
+        for field in ("degraded", "churn", "terminal"):
+            normalized = self._stable_health_value(runtime_snapshot.get(field))
+            if not self._is_empty_health_value(normalized):
+                payload[field] = normalized
+        return json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+
+    def _mark_runtime_health_emitted(self, fingerprint: str, *, emitted_monotonic: float) -> None:
+        self._push_runtime_health_fingerprint = str(fingerprint or "")
+        self._push_runtime_health_emitted_monotonic = max(float(emitted_monotonic or 0.0), 0.0)
+
+    def _should_emit_runtime_state_fact(self, *, runtime_snapshot: Mapping[str, Any], event: str) -> bool:
+        normalized_event = str(event or "").strip().lower()
+        emitted_monotonic = time.monotonic()
+        fingerprint = self._runtime_health_fingerprint(runtime_snapshot)
+        if normalized_event not in {"bar", "intrabar"}:
+            self._mark_runtime_health_emitted(fingerprint, emitted_monotonic=emitted_monotonic)
+            return True
+        previous_fingerprint = str(getattr(self, "_push_runtime_health_fingerprint", "") or "")
+        last_emitted = float(getattr(self, "_push_runtime_health_emitted_monotonic", 0.0) or 0.0)
+        heartbeat_ms = float(
+            getattr(self, "_runtime_health_emit_interval_ms", BOTLENS_RUNTIME_HEALTH_EMIT_INTERVAL_MS)
+            or BOTLENS_RUNTIME_HEALTH_EMIT_INTERVAL_MS
+        )
+        if not previous_fingerprint or previous_fingerprint != fingerprint:
+            self._mark_runtime_health_emitted(fingerprint, emitted_monotonic=emitted_monotonic)
+            return True
+        elapsed_ms = max((emitted_monotonic - last_emitted) * 1000.0, 0.0)
+        if elapsed_ms >= heartbeat_ms:
+            self._mark_runtime_health_emitted(fingerprint, emitted_monotonic=emitted_monotonic)
+            return True
+        return False
+
     def _series_state_fact(
         self,
         *,
@@ -301,11 +643,12 @@ class RuntimePushStreamMixin:
         *,
         series: StrategySeries,
         cache: Dict[str, Any],
-    ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]], int]:
+        bar_time: Optional[Any] = None,
+    ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]], int, bool]:
         trades_revision = self._trade_revision(series)
         if cache.get("trades_revision") == trades_revision:
             cached_trades = cache.get("trades")
-            return [], cache.get("series_stats"), len(cached_trades) if isinstance(cached_trades, list) else 0
+            return [], cache.get("series_stats"), len(cached_trades) if isinstance(cached_trades, list) else 0, False
 
         identity = self._series_identity(series)
         trades = series.risk_engine.serialise_trades()
@@ -317,7 +660,29 @@ class RuntimePushStreamMixin:
             else {}
         )
         next_trade_map: Dict[str, str] = {}
+        emitted_trade_ids = {
+            str(entry)
+            for entry in cache.get("emitted_trade_ids", ())
+            if str(entry).strip()
+        }
+        emitted_closed_trade_ids = {
+            str(entry)
+            for entry in cache.get("emitted_closed_trade_ids", ())
+            if str(entry).strip()
+        }
+        emitted_open_trade_ids = {
+            str(entry)
+            for entry in cache.get("emitted_open_trade_ids", ())
+            if str(entry).strip()
+        }
+        next_emitted_trade_ids = set(emitted_trade_ids)
+        next_emitted_open_trade_ids = set(emitted_open_trade_ids)
+        next_emitted_closed_trade_ids = set(emitted_closed_trade_ids)
+        next_open_trade_ids: set[str] = set()
+        current_trade_ids: set[str] = set()
+        current_closed_trade_ids: set[str] = set()
         trade_facts: List[Dict[str, Any]] = []
+        trade_entry_refresh_required = False
         for trade in trades:
             if not isinstance(trade, AbcMapping):
                 continue
@@ -325,23 +690,120 @@ class RuntimePushStreamMixin:
             trade_id = str(trade_payload.get("trade_id") or "").strip()
             if not trade_id:
                 continue
-            trade_fingerprint = json.dumps(trade_payload, sort_keys=True, default=str, separators=(",", ":"))
+            current_trade_ids.add(trade_id)
+            trade_is_open = self._trade_payload_is_open(trade_payload)
+            if trade_is_open:
+                next_open_trade_ids.add(trade_id)
+            else:
+                current_closed_trade_ids.add(trade_id)
+            fact_type = self._trade_fact_type(
+                trade_id=trade_id,
+                trade_is_open=trade_is_open,
+                cached_trade_map=cached_trade_map,
+                emitted_closed_trade_ids=emitted_closed_trade_ids,
+            )
+            enriched_trade_payload = self._enriched_trade_payload(
+                trade_payload=trade_payload,
+                fact_type=fact_type,
+                series=series,
+                bar_time=bar_time,
+            )
+            trade_fingerprint = json.dumps(enriched_trade_payload, sort_keys=True, default=str, separators=(",", ":"))
             next_trade_map[trade_id] = trade_fingerprint
-            if cached_trade_map.get(trade_id) == trade_fingerprint:
-                continue
+            trade_changed = cached_trade_map.get(trade_id) != trade_fingerprint
+
+            if trade_is_open:
+                if trade_id in emitted_open_trade_ids and not trade_changed:
+                    continue
+                if trade_id not in emitted_open_trade_ids:
+                    fact_type = BOTLENS_FACT_TRADE_OPENED
+                    enriched_trade_payload = self._enriched_trade_payload(
+                        trade_payload=trade_payload,
+                        fact_type=fact_type,
+                        series=series,
+                        bar_time=bar_time,
+                    )
+                    next_emitted_open_trade_ids.add(trade_id)
+                else:
+                    fact_type = BOTLENS_FACT_TRADE_UPDATED
+            else:
+                if trade_id not in emitted_open_trade_ids:
+                    opened_payload = self._open_trade_payload_from_closed_trade(trade_payload)
+                    opened_payload = self._enriched_trade_payload(
+                        trade_payload=opened_payload,
+                        fact_type=BOTLENS_FACT_TRADE_OPENED,
+                        series=series,
+                        bar_time=bar_time,
+                    )
+                    trade_facts.append(
+                        {
+                            "fact_type": BOTLENS_FACT_TRADE_OPENED,
+                            "series_key": identity["series_key"],
+                            "trade": opened_payload,
+                        }
+                    )
+                    trade_entry_refresh_required = True
+                    next_emitted_trade_ids.add(trade_id)
+                    next_emitted_open_trade_ids.add(trade_id)
+                if trade_id in emitted_closed_trade_ids and not trade_changed:
+                    continue
+                if trade_id not in emitted_closed_trade_ids:
+                    fact_type = BOTLENS_FACT_TRADE_CLOSED
+                    next_emitted_closed_trade_ids.add(trade_id)
+                else:
+                    fact_type = BOTLENS_FACT_TRADE_UPDATED
+
+            if fact_type == BOTLENS_FACT_TRADE_OPENED:
+                trade_entry_refresh_required = True
+            next_emitted_trade_ids.add(trade_id)
             trade_facts.append(
                 {
-                    "fact_type": BOTLENS_FACT_TRADE_UPSERTED,
+                    "fact_type": fact_type,
                     "series_key": identity["series_key"],
-                    "trade": trade_payload,
+                    "trade": enriched_trade_payload,
                 }
             )
 
+        self._assert_trade_fact_completeness(
+            trade_ids=current_trade_ids,
+            closed_trade_ids=current_closed_trade_ids,
+            emitted_trade_ids=next_emitted_trade_ids,
+            emitted_open_trade_ids=next_emitted_open_trade_ids,
+            emitted_closed_trade_ids=next_emitted_closed_trade_ids,
+            series=series,
+        )
         cache["trades"] = trades
         cache["trades_revision"] = trades_revision
         cache["series_stats"] = series_stats
         cache["trade_fingerprints"] = next_trade_map
-        return trade_facts, series_stats, len(trades)
+        cache["open_trade_ids"] = tuple(sorted(next_open_trade_ids))
+        cache["emitted_trade_ids"] = tuple(sorted(next_emitted_trade_ids))
+        cache["emitted_open_trade_ids"] = tuple(sorted(next_emitted_open_trade_ids))
+        cache["emitted_closed_trade_ids"] = tuple(sorted(next_emitted_closed_trade_ids))
+        return trade_facts, series_stats, len(trades), trade_entry_refresh_required
+
+    def _should_emit_visual_overlay_facts(
+        self,
+        cache: Dict[str, Any],
+        *,
+        event: str,
+        overlay_revision: Tuple[Any, ...] | None,
+        trade_entry_refresh_required: bool,
+    ) -> bool:
+        if str(event or "").strip().lower() == "intrabar":
+            return False
+        if overlay_revision is None:
+            return False
+        if cache.get("visual_overlay_revision") == overlay_revision:
+            return False
+        if trade_entry_refresh_required:
+            return True
+        last_emit_monotonic = float(cache.get("visual_overlay_emit_monotonic") or 0.0)
+        if last_emit_monotonic <= 0.0:
+            cache["visual_overlay_emit_monotonic"] = time.monotonic()
+            return False
+        elapsed_ms = max((time.monotonic() - last_emit_monotonic) * 1000.0, 0.0)
+        return elapsed_ms >= float(BOTLENS_SELECTED_SYMBOL_VISUAL_REFRESH_INTERVAL_MS)
 
     def botlens_bootstrap_payload(self) -> Dict[str, Any]:
         if not self._series:
@@ -411,11 +873,33 @@ class RuntimePushStreamMixin:
         )
         for trade in chart_snapshot.get("trades") if isinstance(chart_snapshot.get("trades"), list) else []:
             if isinstance(trade, AbcMapping):
+                trade_payload = dict(trade)
+                trade_is_open = self._trade_payload_is_open(trade_payload)
+                if not trade_is_open:
+                    opened_payload = self._open_trade_payload_from_closed_trade(trade_payload)
+                    facts.append(
+                        {
+                            "fact_type": BOTLENS_FACT_TRADE_OPENED,
+                            "series_key": identity["series_key"],
+                            "trade": self._enriched_trade_payload(
+                                trade_payload=opened_payload,
+                                fact_type=BOTLENS_FACT_TRADE_OPENED,
+                                series=series,
+                                bar_time=None,
+                            ),
+                        }
+                    )
+                fact_type = BOTLENS_FACT_TRADE_OPENED if trade_is_open else BOTLENS_FACT_TRADE_CLOSED
                 facts.append(
                     {
-                        "fact_type": BOTLENS_FACT_TRADE_UPSERTED,
+                        "fact_type": fact_type,
                         "series_key": identity["series_key"],
-                        "trade": dict(trade),
+                        "trade": self._enriched_trade_payload(
+                            trade_payload=trade_payload,
+                            fact_type=fact_type,
+                            series=series,
+                            bar_time=None,
+                        ),
                     }
                 )
         for entry in chart_snapshot.get("logs") if isinstance(chart_snapshot.get("logs"), list) else []:
@@ -424,10 +908,18 @@ class RuntimePushStreamMixin:
         for entry in chart_snapshot.get("decisions") if isinstance(chart_snapshot.get("decisions"), list) else []:
             if isinstance(entry, AbcMapping):
                 facts.append({"fact_type": BOTLENS_FACT_DECISION_EMITTED, "decision": dict(entry)})
+        observed_at = _isoformat(datetime.now(timezone.utc))
+        last_candle_time = None
+        candles = selected_series.get("candles") if isinstance(selected_series.get("candles"), list) else []
+        if candles:
+            last_candle = candles[-1]
+            if isinstance(last_candle, AbcMapping):
+                last_candle_time = last_candle.get("time")
         return {
             "type": "facts",
             "event": "bootstrap",
-            "known_at": runtime_snapshot.get("last_snapshot_at") or runtime_snapshot.get("known_at") or _isoformat(datetime.now(timezone.utc)),
+            "known_at": last_candle_time or runtime_snapshot.get("known_at") or runtime_snapshot.get("last_snapshot_at") or observed_at,
+            "observed_at": observed_at,
             "series_key": identity["series_key"],
             "facts": facts,
         }
@@ -465,6 +957,7 @@ class RuntimePushStreamMixin:
         }
         error_message: Optional[str] = None
         trace_persist_ms: Optional[float] = None
+        canonical_append_ms: Optional[float] = None
         build_state_ms: Optional[float] = None
         serialize_ms: Optional[float] = None
         enqueue_ms: Optional[float] = None
@@ -528,22 +1021,37 @@ class RuntimePushStreamMixin:
         try:
             build_started = time.perf_counter()
             runtime_snapshot = self.snapshot()
+            emit_runtime_state = self._should_emit_runtime_state_fact(runtime_snapshot=runtime_snapshot, event=event)
+            observed_at = _isoformat(push_started)
+            last_bar = runtime_snapshot.get("last_bar") if isinstance(runtime_snapshot.get("last_bar"), AbcMapping) else {}
+            candle_time = getattr(candle, "time", None) if candle is not None else None
             payload: Dict[str, Any] = {
                 "type": "facts",
                 "event": event,
-                "known_at": runtime_snapshot.get("last_snapshot_at")
+                "known_at": (_isoformat(candle_time) if candle_time is not None else None)
+                or last_bar.get("time")
                 or runtime_snapshot.get("known_at")
-                or _isoformat(datetime.now(timezone.utc)),
-                "facts": [self._runtime_state_fact(runtime_snapshot=runtime_snapshot, event=event)],
+                or runtime_snapshot.get("last_snapshot_at")
+                or observed_at,
+                "observed_at": observed_at,
+                "facts": [],
             }
+            runtime_state_fact: Optional[Dict[str, Any]] = None
+            if emit_runtime_state:
+                runtime_state_fact = self._runtime_state_fact(runtime_snapshot=runtime_snapshot, event=event)
+                payload["facts"].append(runtime_state_fact)
             if isinstance(precomputed_stats, Mapping):
-                payload["facts"][0]["runtime"]["stats"] = dict(precomputed_stats)
+                if runtime_state_fact is not None:
+                    runtime_state_fact["runtime"]["stats"] = dict(precomputed_stats)
                 stats_update_ms = 0.0
                 payload_context["stats_reused"] = True
-            else:
+            elif emit_runtime_state:
                 stats_started = time.perf_counter()
                 self._aggregate_stats()
                 stats_update_ms = max((time.perf_counter() - stats_started) * 1000.0, 0.0)
+                payload_context["stats_reused"] = False
+            else:
+                stats_update_ms = 0.0
                 payload_context["stats_reused"] = False
             payload["facts"].extend(self._log_facts())
             payload["facts"].extend(self._decision_facts())
@@ -556,6 +1064,13 @@ class RuntimePushStreamMixin:
                 status = str(self.state.get("status") or "").lower()
                 series_state = self._series_state_for(series)
                 bar_index = series_state.bar_index if series_state else 0
+                refresh_overlays = getattr(self, "_refresh_indicator_overlays_for_state", None)
+                if series_state is not None and callable(refresh_overlays):
+                    refresh_overlays(
+                        series_state,
+                        candle=candle,
+                        reason="push_update",
+                    )
                 candles_count = min(bar_index + 1, len(series.candles))
                 payload["series_key"] = public_series_key
                 payload["facts"].append(
@@ -565,16 +1080,25 @@ class RuntimePushStreamMixin:
                         replace_last=bool(replace_last),
                     )
                 )
-                include_heavy_series_data = event != "intrabar"
-                if include_heavy_series_data or "visible_overlays" not in cache:
-                    overlay_revision = self._series_overlay_revision(series, status=status)
-                    if cache.get("overlay_revision") != overlay_revision:
-                        cache["visible_overlays"] = self._series_visible_overlays(series, status=status)
-                        cache["overlay_revision"] = overlay_revision
-                    visible_overlays = cache.get("visible_overlays")
-                    if isinstance(visible_overlays, list):
-                        overlay_summary = self._overlay_summary(visible_overlays)
-                        overlay_delta = build_overlay_delta(cache, visible_overlays)
+                overlay_revision = self._series_overlay_revision(series, status=status)
+                if cache.get("overlay_revision") != overlay_revision or "visible_overlays" not in cache:
+                    cache["visible_overlays"] = self._series_visible_overlays(series, status=status)
+                    cache["overlay_revision"] = overlay_revision
+                visible_overlays = cache.get("visible_overlays")
+                trade_facts, series_stats, trades_count, trade_entry_refresh_required = self._trade_facts(
+                    series=series,
+                    cache=cache,
+                    bar_time=candle_time,
+                )
+                if isinstance(visible_overlays, list):
+                    overlay_summary = self._overlay_summary(visible_overlays)
+                    emit_visual_overlay_facts = self._should_emit_visual_overlay_facts(
+                        cache,
+                        event=event,
+                        overlay_revision=overlay_revision,
+                        trade_entry_refresh_required=trade_entry_refresh_required,
+                    )
+                    if emit_visual_overlay_facts:
                         logger.debug(
                             with_log_context(
                                 "bot_overlay_emit_attempt",
@@ -587,10 +1111,12 @@ class RuntimePushStreamMixin:
                                     overlay_types=overlay_summary.get("type_counts"),
                                     overlay_payloads=overlay_summary.get("payload_counts"),
                                     overlay_profile_params=overlay_summary.get("profile_params_samples"),
-                                    emitted_delta=isinstance(overlay_delta, Mapping),
+                                    emitted_delta=True,
+                                    trade_entry_refresh_required=trade_entry_refresh_required,
                                 ),
                             )
                         )
+                        overlay_delta = build_overlay_delta(cache, visible_overlays)
                         if isinstance(overlay_delta, Mapping):
                             payload["facts"].append(
                                 {
@@ -599,6 +1125,8 @@ class RuntimePushStreamMixin:
                                     "overlay_delta": dict(overlay_delta),
                                 }
                             )
+                            cache["visual_overlay_revision"] = overlay_revision
+                            cache["visual_overlay_emit_monotonic"] = time.monotonic()
                             logger.debug(
                                 with_log_context(
                                     "bot_overlay_delta_sent",
@@ -613,10 +1141,10 @@ class RuntimePushStreamMixin:
                                         overlay_types=overlay_summary.get("type_counts"),
                                         overlay_payloads=overlay_summary.get("payload_counts"),
                                         overlay_profile_params=overlay_summary.get("profile_params_samples"),
+                                        trade_entry_refresh_required=trade_entry_refresh_required,
                                     ),
                                 )
                             )
-                trade_facts, series_stats, trades_count = self._trade_facts(series=series, cache=cache)
                 payload["facts"].extend(trade_facts)
                 if isinstance(series_stats, AbcMapping):
                     payload["facts"].append(
@@ -649,6 +1177,7 @@ class RuntimePushStreamMixin:
                     "overlay_count": overlay_count,
                     "overlay_points": overlay_points,
                     "stats_update_ms": stats_update_ms,
+                    "runtime_state_emitted": emit_runtime_state,
                 }
             )
             if self._obs_enabled:
@@ -664,9 +1193,26 @@ class RuntimePushStreamMixin:
                         serialize_ms = max((time.perf_counter() - serialize_started) * 1000.0, 0.0)
                         payload_context["serialize_ms"] = serialize_ms
                         payload_context["delta_serialize_ms"] = serialize_ms
-            enqueue_started = time.perf_counter()
-            subscriber_count, dropped_messages = self._broadcast("facts", payload)
-            enqueue_ms = max((time.perf_counter() - enqueue_started) * 1000.0, 0.0)
+            append_outcome = None
+            if payload.get("facts"):
+                append_started = time.perf_counter()
+                append_outcome = self.commit_botlens_fact_payload(
+                    payload,
+                    batch_kind=BOTLENS_RUNTIME_FACTS_KIND,
+                    dispatch=False,
+                )
+                canonical_append_ms = max((time.perf_counter() - append_started) * 1000.0, 0.0)
+                payload_context["canonical_append_ms"] = canonical_append_ms
+            if append_outcome is not None:
+                dispatch_started = time.perf_counter()
+                consumer_results = self._canonical_fact_appender.dispatch(append_outcome.batch)
+                enqueue_ms = max((time.perf_counter() - dispatch_started) * 1000.0, 0.0)
+                payload = append_outcome.batch.live_payload
+                subscriber_count, dropped_messages = self._broadcast_metrics_from_consumer_results(consumer_results)
+            else:
+                enqueue_started = time.perf_counter()
+                subscriber_count, dropped_messages = self._broadcast("facts", payload)
+                enqueue_ms = max((time.perf_counter() - enqueue_started) * 1000.0, 0.0)
             payload_context["enqueue_ms"] = enqueue_ms
             payload_context["stream_emit_ms"] = enqueue_ms
             payload_context["subscriber_count"] = subscriber_count

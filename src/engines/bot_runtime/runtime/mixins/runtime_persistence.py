@@ -7,8 +7,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional
 
 from engines.bot_runtime.core.domain import Candle
-from engines.bot_runtime.core.series_identity import canonical_series_key
-from engines.bot_runtime.runtime.event_types import SERIES_BAR_TELEMETRY
 from utils.log_context import with_log_context
 
 from ..core import _isoformat, _timeframe_to_seconds
@@ -84,85 +82,6 @@ class RuntimePersistenceMixin:
             }
         )
 
-    def _build_series_bar_telemetry_event(
-        self,
-        *,
-        series: StrategySeries,
-        candle: Candle,
-        bar_index: int,
-        seq: int,
-        instrument_id: str,
-        timeframe_seconds: int,
-        event_time: datetime,
-    ) -> Dict[str, Any]:
-        return {
-            "event_id": f"{self._run_context.run_id}:{seq}:{SERIES_BAR_TELEMETRY}:{series.symbol}:{series.timeframe}",
-            "bot_id": self.bot_id,
-            "run_id": self._run_context.run_id,
-            "seq": seq,
-            "event_type": SERIES_BAR_TELEMETRY,
-            "critical": False,
-            "schema_version": 1,
-            "event_time": self._event_timestamp(event_time),
-            "known_at": self._event_timestamp(event_time or candle.time),
-            "payload": {
-                "series_key": canonical_series_key(instrument_id, series.timeframe),
-                "strategy_id": str(series.strategy_id or ""),
-                "symbol": str(series.symbol or ""),
-                "timeframe": str(series.timeframe or ""),
-                "timeframe_seconds": int(timeframe_seconds),
-                "instrument_id": instrument_id,
-                "bar_index": int(bar_index),
-                "bar_time": self._event_timestamp(candle.time),
-                "candle": candle.to_dict(),
-            },
-        }
-
-    def _persist_series_bar_telemetry(
-        self,
-        *,
-        series: StrategySeries,
-        candle: Candle,
-        bar_index: int,
-    ) -> Optional[float]:
-        if self._run_context is None:
-            raise ValueError("run context is required before persisting series state")
-        instrument = series.instrument if isinstance(series.instrument, dict) else {}
-        instrument_id = str(instrument.get("id") or "").strip()
-        timeframe_seconds = _timeframe_to_seconds(series.timeframe)
-        if not instrument_id:
-            raise RuntimeError(f"instrument_id missing for series {series.symbol}|{series.timeframe}")
-        if timeframe_seconds <= 0:
-            raise RuntimeError(f"timeframe_seconds missing for series {series.symbol}|{series.timeframe}")
-        event_time = candle.end if isinstance(candle.end, datetime) else candle.time
-        seq = self._allocate_runtime_event_seq()
-        payload = self._build_series_bar_telemetry_event(
-            series=series,
-            candle=candle,
-            bar_index=bar_index,
-            seq=seq,
-            instrument_id=instrument_id,
-            timeframe_seconds=int(timeframe_seconds),
-            event_time=event_time,
-        )
-        enqueue_ms = self._series_bar_telemetry_buffer.record(payload)
-        logger.debug(
-            with_log_context(
-                "bot_series_bar_telemetry_enqueued",
-                self._runtime_log_context(
-                    strategy_id=series.strategy_id,
-                    symbol=series.symbol,
-                    timeframe=series.timeframe,
-                    instrument_id=instrument_id,
-                    seq=seq,
-                    bar_index=bar_index,
-                    bar_time=self._event_timestamp(candle.time),
-                    enqueue_ms=round(enqueue_ms, 3),
-                ),
-            )
-        )
-        return enqueue_ms
-
     def _persist_runtime_state(self, status: str) -> None:
         if not self._state_callback:
             return
@@ -181,10 +100,6 @@ class RuntimePersistenceMixin:
         flush_started = datetime.now(timezone.utc)
         try:
             self._persistence_buffer.flush(reason=reason)
-            self._series_bar_telemetry_buffer.flush(
-                reason=reason,
-                shutdown=reason in {"runtime_loop_complete", "runtime_loop_failed"},
-            )
             self._record_step_trace(
                 "persistence_flush",
                 started_at=flush_started,

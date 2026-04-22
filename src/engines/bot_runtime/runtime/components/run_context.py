@@ -26,7 +26,6 @@ class RunContext:
     runtime_event_seq: int = 0
     runtime_events: List[RuntimeEvent] = field(default_factory=list)
     runtime_event_stream: List[Dict[str, Any]] = field(default_factory=list)
-    decision_trace: List[Dict[str, Any]] = field(default_factory=list)
     decision_artifacts: List[Dict[str, Any]] = field(default_factory=list)
     rejection_artifacts: List[Dict[str, Any]] = field(default_factory=list)
 

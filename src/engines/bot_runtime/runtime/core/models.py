@@ -46,6 +46,7 @@ class SeriesExecutionState:
     indicator_engine: Optional[IndicatorExecutionEngine] = None
     indicator_outputs: Dict[str, RuntimeOutput] = field(default_factory=dict)
     indicator_overlays: Dict[str, RuntimeOverlay] = field(default_factory=dict)
+    last_overlay_refresh_epoch: Optional[int] = None
     indicator_output_types: Dict[str, OutputType] = field(default_factory=dict)
     overlay_runtime_metrics: Dict[str, float] = field(default_factory=dict)
     decision_evaluation_state: DecisionEvaluationState = field(default_factory=DecisionEvaluationState)

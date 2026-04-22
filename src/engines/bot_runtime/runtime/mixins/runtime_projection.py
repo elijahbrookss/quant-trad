@@ -17,6 +17,19 @@ logger = logging.getLogger(__name__)
 
 
 class RuntimeProjectionMixin:
+    @staticmethod
+    def _progress_state_for_status(status: Any) -> str:
+        normalized = str(status or "").strip().lower()
+        if normalized in {"running", "paused"}:
+            return "progressing"
+        if normalized == "degraded":
+            return "degraded"
+        if normalized in {"error", "stopped", "completed"}:
+            return "stalled"
+        if normalized in {"initialising", "starting"}:
+            return "starting"
+        return normalized or "idle"
+
     def logs(self, limit: int = 200) -> List[Dict[str, Any]]:
         with self._lock:
             entries = list(self._logs)
@@ -29,25 +42,29 @@ class RuntimeProjectionMixin:
             entries = list(self._decision_events)
         if limit and limit > 0:
             entries = entries[-limit:]
-        return entries
+        return [entry.serialize() for entry in entries]
 
     def _update_state(self, candle: Candle, status: str = "running") -> Dict[str, Any]:
         update_started = time.perf_counter()
         stats_started = time.perf_counter()
         stats = self._aggregate_stats()
         stats_update_ms = max((time.perf_counter() - stats_started) * 1000.0, 0.0)
+        observed_at = _isoformat(datetime.now(timezone.utc))
         with self._lock:
             self._last_stats = stats
         self._refresh_next_bar_at()
         progress = self._compute_progress()
         snapshot = {
             "status": status,
+            "progress_state": self._progress_state_for_status(status),
             "progress": progress,
             "last_bar": candle.to_dict(),
             "stats": stats,
             "paused": self._paused,
             "next_bar_at": _isoformat(self._next_bar_at),
             "next_bar_in_seconds": self._seconds_until_next_bar(),
+            "last_snapshot_at": observed_at,
+            "last_useful_progress_at": observed_at,
         }
         with self._lock:
             self.state.update(snapshot)
@@ -77,12 +94,14 @@ class RuntimeProjectionMixin:
         if self._run_context is not None:
             payload.setdefault("run_id", self._run_context.run_id)
         payload.setdefault("stats", self._last_stats)
+        payload.setdefault("progress_state", self._progress_state_for_status(payload.get("status")))
         if "next_bar_at" not in payload:
             payload["next_bar_at"] = _isoformat(self._next_bar_at)
         if "next_bar_in_seconds" not in payload:
             payload["next_bar_in_seconds"] = self._seconds_until_next_bar()
         if "started_at" not in payload and self._run_started_at is not None:
             payload["started_at"] = _isoformat(self._run_started_at)
+        payload.setdefault("last_snapshot_at", payload.get("last_useful_progress_at"))
         payload.setdefault("warnings", self.warnings())
         payload["bootstrap"] = self._bootstrap_status_payload()
         return payload
