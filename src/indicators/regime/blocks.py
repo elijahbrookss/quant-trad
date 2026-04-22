@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .config import RegimeBlockConfig
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -109,11 +106,6 @@ def build_regime_blocks(
     cfg = config or RegimeBlockConfig()
     min_block_bars = max(1, cfg.min_block_bars)
     if not points:
-        logger.debug(
-            "regime_blocks_empty | instrument_id=%s timeframe_seconds=%s",
-            instrument_id,
-            timeframe_seconds,
-        )
         return [], {}
 
     accumulators: List[_BlockAccumulator] = []
@@ -262,13 +254,6 @@ def build_regime_blocks(
         blocks.append(block_payload)
         for idx in range(block.start_idx, block.end_idx + 1):
             block_ids[idx] = block_id
-    logger.debug(
-        "regime_blocks_built | instrument_id=%s timeframe_seconds=%s blocks=%s min_block_bars=%s",
-        instrument_id,
-        timeframe_seconds,
-        len(blocks),
-        min_block_bars,
-    )
     return blocks, block_ids
 
 

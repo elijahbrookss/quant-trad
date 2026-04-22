@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from engines.bot_runtime.core.domain import Candle
 from engines.indicator_engine.contracts import OutputRef, RuntimeOutput
+import indicators.regime.overlays as regime_overlays
 from indicators.regime.engine import RegimeEngine
 from indicators.regime.overlays import build_regime_overlay, build_regime_overlays
 from indicators.regime.runtime import TypedRegimeIndicator
@@ -568,6 +569,78 @@ def test_regime_overlay_markers_align_to_confirmed_block_known_at() -> None:
     assert change_marker["time"] == known_at
     assert any(segment["x1"] == block_start for segment in regime_payload["segments"])
     assert all(point.get("regime_block_id") for point in regime_payload["regime_points"])
+
+
+def test_regime_overlay_builds_structure_blocks_once_per_snapshot(monkeypatch) -> None:
+    candles = [_candle(index, close=100_000.0 + index * 20.0) for index in range(12)]
+    regime_rows = {}
+    for candle in candles[:6]:
+        regime_rows[candle.time.replace(tzinfo=None)] = {
+            "structure": {
+                "state": "trend",
+                "trend_direction": "up",
+                "confidence": 0.68,
+                "score_margin": 0.18,
+                "trust_score": 0.74,
+                "is_known": True,
+                "is_mature": True,
+                "is_trustworthy": True,
+                "recent_switch_count": 1,
+                **_context_fields(state="trend_up", direction="up"),
+            },
+            "volatility": {"state": "normal"},
+            "liquidity": {"state": "normal"},
+            "expansion": {"state": "stable"},
+            "confidence": 0.68,
+            "regime_key": "trend|normal|normal|stable",
+        }
+    for candle in candles[6:]:
+        regime_rows[candle.time.replace(tzinfo=None)] = {
+            "structure": {
+                "state": "range",
+                "trend_direction": "neutral",
+                "confidence": 0.63,
+                "score_margin": 0.15,
+                "trust_score": 0.71,
+                "is_known": True,
+                "is_mature": True,
+                "is_trustworthy": True,
+                "recent_switch_count": 2,
+                **_context_fields(state="range", direction="neutral"),
+            },
+            "volatility": {"state": "normal"},
+            "liquidity": {"state": "normal"},
+            "expansion": {"state": "stable"},
+            "confidence": 0.63,
+            "regime_key": "range|normal|normal|stable",
+        }
+
+    original = regime_overlays.build_regime_blocks
+    structure_builds = 0
+
+    def counting_build_regime_blocks(*args, **kwargs):
+        nonlocal structure_builds
+        points = args[0] if args else kwargs.get("points") or []
+        first_state = ""
+        if points:
+            first_state = str(points[0].get("structure_state") or "")
+        if first_state in {"trend_up", "range"}:
+            structure_builds += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(regime_overlays, "build_regime_blocks", counting_build_regime_blocks)
+
+    built = build_regime_overlays(
+        candles=candles,
+        regime_rows=regime_rows,
+        timeframe_seconds=60,
+        regime_version="v1",
+        include_change_markers=True,
+        include_marker_overlay=True,
+    )
+
+    assert any(overlay["type"] == "regime_overlay" for overlay in built)
+    assert structure_builds == 1
 
 
 def test_established_range_persists_through_brief_transition_noise() -> None:

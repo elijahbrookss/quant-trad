@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -11,8 +10,6 @@ from overlays.schema import build_overlay
 
 from .blocks import build_regime_blocks
 from .config import RegimeBlockConfig, default_regime_runtime_config
-
-logger = logging.getLogger(__name__)
 
 STATE_COLORS = {
     "structure": {
@@ -389,7 +386,6 @@ def build_regime_markers(
                 "subtype": "regime_block_label",
             }
         )
-    logger.debug("regime_markers_built | blocks=%s | markers=%s", len(blocks), len(markers))
     return markers
 
 
@@ -398,6 +394,20 @@ def build_regime_marker_overlay(blocks: Sequence[Mapping[str, Any]], candles: Se
     if not markers:
         return None
     return build_overlay("regime_markers", {"markers": markers})
+
+
+def _build_structure_blocks(
+    points: Sequence[Mapping[str, Any]],
+    *,
+    timeframe_seconds: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    block_points = _build_structure_block_points(points)
+    blocks, block_ids = build_regime_blocks(
+        block_points,
+        timeframe_seconds=timeframe_seconds,
+        config=default_regime_runtime_config().blocks,
+    )
+    return blocks, _attach_block_ids(points, block_ids)
 
 
 def _build_boundary_segments(
@@ -432,7 +442,8 @@ def _build_boundary_segments(
 
 
 def _build_regime_payload(
-    points: Sequence[Mapping[str, Any]],
+    points_with_blocks: Sequence[Mapping[str, Any]],
+    blocks: Sequence[Mapping[str, Any]],
     *,
     min_low: float,
     max_high: float,
@@ -442,14 +453,6 @@ def _build_regime_payload(
     include_regime_blocks: bool,
     include_regime_points: bool,
 ) -> Dict[str, Any]:
-    regime_config = default_regime_runtime_config()
-    block_points = _build_structure_block_points(points)
-    blocks, block_ids = build_regime_blocks(
-        block_points,
-        timeframe_seconds=timeframe_seconds,
-        config=regime_config.blocks,
-    )
-    points_with_blocks = _attach_block_ids(points, block_ids)
     price_envelopes = _build_block_price_envelopes(points_with_blocks)
     boxes: List[Dict[str, Any]] = []
     regime_blocks: List[Dict[str, Any]] = []
@@ -625,8 +628,13 @@ def build_regime_overlay(
     points, min_low, max_high = _build_regime_points(candles, regime_rows)
     if not points:
         return None
-    payload = _build_regime_payload(
+    blocks, points_with_blocks = _build_structure_blocks(
         points,
+        timeframe_seconds=timeframe_seconds,
+    )
+    payload = _build_regime_payload(
+        points_with_blocks,
+        blocks,
         min_low=min_low,
         max_high=max_high,
         timeframe_seconds=timeframe_seconds,
@@ -652,15 +660,13 @@ def build_regime_overlays(
     points, min_low, max_high = _build_regime_points(candles, regime_rows)
     if not points:
         return []
-    block_points = _build_structure_block_points(points)
-    blocks, block_ids = build_regime_blocks(
-        block_points,
+    blocks, points_with_blocks = _build_structure_blocks(
+        points,
         timeframe_seconds=timeframe_seconds,
-        config=default_regime_runtime_config().blocks,
     )
-    points_with_blocks = _attach_block_ids(points, block_ids)
     payload = _build_regime_payload(
         points_with_blocks,
+        blocks,
         min_low=min_low,
         max_high=max_high,
         timeframe_seconds=timeframe_seconds,
@@ -669,14 +675,6 @@ def build_regime_overlays(
         include_regime_blocks=True,
         include_regime_points=False,
     )
-    if include_change_markers:
-        change_epochs = detect_regime_changes(blocks)
-        logger.debug(
-            "regime_overlay_change_markers | points=%s | changes=%s | epochs=%s",
-            len(points_with_blocks),
-            len(change_epochs),
-            change_epochs[:12],
-        )
     overlays = [build_overlay("regime_overlay", payload)]
     for lens in ("expansion", "liquidity", "volatility"):
         boxes = _build_lens_boxes(

@@ -77,6 +77,7 @@ class IndicatorExecutionEngine:
         self._detail_defs: Dict[str, Dict[str, DetailDefinition]] = {}
         self._guard_config = guard_config or IndicatorGuardConfig.disabled()
         self._guard_state_by_id: Dict[str, Dict[str, Any]] = {}
+        self._last_outputs_by_ref: Dict[OutputRef, RuntimeOutput] = {}
         for indicator in indicators:
             runtime_spec = getattr(indicator, "runtime_spec", None)
             if runtime_spec is None:
@@ -121,6 +122,7 @@ class IndicatorExecutionEngine:
         bar: object,
         bar_time: datetime,
         include_overlays: bool = True,
+        include_details: bool = True,
     ) -> EngineFrame:
         by_ref: Dict[OutputRef, RuntimeOutput] = {}
         flat: Dict[str, RuntimeOutput] = {}
@@ -155,24 +157,26 @@ class IndicatorExecutionEngine:
                 by_ref[ref] = copied
                 flat[output_ref_key(indicator_id, output_name)] = copied
 
-            detail_started = time.perf_counter()
-            details = dict(indicator.detail_snapshot())
-            detail_time_ms = max((time.perf_counter() - detail_started) * 1000.0, 0.0)
-            declared_details = self._detail_defs[indicator_id]
-            if set(details.keys()) != set(declared_details.keys()):
-                raise RuntimeError(
-                    "indicator_detail_invalid: detail presence mismatch "
-                    f"indicator_id={indicator_id} declared={sorted(declared_details.keys())} returned={sorted(details.keys())}"
-                )
-            for detail_name, definition in declared_details.items():
-                runtime_detail = details[detail_name]
-                validate_runtime_detail(
-                    definition=definition,
-                    detail=runtime_detail,
-                    bar_time=bar_time,
-                    dependency_inputs=inputs,
-                )
-                flat_details[output_ref_key(indicator_id, detail_name)] = runtime_detail.copy()
+            detail_time_ms = 0.0
+            if include_details:
+                detail_started = time.perf_counter()
+                details = dict(indicator.detail_snapshot())
+                detail_time_ms = max((time.perf_counter() - detail_started) * 1000.0, 0.0)
+                declared_details = self._detail_defs[indicator_id]
+                if set(details.keys()) != set(declared_details.keys()):
+                    raise RuntimeError(
+                        "indicator_detail_invalid: detail presence mismatch "
+                        f"indicator_id={indicator_id} declared={sorted(declared_details.keys())} returned={sorted(details.keys())}"
+                    )
+                for detail_name, definition in declared_details.items():
+                    runtime_detail = details[detail_name]
+                    validate_runtime_detail(
+                        definition=definition,
+                        detail=runtime_detail,
+                        bar_time=bar_time,
+                        dependency_inputs=inputs,
+                    )
+                    flat_details[output_ref_key(indicator_id, detail_name)] = runtime_detail.copy()
 
             overlay_time_ms = 0.0
             overlay_count = 0
@@ -273,10 +277,134 @@ class IndicatorExecutionEngine:
                         execution_time_ms=total_time_ms,
                     )
                 )
+        self._last_outputs_by_ref = dict(by_ref)
         return EngineFrame(
             outputs=flat,
             overlays=flat_overlays,
             details=flat_details,
+            guard_metrics=tuple(guard_metrics),
+            guard_warnings=tuple(guard_warnings),
+        )
+
+    def snapshot_overlays(self, *, bar_time: datetime) -> EngineFrame:
+        """Build overlay snapshots from already-advanced indicator state."""
+
+        flat_overlays: Dict[str, RuntimeOverlay] = {}
+        guard_metrics: list[IndicatorGuardMetric] = []
+        guard_warnings: list[IndicatorGuardWarning] = []
+        for indicator_id in self._order:
+            indicator = self._indicators_by_id[indicator_id]
+            runtime_spec = self._runtime_specs_by_id[indicator_id]
+            try:
+                inputs = {ref: self._last_outputs_by_ref[ref] for ref in runtime_spec.dependencies}
+            except KeyError as exc:
+                raise RuntimeError(
+                    "indicator_overlay_snapshot_failed: dependency output missing "
+                    f"indicator_id={indicator_id} dependency={exc.args[0]}"
+                ) from None
+
+            overlay_started = time.perf_counter()
+            overlays = dict(indicator.overlay_snapshot())
+            overlay_time_ms = max((time.perf_counter() - overlay_started) * 1000.0, 0.0)
+            declared_overlays = self._overlay_defs[indicator_id]
+            if set(overlays.keys()) != set(declared_overlays.keys()):
+                raise RuntimeError(
+                    "indicator_overlay_invalid: overlay presence mismatch "
+                    f"indicator_id={indicator_id} declared={sorted(declared_overlays.keys())} returned={sorted(overlays.keys())}"
+                )
+
+            overlay_count = 0
+            overlay_points = 0
+            overlay_payload_bytes = 0
+            overlay_suppressed = False
+            suppressed_overlay_names: tuple[str, ...] = ()
+            ready_overlay_names: list[str] = []
+            for overlay_name, definition in declared_overlays.items():
+                runtime_overlay = overlays[overlay_name]
+                validate_runtime_overlay(
+                    definition=definition,
+                    overlay=runtime_overlay,
+                    bar_time=bar_time,
+                    dependency_inputs=inputs,
+                )
+                copied_overlay = runtime_overlay.copy()
+                if copied_overlay.ready:
+                    ready_overlay_names.append(overlay_name)
+                    overlay_count += 1
+                    overlay_points += self._overlay_points(copied_overlay.value)
+                    overlay_payload_bytes += self._payload_size_bytes(copied_overlay.value)
+                overlays[overlay_name] = copied_overlay
+
+            hard_reasons = self._hard_overlay_reasons(
+                overlay_points=overlay_points,
+                overlay_payload_bytes=overlay_payload_bytes,
+            )
+            if hard_reasons and ready_overlay_names:
+                overlay_suppressed = True
+                suppressed_overlay_names = tuple(sorted(ready_overlay_names))
+                for overlay_name in ready_overlay_names:
+                    overlays[overlay_name] = RuntimeOverlay(
+                        bar_time=bar_time,
+                        ready=False,
+                        value={},
+                    )
+
+            for overlay_name in declared_overlays.keys():
+                flat_overlays[output_ref_key(indicator_id, overlay_name)] = overlays[overlay_name]
+
+            if hard_reasons:
+                guard_warnings.append(
+                    self._overlay_suppressed_warning(
+                        runtime_spec=runtime_spec,
+                        overlay_points=overlay_points,
+                        overlay_payload_bytes=overlay_payload_bytes,
+                        reasons=hard_reasons,
+                        overlay_names=suppressed_overlay_names,
+                    )
+                )
+            else:
+                if self._guard_config.enabled and overlay_points > int(self._guard_config.overlay_points_soft_limit):
+                    guard_warnings.append(
+                        self._overlay_points_warning(
+                            runtime_spec=runtime_spec,
+                            overlay_points=overlay_points,
+                        )
+                    )
+                if self._guard_config.enabled and overlay_payload_bytes > int(
+                    self._guard_config.overlay_payload_soft_limit_bytes
+                ):
+                    guard_warnings.append(
+                        self._overlay_payload_warning(
+                            runtime_spec=runtime_spec,
+                            overlay_payload_bytes=overlay_payload_bytes,
+                        )
+                    )
+
+            guard_metrics.append(
+                IndicatorGuardMetric(
+                    indicator_id=indicator_id,
+                    manifest_type=runtime_spec.manifest_type,
+                    version=runtime_spec.version,
+                    execution_time_ms=round(overlay_time_ms, 4),
+                    overlay_time_ms=round(overlay_time_ms, 4),
+                    overlay_count=overlay_count,
+                    overlay_points=overlay_points,
+                    overlay_payload_bytes=overlay_payload_bytes,
+                    overlay_suppressed=overlay_suppressed,
+                )
+            )
+            if self._should_warn_on_time_budget(indicator_id=indicator_id, execution_time_ms=overlay_time_ms):
+                guard_warnings.append(
+                    self._time_budget_warning(
+                        runtime_spec=runtime_spec,
+                        execution_time_ms=overlay_time_ms,
+                    )
+                )
+
+        return EngineFrame(
+            outputs={},
+            overlays=flat_overlays,
+            details={},
             guard_metrics=tuple(guard_metrics),
             guard_warnings=tuple(guard_warnings),
         )
