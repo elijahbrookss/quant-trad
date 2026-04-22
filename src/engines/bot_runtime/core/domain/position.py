@@ -55,6 +55,10 @@ class LadderPosition:
     short_requires_borrow: bool = False
     instrument: Optional[Dict[str, Any]] = None  # For margin-based validation
     execution_profile: Optional[SeriesExecutionProfile] = None
+    signal_id: Optional[str] = None
+    decision_id: Optional[str] = None
+    strategy_id: Optional[str] = None
+    bar_time: Optional[datetime] = None
     moved_to_breakeven: bool = False
     closed_at: Optional[datetime] = None
     trade_id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -552,6 +556,10 @@ class LadderPosition:
             "trade_id": self.trade_id,
             "created_at": self.created_at,
             "entry_time": isoformat(self.entry_time),
+            "bar_time": isoformat(self.bar_time or self.entry_time),
+            "strategy_id": self.strategy_id,
+            "signal_id": self.signal_id,
+            "decision_id": self.decision_id,
             "entry_price": round(self.entry_price, 4),
             "entry_order": dict(self.entry_order or {}),
             "entry_outcome": dict(self.entry_outcome or {}),
@@ -638,4 +646,3 @@ class LadderPosition:
             "bars_held": self.bars_held,
             "pre_entry_context": dict(self.pre_entry_context or {}),
         }
-

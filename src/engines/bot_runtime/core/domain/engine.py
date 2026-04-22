@@ -341,6 +341,43 @@ class LadderRiskEngine:
     def _new_trade_id() -> str:
         return str(uuid.uuid4())
 
+    def _entry_request_id(self, candle: Candle, direction: str) -> str:
+        bar_time = candle.time.isoformat() if getattr(candle, "time", None) is not None else ""
+        run_id = getattr(self, "run_id", None) or self.template.get("run_id") or ""
+        strategy_id = getattr(self, "strategy_id", None) or self.template.get("strategy_id") or ""
+        timeframe = self.template.get("timeframe") or self.instrument.get("timeframe") or ""
+        instrument_id = self.instrument.get("id") or ""
+        symbol = self.instrument.get("symbol") or ""
+        decision_id = getattr(self, "last_decision_id", None) or ""
+        signal_id = getattr(self, "last_signal_id", None) or ""
+        stable_key = "|".join(
+            str(part or "")
+            for part in (
+                "entry_request",
+                run_id,
+                strategy_id,
+                instrument_id,
+                symbol,
+                timeframe,
+                bar_time,
+                direction,
+                decision_id,
+                signal_id,
+            )
+        )
+        return f"entry_request:{uuid.uuid5(uuid.NAMESPACE_URL, stable_key)}"
+
+    @staticmethod
+    def _entry_request_rejection_detail(
+        *,
+        entry_request_id: str,
+        detail: Optional[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        payload = dict(detail or {})
+        payload.setdefault("entry_request_id", entry_request_id)
+        payload.setdefault("attempt_id", entry_request_id)
+        return payload
+
     def _normalize_qty(self, requested_qty: float):
         return normalize_qty_with_constraints(self.amount_constraints, requested_qty)
 
@@ -416,6 +453,7 @@ class LadderRiskEngine:
         )
 
     def build_entry_request(self, candle: Candle, direction: str) -> EntryRequest:
+        entry_request_id = self._entry_request_id(candle, direction)
         atr_at_entry = candle.atr if self._has_valid_atr(candle.atr) else None
         r_ticks = self._compute_r_ticks(candle)
 
@@ -439,6 +477,7 @@ class LadderRiskEngine:
             return EntryRequest(
                 trade_id=None,
                 order_intent_id=None,
+                entry_request_id=entry_request_id,
                 direction=direction,
                 requested_qty=float(capped_qty),
                 qty_raw=float(capped_qty),
@@ -454,16 +493,28 @@ class LadderRiskEngine:
                 validation=EntryValidation(
                     ok=False,
                     rejection_reason="MARGIN_CALCULATION_FAILED",
-                    rejection_detail=margin_info,
+                    rejection_detail=self._entry_request_rejection_detail(
+                        entry_request_id=entry_request_id,
+                        detail=margin_info,
+                    ),
                 ),
                 margin_info=margin_info,
                 was_margin_capped=was_margin_capped,
             )
 
         if capped_qty <= 0:
-            rejection_detail = margin_info or {"risk_qty": risk_based_qty}
+            rejection_detail = self._entry_request_rejection_detail(
+                entry_request_id=entry_request_id,
+                detail=margin_info or {"risk_qty": risk_based_qty},
+            )
+            rejection_reason = "QTY_CAPPED_TO_ZERO"
+            if margin_info and (
+                margin_info.get("reason") == "no_available_collateral"
+                or float(margin_info.get("max_qty_by_margin") or 0.0) <= 0.0
+            ):
+                rejection_reason = "WALLET_INSUFFICIENT_MARGIN"
             context = self.runtime_log_context(
-                reason="QTY_CAPPED_TO_ZERO",
+                reason=rejection_reason,
                 risk_qty=risk_based_qty,
                 capped_qty=capped_qty,
                 was_margin_capped=was_margin_capped,
@@ -488,6 +539,7 @@ class LadderRiskEngine:
             return EntryRequest(
                 trade_id=None,
                 order_intent_id=None,
+                entry_request_id=entry_request_id,
                 direction=direction,
                 requested_qty=float(capped_qty),
                 qty_raw=float(capped_qty),
@@ -502,7 +554,7 @@ class LadderRiskEngine:
                 intent=None,
                 validation=EntryValidation(
                     ok=False,
-                    rejection_reason="QTY_CAPPED_TO_ZERO",
+                    rejection_reason=rejection_reason,
                     rejection_detail=rejection_detail,
                 ),
                 margin_info=margin_info,
@@ -523,6 +575,7 @@ class LadderRiskEngine:
             return EntryRequest(
                 trade_id=None,
                 order_intent_id=None,
+                entry_request_id=entry_request_id,
                 direction=direction,
                 requested_qty=requested_qty,
                 qty_raw=qty_raw,
@@ -538,7 +591,10 @@ class LadderRiskEngine:
                 validation=EntryValidation(
                     ok=False,
                     rejection_reason=rejection_reason,
-                    rejection_detail=rejection_detail,
+                    rejection_detail=self._entry_request_rejection_detail(
+                        entry_request_id=entry_request_id,
+                        detail=rejection_detail,
+                    ),
                 ),
                 margin_info=margin_info,
                 was_margin_capped=was_margin_capped,
@@ -565,12 +621,14 @@ class LadderRiskEngine:
             metadata={
                 "direction": direction,
                 "symbol": self.instrument.get("symbol"),
+                "entry_request_id": entry_request_id,
             },
         )
 
         return EntryRequest(
             trade_id=trade_id,
             order_intent_id=order_intent_id,
+            entry_request_id=entry_request_id,
             direction=direction,
             requested_qty=requested_qty,
             qty_raw=qty_raw,
@@ -723,7 +781,13 @@ class LadderRiskEngine:
                 events=events,
                 settlement_payloads=settlement_payloads,
                 rejection_reason="MIN_NOTIONAL_NOT_MET",
-                rejection_detail={"notional": notional, "min_notional": self.min_notional},
+                rejection_detail={
+                    "notional": notional,
+                    "min_notional": self.min_notional,
+                    "entry_request_id": pending.request.entry_request_id,
+                    "attempt_id": pending.request.entry_request_id,
+                    "order_request_id": pending.order_intent_id,
+                },
             )
 
         base_currency, quote_currency = self._resolve_base_quote()
@@ -744,14 +808,20 @@ class LadderRiskEngine:
                 )
             )
             if not settled:
+                settlement_detail = dict(self.last_rejection_detail or {})
+                settlement_detail.pop("trade_id", None)
+                settlement_detail.setdefault("entry_request_id", pending.request.entry_request_id)
+                settlement_detail.setdefault("attempt_id", pending.request.entry_request_id)
+                settlement_detail.setdefault("settlement_attempt_id", pending.trade_id)
+                settlement_detail.setdefault("order_request_id", pending.order_intent_id)
                 return EntryFillResult(
                     status="rejected",
                     pending=None,
                     position=None,
                     events=events,
                     settlement_payloads=settlement_payloads,
-                    rejection_reason="ENTRY_SETTLEMENT_FAILED",
-                    rejection_detail={"trade_id": pending.trade_id},
+                    rejection_reason=self.last_rejection_reason or "ENTRY_SETTLEMENT_FAILED",
+                    rejection_detail=settlement_detail,
                 )
 
         stop_price = self._calculate_stop_price(avg_fill_price, pending.direction, pending.r_ticks)
@@ -1020,6 +1090,10 @@ class LadderRiskEngine:
             short_requires_borrow=bool(self.short_requires_borrow),
             instrument=self.instrument if use_wallet_execution else None,
             execution_profile=execution_profile if use_wallet_execution else None,
+            signal_id=getattr(self, "last_signal_id", None),
+            decision_id=getattr(self, "last_decision_id", None),
+            strategy_id=str(self.strategy_id) if getattr(self, "strategy_id", None) else None,
+            bar_time=candle.time,
             atr_at_entry=atr_at_entry,
             r_multiple_at_entry=r_multiple_at_entry,
             r_value=r_value,

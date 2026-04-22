@@ -52,13 +52,16 @@ class EntryExecutionCoordinator:
         request = engine.build_entry_request(candle, direction)
         if not request.validation.ok:
             engine.last_rejection_reason = request.validation.rejection_reason
-            engine.last_rejection_detail = request.validation.rejection_detail
+            engine.last_rejection_detail = self._entry_rejection_detail(
+                request,
+                request.validation.rejection_detail,
+            )
             return None
 
         intent = request.intent
         if intent is None:
             engine.last_rejection_reason = "ENTRY_REQUEST_INVALID"
-            engine.last_rejection_detail = {"reason": "intent_missing"}
+            engine.last_rejection_detail = self._entry_rejection_detail(request, {"reason": "intent_missing"})
             context = build_log_context(
                 symbol=engine.instrument.get("symbol"),
                 reason="ENTRY_REQUEST_INVALID",
@@ -76,7 +79,10 @@ class EntryExecutionCoordinator:
         )
         if rejection:
             engine.last_rejection_reason = rejection.reason
-            engine.last_rejection_detail = {"requested_qty": request.requested_qty, **(rejection.metadata or {})}
+            engine.last_rejection_detail = self._entry_rejection_detail(
+                request,
+                {"requested_qty": request.requested_qty, **(rejection.metadata or {})},
+            )
             context = build_log_context(
                 symbol=engine.instrument.get("symbol"),
                 reason=rejection.reason,
@@ -124,7 +130,7 @@ class EntryExecutionCoordinator:
 
         if outcome.status != "filled":
             engine.last_rejection_reason = "ENTRY_NOT_FILLED"
-            engine.last_rejection_detail = {"status": outcome.status}
+            engine.last_rejection_detail = self._entry_rejection_detail(request, {"status": outcome.status})
             context = build_log_context(
                 symbol=engine.instrument.get("symbol"),
                 order_id=request.order_intent_id,
@@ -158,7 +164,7 @@ class EntryExecutionCoordinator:
         )
         if rejection:
             engine.last_rejection_reason = rejection.reason
-            engine.last_rejection_detail = rejection.metadata
+            engine.last_rejection_detail = self._entry_rejection_detail(request, rejection.metadata)
             context = build_log_context(
                 symbol=engine.instrument.get("symbol"),
                 reason=rejection.reason,
@@ -187,7 +193,7 @@ class EntryExecutionCoordinator:
             return None
         self.pending_entry = None
         engine.last_rejection_reason = "ENTRY_NOT_FILLED"
-        engine.last_rejection_detail = {"status": outcome.status}
+        engine.last_rejection_detail = self._entry_rejection_detail(request, {"status": outcome.status})
         context = build_log_context(
             symbol=engine.instrument.get("symbol"),
             order_id=pending.order_intent_id,
@@ -224,6 +230,15 @@ class EntryExecutionCoordinator:
         self.pending_entry = None
         return None
 
+    @staticmethod
+    def _entry_rejection_detail(request: "EntryRequest", metadata: Optional[dict]) -> dict:
+        detail = dict(metadata or {})
+        detail.setdefault("entry_request_id", request.entry_request_id)
+        detail.setdefault("attempt_id", request.entry_request_id)
+        if request.order_intent_id:
+            detail.setdefault("order_request_id", str(request.order_intent_id))
+        return detail
+
     def _apply_entry_fallback(
         self,
         candle: Candle,
@@ -253,7 +268,7 @@ class EntryExecutionCoordinator:
             )
             if rejection:
                 engine.last_rejection_reason = rejection.reason
-                engine.last_rejection_detail = rejection.metadata
+                engine.last_rejection_detail = self._entry_rejection_detail(pending.request, rejection.metadata)
                 context = build_log_context(
                     symbol=engine.instrument.get("symbol"),
                     reason=rejection.reason,
@@ -286,7 +301,7 @@ class EntryExecutionCoordinator:
             }
         )
         engine.last_rejection_reason = "ENTRY_UNFILLED"
-        engine.last_rejection_detail = asdict(outcome_payload)
+        engine.last_rejection_detail = self._entry_rejection_detail(pending.request, asdict(outcome_payload))
         context = build_log_context(
             symbol=engine.instrument.get("symbol"),
             order_id=pending.order_intent_id,

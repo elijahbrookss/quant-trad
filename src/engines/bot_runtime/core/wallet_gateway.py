@@ -174,31 +174,33 @@ class BaseWalletGateway:
     @staticmethod
     def _event_trade_id(event: RuntimeEvent | Mapping[str, Any]) -> Optional[str]:
         if isinstance(event, RuntimeEvent):
-            trade_id = event.payload.get("trade_id")
+            trade_id = getattr(event.context, "trade_id", None)
             return str(trade_id) if trade_id else None
         if not isinstance(event, Mapping):
             return None
-        payload = event.get("payload")
-        if not isinstance(payload, Mapping):
-            return None
+        payload = BaseWalletGateway._event_payload(event)
         trade_id = payload.get("trade_id")
         return str(trade_id) if trade_id else None
 
     @staticmethod
     def _event_payload(event: RuntimeEvent | Mapping[str, Any]) -> Dict[str, Any]:
         if isinstance(event, RuntimeEvent):
-            return dict(event.payload or {})
+            return dict(event.context.to_dict())
         if not isinstance(event, Mapping):
             return {}
-        payload = event.get("payload")
+        payload = event.get("context")
         if isinstance(payload, Mapping):
             return dict(payload)
+        payload = event.get("payload")
+        if isinstance(payload, Mapping):
+            nested = payload.get("context") if isinstance(payload.get("context"), Mapping) else payload
+            return dict(nested)
         return {}
 
     @staticmethod
     def _event_correlation_id(event: RuntimeEvent | Mapping[str, Any]) -> Optional[str]:
         payload = BaseWalletGateway._event_payload(event)
-        payload_correlation = str(payload.get("correlation_id") or "").strip()
+        payload_correlation = str(payload.get("wallet_correlation_id") or "").strip()
         if payload_correlation:
             return payload_correlation
         if isinstance(event, RuntimeEvent):
@@ -655,7 +657,7 @@ class BaseWalletGateway:
                         event_id=str(item.event_id),
                         event_type=str(item.event_name.value),
                         timestamp=item.event_ts.isoformat().replace("+00:00", "Z"),
-                        payload=dict(item.payload or {}),
+                        payload=dict(item.context.to_dict()),
                     )
                 )
                 continue
@@ -677,7 +679,7 @@ class BaseWalletGateway:
                     event_id=str(item.get("event_id") or ""),
                     event_type=str(event_name),
                     timestamp=str(timestamp or ""),
-                    payload=dict(item.get("payload") or {}),
+                    payload=BaseWalletGateway._event_payload(item),
                 )
             )
         return normalised

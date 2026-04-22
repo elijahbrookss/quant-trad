@@ -383,7 +383,7 @@ def _normalize_wallet_projection_event(event: Any) -> Tuple[Optional[str], Dict[
     if isinstance(event, WalletEvent):
         return str(event.event_type or ""), dict(event.payload or {})
     if isinstance(event, RuntimeEvent):
-        payload = dict(event.payload or {})
+        payload = dict(event.context.to_dict())
         name = event.event_name
         if name == RuntimeEventName.WALLET_INITIALIZED:
             return "INITIALIZE", payload
@@ -395,7 +395,14 @@ def _normalize_wallet_projection_event(event: Any) -> Tuple[Optional[str], Dict[
             return "EXIT_FILL", payload
         return None, payload
     if isinstance(event, Mapping):
-        payload = dict(event.get("payload") or {})
+        payload = event.get("context")
+        if isinstance(payload, Mapping):
+            payload = dict(payload)
+        else:
+            payload = dict(event.get("payload") or {})
+            nested = payload.get("context")
+            if isinstance(nested, Mapping):
+                payload = dict(nested)
         raw_name = str(event.get("event_name") or event.get("event_type") or "").strip()
         if raw_name in {RuntimeEventName.WALLET_INITIALIZED.value, "INITIALIZE"}:
             return "INITIALIZE", payload
