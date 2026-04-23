@@ -2,6 +2,7 @@
 
 from .models import (
     Base,
+    REQUIRED_BOT_RUN_EVENT_INDEXES,
     ATMTemplateRecord,
     BotRecord,
     BotTradeEventRecord,
@@ -9,7 +10,6 @@ from .models import (
     BotRunLifecycleEventRecord,
     BotRunLifecycleRecord,
     BotRunStepRecord,
-    BotRunViewStateRecord,
     BotlensBackendEventRecord,
     BotlensBackendMetricSampleRecord,
     AsyncJobRecord,
@@ -28,6 +28,7 @@ from .session import Database, db
 
 __all__ = [
     "Base",
+    "REQUIRED_BOT_RUN_EVENT_INDEXES",
     "Database",
     "ATMTemplateRecord",
     "BotRecord",
@@ -36,7 +37,6 @@ __all__ = [
     "BotRunLifecycleEventRecord",
     "BotRunLifecycleRecord",
     "BotRunStepRecord",
-    "BotRunViewStateRecord",
     "BotlensBackendEventRecord",
     "BotlensBackendMetricSampleRecord",
     "AsyncJobRecord",

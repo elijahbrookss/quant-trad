@@ -44,16 +44,13 @@ from .observability import (
 from .presets import delete_symbol_preset, list_symbol_presets, upsert_symbol_preset
 from .runs import get_bot_run, list_bot_runs, upsert_bot_run
 from .runtime_events import (
-    get_latest_bot_run_view_state,
     get_latest_bot_runtime_event,
     get_latest_bot_runtime_run_id,
-    list_bot_run_view_states,
     list_bot_runtime_events,
     record_bot_run_step,
     record_bot_run_steps_batch,
     record_bot_runtime_event,
     record_bot_runtime_events_batch,
-    upsert_bot_run_view_state,
     update_bot_runtime_status,
 )
 from .strategies import (
@@ -107,10 +104,8 @@ __all__ = [
     "get_instrument",
     "get_latest_bot_run_lifecycle",
     "get_strategy_variant",
-    "get_latest_bot_run_view_state",
     "get_latest_bot_runtime_event",
     "get_latest_bot_runtime_run_id",
-    "list_bot_run_view_states",
     "list_bot_run_lifecycle_events",
     "list_bot_runs",
     "list_bot_runtime_events",
@@ -135,7 +130,6 @@ __all__ = [
     "record_observability_metric_samples_batch",
     "record_bot_runtime_event",
     "record_bot_runtime_events_batch",
-    "upsert_bot_run_view_state",
     "record_bot_trade",
     "record_bot_trade_event",
     "strategies_for_indicator",

@@ -19,12 +19,26 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    and_,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
 
 
 Base = declarative_base()
+
+
+REQUIRED_BOT_RUN_EVENT_INDEXES = frozenset(
+    {
+        "ix_portal_bot_run_events_bot_run_seq_id",
+        "ix_portal_bot_run_events_bot_run_series_seq_id",
+        "ix_portal_bot_run_events_candle_series_bar_time_seq_id",
+        "ix_portal_bot_run_events_bot_run_event_name_seq_id",
+        "ix_portal_bot_run_events_bot_run_correlation_seq_id",
+        "ix_portal_bot_run_events_bot_run_root_seq_id",
+        "ix_portal_bot_run_events_bot_run_bar_time_seq_id",
+    }
+)
 
 
 class IndicatorRecord(Base):
@@ -690,49 +704,15 @@ class BotRunStepRecord(Base):
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
         }
 
-
-
-
-class BotRunViewStateRecord(Base):
-    """Materialized BotLens view state for run/bootstrap reads."""
-
-    __tablename__ = "portal_bot_run_view_state"
-    __table_args__ = (
-        UniqueConstraint("bot_id", "run_id", "series_key", name="uq_portal_bot_run_view_state_scope"),
-    )
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(String(64), nullable=False)
-    bot_id = Column(String(64), nullable=False)
-    series_key = Column(String(255), nullable=False)
-    seq = Column(Integer, nullable=False)
-    schema_version = Column(Integer, nullable=False, default=1)
-    payload = Column(JSONB, nullable=False, default=dict)
-    event_time = Column(DateTime, nullable=True)
-    known_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": int(self.id or 0),
-            "run_id": self.run_id,
-            "bot_id": self.bot_id,
-            "series_key": self.series_key,
-            "seq": int(self.seq or 0),
-            "schema_version": int(self.schema_version or 1),
-            "payload": dict(self.payload or {}),
-            "event_time": (self.event_time.isoformat() + "Z") if self.event_time else None,
-            "known_at": (self.known_at or datetime.utcnow()).isoformat() + "Z",
-            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
-        }
-
-
 class BotRunEventRecord(Base):
     """Durable runtime event log for BotLens snapshot+stream delivery."""
 
     __tablename__ = "portal_bot_run_events"
     __table_args__ = (
         UniqueConstraint("event_id", name="uq_portal_bot_run_events_event_id"),
+        Index("ix_portal_bot_run_events_bot_run_seq_id", "bot_id", "run_id", "seq", "id"),
+        Index("ix_portal_bot_run_events_bot_run_series_seq_id", "bot_id", "run_id", "series_key", "seq", "id"),
+        Index("ix_portal_bot_run_events_bot_run_event_name_seq_id", "bot_id", "run_id", "event_name", "seq", "id"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -744,6 +724,18 @@ class BotRunEventRecord(Base):
     critical = Column(Boolean, nullable=False, default=False)
     schema_version = Column(Integer, nullable=False, default=1)
     payload = Column(JSONB, nullable=False, default=dict)
+    event_name = Column(String(128), nullable=True)
+    series_key = Column(String(255), nullable=True)
+    correlation_id = Column(String(128), nullable=True)
+    root_id = Column(String(128), nullable=True)
+    bar_time = Column(DateTime, nullable=True)
+    instrument_id = Column(String(128), nullable=True)
+    symbol = Column(String(64), nullable=True)
+    timeframe = Column(String(32), nullable=True)
+    signal_id = Column(String(128), nullable=True)
+    decision_id = Column(String(128), nullable=True)
+    trade_id = Column(String(128), nullable=True)
+    reason_code = Column(String(128), nullable=True)
     event_time = Column(DateTime, nullable=True)
     known_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -759,10 +751,68 @@ class BotRunEventRecord(Base):
             "critical": bool(self.critical),
             "schema_version": int(self.schema_version or 1),
             "payload": dict(self.payload or {}),
+            "event_name": self.event_name,
+            "series_key": self.series_key,
+            "correlation_id": self.correlation_id,
+            "root_id": self.root_id,
+            "bar_time": (self.bar_time.isoformat() + "Z") if self.bar_time else None,
+            "instrument_id": self.instrument_id,
+            "symbol": self.symbol,
+            "timeframe": self.timeframe,
+            "signal_id": self.signal_id,
+            "decision_id": self.decision_id,
+            "trade_id": self.trade_id,
+            "reason_code": self.reason_code,
             "event_time": (self.event_time.isoformat() + "Z") if self.event_time else None,
             "known_at": (self.known_at or datetime.utcnow()).isoformat() + "Z",
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
         }
+
+
+Index(
+    "ix_portal_bot_run_events_candle_series_bar_time_seq_id",
+    BotRunEventRecord.bot_id,
+    BotRunEventRecord.run_id,
+    BotRunEventRecord.series_key,
+    BotRunEventRecord.bar_time,
+    BotRunEventRecord.seq,
+    BotRunEventRecord.id,
+    postgresql_where=and_(
+        BotRunEventRecord.event_name == "CANDLE_OBSERVED",
+        BotRunEventRecord.series_key.isnot(None),
+        BotRunEventRecord.bar_time.isnot(None),
+    ),
+)
+
+Index(
+    "ix_portal_bot_run_events_bot_run_correlation_seq_id",
+    BotRunEventRecord.bot_id,
+    BotRunEventRecord.run_id,
+    BotRunEventRecord.correlation_id,
+    BotRunEventRecord.seq,
+    BotRunEventRecord.id,
+    postgresql_where=BotRunEventRecord.correlation_id.isnot(None),
+)
+
+Index(
+    "ix_portal_bot_run_events_bot_run_root_seq_id",
+    BotRunEventRecord.bot_id,
+    BotRunEventRecord.run_id,
+    BotRunEventRecord.root_id,
+    BotRunEventRecord.seq,
+    BotRunEventRecord.id,
+    postgresql_where=BotRunEventRecord.root_id.isnot(None),
+)
+
+Index(
+    "ix_portal_bot_run_events_bot_run_bar_time_seq_id",
+    BotRunEventRecord.bot_id,
+    BotRunEventRecord.run_id,
+    BotRunEventRecord.bar_time,
+    BotRunEventRecord.seq,
+    BotRunEventRecord.id,
+    postgresql_where=BotRunEventRecord.bar_time.isnot(None),
+)
 
 
 class BotlensBackendEventRecord(Base):

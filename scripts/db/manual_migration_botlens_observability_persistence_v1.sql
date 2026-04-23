@@ -70,8 +70,17 @@ CREATE INDEX IF NOT EXISTS ix_botlens_backend_metric_samples_v1_metric_name_obse
 CREATE INDEX IF NOT EXISTS ix_botlens_backend_metric_samples_v1_run_id_observed_at
     ON observability_metrics.botlens_backend_metric_samples_v1 (run_id, observed_at);
 
-CREATE INDEX IF NOT EXISTS ix_portal_bot_run_events_payload_series_key
-    ON public.portal_bot_run_events ((payload ->> 'series_key'));
+CREATE INDEX IF NOT EXISTS ix_portal_bot_run_events_bot_run_seq_id
+    ON public.portal_bot_run_events (bot_id, run_id, seq, id);
+
+CREATE INDEX IF NOT EXISTS ix_portal_bot_run_events_bot_run_series_seq_id
+    ON public.portal_bot_run_events (bot_id, run_id, series_key, seq, id);
+
+CREATE INDEX IF NOT EXISTS ix_portal_bot_run_events_candle_series_bar_time_seq_id
+    ON public.portal_bot_run_events (bot_id, run_id, series_key, bar_time, seq, id)
+    WHERE event_name = 'CANDLE_OBSERVED'
+      AND series_key IS NOT NULL
+      AND bar_time IS NOT NULL;
 
 CREATE OR REPLACE VIEW runtime_state.bot_runtime_events_v1 AS
 SELECT
@@ -87,28 +96,31 @@ SELECT
     e.known_at,
     e.created_at,
     e.payload,
-    NULLIF(e.payload ->> 'series_key', '') AS series_key,
-    NULLIF(e.payload ->> 'bridge_session_id', '') AS bridge_session_id,
+    e.series_key,
+    NULLIF(e.payload #>> '{context,bridge_session_id}', '') AS bridge_session_id,
     CASE
-        WHEN NULLIF(e.payload ->> 'bridge_seq', '') ~ '^-?[0-9]+$'
-            THEN (e.payload ->> 'bridge_seq')::INTEGER
+        WHEN NULLIF(e.payload #>> '{context,bridge_seq}', '') ~ '^-?[0-9]+$'
+            THEN (e.payload #>> '{context,bridge_seq}')::INTEGER
         ELSE NULL
     END AS bridge_seq,
     CASE
-        WHEN NULLIF(e.payload ->> 'run_seq', '') ~ '^-?[0-9]+$'
-            THEN (e.payload ->> 'run_seq')::INTEGER
+        WHEN NULLIF(e.payload #>> '{context,run_seq}', '') ~ '^-?[0-9]+$'
+            THEN (e.payload #>> '{context,run_seq}')::INTEGER
         ELSE NULL
     END AS run_seq,
-    NULLIF(e.payload ->> 'instrument_id', '') AS instrument_id,
-    NULLIF(e.payload ->> 'symbol', '') AS symbol,
-    NULLIF(e.payload ->> 'timeframe', '') AS timeframe,
-    NULLIF(e.payload ->> 'event_name', '') AS runtime_event_name,
-    NULLIF(e.payload ->> 'category', '') AS runtime_event_category
+    e.instrument_id,
+    e.symbol,
+    e.timeframe,
+    e.event_name AS runtime_event_name,
+    NULLIF(e.payload #>> '{context,category}', '') AS runtime_event_category,
+    e.root_id,
+    e.correlation_id,
+    e.bar_time,
+    e.signal_id,
+    e.decision_id,
+    e.trade_id,
+    e.reason_code
 FROM public.portal_bot_run_events e;
-
-CREATE OR REPLACE VIEW runtime_state.bot_run_view_state_v1 AS
-SELECT *
-FROM public.portal_bot_run_view_state;
 
 CREATE OR REPLACE VIEW runtime_state.bot_run_lifecycle_v1 AS
 SELECT *

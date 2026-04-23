@@ -12,7 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.schema import CreateSchema, CreateTable
 
-from .models import Base
+from .models import Base, REQUIRED_BOT_RUN_EVENT_INDEXES
 
 
 logger = logging.getLogger(__name__)
@@ -190,6 +190,18 @@ class Database:
                     "Drop the table or rebuild the database to ensure a clean schema."
                 )
 
+        def warn_missing_indexes(name: str, required: set[str] | frozenset[str], *, schema: Optional[str] = None) -> None:
+            existing = {str(index.get("name") or "") for index in inspector.get_indexes(name, schema=schema)}
+            missing = sorted(set(required) - existing)
+            if missing:
+                logger.warning(
+                    "portal_db_required_indexes_missing | schema=%s | table=%s | missing=%s | migration=%s",
+                    schema or "public",
+                    name,
+                    ",".join(missing),
+                    "scripts/db/manual_migration_botlens_runtime_event_storage_efficiency_v2.sql",
+                )
+
         require_table("portal_bot_runs")
         require_table("portal_bot_run_steps")
         require_table("portal_bot_run_lifecycle")
@@ -203,7 +215,6 @@ class Database:
         require_table("portal_strategy_variants")
         require_table("portal_async_jobs")
         require_table("portal_bot_run_events")
-        require_table("portal_bot_run_view_state")
         require_table("botlens_backend_events_v1", schema="observability_events")
         require_table("botlens_backend_metric_samples_v1", schema="observability_metrics")
         assert_columns("portal_bot_run_steps")
@@ -218,9 +229,9 @@ class Database:
         assert_columns("portal_strategy_variants")
         assert_columns("portal_async_jobs")
         assert_columns("portal_bot_run_events")
-        assert_columns("portal_bot_run_view_state")
         assert_columns("botlens_backend_events_v1", schema="observability_events")
         assert_columns("botlens_backend_metric_samples_v1", schema="observability_metrics")
+        warn_missing_indexes("portal_bot_run_events", REQUIRED_BOT_RUN_EVENT_INDEXES)
 
     @property
     def available(self) -> bool:
