@@ -108,6 +108,9 @@ export const StrategyPreviewCharts = ({
           if (!candles.length) {
             throw new Error('No candles returned for preview.')
           }
+          if (!Array.isArray(result?.ui?.overlays)) {
+            throw new Error('Preview overlays are missing.')
+          }
 
           setPreviewState((prev) => ({
             ...prev,
@@ -115,11 +118,7 @@ export const StrategyPreviewCharts = ({
               loading: false,
               error: null,
               candles,
-              overlays: Array.isArray(result?.ui?.overlays)
-                ? result.ui.overlays
-                : Array.isArray(result?.overlays)
-                  ? result.overlays
-                  : [],
+              overlays: result.ui.overlays,
             },
           }))
         } catch (err) {

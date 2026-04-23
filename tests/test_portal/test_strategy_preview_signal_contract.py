@@ -9,6 +9,7 @@ pytest.importorskip("pandas")
 
 import pandas as pd
 
+from engines.bot_runtime.core.domain import StrategySignal
 from engines.indicator_engine.contracts import RuntimeOutput
 from portal.backend.service.strategies.strategy_service import facade, typed_preview
 
@@ -28,6 +29,11 @@ def _single_bar_frame() -> pd.DataFrame:
 
 
 def test_strategy_preview_response_separates_machine_and_ui(monkeypatch) -> None:
+    expected_signal_id = StrategySignal.build_signal_id(
+        decision_id="decision-1",
+        source_type="strategy_preview",
+        source_id="preview-1",
+    )
     selected_artifact = {
         "decision_id": "decision-1",
         "strategy_id": "strategy-1",
@@ -174,7 +180,7 @@ def test_strategy_preview_response_separates_machine_and_ui(monkeypatch) -> None
     instrument_payload = payload["instruments"]["instrument-1"]
     signal = instrument_payload["machine"]["signals"][0]
     assert signal == {
-        "signal_id": "decision-1",
+        "signal_id": expected_signal_id,
         "source_type": "strategy_preview",
         "source_id": "preview-1",
         "decision_id": "decision-1",
@@ -192,9 +198,10 @@ def test_strategy_preview_response_separates_machine_and_ui(monkeypatch) -> None
         "direction": "long",
         "event_key": "breakout_long",
     }
-    assert instrument_payload["signals"] == instrument_payload["machine"]["signals"]
-    assert instrument_payload["decision_artifacts"] == instrument_payload["machine"]["decision_artifacts"]
-    assert instrument_payload["overlays"] == instrument_payload["ui"]["overlays"]
+    assert "signals" not in instrument_payload
+    assert "decision_artifacts" not in instrument_payload
+    assert "rule_matches" not in instrument_payload
+    assert "overlays" not in instrument_payload
     selected_artifact_payload = instrument_payload["machine"]["decision_artifacts"][0]
     assert sorted(selected_artifact_payload["observed_outputs"].keys()) == [
         "indicator-1.balance_breakout",
@@ -216,11 +223,16 @@ def test_strategy_preview_response_separates_machine_and_ui(monkeypatch) -> None
         "poc": 100.25,
     }
     markers = instrument_payload["ui"]["overlays"][-1]["payload"]["markers"]
-    assert markers[0]["signal_id"] == "decision-1"
+    assert markers[0]["signal_id"] == expected_signal_id
     assert markers[0]["source_id"] == "preview-1"
 
 
 def test_strategy_preview_store_returns_signal_detail() -> None:
+    expected_signal_id = StrategySignal.build_signal_id(
+        decision_id="decision-1",
+        source_type="strategy_preview",
+        source_id="preview-1",
+    )
     store = facade.StrategyPreviewStore()
     payload = {
         "preview_id": "preview-1",
@@ -235,7 +247,7 @@ def test_strategy_preview_store_returns_signal_detail() -> None:
                 "machine": {
                     "signals": [
                         {
-                            "signal_id": "decision-1",
+                            "signal_id": expected_signal_id,
                             "source_type": "strategy_preview",
                             "source_id": "preview-1",
                             "decision_id": "decision-1",
@@ -262,26 +274,28 @@ def test_strategy_preview_store_returns_signal_detail() -> None:
                         }
                     ],
                 },
-                "overlays": [
-                    {
-                        "payload": {
-                            "markers": [
-                                {
-                                    "signal_id": "decision-1",
-                                    "time": 1769904000,
-                                }
-                            ]
+                "ui": {
+                    "overlays": [
+                        {
+                            "payload": {
+                                "markers": [
+                                    {
+                                        "signal_id": expected_signal_id,
+                                        "time": 1769904000,
+                                    }
+                                ]
+                            }
                         }
-                    }
-                ],
+                    ],
+                },
             }
         },
     }
 
     store.put(payload)
-    detail = store.get_signal_detail("strategy-1", "preview-1", "decision-1")
+    detail = store.get_signal_detail("strategy-1", "preview-1", expected_signal_id)
 
-    assert detail["signal"]["signal_id"] == "decision-1"
+    assert detail["signal"]["signal_id"] == expected_signal_id
     assert detail["signal"]["source_id"] == "preview-1"
     assert detail["audit"]["decision_artifact"]["rule_id"] == "rule-1"
     assert detail["audit"]["decision_artifact"]["observed_outputs"] == {
@@ -298,4 +312,4 @@ def test_strategy_preview_store_returns_signal_detail() -> None:
             "fields": {"state": "trend"},
         }
     }
-    assert detail["ui"]["markers"] == [{"signal_id": "decision-1", "time": 1769904000}]
+    assert detail["ui"]["markers"] == [{"signal_id": expected_signal_id, "time": 1769904000}]

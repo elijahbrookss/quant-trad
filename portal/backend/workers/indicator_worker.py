@@ -58,6 +58,18 @@ def _worker_identity() -> tuple[str, int, int]:
     return worker_id, index, total
 
 
+def _signal_response_count(payload: Dict[str, Any]) -> int | None:
+    machine_payload = payload.get("machine") if isinstance(payload, dict) else None
+    signals = machine_payload.get("signals") if isinstance(machine_payload, dict) else None
+    return len(signals) if isinstance(signals, list) else None
+
+
+def _signal_overlay_count(payload: Dict[str, Any]) -> int | None:
+    ui_payload = payload.get("ui") if isinstance(payload, dict) else None
+    overlays = ui_payload.get("overlays") if isinstance(ui_payload, dict) else None
+    return len(overlays) if isinstance(overlays, list) else None
+
+
 def _process_signals(payload: Dict[str, Any], *, ctx: IndicatorServiceContext) -> Dict[str, Any]:
     response = generate_signals_for_instance(
         inst_id=str(payload["inst_id"]),
@@ -170,16 +182,8 @@ def main() -> int:
             else:
                 raise RuntimeError(f"unknown_job_type: {job.job_type}")
             complete_job(job.id, result=result if isinstance(result, dict) else {"result": result})
-            signals_count = (
-                len(result.get("signals"))
-                if isinstance(result, dict) and isinstance(result.get("signals"), list)
-                else None
-            )
-            overlays_count = (
-                len(result.get("overlays"))
-                if isinstance(result, dict) and isinstance(result.get("overlays"), list)
-                else None
-            )
+            signals_count = _signal_response_count(result if isinstance(result, dict) else {})
+            overlays_count = _signal_overlay_count(result if isinstance(result, dict) else {})
             logger.info(
                 "indicator_worker_job_succeeded | worker_id=%s job_id=%s job_type=%s duration_ms=%s overlays=%s signals=%s runtime_path=%s",
                 worker_id,

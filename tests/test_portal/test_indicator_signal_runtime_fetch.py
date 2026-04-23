@@ -219,7 +219,7 @@ def test_signal_executor_enriches_contract_fields_from_replay_context(monkeypatc
     )
 
     assert payload["runtime_path"] == SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT
-    event = payload["signals"][0]
+    event = payload["machine"]["signals"][0]
     assert event["signal_id"].startswith("sig_")
     assert event["timeframe_seconds"] == 3600
     assert event["series_key"] == "instrument-1|1h"
@@ -227,8 +227,10 @@ def test_signal_executor_enriches_contract_fields_from_replay_context(monkeypatc
     assert event["known_at"] == "2026-02-01T00:00:00Z"
     assert "pattern_id" not in event
     assert event["metadata"] == {"datasource": "ALPACA", "exchange": "cme"}
-    assert len(payload["overlays"]) == 1
-    overlay = payload["overlays"][0]
+    assert "signals" not in payload
+    assert "overlays" not in payload
+    assert len(payload["ui"]["overlays"]) == 1
+    overlay = payload["ui"]["overlays"][0]
     assert overlay["type"] == "indicator_signal"
     assert overlay["source"] == "signal"
     assert overlay["overlay_name"] == "balance_breakout"
@@ -236,9 +238,6 @@ def test_signal_executor_enriches_contract_fields_from_replay_context(monkeypatc
     assert overlay["payload"]["bubbles"][0]["price"] == 100.5
     assert overlay["payload"]["bubbles"][0]["meta"] == "Balance Breakout"
     assert overlay["payload"]["bubbles"][0]["signal_id"] == event["signal_id"]
-    assert payload["machine"]["signals"] == payload["signals"]
-    assert payload["machine"]["runtime_path"] == payload["runtime_path"]
-    assert payload["ui"]["overlays"] == payload["overlays"]
 
 
 def test_signal_executor_preserves_event_contract_metadata_when_present(monkeypatch) -> None:
@@ -323,7 +322,7 @@ def test_signal_executor_preserves_event_contract_metadata_when_present(monkeypa
         config={},
     )
 
-    event = payload["signals"][0]
+    event = payload["machine"]["signals"][0]
     assert event["signal_id"].startswith("sig_")
     assert event["pattern_id"] == "balance_breakout_v2"
     assert event["series_key"] == "instrument-1|1h"
@@ -349,7 +348,9 @@ def test_signal_executor_preserves_event_contract_metadata_when_present(monkeypa
         "datasource": "ALPACA",
         "exchange": "cme",
     }
-    bubble = payload["overlays"][0]["payload"]["bubbles"][0]
+    assert "signals" not in payload
+    assert "overlays" not in payload
+    bubble = payload["ui"]["overlays"][0]["payload"]["bubbles"][0]
     assert bubble["signal_id"] == event["signal_id"]
     assert bubble["label"] == "Balance Breakout Long"
     assert bubble["meta"] == "VAH 101.25"
@@ -368,5 +369,3 @@ def test_signal_executor_preserves_event_contract_metadata_when_present(monkeypa
             "profile_key": "profile-1",
         },
     }
-    assert payload["machine"]["signals"] == payload["signals"]
-    assert payload["ui"]["overlays"] == payload["overlays"]

@@ -14,7 +14,7 @@ def test_worker_process_signals_rejects_non_engine_runtime_path(monkeypatch) -> 
     monkeypatch.setattr(
         indicator_worker,
         "generate_signals_for_instance",
-        lambda **kwargs: {"signals": [], "runtime_path": "legacy"},
+        lambda **kwargs: {"machine": {"signals": []}, "ui": {"overlays": []}, "runtime_path": "legacy"},
     )
 
     with pytest.raises(RuntimeError, match="runtime_path_mismatch"):
@@ -40,8 +40,8 @@ def test_worker_process_signals_accepts_engine_runtime_path(monkeypatch) -> None
     def _fake_generate_signals_for_instance(**kwargs):
         captured.update(kwargs)
         return {
-            "signals": [],
-            "overlays": [{"type": "indicator_signal", "source": "signal", "payload": {"bubbles": []}}],
+            "machine": {"signals": []},
+            "ui": {"overlays": [{"type": "indicator_signal", "source": "signal", "payload": {"bubbles": []}}]},
             "runtime_path": SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT,
         }
 
@@ -66,5 +66,6 @@ def test_worker_process_signals_accepts_engine_runtime_path(monkeypatch) -> None
         ctx=None,  # unused by monkeypatched generator
     )
     assert payload.get("runtime_path") == SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT
-    assert payload.get("overlays") == [{"type": "indicator_signal", "source": "signal", "payload": {"bubbles": []}}]
+    assert payload.get("machine") == {"signals": []}
+    assert payload.get("ui") == {"overlays": [{"type": "indicator_signal", "source": "signal", "payload": {"bubbles": []}}]}
     assert captured["instrument_id"] == "instrument-1"

@@ -104,11 +104,11 @@ const useStrategyPreview = ({
           return
         }
 
-        const overlays = Array.isArray(instrumentResult?.ui?.overlays)
-          ? instrumentResult.ui.overlays
-          : Array.isArray(instrumentResult?.overlays)
-            ? instrumentResult.overlays
-            : []
+        if (!Array.isArray(instrumentResult?.ui?.overlays)) {
+          onError?.('Strategy preview response is missing ui.overlays for the selected instrument.')
+          return
+        }
+        const overlays = instrumentResult.ui.overlays
 
         const appliedDateRange = Array.isArray(window.dateRange)
           && window.dateRange[0] instanceof Date

@@ -1224,7 +1224,7 @@ class StrategyPreviewStore:
             if not isinstance(instrument_payload, Mapping):
                 continue
             machine_payload = instrument_payload.get("machine")
-            signals = machine_payload.get("signals") if isinstance(machine_payload, Mapping) else instrument_payload.get("signals")
+            signals = machine_payload.get("signals") if isinstance(machine_payload, Mapping) else None
             if not isinstance(signals, list):
                 continue
             matched_signal = next(
@@ -1238,11 +1238,7 @@ class StrategyPreviewStore:
             )
             if matched_signal is None:
                 continue
-            decision_artifacts = (
-                machine_payload.get("decision_artifacts")
-                if isinstance(machine_payload, Mapping)
-                else instrument_payload.get("decision_artifacts")
-            )
+            decision_artifacts = machine_payload.get("decision_artifacts") if isinstance(machine_payload, Mapping) else None
             matched_artifact = next(
                 (
                     dict(item)
@@ -1252,7 +1248,8 @@ class StrategyPreviewStore:
                 ),
                 None,
             )
-            overlays = instrument_payload.get("overlays")
+            ui_payload = instrument_payload.get("ui")
+            overlays = ui_payload.get("overlays") if isinstance(ui_payload, Mapping) else None
             ui_signal_markers: List[Dict[str, Any]] = []
             if isinstance(overlays, list):
                 for overlay in overlays:

@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from engines.bot_runtime.core.domain import Candle
+from engines.bot_runtime.core.domain import Candle, StrategySignal
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
 from indicators.config import IndicatorExecutionContext
 from overlays.schema import build_overlay
@@ -233,10 +233,15 @@ def _build_strategy_preview_signal(
     decision_id = str(artifact.get("decision_id") or "").strip()
     if not decision_id:
         raise RuntimeError("strategy_preview_signal_invalid: decision artifact missing decision_id")
+    signal_id = StrategySignal.build_signal_id(
+        decision_id=decision_id,
+        source_type="strategy_preview",
+        source_id=preview_id,
+    )
     intent = str(artifact.get("emitted_intent") or artifact.get("intent") or "").strip()
     trigger = artifact.get("trigger") if isinstance(artifact.get("trigger"), Mapping) else {}
     return {
-        "signal_id": decision_id,
+        "signal_id": signal_id,
         "source_type": "strategy_preview",
         "source_id": preview_id,
         "decision_id": decision_id,
@@ -463,10 +468,6 @@ def evaluate_strategy_preview(
             },
             "machine": machine_payload,
             "ui": ui_payload,
-            "signals": strategy_signals,
-            "decision_artifacts": decision_artifacts,
-            "rule_matches": len(strategy_signals),
-            "overlays": overlays,
             "missing_indicators": missing_indicators,
             "status": "missing_indicators" if missing_indicators else "ok",
             "perf": {

@@ -16,7 +16,7 @@ def test_signals_endpoint_rejects_non_engine_runtime_path(monkeypatch) -> None:
     monkeypatch.setattr(controller, "enqueue_signal_job", lambda **kwargs: "job-1")
 
     async def _fake_wait_for_job(job_id: str):
-        return {"signals": [], "runtime_path": "legacy"}
+        return {"machine": {"signals": []}, "ui": {"overlays": []}, "runtime_path": "legacy"}
 
     monkeypatch.setattr(controller, "wait_for_job", _fake_wait_for_job)
 
@@ -50,8 +50,8 @@ def test_signals_endpoint_accepts_engine_runtime_path(monkeypatch) -> None:
 
     async def _fake_wait_for_job(job_id: str):
         return {
-            "signals": [],
-            "overlays": [{"type": "indicator_signal", "source": "signal", "payload": {"bubbles": []}}],
+            "machine": {"signals": []},
+            "ui": {"overlays": [{"type": "indicator_signal", "source": "signal", "payload": {"bubbles": []}}]},
             "runtime_path": SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT,
         }
 
@@ -72,12 +72,9 @@ def test_signals_endpoint_accepts_engine_runtime_path(monkeypatch) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body.get("runtime_path") == SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT
-    assert body.get("overlays") == [{"type": "indicator_signal", "source": "signal", "payload": {"bubbles": []}}]
-    assert body.get("machine") == {
-        "signals": [],
-        "runtime_path": SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT,
-        "runtime_invariants": None,
-    }
+    assert "signals" not in body
+    assert "overlays" not in body
+    assert body.get("machine") == {"signals": []}
     assert body.get("ui") == {
         "overlays": [{"type": "indicator_signal", "source": "signal", "payload": {"bubbles": []}}],
     }

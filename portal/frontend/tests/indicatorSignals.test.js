@@ -70,20 +70,24 @@ test('runSignalGeneration stores signal events, merges signal overlays, and togg
   const getChart = () => currentState;
 
   const adapterResponse = {
-    signals: [
-      { event_key: 'breakout', symbol: 'ES', event_time: START },
-    ],
-    overlays: [
-      {
-        type: 'indicator_signal',
-        source: 'signal',
-        payload: {
-          bubbles: [
-            { time: 1704067200, price: 100.5, label: 'Breakout', subtype: 'bubble' },
-          ],
+    machine: {
+      signals: [
+        { event_key: 'breakout', symbol: 'ES', event_time: START },
+      ],
+    },
+    ui: {
+      overlays: [
+        {
+          type: 'indicator_signal',
+          source: 'signal',
+          payload: {
+            bubbles: [
+              { time: 1704067200, price: 100.5, label: 'Breakout', subtype: 'bubble' },
+            ],
+          },
         },
-      },
-    ],
+      ],
+    },
   };
 
   let errorMsg = 'seed';
@@ -144,4 +148,33 @@ test('runSignalGeneration exits early when chart context missing', async () => {
   assert.equal(success, false);
   assert.equal(errorMsg, 'Cannot generate signals: missing chart instrument or interval.');
   assert.equal(updateCalls.length, 0);
+});
+
+test('runSignalGeneration fails loud when the signal response omits canonical machine/ui sections', async () => {
+  const indicator = { id: 'ind-1', params: {} };
+  const chartState = {
+    symbol: 'ES',
+    interval: '1h',
+    datasource: 'ALPACA',
+    exchange: 'cme',
+    instrument_id: 'instrument-1',
+  };
+
+  let errorMsg = null;
+  const updates = [];
+  const success = await runSignalGeneration({
+    indicator,
+    chartId: 'chart-1',
+    chartState,
+    startISO: START,
+    endISO: END,
+    getChart: () => ({ overlays: [], indicators: [{ id: 'ind-1', enabled: true }] }),
+    updateChart: (id, patch) => updates.push({ id, patch }),
+    setError: (msg) => { errorMsg = msg; },
+    signalsAdapter: createSignalsAdapter({ signals: [] }),
+  });
+
+  assert.equal(success, false);
+  assert.equal(errorMsg, 'Indicator signal response is missing machine.signals.');
+  assert.ok(updates.length >= 2);
 });

@@ -47,6 +47,12 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+def _signal_response_count(payload: Any) -> int | None:
+    machine_payload = payload.get("machine") if isinstance(payload, dict) else None
+    signals = machine_payload.get("signals") if isinstance(machine_payload, dict) else None
+    return len(signals) if isinstance(signals, list) else None
+
+
 def _indicator_instance_section(meta: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "id": meta.get("id"),
@@ -723,7 +729,7 @@ async def signals(inst_id: str, req: SignalRequest):
                 "event=signals_endpoint_complete inst_id=%s cache_hit=true runtime_path=%s signals=%s",
                 inst_id,
                 payload.get("runtime_path") if isinstance(payload, dict) else None,
-                len(payload.get("signals")) if isinstance(payload, dict) and isinstance(payload.get("signals"), list) else None,
+                _signal_response_count(payload),
             )
             return payload
 
@@ -758,7 +764,7 @@ async def signals(inst_id: str, req: SignalRequest):
             "event=signals_endpoint_complete inst_id=%s cache_hit=false runtime_path=%s signals=%s",
             inst_id,
             payload.get("runtime_path") if isinstance(payload, dict) else None,
-            len(payload.get("signals")) if isinstance(payload, dict) and isinstance(payload.get("signals"), list) else None,
+            _signal_response_count(payload),
         )
         return payload
     except AsyncJobNotFoundError:

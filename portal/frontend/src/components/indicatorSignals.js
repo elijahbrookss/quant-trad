@@ -202,16 +202,19 @@ export async function runSignalGeneration({
     }
 
     const response = await signalsAdapter(indicator.id, requestPayload);
+    if (!response?.machine || !Array.isArray(response.machine.signals)) {
+      throw new Error('Indicator signal response is missing machine.signals.');
+    }
+    if (!response?.ui || !Array.isArray(response.ui.overlays)) {
+      throw new Error('Indicator signal response is missing ui.overlays.');
+    }
 
-    const rawSignals = Array.isArray(response?.machine?.signals)
-      ? response.machine.signals
-      : Array.isArray(response?.signals)
-        ? response.signals
-        : [];
-    const overlayResponse = response?.ui && typeof response.ui === 'object'
-      ? { ...response, overlays: response.ui.overlays }
-      : response;
-    const signalOverlays = normalizeIndicatorArtifactResponse(indicator, overlayResponse, { defaultSource: 'signal' });
+    const rawSignals = response.machine.signals;
+    const signalOverlays = normalizeIndicatorArtifactResponse(
+      indicator,
+      { overlays: response.ui.overlays },
+      { defaultSource: 'signal' },
+    );
     const latestState = getChart(chartId) || {};
     const retainBySource = buildVisibleArtifactSets(
       Array.isArray(latestState?.indicators) ? latestState.indicators : [],

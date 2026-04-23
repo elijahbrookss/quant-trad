@@ -280,14 +280,10 @@ class IndicatorSignalExecutor:
             "signals_count": len(signals),
             "signal_overlay_count": len(signal_overlays),
         }
-        payload["signals"] = signals
-        payload["overlays"] = signal_overlays
         payload["runtime_path"] = SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT
         payload["runtime_invariants"] = runtime_invariants
         payload["machine"] = {
             "signals": signals,
-            "runtime_path": SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT,
-            "runtime_invariants": runtime_invariants,
         }
         payload["ui"] = {
             "overlays": signal_overlays,

@@ -201,14 +201,10 @@ export function buildTriggerRows({ instrumentResult, rules = [], symbol = '' } =
   const ruleLookup = new Map((Array.isArray(rules) ? rules : []).map((rule) => [rule.id, rule]))
   const artifacts = Array.isArray(instrumentResult?.machine?.decision_artifacts)
     ? instrumentResult.machine.decision_artifacts
-    : Array.isArray(instrumentResult?.decision_artifacts)
-      ? instrumentResult.decision_artifacts
-      : []
+    : []
   const signals = Array.isArray(instrumentResult?.machine?.signals)
     ? instrumentResult.machine.signals
-    : Array.isArray(instrumentResult?.signals)
-      ? instrumentResult.signals
-      : []
+    : []
   const signalByDecisionId = new Map(
     signals
       .filter((signal) => signal && typeof signal === 'object')
