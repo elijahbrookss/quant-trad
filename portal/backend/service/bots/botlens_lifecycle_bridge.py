@@ -1,14 +1,31 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping
 from typing import Any, Dict
 
 from .botlens_contract import LIFECYCLE_KIND
 
+logger = logging.getLogger(__name__)
+
+
+def _telemetry_hub():
+    try:
+        from .telemetry_stream import telemetry_hub
+    except ModuleNotFoundError as exc:
+        logger.debug(
+            "botlens_lifecycle_bridge_unavailable | reason=module_not_available | error=%s",
+            exc,
+        )
+        return None
+    return telemetry_hub
+
 
 def emit_lifecycle_event(payload: Mapping[str, Any]) -> None:
-    from .telemetry_stream import telemetry_hub
+    telemetry_hub = _telemetry_hub()
+    if telemetry_hub is None:
+        return
 
     event: Dict[str, Any] = {
         "kind": LIFECYCLE_KIND,
