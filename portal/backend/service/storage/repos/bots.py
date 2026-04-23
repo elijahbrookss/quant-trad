@@ -6,8 +6,6 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from ._shared import (
     BotRecord,
-    BotRunLifecycleRecord,
-    BotRunRecord,
     SQLAlchemyError,
     _json_safe,
     _parse_optional_timestamp,
@@ -28,6 +26,33 @@ def _watchdog_reason_code(reason: str) -> str:
     if normalized.startswith("server_restart:"):
         return "server_restart"
     return "watchdog_orphaned"
+
+
+def _watchdog_terminal_metadata(bot_id: str, reason: str) -> Dict[str, Any]:
+    normalized = str(reason or "").strip().lower()
+    metadata: Dict[str, Any] = {
+        "terminal_actor": "watchdog_stop",
+        "terminal_reason_text": str(reason or "").strip() or "watchdog_orphaned",
+    }
+    if normalized.startswith("container_not_running:"):
+        try:
+            from ....service.bots.runner import DockerBotRunner
+
+            container = DockerBotRunner.inspect_bot_container(bot_id)
+        except Exception:
+            container = {}
+        container_status = str(container.get("status") or "").strip().lower()
+        metadata["container_status"] = container_status or None
+        metadata["container_exit_code"] = container.get("exit_code")
+        metadata["container_oom_killed"] = bool(container.get("oom_killed"))
+        metadata["container_error"] = container.get("error")
+        if bool(container.get("oom_killed")):
+            metadata["terminal_actor"] = "oom_kill"
+        elif container_status in {"exited", "dead"}:
+            metadata["terminal_actor"] = "process_exit"
+        elif container_status == "missing":
+            metadata["terminal_actor"] = "unknown"
+    return metadata
 
 def load_bots() -> List[Dict[str, Any]]:
     """Return all persisted bot configurations."""
@@ -162,33 +187,47 @@ def mark_bot_crashed(bot_id: str, reason: str = "orphaned") -> bool:
     latest_run_id = ""
     try:
         from ....service.bots.startup_lifecycle import BotLifecyclePhase, BotLifecycleStatus, LifecycleOwner
-        from .lifecycle import record_bot_run_lifecycle_checkpoint
+        from .lifecycle import get_latest_bot_run_lifecycle, record_bot_run_lifecycle_checkpoint
 
         with db.session() as session:
             record = session.get(BotRecord, bot_id)
             if record is None:
                 return False
             previous_runner = record.runner_id
-            record.status = "crashed"
+            latest_lifecycle = get_latest_bot_run_lifecycle(bot_id)
+            latest_run_id = str((latest_lifecycle or {}).get("run_id") or "").strip()
+            latest_phase = str((latest_lifecycle or {}).get("phase") or "").strip().lower()
+            latest_status = str((latest_lifecycle or {}).get("status") or "").strip().lower()
+            if latest_phase in {
+                BotLifecyclePhase.COMPLETED.value,
+                BotLifecyclePhase.STOPPED.value,
+                BotLifecyclePhase.STARTUP_FAILED.value,
+                BotLifecyclePhase.CRASHED.value,
+            } or latest_status in {
+                BotLifecycleStatus.COMPLETED.value,
+                BotLifecycleStatus.STOPPED.value,
+                BotLifecycleStatus.STARTUP_FAILED.value,
+                BotLifecycleStatus.CRASHED.value,
+            }:
+                logger.info(
+                    "bot_mark_crashed_skipped_terminal | id=%s | reason=%s | phase=%s | status=%s",
+                    bot_id,
+                    reason,
+                    latest_phase or None,
+                    latest_status or None,
+                )
+                return False
+            if not latest_run_id:
+                logger.error(
+                    "bot_mark_crashed_missing_run_context | id=%s | reason=%s | previous_runner=%s",
+                    bot_id,
+                    reason,
+                    previous_runner,
+                )
+                return False
             record.runner_id = None
             record.heartbeat_at = None
             record.updated_at = _utcnow()
-            latest_lifecycle = (
-                session.execute(
-                    select(BotRunLifecycleRecord)
-                    .where(BotRunLifecycleRecord.bot_id == bot_id)
-                    .order_by(BotRunLifecycleRecord.checkpoint_at.desc(), BotRunLifecycleRecord.updated_at.desc())
-                    .limit(1)
-                )
-                .scalars()
-                .first()
-            )
-            latest_run_id = str(latest_lifecycle.run_id or "").strip() if latest_lifecycle is not None else ""
-            latest_run = session.get(BotRunRecord, latest_run_id) if latest_run_id else None
-            if latest_run is not None:
-                latest_run.status = BotLifecycleStatus.CRASHED.value
-                latest_run.ended_at = _utcnow()
-                latest_run.updated_at = _utcnow()
             logger.info(
                 "bot_marked_crashed | id=%s | reason=%s | previous_runner=%s",
                 bot_id,
@@ -196,6 +235,7 @@ def mark_bot_crashed(bot_id: str, reason: str = "orphaned") -> bool:
                 previous_runner,
             )
         if latest_run_id:
+            terminal_metadata = _watchdog_terminal_metadata(bot_id, reason)
             record_bot_run_lifecycle_checkpoint(
                 {
                     "bot_id": bot_id,
@@ -204,6 +244,7 @@ def mark_bot_crashed(bot_id: str, reason: str = "orphaned") -> bool:
                     "status": BotLifecycleStatus.CRASHED.value,
                     "owner": LifecycleOwner.WATCHDOG.value,
                     "message": f"Bot marked crashed by watchdog: {reason}",
+                    "metadata": terminal_metadata,
                     "failure": build_failure_payload(
                         phase=BotLifecyclePhase.CRASHED.value,
                         message=f"Bot marked crashed by watchdog: {reason}",
@@ -211,7 +252,8 @@ def mark_bot_crashed(bot_id: str, reason: str = "orphaned") -> bool:
                         reason_code=_watchdog_reason_code(reason),
                         owner=LifecycleOwner.WATCHDOG.value,
                     )
-                    | {"reason": reason},
+                    | {"reason": reason}
+                    | terminal_metadata,
                 }
             )
         return True
