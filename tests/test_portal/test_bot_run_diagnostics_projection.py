@@ -259,6 +259,104 @@ def test_project_bot_run_diagnostics_keeps_last_success_before_later_terminal_ob
     assert diagnostics["summary"]["last_successful_checkpoint"]["phase"] == "warming_up_runtime"
 
 
+def test_project_bot_run_diagnostics_includes_runtime_state_progress_and_pressure() -> None:
+    diagnostics = project_bot_run_diagnostics(
+        run_id="run-1",
+        lifecycle={"run_id": "run-1", "phase": "degraded", "status": "degraded", "owner": "runtime"},
+        events=_startup_failure_events(),
+        run_health={
+            "status": "degraded",
+            "phase": "degraded",
+            "runtime_state": "degraded",
+            "progress_state": "churning",
+            "last_useful_progress_at": "2026-04-09T01:56:35Z",
+            "degraded": {
+                "active": True,
+                "started_at": "2026-04-09T01:56:36Z",
+                "reason_code": "subscriber_gap",
+            },
+            "churn": {
+                "active": True,
+                "detected_at": "2026-04-09T01:56:39Z",
+            },
+            "pressure": {
+                "top_pressure": {
+                    "reason_code": "telemetry_backpressure",
+                    "value": 0.75,
+                    "unit": "ratio",
+                }
+            },
+            "recent_transitions": [
+                {
+                    "from_state": "live",
+                    "to_state": "degraded",
+                    "transition_reason": "continuity_gap:subscriber_gap",
+                    "source_component": "worker_bridge",
+                    "timestamp": "2026-04-09T01:56:36Z",
+                }
+            ],
+        },
+    )
+
+    assert diagnostics["runtime"]["state"] == "degraded"
+    assert diagnostics["runtime"]["progress_state"] == "churning"
+    assert diagnostics["runtime"]["degraded"]["started_at"] == "2026-04-09T01:56:36Z"
+    assert diagnostics["runtime"]["top_pressure"]["reason_code"] == "telemetry_backpressure"
+    assert diagnostics["summary"]["runtime_state"] == "degraded"
+    assert diagnostics["summary"]["is_churning"] is True
+
+
+def test_project_bot_run_diagnostics_surfaces_structured_root_failure_details() -> None:
+    events = [
+        _event(1, "container_launched", "starting", "backend", "Runtime container launched."),
+        _event(
+            2,
+            "degraded",
+            "degraded",
+            "runtime",
+            "Artifact finalization failed for worker.",
+            failure={
+                "type": "worker_exception",
+                "reason_code": "artifact_cleanup_race",
+                "message": "Run artifact spool cleanup raced with another worker finalizer.",
+                "phase": "degraded",
+                "owner": "runtime",
+                "at": "2026-04-09T01:56:36Z",
+                "worker_id": "worker-3",
+                "symbol": "XPP",
+                "exception_type": "OSError",
+                "component": "report_artifacts",
+                "operation": "spool_cleanup",
+                "path": "indicators",
+                "errno": 39,
+            },
+            at="2026-04-09T01:56:36Z",
+        ),
+        _event(
+            3,
+            "degraded",
+            "degraded",
+            "container",
+            "At least one worker reported degraded terminal state.",
+            at="2026-04-09T01:56:37Z",
+        ),
+    ]
+
+    diagnostics = project_bot_run_diagnostics(
+        run_id="run-1",
+        lifecycle={"run_id": "run-1", "phase": "degraded", "status": "degraded", "owner": "container"},
+        events=events,
+    )
+
+    summary = diagnostics["summary"]
+    assert summary["root_failure_message"] == "Run artifact spool cleanup raced with another worker finalizer."
+    assert summary["root_failure_reason_code"] == "artifact_cleanup_race"
+    assert summary["root_failure_exception_type"] == "OSError"
+    assert summary["root_failure_worker_id"] == "worker-3"
+    assert summary["root_failure"]["component"] == "report_artifacts"
+    assert summary["root_failure"]["operation"] == "spool_cleanup"
+
+
 def test_terminal_status_after_supervision_marks_startup_failed_before_live():
     phase, status = terminal_status_after_supervision(
         startup_live_emitted=False,
@@ -276,3 +374,42 @@ def test_terminal_status_after_supervision_marks_startup_failed_before_live():
     )
     assert live_phase == "degraded"
     assert live_status == "degraded"
+
+
+def test_terminal_status_after_supervision_requires_explicit_completed_worker_reports():
+    phase, status = terminal_status_after_supervision(
+        startup_live_emitted=True,
+        degraded_symbols_count=0,
+        telemetry_degraded=False,
+        expected_worker_count=2,
+        worker_terminal_statuses={"worker-1": "completed", "worker-2": "completed"},
+    )
+
+    assert phase == "completed"
+    assert status == "completed"
+
+
+def test_terminal_status_after_supervision_marks_crashed_when_worker_terminal_reports_are_missing():
+    phase, status = terminal_status_after_supervision(
+        startup_live_emitted=True,
+        degraded_symbols_count=0,
+        telemetry_degraded=False,
+        expected_worker_count=2,
+        worker_terminal_statuses={"worker-1": "completed"},
+    )
+
+    assert phase == "crashed"
+    assert status == "crashed"
+
+
+def test_terminal_status_after_supervision_prefers_stopped_over_completed_mix():
+    phase, status = terminal_status_after_supervision(
+        startup_live_emitted=True,
+        degraded_symbols_count=0,
+        telemetry_degraded=False,
+        expected_worker_count=2,
+        worker_terminal_statuses={"worker-1": "completed", "worker-2": "stopped"},
+    )
+
+    assert phase == "stopped"
+    assert status == "stopped"

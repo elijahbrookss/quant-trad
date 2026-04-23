@@ -1,17 +1,8 @@
-"""Symbol-level projector for the BotLens telemetry pipeline.
+"""Symbol-level BotLens projector.
 
-SymbolProjector is the sole owner of canonical state for one (run_id, symbol_key).
-It runs as an asyncio task and is the only writer of symbol detail persistence.
-
-Ownership:
-  Reads from:  SymbolMailbox (fact_queue + bootstrap_slot)
-  Writes to:   symbol detail storage, run_notifications queue, fanout_channel
-
-Invariants:
-  - Facts are applied in order within (run_id, symbol_key, bridge_session_id).
-  - A bootstrap resets state, drains stale-session facts, and resumes cleanly.
-  - Facts whose bridge_session_id doesn't match the current session are rejected.
-  - SymbolProjector never writes run-summary or open-trades state.
+SymbolProjector coordinates concern-specific symbol projection for one
+``(run_id, symbol_key)`` lane. It does not own run-level state and it does not
+shape transport payloads.
 """
 
 from __future__ import annotations
@@ -19,67 +10,47 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from typing import Any, Mapping, Optional, Tuple
 
-from ..observability import BackendObserver, QueueStateMetricOwner, normalize_failure_mode
-from ..storage.storage import (
-    record_bot_runtime_event,
-    upsert_bot_run_view_state,
-    get_latest_bot_run_view_state,
+from ..observability import BackendObserver, QueueStateMetricOwner
+from .botlens_event_replay import load_domain_projection_batches
+from .botlens_mailbox import FanoutEnvelope, FanoutSymbolDeltaBatch, QueueEnvelope, SymbolMailbox
+from .botlens_state import (
+    ProjectionBatch,
+    SymbolDiagnosticsState,
+    SymbolProjectionSnapshot,
+    SymbolConcernDelta,
+    SymbolReadinessState,
+    apply_symbol_batch,
+    empty_symbol_projection_snapshot,
 )
-from .botlens_contract import (
-    EVENT_TYPE_RUNTIME_BOOTSTRAP,
-    EVENT_TYPE_RUNTIME_FACTS,
-    _event_id,
-    _sanitize_json,
-    normalize_bridge_seq,
-    normalize_bridge_session_id,
-    normalize_fact_entries,
-    normalize_series_key,
-)
-from .botlens_mailbox import FanoutTypedDelta, SymbolMailbox
-from .botlens_mailbox import FanoutEnvelope, QueueEnvelope
-from .botlens_state import apply_fact_batch, empty_symbol_detail, read_symbol_detail_state, serialize_symbol_detail_state
-from .botlens_typed_deltas import SymbolTypedDeltaBuilder
 
 logger = logging.getLogger(__name__)
 _OBSERVER = BackendObserver(component="botlens_symbol_projector", event_logger=logger)
 
 
-# ---------------------------------------------------------------------------
-# Notification types sent upward to RunProjector
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class SymbolProjectorSnapshot:
+    state: SymbolProjectionSnapshot
 
-@dataclass
+
+@dataclass(frozen=True)
 class SymbolSummaryNotification:
-    """Sent from SymbolProjector to RunProjector after each state update."""
     run_id: str
+    bot_id: str
     symbol_key: str
-    detail_state: Dict[str, Any]   # copy of projected symbol state for summary building
-    trade_upserts: List[Dict[str, Any]]
-    trade_removals: List[str]
     seq: int
-    runtime: Optional[Dict[str, Any]]
     event_time: Any
     known_at: Any
+    symbol_summary: dict[str, Any]
+    trade_upserts: Tuple[dict[str, Any], ...]
+    trade_removals: Tuple[str, ...]
+    runtime: dict[str, Any]
 
-
-# ---------------------------------------------------------------------------
-# SymbolProjector
-# ---------------------------------------------------------------------------
 
 class SymbolProjector:
-    """
-    Owns canonical state for one (run_id, symbol_key).
-
-    Runs as a persistent asyncio task. Processes its SymbolMailbox in a loop:
-    - Bootstrap arrivals (via bootstrap_slot) take priority and reset state.
-    - Incremental facts are applied in order within the current bridge session.
-    - State changes are persisted then emitted to RunProjector and the fanout channel.
-    """
-
     def __init__(
         self,
         *,
@@ -87,7 +58,7 @@ class SymbolProjector:
         bot_id: str,
         symbol_key: str,
         mailbox: SymbolMailbox,
-        run_notifications: "asyncio.Queue[QueueEnvelope]",
+        run_notifications: "asyncio.Queue[Any]",
         fanout_channel: "asyncio.Queue[Any]",
         run_notification_queue_metrics: QueueStateMetricOwner,
         fanout_queue_metrics: QueueStateMetricOwner,
@@ -101,101 +72,54 @@ class SymbolProjector:
         self._run_notification_queue_metrics = run_notification_queue_metrics
         self._fanout_queue_metrics = fanout_queue_metrics
 
-        self._state: Dict[str, Any] = empty_symbol_detail(symbol_key)
+        self._state = empty_symbol_projection_snapshot(symbol_key)
         self._current_session_id: Optional[str] = None
+        self._seen_event_ids: set[str] = set()
         self._active = True
+        self._ready = asyncio.Event()
 
     @property
     def symbol_key(self) -> str:
         return self._symbol_key
 
-    def get_snapshot(self) -> Dict[str, Any]:
-        """
-        Return a synchronous copy of the current canonical symbol state.
+    def get_snapshot(self) -> SymbolProjectionSnapshot:
+        return self._state
 
-        Safe to call from outside the projector task (asyncio cooperative
-        scheduling ensures no concurrent state mutation during a sync call).
-        """
-        return dict(self._state)
-
-    async def _await_persistence(
-        self,
-        *,
-        storage_target: str,
-        pipeline_stage: str,
-        func: Any,
-        args: tuple[Any, ...] = (),
-        **kwargs: Any,
-    ) -> Any:
-        started = time.perf_counter()
-        try:
-            result = await asyncio.to_thread(func, *args, **kwargs)
-        except Exception as exc:
-            _OBSERVER.observe(
-                "persistence_wait_ms",
-                max((time.perf_counter() - started) * 1000.0, 0.0),
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                series_key=self._symbol_key,
-                storage_target=storage_target,
-                pipeline_stage=pipeline_stage,
-                failure_mode=normalize_failure_mode(exc),
-            )
-            raise
-        _OBSERVER.observe(
-            "persistence_wait_ms",
-            max((time.perf_counter() - started) * 1000.0, 0.0),
-            bot_id=self._bot_id,
-            run_id=self._run_id,
-            series_key=self._symbol_key,
-            storage_target=storage_target,
-            pipeline_stage=pipeline_stage,
-        )
-        return result
-
-    # ------------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------------
+    async def wait_until_ready(self) -> None:
+        await self._ready.wait()
 
     async def run(self) -> None:
-        """Main projector loop. Runs until cancelled."""
         await self._load_initial_state()
+        self._ready.set()
 
-        # Persistent tasks for waiting on either source. Re-created after each use.
-        fact_task: asyncio.Task[Any] = asyncio.create_task(
-            self._mailbox.fact_queue.get(), name=f"sym-fact-{self._symbol_key}"
+        event_task: asyncio.Task[Any] = asyncio.create_task(
+            self._mailbox.event_queue.get(), name=f"sym-events-{self._symbol_key}"
         )
         bootstrap_task: asyncio.Task[None] = asyncio.create_task(
             self._mailbox.bootstrap_slot.event.wait(),
-            name=f"sym-boot-{self._symbol_key}",
+            name=f"sym-bootstrap-{self._symbol_key}",
         )
 
         try:
             while self._active:
-                # Fast path: bootstrap is already pending from a previous signal.
                 if self._mailbox.bootstrap_slot.pending:
-                    fact_task, bootstrap_task = await self._handle_bootstrap(
-                        fact_task, bootstrap_task
-                    )
+                    event_task, bootstrap_task = await self._handle_bootstrap(event_task, bootstrap_task)
                     continue
 
                 done, _ = await asyncio.wait(
-                    {fact_task, bootstrap_task},
+                    {event_task, bootstrap_task},
                     return_when=asyncio.FIRST_COMPLETED,
                     timeout=5.0,
                 )
 
                 if bootstrap_task in done:
-                    # Bootstrap event fired during wait.
-                    fact_task, bootstrap_task = await self._handle_bootstrap(
-                        fact_task, bootstrap_task
-                    )
+                    event_task, bootstrap_task = await self._handle_bootstrap(event_task, bootstrap_task)
                     continue
 
-                if fact_task in done:
+                if event_task in done:
                     try:
-                        envelope = fact_task.result()
-                        payload = envelope.payload if isinstance(envelope, QueueEnvelope) else envelope
+                        envelope = event_task.result()
+                        batch = envelope.payload if isinstance(envelope, QueueEnvelope) else envelope
                         queue_wait_ms = (
                             max((time.monotonic() - envelope.enqueued_monotonic) * 1000.0, 0.0)
                             if isinstance(envelope, QueueEnvelope)
@@ -208,10 +132,10 @@ class SymbolProjector:
                             run_id=self._run_id,
                             series_key=self._symbol_key,
                             queue_name="symbol_fact_queue",
-                            message_kind="facts",
+                            message_kind="domain_batch",
                         )
                         self._mailbox._emit_fact_gauges()
-                        await self._apply_facts(payload)
+                        await self._apply_batch(batch)
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
@@ -221,47 +145,37 @@ class SymbolProjector:
                             bot_id=self._bot_id,
                             run_id=self._run_id,
                             series_key=self._symbol_key,
-                            failure_mode="fact_apply_failed",
+                            failure_mode="batch_apply_failed",
                             error=str(exc),
                         )
-                    fact_task = asyncio.create_task(
-                        self._mailbox.fact_queue.get(),
-                        name=f"sym-fact-{self._symbol_key}",
+                    event_task = asyncio.create_task(
+                        self._mailbox.event_queue.get(),
+                        name=f"sym-events-{self._symbol_key}",
                     )
-
         except asyncio.CancelledError:
             pass
         finally:
-            for t in (fact_task, bootstrap_task):
-                if not t.done():
-                    t.cancel()
-
-    # ------------------------------------------------------------------
-    # Bootstrap handling
-    # ------------------------------------------------------------------
+            for task in (event_task, bootstrap_task):
+                if not task.done():
+                    task.cancel()
 
     async def _handle_bootstrap(
         self,
-        fact_task: "asyncio.Task[Any]",
+        event_task: "asyncio.Task[Any]",
         bootstrap_task: "asyncio.Task[None]",
-    ) -> "Tuple[asyncio.Task[Any], asyncio.Task[None]]":
-        """Take and apply the latest pending bootstrap, drain stale facts, return fresh tasks."""
+    ) -> Tuple[asyncio.Task[Any], asyncio.Task[None]]:
         bootstrap_delay_ms = self._mailbox.bootstrap_slot.pending_age_ms
-        bootstrap = self._mailbox.bootstrap_slot.take()
+        batch = self._mailbox.bootstrap_slot.take()
 
-        # Cancel the fact task so the queue slot isn't held by an awaiter
-        # during the drain. asyncio.Queue.get() cancellation leaves the item
-        # in the queue, so nothing is lost.
-        if not fact_task.done():
-            fact_task.cancel()
+        if not event_task.done():
+            event_task.cancel()
             try:
-                await fact_task
+                await event_task
             except (asyncio.CancelledError, Exception):
                 pass
 
-        if bootstrap is not None:
-            new_session_id = normalize_bridge_session_id(bootstrap)
-            self._drain_stale_session_facts(new_session_id)
+        if batch is not None:
+            self._drain_stale_session_batches(batch.bridge_session_id or "")
             _OBSERVER.observe(
                 "bootstrap_apply_delay_ms",
                 bootstrap_delay_ms,
@@ -270,20 +184,8 @@ class SymbolProjector:
                 series_key=self._symbol_key,
                 message_kind="bootstrap",
             )
-            await self._apply_bootstrap(bootstrap)
-        else:
-            # Slot was taken by another concurrent reader (shouldn't happen with
-            # single-task ownership, but guard defensively).
-            _OBSERVER.event(
-                "symbol_projector_failed",
-                level=logging.WARN,
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                series_key=self._symbol_key,
-                failure_mode="bootstrap_slot_empty",
-            )
+            await self._apply_bootstrap(batch)
 
-        # Cancel and re-create the bootstrap wait task (event was cleared by take()).
         if not bootstrap_task.done():
             bootstrap_task.cancel()
             try:
@@ -292,35 +194,27 @@ class SymbolProjector:
                 pass
 
         return (
-            asyncio.create_task(
-                self._mailbox.fact_queue.get(), name=f"sym-fact-{self._symbol_key}"
-            ),
-            asyncio.create_task(
-                self._mailbox.bootstrap_slot.event.wait(), name=f"sym-boot-{self._symbol_key}"
-            ),
+            asyncio.create_task(self._mailbox.event_queue.get(), name=f"sym-events-{self._symbol_key}"),
+            asyncio.create_task(self._mailbox.bootstrap_slot.event.wait(), name=f"sym-bootstrap-{self._symbol_key}"),
         )
 
-    def _drain_stale_session_facts(self, new_session_id: str) -> int:
-        """
-        Remove facts from the queue that belong to sessions other than new_session_id.
-        Facts for new_session_id are valid continuations of the bootstrap and are kept.
-        """
-        stale: List[QueueEnvelope] = []
-        fresh: List[QueueEnvelope] = []
+    def _drain_stale_session_batches(self, new_session_id: str) -> int:
+        stale = []
+        fresh = []
         while True:
             try:
-                item = self._mailbox.fact_queue.get_nowait()
-                payload = item.payload if isinstance(item, QueueEnvelope) else item
-                if normalize_bridge_session_id(payload) == new_session_id:
-                    fresh.append(item)
-                else:
-                    stale.append(item)
+                item = self._mailbox.event_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-        # Re-queue fresh items (valid continuations of the new session).
+            batch = item.payload if isinstance(item, QueueEnvelope) else item
+            session_id = getattr(batch, "bridge_session_id", None)
+            if session_id == new_session_id:
+                fresh.append(item)
+            else:
+                stale.append(item)
         for item in fresh:
             try:
-                self._mailbox.fact_queue.put_nowait(item)
+                self._mailbox.event_queue.put_nowait(item)
             except asyncio.QueueFull:
                 _OBSERVER.increment(
                     "symbol_fact_dropped_total",
@@ -328,18 +222,8 @@ class SymbolProjector:
                     run_id=self._run_id,
                     series_key=self._symbol_key,
                     queue_name="symbol_fact_queue",
-                    message_kind="facts",
+                    message_kind="domain_batch",
                     failure_mode="queue_full",
-                )
-                _OBSERVER.event(
-                    "symbol_fact_queue_overflow",
-                    level=logging.WARN,
-                    bot_id=self._bot_id,
-                    run_id=self._run_id,
-                    series_key=self._symbol_key,
-                    queue_name="symbol_fact_queue",
-                    failure_mode="queue_full",
-                    overflow_policy="drop_new",
                 )
         if stale:
             _OBSERVER.increment(
@@ -348,284 +232,123 @@ class SymbolProjector:
                 bot_id=self._bot_id,
                 run_id=self._run_id,
                 series_key=self._symbol_key,
-                message_kind="facts",
-            )
-            _OBSERVER.event(
-                "symbol_stale_facts_drained",
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                series_key=self._symbol_key,
-                stale_count=len(stale),
-                fresh_count=len(fresh),
+                message_kind="domain_batch",
             )
         return len(stale)
 
-    # ------------------------------------------------------------------
-    # Core projection
-    # ------------------------------------------------------------------
+    async def _apply_bootstrap(self, batch: ProjectionBatch) -> None:
+        self._state = empty_symbol_projection_snapshot(self._symbol_key)
+        self._current_session_id = batch.bridge_session_id
+        await self._apply_projected_batch(batch, message_kind="bootstrap")
 
-    async def _apply_bootstrap(self, payload: Mapping[str, Any]) -> None:
-        started = time.perf_counter()
-        session_id = normalize_bridge_session_id(payload)
-        facts = normalize_fact_entries(payload.get("facts"))
-        if not facts:
-            _OBSERVER.event(
-                "symbol_projector_failed",
-                level=logging.WARN,
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                series_key=self._symbol_key,
-                failure_mode="empty_bootstrap",
-            )
-            return
-
-        # Reset to empty state before applying the snapshot.
-        self._state = empty_symbol_detail(self._symbol_key)
-        self._current_session_id = session_id
-
-        seq = int(payload.get("run_seq") or 0)
-        known_at = payload.get("known_at") or payload.get("event_time")
-        event_time = payload.get("event_time") or known_at
-
-        applied = apply_fact_batch(self._state, facts=facts, seq=seq, event_time=known_at)
-        self._state = dict(applied["detail"])
-
-        _OBSERVER.increment(
-            "symbol_projector_bootstrap_apply_total",
-            bot_id=self._bot_id,
-            run_id=self._run_id,
-            series_key=self._symbol_key,
-            message_kind="bootstrap",
-        )
-        _OBSERVER.observe(
-            "symbol_projector_batch_size",
-            float(len(facts)),
-            bot_id=self._bot_id,
-            run_id=self._run_id,
-            series_key=self._symbol_key,
-            message_kind="bootstrap",
-        )
-        await self._emit_typed_deltas(delta=applied["delta"], seq=seq, event_time=event_time)
-        await self._persist_detail_state(seq=seq, event_time=event_time, known_at=known_at)
-        await self._record_raw_event(
-            event_type=EVENT_TYPE_RUNTIME_BOOTSTRAP,
-            seq=seq,
-            raw_payload=payload,
-            event_time=event_time,
-            known_at=known_at,
-        )
-        await self._notify_run_projector(
-            delta=applied["delta"],
-            seq=seq,
-            event_time=event_time,
-            known_at=known_at,
-        )
-        _OBSERVER.observe(
-            "symbol_projector_apply_ms",
-            max((time.perf_counter() - started) * 1000.0, 0.0),
-            bot_id=self._bot_id,
-            run_id=self._run_id,
-            series_key=self._symbol_key,
-            message_kind="bootstrap",
-        )
-        _OBSERVER.event(
-            "symbol_bootstrap_applied",
-            bot_id=self._bot_id,
-            run_id=self._run_id,
-            series_key=self._symbol_key,
-            seq=seq,
-            bridge_session_id=session_id,
-        )
-
-    async def _apply_facts(self, payload: Mapping[str, Any]) -> None:
-        started = time.perf_counter()
-        session_id = normalize_bridge_session_id(payload)
-
-        # Reject facts from a superseded session.
-        if self._current_session_id and session_id and session_id != self._current_session_id:
+    async def _apply_batch(self, batch: ProjectionBatch) -> None:
+        if self._current_session_id and batch.bridge_session_id and batch.bridge_session_id != self._current_session_id:
             _OBSERVER.increment(
                 "symbol_projector_stale_session_reject_total",
                 bot_id=self._bot_id,
                 run_id=self._run_id,
                 series_key=self._symbol_key,
-                message_kind="facts",
-            )
-            _OBSERVER.event(
-                "symbol_stale_session_rejected",
-                level=logging.WARN,
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                series_key=self._symbol_key,
-                expected_session_id=self._current_session_id,
-                observed_session_id=session_id,
+                message_kind="domain_batch",
             )
             return
+        if not self._current_session_id and batch.bridge_session_id:
+            self._current_session_id = batch.bridge_session_id
+        await self._apply_projected_batch(batch, message_kind="facts")
 
-        facts = normalize_fact_entries(payload.get("facts"))
-        if not facts:
+    async def _apply_facts(self, batch: ProjectionBatch) -> None:
+        await self._apply_batch(batch)
+
+    async def _apply_projected_batch(self, batch: ProjectionBatch, *, message_kind: str) -> None:
+        started = time.perf_counter()
+        if not batch.events:
             return
-
-        # Accept the session on first facts message if no bootstrap arrived yet.
-        if not self._current_session_id and session_id:
-            self._current_session_id = session_id
-
-        seq = int(payload.get("run_seq") or 0)
-        known_at = payload.get("known_at") or payload.get("event_time")
-        event_time = payload.get("event_time") or known_at
-
-        applied = apply_fact_batch(self._state, facts=facts, seq=seq, event_time=known_at)
-        self._state = dict(applied["detail"])
-
+        events = tuple(
+            event for event in batch.events
+            if str(getattr(event, "event_id", "") or "").strip() not in self._seen_event_ids
+        )
+        if not events:
+            return
+        batch = replace(batch, events=events)
+        next_state, deltas = apply_symbol_batch(self._state, batch=batch)
+        self._state = next_state
+        self._seen_event_ids.update(
+            str(getattr(event, "event_id", "") or "").strip()
+            for event in events
+            if str(getattr(event, "event_id", "") or "").strip()
+        )
         _OBSERVER.increment(
-            "symbol_projector_fact_apply_total",
+            f"symbol_projector_{'bootstrap' if message_kind == 'bootstrap' else 'fact'}_apply_total",
             bot_id=self._bot_id,
             run_id=self._run_id,
             series_key=self._symbol_key,
-            message_kind="facts",
+            message_kind=message_kind,
         )
         _OBSERVER.observe(
             "symbol_projector_batch_size",
-            float(len(facts)),
+            float(len(batch.events)),
             bot_id=self._bot_id,
             run_id=self._run_id,
             series_key=self._symbol_key,
-            message_kind="facts",
+            message_kind=message_kind,
         )
-        await self._emit_typed_deltas(delta=applied["delta"], seq=seq, event_time=event_time)
-        await self._persist_detail_state(seq=seq, event_time=event_time, known_at=known_at)
-        await self._record_raw_event(
-            event_type=EVENT_TYPE_RUNTIME_FACTS,
-            seq=seq,
-            raw_payload=payload,
-            event_time=event_time,
-            known_at=known_at,
-        )
-        await self._notify_run_projector(
-            delta=applied["delta"],
-            seq=seq,
-            event_time=event_time,
-            known_at=known_at,
-        )
+        await self._emit_run_notification(batch=batch, deltas=deltas)
+        await self._emit_deltas(deltas=deltas)
         _OBSERVER.observe(
             "symbol_projector_apply_ms",
             max((time.perf_counter() - started) * 1000.0, 0.0),
             bot_id=self._bot_id,
             run_id=self._run_id,
             series_key=self._symbol_key,
-            message_kind="facts",
+            message_kind=message_kind,
         )
 
-    # ------------------------------------------------------------------
-    # Fanout emission (non-blocking — projection must not wait on delivery)
-    # ------------------------------------------------------------------
-
-    async def _emit_typed_deltas(
+    async def _emit_run_notification(
         self,
         *,
-        delta: Dict[str, Any],
-        seq: int,
-        event_time: Any,
-    ) -> Dict[str, Any]:
-        prepared = SymbolTypedDeltaBuilder.build(
-            run_id=self._run_id,
-            symbol_key=self._symbol_key,
-            seq=seq,
-            event_time=event_time,
-            delta=_sanitize_json(delta),
-        )
-        if prepared:
-            try:
-                payload_bytes = sum(int(item.payload_bytes) for item in prepared)
-                self._fanout_channel.put_nowait(
-                    FanoutEnvelope(
-                        run_id=self._run_id,
-                        item=FanoutTypedDelta(run_id=self._run_id, prepared_deltas=prepared),
-                        message_kind="typed_delta",
-                        payload_bytes=payload_bytes,
-                    )
-                )
-                _OBSERVER.increment(
-                    "fanout_enqueued_total",
-                    bot_id=self._bot_id,
-                    run_id=self._run_id,
-                    series_key=self._symbol_key,
-                    queue_name="fanout_channel",
-                    message_kind="typed_delta",
-                )
-                _OBSERVER.observe(
-                    "fanout_payload_bytes",
-                    float(payload_bytes),
-                    bot_id=self._bot_id,
-                    run_id=self._run_id,
-                    series_key=self._symbol_key,
-                    queue_name="fanout_channel",
-                    message_kind="typed_delta",
-                )
-                self._emit_fanout_gauges()
-            except asyncio.QueueFull:
-                _OBSERVER.increment(
-                    "fanout_dropped_total",
-                    bot_id=self._bot_id,
-                    run_id=self._run_id,
-                    series_key=self._symbol_key,
-                    queue_name="fanout_channel",
-                    message_kind="typed_delta",
-                    failure_mode="queue_full",
-                )
-                _OBSERVER.event(
-                    "fanout_channel_overflow",
-                    level=logging.WARN,
-                    log_to_logger=False,
-                    bot_id=self._bot_id,
-                    run_id=self._run_id,
-                    queue_name="fanout_channel",
-                    operation="typed_delta",
-                    failure_mode="queue_full",
-                    overflow_policy="drop_new",
-                )
-                self._emit_fanout_gauges()
-        return {}
-
-    # ------------------------------------------------------------------
-    # Run projector notification
-    # ------------------------------------------------------------------
-
-    async def _notify_run_projector(
-        self,
-        *,
-        delta: Dict[str, Any],
-        seq: int,
-        event_time: Any,
-        known_at: Any,
+        batch: ProjectionBatch,
+        deltas: Tuple[SymbolConcernDelta, ...],
     ) -> None:
-        trade_upserts = [
-            dict(t) for t in (delta.get("trade_upserts") or []) if isinstance(t, Mapping)
-        ]
-        trade_removals = [
-            str(r) for r in (delta.get("trade_removals") or []) if str(r).strip()
-        ]
+        trade_upserts: list[dict[str, Any]] = []
+        trade_removals: list[str] = []
+        for delta in deltas:
+            if not hasattr(delta, "trade_upserts"):
+                continue
+            trade_upserts.extend(
+                dict(entry)
+                for entry in getattr(delta, "trade_upserts", ())
+                if isinstance(entry, Mapping)
+            )
+            trade_removals.extend(
+                str(entry)
+                for entry in getattr(delta, "trade_removals", ())
+                if str(entry).strip()
+            )
+
+        runtime_payload = self._runtime_payload_from_batch(batch)
+        if not deltas and not runtime_payload:
+            return
+
         notification = SymbolSummaryNotification(
             run_id=self._run_id,
-            symbol_key=self._symbol_key,
-            detail_state=dict(self._state),
-            trade_upserts=trade_upserts,
-            trade_removals=trade_removals,
-            seq=seq,
-            runtime=dict(self._state.get("runtime") or {}),
-            event_time=event_time,
-            known_at=known_at,
+            bot_id=self._bot_id,
+            symbol_key=self._state.symbol_key,
+            seq=int(self._state.seq),
+            event_time=batch.event_time,
+            known_at=batch.known_at,
+            symbol_summary=self._symbol_summary_payload(),
+            trade_upserts=tuple(trade_upserts),
+            trade_removals=tuple(trade_removals),
+            runtime=runtime_payload,
         )
         try:
-            self._run_notifications.put_nowait(
-                QueueEnvelope(payload=notification)
-            )
+            self._run_notifications.put_nowait(QueueEnvelope(payload=notification))
             _OBSERVER.increment(
                 "run_notification_enqueued_total",
                 bot_id=self._bot_id,
                 run_id=self._run_id,
                 series_key=self._symbol_key,
                 queue_name="run_notification_queue",
-                message_kind="notification",
+                message_kind="symbol_summary",
             )
             self._emit_run_notification_gauges()
         except asyncio.QueueFull:
@@ -635,169 +358,152 @@ class SymbolProjector:
                 run_id=self._run_id,
                 series_key=self._symbol_key,
                 queue_name="run_notification_queue",
-                message_kind="notification",
+                message_kind="symbol_summary",
                 failure_mode="queue_full",
             )
             _OBSERVER.event(
                 "run_notification_queue_overflow",
                 level=logging.WARN,
                 log_to_logger=False,
+                bot_id=self._bot_id,
                 run_id=self._run_id,
+                series_key=self._symbol_key,
                 queue_name="run_notification_queue",
-                failure_mode="queue_full",
+                message_kind="symbol_summary",
+                depth=self._run_notifications.qsize(),
                 overflow_policy="drop_new",
             )
             self._emit_run_notification_gauges()
 
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
-
-    async def _persist_detail_state(
-        self, *, seq: int, event_time: Any, known_at: Any
-    ) -> None:
-        await self._await_persistence(
-            storage_target="bot_run_view_state",
-            pipeline_stage="detail_state_persist",
-            func=upsert_bot_run_view_state,
-            args=(
-                {
-                    "run_id": self._run_id,
-                    "bot_id": self._bot_id,
-                    "series_key": self._symbol_key,
-                    "seq": int(seq),
-                    "schema_version": int(self._state.get("schema_version") or 4),
-                    "payload": serialize_symbol_detail_state(self._state),
-                    "event_time": event_time,
-                    "known_at": known_at,
-                    "updated_at": known_at,
-                },
-            ),
+    def _symbol_summary_payload(self) -> dict[str, Any]:
+        identity = self._state.identity.to_dict()
+        candles = self._state.candles.candles
+        trades = self._state.trades.trades
+        last_candle = candles[-1] if candles else {}
+        last_trade = trades[-1] if trades else {}
+        last_trade_at = (
+            str(last_trade.get("updated_at") or last_trade.get("closed_at") or last_trade.get("opened_at") or "").strip()
+            or None
         )
-    async def _record_raw_event(
-        self,
-        *,
-        event_type: str,
-        seq: int,
-        raw_payload: Mapping[str, Any],
-        event_time: Any,
-        known_at: Any,
-    ) -> None:
-        bridge_session_id = normalize_bridge_session_id(raw_payload)
-        bridge_seq = normalize_bridge_seq(raw_payload)
-        event_payload: Dict[str, Any] = {
-            "series_key": self._symbol_key,
-            "run_seq": int(seq),
-            "bridge_session_id": bridge_session_id,
-            "bridge_seq": bridge_seq,
+        return {
+            "symbol_key": self._state.symbol_key,
+            "instrument_id": identity.get("instrument_id"),
+            "symbol": identity.get("symbol"),
+            "timeframe": identity.get("timeframe"),
+            "last_event_at": self._state.last_event_at,
+            "last_bar_time": last_candle.get("time"),
+            "last_price": last_candle.get("close"),
+            "candle_count": len(candles),
+            "last_trade_at": last_trade_at,
+            "last_activity_at": self._state.last_event_at,
+            "stats": dict(self._state.stats.stats),
+            "readiness": self._state.readiness.to_dict(),
         }
-        facts = normalize_fact_entries(raw_payload.get("facts"))
-        if facts:
-            event_payload["facts"] = facts
-        await self._await_persistence(
-            storage_target="bot_runtime_events",
-            pipeline_stage="raw_event_persist",
-            func=record_bot_runtime_event,
-            args=(
-                {
-                    "event_id": _event_id(
-                        bot_id=self._bot_id,
-                        run_id=self._run_id,
-                        event_type=event_type,
-                        symbol_key=self._symbol_key,
-                        bridge_session_id=bridge_session_id,
-                        bridge_seq=bridge_seq,
-                        seq=seq,
-                    ),
-                    "bot_id": self._bot_id,
-                    "run_id": self._run_id,
-                    "seq": int(seq),
-                    "event_type": event_type,
-                    "critical": bool(event_type == EVENT_TYPE_RUNTIME_BOOTSTRAP),
-                    "schema_version": 4,
-                    "event_time": event_time,
-                    "known_at": known_at,
-                    "payload": event_payload,
-                },
-            ),
-        )
 
-    # ------------------------------------------------------------------
-    # Initial state load (on startup / backend restart)
-    # ------------------------------------------------------------------
+    def _runtime_payload_from_batch(self, batch: ProjectionBatch) -> dict[str, Any]:
+        for event in batch.events:
+            context = event.context.to_dict() if hasattr(event.context, "to_dict") else {}
+            if not context.get("status"):
+                continue
+            if "warning_count" not in context and "warnings" not in context:
+                continue
+            return dict(context)
+        return {}
 
-    async def _load_initial_state(self) -> None:
-        """
-        Eagerly load the latest persisted symbol state from storage.
-        Gives viewers a meaningful snapshot even before the first new bootstrap.
-        """
-        started = time.perf_counter()
+    async def _emit_deltas(self, *, deltas: Tuple[SymbolConcernDelta, ...]) -> None:
+        if not deltas:
+            return
         try:
-            row = await asyncio.to_thread(
-                get_latest_bot_run_view_state,
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                series_key=self._symbol_key,
+            self._fanout_channel.put_nowait(
+                FanoutEnvelope(
+                    run_id=self._run_id,
+                    item=FanoutSymbolDeltaBatch(run_id=self._run_id, deltas=deltas),
+                    message_kind="symbol_projection_delta",
+                    payload_bytes=0,
+                )
             )
-            if row:
-                payload = (row or {}).get("payload")
-                if payload:
-                    self._state = read_symbol_detail_state(payload, symbol_key=self._symbol_key)
-                    load_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
-                    _OBSERVER.observe(
-                        "db_initial_load_ms",
-                        load_ms,
-                        bot_id=self._bot_id,
-                        run_id=self._run_id,
-                        series_key=self._symbol_key,
-                        storage_target="bot_run_view_state",
-                    )
-                    _OBSERVER.event(
-                        "db_initial_state_load_completed",
-                        bot_id=self._bot_id,
-                        run_id=self._run_id,
-                        series_key=self._symbol_key,
-                        storage_target="bot_run_view_state",
-                        load_ms=round(load_ms, 6),
-                    )
-        except Exception as exc:
-            load_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
-            _OBSERVER.observe(
-                "db_initial_load_ms",
-                load_ms,
+            self._emit_fanout_gauges()
+        except asyncio.QueueFull:
+            _OBSERVER.increment(
+                "fanout_dropped_total",
                 bot_id=self._bot_id,
                 run_id=self._run_id,
                 series_key=self._symbol_key,
-                storage_target="bot_run_view_state",
-                failure_mode="load_failed",
+                queue_name="fanout_channel",
+                message_kind="symbol_projection_delta",
+                failure_mode="queue_full",
             )
             _OBSERVER.event(
-                "db_initial_state_load_failed",
+                "fanout_channel_overflow",
                 level=logging.WARN,
+                log_to_logger=False,
                 bot_id=self._bot_id,
                 run_id=self._run_id,
                 series_key=self._symbol_key,
-                storage_target="bot_run_view_state",
-                load_ms=round(load_ms, 6),
-                failure_mode="load_failed",
-                error=str(exc),
+                queue_name="fanout_channel",
+                message_kind="symbol_projection_delta",
+                depth=self._fanout_channel.qsize(),
+                overflow_policy="drop_new",
+                failure_mode="queue_full",
             )
+            self._emit_fanout_gauges()
 
-    def _emit_run_notification_gauges(self) -> None:
-        queue = self._run_notifications
-        oldest_age_ms = 0.0
-        if queue.qsize() > 0:
-            try:
-                envelope = queue._queue[0]
-                if isinstance(envelope, QueueEnvelope):
-                    oldest_age_ms = max((time.monotonic() - envelope.enqueued_monotonic) * 1000.0, 0.0)
-            except Exception:
-                oldest_age_ms = 0.0
-        self._run_notification_queue_metrics.emit(
-            depth=queue.qsize(),
-            capacity=max(int(queue.maxsize or 1), 1),
-            oldest_age_ms=oldest_age_ms,
-        )
+    async def _load_initial_state(self) -> None:
+        started = time.perf_counter()
+        try:
+            batches = await asyncio.to_thread(
+                load_domain_projection_batches,
+                bot_id=self._bot_id,
+                run_id=self._run_id,
+                series_key=self._symbol_key,
+            )
+            for batch in batches:
+                self._state, _ = apply_symbol_batch(self._state, batch=batch)
+                self._seen_event_ids.update(
+                    str(getattr(event, "event_id", "") or "").strip()
+                    for event in batch.events
+                    if str(getattr(event, "event_id", "") or "").strip()
+                )
+            if batches:
+                load_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
+                _OBSERVER.observe(
+                    "ledger_rebuild_ms",
+                    load_ms,
+                    bot_id=self._bot_id,
+                    run_id=self._run_id,
+                    series_key=self._symbol_key,
+                    storage_target="bot_runtime_events",
+                )
+        except Exception as exc:
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            error_text = str(exc)[:512]
+            diagnostic = {
+                "id": f"projection_error:{self._symbol_key}",
+                "event_id": f"projection_error:{self._run_id}:{self._symbol_key}",
+                "type": "projection_error",
+                "severity": "error",
+                "source": "botlens_symbol_projector",
+                "message": "Symbol projection is unavailable because ledger rebuild failed.",
+                "error": error_text,
+                "timestamp": now,
+                "created_at": now,
+            }
+            self._state = replace(
+                self._state,
+                diagnostics=SymbolDiagnosticsState(diagnostics=(diagnostic,)),
+                readiness=SymbolReadinessState(snapshot_ready=False, symbol_live=False),
+            )
+            _OBSERVER.event(
+                "ledger_rebuild_failed",
+                level=logging.ERROR,
+                bot_id=self._bot_id,
+                run_id=self._run_id,
+                series_key=self._symbol_key,
+                storage_target="bot_runtime_events",
+                failure_mode="load_failed",
+                projection_state="projection_error",
+                error=error_text,
+            )
 
     def _emit_fanout_gauges(self) -> None:
         oldest_age_ms = 0.0
@@ -814,5 +520,20 @@ class SymbolProjector:
             oldest_age_ms=oldest_age_ms,
         )
 
+    def _emit_run_notification_gauges(self) -> None:
+        oldest_age_ms = 0.0
+        if self._run_notifications.qsize() > 0:
+            try:
+                envelope = self._run_notifications._queue[0]
+                if isinstance(envelope, QueueEnvelope):
+                    oldest_age_ms = max((time.monotonic() - envelope.enqueued_monotonic) * 1000.0, 0.0)
+            except Exception:
+                oldest_age_ms = 0.0
+        self._run_notification_queue_metrics.emit(
+            depth=self._run_notifications.qsize(),
+            capacity=max(int(self._run_notifications.maxsize or 1), 1),
+            oldest_age_ms=oldest_age_ms,
+        )
 
-__all__ = ["SymbolProjector", "SymbolSummaryNotification"]
+
+__all__ = ["SymbolProjector", "SymbolProjectorSnapshot", "SymbolSummaryNotification"]

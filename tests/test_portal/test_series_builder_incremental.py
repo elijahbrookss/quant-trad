@@ -6,7 +6,8 @@ import pytest
 
 pytest.importorskip("pandas")
 
-from engines.bot_runtime.core.domain import Candle, isoformat
+from engines.bot_runtime.core.domain import Candle, StrategySignal, isoformat
+from engines.bot_runtime.deps import BotRuntimeDeps
 from engines.bot_runtime.strategy.series_builder import SeriesBuilder, StrategySeries
 
 
@@ -21,11 +22,34 @@ def _candle_at(ts: datetime, value: float = 100.0) -> Candle:
     )
 
 
+def _builder_deps() -> BotRuntimeDeps:
+    return BotRuntimeDeps(
+        fetch_strategy=lambda _strategy_id: None,
+        fetch_ohlcv=lambda *args, **kwargs: None,
+        resolve_instrument=lambda _datasource, _exchange, _symbol: None,
+        strategy_evaluate=lambda *args, **kwargs: {},
+        strategy_run_preview=lambda *args, **kwargs: {},
+        indicator_get_instance_meta=lambda *args, **kwargs: {},
+        indicator_build_runtime_graph=lambda *args, **kwargs: ({}, []),
+        indicator_build_runtime_instance=lambda *args, **kwargs: None,
+        indicator_runtime_input_plan_for_instance=lambda *args, **kwargs: {},
+        build_indicator_context=lambda *_args, **_kwargs: None,
+        record_bot_runtime_event=lambda _payload: None,
+        record_bot_runtime_events_batch=lambda _payloads: 0,
+        record_bot_trade=lambda _payload: None,
+        record_bot_trade_event=lambda _payload: None,
+        record_bot_run_steps_batch=lambda _payloads: 0,
+        update_bot_run_artifact=lambda _run_id, _payload: None,
+        build_run_artifact_bundle=lambda _bot_id, _run_id, _config, _series: None,
+    )
+
+
 def test_incremental_eval_emits_only_current_epoch_and_newer_than_cursor():
     builder = SeriesBuilder(
         bot_id="bot-1",
         config={"incremental_signal_lookback_bars": 10},
         run_type="backtest",
+        deps=_builder_deps(),
     )
     now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
     series = StrategySeries(
@@ -90,6 +114,7 @@ def test_incremental_eval_uses_bounded_lookback_window():
         bot_id="bot-1",
         config={"incremental_signal_lookback_bars": 5},
         run_type="backtest",
+        deps=_builder_deps(),
     )
     now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
     series = StrategySeries(
@@ -142,7 +167,7 @@ def test_build_signals_from_decision_artifacts_preserves_signal_time_without_shi
     assert len(out) == 1
     assert out[0].epoch == int(ts.timestamp())
     assert out[0].direction == "long"
-    assert out[0].signal_id == "d-1"
+    assert out[0].signal_id == StrategySignal.build_signal_id(decision_id="d-1")
     assert out[0].strategy_hash == "hash-1"
     assert out[0].decision_id == "d-1"
     assert out[0].rule_id == "rule-1"

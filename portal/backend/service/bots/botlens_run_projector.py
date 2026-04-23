@@ -1,18 +1,8 @@
-"""Run-level projector for the BotLens telemetry pipeline.
+"""Run-level BotLens projector.
 
-RunProjector is the sole owner of canonical run-level state:
-  - run summary (health, lifecycle, symbol_index, open_trades_index, run_meta)
-  - run lifecycle persistence
-  - run-level fanout emission (summary delta, open-trades delta)
-
-It processes from two sources concurrently:
-  - lifecycle_channel: lifecycle event payloads from the intake router
-  - _symbol_notifications: SymbolSummaryNotification from SymbolProjectors
-
-Ownership invariants:
-  - RunProjector is the only writer of run summary state and run-level persistence.
-  - SymbolProjector never writes run-level state.
-  - RunProjector never writes symbol detail state.
+RunProjector coordinates concern-specific run projection for one ``run_id``.
+It owns run lifecycle, runtime health, bounded fault state, the open-trades
+index, and the run symbol catalog. It does not depend on SymbolProjector state.
 """
 
 from __future__ import annotations
@@ -20,81 +10,41 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Mapping
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from dataclasses import replace
+from datetime import datetime, timezone
+from typing import Any, Callable, Coroutine
 
-from ..observability import BackendObserver, QueueStateMetricOwner, normalize_failure_mode, payload_size_bytes
-from ..storage.storage import (
-    get_bot_run,
-    get_latest_bot_run_view_state,
-    get_latest_bot_runtime_event,
-    record_bot_runtime_event,
-    upsert_bot_run_view_state,
-)
-from .botlens_contract import (
-    EVENT_TYPE_LIFECYCLE,
-    RUN_SCOPE_KEY,
-    normalize_lifecycle_payload,
-    normalize_series_key,
-)
-from .botlens_mailbox import (
-    FanoutEnvelope,
-    FanoutOpenTradesDelta,
-    FanoutSummaryDelta,
-    QueueEnvelope,
-    RunMailbox,
-)
-from .botlens_state import (
-    build_symbol_summary,
-    empty_run_summary,
-    is_open_trade,
-    read_run_summary_state,
-    serialize_run_summary_state,
-)
+from ..observability import BackendObserver, QueueStateMetricOwner
+from .botlens_event_replay import load_domain_projection_batches
+from .botlens_mailbox import FanoutEnvelope, FanoutRunDeltaBatch, QueueEnvelope, RunMailbox
 from .botlens_symbol_projector import SymbolSummaryNotification
+from .botlens_state import (
+    ProjectionBatch,
+    RunConcernDelta,
+    RunFaultsState,
+    RunHealthDelta,
+    RunHealthState,
+    RunLifecycleDelta,
+    RunOpenTradesDelta,
+    RunProjectionSnapshot,
+    RunReadinessState,
+    RunSymbolCatalogDelta,
+    RunOpenTradesState,
+    RunSymbolCatalogState,
+    _build_run_health_state,
+    apply_run_batch,
+    empty_run_projection_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 _OBSERVER = BackendObserver(component="botlens_run_projector", event_logger=logger)
 
-_ACTIVE_RUN_TTL_S = 1800.0
 _TERMINAL_RUN_TTL_S = 300.0
-_LIFECYCLE_SEQ_OFFSET = 1_000_000_000
-_INT32_MAX = 2_147_483_647
-_TERMINAL_LIFECYCLE_PHASES = frozenset(
-    {"completed", "stopped", "error", "failed", "crashed", "startup_failed"}
-)
-_TERMINAL_LIFECYCLE_STATUSES = frozenset(
-    {"completed", "stopped", "error", "failed", "crashed", "startup_failed"}
-)
-_SYMBOL_NOTIFICATION_QUEUE_MAX = 1024
-
-
-def _mapping(value: Any) -> Dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
-
-
-def _coerce_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return int(default)
+_TERMINAL_LIFECYCLE_PHASES = frozenset({"completed", "stopped", "cancelled", "error", "failed", "crashed", "startup_failed"})
+_TERMINAL_LIFECYCLE_STATUSES = frozenset({"completed", "stopped", "cancelled", "error", "failed", "crashed", "startup_failed"})
 
 
 class RunProjector:
-    """
-    Owns run-level canonical state for one run_id.
-    Runs as an asyncio task.
-
-    Consumes:
-      - mailbox.lifecycle_channel  → lifecycle events from the intake router
-      - _symbol_notifications      → SymbolSummaryNotification from SymbolProjectors
-
-    Emits:
-      - FanoutSummaryDelta and FanoutOpenTradesDelta to fanout_channel
-      - Persistence writes (run summary, lifecycle events)
-      - publish_runtime_update / publish_projected_bot side-effects
-    """
-
     def __init__(
         self,
         *,
@@ -112,93 +62,26 @@ class RunProjector:
         self._fanout_queue_metrics = fanout_queue_metrics
         self._on_evict = on_evict
 
-        self._summary_state: Dict[str, Any] = empty_run_summary(
-            bot_id=bot_id, run_id=run_id
-        )
-        self._latest_lifecycle: Dict[str, Any] = {}
-        self._latest_lifecycle_seq: Optional[int] = None
-
+        self._state = empty_run_projection_snapshot(bot_id=bot_id, run_id=run_id)
         self._terminal = False
-        self._terminal_at: Optional[float] = None
-        self._last_activity: float = time.monotonic()
-
-        # Notification queue from SymbolProjectors to this RunProjector.
-        self._symbol_notifications: "asyncio.Queue[QueueEnvelope]" = asyncio.Queue(
-            maxsize=_SYMBOL_NOTIFICATION_QUEUE_MAX
-        )
-        self._run_notification_queue_metrics = QueueStateMetricOwner(
-            observer=_OBSERVER,
-            key=f"run_notification_queue:{self._run_id}",
-            depth_metric="run_notification_queue_depth",
-            utilization_metric="run_notification_queue_utilization",
-            oldest_age_metric="run_notification_queue_oldest_age_ms",
-            labels={
-                "bot_id": self._bot_id,
-                "run_id": self._run_id,
-                "queue_name": "run_notification_queue",
-            },
-        )
+        self._terminal_at: float | None = None
         self._active = True
+        self._ready = asyncio.Event()
 
-    @property
-    def symbol_notifications(self) -> "asyncio.Queue[QueueEnvelope]":
-        """SymbolProjectors push to this queue to notify the run projector."""
-        return self._symbol_notifications
+    def get_snapshot(self) -> RunProjectionSnapshot:
+        return self._state
 
-    @property
-    def run_notification_queue_metrics(self) -> QueueStateMetricOwner:
-        return self._run_notification_queue_metrics
-
-    @property
-    def fanout_queue_metrics(self) -> QueueStateMetricOwner:
-        return self._fanout_queue_metrics
-
-    async def _await_persistence(
-        self,
-        *,
-        storage_target: str,
-        pipeline_stage: str,
-        func: Any,
-        args: tuple[Any, ...] = (),
-        **kwargs: Any,
-    ) -> Any:
-        started = time.perf_counter()
-        try:
-            result = await asyncio.to_thread(func, *args, **kwargs)
-        except Exception as exc:
-            _OBSERVER.observe(
-                "persistence_wait_ms",
-                max((time.perf_counter() - started) * 1000.0, 0.0),
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                storage_target=storage_target,
-                pipeline_stage=pipeline_stage,
-                failure_mode=normalize_failure_mode(exc),
-            )
-            raise
-        _OBSERVER.observe(
-            "persistence_wait_ms",
-            max((time.perf_counter() - started) * 1000.0, 0.0),
-            bot_id=self._bot_id,
-            run_id=self._run_id,
-            storage_target=storage_target,
-            pipeline_stage=pipeline_stage,
-        )
-        return result
-
-    # ------------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------------
+    async def wait_until_ready(self) -> None:
+        await self._ready.wait()
 
     async def run(self) -> None:
-        """Main run projector loop. Exits when cancelled or when the run TTL expires."""
         await self._load_initial_state()
-
+        self._ready.set()
         lifecycle_task: asyncio.Task[Any] = asyncio.create_task(
-            self._mailbox.lifecycle_channel.get(), name=f"run-lc-{self._run_id}"
+            self._mailbox.lifecycle_queue.get(), name=f"run-lifecycle-{self._run_id}"
         )
         notification_task: asyncio.Task[Any] = asyncio.create_task(
-            self._symbol_notifications.get(), name=f"run-notif-{self._run_id}"
+            self._mailbox.notification_queue.get(), name=f"run-notifications-{self._run_id}"
         )
 
         try:
@@ -208,11 +91,10 @@ class RunProjector:
                     return_when=asyncio.FIRST_COMPLETED,
                     timeout=2.0,
                 )
-
                 if lifecycle_task in done:
                     try:
                         envelope = lifecycle_task.result()
-                        payload = envelope.payload if isinstance(envelope, QueueEnvelope) else envelope
+                        batch = envelope.payload if isinstance(envelope, QueueEnvelope) else envelope
                         queue_wait_ms = (
                             max((time.monotonic() - envelope.enqueued_monotonic) * 1000.0, 0.0)
                             if isinstance(envelope, QueueEnvelope)
@@ -224,10 +106,10 @@ class RunProjector:
                             bot_id=self._bot_id,
                             run_id=self._run_id,
                             queue_name="run_lifecycle_queue",
-                            message_kind="lifecycle",
+                            message_kind="domain_batch",
                         )
                         self._mailbox._emit_lifecycle_gauges()
-                        await self._process_lifecycle(payload)
+                        await self._apply_lifecycle_batch(batch)
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
@@ -236,12 +118,12 @@ class RunProjector:
                             level=logging.ERROR,
                             bot_id=self._bot_id,
                             run_id=self._run_id,
-                            failure_mode="lifecycle_apply_failed",
+                            failure_mode="batch_apply_failed",
                             error=str(exc),
                         )
                     lifecycle_task = asyncio.create_task(
-                        self._mailbox.lifecycle_channel.get(),
-                        name=f"run-lc-{self._run_id}",
+                        self._mailbox.lifecycle_queue.get(),
+                        name=f"run-lifecycle-{self._run_id}",
                     )
 
                 if notification_task in done:
@@ -259,10 +141,11 @@ class RunProjector:
                             bot_id=self._bot_id,
                             run_id=self._run_id,
                             queue_name="run_notification_queue",
-                            message_kind="notification",
+                            message_kind="symbol_summary",
                         )
-                        self._emit_notification_gauges()
-                        await self._process_symbol_notification(notification)
+                        self._mailbox._emit_notification_gauges()
+                        if isinstance(notification, SymbolSummaryNotification):
+                            await self._process_symbol_notification(notification)
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
@@ -275,622 +158,283 @@ class RunProjector:
                             error=str(exc),
                         )
                     notification_task = asyncio.create_task(
-                        self._symbol_notifications.get(),
-                        name=f"run-notif-{self._run_id}",
+                        self._mailbox.notification_queue.get(),
+                        name=f"run-notifications-{self._run_id}",
                     )
 
-                # Eviction check: terminal + TTL elapsed + no viewers.
                 if self._should_evict():
                     break
-
         except asyncio.CancelledError:
             pass
         finally:
-            for t in (lifecycle_task, notification_task):
-                if not t.done():
-                    t.cancel()
+            for task in (lifecycle_task, notification_task):
+                if not task.done():
+                    task.cancel()
             asyncio.create_task(self._on_evict(self._run_id))
 
     def _should_evict(self) -> bool:
-        if not self._terminal or self._terminal_at is None:
-            return False
-        return (time.monotonic() - self._terminal_at) > _TERMINAL_RUN_TTL_S
+        return bool(self._terminal and self._terminal_at is not None and (time.monotonic() - self._terminal_at) > _TERMINAL_RUN_TTL_S)
 
-    # ------------------------------------------------------------------
-    # Symbol summary notification processing
-    # ------------------------------------------------------------------
+    async def _apply_lifecycle_batch(self, batch: ProjectionBatch) -> None:
+        started = time.perf_counter()
+        self._state, deltas = apply_run_batch(self._state, batch=batch)
+        await self._emit_deltas(deltas=deltas)
+        await self._publish_side_effects(deltas=deltas, batch=batch)
+        self._refresh_terminal_state()
+        _OBSERVER.observe(
+            "run_projector_apply_ms",
+            max((time.perf_counter() - started) * 1000.0, 0.0),
+            bot_id=self._bot_id,
+            run_id=self._run_id,
+            message_kind=batch.batch_kind,
+        )
 
     async def _process_symbol_notification(self, notification: SymbolSummaryNotification) -> None:
         started = time.perf_counter()
-        self._last_activity = time.monotonic()
-        seq = notification.seq
-        symbol_key = notification.symbol_key
+        deltas: list[RunConcernDelta] = []
 
-        # 1. Merge trade diffs into the run-level open-trades index.
-        open_trades_delta = self._merge_open_trades(
-            upserts=notification.trade_upserts,
-            removals=notification.trade_removals,
-        )
+        symbol_summary = dict(notification.symbol_summary)
+        symbol_key = str(symbol_summary.get("symbol_key") or notification.symbol_key).strip()
+        if symbol_key:
+            next_catalog = dict(self._state.symbol_catalog.entries)
+            current_entry = next_catalog.get(symbol_key)
+            if current_entry != symbol_summary:
+                next_catalog[symbol_key] = symbol_summary
+                self._state = replace(
+                    self._state,
+                    seq=max(int(self._state.seq), int(notification.seq)),
+                    symbol_catalog=RunSymbolCatalogState(entries=next_catalog),
+                    readiness=RunReadinessState(
+                        catalog_discovered=bool(next_catalog),
+                        run_live=bool(self._state.readiness.run_live),
+                    ),
+                )
+                deltas.append(
+                    RunSymbolCatalogDelta(
+                        seq=int(notification.seq),
+                        event_time=notification.event_time,
+                        symbol_upserts=(dict(symbol_summary),),
+                    )
+                )
 
-        # 2. Build updated symbol summary (now that open_trades_index is merged).
-        open_trades_for_symbol = [
-            t for t in self._summary_state.get("open_trades_index", {}).values()
-            if normalize_series_key(t.get("symbol_key")) == symbol_key
-            and isinstance(t, Mapping)
-        ]
-        symbol_summary = build_symbol_summary(
-            notification.detail_state,
-            open_trades=open_trades_for_symbol,
-        )
-        self._summary_state.setdefault("symbol_index", {})[symbol_key] = symbol_summary
+        if notification.trade_upserts or notification.trade_removals:
+            next_open_trades = dict(self._state.open_trades.entries)
+            changed = False
+            for trade in notification.trade_upserts:
+                trade_id = str(trade.get("trade_id") or "").strip()
+                if not trade_id:
+                    continue
+                if next_open_trades.get(trade_id) != trade:
+                    next_open_trades[trade_id] = dict(trade)
+                    changed = True
+            for trade_id in notification.trade_removals:
+                if next_open_trades.pop(str(trade_id), None) is not None:
+                    changed = True
+            if changed:
+                self._state = replace(
+                    self._state,
+                    seq=max(int(self._state.seq), int(notification.seq)),
+                    open_trades=RunOpenTradesState(entries=next_open_trades),
+                )
+                deltas.append(
+                    RunOpenTradesDelta(
+                        seq=int(notification.seq),
+                        event_time=notification.event_time,
+                        upserts=tuple(dict(entry) for entry in notification.trade_upserts),
+                        removals=tuple(str(entry) for entry in notification.trade_removals),
+                    )
+                )
 
-        # 3. Refresh run health from symbol runtime payload.
         if notification.runtime:
-            self._refresh_health_from_runtime(notification.runtime, known_at=notification.known_at)
+            next_health = _build_run_health_state(
+                self._state.health,
+                status=notification.runtime.get("status"),
+                phase=self._state.lifecycle.phase,
+                warning_count=notification.runtime.get("warning_count"),
+                warnings=notification.runtime.get("warnings"),
+                last_event_at=notification.runtime.get("last_event_at") or notification.known_at,
+                worker_count=notification.runtime.get("worker_count"),
+                active_workers=notification.runtime.get("active_workers"),
+                trigger_event=notification.runtime.get("trigger_event"),
+                runtime_state=notification.runtime.get("runtime_state"),
+                last_useful_progress_at=notification.runtime.get("last_useful_progress_at"),
+                progress_state=notification.runtime.get("progress_state"),
+                degraded=notification.runtime.get("degraded"),
+                churn=notification.runtime.get("churn"),
+                pressure=notification.runtime.get("pressure"),
+                recent_transitions=notification.runtime.get("recent_transitions"),
+                terminal=notification.runtime.get("terminal"),
+            )
+            if next_health != self._state.health:
+                self._state = replace(
+                    self._state,
+                    seq=max(int(self._state.seq), int(notification.seq)),
+                    health=next_health,
+                )
+                deltas.append(
+                    RunHealthDelta(
+                        seq=int(notification.seq),
+                        event_time=notification.event_time,
+                        health=next_health.to_dict(),
+                    )
+                )
 
-        self._summary_state["seq"] = int(seq)
+        if not deltas:
+            return
 
-        # 4. Ensure run metadata is loaded.
-        await self._ensure_run_meta()
-
-        # 5. Persist summary state.
-        await self._persist_summary_state(
-            seq=seq,
-            event_time=notification.event_time,
-            known_at=notification.known_at,
-        )
-
-        # 6. Emit runtime update publish.
-        if notification.runtime:
-            await self._publish_runtime_update(
-                runtime_payload=notification.runtime,
-                seq=seq,
+        await self._emit_deltas(deltas=tuple(deltas))
+        await self._publish_side_effects(
+            deltas=tuple(deltas),
+            batch=ProjectionBatch(
+                batch_kind="botlens_symbol_summary_notification",
+                run_id=self._run_id,
+                bot_id=self._bot_id,
+                seq=int(notification.seq),
+                event_time=notification.event_time,
                 known_at=notification.known_at,
-            )
-
-        # 7. Fanout summary delta.
-        await self._emit_summary_delta(seq=seq, symbol_upserts=[symbol_summary])
-
-        # 8. Fanout open-trades delta if there were changes.
-        if open_trades_delta:
-            upserts, removals = open_trades_delta
-            await self._emit_open_trades_delta(
-                seq=seq, upserts=upserts, removals=removals
-            )
-        _OBSERVER.increment(
-            "run_projector_notification_apply_total",
-            bot_id=self._bot_id,
-            run_id=self._run_id,
-            series_key=symbol_key,
-            message_kind="notification",
+                symbol_key=notification.symbol_key,
+                events=(),
+            ),
         )
+        self._refresh_terminal_state()
         _OBSERVER.observe(
             "run_projector_apply_ms",
             max((time.perf_counter() - started) * 1000.0, 0.0),
             bot_id=self._bot_id,
             run_id=self._run_id,
-            series_key=symbol_key,
-            message_kind="notification",
+            message_kind="botlens_symbol_summary_notification",
         )
 
-    # ------------------------------------------------------------------
-    # Lifecycle processing
-    # ------------------------------------------------------------------
-
-    async def _process_lifecycle(self, payload: Mapping[str, Any]) -> None:
-        started = time.perf_counter()
-        self._last_activity = time.monotonic()
-        lifecycle = normalize_lifecycle_payload(payload)
-        if not lifecycle:
-            return
-
-        previous_phase = str(self._latest_lifecycle.get("phase") or "").strip().lower()
-        previous_status = str(self._latest_lifecycle.get("status") or "").strip().lower()
-        self._latest_lifecycle = dict(lifecycle)
-
-        # Persist lifecycle event with its own monotonic seq.
-        lifecycle_seq = await self._next_lifecycle_seq(lifecycle)
-        await self._persist_lifecycle_event(lifecycle=lifecycle, lifecycle_seq=lifecycle_seq)
-
-        # Update summary health from lifecycle.
-        self._summary_state["lifecycle"] = dict(lifecycle)
-        self._refresh_health_from_lifecycle(lifecycle, known_at=lifecycle.get("checkpoint_at"))
-
-        summary_seq = max(
-            int(self._summary_state.get("seq") or 0) + 1,
-            _coerce_int(payload.get("seq"), default=0),
-        )
-        self._summary_state["seq"] = summary_seq
-
-        await self._ensure_run_meta()
-        await self._persist_summary_state(
-            seq=summary_seq,
-            event_time=lifecycle.get("checkpoint_at"),
-            known_at=lifecycle.get("checkpoint_at"),
-        )
-
-        terminal = (
-            str(lifecycle.get("phase") or "").strip().lower() in _TERMINAL_LIFECYCLE_PHASES
-            or str(lifecycle.get("status") or "").strip().lower() in _TERMINAL_LIFECYCLE_STATUSES
-        )
+    def _refresh_terminal_state(self) -> None:
+        phase = str(self._state.lifecycle.phase or "").strip().lower()
+        status = str(self._state.lifecycle.status or self._state.health.status or "").strip().lower()
+        terminal = phase in _TERMINAL_LIFECYCLE_PHASES or status in _TERMINAL_LIFECYCLE_STATUSES
         if terminal and not self._terminal:
             self._terminal = True
             self._terminal_at = time.monotonic()
-            _OBSERVER.increment("run_projector_terminal_total", bot_id=self._bot_id, run_id=self._run_id)
-            _OBSERVER.event(
-                "run_terminal_detected",
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                message_kind="lifecycle",
-                phase=lifecycle.get("phase"),
-                status=lifecycle.get("status"),
-            )
 
-        await self._publish_projected_bot()
-        await self._emit_summary_delta(
-            seq=summary_seq,
-            symbol_upserts=[],
-            lifecycle=lifecycle,
-        )
-        if (
-            previous_phase != str(lifecycle.get("phase") or "").strip().lower()
-            or previous_status != str(lifecycle.get("status") or "").strip().lower()
-        ):
-            _OBSERVER.event(
-                "run_phase_changed",
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                message_kind="lifecycle",
-                previous_phase=previous_phase or None,
-                phase=lifecycle.get("phase"),
-                previous_status=previous_status or None,
-                status=lifecycle.get("status"),
-            )
-        _OBSERVER.increment(
-            "run_projector_lifecycle_apply_total",
-            bot_id=self._bot_id,
-            run_id=self._run_id,
-            message_kind="lifecycle",
-        )
-        _OBSERVER.observe(
-            "run_projector_apply_ms",
-            max((time.perf_counter() - started) * 1000.0, 0.0),
-            bot_id=self._bot_id,
-            run_id=self._run_id,
-            message_kind="lifecycle",
-        )
-
-    # ------------------------------------------------------------------
-    # Open-trades merge (run projector is sole writer)
-    # ------------------------------------------------------------------
-
-    def _merge_open_trades(
-        self,
-        *,
-        upserts: List[Dict[str, Any]],
-        removals: List[str],
-    ) -> Optional[tuple]:
-        if not upserts and not removals:
-            return None
-        index = self._summary_state.setdefault("open_trades_index", {})
-        effective_removals = []
-        effective_upserts = []
-        for trade_id in removals:
-            if str(trade_id).strip() and str(trade_id) in index:
-                index.pop(str(trade_id))
-                effective_removals.append(str(trade_id))
-        for trade in upserts:
-            if not isinstance(trade, Mapping):
-                continue
-            trade_id = str(trade.get("trade_id") or "").strip()
-            if not trade_id:
-                continue
-            if is_open_trade(trade):
-                index[trade_id] = dict(trade)
-                effective_upserts.append(dict(trade))
-            else:
-                if trade_id in index:
-                    index.pop(trade_id)
-                    effective_removals.append(trade_id)
-        if not effective_upserts and not effective_removals:
-            return None
-        return effective_upserts, effective_removals
-
-    # ------------------------------------------------------------------
-    # Health refresh helpers
-    # ------------------------------------------------------------------
-
-    def _refresh_health_from_runtime(
-        self, runtime: Mapping[str, Any], *, known_at: Any
-    ) -> None:
-        health = dict(self._summary_state.get("health") or {})
-        health["status"] = str(runtime.get("status") or health.get("status") or "waiting")
-        health["worker_count"] = int(runtime.get("worker_count") or health.get("worker_count") or 0)
-        health["active_workers"] = int(runtime.get("active_workers") or health.get("active_workers") or 0)
-        warnings = runtime.get("warnings")
-        if isinstance(warnings, list):
-            health["warning_count"] = len(warnings)
-            health["warnings"] = [dict(w) for w in warnings if isinstance(w, Mapping)]
-        health["last_event_at"] = known_at
-        self._summary_state["health"] = health
-
-    def _refresh_health_from_lifecycle(
-        self, lifecycle: Mapping[str, Any], *, known_at: Any
-    ) -> None:
-        health = dict(self._summary_state.get("health") or {})
-        health["phase"] = lifecycle.get("phase") or health.get("phase")
-        health["status"] = str(lifecycle.get("status") or health.get("status") or "waiting")
-        if known_at:
-            health["last_event_at"] = known_at
-        self._summary_state["health"] = health
-
-    # ------------------------------------------------------------------
-    # Fanout emission
-    # ------------------------------------------------------------------
-
-    async def _emit_summary_delta(
-        self,
-        *,
-        seq: int,
-        symbol_upserts: List[Dict[str, Any]],
-        lifecycle: Optional[Dict[str, Any]] = None,
-        symbol_removals: Optional[List[str]] = None,
-    ) -> None:
-        item = FanoutSummaryDelta(
-            run_id=self._run_id,
-            seq=seq,
-            health=dict(self._summary_state.get("health") or {}),
-            lifecycle=lifecycle or dict(self._latest_lifecycle),
-            symbol_upserts=list(symbol_upserts),
-            symbol_removals=symbol_removals,
-        )
-        try:
-            payload_bytes = payload_size_bytes(
-                {
-                    "health": item.health,
-                    "lifecycle": item.lifecycle,
-                    "symbol_upserts": item.symbol_upserts,
-                    "symbol_removals": item.symbol_removals,
-                }
-            )
-            self._fanout_channel.put_nowait(
-                FanoutEnvelope(
-                    run_id=self._run_id,
-                    item=item,
-                    message_kind="summary_delta",
-                    payload_bytes=payload_bytes,
-                )
-            )
-            _OBSERVER.increment(
-                "fanout_enqueued_total",
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                queue_name="fanout_channel",
-                message_kind="summary_delta",
-            )
-            _OBSERVER.observe(
-                "fanout_payload_bytes",
-                float(payload_bytes),
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                queue_name="fanout_channel",
-                message_kind="summary_delta",
-            )
-            self._emit_fanout_gauges()
-        except asyncio.QueueFull:
-            _OBSERVER.increment(
-                "fanout_dropped_total",
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                queue_name="fanout_channel",
-                message_kind="summary_delta",
-                failure_mode="queue_full",
-            )
-            _OBSERVER.event(
-                "fanout_channel_overflow",
-                level=logging.WARN,
-                log_to_logger=False,
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                queue_name="fanout_channel",
-                operation="summary_delta",
-                failure_mode="queue_full",
-                overflow_policy="drop_new",
-            )
-            self._emit_fanout_gauges()
-
-    async def _emit_open_trades_delta(
-        self,
-        *,
-        seq: int,
-        upserts: List[Dict[str, Any]],
-        removals: List[str],
-    ) -> None:
-        item = FanoutOpenTradesDelta(
-            run_id=self._run_id,
-            seq=seq,
-            upserts=upserts,
-            removals=removals,
-        )
-        try:
-            payload_bytes = payload_size_bytes(
-                {
-                    "upserts": item.upserts,
-                    "removals": item.removals,
-                }
-            )
-            self._fanout_channel.put_nowait(
-                FanoutEnvelope(
-                    run_id=self._run_id,
-                    item=item,
-                    message_kind="open_trades_delta",
-                    payload_bytes=payload_bytes,
-                )
-            )
-            _OBSERVER.increment(
-                "fanout_enqueued_total",
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                queue_name="fanout_channel",
-                message_kind="open_trades_delta",
-            )
-            _OBSERVER.observe(
-                "fanout_payload_bytes",
-                float(payload_bytes),
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                queue_name="fanout_channel",
-                message_kind="open_trades_delta",
-            )
-            self._emit_fanout_gauges()
-        except asyncio.QueueFull:
-            _OBSERVER.increment(
-                "fanout_dropped_total",
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                queue_name="fanout_channel",
-                message_kind="open_trades_delta",
-                failure_mode="queue_full",
-            )
-            _OBSERVER.event(
-                "fanout_channel_overflow",
-                level=logging.WARN,
-                log_to_logger=False,
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                queue_name="fanout_channel",
-                operation="open_trades_delta",
-                failure_mode="queue_full",
-                overflow_policy="drop_new",
-            )
-            self._emit_fanout_gauges()
-
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
-
-    async def _persist_summary_state(
-        self, *, seq: int, event_time: Any, known_at: Any
-    ) -> None:
-        await self._await_persistence(
-            storage_target="bot_run_view_state",
-            pipeline_stage="summary_state_persist",
-            func=upsert_bot_run_view_state,
-            args=(
-                {
-                    "run_id": self._run_id,
-                    "bot_id": self._bot_id,
-                    "series_key": RUN_SCOPE_KEY,
-                    "seq": int(seq),
-                    "schema_version": int(self._summary_state.get("schema_version") or 4),
-                    "payload": serialize_run_summary_state(self._summary_state),
-                    "event_time": event_time,
-                    "known_at": known_at,
-                    "updated_at": known_at,
-                },
-            ),
-        )
-
-    async def _next_lifecycle_seq(self, lifecycle_payload: Mapping[str, Any]) -> int:
-        if self._latest_lifecycle_seq is None:
-            latest = await self._await_persistence(
-                storage_target="bot_runtime_events",
-                pipeline_stage="lifecycle_seq_load",
-                func=get_latest_bot_runtime_event,
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                event_types=[EVENT_TYPE_LIFECYCLE],
-            )
-            self._latest_lifecycle_seq = max(
-                _LIFECYCLE_SEQ_OFFSET,
-                _coerce_int((latest or {}).get("seq"), default=0),
-            )
-        raw_seq = _coerce_int(lifecycle_payload.get("seq"), default=0)
-        candidate = _LIFECYCLE_SEQ_OFFSET + raw_seq if raw_seq > 0 else 0
-        if candidate > _INT32_MAX:
-            candidate = 0
-        next_seq = max(self._latest_lifecycle_seq + 1, candidate or (_LIFECYCLE_SEQ_OFFSET + 1))
-        if next_seq > _INT32_MAX:
-            raise RuntimeError(
-                f"lifecycle seq exceeded int32 | run_id={self._run_id} | seq={next_seq}"
-            )
-        self._latest_lifecycle_seq = next_seq
-        return next_seq
-
-    async def _persist_lifecycle_event(
-        self, *, lifecycle: Mapping[str, Any], lifecycle_seq: int
-    ) -> None:
-        await self._await_persistence(
-            storage_target="bot_runtime_events",
-            pipeline_stage="lifecycle_event_persist",
-            func=record_bot_runtime_event,
-            args=(
-                {
-                    "event_id": f"{self._bot_id}:{self._run_id}:{EVENT_TYPE_LIFECYCLE}:{lifecycle_seq}",
-                    "bot_id": self._bot_id,
-                    "run_id": self._run_id,
-                    "seq": lifecycle_seq,
-                    "event_type": EVENT_TYPE_LIFECYCLE,
-                    "critical": True,
-                    "schema_version": 4,
-                    "event_time": lifecycle.get("checkpoint_at") or lifecycle.get("updated_at"),
-                    "known_at": lifecycle.get("checkpoint_at") or lifecycle.get("updated_at"),
-                    "payload": dict(lifecycle),
-                },
-            ),
-        )
-
-    # ------------------------------------------------------------------
-    # Run metadata
-    # ------------------------------------------------------------------
-
-    async def _ensure_run_meta(self) -> None:
-        cached = _mapping(self._summary_state.get("run_meta"))
-        if cached.get("run_id") == str(self._run_id):
+    async def _emit_deltas(self, *, deltas: tuple[RunConcernDelta, ...]) -> None:
+        if not deltas:
             return
         try:
-            row = await asyncio.to_thread(get_bot_run, str(self._run_id))
-            row = _mapping(row)
-            meta = {
-                "run_id": str(self._run_id),
-                "bot_id": str(row.get("bot_id") or self._bot_id),
-                "strategy_id": row.get("strategy_id"),
-                "strategy_name": row.get("strategy_name"),
-                "run_type": row.get("run_type"),
-                "datasource": row.get("datasource"),
-                "exchange": row.get("exchange"),
-                "symbols": list(row.get("symbols") or []) if isinstance(row.get("symbols"), list) else [],
-                "started_at": row.get("started_at"),
-                "ended_at": row.get("ended_at"),
-            }
-            self._summary_state["run_meta"] = meta
-        except Exception as exc:
-            logger.warning(
-                "run_projector_meta_load_failed | run_id=%s | error=%s", self._run_id, exc
+            self._fanout_channel.put_nowait(
+                FanoutEnvelope(
+                    run_id=self._run_id,
+                    item=FanoutRunDeltaBatch(run_id=self._run_id, state=self._state, deltas=deltas),
+                    message_kind="run_projection_delta",
+                    payload_bytes=0,
+                )
+            )
+            self._emit_fanout_gauges()
+        except asyncio.QueueFull:
+            _OBSERVER.increment(
+                "fanout_dropped_total",
+                bot_id=self._bot_id,
+                run_id=self._run_id,
+                queue_name="fanout_channel",
+                message_kind="run_projection_delta",
+                failure_mode="queue_full",
             )
 
-    # ------------------------------------------------------------------
-    # Side-effect publishes
-    # ------------------------------------------------------------------
+    async def _publish_side_effects(self, *, deltas: tuple[RunConcernDelta, ...], batch: ProjectionBatch) -> None:
+        if any(isinstance(delta, RunHealthDelta) for delta in deltas):
+            try:
+                from .bot_service import publish_runtime_update
 
-    async def _publish_runtime_update(
-        self, *, runtime_payload: Mapping[str, Any], seq: int, known_at: Any
-    ) -> None:
-        try:
-            from .bot_service import publish_runtime_update
-            await asyncio.to_thread(
-                publish_runtime_update,
-                self._bot_id,
-                {
-                    **dict(runtime_payload),
-                    "status": str(runtime_payload.get("status") or "running"),
+                health = self._state.health.to_dict()
+                payload = {
+                    **health,
                     "run_id": self._run_id,
-                    "seq": seq,
-                    "known_at": known_at,
-                    "last_snapshot_at": known_at,
-                    "warnings": list(runtime_payload.get("warnings") or []),
-                },
-            )
-        except Exception as exc:
-            logger.warning(
-                "run_projector_runtime_publish_failed | run_id=%s | error=%s",
-                self._run_id, exc,
-            )
+                    "seq": int(self._state.seq),
+                    "known_at": batch.known_at,
+                    "last_snapshot_at": batch.known_at,
+                }
+                await asyncio.to_thread(publish_runtime_update, self._bot_id, payload)
+            except Exception as exc:
+                logger.warning("run_projector_runtime_publish_failed | run_id=%s | error=%s", self._run_id, exc)
 
-    async def _publish_projected_bot(self) -> None:
-        try:
-            from .bot_service import publish_projected_bot
-            await asyncio.to_thread(publish_projected_bot, self._bot_id, inspect_container=False)
-        except Exception as exc:
-            logger.warning(
-                "run_projector_projected_bot_failed | run_id=%s | error=%s", self._run_id, exc
-            )
+        if any(isinstance(delta, RunLifecycleDelta) for delta in deltas):
+            try:
+                from .bot_service import publish_projected_bot
 
-    # ------------------------------------------------------------------
-    # Initial state load
-    # ------------------------------------------------------------------
+                await asyncio.to_thread(publish_projected_bot, self._bot_id, inspect_container=False)
+            except Exception as exc:
+                logger.warning("run_projector_projected_bot_failed | run_id=%s | error=%s", self._run_id, exc)
 
     async def _load_initial_state(self) -> None:
-        """Load latest persisted run summary from storage on startup."""
         started = time.perf_counter()
         try:
-            row = await asyncio.to_thread(
-                get_latest_bot_run_view_state,
+            batches = await asyncio.to_thread(
+                load_domain_projection_batches,
                 bot_id=self._bot_id,
                 run_id=self._run_id,
-                series_key=RUN_SCOPE_KEY,
+                series_key=None,
             )
-            if row:
-                payload = (row or {}).get("payload")
-                if payload:
-                    self._summary_state = read_run_summary_state(
-                        payload, bot_id=self._bot_id, run_id=self._run_id
-                    )
-                    load_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
-                    _OBSERVER.observe(
-                        "run_projector_initial_state_load_ms",
-                        load_ms,
-                        bot_id=self._bot_id,
-                        run_id=self._run_id,
-                        storage_target="bot_run_view_state",
-                    )
-                    _OBSERVER.observe(
-                        "db_initial_load_ms",
-                        load_ms,
-                        bot_id=self._bot_id,
-                        run_id=self._run_id,
-                        storage_target="bot_run_view_state",
-                    )
-                    _OBSERVER.event(
-                        "db_initial_state_load_completed",
-                        bot_id=self._bot_id,
-                        run_id=self._run_id,
-                        storage_target="bot_run_view_state",
-                        load_ms=round(load_ms, 6),
-                    )
+            for batch in batches:
+                self._state, _ = apply_run_batch(self._state, batch=batch)
+            if batches:
+                load_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
+                _OBSERVER.observe(
+                    "ledger_rebuild_ms",
+                    load_ms,
+                    bot_id=self._bot_id,
+                    run_id=self._run_id,
+                    storage_target="bot_runtime_events",
+                )
+            self._refresh_terminal_state()
         except Exception as exc:
-            load_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
-            _OBSERVER.observe(
-                "run_projector_initial_state_load_ms",
-                load_ms,
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                storage_target="bot_run_view_state",
-                failure_mode="load_failed",
-            )
-            _OBSERVER.observe(
-                "db_initial_load_ms",
-                load_ms,
-                bot_id=self._bot_id,
-                run_id=self._run_id,
-                storage_target="bot_run_view_state",
-                failure_mode="load_failed",
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            error_text = str(exc)[:512]
+            warning = {
+                "warning_id": f"projection_error::{self._run_id}",
+                "warning_type": "projection_error",
+                "severity": "error",
+                "source": "botlens_run_projector",
+                "message": "Run projection is unavailable because ledger rebuild failed.",
+                "error": error_text,
+                "first_seen_at": now,
+                "last_seen_at": now,
+                "updated_at": now,
+                "count": 1,
+            }
+            fault = {
+                "event_id": f"projection_error:{self._run_id}",
+                "fault_code": "projection_error",
+                "severity": "error",
+                "source": "botlens_run_projector",
+                "message": "Run projection is unavailable because ledger rebuild failed.",
+                "error": error_text,
+                "observed_at": now,
+            }
+            self._state = replace(
+                self._state,
+                health=RunHealthState(
+                    status="projection_error",
+                    phase=self._state.lifecycle.phase,
+                    warning_count=1,
+                    warnings=(warning,),
+                    last_event_at=now,
+                    worker_count=self._state.health.worker_count,
+                    active_workers=self._state.health.active_workers,
+                    warning_types=("projection_error",),
+                    highest_warning_severity="error",
+                    trigger_event="ledger_rebuild_failed",
+                    runtime_state="projection_error",
+                    terminal=self._state.health.terminal,
+                ),
+                faults=RunFaultsState(faults=(fault, *self._state.faults.faults)),
+                readiness=RunReadinessState(catalog_discovered=False, run_live=False),
             )
             _OBSERVER.event(
-                "db_initial_state_load_failed",
-                level=logging.WARN,
+                "ledger_rebuild_failed",
+                level=logging.ERROR,
                 bot_id=self._bot_id,
                 run_id=self._run_id,
-                storage_target="bot_run_view_state",
+                storage_target="bot_runtime_events",
                 failure_mode="load_failed",
-                load_ms=round(load_ms, 6),
-                error=str(exc),
+                projection_state="projection_error",
+                error=error_text,
             )
-
-    def _emit_notification_gauges(self) -> None:
-        oldest_age_ms = 0.0
-        if self._symbol_notifications.qsize() > 0:
-            try:
-                envelope = self._symbol_notifications._queue[0]
-                if isinstance(envelope, QueueEnvelope):
-                    oldest_age_ms = max((time.monotonic() - envelope.enqueued_monotonic) * 1000.0, 0.0)
-            except Exception:
-                oldest_age_ms = 0.0
-        self._run_notification_queue_metrics.emit(
-            depth=self._symbol_notifications.qsize(),
-            capacity=max(int(self._symbol_notifications.maxsize or 1), 1),
-            oldest_age_ms=oldest_age_ms,
-        )
 
     def _emit_fanout_gauges(self) -> None:
         oldest_age_ms = 0.0

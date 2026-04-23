@@ -79,6 +79,48 @@ def _normalize_failure(event: Mapping[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in normalized.items() if value not in (None, "", [], {})}
 
 
+def _failure_rank(event: Mapping[str, Any], failure: Mapping[str, Any]) -> tuple[int, int]:
+    score = 0
+    if failure.get("worker_id"):
+        score += 100
+    if failure.get("symbol") or _sequence(failure.get("symbols")):
+        score += 20
+    if failure.get("reason_code"):
+        score += 20
+    if failure.get("exception_type"):
+        score += 25
+    if failure.get("traceback"):
+        score += 25
+    if failure.get("stderr_tail"):
+        score += 10
+    if failure.get("component"):
+        score += 10
+    if failure.get("operation"):
+        score += 5
+    owner = str(event.get("owner") or failure.get("owner") or "").strip().lower()
+    if owner == "runtime":
+        score += 5
+    message = str(failure.get("message") or event.get("message") or "").strip().lower()
+    if "at least one worker reported degraded terminal state" in message:
+        score -= 50
+    if "worker exited with code" in message and not failure.get("exception_type") and not failure.get("traceback"):
+        score -= 10
+    return score, -int(event.get("seq") or 0)
+
+
+def _root_failure_entry(events: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    candidates: list[tuple[tuple[int, int], Dict[str, Any]]] = []
+    for event in events:
+        failure = _normalize_failure(event)
+        if not failure:
+            continue
+        candidates.append((_failure_rank(event, failure), {**failure, "_seq": int(event.get("seq") or 0)}))
+    if not candidates:
+        return {}
+    candidates.sort(key=lambda entry: entry[0], reverse=True)
+    return dict(candidates[0][1])
+
+
 def _series_progress(event: Mapping[str, Any]) -> Dict[str, Any]:
     metadata = _mapping(event.get("metadata"))
     return _mapping(metadata.get("series_progress"))
@@ -171,8 +213,10 @@ def project_bot_run_diagnostics(
     run_id: str,
     lifecycle: Mapping[str, Any] | None,
     events: Sequence[Mapping[str, Any]] | None,
+    run_health: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     lifecycle_row = _mapping(lifecycle)
+    health_row = _mapping(run_health)
     raw_events = [dict(event) for event in (events or []) if isinstance(event, Mapping)]
     latest_event = raw_events[-1] if raw_events else lifecycle_row
     latest_phase = str((latest_event or {}).get("phase") or lifecycle_row.get("phase") or "").strip()
@@ -260,13 +304,45 @@ def project_bot_run_diagnostics(
                 worker_summary["first_failed_worker_id"] = str(entry.get("worker_id"))
 
     worker_summary["failed_worker_count"] = max(len(failed_workers), len(worker_summary["failed_symbols"]))
+    root_failure = _root_failure_entry(projected_events)
+    runtime_degraded = _mapping(health_row.get("degraded"))
+    runtime_churn = _mapping(health_row.get("churn"))
+    runtime_pressure = _mapping(health_row.get("pressure"))
+    runtime_transitions = [
+        dict(entry)
+        for entry in _sequence(health_row.get("recent_transitions"))
+        if isinstance(entry, Mapping)
+    ]
+    runtime_terminal = _mapping(health_row.get("terminal"))
+    runtime = {
+        "state": str(health_row.get("runtime_state") or "").strip() or None,
+        "progress_state": str(health_row.get("progress_state") or "").strip() or None,
+        "last_useful_progress_at": health_row.get("last_useful_progress_at"),
+        "degraded": runtime_degraded,
+        "churn": runtime_churn,
+        "pressure": runtime_pressure,
+        "top_pressure": _mapping(runtime_pressure.get("top_pressure")),
+        "recent_transitions": runtime_transitions,
+        "terminal": runtime_terminal,
+        "current_status": str(health_row.get("status") or latest_run_status or "").strip() or None,
+        "current_phase": health_row.get("phase") or latest_phase or None,
+        "is_churning": bool(runtime_churn.get("active")),
+        "is_degraded": bool(runtime_degraded.get("active")) or str(health_row.get("runtime_state") or "") == "degraded",
+        "is_progressing": str(health_row.get("progress_state") or "").strip().lower() == "progressing",
+    }
     summary = {
         "run_status": latest_run_status or None,
         "current_phase": latest_phase or None,
-        "root_failure_phase": (first_failure or {}).get("phase"),
-        "root_failure_owner": (first_failure or {}).get("owner"),
-        "root_failure_message": (first_failure or {}).get("message"),
+        "root_failure_phase": root_failure.get("phase") or (first_failure or {}).get("phase"),
+        "root_failure_owner": root_failure.get("owner") or (first_failure or {}).get("owner"),
+        "root_failure_message": root_failure.get("message") or (first_failure or {}).get("message"),
+        "root_failure_reason_code": root_failure.get("reason_code"),
+        "root_failure_type": root_failure.get("type"),
+        "root_failure_worker_id": root_failure.get("worker_id"),
+        "root_failure_symbol": root_failure.get("symbol"),
+        "root_failure_exception_type": root_failure.get("exception_type"),
         "first_failure_at": (first_failure or {}).get("at"),
+        "root_failure_at": root_failure.get("at") or (first_failure or {}).get("at"),
         "last_successful_checkpoint": last_successful_checkpoint,
         "container_launched": any(str(event.get("phase") or "").strip() == BotLifecyclePhase.CONTAINER_LAUNCHED.value for event in raw_events),
         "container_booted": any(str(event.get("phase") or "").strip() in _CONTAINER_BOOTED_PHASES for event in raw_events),
@@ -280,6 +356,14 @@ def project_bot_run_diagnostics(
         "failed_worker_count": int(worker_summary["failed_worker_count"] or 0),
         "any_worker_live": bool(worker_summary["any_worker_live"]),
         "crash_before_any_series_live": bool(first_failure) and not bool(worker_summary["any_worker_live"]),
+        "runtime_state": runtime["state"],
+        "progress_state": runtime["progress_state"],
+        "last_useful_progress_at": runtime["last_useful_progress_at"],
+        "degraded_since": runtime_degraded.get("started_at"),
+        "degraded_cleared_at": runtime_degraded.get("cleared_at"),
+        "is_churning": runtime["is_churning"],
+        "top_pressure": runtime["top_pressure"] or None,
+        "latest_runtime_transition": runtime_transitions[-1] if runtime_transitions else None,
         "final_observation": {
             "phase": str((latest_event or {}).get("phase") or "").strip() or None,
             "owner": str((latest_event or {}).get("owner") or "").strip() or None,
@@ -287,12 +371,20 @@ def project_bot_run_diagnostics(
             "at": (latest_event or {}).get("checkpoint_at") or (latest_event or {}).get("created_at"),
             "status": latest_run_status or None,
         },
+        "root_failure": {
+            key: value
+            for key, value in root_failure.items()
+            if key != "_seq"
+        }
+        if root_failure
+        else None,
     }
 
     return {
         "run_id": str(run_id or "").strip(),
         "run_status": latest_run_status or None,
         "summary": summary,
+        "runtime": runtime,
         "checkpoints": _project_checkpoints(projected_events, latest_phase=latest_phase, latest_run_status=latest_run_status),
         "events": projected_events,
     }
