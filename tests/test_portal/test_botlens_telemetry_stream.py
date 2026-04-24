@@ -33,16 +33,15 @@ from portal.backend.service.bots.botlens_contract import (
     BRIDGE_BOOTSTRAP_KIND,
     BRIDGE_FACTS_KIND,
     LIFECYCLE_KIND,
-    RUN_SCOPE_KEY,
 )
+from portal.backend.service.bots.botlens_domain_events import botlens_domain_event_type
 from portal.backend.service.bots.botlens_mailbox import (
     BootstrapSlot,
     FanoutEnvelope,
+    FanoutRunDeltaBatch,
+    FanoutSymbolDeltaBatch,
     RunMailbox,
     SymbolMailbox,
-    FanoutTypedDelta,
-    FanoutSummaryDelta,
-    FanoutOpenTradesDelta,
     QueueEnvelope,
 )
 from portal.backend.service.bots.botlens_symbol_projector import (
@@ -50,6 +49,7 @@ from portal.backend.service.bots.botlens_symbol_projector import (
     SymbolSummaryNotification,
 )
 from portal.backend.service.bots.botlens_run_projector import RunProjector
+from portal.backend.service.bots.botlens_state import RunOpenTradesDelta, RunSymbolCatalogDelta
 from portal.backend.service.bots.botlens_projector_registry import ProjectorRegistry
 from portal.backend.service.bots.botlens_intake_router import IntakeRouter
 import portal.backend.service.bots.botlens_symbol_projector as sym_mod
@@ -132,7 +132,7 @@ def _facts_batch(
             },
         },
         {
-            "fact_type": "trade_upserted",
+            "fact_type": "trade_opened",
             "series_key": symbol_key,
             "trade": {"trade_id": "trade-1", "symbol_key": symbol_key, "symbol": symbol},
         },
@@ -241,6 +241,71 @@ def _make_symbol_projector(
     return projector, run_notifications, fanout_channel
 
 
+@pytest.mark.asyncio
+async def test_projectors_use_shared_botlens_domain_event_type_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    symbol_rows: list[dict] = []
+    run_rows: list[dict] = []
+
+    monkeypatch.setattr(
+        sym_mod,
+        "record_bot_runtime_events_batch",
+        lambda rows: symbol_rows.extend([dict(row) for row in rows]) or len(rows),
+    )
+
+    symbol_projector, *_ = _make_symbol_projector()
+    await symbol_projector._load_initial_state()
+    await symbol_projector._apply_bootstrap(_bootstrap_payload())
+
+    assert symbol_rows
+    assert all(
+        row["event_type"] == botlens_domain_event_type(row["payload"]["event_name"])
+        for row in symbol_rows
+    )
+
+    monkeypatch.setattr(
+        run_mod,
+        "record_bot_runtime_events_batch",
+        lambda rows: run_rows.extend([dict(row) for row in rows]) or len(rows),
+    )
+
+    async def _fake_evict(_run_id: str) -> None:
+        return None
+
+    run_projector = RunProjector(
+        run_id="run-1",
+        bot_id="bot-1",
+        mailbox=RunMailbox(run_id="run-1", bot_id="bot-1"),
+        fanout_channel=asyncio.Queue(),
+        fanout_queue_metrics=_queue_owner(
+            key="fanout_channel:run-1",
+            depth_metric="fanout_queue_depth",
+            utilization_metric="fanout_queue_utilization",
+            oldest_age_metric="fanout_queue_oldest_age_ms",
+            bot_id="bot-1",
+            run_id="run-1",
+            queue_name="fanout_channel",
+        ),
+        on_evict=_fake_evict,
+    )
+    await run_projector._persist_lifecycle_event(
+        lifecycle={
+            "phase": "live",
+            "status": "running",
+            "owner": "runtime",
+            "checkpoint_at": "2026-01-01T00:00:00Z",
+        },
+        lifecycle_seq=1,
+    )
+
+    assert run_rows
+    assert all(
+        row["event_type"] == botlens_domain_event_type(row["payload"]["event_name"])
+        for row in run_rows
+    )
+
+
 # ---------------------------------------------------------------------------
 # BootstrapSlot unit tests
 # ---------------------------------------------------------------------------
@@ -303,32 +368,31 @@ class TestSymbolMailbox:
 class TestSymbolProjectorBootstrap:
     def test_bootstrap_resets_state_and_applies_facts(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            rows: list = []
             events: list = []
-            monkeypatch.setattr(sym_mod, "upsert_bot_run_view_state", lambda row: rows.append(dict(row)) or dict(row))
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_event", lambda row: events.append(dict(row)) or dict(row))
-            monkeypatch.setattr(sym_mod, "get_latest_bot_run_view_state", lambda **kw: None)
+            monkeypatch.setattr(
+                sym_mod,
+                "record_bot_runtime_events_batch",
+                lambda rows: events.extend([dict(row) for row in rows]) or len(rows),
+            )
 
             projector, notifications, fanout = _make_symbol_projector()
             await projector._load_initial_state()
             await projector._apply_bootstrap(_bootstrap_payload(candle_time=5, run_seq=10))
 
             snapshot = projector.get_snapshot()
-            assert snapshot["candles"][-1]["time"] == 5
-            assert snapshot["symbol_key"] == "instrument-btc|1m"
-            assert len(rows) == 1
-            assert rows[0]["series_key"] == "instrument-btc|1m"
-            assert rows[0]["seq"] == 10
-            assert len(events) == 1
-            assert events[0]["event_type"] == "botlens.runtime_bootstrap_facts"
+            assert snapshot.candles.candles[-1]["time"] == 5
+            assert snapshot.symbol_key == "instrument-btc|1m"
+            assert len(events) >= 2
+            assert {event["event_type"] for event in events} >= {
+                "botlens_domain.health_status_reported",
+                "botlens_domain.candle_observed",
+            }
 
         asyncio.run(scenario())
 
     def test_bootstrap_sets_session_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "upsert_bot_run_view_state", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_event", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "get_latest_bot_run_view_state", lambda **kw: None)
+            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
 
             projector, *_ = _make_symbol_projector()
             await projector._load_initial_state()
@@ -339,9 +403,7 @@ class TestSymbolProjectorBootstrap:
 
     def test_second_bootstrap_replaces_first_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "upsert_bot_run_view_state", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_event", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "get_latest_bot_run_view_state", lambda **kw: None)
+            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
 
             projector, *_ = _make_symbol_projector()
             await projector._load_initial_state()
@@ -350,16 +412,14 @@ class TestSymbolProjectorBootstrap:
 
             # State must reflect the second bootstrap, not the first.
             snapshot = projector.get_snapshot()
-            assert snapshot["candles"][-1]["time"] == 99
+            assert snapshot.candles.candles[-1]["time"] == 99
             assert projector._current_session_id == "sess-B"
 
         asyncio.run(scenario())
 
     def test_bootstrap_emits_typed_deltas_to_fanout_channel(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "upsert_bot_run_view_state", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_event", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "get_latest_bot_run_view_state", lambda **kw: None)
+            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
 
             projector, _, fanout = _make_symbol_projector()
             await projector._load_initial_state()
@@ -368,18 +428,16 @@ class TestSymbolProjectorBootstrap:
             assert not fanout.empty()
             item = fanout.get_nowait()
             assert isinstance(item, FanoutEnvelope)
-            assert isinstance(item.item, FanoutTypedDelta)
-            delta_types = {d.event.delta_type for d in item.item.prepared_deltas}
-            assert "symbol_candle_delta" in delta_types
-            assert "symbol_runtime_delta" in delta_types
+            assert isinstance(item.item, FanoutSymbolDeltaBatch)
+            delta_types = {d.event.delta_type for d in item.item.deltas}
+            assert "botlens_symbol_candle_delta" in delta_types
+            assert "botlens_symbol_runtime_delta" in delta_types
 
         asyncio.run(scenario())
 
     def test_bootstrap_notifies_run_projector(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "upsert_bot_run_view_state", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_event", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "get_latest_bot_run_view_state", lambda **kw: None)
+            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
 
             projector, notifications, _ = _make_symbol_projector()
             await projector._load_initial_state()
@@ -397,9 +455,7 @@ class TestSymbolProjectorBootstrap:
 class TestSymbolProjectorFacts:
     def test_facts_advance_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "upsert_bot_run_view_state", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_event", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "get_latest_bot_run_view_state", lambda **kw: None)
+            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
 
             projector, *_ = _make_symbol_projector()
             await projector._load_initial_state()
@@ -407,54 +463,88 @@ class TestSymbolProjectorFacts:
             await projector._apply_facts(_facts_payload(candle_time=2, run_seq=2))
 
             snapshot = projector.get_snapshot()
-            assert snapshot["candles"][-1]["time"] == 2
+            assert snapshot.candles.candles[-1]["time"] == 2
 
         asyncio.run(scenario())
 
     def test_stale_session_facts_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            rows: list = []
-            monkeypatch.setattr(sym_mod, "upsert_bot_run_view_state", lambda row: rows.append(dict(row)) or dict(row))
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_event", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "get_latest_bot_run_view_state", lambda **kw: None)
+            events: list = []
+            monkeypatch.setattr(
+                sym_mod,
+                "record_bot_runtime_events_batch",
+                lambda rows: events.extend([dict(row) for row in rows]) or len(rows),
+            )
 
             projector, *_ = _make_symbol_projector()
             await projector._load_initial_state()
             await projector._apply_bootstrap(
                 _bootstrap_payload(candle_time=1, run_seq=1, bridge_session_id="session-A")
             )
-            rows.clear()
+            events.clear()
 
             # Facts from old session must be rejected.
             await projector._apply_facts(
                 _facts_payload(candle_time=99, run_seq=99, bridge_session_id="session-OLD")
             )
-            assert len(rows) == 0  # no persistence happened
+            assert not events
             snapshot = projector.get_snapshot()
-            assert snapshot["candles"][-1]["time"] == 1  # state unchanged
+            assert snapshot.candles.candles[-1]["time"] == 1
 
         asyncio.run(scenario())
 
     def test_same_session_facts_accepted_after_bootstrap(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            rows: list = []
-            monkeypatch.setattr(sym_mod, "upsert_bot_run_view_state", lambda row: rows.append(dict(row)) or dict(row))
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_event", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "get_latest_bot_run_view_state", lambda **kw: None)
+            events: list = []
+            monkeypatch.setattr(
+                sym_mod,
+                "record_bot_runtime_events_batch",
+                lambda rows: events.extend([dict(row) for row in rows]) or len(rows),
+            )
 
             projector, *_ = _make_symbol_projector()
             await projector._load_initial_state()
             await projector._apply_bootstrap(
                 _bootstrap_payload(candle_time=1, run_seq=1, bridge_session_id="session-B")
             )
-            rows.clear()
+            events.clear()
 
             await projector._apply_facts(
                 _facts_payload(candle_time=5, run_seq=2, bridge_session_id="session-B")
             )
-            assert len(rows) == 1
+            assert events
             snapshot = projector.get_snapshot()
-            assert snapshot["candles"][-1]["time"] == 5
+            assert snapshot.candles.candles[-1]["time"] == 5
+
+        asyncio.run(scenario())
+
+    def test_new_session_facts_accepted_after_replacement_bootstrap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def scenario() -> None:
+            events: list = []
+            monkeypatch.setattr(
+                sym_mod,
+                "record_bot_runtime_events_batch",
+                lambda rows: events.extend([dict(row) for row in rows]) or len(rows),
+            )
+
+            projector, *_ = _make_symbol_projector()
+            await projector._load_initial_state()
+            await projector._apply_bootstrap(
+                _bootstrap_payload(candle_time=1, run_seq=1, bridge_session_id="session-A")
+            )
+            await projector._apply_bootstrap(
+                _bootstrap_payload(candle_time=10, run_seq=10, bridge_session_id="session-B")
+            )
+            events.clear()
+
+            await projector._apply_facts(
+                _facts_payload(candle_time=11, run_seq=11, bridge_session_id="session-B")
+            )
+
+            assert events
+            snapshot = projector.get_snapshot()
+            assert snapshot.candles.candles[-1]["time"] == 11
+            assert projector._current_session_id == "session-B"
 
         asyncio.run(scenario())
 
@@ -494,7 +584,7 @@ class TestSymbolProjectorDrainStale:
             for seq in range(3, 5):
                 mailbox.fact_queue.put_nowait(QueueEnvelope(payload={"bridge_session_id": "new-session", "seq": seq}))
 
-            drained = projector._drain_stale_session_facts("new-session")
+            drained = projector._drain_stale_session_batches("new-session")
             assert drained == 2
             assert mailbox.fact_queue.qsize() == 2
             remaining = []
@@ -549,62 +639,58 @@ class TestRunProjectorSymbolNotification:
         trade_upserts: list | None = None,
         trade_removals: list | None = None,
     ) -> SymbolSummaryNotification:
-        detail_state = {
+        symbol_summary = {
             "symbol_key": symbol_key,
             "symbol": "BTC",
             "timeframe": "1m",
             "display_label": "BTC 1m",
             "status": "running",
             "last_event_at": "2026-01-01T00:00:00Z",
-            "candles": [{"time": candle_time, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0}],
-            "overlays": [],
-            "recent_trades": [],
-            "logs": [],
-            "decisions": [],
-            "stats": {},
-            "runtime": {"status": "running", "worker_count": 1, "active_workers": 1, "warnings": []},
+            "last_price": 1.0,
+            "stats": {"total_trades": 1},
         }
         return SymbolSummaryNotification(
             run_id="run-1",
+            bot_id="bot-1",
             symbol_key=symbol_key,
-            detail_state=detail_state,
-            trade_upserts=trade_upserts or [],
-            trade_removals=trade_removals or [],
+            symbol_summary=symbol_summary,
+            trade_upserts=tuple(trade_upserts or []),
+            trade_removals=tuple(trade_removals or []),
             seq=seq,
-            runtime={"status": "running", "worker_count": 1, "active_workers": 1, "warnings": []},
+            runtime={
+                "status": "running",
+                "worker_count": 1,
+                "active_workers": 1,
+                "warnings": [],
+                "last_event_at": "2026-01-01T00:00:00Z",
+                "last_useful_progress_at": "2026-01-01T00:00:00Z",
+            },
             event_time="2026-01-01T00:00:00Z",
             known_at="2026-01-01T00:00:00Z",
         )
 
     def test_symbol_notification_updates_symbol_index(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            monkeypatch.setattr(run_mod, "upsert_bot_run_view_state", lambda row: dict(row))
-            monkeypatch.setattr(run_mod, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
-            monkeypatch.setattr(run_mod, "get_latest_bot_run_view_state", lambda **kw: None)
-
             projector, fanout_channel = self._make_run_projector()
             await projector._load_initial_state()
 
             notification = self._make_notification(candle_time=5, seq=10)
             await projector._process_symbol_notification(notification)
 
-            assert "instrument-btc|1m" in projector._summary_state.get("symbol_index", {})
-            assert projector._summary_state["seq"] == 10
+            snapshot = projector.get_snapshot()
+            assert "instrument-btc|1m" in snapshot.symbol_catalog.entries
+            assert snapshot.seq == 10
             # FanoutSummaryDelta emitted
             assert not fanout_channel.empty()
             item = fanout_channel.get_nowait()
             assert isinstance(item, FanoutEnvelope)
-            assert isinstance(item.item, FanoutSummaryDelta)
-            assert item.item.seq == 10
+            assert isinstance(item.item, FanoutRunDeltaBatch)
+            assert any(isinstance(delta, RunSymbolCatalogDelta) for delta in item.item.deltas)
 
         asyncio.run(scenario())
 
     def test_symbol_notification_merges_open_trades(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            monkeypatch.setattr(run_mod, "upsert_bot_run_view_state", lambda row: dict(row))
-            monkeypatch.setattr(run_mod, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
-            monkeypatch.setattr(run_mod, "get_latest_bot_run_view_state", lambda **kw: None)
-
             projector, fanout_channel = self._make_run_projector()
             await projector._load_initial_state()
 
@@ -619,13 +705,20 @@ class TestRunProjectorSymbolNotification:
             )
             await projector._process_symbol_notification(notification)
 
-            assert "t-1" in projector._summary_state.get("open_trades_index", {})
+            snapshot = projector.get_snapshot()
+            assert "t-1" in snapshot.open_trades.entries
 
             # FanoutOpenTradesDelta must have been emitted.
             items = []
             while not fanout_channel.empty():
                 items.append(fanout_channel.get_nowait())
-            trade_deltas = [i.item for i in items if isinstance(i, FanoutEnvelope) and isinstance(i.item, FanoutOpenTradesDelta)]
+            trade_deltas = [
+                delta
+                for item in items
+                if isinstance(item, FanoutEnvelope) and isinstance(item.item, FanoutRunDeltaBatch)
+                for delta in item.item.deltas
+                if isinstance(delta, RunOpenTradesDelta)
+            ]
             assert len(trade_deltas) == 1
             assert trade_deltas[0].upserts[0]["trade_id"] == "t-1"
 
@@ -636,9 +729,7 @@ class TestRunProjectorSymbolNotification:
         async def scenario() -> None:
             # Build a symbol projector and verify _apply_facts does NOT touch
             # any run-level summary — it only sends a notification.
-            monkeypatch.setattr(sym_mod, "upsert_bot_run_view_state", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_event", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "get_latest_bot_run_view_state", lambda **kw: None)
+            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
 
             projector, run_notifications, _ = _make_symbol_projector()
             await projector._load_initial_state()
@@ -805,9 +896,7 @@ class TestBootstrapSupersession:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "upsert_bot_run_view_state", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_event", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "get_latest_bot_run_view_state", lambda **kw: None)
+            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
 
             projector, _, _ = _make_symbol_projector()
             await projector._load_initial_state()
@@ -826,7 +915,7 @@ class TestBootstrapSupersession:
                     "run_seq": 100 + i,
                 }))
 
-            drained = projector._drain_stale_session_facts("new-session")
+            drained = projector._drain_stale_session_batches("new-session")
             assert drained == 3
             assert projector._mailbox.fact_queue.qsize() == 2
 
@@ -843,9 +932,7 @@ class TestFanoutDecoupling:
     ) -> None:
         """Projection must put_nowait to fanout, never awaiting delivery."""
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "upsert_bot_run_view_state", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_event", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "get_latest_bot_run_view_state", lambda **kw: None)
+            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
 
             fanout: asyncio.Queue = asyncio.Queue(maxsize=100)
             mailbox = SymbolMailbox(run_id="run-1", bot_id="bot-1", symbol_key="instrument-btc|1m")
@@ -880,7 +967,7 @@ class TestFanoutDecoupling:
             assert not fanout.empty()
             item = fanout.get_nowait()
             assert isinstance(item, FanoutEnvelope)
-            assert isinstance(item.item, FanoutTypedDelta)
+            assert isinstance(item.item, FanoutSymbolDeltaBatch)
 
         asyncio.run(scenario())
 
@@ -889,9 +976,7 @@ class TestFanoutDecoupling:
     ) -> None:
         """When fanout channel is full, projection must continue (delta dropped, not blocked)."""
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "upsert_bot_run_view_state", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_event", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "get_latest_bot_run_view_state", lambda **kw: None)
+            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
 
             # Fill fanout channel to capacity.
             fanout: asyncio.Queue = asyncio.Queue(maxsize=1)
@@ -936,19 +1021,16 @@ class TestFanoutDecoupling:
 # ---------------------------------------------------------------------------
 
 class TestHubIntegration:
-    def test_bootstrap_then_facts_produce_persisted_state_and_fanout(
+    def test_bootstrap_then_facts_update_in_memory_projections_and_fanout(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         async def scenario() -> None:
-            rows: list = []
             events: list = []
-            monkeypatch.setattr(sym_mod, "upsert_bot_run_view_state", lambda row: rows.append(dict(row)) or dict(row))
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_event", lambda row: events.append(dict(row)) or dict(row))
-            monkeypatch.setattr(sym_mod, "get_latest_bot_run_view_state", lambda **kw: None)
-            monkeypatch.setattr(run_mod, "upsert_bot_run_view_state", lambda row: rows.append(dict(row)) or dict(row))
-            monkeypatch.setattr(run_mod, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
-            monkeypatch.setattr(run_mod, "get_latest_bot_run_view_state", lambda **kw: None)
-            monkeypatch.setattr(run_mod, "get_latest_bot_runtime_event", lambda **kw: None)
+            monkeypatch.setattr(
+                sym_mod,
+                "record_bot_runtime_events_batch",
+                lambda rows: events.extend([dict(row) for row in rows]) or len(rows),
+            )
 
             from portal.backend.service.bots.telemetry_stream import BotTelemetryHub
 
@@ -965,17 +1047,17 @@ class TestHubIntegration:
             # a real sleep ensures asyncio.to_thread persistence calls finish.
             await asyncio.sleep(0.15)
 
-            symbol_rows = [r for r in rows if r.get("series_key") == "instrument-btc|1m"]
-            run_rows = [r for r in rows if r.get("series_key") == RUN_SCOPE_KEY]
-
-            assert len(symbol_rows) >= 2, "Expected at least one row per ingest"
-            latest_symbol = max(symbol_rows, key=lambda r: r.get("seq", 0))
-            assert latest_symbol["payload"]["detail"]["candles"][-1]["time"] == 2
-
-            assert len(run_rows) >= 1, "Expected at least one run summary row"
+            symbol_snapshot = hub.get_symbol_snapshot(run_id="run-1", symbol_key="instrument-btc|1m")
+            run_snapshot = hub.get_run_snapshot(run_id="run-1")
+            assert symbol_snapshot is not None
+            assert symbol_snapshot.candles.candles[-1]["time"] == 2
+            assert run_snapshot is not None
+            assert "instrument-btc|1m" in run_snapshot.symbol_catalog.entries
+            assert events
 
             message_types = {m["type"] for m in ws.messages}
-            assert "botlens_run_connected" in message_types
+            assert "botlens_live_connected" in message_types
+            assert "botlens_symbol_candle_delta" in message_types
 
         asyncio.run(scenario())
 
@@ -983,13 +1065,7 @@ class TestHubIntegration:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "upsert_bot_run_view_state", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_event", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "get_latest_bot_run_view_state", lambda **kw: None)
-            monkeypatch.setattr(run_mod, "upsert_bot_run_view_state", lambda row: dict(row))
-            monkeypatch.setattr(run_mod, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
-            monkeypatch.setattr(run_mod, "get_latest_bot_run_view_state", lambda **kw: None)
-            monkeypatch.setattr(run_mod, "get_latest_bot_runtime_event", lambda **kw: None)
+            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
 
             from portal.backend.service.bots.telemetry_stream import BotTelemetryHub
             hub = BotTelemetryHub()
@@ -1005,8 +1081,8 @@ class TestHubIntegration:
             await asyncio.sleep(0.15)
 
             message_types = {m["type"] for m in ws.messages}
-            assert "symbol_candle_delta" in message_types
-            assert "symbol_runtime_delta" in message_types
+            assert "botlens_symbol_candle_delta" in message_types
+            assert "botlens_symbol_runtime_delta" in message_types
 
         asyncio.run(scenario())
 
@@ -1014,24 +1090,7 @@ class TestHubIntegration:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         async def scenario() -> None:
-            rows_a: list = []
-            rows_b: list = []
-
-            def capture_row(target: list):
-                def _inner(row: dict) -> dict:
-                    target.append(dict(row))
-                    return dict(row)
-                return _inner
-
-            # Both runs share the same monkeypatched function, but we capture by run_id.
-            all_rows: list = []
-            monkeypatch.setattr(sym_mod, "upsert_bot_run_view_state", lambda row: all_rows.append(dict(row)) or dict(row))
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_event", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "get_latest_bot_run_view_state", lambda **kw: None)
-            monkeypatch.setattr(run_mod, "upsert_bot_run_view_state", lambda row: all_rows.append(dict(row)) or dict(row))
-            monkeypatch.setattr(run_mod, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
-            monkeypatch.setattr(run_mod, "get_latest_bot_run_view_state", lambda **kw: None)
-            monkeypatch.setattr(run_mod, "get_latest_bot_runtime_event", lambda **kw: None)
+            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
 
             from portal.backend.service.bots.telemetry_stream import BotTelemetryHub
             hub = BotTelemetryHub()
@@ -1041,21 +1100,12 @@ class TestHubIntegration:
 
             await asyncio.sleep(0.15)
 
-            run_a_symbol_rows = [
-                r for r in all_rows
-                if r.get("run_id") == "run-A" and r.get("series_key") == "instrument-btc|1m"
-            ]
-            run_b_symbol_rows = [
-                r for r in all_rows
-                if r.get("run_id") == "run-B" and r.get("series_key") == "instrument-btc|1m"
-            ]
-
-            assert len(run_a_symbol_rows) >= 1
-            assert len(run_b_symbol_rows) >= 1
-            a_candle = run_a_symbol_rows[-1]["payload"]["detail"]["candles"][-1]["time"]
-            b_candle = run_b_symbol_rows[-1]["payload"]["detail"]["candles"][-1]["time"]
-            assert a_candle == 10
-            assert b_candle == 20
+            run_a_snapshot = hub.get_symbol_snapshot(run_id="run-A", symbol_key="instrument-btc|1m")
+            run_b_snapshot = hub.get_symbol_snapshot(run_id="run-B", symbol_key="instrument-btc|1m")
+            assert run_a_snapshot is not None
+            assert run_b_snapshot is not None
+            assert run_a_snapshot.candles.candles[-1]["time"] == 10
+            assert run_b_snapshot.candles.candles[-1]["time"] == 20
 
         asyncio.run(scenario())
 
@@ -1064,14 +1114,7 @@ class TestHubIntegration:
     ) -> None:
         """Multiple bootstraps for same symbol: only latest state is canonical."""
         async def scenario() -> None:
-            rows: list = []
-            monkeypatch.setattr(sym_mod, "upsert_bot_run_view_state", lambda row: rows.append(dict(row)) or dict(row))
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_event", lambda row: dict(row))
-            monkeypatch.setattr(sym_mod, "get_latest_bot_run_view_state", lambda **kw: None)
-            monkeypatch.setattr(run_mod, "upsert_bot_run_view_state", lambda row: dict(row))
-            monkeypatch.setattr(run_mod, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
-            monkeypatch.setattr(run_mod, "get_latest_bot_run_view_state", lambda **kw: None)
-            monkeypatch.setattr(run_mod, "get_latest_bot_runtime_event", lambda **kw: None)
+            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
 
             from portal.backend.service.bots.telemetry_stream import BotTelemetryHub
             hub = BotTelemetryHub()
@@ -1088,75 +1131,8 @@ class TestHubIntegration:
 
             await asyncio.sleep(0.15)
 
-            symbol_rows = [
-                r for r in rows
-                if r.get("series_key") == "instrument-btc|1m"
-            ]
-            assert len(symbol_rows) >= 1
-            latest = max(symbol_rows, key=lambda r: r.get("seq", 0))
-            # The final projected state must reflect candle_time=99 (latest bootstrap).
-            assert latest["payload"]["detail"]["candles"][-1]["time"] == 99
-
-        asyncio.run(scenario())
-
-    def test_viewer_snapshot_hydration_emits_load_and_total_metrics(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        async def scenario() -> None:
-            from portal.backend.service.bots.telemetry_stream import BotTelemetryHub
-
-            hub = BotTelemetryHub()
-            ws = FakeWebSocket()
-
-            async def fake_load_symbol_state(*, run_id: str, symbol_key: str):
-                return (
-                    {
-                        "symbol_key": symbol_key,
-                        "symbol": "BTC",
-                        "timeframe": "1m",
-                        "candles": [],
-                        "overlays": [],
-                    },
-                    {"pipeline_stage": "storage_fallback", "storage_target": "bot_run_view_state"},
-                )
-
-            monkeypatch.setattr(hub, "_load_symbol_state", fake_load_symbol_state)
-
-            await hub._send_viewer_symbol_snapshot(
-                run_id="run-1",
-                ws=ws,
-                symbol_key="instrument-btc|1m",
-            )
-
-            snapshot = get_observability_sink().snapshot()
-            metric_names = [metric["name"] for metric in snapshot["metrics"]]
-            assert "viewer_snapshot_load_ms" in metric_names
-            assert "viewer_snapshot_total_ms" in metric_names
-            assert any(event["name"] == "viewer_snapshot_started" for event in snapshot["events"])
-
-        asyncio.run(scenario())
-
-    def test_viewer_snapshot_hydration_failure_emits_load_failed_event(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        async def scenario() -> None:
-            from portal.backend.service.bots.telemetry_stream import BotTelemetryHub
-
-            hub = BotTelemetryHub()
-            ws = FakeWebSocket()
-
-            async def fake_load_symbol_state(*, run_id: str, symbol_key: str):
-                raise RuntimeError("state unavailable")
-
-            monkeypatch.setattr(hub, "_load_symbol_state", fake_load_symbol_state)
-
-            await hub._send_viewer_symbol_snapshot(
-                run_id="run-1",
-                ws=ws,
-                symbol_key="instrument-btc|1m",
-            )
-
-            snapshot = get_observability_sink().snapshot()
-            assert any(event["name"] == "viewer_snapshot_load_failed" for event in snapshot["events"])
+            symbol_snapshot = hub.get_symbol_snapshot(run_id="run-1", symbol_key="instrument-btc|1m")
+            assert symbol_snapshot is not None
+            assert symbol_snapshot.candles.candles[-1]["time"] == 99
 
         asyncio.run(scenario())
