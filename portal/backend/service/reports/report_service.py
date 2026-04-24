@@ -689,7 +689,9 @@ def _build_report(run: Dict[str, Any], trades: Sequence[Dict[str, Any]]) -> Dict
         },
         "run_config": run_config,
     }
-    report["decision_ledger"] = list(run.get("decision_ledger") or [])
+    decision_ledger = list(run.get("decision_ledger") or [])
+    report["decision_ledger"] = decision_ledger
+    report["decision_summary"] = report_data.summarize_decision_ledger(decision_ledger)
     return report
 
 

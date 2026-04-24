@@ -17,7 +17,8 @@ import { createChart, LineSeries, AreaSeries, HistogramSeries, LineType } from '
 import LoadingOverlay from '../LoadingOverlay.jsx'
 import { formatCurrency, formatNumber, formatPercent, formatTimeframe } from '../../utils/formatters.js'
 import { reportService } from '../../services/reportService.js'
-import { Badge } from '../ui/Badge.jsx'
+import { SemanticStatusBadge } from '../ui/StatusBadge.jsx'
+import { mapRunToViewModel } from '../../features/bots/viewModels/runViewModel.js'
 import { getStatDescription, getChartDescription } from './statDescriptions.js'
 import DecisionTable from '../bots/DecisionTrace/DecisionTable.jsx'
 
@@ -555,6 +556,7 @@ export function ReportModal({ runId, open, onClose }) {
   const trades = report?.tables?.trades || []
   const decisionLedger = report?.decision_ledger || []
   const balances = runConfig?.wallet_start?.balances || {}
+  const runView = mapRunToViewModel(report || { run_id: runId })
   const balanceEntries = Object.entries(balances)
   const startingBalanceLabel = balanceEntries.length
     ? balanceEntries.map(([currency, amount]) => `${formatNumber(amount, 0)} ${currency}`).join(', ')
@@ -579,7 +581,7 @@ export function ReportModal({ runId, open, onClose }) {
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className="text-[10px] uppercase tracking-[0.3em] text-slate-500">Backtest Report</span>
-              <Badge variant="success" size="sm">Completed</Badge>
+              <SemanticStatusBadge kind="report" value={runView.reportStatus} />
             </div>
             <h3 className="mt-2 truncate text-xl font-semibold text-slate-100">
               {report?.bot_name || 'Bot'} <span className="text-slate-500">•</span> {report?.strategy_name || 'Strategy'}
@@ -639,6 +641,16 @@ export function ReportModal({ runId, open, onClose }) {
           </div>
         ) : (
           <>
+            {runView.reportStatus === 'unknown' ? (
+              <div className="border-b border-white/5 bg-white/[0.02] px-5 py-3">
+                <div className="rounded-lg border border-white/8 bg-white/[0.03] p-3">
+                  <p className="text-sm font-medium text-slate-200">Report status unknown</p>
+                  <p className="mt-1 text-xs leading-5 text-slate-500">
+                    The current backend response does not yet expose report readiness. Showing available run data only.
+                  </p>
+                </div>
+              </div>
+            ) : null}
             <div className="border-b border-white/5 px-5">
               <div className="flex gap-1">
                 <TabButton active={activeTab === 'overview'} onClick={() => setActiveTab('overview')}>

@@ -6,6 +6,19 @@ from typing import Any, Dict, List, Optional
 
 from ._shared import BotRunRecord, SQLAlchemyError, _parse_optional_timestamp, _utcnow, db, logger, select
 
+
+def _merge_symbols(existing: Any, incoming: Any) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for raw in list(existing or []) + list(incoming or []):
+        symbol = str(raw or "").strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        merged.append(symbol)
+    return merged
+
+
 def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Insert or update a bot run snapshot."""
 
@@ -32,7 +45,7 @@ def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
         record.exchange = payload.get("exchange") or record.exchange
         symbols = payload.get("symbols")
         if symbols is not None:
-            record.symbols = list(symbols)
+            record.symbols = _merge_symbols(record.symbols, symbols)
         record.backtest_start = _parse_optional_timestamp(payload.get("backtest_start")) or record.backtest_start
         record.backtest_end = _parse_optional_timestamp(payload.get("backtest_end")) or record.backtest_end
         record.started_at = _parse_optional_timestamp(payload.get("started_at")) or record.started_at
@@ -105,6 +118,5 @@ def list_bot_runs(
             exc,
         )
         raise
-
 
 

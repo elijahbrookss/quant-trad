@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useParams, useSearchParams } from 'react-router-dom'
 import {
   ArrowDownAZ,
   ArrowUpDown,
@@ -19,10 +19,11 @@ import {
 } from 'lucide-react'
 import { reportService } from '../../services/reportService.js'
 import { formatCurrency, formatNumber, formatPercent, formatTimeframe, formatSymbols } from '../../utils/formatters.js'
-import { Badge } from '../ui/Badge.jsx'
 import { Button } from '../ui/Button.jsx'
 import { ReportModal } from './ReportModal.jsx'
 import { CompareModal } from './CompareModal.jsx'
+import { SemanticStatusBadge } from '../ui/StatusBadge.jsx'
+import { mapRunToViewModel } from '../../features/bots/viewModels/runViewModel.js'
 
 const PAGE_SIZE = 25
 
@@ -98,10 +99,46 @@ const StatCard = ({ label, value, subValue, icon: Icon, tone = 'neutral' }) => {
   )
 }
 
+const ReportStateShell = ({ runView, selected = false }) => (
+  <section className="rounded-2xl border border-white/8 bg-[#111722]/70 p-4">
+    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+      <div className="min-w-0">
+        <div className="text-[11px] font-medium text-slate-500">{selected ? 'Selected run' : 'Report state'}</div>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <span className="font-mono text-sm text-slate-200">{runView.runId || 'No run selected'}</span>
+          {runView.name ? <span className="text-sm text-slate-500">{runView.name}</span> : null}
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <SemanticStatusBadge kind="report" value={runView.reportStatus} />
+        <SemanticStatusBadge kind="comparison" value={runView.comparisonStatus} />
+      </div>
+    </div>
+    {runView.reportStatus === 'unknown' ? (
+      <div className="mt-4 rounded-lg border border-white/8 bg-white/[0.03] p-3">
+        <p className="text-sm font-medium text-slate-200">Report status unknown</p>
+        <p className="mt-1 text-xs leading-5 text-slate-500">
+          The current backend response does not yet expose report readiness. Showing available run data only.
+        </p>
+      </div>
+    ) : null}
+    {runView.comparisonStatus === 'unknown' ? (
+      <div className="mt-3 rounded-lg border border-white/8 bg-white/[0.03] p-3">
+        <p className="text-sm font-medium text-slate-200">Comparison eligibility unknown</p>
+        <p className="mt-1 text-xs leading-5 text-slate-500">
+          The current backend response does not yet expose whether this run is eligible for comparison.
+        </p>
+      </div>
+    ) : null}
+  </section>
+)
+
 const ReportCard = ({ report, onSelect, isSelected, onToggleCompare }) => {
   const pnl = report.net_pnl || 0
   const isProfit = pnl > 0
   const isLoss = pnl < 0
+  const runView = mapRunToViewModel(report)
+  const canCompare = runView.comparisonStatus === 'eligible'
 
   return (
     <div
@@ -115,14 +152,17 @@ const ReportCard = ({ report, onSelect, isSelected, onToggleCompare }) => {
           type="button"
           onClick={(e) => {
             e.stopPropagation()
-            onToggleCompare(report.run_id)
+            if (canCompare) onToggleCompare(report.run_id)
           }}
+          disabled={!canCompare}
           className={`rounded-full border p-1.5 transition ${
             isSelected
               ? 'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-soft)]'
-              : 'border-white/10 bg-white/5 text-slate-400 hover:border-white/20 hover:text-slate-300'
+              : canCompare
+                ? 'border-white/10 bg-white/5 text-slate-400 hover:border-white/20 hover:text-slate-300'
+                : 'cursor-not-allowed border-white/8 bg-white/[0.03] text-slate-600'
           }`}
-          title={isSelected ? 'Remove from comparison' : 'Add to comparison'}
+          title={canCompare ? (isSelected ? 'Remove from comparison' : 'Add to comparison') : 'Comparison eligibility unknown'}
         >
           <GitCompare className="size-3" />
         </button>
@@ -133,9 +173,7 @@ const ReportCard = ({ report, onSelect, isSelected, onToggleCompare }) => {
           <div className="truncate text-sm font-medium text-slate-100">{report.bot_name || 'Bot'}</div>
           <div className="mt-0.5 truncate text-xs text-slate-500">{report.strategy_name || 'Strategy'}</div>
         </div>
-        <Badge variant="success" size="sm">
-          {report.status || 'completed'}
-        </Badge>
+        <SemanticStatusBadge kind="report" value={runView.reportStatus} />
       </div>
 
       <div className="mb-4 flex items-center gap-2 text-xs text-slate-400">
@@ -191,6 +229,7 @@ const ReportCard = ({ report, onSelect, isSelected, onToggleCompare }) => {
 }
 
 export function ReportsPage() {
+  const { routeRunId } = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
   const [reports, setReports] = useState([])
   const [total, setTotal] = useState(0)
@@ -210,7 +249,7 @@ export function ReportsPage() {
   const [compareIds, setCompareIds] = useState([])
   const [compareOpen, setCompareOpen] = useState(false)
 
-  const runId = searchParams.get('runId')
+  const runId = routeRunId || searchParams.get('runId')
 
   const fetchReports = useCallback(async () => {
     setLoading(true)
@@ -218,7 +257,6 @@ export function ReportsPage() {
     try {
       const payload = await reportService.listReports({
         type: 'backtest',
-        status: 'completed',
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
         search,
@@ -302,6 +340,14 @@ export function ReportsPage() {
   }, [reports])
 
   const pageCount = Math.ceil(total / PAGE_SIZE)
+  const selectedReport = useMemo(() => {
+    if (!runId) return null
+    return reports.find((report) => report?.run_id === runId) || null
+  }, [reports, runId])
+  const selectedRunView = useMemo(
+    () => mapRunToViewModel(selectedReport || { run_id: runId, name: selectedReport?.bot_name || 'Selected run' }),
+    [runId, selectedReport],
+  )
 
   const handleRowClick = (report) => {
     if (!report?.run_id) return
@@ -319,6 +365,9 @@ export function ReportsPage() {
   const handleResetPage = () => setPage(0)
 
   const handleToggleCompare = (runId) => {
+    const report = reports.find((item) => item?.run_id === runId)
+    const runView = mapRunToViewModel(report || { run_id: runId })
+    if (runView.comparisonStatus !== 'eligible') return
     setCompareIds((prev) => (prev.includes(runId) ? prev.filter((id) => id !== runId) : [...prev, runId].slice(-4)))
   }
 
@@ -336,6 +385,8 @@ export function ReportsPage() {
 
   return (
     <div className="space-y-6">
+      {runId ? <ReportStateShell runView={selectedRunView} selected /> : null}
+
       {stats && (
         <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           <StatCard
@@ -573,7 +624,7 @@ export function ReportsPage() {
                 size="sm"
                 onClick={() => setCompareOpen(true)}
                 disabled={compareIds.length < 2}
-                title={compareIds.length < 2 ? 'Select at least two reports' : undefined}
+                title={compareIds.length < 2 ? 'Select at least two comparison-eligible reports' : undefined}
               >
                 Compare
               </Button>
@@ -585,7 +636,7 @@ export function ReportsPage() {
       <section className="rounded-3xl border border-white/8 bg-[#1a1d27]/80 p-5 shadow-[0_40px_120px_-70px_rgba(0,0,0,0.85)]">
         <div className="mb-4 flex items-center justify-between">
           <div>
-            <div className="text-xs uppercase tracking-[0.3em] text-slate-500">Completed Backtests</div>
+            <div className="text-xs uppercase tracking-[0.3em] text-slate-500">Report Archive</div>
             <div className="mt-1 text-sm text-slate-300">
               {total} report{total !== 1 ? 's' : ''}
               {hasActiveFilters && (
@@ -638,7 +689,7 @@ export function ReportsPage() {
           <div className="rounded-2xl border border-white/5 bg-black/20 p-12 text-center">
             <BarChart3 className="mx-auto size-10 text-slate-600" />
             <div className="mt-4 text-sm text-slate-400">
-              {hasActiveFilters ? 'No reports match your filters.' : 'No completed backtests yet.'}
+              {hasActiveFilters ? 'No reports match your filters.' : 'No reports are available yet.'}
             </div>
             {hasActiveFilters && (
               <button
