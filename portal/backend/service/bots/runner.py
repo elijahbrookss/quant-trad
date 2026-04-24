@@ -20,7 +20,7 @@ _SECURITY_SETTINGS = _SETTINGS.security
 class BotRunner(Protocol):
     def start_bot(self, *, bot: Mapping[str, object], run_id: str) -> str: ...
 
-    def stop_bot(self, *, bot_id: str) -> None: ...
+    def stop_bot(self, *, bot_id: str, preserve_container: bool = False) -> None: ...
 
 
 @dataclass
@@ -131,6 +131,7 @@ class DockerBotRunner:
             "started_at": str(state.get("StartedAt") or "").strip() or None,
             "finished_at": str(state.get("FinishedAt") or "").strip() or None,
             "exit_code": state.get("ExitCode"),
+            "oom_killed": bool(state.get("OOMKilled")),
             "error": str(state.get("Error") or "").strip() or None,
         }
 
@@ -188,9 +189,9 @@ class DockerBotRunner:
             raise RuntimeError("docker start returned empty container id")
         return container_id
 
-    def stop_bot(self, *, bot_id: str) -> None:
+    def stop_bot(self, *, bot_id: str, preserve_container: bool = False) -> None:
         name = self._container_name(bot_id)
-        cmd = ["docker", "rm", "-f", name]
+        cmd = ["docker", "stop", name] if preserve_container else ["docker", "rm", "-f", name]
         proc = self._run_docker(cmd)
         if proc.returncode != 0 and "No such container" not in (proc.stderr or ""):
             raise RuntimeError(f"docker stop failed: {proc.stderr.strip()}")

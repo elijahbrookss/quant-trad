@@ -6,12 +6,14 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from .botlens_state import read_run_summary_state
+from .botlens_state import RunProjectionSnapshot
 from .runner import DockerBotRunner
 from .startup_lifecycle import ACTIVE_PHASES, BACKEND_OWNED_PHASES, TERMINAL_PHASES
 
 _ACTIVE_STATUSES = {"starting", "running", "paused", "degraded", "telemetry_degraded"}
 _TERMINAL_STATUSES = {"idle", "stopped", "completed", "error", "failed", "crashed", "startup_failed"}
+_TELEMETRY_REASON_NO_ACTIVE_RUN = "no_active_run"
+_TELEMETRY_REASON_SNAPSHOT_UNAVAILABLE = "snapshot_unavailable"
 
 
 def _normalize_status(value: Any, default: str = "idle") -> str:
@@ -111,11 +113,11 @@ def _resolve_status(
     return "idle"
 
 
-def _default_phase_for_status(status: str, *, container_running: bool, has_view_state: bool) -> str:
+def _default_phase_for_status(status: str, *, container_running: bool, has_run_snapshot: bool) -> str:
     if status == "starting":
         return "container_booting" if container_running else "launching_container"
     if status in {"running", "paused"}:
-        return "live" if has_view_state else "awaiting_first_snapshot"
+        return "live" if has_run_snapshot else "awaiting_first_snapshot"
     if status in {"degraded", "telemetry_degraded"}:
         return status
     if status in {"startup_failed", "crashed", "stopped", "completed"}:
@@ -200,11 +202,20 @@ def _resolve_controls(*, status: str, phase: str, container_running: bool, has_r
     }
 
 
+def _telemetry_reason(*, selected_run_id: Optional[str], has_run_snapshot: bool) -> Optional[str]:
+    if has_run_snapshot:
+        return None
+    if selected_run_id:
+        return _TELEMETRY_REASON_SNAPSHOT_UNAVAILABLE
+    return _TELEMETRY_REASON_NO_ACTIVE_RUN
+
+
 def project_bot_state(
     bot: Mapping[str, Any],
     *,
     run: Mapping[str, Any] | None = None,
     lifecycle: Mapping[str, Any] | None = None,
+    run_snapshot: RunProjectionSnapshot | None = None,
     view_row: Mapping[str, Any] | None = None,
     container_state: Mapping[str, Any] | None = None,
     heartbeat_stale_ms: int = 30000,
@@ -221,19 +232,21 @@ def project_bot_state(
         or str(selected_run.get("run_id") or "").strip()
         or None
     )
-    summary_state = read_run_summary_state(
-        _mapping(view_row).get("payload"),
-        bot_id=bot_id,
-        run_id=str(selected_run_id or ""),
-    ) if view_row else {}
-    health_payload = _mapping(_mapping(summary_state).get("health"))
+    del view_row
+    summary_state = run_snapshot
+    has_run_snapshot = summary_state is not None
+    health_payload = summary_state.health.to_dict() if has_run_snapshot else {}
     snapshot_runtime = {
-        "status": health_payload.get("status"),
-        "worker_count": int(health_payload.get("worker_count") or 0),
-        "active_workers": int(health_payload.get("active_workers") or 0),
+        "status": health_payload.get("status") if has_run_snapshot else None,
+        "worker_count": int(health_payload.get("worker_count") or 0) if has_run_snapshot else None,
+        "active_workers": int(health_payload.get("active_workers") or 0) if has_run_snapshot else None,
     }
-    warnings = [dict(entry) for entry in _sequence(health_payload.get("warnings")) if isinstance(entry, Mapping)]
-    engine_status = _normalize_status(snapshot_runtime.get("status"), default="")
+    warnings = (
+        [dict(entry) for entry in _sequence(health_payload.get("warnings")) if isinstance(entry, Mapping)]
+        if has_run_snapshot
+        else None
+    )
+    engine_status = _normalize_status(snapshot_runtime.get("status"), default="") if has_run_snapshot else ""
     persisted_status = _normalize_status(payload.get("status"))
     lifecycle_status = _normalize_status(lifecycle_row.get("status"), default="")
     claimed_active = bool(selected_run_id) and (
@@ -255,7 +268,7 @@ def project_bot_state(
     default_phase = _default_phase_for_status(
         status,
         container_running=bool(container.get("running")),
-        has_view_state=bool(view_row),
+        has_run_snapshot=has_run_snapshot,
     )
     phase = default_phase if lifecycle_phase in TERMINAL_PHASES and status in _ACTIVE_STATUSES else (lifecycle_phase or default_phase)
     reason = _resolve_reason(
@@ -269,24 +282,26 @@ def project_bot_state(
     runtime_stats = _mapping(snapshot_runtime.get("stats"))
     if not runtime_stats:
         runtime_stats = _mapping(selected_run.get("summary")) or _mapping(payload.get("last_stats"))
+    telemetry_reason = _telemetry_reason(selected_run_id=selected_run_id, has_run_snapshot=has_run_snapshot)
     telemetry = {
         "run_id": selected_run_id,
-        "seq": int(_mapping(view_row).get("seq") or 0) if view_row else 0,
-        "available": bool(view_row),
-        "known_at": _mapping(view_row).get("known_at") if view_row else None,
-        "last_snapshot_at": _mapping(view_row).get("event_time") if view_row else None,
-        "warning_count": int(health_payload.get("warning_count") or 0),
-        "series_count": len(_mapping(summary_state).get("symbol_index") or {}),
-        "trade_count": len(_mapping(summary_state).get("open_trades_index") or {}),
-        "engine_status": engine_status or None,
-        "worker_count": int(snapshot_runtime.get("worker_count") or 0),
-        "active_workers": int(snapshot_runtime.get("active_workers") or 0),
+        "seq": int(summary_state.seq or 0) if has_run_snapshot else None,
+        "available": has_run_snapshot,
+        "reason": telemetry_reason,
+        "known_at": health_payload.get("last_event_at") if has_run_snapshot else None,
+        "last_snapshot_at": health_payload.get("last_event_at") if has_run_snapshot else None,
+        "warning_count": int(health_payload.get("warning_count") or 0) if has_run_snapshot else None,
+        "series_count": len(getattr(getattr(summary_state, "symbol_catalog", None), "entries", {}) or {}) if has_run_snapshot else None,
+        "trade_count": len(getattr(getattr(summary_state, "open_trades", None), "entries", {}) or {}) if has_run_snapshot else None,
+        "engine_status": (engine_status or None) if has_run_snapshot else None,
+        "worker_count": snapshot_runtime.get("worker_count"),
+        "active_workers": snapshot_runtime.get("active_workers"),
     }
     runtime = {
         **snapshot_runtime,
         "status": status,
         "phase": phase,
-        "engine_status": engine_status or None,
+        "engine_status": (engine_status or None) if has_run_snapshot else None,
         "run_id": selected_run_id,
         "seq": telemetry["seq"],
         "known_at": telemetry["known_at"],

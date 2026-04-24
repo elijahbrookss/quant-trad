@@ -1,14 +1,22 @@
 from collections import deque
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from engines.bot_runtime.core.domain import Candle
 from engines.bot_runtime.core.runtime_events import RuntimeEventName
 from engines.bot_runtime.deps import BotRuntimeDeps
+from engines.bot_runtime.runtime.core import SeriesExecutionState
 from engines.bot_runtime.runtime.components.overlay_delta import count_overlay_points
 from engines.bot_runtime.runtime.components.run_context import RunContext
 from engines.bot_runtime.runtime.runtime import BotRuntime
-from engines.indicator_engine.contracts import EngineFrame, IndicatorGuardWarning
+from engines.indicator_engine.contracts import (
+    EngineFrame,
+    IndicatorGuardWarning,
+    IndicatorRuntimeSpec,
+    RuntimeOutput,
+    RuntimeOverlay,
+)
 
 
 def _runtime_deps() -> BotRuntimeDeps:
@@ -128,6 +136,52 @@ def test_runtime_warning_store_aggregates_repeated_indicator_warnings():
     assert warnings[0]["last_seen_at"] is not None
 
 
+def test_runtime_artifact_performance_summary_uses_precise_duration_fields():
+    runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=_runtime_deps())
+    runtime._run_context = RunContext(bot_id="bot-1", run_id="run-1")
+    runtime._runtime_loop_started_at = datetime(2026, 1, 1, 0, 0, 1, tzinfo=timezone.utc)
+    runtime._runtime_loop_ended_at = datetime(2026, 1, 1, 0, 0, 4, tzinfo=timezone.utc)
+    runtime._runtime_loop_duration_seconds = 3.0
+    runtime._runtime_flush_drain_duration_seconds = 0.25
+
+    payload = runtime._run_artifact_payload("completed")
+    summary = payload["performance_summary"]
+
+    assert set(summary) >= {
+        "user_wall_clock_seconds",
+        "runtime_loop_duration_seconds",
+        "db_run_started_ended_seconds",
+        "async_projection_flush_drain_seconds",
+        "duration_basis",
+    }
+    assert summary["runtime_loop_duration_seconds"] == 3.0
+    assert summary["async_projection_flush_drain_seconds"] == 0.25
+
+
+def test_overlay_suppression_log_throttle_preserves_first_and_final_summary(caplog):
+    runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=_runtime_deps())
+    series = SimpleNamespace(instrument={"id": "instrument-btc"}, timeframe="1m", symbol="BTC")
+    caplog.set_level("WARNING")
+
+    for _ in range(3):
+        runtime._log_overlay_suppressed_warning(
+            series=series,
+            indicator_id="typed_regime",
+            warning_type="indicator_overlay_suppressed",
+            warning_context={
+                "overlay_payload_bytes": 316_000,
+                "overlay_points": 1200,
+                "hard_breach_reasons": ["overlay_payload_bytes"],
+            },
+        )
+    runtime._flush_overlay_suppression_logs()
+
+    messages = [record.message for record in caplog.records]
+    assert sum("indicator_overlay_suppressed " in message for message in messages) == 1
+    assert any("indicator_overlay_suppressed_summary" in message for message in messages)
+    assert any("count=3" in message for message in messages)
+
+
 def test_runtime_signal_artifact_helper_delegates_without_name_error():
     runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=_runtime_deps())
 
@@ -210,6 +264,212 @@ def test_next_signal_for_records_guard_warning_without_bar_time_name_error(monke
     assert warnings_recorded[0]["warning_type"] == "indicator_overlay_payload_exceeded"
     assert warnings_recorded[0]["bar_time"] == "2026-04-10T00:40:00Z"
     assert warnings_recorded[0]["context"]["bar_time"] == "2026-04-10T00:40:00Z"
+
+
+def test_next_signal_for_uses_output_only_indicator_step(monkeypatch):
+    runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=_runtime_deps())
+    monkeypatch.setattr(
+        "engines.bot_runtime.runtime.mixins.execution_loop.evaluate_strategy_bar",
+        lambda **_kwargs: SimpleNamespace(artifacts=[], selected_artifact=None),
+    )
+    candle = Candle(
+        time=datetime(2026, 4, 10, 0, 45, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=42.0,
+    )
+    step_calls: list[dict] = []
+
+    class _SpyIndicatorEngine:
+        order = ("spy",)
+        output_types = {"spy.metric": "metric"}
+
+        def step(self, *, bar, bar_time, include_overlays=True, include_details=True):
+            step_calls.append(
+                {
+                    "bar": bar,
+                    "bar_time": bar_time,
+                    "include_overlays": include_overlays,
+                    "include_details": include_details,
+                }
+            )
+            return EngineFrame(
+                outputs={
+                    "spy.metric": RuntimeOutput(
+                        bar_time=bar_time,
+                        ready=True,
+                        value={"value": 1.0},
+                    )
+                },
+                overlays={
+                    "spy.overlay": RuntimeOverlay(
+                        bar_time=bar_time,
+                        ready=True,
+                        value={"type": "debug_overlay", "payload": {"markers": []}},
+                    )
+                } if include_overlays else {},
+                details={},
+            )
+
+        def snapshot_overlays(self, *, bar_time):
+            raise AssertionError("overlay snapshots must not run during signal evaluation")
+
+    series = SimpleNamespace(
+        instrument={"id": "instrument-btc"},
+        timeframe="1m",
+        symbol="BTCUSD",
+        overlays=[{"overlay_id": "existing"}],
+        meta={"compiled_strategy": object()},
+    )
+    state = SeriesExecutionState(series=series, bar_index=0, total_bars=1)
+    state.indicator_engine = _SpyIndicatorEngine()
+    state.indicator_output_types = dict(state.indicator_engine.output_types)
+
+    runtime._next_signal_for(state, series, candle, int(candle.time.timestamp()))
+
+    assert step_calls == [
+        {
+            "bar": candle,
+            "bar_time": candle.time,
+            "include_overlays": False,
+            "include_details": False,
+        }
+    ]
+    assert state.indicator_overlays == {}
+    assert series.overlays == [{"overlay_id": "existing"}]
+
+
+def test_explicit_overlay_refresh_uses_current_indicator_state() -> None:
+    runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=_runtime_deps())
+    candle = Candle(
+        time=datetime(2026, 4, 10, 0, 50, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=42.0,
+    )
+    snapshot_calls: list[datetime] = []
+
+    class _SpyIndicatorEngine:
+        order = ("spy",)
+        output_types = {}
+
+        def snapshot_overlays(self, *, bar_time):
+            snapshot_calls.append(bar_time)
+            return EngineFrame(
+                outputs={},
+                overlays={
+                    "spy.markers": RuntimeOverlay(
+                        bar_time=bar_time,
+                        ready=True,
+                        value={"type": "debug_overlay", "payload": {"markers": [{"time": 1}]}},
+                    )
+                },
+                details={},
+            )
+
+    series = SimpleNamespace(
+        instrument={"id": "instrument-btc"},
+        timeframe="1m",
+        symbol="BTCUSD",
+        overlays=[],
+        candles=[candle],
+    )
+    state = SeriesExecutionState(series=series, bar_index=1, total_bars=1, active_candle=candle)
+    state.indicator_engine = _SpyIndicatorEngine()
+
+    overlays = runtime._refresh_indicator_overlays_for_state(
+        state,
+        candle=candle,
+        reason="test_debug_refresh",
+    )
+
+    assert snapshot_calls == [candle.time]
+    assert overlays == series.overlays
+    assert overlays[0]["overlay_id"] == "spy.markers"
+    assert overlays[0]["payload"]["markers"] == [{"time": 1}]
+
+
+def test_visible_overlays_request_refreshes_indicator_overlays(monkeypatch) -> None:
+    runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=_runtime_deps())
+    overlay_payload = {"overlay_id": "spy.markers", "type": "test_indicator_overlay", "payload": {}}
+    series = SimpleNamespace(
+        instrument={"id": "instrument-btc"},
+        timeframe="1h",
+        symbol="BTCUSD",
+        overlays=[],
+        trade_overlay=None,
+    )
+    state = SimpleNamespace(series=series)
+    calls: list[dict[str, object]] = []
+
+    def refresh(candidate_state, **kwargs):
+        calls.append({"state": candidate_state, **kwargs})
+        series.overlays = [overlay_payload]
+        return [overlay_payload]
+
+    monkeypatch.setattr(runtime, "_series_state_for", lambda candidate: state if candidate is series else None)
+    monkeypatch.setattr(runtime, "_refresh_indicator_overlays_for_state", refresh)
+    monkeypatch.setattr(runtime, "_current_epoch_for", lambda _series: None)
+
+    visible = runtime._series_visible_overlays(series, status="running")
+
+    assert calls == [{"state": state, "reason": "visible_overlays"}]
+    assert visible == [overlay_payload]
+
+
+def test_indicator_runtime_initialization_configures_overlay_replay_window():
+    class _ReplayWindowIndicator:
+        def __init__(self):
+            self.calls = []
+            self.runtime_spec = IndicatorRuntimeSpec(
+                instance_id="stats-1",
+                manifest_type="candle_stats",
+                version="v1",
+                dependencies=(),
+                outputs=(),
+                overlays=(),
+            )
+
+        def configure_replay_window(self, *, history_bars=None):
+            self.calls.append(history_bars)
+
+    indicator = _ReplayWindowIndicator()
+    deps = replace(
+        _runtime_deps(),
+        indicator_get_instance_meta=lambda *args, **kwargs: {"id": "stats-1", "type": "candle_stats"},
+        indicator_build_runtime_graph=lambda *args, **kwargs: ({"stats-1": {"id": "stats-1"}}, [indicator]),
+    )
+    runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=deps)
+    candle = Candle(
+        time=datetime(2026, 4, 10, 0, 0, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=42.0,
+    )
+    series = SimpleNamespace(
+        strategy_id="strategy-1",
+        meta={"indicator_links": [{"indicator_id": "stats-1"}]},
+        candles=[candle, candle, candle, candle],
+        window_start=None,
+        window_end=None,
+        instrument={"id": "instrument-btc"},
+        symbol="BTCUSD",
+        timeframe="1m",
+        datasource="local",
+        exchange="test",
+        overlays=[],
+    )
+    state = SeriesExecutionState(series=series, bar_index=0, total_bars=len(series.candles))
+
+    runtime._initialize_indicator_runtime_state(state)
+
+    assert indicator.calls == [4]
 
 
 def test_aggregate_stats_reuses_cached_trade_summary_until_trade_revision_changes():

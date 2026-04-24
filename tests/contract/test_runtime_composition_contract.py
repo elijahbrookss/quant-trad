@@ -56,10 +56,6 @@ class _FakeStorage:
     def list_bot_runs(self, *, bot_id=None, limit=None):
         return []
 
-    def get_latest_bot_run_view_state(self, *, bot_id: str, run_id=None, series_key=None):
-        return None
-
-
 class _FakeWatchdog:
     runner_id = "runner-test"
 

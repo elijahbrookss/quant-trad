@@ -46,6 +46,7 @@ class _FakeStorage:
         self.runs = []
         self.lifecycle = []
         self.bots = []
+        self._next_lifecycle_seq = 1
 
     def upsert_bot(self, payload):
         self.order.append("upsert_bot")
@@ -58,8 +59,11 @@ class _FakeStorage:
 
     def record_bot_run_lifecycle_checkpoint(self, payload):
         self.order.append(f"phase:{payload['phase']}")
-        self.lifecycle.append(dict(payload))
-        return dict(payload)
+        persisted = dict(payload)
+        persisted["seq"] = int(persisted.get("seq") or self._next_lifecycle_seq)
+        self._next_lifecycle_seq = max(self._next_lifecycle_seq, persisted["seq"] + 1)
+        self.lifecycle.append(dict(persisted))
+        return persisted
 
     def update_bot_runtime_status(self, *, bot_id, run_id, status, telemetry_degraded=False):
         _ = bot_id, run_id, status, telemetry_degraded
@@ -114,6 +118,7 @@ def test_startup_orchestrator_creates_run_before_container_launch():
     assert storage.lifecycle[-1]["phase"] == BotLifecyclePhase.AWAITING_CONTAINER_BOOT.value
     assert storage.bots[-1]["status"] == "starting"
     assert storage.bots[-1]["last_run_artifact"]["startup"]["run_id"] == ctx.run_id
+    assert [entry for entry in order if entry.startswith("status:")] == ["status:starting"]
 
 
 def test_startup_orchestrator_persists_startup_failed_phase():
@@ -144,3 +149,7 @@ def test_startup_orchestrator_persists_startup_failed_phase():
     assert storage.lifecycle[-1]["phase"] == BotLifecyclePhase.STARTUP_FAILED.value
     assert "docker launch failed" in storage.lifecycle[-1]["message"]
     assert storage.bots[-1]["status"] == "startup_failed"
+    assert [entry for entry in order if entry.startswith("status:")] == [
+        "status:starting",
+        "status:startup_failed",
+    ]

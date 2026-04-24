@@ -26,6 +26,7 @@ from ..storage.storage import (
     update_bot_run_artifact,
 )
 from ..strategies.strategy_service.facade import run_strategy_preview
+from .botlens_canonical_facts import append_botlens_canonical_fact_batch
 
 
 def _build_indicator_context(bot_id: str, overlay_cache: Any) -> Any:
@@ -113,6 +114,7 @@ def build_bot_runtime_deps() -> BotRuntimeDeps:
         build_indicator_context=_build_indicator_context,
         record_bot_runtime_event=record_bot_runtime_event,
         record_bot_runtime_events_batch=record_bot_runtime_events_batch,
+        append_botlens_canonical_fact_batch=append_botlens_canonical_fact_batch,
         record_bot_trade=record_bot_trade,
         record_bot_trade_event=record_bot_trade_event,
         record_bot_run_steps_batch=record_bot_run_steps_batch,

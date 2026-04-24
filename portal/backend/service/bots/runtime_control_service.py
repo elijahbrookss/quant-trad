@@ -28,13 +28,6 @@ class BotControlStorage(Protocol):
     def get_bot_run(self, run_id: str) -> Optional[Dict[str, Any]]: ...
     def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]: ...
     def get_latest_bot_run_lifecycle(self, bot_id: str) -> Optional[Dict[str, Any]]: ...
-    def get_latest_bot_run_view_state(
-        self,
-        *,
-        bot_id: str,
-        run_id: Optional[str] = None,
-        series_key: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]: ...
     def record_bot_run_lifecycle_checkpoint(self, payload: Dict[str, Any]) -> Dict[str, Any]: ...
     def update_bot_runtime_status(self, *, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None: ...
 
@@ -61,6 +54,12 @@ class BotRuntimeControlService:
 
     def _broadcast(self, event: str, payload: Dict[str, Any]) -> None:
         self._stream_manager.broadcast(event, payload)
+
+    @staticmethod
+    def _telemetry_hub():
+        from .telemetry_stream import telemetry_hub
+
+        return telemetry_hub
 
     @staticmethod
     def _runner_target() -> str:
@@ -96,15 +95,6 @@ class BotRuntimeControlService:
 
             def get_latest_bot_run_lifecycle(self, bot_id: str) -> Optional[Dict[str, Any]]:
                 return storage_module.get_latest_bot_run_lifecycle(str(bot_id))
-
-            def get_latest_bot_run_view_state(
-                self,
-                *,
-                bot_id: str,
-                run_id: Optional[str] = None,
-                series_key: Optional[str] = None,
-            ) -> Optional[Dict[str, Any]]:
-                return storage_module.get_latest_bot_run_view_state(bot_id=bot_id, run_id=run_id, series_key=series_key)
 
             def record_bot_run_lifecycle_checkpoint(self, payload: Dict[str, Any]) -> Dict[str, Any]:
                 return storage_module.record_bot_run_lifecycle_checkpoint(dict(payload))
@@ -149,12 +139,14 @@ class BotRuntimeControlService:
         if not inspect_container:
             return default_state
         lifecycle_status = str((lifecycle or {}).get("status") or "").strip().lower()
+        lifecycle_metadata = lifecycle.get("metadata") if isinstance(lifecycle, dict) else {}
         persisted_status = str(bot.get("status") or "").strip().lower()
         should_inspect = bool(
             bot.get("runner_id")
             or bot.get("heartbeat_at")
             or lifecycle_status in {"starting", "running", "degraded", "telemetry_degraded"}
             or persisted_status in {"starting", "running", "degraded", "telemetry_degraded"}
+            or bool((lifecycle_metadata or {}).get("preserve_container"))
         )
         if not should_inspect:
             return default_state
@@ -173,13 +165,13 @@ class BotRuntimeControlService:
             or storage.get_latest_bot_runtime_run_id(bot_id)
         )
         run = storage.get_bot_run(run_id) if run_id else None
-        view_row = storage.get_latest_bot_run_view_state(bot_id=bot_id, run_id=run_id) if run_id else None
+        run_snapshot = self._telemetry_hub().get_run_snapshot(run_id=run_id) if run_id else None
         container_state = self._container_state_for_bot(bot, lifecycle, inspect_container=inspect_container)
         return project_bot_state(
             bot,
             run=run,
             lifecycle=lifecycle,
-            view_row=view_row,
+            run_snapshot=run_snapshot,
             container_state=container_state,
             heartbeat_stale_ms=_BOT_RUNTIME_SETTINGS.status_heartbeat_stale_ms,
         )
@@ -216,9 +208,9 @@ class BotRuntimeControlService:
         self._broadcast("bot", {"bot": projected})
         return projected
 
-    def stop_bot(self, bot_id: str) -> Dict[str, object]:
+    def stop_bot(self, bot_id: str, *, preserve_container: bool = False) -> Dict[str, object]:
         runner = self._resolve_runner()
-        runner.stop_bot(bot_id=bot_id)
+        runner.stop_bot(bot_id=bot_id, preserve_container=preserve_container)
         watchdog = self._watchdog_instance()
         watchdog.unregister_bot(bot_id)
 
@@ -229,13 +221,23 @@ class BotRuntimeControlService:
         self._upsert_bot(payload)
         run_id = self._storage_gateway().get_latest_bot_runtime_run_id(bot_id)
         if run_id:
+            reason_text = (
+                "Bot stop requested from backend control service; container preserved for debugging."
+                if preserve_container
+                else "Bot stop requested from backend control service."
+            )
             checkpoint = lifecycle_checkpoint_payload(
                 bot_id=bot_id,
                 run_id=run_id,
                 phase=BotLifecyclePhase.STOPPED.value,
                 status=BotLifecycleStatus.STOPPED.value,
                 owner=LifecycleOwner.BACKEND.value,
-                message="Bot stop requested from backend control service.",
+                message=reason_text,
+                metadata={
+                    "terminal_actor": "platform_stop",
+                    "terminal_reason_text": reason_text,
+                    "preserve_container": bool(preserve_container),
+                },
             )
             lifecycle_state = self._storage_gateway().record_bot_run_lifecycle_checkpoint(checkpoint)
             emit_lifecycle_event(
@@ -246,7 +248,7 @@ class BotRuntimeControlService:
                     "phase": BotLifecyclePhase.STOPPED.value,
                     "status": BotLifecycleStatus.STOPPED.value,
                     "owner": LifecycleOwner.BACKEND.value,
-                    "message": "Bot stop requested from backend control service.",
+                    "message": reason_text,
                 }
             )
             self._storage_gateway().update_bot_runtime_status(
@@ -254,7 +256,12 @@ class BotRuntimeControlService:
                 run_id=run_id,
                 status=BotLifecycleStatus.STOPPED.value,
             )
-        logger.info("bot_container_stopped | bot_id=%s | run_id=%s", bot_id, run_id)
+        logger.info(
+            "bot_container_stopped | bot_id=%s | run_id=%s | preserve_container=%s",
+            bot_id,
+            run_id,
+            preserve_container,
+        )
         refreshed = self._config.get_bot(bot_id)
         projected = self._project_bot_from_storage(refreshed, inspect_container=True)
         self._broadcast("bot", {"bot": projected})

@@ -244,13 +244,6 @@ class BotStartupOrchestrator:
                 "status": str(lifecycle_state.get("status") or checkpoint["status"]).strip(),
             }
         )
-        lifecycle_status = str(lifecycle_state.get("status") or checkpoint["status"]).strip()
-        self.storage.update_bot_runtime_status(
-            bot_id=ctx.bot_id,
-            run_id=ctx.run_id,
-            status=lifecycle_status,
-            telemetry_degraded=lifecycle_status == BotLifecycleStatus.TELEMETRY_DEGRADED.value,
-        )
         return lifecycle_state
 
     def _persist_startup_failure(self, ctx: BotStartupContext, exc: Exception, *, traceback_text: str | None = None) -> None:

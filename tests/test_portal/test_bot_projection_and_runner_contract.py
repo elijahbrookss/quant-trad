@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from portal.backend.service.bots.bot_state_projection import project_bot_state
 from portal.backend.service.bots.runner import DockerBotRunner
 
@@ -75,6 +77,21 @@ def test_runner_runtime_env_includes_backend_owned_run_id(monkeypatch):
 
 
 def test_project_bot_state_prefers_active_runtime_over_stale_startup_failed_lifecycle():
+    run_snapshot = SimpleNamespace(
+        seq=7,
+        health=SimpleNamespace(
+            to_dict=lambda: {
+                "status": "running",
+                "warning_count": 0,
+                "warnings": [],
+                "worker_count": 2,
+                "active_workers": 1,
+                "last_event_at": "2026-01-01T00:00:10Z",
+            }
+        ),
+        symbol_catalog=SimpleNamespace(entries={"instrument-btc|1m": {"symbol_key": "instrument-btc|1m"}}),
+        open_trades=SimpleNamespace(entries={}),
+    )
     projected = project_bot_state(
         {
             "id": "bot-1",
@@ -91,35 +108,7 @@ def test_project_bot_state_prefers_active_runtime_over_stale_startup_failed_life
             "owner": "runtime",
             "message": "Worker failed before initial lifecycle reconciliation.",
         },
-        view_row={
-            "seq": 7,
-            "event_time": "2026-01-01T00:00:10Z",
-            "known_at": "2026-01-01T00:00:10Z",
-            "payload": {
-                "projection": {
-                    "runtime": {
-                        "status": "running",
-                        "worker_count": 2,
-                        "active_workers": 1,
-                    },
-                    "series": [{"series_key": "instrument-btc|1m"}],
-                    "trades": [],
-                    "logs": [],
-                    "decisions": [],
-                    "warnings": [],
-                },
-                "runtime": {
-                    "status": "running",
-                    "worker_count": 2,
-                    "active_workers": 1,
-                },
-                "series": [{"series_key": "instrument-btc|1m"}],
-                "trades": [],
-                "logs": [],
-                "decisions": [],
-                "warnings": [],
-            },
-        },
+        run_snapshot=run_snapshot,
         container_state={
             "name": "quant-trad-bots-bot-1",
             "status": "running",
@@ -137,3 +126,42 @@ def test_project_bot_state_prefers_active_runtime_over_stale_startup_failed_life
     assert projected["runtime"]["phase"] == "live"
     assert projected["lifecycle"]["status"] == "running"
     assert projected["lifecycle"]["phase"] == "live"
+
+
+def test_project_bot_state_marks_runtime_telemetry_unavailable_without_snapshot():
+    projected = project_bot_state(
+        {
+            "id": "bot-1",
+            "name": "Bot 1",
+            "status": "running",
+            "runner_id": "runner-test",
+            "heartbeat_at": "2026-01-01T00:00:02Z",
+        },
+        run={"run_id": "run-1", "status": "running", "started_at": "2026-01-01T00:00:00Z"},
+        lifecycle={
+            "run_id": "run-1",
+            "phase": "live",
+            "status": "running",
+            "owner": "runtime",
+            "message": "Runtime is live.",
+        },
+        container_state={
+            "name": "quant-trad-bots-bot-1",
+            "status": "running",
+            "running": True,
+            "id": "container-1",
+            "started_at": "2026-01-01T00:00:01Z",
+            "finished_at": None,
+            "exit_code": None,
+            "error": None,
+        },
+    )
+
+    assert projected["status"] == "running"
+    assert projected["runtime"]["phase"] == "live"
+    assert projected["runtime"]["engine_status"] is None
+    assert projected["runtime"]["seq"] is None
+    assert projected["lifecycle"]["telemetry"]["available"] is False
+    assert projected["lifecycle"]["telemetry"]["reason"] == "snapshot_unavailable"
+    assert projected["lifecycle"]["telemetry"]["worker_count"] is None
+    assert projected["lifecycle"]["telemetry"]["series_count"] is None

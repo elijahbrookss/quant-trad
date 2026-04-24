@@ -68,20 +68,28 @@ def tail_window(entries: Any, max_items: int) -> List[Any]:
     return list(entries[-int(max_items):])
 
 
-def compact_overlay_geometry(value: Any, *, max_points: int) -> Any:
+def _preserve_overlay_list(path: tuple[str, ...]) -> bool:
+    return len(path) >= 2 and path[-1] == "points" and "polylines" in path
+
+
+def compact_overlay_geometry(value: Any, *, max_points: int, path: tuple[str, ...] = ()) -> Any:
     if isinstance(value, Mapping):
         compact: Dict[str, Any] = {}
         for key, entry in value.items():
-            compact[str(key)] = compact_overlay_geometry(entry, max_points=max_points)
+            compact[str(key)] = compact_overlay_geometry(
+                entry,
+                max_points=max_points,
+                path=(*path, str(key)),
+            )
         return compact
     if isinstance(value, list):
-        if int(max_points) <= 0:
+        if _preserve_overlay_list(path) or int(max_points) <= 0:
             subset = list(value)
         elif len(value) <= int(max_points):
             subset = list(value)
         else:
             subset = list(value[-int(max_points):])
-        return [compact_overlay_geometry(entry, max_points=max_points) for entry in subset]
+        return [compact_overlay_geometry(entry, max_points=max_points, path=path) for entry in subset]
     return value
 
 

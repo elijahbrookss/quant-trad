@@ -42,14 +42,6 @@ class BotStorageGateway(Protocol):
 
     def list_bot_runs(self, *, bot_id: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]: ...
 
-    def get_latest_bot_run_view_state(
-        self,
-        *,
-        bot_id: str,
-        run_id: Optional[str] = None,
-        series_key: Optional[str] = None,
-    ) -> Optional[Mapping[str, Any]]: ...
-
 
 @dataclass(frozen=True)
 class RuntimeComposition:
@@ -115,19 +107,6 @@ def _build_storage_gateway() -> BotStorageGateway:
             if limit and int(limit) > 0:
                 return list(rows)[: int(limit)]
             return list(rows)
-
-        def get_latest_bot_run_view_state(
-            self,
-            *,
-            bot_id: str,
-            run_id: Optional[str] = None,
-            series_key: Optional[str] = None,
-        ) -> Optional[Mapping[str, Any]]:
-            return storage_module.get_latest_bot_run_view_state(
-                bot_id=bot_id,
-                run_id=run_id,
-                series_key=series_key,
-            )
 
     return _Gateway()
 

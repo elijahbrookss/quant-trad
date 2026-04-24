@@ -165,14 +165,46 @@ def terminal_status_after_supervision(
     startup_live_emitted: bool,
     degraded_symbols_count: int,
     telemetry_degraded: bool,
+    expected_worker_count: int = 0,
+    worker_terminal_statuses: Mapping[str, Any] | None = None,
 ) -> tuple[str, str]:
+    normalized_worker_statuses = [
+        str(value or "").strip().lower()
+        for value in dict(worker_terminal_statuses or {}).values()
+        if str(value or "").strip()
+    ]
     if int(degraded_symbols_count or 0) > 0:
         if startup_live_emitted:
             return BotLifecyclePhase.DEGRADED.value, BotLifecycleStatus.DEGRADED.value
         return BotLifecyclePhase.STARTUP_FAILED.value, BotLifecycleStatus.STARTUP_FAILED.value
     if telemetry_degraded:
         return BotLifecyclePhase.TELEMETRY_DEGRADED.value, BotLifecycleStatus.TELEMETRY_DEGRADED.value
-    return BotLifecyclePhase.COMPLETED.value, BotLifecycleStatus.COMPLETED.value
+    resolved_expected_workers = max(int(expected_worker_count or 0), 0)
+    if resolved_expected_workers > 0 and len(normalized_worker_statuses) < resolved_expected_workers:
+        if startup_live_emitted:
+            return BotLifecyclePhase.CRASHED.value, BotLifecycleStatus.CRASHED.value
+        return BotLifecyclePhase.STARTUP_FAILED.value, BotLifecycleStatus.STARTUP_FAILED.value
+    if not normalized_worker_statuses:
+        if startup_live_emitted:
+            return BotLifecyclePhase.CRASHED.value, BotLifecycleStatus.CRASHED.value
+        return BotLifecyclePhase.STARTUP_FAILED.value, BotLifecycleStatus.STARTUP_FAILED.value
+    if any(status in {"error", "failed", BotLifecycleStatus.CRASHED.value, BotLifecycleStatus.STARTUP_FAILED.value} for status in normalized_worker_statuses):
+        if startup_live_emitted:
+            return BotLifecyclePhase.CRASHED.value, BotLifecycleStatus.CRASHED.value
+        return BotLifecyclePhase.STARTUP_FAILED.value, BotLifecycleStatus.STARTUP_FAILED.value
+    if any(status in {BotLifecycleStatus.DEGRADED.value, BotLifecycleStatus.TELEMETRY_DEGRADED.value} for status in normalized_worker_statuses):
+        if any(status == BotLifecycleStatus.TELEMETRY_DEGRADED.value for status in normalized_worker_statuses):
+            return BotLifecyclePhase.TELEMETRY_DEGRADED.value, BotLifecycleStatus.TELEMETRY_DEGRADED.value
+        if startup_live_emitted:
+            return BotLifecyclePhase.DEGRADED.value, BotLifecycleStatus.DEGRADED.value
+        return BotLifecyclePhase.STARTUP_FAILED.value, BotLifecycleStatus.STARTUP_FAILED.value
+    if any(status == BotLifecycleStatus.STOPPED.value for status in normalized_worker_statuses):
+        return BotLifecyclePhase.STOPPED.value, BotLifecycleStatus.STOPPED.value
+    if all(status == BotLifecycleStatus.COMPLETED.value for status in normalized_worker_statuses):
+        return BotLifecyclePhase.COMPLETED.value, BotLifecycleStatus.COMPLETED.value
+    if startup_live_emitted:
+        return BotLifecyclePhase.CRASHED.value, BotLifecycleStatus.CRASHED.value
+    return BotLifecyclePhase.STARTUP_FAILED.value, BotLifecycleStatus.STARTUP_FAILED.value
 
 
 def deep_merge_dict(base: Mapping[str, Any] | None, incoming: Mapping[str, Any] | None) -> Dict[str, Any]:
@@ -222,6 +254,10 @@ def build_failure_payload(
     exception_type: str | None = None,
     traceback: str | None = None,
     symbols: list[str] | None = None,
+    component: str | None = None,
+    operation: str | None = None,
+    path: str | None = None,
+    errno: int | None = None,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "phase": str(phase or "").strip(),
@@ -244,6 +280,14 @@ def build_failure_payload(
         payload["exit_code"] = int(exit_code)
     if stderr_tail:
         payload["stderr_tail"] = str(stderr_tail)
+    if component:
+        payload["component"] = str(component)
+    if operation:
+        payload["operation"] = str(operation)
+    if path:
+        payload["path"] = str(path)
+    if errno is not None:
+        payload["errno"] = int(errno)
     resolved_exception_type = exception_type or error_type
     if resolved_exception_type:
         payload["exception_type"] = str(resolved_exception_type)
@@ -267,18 +311,28 @@ def lifecycle_checkpoint_payload(
     failure: Mapping[str, Any] | None = None,
     checkpoint_at: str | None = None,
     status: str | None = None,
+    seq: int | None = None,
 ) -> Dict[str, Any]:
     resolved_phase = str(phase or "").strip()
+    expected_status = str(status_for_phase(resolved_phase)).strip()
+    resolved_status = str(status or expected_status).strip()
+    if resolved_status != expected_status:
+        raise ValueError(
+            "lifecycle checkpoint status must match phase "
+            f"phase={resolved_phase or '<missing>'} status={resolved_status or '<missing>'} "
+            f"expected_status={expected_status or '<missing>'}"
+        )
     return {
         "bot_id": str(bot_id or "").strip(),
         "run_id": str(run_id or "").strip(),
         "phase": resolved_phase,
-        "status": str(status or status_for_phase(resolved_phase)).strip(),
+        "status": resolved_status,
         "owner": str(owner or "").strip(),
         "message": str(message or "").strip(),
         "metadata": dict(metadata or {}),
         "failure": dict(failure or {}),
         "checkpoint_at": checkpoint_at or utc_now_iso(),
+        "seq": int(seq) if seq is not None and int(seq) > 0 else None,
     }
 
 

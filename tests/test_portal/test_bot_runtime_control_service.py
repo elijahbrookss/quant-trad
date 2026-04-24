@@ -9,6 +9,18 @@ pytest.importorskip("sqlalchemy")
 from portal.backend.service.bots.runtime_control_service import BotRuntimeControlService
 
 
+@pytest.fixture(autouse=True)
+def _stub_lifecycle_bridge(monkeypatch):
+    monkeypatch.setattr(
+        "portal.backend.service.bots.startup_service.emit_lifecycle_event",
+        lambda payload: None,
+    )
+    monkeypatch.setattr(
+        "portal.backend.service.bots.runtime_control_service.emit_lifecycle_event",
+        lambda payload: None,
+    )
+
+
 class _FakeConfigService:
     def __init__(self) -> None:
         self._bots = [
@@ -92,10 +104,6 @@ class _FakeStorage:
             return dict(row)
         return None
 
-    def get_latest_bot_run_view_state(self, *, bot_id, run_id=None, series_key=None):
-        _ = bot_id, run_id, series_key
-        return None
-
     def record_bot_run_lifecycle_checkpoint(self, payload):
         row = dict(payload)
         self.lifecycle.setdefault(str(row["bot_id"]), []).append(row)
@@ -124,6 +132,14 @@ class _FakeWatchdog:
 
     def status(self):
         return {"runner_id": self.runner_id}
+
+
+class _FakeTelemetryHub:
+    def __init__(self, snapshots: dict[str, object] | None = None) -> None:
+        self._snapshots = dict(snapshots or {})
+
+    def get_run_snapshot(self, *, run_id: str):
+        return self._snapshots.get(str(run_id))
 
 
 def test_start_bot_persists_startup_failed_when_runner_fails():
@@ -165,10 +181,76 @@ def test_start_bot_rejects_unknown_runtime_target(monkeypatch):
     config = _FakeConfigService()
     stream = _FakeStreamManager()
     service = BotRuntimeControlService(config, stream, storage=_FakeStorage(), watchdog=_FakeWatchdog())
-    monkeypatch.setenv("QT_BOT_RUNTIME_TARGET", "vps")
+    monkeypatch.setattr(BotRuntimeControlService, "_runner_target", staticmethod(lambda: "vps"))
 
     with pytest.raises(RuntimeError, match="Unsupported bot runtime target"):
         service.start_bot("bot-1")
+
+
+def test_stop_bot_can_preserve_container_for_debugging(monkeypatch):
+    config = _FakeConfigService()
+    stream = _FakeStreamManager()
+    storage = _FakeStorage()
+    storage.runs["run-1"] = {
+        "run_id": "run-1",
+        "bot_id": "bot-1",
+        "status": "running",
+        "started_at": "2026-04-09T04:21:37Z",
+    }
+    storage.lifecycle["bot-1"] = [
+        {
+            "bot_id": "bot-1",
+            "run_id": "run-1",
+            "phase": "live",
+            "status": "running",
+            "owner": "runtime",
+            "message": "live",
+            "metadata": {},
+            "failure": {},
+            "checkpoint_at": "2026-04-09T04:21:43Z",
+            "updated_at": "2026-04-09T04:21:43Z",
+        }
+    ]
+    stop_calls: list[dict[str, object]] = []
+
+    class _Runner:
+        def start_bot(self, *, bot, run_id):
+            _ = bot, run_id
+            return "container-1"
+
+        def stop_bot(self, *, bot_id, preserve_container=False):
+            stop_calls.append({"bot_id": bot_id, "preserve_container": preserve_container})
+            return None
+
+    monkeypatch.setattr(
+        "portal.backend.service.bots.runtime_control_service.DockerBotRunner.inspect_bot_container",
+        lambda _bot_id: {
+            "name": "quant-trad-bots-bot-1",
+            "status": "exited",
+            "running": False,
+            "id": "container-1",
+            "started_at": "2026-04-09T04:21:37Z",
+            "finished_at": "2026-04-09T04:22:00Z",
+            "exit_code": 137,
+            "oom_killed": False,
+            "error": None,
+        },
+    )
+
+    service = BotRuntimeControlService(
+        config,
+        stream,
+        storage=storage,
+        watchdog=_FakeWatchdog(),
+        runner_factory=lambda: _Runner(),
+    )
+
+    projected = service.stop_bot("bot-1", preserve_container=True)
+
+    assert stop_calls == [{"bot_id": "bot-1", "preserve_container": True}]
+    assert storage.lifecycle["bot-1"][-1]["metadata"]["terminal_actor"] == "platform_stop"
+    assert storage.lifecycle["bot-1"][-1]["metadata"]["preserve_container"] is True
+    assert projected["lifecycle"]["container"]["status"] == "exited"
 
 
 def test_bots_stream_snapshot_uses_projected_bot_payload():
@@ -211,3 +293,152 @@ def test_bots_stream_snapshot_uses_projected_bot_payload():
     assert initial["bots"][0]["active_run_id"] == "run-1"
     assert initial["bots"][0]["lifecycle"]["status"] == "startup_failed"
     assert initial["bots"][0]["controls"]["can_start"] is True
+
+
+def test_bots_stream_snapshot_marks_telemetry_unavailable_without_replay(monkeypatch):
+    def _unexpected_replay(*args, **kwargs):
+        _ = args, kwargs
+        raise AssertionError("bots_stream must not trigger replay")
+
+    config = _FakeConfigService()
+    stream = _FakeStreamManager()
+    storage = _FakeStorage()
+    storage.runs["run-1"] = {
+        "run_id": "run-1",
+        "bot_id": "bot-1",
+        "status": "running",
+        "started_at": "2026-04-09T04:21:37Z",
+    }
+    storage.lifecycle["bot-1"] = [
+        {
+            "bot_id": "bot-1",
+            "run_id": "run-1",
+            "phase": "live",
+            "status": "running",
+            "owner": "runtime",
+            "message": "live",
+            "metadata": {},
+            "failure": {},
+            "checkpoint_at": "2026-04-09T04:21:43Z",
+            "updated_at": "2026-04-09T04:21:43Z",
+        }
+    ]
+    monkeypatch.setattr(
+        BotRuntimeControlService,
+        "_telemetry_hub",
+        staticmethod(lambda: _FakeTelemetryHub()),
+    )
+    monkeypatch.setattr(
+        "portal.backend.service.bots.botlens_event_replay.rebuild_run_projection_snapshot",
+        _unexpected_replay,
+    )
+    monkeypatch.setattr(
+        "portal.backend.service.bots.runtime_control_service.DockerBotRunner.inspect_bot_container",
+        lambda _bot_id: {
+            "name": "quant-trad-bots-bot-1",
+            "status": "running",
+            "running": True,
+            "id": "container-1",
+            "started_at": "2026-04-09T04:21:37Z",
+            "finished_at": None,
+            "exit_code": None,
+            "error": None,
+        },
+    )
+    service = BotRuntimeControlService(
+        config,
+        stream,
+        storage=storage,
+        watchdog=_FakeWatchdog(),
+        runner_factory=lambda: None,
+    )
+
+    _release, _channel, initial = service.bots_stream()
+
+    bot = initial["bots"][0]
+    assert bot["status"] == "running"
+    assert bot["runtime"]["phase"] == "live"
+    assert bot["lifecycle"]["telemetry"]["available"] is False
+    assert bot["lifecycle"]["telemetry"]["reason"] == "snapshot_unavailable"
+    assert bot["lifecycle"]["telemetry"]["worker_count"] is None
+    assert bot["lifecycle"]["telemetry"]["seq"] is None
+
+
+def test_bots_stream_snapshot_tolerates_null_recent_transitions(monkeypatch):
+    config = _FakeConfigService()
+    stream = _FakeStreamManager()
+    storage = _FakeStorage()
+    storage.runs["run-1"] = {
+        "run_id": "run-1",
+        "bot_id": "bot-1",
+        "status": "running",
+        "started_at": "2026-04-09T04:21:37Z",
+    }
+    storage.lifecycle["bot-1"] = [
+        {
+            "bot_id": "bot-1",
+            "run_id": "run-1",
+            "phase": "live",
+            "status": "running",
+            "owner": "runtime",
+            "message": "live",
+            "metadata": {},
+            "failure": {},
+            "checkpoint_at": "2026-04-09T04:21:43Z",
+            "updated_at": "2026-04-09T04:21:43Z",
+        }
+    ]
+    monkeypatch.setattr(
+        BotRuntimeControlService,
+        "_telemetry_hub",
+        staticmethod(
+            lambda: _FakeTelemetryHub(
+                {
+                    "run-1": SimpleNamespace(
+                        seq=7,
+                        health=SimpleNamespace(
+                            to_dict=lambda: {
+                                "status": "running",
+                                "runtime_state": "live",
+                                "recent_transitions": None,
+                                "warning_count": 0,
+                                "warnings": [],
+                                "worker_count": 2,
+                                "active_workers": 2,
+                                "last_event_at": "2026-04-09T04:21:43Z",
+                            }
+                        ),
+                        symbol_catalog=SimpleNamespace(entries={}),
+                        open_trades=SimpleNamespace(entries={}),
+                    )
+                }
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "portal.backend.service.bots.runtime_control_service.DockerBotRunner.inspect_bot_container",
+        lambda _bot_id: {
+            "name": "quant-trad-bots-bot-1",
+            "status": "running",
+            "running": True,
+            "id": "container-1",
+            "started_at": "2026-04-09T04:21:37Z",
+            "finished_at": None,
+            "exit_code": None,
+            "error": None,
+        },
+    )
+    service = BotRuntimeControlService(
+        config,
+        stream,
+        storage=storage,
+        watchdog=_FakeWatchdog(),
+        runner_factory=lambda: None,
+    )
+
+    _release, _channel, initial = service.bots_stream()
+
+    assert initial["type"] == "snapshot"
+    assert initial["bots"][0]["active_run_id"] == "run-1"
+    assert initial["bots"][0]["runtime"]["status"] == "running"
+    assert initial["bots"][0]["lifecycle"]["telemetry"]["available"] is True

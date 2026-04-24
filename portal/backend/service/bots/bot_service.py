@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Mapping
 
 from core.settings import get_settings
 
-from .botlens_state import read_run_summary_state
 from .bot_state_projection import project_bot_state
 from .runner import DockerBotRunner
 from .runtime_composition import get_runtime_composition
@@ -33,6 +32,12 @@ def _ensure_watchdog_callback() -> None:
     _WATCHDOG_CALLBACK_SET = True
 
 
+def _telemetry_hub():
+    from .telemetry_stream import telemetry_hub
+
+    return telemetry_hub
+
+
 def ensure_watchdog_stream_bridge() -> None:
     _ensure_watchdog_callback()
 
@@ -41,7 +46,13 @@ def _broadcast_bot_stream(event: str, payload: Dict[str, Any]) -> None:
     _composition().stream_manager.broadcast(event, payload)
 
 
-def _load_projection_inputs(bot: Mapping[str, Any]) -> tuple[Optional[Mapping[str, Any]], Optional[Mapping[str, Any]], Optional[Mapping[str, Any]]]:
+def _load_projection_inputs(
+    bot: Mapping[str, Any],
+) -> tuple[
+    Optional[Mapping[str, Any]],
+    Optional[Mapping[str, Any]],
+    Any,
+]:
     bot_id = str(bot.get("id") or "").strip()
     lifecycle = _composition().storage.get_latest_bot_run_lifecycle(bot_id) if bot_id else None
     run_id = (
@@ -51,8 +62,8 @@ def _load_projection_inputs(bot: Mapping[str, Any]) -> tuple[Optional[Mapping[st
         else None
     )
     run = _composition().storage.get_bot_run(run_id) if run_id else None
-    view_row = _composition().storage.get_latest_bot_run_view_state(bot_id=bot_id, run_id=run_id) if run_id else None
-    return run, lifecycle, view_row
+    run_snapshot = _telemetry_hub().get_run_snapshot(run_id=run_id) if run_id else None
+    return run, lifecycle, run_snapshot
 
 
 def _container_state_for_bot(bot: Mapping[str, Any], lifecycle: Mapping[str, Any] | None, *, inspect_container: bool) -> Dict[str, Any]:
@@ -70,12 +81,14 @@ def _container_state_for_bot(bot: Mapping[str, Any], lifecycle: Mapping[str, Any
     if not inspect_container:
         return default_state
     lifecycle_status = str((lifecycle or {}).get("status") or "").strip().lower()
+    lifecycle_metadata = lifecycle.get("metadata") if isinstance(lifecycle, Mapping) else {}
     persisted_status = str(bot.get("status") or "").strip().lower()
     should_inspect = bool(
         bot.get("runner_id")
         or bot.get("heartbeat_at")
         or lifecycle_status in {"starting", "running", "degraded", "telemetry_degraded"}
         or persisted_status in {"starting", "running", "degraded", "telemetry_degraded"}
+        or bool((lifecycle_metadata or {}).get("preserve_container"))
     )
     if not should_inspect:
         return default_state
@@ -87,13 +100,13 @@ def _container_state_for_bot(bot: Mapping[str, Any], lifecycle: Mapping[str, Any
 
 
 def _project_bot(bot: Mapping[str, Any], *, inspect_container: bool = True) -> Dict[str, Any]:
-    run, lifecycle, view_row = _load_projection_inputs(bot)
+    run, lifecycle, run_snapshot = _load_projection_inputs(bot)
     container_state = _container_state_for_bot(bot, lifecycle, inspect_container=inspect_container)
     return project_bot_state(
         bot,
         run=run,
         lifecycle=lifecycle,
-        view_row=view_row,
+        run_snapshot=run_snapshot,
         container_state=container_state,
         heartbeat_stale_ms=_BOT_RUNTIME_SETTINGS.status_heartbeat_stale_ms,
     )
@@ -160,8 +173,8 @@ def start_bot(bot_id: str) -> Dict[str, object]:
     return _composition().runtime_control_service.start_bot(bot_id)
 
 
-def stop_bot(bot_id: str) -> Dict[str, object]:
-    return _composition().runtime_control_service.stop_bot(bot_id)
+def stop_bot(bot_id: str, *, preserve_container: bool = False) -> Dict[str, object]:
+    return _composition().runtime_control_service.stop_bot(bot_id, preserve_container=preserve_container)
 
 
 def get_bot(bot_id: str) -> Dict[str, object]:
@@ -186,16 +199,11 @@ def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
         run_id = str(run.get("run_id") or "").strip()
         if not run_id:
             continue
-        view_row = _composition().storage.get_latest_bot_run_view_state(bot_id=bot_id, run_id=run_id)
-        summary_state = read_run_summary_state(
-            view_row.get("payload") if isinstance(view_row, Mapping) else {},
-            bot_id=bot_id,
-            run_id=run_id,
-        )
-        runtime_payload = dict(summary_state.get("health") or {}) if isinstance(summary_state.get("health"), Mapping) else {}
+        summary_state = _telemetry_hub().get_run_snapshot(run_id=run_id)
+        runtime_payload = summary_state.health.to_dict() if summary_state is not None else {}
         summary = dict(run.get("summary") or {})
         if not summary:
-            symbol_index = summary_state.get("symbol_index") if isinstance(summary_state.get("symbol_index"), Mapping) else {}
+            symbol_index = summary_state.symbol_catalog.entries if summary_state is not None else {}
             total_trades = 0
             for item in symbol_index.values():
                 if not isinstance(item, Mapping):
@@ -209,10 +217,11 @@ def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
                 **dict(run),
                 "is_active": run_id == active_run_id,
                 "runtime_status": str(runtime_payload.get("status") or run.get("status") or ""),
-                "view_state_available": bool(view_row),
-                "last_snapshot_at": view_row.get("event_time") if isinstance(view_row, Mapping) else None,
-                "known_at": view_row.get("known_at") if isinstance(view_row, Mapping) else None,
-                "seq": int(view_row.get("seq") or 0) if isinstance(view_row, Mapping) else 0,
+                "botlens_available": summary_state is not None,
+                "botlens_reason": None if summary_state is not None else "snapshot_unavailable",
+                "last_snapshot_at": runtime_payload.get("last_event_at"),
+                "known_at": runtime_payload.get("last_event_at"),
+                "seq": int(summary_state.seq or 0) if summary_state is not None else None,
                 "summary": summary,
             }
         )
@@ -237,6 +246,7 @@ def runtime_capacity() -> Dict[str, Any]:
     workers_in_use = 0
     workers_requested = 0
     running_bots = 0
+    telemetry_unavailable_bots = 0
 
     for bot in _composition().config_service.list_bots():
         status = str(bot.get("status") or "").strip().lower()
@@ -244,20 +254,18 @@ def runtime_capacity() -> Dict[str, Any]:
             continue
         running_bots += 1
         runtime_payload: Mapping[str, Any] = {}
-        view_row = _composition().storage.get_latest_bot_run_view_state(
-            bot_id=str(bot.get("id") or ""),
-            run_id=None,
-            series_key=None,
+        bot_id = str(bot.get("id") or "")
+        lifecycle = _composition().storage.get_latest_bot_run_lifecycle(bot_id)
+        run_id = (
+            str((lifecycle or {}).get("run_id") or "").strip()
+            or _composition().storage.get_latest_bot_runtime_run_id(bot_id)
         )
-        if isinstance(view_row, Mapping):
-            summary_state = read_run_summary_state(
-                view_row.get("payload"),
-                bot_id=str(bot.get("id") or ""),
-                run_id=str(view_row.get("run_id") or ""),
-            )
-            maybe_runtime = summary_state.get("health")
-            if isinstance(maybe_runtime, Mapping):
-                runtime_payload = maybe_runtime
+        summary_state = _telemetry_hub().get_run_snapshot(run_id=run_id) if run_id else None
+        if summary_state is None:
+            telemetry_unavailable_bots += 1
+            continue
+        if summary_state is not None:
+            runtime_payload = summary_state.health.to_dict()
         try:
             active_workers = int(runtime_payload.get("active_workers") or 0)
         except (TypeError, ValueError):
@@ -279,6 +287,8 @@ def runtime_capacity() -> Dict[str, Any]:
         "workers_in_use": workers_in_use,
         "workers_requested": workers_requested,
         "running_bots": running_bots,
+        "telemetry_unavailable_bots": telemetry_unavailable_bots,
+        "estimate_incomplete": telemetry_unavailable_bots > 0,
         "over_capacity_workers": max(0, workers_in_use - host_cpu_cores),
         "in_use_pct": in_use_pct,
         "updated_at": datetime.utcnow().isoformat() + "Z",
