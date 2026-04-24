@@ -11,10 +11,10 @@ def start_bot(bot_id: str):
     return _start_bot(bot_id)
 
 
-def stop_bot(bot_id: str):
+def stop_bot(bot_id: str, *, preserve_container: bool = False):
     from .bot_service import stop_bot as _stop_bot
 
-    return _stop_bot(bot_id)
+    return _stop_bot(bot_id, preserve_container=preserve_container)
 
 
 __all__ = ["BotStreamManager", "start_bot", "stop_bot"]

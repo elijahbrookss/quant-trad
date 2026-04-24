@@ -14,15 +14,18 @@ from typing import Any, Dict, List, Mapping, Optional
 from fastapi import APIRouter, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.websockets import WebSocketState
 
 from ..service.bots import bot_service
 from ..service.bots.bot_run_diagnostics_projection import project_bot_run_diagnostics
-from ..service.bots.botlens_session_service import get_active_botlens_session, resolve_active_botlens_stream
-from ..service.bots.botlens_symbol_service import get_symbol_detail, get_symbol_history, list_run_symbols
-from ..service.bots.ledger_service import get_run_signal_detail, list_run_ledger_events
+from ..service.bots.botlens_bootstrap_service import get_active_botlens_run_bootstrap, resolve_active_botlens_stream
+from ..service.bots.botlens_chart_service import get_symbol_chart_history
+from ..service.bots.botlens_forensics_service import get_run_signal_forensics, list_run_forensic_events
+from ..service.bots.botlens_symbol_service import get_selected_symbol_snapshot, get_symbol_detail, list_run_symbols
 from ..service.bots.telemetry_stream import telemetry_hub
 from ..service.observability import BackendObserver
 from ..service.storage.repos.lifecycle import get_bot_run_lifecycle, list_bot_run_lifecycle_events
+from ..service.storage.repos.runtime_events import get_latest_bot_runtime_event
 router = APIRouter()
 logger = logging.getLogger(__name__)
 _INGEST_OBSERVER = BackendObserver(component="botlens_ingest_ws", event_logger=logger)
@@ -52,6 +55,21 @@ def _format_sse(event: str, payload: Mapping[str, Any]) -> str:
 
     body = json.dumps(_sanitize_json(payload))
     return f"event: {event}\ndata: {body}\n\n"
+
+
+def _utc_now_iso() -> str:
+    return datetime.utcnow().isoformat() + "Z"
+
+
+def _websocket_is_connected(websocket: WebSocket) -> bool:
+    return (
+        websocket.application_state == WebSocketState.CONNECTED
+        and websocket.client_state == WebSocketState.CONNECTED
+    )
+
+
+def _is_expected_websocket_runtime_error(exc: RuntimeError) -> bool:
+    return "websocket is not connected" in str(exc).strip().lower()
 
 
 class BotBase(BaseModel):
@@ -215,9 +233,9 @@ async def start_bot(bot_id: str) -> Dict[str, Any]:
 
 
 @router.post("/{bot_id}/stop", response_model=BotResponse)
-async def stop_bot(bot_id: str) -> Dict[str, Any]:
+async def stop_bot(bot_id: str, preserve_container: bool = False) -> Dict[str, Any]:
     try:
-        return bot_service.stop_bot(bot_id)
+        return bot_service.stop_bot(bot_id, preserve_container=preserve_container)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except RuntimeError as exc:
@@ -248,58 +266,87 @@ def bot_runs(
         raise HTTPException(404, str(exc)) from exc
 
 
-@router.get("/{bot_id}/runs/{run_id}/events")
-async def bot_run_ledger_events(
-    bot_id: str,
-    run_id: str,
-    after_seq: int = 0,
-    limit: int = 500,
-    event_name: Optional[List[str]] = Query(default=None),
-) -> Dict[str, Any]:
-    try:
-        return list_run_ledger_events(
-            bot_id=str(bot_id),
-            run_id=str(run_id),
-            after_seq=max(0, int(after_seq or 0)),
-            limit=max(1, int(limit or 500)),
-            event_names=event_name or None,
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-
-
 @router.get("/{bot_id}/runs/{run_id}/lifecycle-events")
 def bot_run_lifecycle_events(bot_id: str, run_id: str) -> Dict[str, Any]:
     normalized_run_id = str(run_id)
+    lifecycle = get_bot_run_lifecycle(normalized_run_id)
+    events = list_bot_run_lifecycle_events(normalized_run_id)
+    run_snapshot = telemetry_hub.get_run_snapshot(run_id=normalized_run_id)
+    run_health = run_snapshot.health.to_dict() if run_snapshot is not None else None
+    latest_runtime_event = get_latest_bot_runtime_event(bot_id=str(bot_id), run_id=normalized_run_id)
     diagnostics = project_bot_run_diagnostics(
         run_id=normalized_run_id,
-        lifecycle=get_bot_run_lifecycle(normalized_run_id),
-        events=list_bot_run_lifecycle_events(normalized_run_id),
+        lifecycle=lifecycle,
+        events=events,
+        run_health=run_health,
     )
+    latest_event = events[-1] if events else {}
+    consistency = {
+        "read_completed_at": _utc_now_iso(),
+        "lifecycle_checkpoint_at": (lifecycle or {}).get("checkpoint_at"),
+        "lifecycle_event_seq": latest_event.get("seq"),
+        "runtime_available": run_snapshot is not None,
+        "runtime_reason": None if run_snapshot is not None else "snapshot_unavailable",
+        "runtime_seq": int(run_snapshot.seq or 0) if run_snapshot is not None else None,
+        "runtime_known_at": (run_health or {}).get("last_event_at"),
+        "runtime_event_time": (latest_runtime_event or {}).get("event_time"),
+    }
     return {
         "bot_id": str(bot_id),
         "run_id": normalized_run_id,
         "run_status": diagnostics.get("run_status"),
         "summary": diagnostics.get("summary"),
+        "runtime": diagnostics.get("runtime"),
+        "consistency": consistency,
         "checkpoints": diagnostics.get("checkpoints"),
         "events": diagnostics.get("events"),
     }
 
 
-@router.get("/{bot_id}/runs/{run_id}/signals/{signal_id}")
-async def bot_run_signal_detail(
+@router.get("/{bot_id}/runs/{run_id}/forensics/signals/{signal_id}")
+async def bot_run_signal_forensics(
     bot_id: str,
     run_id: str,
     signal_id: str,
 ) -> Dict[str, Any]:
     try:
-        return get_run_signal_detail(
+        return get_run_signal_forensics(
             bot_id=str(bot_id),
             run_id=str(run_id),
             signal_id=str(signal_id),
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/{bot_id}/runs/{run_id}/forensics/events")
+async def bot_run_forensic_events(
+    bot_id: str,
+    run_id: str,
+    after_seq: int = 0,
+    after_row_id: int = 0,
+    limit: int = 200,
+    event_name: Optional[List[str]] = Query(default=None),
+    series_key: Optional[str] = None,
+    root_event_id: Optional[str] = None,
+    parent_event_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    try:
+        return list_run_forensic_events(
+            bot_id=str(bot_id),
+            run_id=str(run_id),
+            after_seq=max(0, int(after_seq or 0)),
+            after_row_id=max(0, int(after_row_id or 0)),
+            limit=max(1, int(limit or 200)),
+            event_names=event_name or None,
+            series_key=series_key,
+            root_event_id=root_event_id,
+            parent_event_id=parent_event_id,
+            correlation_id=correlation_id,
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -311,25 +358,49 @@ async def bot_run_signal_detail(
 @router.get("/runs/{run_id}/series")
 async def bot_lens_symbol_catalog(run_id: str) -> Dict[str, Any]:
     try:
-        return list_run_symbols(run_id=str(run_id))
+        return await list_run_symbols(run_id=str(run_id))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
 
-@router.get("/{bot_id}/botlens/session")
-async def bot_lens_active_session(
-    bot_id: str,
-    symbol_key: Optional[str] = None,
+@router.get("/{bot_id}/botlens/bootstrap/run")
+async def bot_lens_run_bootstrap(bot_id: str) -> Dict[str, Any]:
+    try:
+        return await get_active_botlens_run_bootstrap(bot_id=str(bot_id))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/series/{series_key}/snapshot")
+async def bot_lens_selected_symbol_snapshot(
+    run_id: str,
+    series_key: str,
     limit: int = 320,
 ) -> Dict[str, Any]:
     try:
-        return get_active_botlens_session(
-            bot_id=str(bot_id),
-            symbol_key=symbol_key,
+        return await get_selected_symbol_snapshot(
+            run_id=str(run_id),
+            symbol_key=str(series_key),
             limit=max(1, min(int(limit or 320), 2000)),
         )
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/series/{series_key}/bootstrap")
+async def bot_lens_selected_symbol_bootstrap(
+    run_id: str,
+    series_key: str,
+    limit: int = 320,
+) -> Dict[str, Any]:
+    try:
+        return await get_selected_symbol_snapshot(
+            run_id=str(run_id),
+            symbol_key=str(series_key),
+            limit=max(1, min(int(limit or 320), 2000)),
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -341,23 +412,29 @@ async def bot_lens_symbol_detail(
     limit: int = 320,
 ) -> Dict[str, Any]:
     try:
-        return get_symbol_detail(run_id=str(run_id), symbol_key=str(series_key), limit=max(1, min(int(limit or 320), 2000)))
+        return await get_symbol_detail(
+            run_id=str(run_id),
+            symbol_key=str(series_key),
+            limit=max(1, min(int(limit or 320), 2000)),
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
 
-@router.get("/runs/{run_id}/series/{series_key}/history")
-async def bot_lens_series_history(
+@router.get("/runs/{run_id}/series/{series_key}/chart")
+async def bot_lens_series_chart_history(
     run_id: str,
     series_key: str,
-    before_ts: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
     limit: int = 320,
 ) -> Dict[str, Any]:
     try:
-        return get_symbol_history(
+        return get_symbol_chart_history(
             run_id=str(run_id),
             symbol_key=str(series_key),
-            before_ts=before_ts,
+            start_time=start_time,
+            end_time=end_time,
             limit=max(1, min(int(limit or 320), 2000)),
         )
     except ValueError as exc:
@@ -403,13 +480,9 @@ async def bot_telemetry_ingest(websocket: WebSocket) -> None:
 async def bot_lens_active_live(
     bot_id: str,
     websocket: WebSocket,
-    symbol_key: Optional[str] = None,
 ) -> None:
     try:
-        resolved = resolve_active_botlens_stream(
-            bot_id=str(bot_id),
-            symbol_key=symbol_key,
-        )
+        resolved = resolve_active_botlens_stream(bot_id=str(bot_id))
     except (KeyError, ValueError) as exc:
         await websocket.accept()
         logger.warning("botlens_live_ws_open_failed | bot_id=%s | error=%s", bot_id, str(exc))
@@ -417,18 +490,32 @@ async def bot_lens_active_live(
         return
 
     run_id = str(resolved.get("run_id") or "")
-    selected_symbol_key = str(resolved.get("selected_symbol_key") or "")
+    selected_symbol_key = str(websocket.query_params.get("selected_symbol_key") or "").strip() or None
+    requested_stream_session_id = str(websocket.query_params.get("stream_session_id") or "").strip() or None
+    try:
+        resume_from_seq = max(int(websocket.query_params.get("resume_from_seq") or 0), 0)
+    except (TypeError, ValueError):
+        resume_from_seq = 0
     await telemetry_hub.add_run_viewer(
         run_id=run_id,
         ws=websocket,
-        selected_symbol_key=selected_symbol_key or None,
+        selected_symbol_key=selected_symbol_key,
+        resume_from_seq=resume_from_seq,
+        stream_session_id=requested_stream_session_id,
     )
+    if not _websocket_is_connected(websocket):
+        return
     try:
         while True:
+            if not _websocket_is_connected(websocket):
+                break
             payload = await websocket.receive_json()
             if isinstance(payload, dict):
                 await telemetry_hub.update_run_viewer(run_id=run_id, ws=websocket, payload=payload)
     except WebSocketDisconnect:
         pass
+    except RuntimeError as exc:
+        if not _is_expected_websocket_runtime_error(exc):
+            raise
     finally:
         await telemetry_hub.remove_run_viewer(run_id=run_id, ws=websocket)
