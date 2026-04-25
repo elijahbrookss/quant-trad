@@ -153,7 +153,7 @@ Strategy preview signals:
 - For each instrument, preview returns two explicit sections from the same engine timeline:
   - `machine.signals` and `machine.decision_artifacts`,
   - `ui.overlays`, including the canonical `strategy_signal` overlay for preview markers.
-- Each retained strategy preview signal uses `signal_id=<decision_id>`, `source_type=strategy_preview`, and `source_id=<preview_id>`.
+- Each retained strategy preview signal uses a preview-scoped `signal_id` derived from `(decision_id, source_type=strategy_preview, source_id=<preview_id>)`, while preserving the original `decision_id` separately.
 - For selected decision artifacts only, preview also records audit snapshots derived from the same current-bar engine frame:
   - `observed_outputs`: all ready/pending indicator outputs at the selected decision bar,
   - `referenced_outputs`: the subset directly referenced by the trigger and guard evaluations.
@@ -168,7 +168,7 @@ Bot runtime signals:
   - the enclosing rule resolves true,
   - the resulting action maps to the current bar epoch.
 - Full trigger traces, guard results, suppression metadata, and preview labels remain on the decision artifact path only.
-- The consumed `StrategySignal` carries the execution-facing identity and provenance fields needed by runtime events, including `signal_id`, `source_type=runtime`, `source_id=<run_id>`, and `strategy_hash`.
+- The consumed `StrategySignal` carries the execution-facing identity and provenance fields needed by runtime events, including a runtime-scoped `signal_id` distinct from `decision_id`, `source_type=runtime`, `source_id=<run_id>`, and `strategy_hash`.
 - Consumed signal direction triggers `SIGNAL_EMITTED`; decision/execution events follow from risk engine outcomes, while the matching decision artifact remains attached for audit.
 
 Ordering keys used:
@@ -219,6 +219,7 @@ Persistence boundaries:
 Non-negotiable invariants:
 - QuantLab and strategy preview indicator signals must pass `runtime_path == engine_snapshot_v1`; mismatch fails loud.
 - Indicator runtime strategy-driving signals must come from typed `signal` outputs published by the indicator execution engine.
+- `signal_id` and `decision_id` are separate contract identities across preview, runtime, and persistence; aliasing them is invalid and fails loud.
 - If a signal refers to a concrete level, that reference must be emitted by the indicator in `metadata.reference`; consumers must not infer it from unrelated overlays or chart geometry.
 - Bot runtime can emit execution-driving signals only for current bar epoch (`signal_epoch == current_epoch`).
 - `SIGNAL_EMITTED` is the causal parent for `DECISION_*`; `DECISION_ACCEPTED` is parent for `ENTRY_FILLED`; entry/decision chain parents `EXIT_FILLED`.

@@ -53,7 +53,7 @@ flowchart LR
     C2 --> E
     C3 --> E
     E --> F[parent bridge + supervision loop]
-    F --> G[bridge events + lifecycle checkpoints]
+    F --> G[bridge events + canonical lifecycle facts]
     F --> H[telemetry + status + container step traces]
 ```
 

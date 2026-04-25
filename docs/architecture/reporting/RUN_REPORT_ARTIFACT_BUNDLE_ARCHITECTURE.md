@@ -38,18 +38,26 @@ During runtime, the bundle is created with:
 - `run/series.json`
 - `run/indicators.json`
 - append-friendly spool files under `.spool/`
+- worker-scoped intermediate state under `.spool/workers/worker_id=.../` when the runtime is symbol-sharded
 
 Runtime writes are incremental so aborted or failed runs still leave analyzable partial artifacts.
+
+Canonical runtime event writes stay event-only.
+Derived `decision_trace` output is materialized during finalize from the completed runtime event stream rather than being spooled inline on each event write.
 
 ### Finalize
 
 On completion, abort, or failure:
 
-- pending spool data is materialized into final files,
+- pending worker spool data is materialized into final files by one run-level finalize owner,
 - `summary/summary.json` and `summary/run_summary.md` are written,
 - `.spool/` is removed,
 - `manifest.json` is updated to `completed`, `aborted`, or `failed`,
 - and the directory may be zipped if `reports.artifacts.compress_zip_on_finalize` is enabled.
+
+In symbol-sharded runs, workers do not delete shared spool state and do not write the final summary/manifest/zip directly.
+They only persist worker-scoped intermediate data plus worker-local runtime artifact payloads.
+The container parent performs the single finalize pass after worker supervision completes.
 
 ## Artifact Provenance
 

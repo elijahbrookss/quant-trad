@@ -30,10 +30,8 @@ Runtime services consume storage through explicit service boundaries.
 - `BotRuntimeControlService` consumes an explicit storage gateway for bot rows, run rows, and lifecycle checkpoints.
 - `bot_service.py` uses composition-provided storage reads for run listings, lifecycle state, and latest view-state reads.
 - Worker runtime persistence crosses the storage boundary only through `BotRuntimeDeps`, which is built on the portal side in `runtime_dependencies.py`.
-- Backend/container startup lifecycle state persists through:
-  - `portal_bot_run_lifecycle`
-  - `portal_bot_run_lifecycle_events`
-- Run diagnostics for UI consumers are projected from those lifecycle tables; they do not introduce a second persistence schema.
+- Backend/container startup lifecycle truth persists canonically through `portal_bot_run_events` (`botlens_domain.run_*`), with `portal_bot_run_lifecycle` and `portal_bot_run_lifecycle_events` synchronized as convenience views.
+- Run diagnostics for UI consumers are projected from canonical lifecycle ordering; the helper lifecycle tables do not introduce a second truth schema.
 - Strategy authoring metadata may persist named variant presets in `portal_strategy_variants`.
 - Bot configuration persistence may carry strategy provenance fields such as saved variant identity and resolved params, but runtime compile/evaluation still consume only concrete strategy inputs.
 
@@ -46,6 +44,8 @@ Runtime services consume storage through explicit service boundaries.
 - Startup truth must be durable enough to survive refresh/reconnect without depending on in-memory process state.
 - Frontend diagnostics contracts should be derived from durable lifecycle rows and append-only checkpoint trails, not from client-side reconstruction of raw event semantics.
 - FK-constrained write paths are authoritative; tests should build a valid parent graph instead of bypassing the contract with partial rows.
+- Lifecycle checkpoint persistence owns per-run event ordering and serializes `seq` allocation inside the database transaction rather than trusting optimistic `max(seq)+1` reads across processes.
+- Storage writers must honor durable column limits at the boundary; lifecycle `message` truncation is allowed when full structured detail is preserved in JSON fields such as `failure`.
 
 ## BotLens Observability Note
 

@@ -19,7 +19,7 @@ code_paths:
 
 - `Component`: Bot runtime execution engine
 - `Owner/Domain`: Bot Runtime
-- `Doc Version`: 2.2
+- `Doc Version`: 2.3
 - `Related Contracts`: [[BOT_RUNTIME_DOCS_HUB]], [[01_runtime_contract]], [[BOT_RUNTIME_SERVICE_ARCHITECTURE]], [[BOT_RUNTIME_SYMBOL_SHARDING_ARCHITECTURE]], [[RUNTIME_EVENT_MODEL_V1]], [[WALLET_GATEWAY_ARCHITECTURE]], `src/engines/bot_runtime/runtime/`, `src/engines/bot_runtime/core/`, `src/engines/bot_runtime/strategy/`, `portal/backend/service/bots/runtime_dependencies.py`
 
 ## 1) Problem and scope
@@ -46,14 +46,14 @@ Current package split:
 - `src/engines/bot_runtime/runtime/runtime.py`: `BotRuntime` assembly.
 - `src/engines/bot_runtime/runtime/mixins/setup_prepare.py`: preparation, series bootstrap, indicator runtime state, overlay aggregation, intrabar setup.
 - `src/engines/bot_runtime/runtime/mixins/execution_loop.py`: blocking start/run loop, per-series stepping, intrabar stepping, completion handling.
-- `src/engines/bot_runtime/runtime/mixins/runtime_events.py`: canonical runtime event emission, decision trace, run artifact construction, shared wallet runtime context.
+- `src/engines/bot_runtime/runtime/mixins/runtime_events.py`: canonical runtime event emission, run artifact construction, and shared wallet runtime context.
 - `src/engines/bot_runtime/runtime/mixins/runtime_projection.py`: snapshots, chart payloads, visible-state projection, and read-model shaping.
-- `src/engines/bot_runtime/runtime/mixins/runtime_persistence.py`: trade persistence, `series_bar.telemetry`, and step-trace recording/flush.
+- `src/engines/bot_runtime/runtime/mixins/runtime_persistence.py`: trade persistence and step-trace recording/flush.
 - `src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py`: subscriber lifecycle, overlay delta generation, and live runtime push payloads.
 - `src/engines/bot_runtime/runtime/mixins/state_streaming.py`: compatibility shim that aggregates the split runtime projection/persistence/push mixins.
 - `src/engines/bot_runtime/runtime/overlay_types.py`: explicit runtime overlay-type registration invoked during runtime setup.
 - `src/engines/bot_runtime/runtime/components/overlay_delta.py`: pure overlay diff/fingerprint helpers used by live runtime streaming.
-- `src/engines/bot_runtime/runtime/components/`: helpers for run context, runtime policy, series runner, chart state, intrabar cache, settlement, signal consumption, event sinks, trade persistence, and step-trace buffering.
+- `src/engines/bot_runtime/runtime/components/`: helpers for start context, run context, runtime policy, series runner, chart state, intrabar cache, settlement, signal consumption, event sinks, producer-side canonical BotLens fact append/dispatch, trade persistence, and step-trace buffering.
 - `src/engines/bot_runtime/strategy/`: runtime-domain strategy loading contracts, series construction, regime overlays, and incremental signal/overlay preparation.
 - `src/engines/bot_runtime/deps.py`: explicit boundary contract for portal-owned collaborators.
 - `src/engines/bot_runtime/core/`: execution profile compilation, execution adapters, wallet gateway, wallet projection, margin/fee helpers, and the ladder trading domain engine.
@@ -99,16 +99,17 @@ Execution boundary:
 - `RuntimeExecutionLoopMixin` owns `warm_up()`, `start()`, `_execute_loop()`, `_step_series_state()`, intrabar stepping, and final status transitions.
 
 Event boundary:
-- `RuntimeEventsMixin` owns append-only canonical runtime events, correlation IDs, decision trace entries, shared wallet projection hooks, and final run artifact payloads.
+- `RuntimeEventsMixin` owns append-only canonical runtime events, correlation IDs, shared wallet projection hooks, and final run artifact payloads.
 
 Read-model boundary:
 - `RuntimeProjectionMixin` owns `snapshot()` and `chart_payload()` read models.
-- `RuntimePersistenceMixin` owns trade persistence, `series_bar.telemetry`, and step-trace buffering.
+- `RuntimePersistenceMixin` owns trade persistence and step-trace buffering.
 - `RuntimePushStreamMixin` owns subscriber updates and live overlay/runtime delta payload assembly.
 - `RuntimeStateStreamingMixin` remains only as a compatibility shim and should not accumulate new behavior.
 
 Component boundary:
-- `RunContext` is the in-memory per-run holder for `run_id`, status, wallet gateway, runtime events, and decision trace.
+- `StartContext` is the pre-run worker identity boundary for `bot_id`, `run_id`, and `worker_id`; warm-up and canonical BotLens fact append depend on it.
+- `RunContext` is the in-memory per-run holder for `run_id`, status, wallet gateway, and canonical runtime events.
 - `RuntimeModePolicy` centralizes run-type switches such as `allow_live_refresh`, `use_intrabar`, and wallet enforcement.
 - `InlineSeriesRunner` is the only supported series runner type at runtime today.
 - `IntrabarManager` fetches and caches 1-minute candles for active-trade intrabar stepping on coarse timeframes.
@@ -123,24 +124,30 @@ Component boundary:
 `warm_up()` and `start()` both flow through `_ensure_prepared()`.
 
 Preparation does the following:
-1. Validate that `strategy_ids` are present.
-2. Build `StrategySeries` instances through `src/engines/bot_runtime/strategy/series_builder.py`.
-3. Build `SeriesExecutionState` for each series.
-4. Build runtime indicator instances and initialize `IndicatorExecutionEngine`.
-5. Execute warmup candles sequentially through the canonical indicator contract:
+1. Build or reuse a `StartContext`.
+2. Validate that `strategy_ids` are present.
+3. Build `StrategySeries` instances through `src/engines/bot_runtime/strategy/series_builder.py`.
+4. Build `SeriesExecutionState` for each series.
+5. Build runtime indicator instances and initialize `IndicatorExecutionEngine`.
+6. Execute warmup candles sequentially through the canonical indicator contract:
    - `apply_bar(bar, dependency_outputs)`
    - `snapshot()`
    - `overlay_snapshot()`
-6. Capture the last `EngineFrame(outputs, overlays)` on the series state.
-7. Treat overlays as full current-state snapshots, diff them only at the runtime transport boundary, and mark the runtime `idle`.
+7. Capture the last `EngineFrame(outputs, overlays)` on the series state.
+8. Treat overlays as full current-state snapshots, diff them only at the runtime transport boundary, and mark the runtime `idle`.
 
 Preparation is single-flight and guarded by `_prepare_lock`. Read paths must not implicitly build partial runtime state.
+
+Startup identity boundary:
+- `StartContext` exists before `RunContext` and is the only identity surface available during warm-up,
+- canonical BotLens bootstrap/push facts allocate `run_seq` from the shared counter through this startup boundary,
+- and warm-up must not instantiate wallet-backed live runtime state just to append pre-run facts.
 
 ### Start
 
 `start()` is blocking and does the following:
 1. Ensure preparation is complete.
-2. Build a `RunContext`.
+2. Build a `RunContext` from the already-established `StartContext`.
 3. Require `wallet_config.balances` and `shared_wallet_proxy`.
 4. Attach `SharedWalletGateway` to every series risk engine.
 5. Emit `WALLET_INITIALIZED` if balances are available.
@@ -153,14 +160,16 @@ Each due series state runs through `_step_series_state()`:
 2. Execute `IndicatorExecutionEngine.step(...)` in topological dependency order.
 3. Store the returned `EngineFrame.outputs` and `EngineFrame.overlays` on `SeriesExecutionState`.
 4. Evaluate typed strategy rules from the flattened output map only.
-5. Convert full current overlay snapshots into transport deltas for BotLens/runtime subscribers.
-6. Consume pending signals up to the current epoch.
-7. Emit `SIGNAL_EMITTED` when a direction is chosen.
-8. Attempt entry through `LadderRiskEngine.maybe_enter(...)`.
-9. Emit `DECISION_ACCEPTED` or `DECISION_REJECTED`.
-10. Persist trade-entry rows and canonical `ENTRY_FILLED` / `EXIT_FILLED` events as execution occurs.
-11. If an active trade exists on a coarse timeframe, switch into intrabar stepping with cached 1-minute candles.
-12. Finalize the bar, refresh state, and push a chart/runtime update.
+5. Build one runtime fact batch from the same bar result.
+6. Persist canonical BotLens facts (`CANDLE_OBSERVED`, `SIGNAL_EMITTED`, `DECISION_EMITTED`, `TRADE_OPENED`, `TRADE_UPDATED`, `TRADE_CLOSED`) at origin with the committed `run_seq`.
+7. Dispatch post-append consumers from that committed batch; live transport is one non-authoritative consumer.
+8. Consume pending signals up to the current epoch.
+9. Emit `SIGNAL_EMITTED` when a direction is chosen.
+10. Attempt entry through `LadderRiskEngine.maybe_enter(...)`.
+11. Emit `DECISION_ACCEPTED` or `DECISION_REJECTED`.
+12. Persist trade-entry rows and canonical `ENTRY_FILLED` / `EXIT_FILLED` events as execution occurs.
+13. If an active trade exists on a coarse timeframe, switch into intrabar stepping with cached 1-minute candles.
+14. Finalize the bar, refresh state, and publish derived/ephemeral live payloads after canonical append succeeds.
 
 ### Complete
 
@@ -186,7 +195,7 @@ Current runtime uses that contract for:
 Important invariants:
 - every runtime event is stamped with `run_id`, `bot_id`, `strategy_id`, symbol/timeframe context, and a deterministic bar correlation ID,
 - signal/decision/execution causality is linked through `root_id`, `parent_id`, and `correlation_id`,
-- runtime events are persisted immediately through injected storage collaborators from `BotRuntimeDeps`,
+- runtime events are retained in `RunContext` and projected into run artifacts/report bundles from the same runtime timeline,
 - wallet state is projected from runtime events, not from ad-hoc mutable balance copies,
 - shared-wallet coordination uses reservations plus the shared canonical runtime-event stream.
 
@@ -200,10 +209,17 @@ Authoritative runtime state is split across:
 Derived read models:
 - `snapshot()`: thread-safe runtime status/progress/stats surface.
 - `chart_payload()`: BotLens-oriented payload containing visible candles, overlays, trades, logs, decisions, warnings, and the runtime snapshot.
-- `decision_trace`: reduced causality ledger derived from runtime events.
+- `decision_trace`: reduced causality ledger derived from runtime events after emission, not during event persistence.
 - final run artifact: serialized runtime event stream plus projected wallet start/end state.
 
 `chart_payload()` is not a second execution path. It is a read model derived from the same runtime state timeline.
+
+Bridge-only BotLens note:
+- `runtime_push_stream.py` now commits canonical BotLens fact families at the worker/runtime boundary before any live fanout,
+- transport payloads are post-append deltas used for projectors, websocket viewers, and other non-authoritative consumers,
+- warnings, overlays, series stats, debug logs, and transport triggers stay off the canonical path even when they are still carried in live/projector payloads,
+- the runtime health fact `event` value is only a transport/internal trigger and remains a derived `trigger_event`,
+- and backend intake no longer owns canonical persistence for candle/signal/decision/trade BotLens truth.
 
 Indicator boundary rules in runtime:
 - strategies consume typed outputs only,
