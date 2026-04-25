@@ -1,4 +1,3 @@
-const ACTIVE_STATUSES = new Set(['starting', 'running', 'paused', 'degraded', 'telemetry_degraded'])
 const STARTING_PHASES = new Set([
   'start_requested',
   'validating_configuration',
@@ -42,7 +41,7 @@ const PHASE_LABELS = {
   waiting_for_series_bootstrap: 'Waiting for series bootstrap',
   warming_up_runtime: 'Warming runtime',
   runtime_subscribing: 'Runtime subscribing',
-  awaiting_first_snapshot: 'Awaiting first snapshot',
+  awaiting_first_snapshot: 'Waiting for live runtime facts',
   live: 'Live',
   degraded: 'Degraded',
   telemetry_degraded: 'Telemetry degraded',
@@ -58,7 +57,11 @@ export function normalizeBotStatus(value, fallback = 'idle') {
 }
 
 export function getBotStatus(bot) {
-  return normalizeBotStatus(bot?.lifecycle?.status || bot?.status || 'idle')
+  const lifecycleStatus = normalizeBotStatus(bot?.lifecycle?.status, '')
+  if (lifecycleStatus && lifecycleStatus !== 'idle') return lifecycleStatus
+  const runtimeStatus = normalizeBotStatus(bot?.runtime?.status, '')
+  if (runtimeStatus) return runtimeStatus
+  return normalizeBotStatus(bot?.status || lifecycleStatus || 'idle')
 }
 
 export function getBotRunId(bot) {
@@ -78,10 +81,6 @@ export function formatLifecyclePhaseLabel(phase) {
     .join(' ')
 }
 
-export function getBotControls(bot) {
-  return getBotCardDisplayState(bot).controls
-}
-
 function describeReason(reason, telemetry) {
   switch (reason) {
     case 'container_start_pending':
@@ -96,8 +95,8 @@ function describeReason(reason, telemetry) {
       }
     case 'awaiting_first_snapshot':
       return {
-        label: 'Awaiting first snapshot',
-        detail: 'Container is running, but BotLens has not received the first merged runtime snapshot yet.',
+        label: 'Waiting for live runtime facts',
+        detail: 'Runtime bootstrap completed, but BotLens has not received the first live runtime facts yet.',
       }
     case 'live_runtime':
       return {
@@ -151,12 +150,19 @@ function describeReason(reason, telemetry) {
 
 export function describeBotLifecycle(bot) {
   const lifecycle = bot?.lifecycle || {}
+  const runtime = bot?.runtime || {}
   const heartbeat = lifecycle?.heartbeat || {}
   const telemetry = lifecycle?.telemetry || {}
   const container = lifecycle?.container || {}
   const failure = lifecycle?.failure || {}
   const status = getBotStatus(bot)
-  const phase = String(lifecycle?.phase || '').trim().toLowerCase() || (status === 'running' ? 'live' : 'idle')
+  const lifecyclePhase = String(lifecycle?.phase || '').trim().toLowerCase()
+  const runtimePhase = String(runtime?.phase || '').trim().toLowerCase()
+  const phase = (
+    lifecyclePhase && (lifecyclePhase !== 'idle' || !runtimePhase)
+      ? lifecyclePhase
+      : runtimePhase
+  ) || (status === 'running' ? 'live' : 'idle')
   const reason = String(lifecycle?.reason || '').trim().toLowerCase() || status
   const description = describeReason(reason, telemetry)
   const backendLabel = formatLifecyclePhaseLabel(phase)
@@ -211,12 +217,8 @@ export function describeBotLifecycle(bot) {
     live: Boolean(lifecycle?.live),
     heartbeatState: String(heartbeat?.state || 'inactive'),
     containerStatus: String(container?.status || 'missing'),
-    updatedAt: lifecycle?.updated_at || lifecycle?.checkpoint_at || null,
+    updatedAt: lifecycle?.updated_at || lifecycle?.checkpoint_at || runtime?.last_snapshot_at || runtime?.known_at || null,
   }
-}
-
-export function isActiveBotStatus(status) {
-  return ACTIVE_STATUSES.has(normalizeBotStatus(status))
 }
 
 const FAILURE_STATUSES = new Set(['error', 'failed', 'crashed', 'startup_failed'])
@@ -267,6 +269,22 @@ function firstNonEmpty(values) {
   return ''
 }
 
+function startupSeriesProgress(metadata) {
+  const lifecycleMetadata = metadata && typeof metadata === 'object' ? metadata : {}
+  const seriesProgress = lifecycleMetadata.series_progress
+  return seriesProgress && typeof seriesProgress === 'object' ? seriesProgress : {}
+}
+
+function startupProgressCount(seriesProgress, key) {
+  const entries = seriesProgress?.[key]
+  return Array.isArray(entries) ? entries.length : 0
+}
+
+function startupSeriesTotal(seriesProgress) {
+  const total = Number(seriesProgress?.total_series || 0)
+  return total > 0 ? total : 0
+}
+
 function normalizeFailureMessage(bot, lifecycle) {
   const artifactError = bot?.last_run_artifact?.error
   return firstNonEmpty([
@@ -280,13 +298,16 @@ function extractBotCardFacts(bot, lifecycle, pendingStart) {
   const rawBotStatus = normalizeOptionalStatus(bot?.status)
   const rawLifecycleStatus = normalizeOptionalStatus(bot?.lifecycle?.status)
   const rawRunStatus = normalizeOptionalStatus(run?.status)
+  const rawRuntimeStatus = normalizeOptionalStatus(bot?.runtime?.status)
   const phase = String(lifecycle?.phase || '').trim().toLowerCase()
+  const runtimePhase = String(bot?.runtime?.phase || '').trim().toLowerCase()
   const reason = String(lifecycle?.reason || '').trim().toLowerCase()
   const containerStatus = String(lifecycle?.containerStatus || lifecycle?.container?.status || 'missing').trim().toLowerCase()
   const heartbeatState = String(lifecycle?.heartbeatState || lifecycle?.heartbeat?.state || 'inactive').trim().toLowerCase()
   const telemetrySeq = Number(lifecycle?.telemetry?.seq || 0)
   const warningCount = Number(lifecycle?.telemetry?.warning_count || 0)
-  const runId = getBotRunId(bot)
+  const projectedRunId = getBotRunId(bot)
+  const runtimeRunId = String(bot?.runtime?.run_id || '').trim() || null
   const failureMessage = normalizeFailureMessage(bot, lifecycle)
   const crashSummary = String(lifecycle?.crashSummary || '').trim()
   const startedAt = run?.started_at || bot?.last_run_artifact?.started_at || bot?.last_run_at || null
@@ -296,18 +317,32 @@ function extractBotCardFacts(bot, lifecycle, pendingStart) {
     lifecycle?.container?.finished_at ||
     null
   const statuses = [rawLifecycleStatus, rawRunStatus, rawBotStatus].filter(Boolean)
-  const runningSignal = statuses.some((status) => RUNNING_STATUSES.has(status)) || phase === 'live'
-  const degradedSignal = statuses.some((status) => DEGRADED_STATUSES.has(status)) || DEGRADED_STATUSES.has(phase)
+  const runningSignal = (
+    statuses.some((status) => RUNNING_STATUSES.has(status)) ||
+    RUNNING_STATUSES.has(rawRuntimeStatus) ||
+    phase === 'live' ||
+    runtimePhase === 'live'
+  )
+  const degradedSignal = (
+    statuses.some((status) => DEGRADED_STATUSES.has(status)) ||
+    DEGRADED_STATUSES.has(rawRuntimeStatus) ||
+    DEGRADED_STATUSES.has(phase) ||
+    DEGRADED_STATUSES.has(runtimePhase)
+  )
   const completedSignal = statuses.some((status) => COMPLETED_STATUSES.has(status)) || phase === 'completed' || reason === 'run_completed'
   const stoppedSignal = statuses.some((status) => STOPPED_STATUSES.has(status)) || phase === 'stopped' || reason === 'run_stopped'
   const startupFailureSignal =
     statuses.includes('startup_failed') || phase === 'startup_failed' || reason === 'startup_failed'
   const crashSignal =
-    statuses.some((status) => FAILURE_STATUSES.has(status) && status !== 'startup_failed') ||
-    phase === 'crashed' ||
-    FAILURE_REASONS.has(reason) ||
-    ['exited', 'dead'].includes(containerStatus) ||
-    (heartbeatState === 'stale' && Boolean(runId))
+    !completedSignal &&
+    !stoppedSignal &&
+    (
+      statuses.some((status) => FAILURE_STATUSES.has(status) && status !== 'startup_failed') ||
+      phase === 'crashed' ||
+      FAILURE_REASONS.has(reason) ||
+      ['exited', 'dead'].includes(containerStatus) ||
+      (heartbeatState === 'stale' && Boolean(projectedRunId || runtimeRunId))
+    )
   const healthyEvidence =
     runningSignal ||
     degradedSignal ||
@@ -317,13 +352,18 @@ function extractBotCardFacts(bot, lifecycle, pendingStart) {
     pendingStart ||
     statuses.includes('starting') ||
     STARTING_PHASES.has(phase) ||
-    (!healthyEvidence && Boolean(runId) && !completedSignal && !stoppedSignal && !startupFailureSignal && !crashSignal)
+    rawRuntimeStatus === 'starting' ||
+    STARTING_PHASES.has(runtimePhase) ||
+    (!healthyEvidence && Boolean(projectedRunId || runtimeRunId) && !completedSignal && !stoppedSignal && !startupFailureSignal && !crashSignal)
+  const runId = projectedRunId || ((runningSignal || degradedSignal || startingContext) ? runtimeRunId : null)
 
   return {
     rawBotStatus,
     rawLifecycleStatus,
     rawRunStatus,
+    rawRuntimeStatus,
     phase,
+    runtimePhase,
     reason,
     containerStatus,
     heartbeatState,
@@ -341,12 +381,16 @@ function extractBotCardFacts(bot, lifecycle, pendingStart) {
     crashSignal,
     healthyEvidence,
     startingContext,
+    pendingStart,
   }
 }
 
 function getBotCardStatusKey(facts) {
   if (facts.rawLifecycleStatus === 'paused' || facts.rawRunStatus === 'paused' || facts.rawBotStatus === 'paused') {
     return 'paused'
+  }
+  if (facts.pendingStart && !facts.healthyEvidence) {
+    return 'starting'
   }
   if (facts.startupFailureSignal) {
     return 'failed_start'
@@ -372,6 +416,20 @@ function getStartingStatusDetail(phase, lifecycle, facts) {
   if (['awaiting_container_boot', 'container_booting'].includes(phase)) {
     return 'Waiting for runtime bootstrap'
   }
+  const seriesProgress = startupSeriesProgress(lifecycle?.metadata)
+  const totalSeries = startupSeriesTotal(seriesProgress)
+  if (phase === 'waiting_for_series_bootstrap' && totalSeries > 0) {
+    return `Waiting for series bootstrap (${startupProgressCount(seriesProgress, 'bootstrapped_series')}/${totalSeries} bootstrapped)`
+  }
+  if (phase === 'warming_up_runtime' && totalSeries > 0) {
+    return `Warming runtime (${startupProgressCount(seriesProgress, 'warming_series')}/${totalSeries} series warming)`
+  }
+  if (phase === 'runtime_subscribing' && totalSeries > 0) {
+    return `Subscribing workers to live facts (${startupProgressCount(seriesProgress, 'bootstrapped_series')}/${totalSeries} series bootstrapped)`
+  }
+  if (phase === 'awaiting_first_snapshot' && totalSeries > 0) {
+    return `Bootstrap complete (${startupProgressCount(seriesProgress, 'live_series')}/${totalSeries} series live)`
+  }
   if (
     [
       'loading_bot_config',
@@ -386,7 +444,10 @@ function getStartingStatusDetail(phase, lifecycle, facts) {
       'awaiting_first_snapshot',
     ].includes(phase)
   ) {
-    return phase === 'awaiting_first_snapshot' ? 'Awaiting first runtime snapshot' : 'Waiting for runtime bootstrap'
+    if (phase === 'awaiting_first_snapshot') {
+      return lifecycle?.message || 'Waiting for first live runtime facts'
+    }
+    return lifecycle?.message || 'Waiting for runtime bootstrap'
   }
   if (facts.runId) return 'Run requested, awaiting backend lifecycle'
   return lifecycle?.message || lifecycle?.detail || 'Preparing run'
@@ -455,6 +516,7 @@ function resolveCardControls(bot, facts, statusKey) {
 
   return {
     canOpenLens: lensEligible && rawControls.can_open_lens !== false,
+    canViewReport: Boolean(facts.runId),
     canViewDiagnostics: diagnosticsEligible,
     canStop:
       statusKey === 'starting'
@@ -510,7 +572,44 @@ function buildCardActions(statusKey, controls, pendingStart) {
     actions.push({ key: 'delete', label: 'Delete', tone: 'ghost' })
   }
 
-  return actions
+  actions.push({
+    key: 'report',
+    label: 'View Report',
+    tone: 'secondary',
+    disabled: !controls.canViewReport,
+    title: controls.canViewReport ? undefined : 'No run id available.',
+  })
+
+  return rankBotCardActions(actions)
+}
+
+function actionPriority(action) {
+  const key = String(action?.key || '').trim().toLowerCase()
+  if (key === 'start' || key === 'starting') return 0
+  if (key === 'open') return 1
+  if (key === 'report') return 2
+  if (key === 'diagnostics') return 3
+  if (key === 'delete' || key === 'stop') return 4
+  return 4
+}
+
+function actionVariant(action) {
+  const key = String(action?.key || '').trim().toLowerCase()
+  if (key === 'start' || key === 'starting') return 'primary'
+  if (key === 'diagnostics') return 'diagnostic'
+  if (key === 'open') return 'secondary'
+  if (key === 'report') return 'secondary'
+  if (key === 'delete' || key === 'stop') return 'danger'
+  return 'tertiary'
+}
+
+export function rankBotCardActions(actions = []) {
+  return [...actions]
+    .sort((left, right) => actionPriority(left) - actionPriority(right))
+    .map((action) => ({
+      ...action,
+      variant: actionVariant(action),
+    }))
 }
 
 export function getBotCardDisplayState(bot, { nowEpochMs = Date.now(), pendingStart = false } = {}) {
@@ -535,7 +634,7 @@ export function getBotCardDisplayState(bot, { nowEpochMs = Date.now(), pendingSt
     statusKey,
     displayStatus:
       statusKey === 'failed_start'
-        ? 'Failed Start'
+        ? 'Startup failed'
         : statusKey === 'paused'
         ? 'Paused'
         : statusKey === 'degraded'

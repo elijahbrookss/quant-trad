@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { getBotCardDisplayState } from '../src/components/bots/botStatusModel.js'
+import { getBotCardDisplayState } from '../src/features/bots/state/botRuntimeStatus.js'
 
 function buildBot(overrides = {}) {
   return {
@@ -60,6 +60,33 @@ test('maps granular startup phases into a single Starting card state', () => {
   assert.equal(state.detail, 'Waiting for runtime bootstrap')
 })
 
+test('surfaces granular series bootstrap progress while runtime is still starting', () => {
+  const state = getBotCardDisplayState(
+    buildBot({
+      status: 'starting',
+      lifecycle: {
+        status: 'starting',
+        phase: 'awaiting_first_snapshot',
+        reason: 'awaiting_first_snapshot',
+        message: 'Series bootstrap completed; waiting for first live runtime facts.',
+        metadata: {
+          series_progress: {
+            total_series: 3,
+            bootstrapped_series: ['BTC', 'ETH', 'SOL'],
+            live_series: [],
+          },
+        },
+      },
+      runtime: {
+        status: 'starting',
+      },
+    }),
+  )
+
+  assert.equal(state.displayStatus, 'Starting')
+  assert.equal(state.detail, 'Bootstrap complete (0/3 series live)')
+})
+
 test('treats degraded runtime as a distinct Degraded card state', () => {
   const state = getBotCardDisplayState(
     buildBot({
@@ -93,7 +120,7 @@ test('treats degraded runtime as a distinct Degraded card state', () => {
   assert.equal(state.detail, '2 runtime warnings active')
   assert.deepEqual(
     state.allowedActions.map((action) => action.key),
-    ['open', 'stop'],
+    ['open', 'report', 'stop'],
   )
 })
 
@@ -129,11 +156,11 @@ test('surfaces completed runs as Completed with rerun and lens actions', () => {
   assert.equal(state.detail, 'Run completed in 3m 30s')
   assert.deepEqual(
     state.allowedActions.map((action) => action.label),
-    ['Rerun', 'Delete'],
+    ['Rerun', 'View Report', 'Delete'],
   )
 })
 
-test('surfaces startup_failed lifecycle as Failed Start', () => {
+test('surfaces startup_failed lifecycle as Startup failed', () => {
   const state = getBotCardDisplayState(
     buildBot({
       status: 'startup_failed',
@@ -157,15 +184,18 @@ test('surfaces startup_failed lifecycle as Failed Start', () => {
         run_id: 'run-boot-1',
       },
     }),
-    { pendingStart: true },
   )
 
-  assert.equal(state.displayStatus, 'Failed Start')
+  assert.equal(state.displayStatus, 'Startup failed')
   assert.equal(state.tone, 'rose')
   assert.equal(state.detail, 'docker launch failed')
   assert.deepEqual(
     state.allowedActions.map((action) => action.label),
-    ['View Diagnostics', 'Restart', 'Delete'],
+    ['Restart', 'View Report', 'View Diagnostics', 'Delete'],
+  )
+  assert.deepEqual(
+    state.allowedActions.map((action) => action.variant),
+    ['primary', 'secondary', 'diagnostic', 'danger'],
   )
 })
 
@@ -230,7 +260,11 @@ test('surfaces crashed runs as Crashed and routes detail to diagnostics instead 
   assert.equal(state.detail, 'Container exited unexpectedly')
   assert.deepEqual(
     state.allowedActions.map((action) => action.label),
-    ['View Diagnostics', 'Restart', 'Delete'],
+    ['Restart', 'View Report', 'View Diagnostics', 'Delete'],
+  )
+  assert.deepEqual(
+    state.allowedActions.map((action) => action.variant),
+    ['primary', 'secondary', 'diagnostic', 'danger'],
   )
 })
 
@@ -266,7 +300,51 @@ test('maps watchdog/container crash after healthy runtime to Crashed', () => {
   assert.equal(state.detail, 'Runtime heartbeat lost')
   assert.deepEqual(
     state.allowedActions.map((action) => action.label),
-    ['View Diagnostics', 'Restart', 'Delete'],
+    ['Restart', 'View Report', 'View Diagnostics', 'Delete'],
+  )
+  assert.deepEqual(
+    state.allowedActions.map((action) => action.variant),
+    ['primary', 'secondary', 'diagnostic', 'danger'],
+  )
+})
+
+test('keeps terminal completion over stale lifecycle crash residue after refresh', () => {
+  const state = getBotCardDisplayState(
+    buildBot({
+      status: 'completed',
+      controls: {
+        can_start: true,
+        can_stop: false,
+        can_open_lens: true,
+        can_delete: true,
+        start_label: 'Rerun',
+      },
+      active_run_id: 'run-complete-1',
+      lifecycle: {
+        status: 'running',
+        phase: 'live',
+        reason: 'runner_stale',
+        message: 'Backend lost heartbeat.',
+        heartbeat: { state: 'stale' },
+        telemetry: { run_id: 'run-complete-1' },
+      },
+      runtime: {
+        status: 'completed',
+        run_id: 'run-complete-1',
+      },
+      last_run_artifact: {
+        started_at: '2026-04-06T12:00:00Z',
+        ended_at: '2026-04-06T12:03:30Z',
+      },
+    }),
+    { nowEpochMs: Date.parse('2026-04-06T12:05:00Z') },
+  )
+
+  assert.equal(state.displayStatus, 'Completed')
+  assert.equal(state.detail, 'Run completed in 3m 30s')
+  assert.deepEqual(
+    state.allowedActions.map((action) => action.label),
+    ['Rerun', 'View Report', 'Delete'],
   )
 })
 
@@ -295,7 +373,68 @@ test('does not expose diagnostics from runtime.run_id alone without projected ac
     }),
   )
 
-  assert.equal(state.displayStatus, 'Failed Start')
+  assert.equal(state.displayStatus, 'Startup failed')
   assert.equal(state.runId, null)
   assert.equal(state.allowedActions.some((action) => action.label === 'View Diagnostics'), false)
+})
+
+test('promotes runtime-only live telemetry into Running without waiting for a hard refresh', () => {
+  const state = getBotCardDisplayState(
+    buildBot({
+      status: 'idle',
+      controls: {
+        can_start: false,
+        can_stop: true,
+        can_open_lens: true,
+        can_delete: false,
+        start_label: 'Stop',
+      },
+      lifecycle: {
+        status: 'idle',
+        phase: 'idle',
+        reason: 'idle',
+        message: '',
+      },
+      runtime: {
+        status: 'running',
+        phase: 'live',
+        run_id: 'runtime-live-1',
+        last_snapshot_at: '2026-04-06T12:05:00Z',
+      },
+    }),
+    { nowEpochMs: Date.parse('2026-04-06T12:05:10Z') },
+  )
+
+  assert.equal(state.displayStatus, 'Running')
+  assert.equal(state.runId, 'runtime-live-1')
+  assert.equal(state.allowedActions.some((action) => action.label === 'Open Lens'), true)
+  assert.equal(state.allowedActions.some((action) => action.label === 'View Report'), true)
+})
+
+test('restart clicks immediately surface Starting while the new run is being requested', () => {
+  const state = getBotCardDisplayState(
+    buildBot({
+      status: 'completed',
+      controls: {
+        can_start: true,
+        can_stop: false,
+        can_open_lens: true,
+        can_delete: true,
+        start_label: 'Rerun',
+      },
+      lifecycle: {
+        status: 'completed',
+        phase: 'completed',
+        reason: 'run_completed',
+        message: 'Run completed.',
+      },
+      runtime: {
+        status: 'completed',
+      },
+    }),
+    { pendingStart: true },
+  )
+
+  assert.equal(state.displayStatus, 'Starting')
+  assert.equal(state.allowedActions.some((action) => action.label === 'Starting…'), true)
 })

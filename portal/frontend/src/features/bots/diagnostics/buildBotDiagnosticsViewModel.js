@@ -1,4 +1,4 @@
-import { formatLifecyclePhaseLabel, normalizeBotStatus } from './botStatusModel.js'
+import { formatLifecyclePhaseLabel, normalizeBotStatus } from '../state/botRuntimeStatus.js'
 
 const STATUS_LABELS = {
   running: 'Running',
@@ -73,6 +73,9 @@ function formatCountLabel(value, singular, plural = `${singular}s`) {
 
 function normalizeSummary(payload, lifecycle) {
   const summary = payload?.summary && typeof payload.summary === 'object' ? payload.summary : {}
+  const rootFailure = summary?.root_failure && typeof summary.root_failure === 'object'
+    ? summary.root_failure
+    : {}
   const finalObservation = summary?.final_observation && typeof summary.final_observation === 'object'
     ? summary.final_observation
     : {}
@@ -80,10 +83,19 @@ function normalizeSummary(payload, lifecycle) {
   return {
     runStatus,
     currentPhase: summary.current_phase || lifecycle?.phase || null,
-    rootFailurePhase: summary.root_failure_phase || null,
-    rootFailureOwner: summary.root_failure_owner || null,
-    rootFailureMessage: normalizeMessage(summary.root_failure_message),
+    rootFailurePhase: rootFailure.phase || summary.root_failure_phase || null,
+    rootFailureOwner: rootFailure.owner || summary.root_failure_owner || null,
+    rootFailureMessage: normalizeMessage(rootFailure.message || summary.root_failure_message),
+    rootFailureReasonCode: summary.root_failure_reason_code || rootFailure.reason_code || null,
+    rootFailureType: summary.root_failure_type || rootFailure.type || null,
+    rootFailureWorkerId: summary.root_failure_worker_id || rootFailure.worker_id || null,
+    rootFailureSymbol: summary.root_failure_symbol || rootFailure.symbol || null,
+    rootFailureExceptionType: summary.root_failure_exception_type || rootFailure.exception_type || null,
+    rootFailureComponent: rootFailure.component || null,
+    rootFailureOperation: rootFailure.operation || null,
+    rootFailurePath: rootFailure.path || null,
     firstFailureAt: summary.first_failure_at || null,
+    rootFailureAt: summary.root_failure_at || rootFailure.at || null,
     lastSuccessfulCheckpoint: summary.last_successful_checkpoint || null,
     containerLaunched: Boolean(summary.container_launched),
     containerBooted: Boolean(summary.container_booted),
@@ -158,13 +170,26 @@ function buildQuickFacts(summary) {
 function buildPrimaryFailure(summary) {
   const contextParts = []
   if (summary.rootFailureOwner) contextParts.push(formatOwnerLabel(summary.rootFailureOwner))
-  if (summary.firstFailureAt) contextParts.push(`First detected ${formatTimestamp(summary.firstFailureAt)}`)
+  if (summary.rootFailureAt || summary.firstFailureAt) {
+    contextParts.push(`First detected ${formatTimestamp(summary.rootFailureAt || summary.firstFailureAt)}`)
+  }
   const keyFacts = []
-  if (summary.firstFailedWorkerId || summary.firstFailedSymbol) {
+  if (summary.rootFailureWorkerId || summary.rootFailureSymbol || summary.firstFailedWorkerId || summary.firstFailedSymbol) {
+    const workerId = summary.rootFailureWorkerId || summary.firstFailedWorkerId
+    const symbol = summary.rootFailureSymbol || summary.firstFailedSymbol
     const parts = []
-    if (summary.firstFailedWorkerId) parts.push(summary.firstFailedWorkerId)
-    if (summary.firstFailedSymbol) parts.push(summary.firstFailedSymbol)
-    keyFacts.push({ label: 'First failure', value: parts.join(' • ') })
+    if (workerId) parts.push(workerId)
+    if (symbol) parts.push(symbol)
+    const copyItems = []
+    if (workerId) copyItems.push(buildIdentifier('Worker ID', 'root_failure_worker_id', workerId))
+    if (symbol) copyItems.push(buildIdentifier('Symbol', 'root_failure_symbol', symbol))
+    keyFacts.push({ label: 'First failure', value: parts.join(' • '), copyItems })
+  }
+  if (summary.rootFailureReasonCode) {
+    keyFacts.push({ label: 'Reason', value: humanizeToken(summary.rootFailureReasonCode) })
+  }
+  if (summary.rootFailureExceptionType) {
+    keyFacts.push({ label: 'Exception', value: summary.rootFailureExceptionType })
   }
   if (summary.lastSuccessfulCheckpoint) {
     keyFacts.push({ label: 'Last successful', value: formatCheckpointLabel(summary.lastSuccessfulCheckpoint) })
@@ -195,6 +220,53 @@ function buildFinalState(summary) {
   }
 }
 
+function formatPressureSummary(value) {
+  const pressure = value && typeof value === 'object' ? value : {}
+  const reason = String(pressure.reason_code || '').trim()
+  if (!reason) return '—'
+  const unit = String(pressure.unit || '').trim()
+  const rawValue = pressure.value
+  if (rawValue == null || rawValue === '') return humanizeToken(reason)
+  return `${humanizeToken(reason)} • ${rawValue}${unit ? ` ${unit}` : ''}`
+}
+
+function buildRuntimeInsights(payload) {
+  const runtime = payload?.runtime && typeof payload.runtime === 'object' ? payload.runtime : {}
+  const degraded = runtime?.degraded && typeof runtime.degraded === 'object' ? runtime.degraded : {}
+  const churn = runtime?.churn && typeof runtime.churn === 'object' ? runtime.churn : {}
+  const terminal = runtime?.terminal && typeof runtime.terminal === 'object' ? runtime.terminal : {}
+  const transitions = Array.isArray(runtime?.recent_transitions)
+    ? runtime.recent_transitions
+      .filter((entry) => entry && typeof entry === 'object')
+      .slice(-5)
+      .reverse()
+      .map((entry, index) => ({
+        key: `${entry.timestamp || index}-${entry.from_state || 'none'}-${entry.to_state || 'unknown'}`,
+        label: [entry.from_state || 'none', entry.to_state || 'unknown'].join(' -> '),
+        reason: humanizeToken(entry.transition_reason || ''),
+        source: humanizeToken(entry.source_component || ''),
+        at: formatTimestamp(entry.timestamp),
+      }))
+    : []
+  return {
+    title: 'Runtime State',
+    facts: [
+      { label: 'Runtime state', value: runtime.state ? humanizeToken(runtime.state) : '—' },
+      { label: 'Progress state', value: runtime.progress_state ? humanizeToken(runtime.progress_state) : '—' },
+      { label: 'Last useful progress', value: formatTimestamp(runtime.last_useful_progress_at) },
+      { label: 'Degraded since', value: formatTimestamp(degraded.started_at) },
+      { label: 'Degraded cleared', value: formatTimestamp(degraded.cleared_at) },
+      { label: 'Churn detected', value: formatTimestamp(churn.detected_at) },
+      { label: 'Top pressure', value: formatPressureSummary(runtime.top_pressure) },
+      {
+        label: 'Terminal',
+        value: [humanizeToken(terminal.actor || ''), normalizeMessage(terminal.reason)].filter(Boolean).join(' • ') || '—',
+      },
+    ],
+    transitions,
+  }
+}
+
 function buildWorkerFailureEntries(events) {
   const ordered = [...events].sort((left, right) => {
     const leftSeq = Number(left?.seq || 0)
@@ -215,6 +287,7 @@ function buildWorkerFailureEntries(events) {
     const workerId = String(failure.worker_id || '').trim()
     const symbol = String(failure.symbol || '').trim()
     const exitCode = failure.exit_code
+    const eventId = String(event?.event_id || '').trim()
     const message = normalizeMessage(failure.message || event?.message)
     if (!workerId && !symbol && exitCode == null) continue
     const key = workerId || symbol || `${event?.seq || entries.length}`
@@ -224,10 +297,15 @@ function buildWorkerFailureEntries(events) {
     if (workerId) summaryParts.push(workerId)
     if (symbol) summaryParts.push(symbol)
     if (exitCode != null) summaryParts.push(`exit code ${exitCode}`)
+    const copyItems = []
+    if (eventId) copyItems.push(buildIdentifier('Event ID', `${key}-event_id`, eventId))
+    if (workerId) copyItems.push(buildIdentifier('Worker ID', `${key}-worker_id`, workerId))
+    if (symbol) copyItems.push(buildIdentifier('Symbol', `${key}-symbol`, symbol))
     entries.push({
       key,
       summary: summaryParts.join(' • '),
       message,
+      copyItems,
     })
   }
   return entries
@@ -256,13 +334,13 @@ function compactIdentifier(value) {
   return `${text.slice(0, 8)}…${text.slice(-8)}`
 }
 
-function buildIdentifier(label, key, value) {
+function buildIdentifier(label, key, value, options = {}) {
   const raw = String(value || '').trim()
   return {
     label,
     key,
     value: raw,
-    displayValue: compactIdentifier(raw),
+    displayValue: options.displayValue || compactIdentifier(raw),
   }
 }
 
@@ -308,11 +386,30 @@ function buildLifecycleEventRows(events) {
     const message = normalizeMessage(event?.message) || failureMessage || 'No checkpoint message.'
     const checkpointStatus = String(event?.checkpoint_status || '').trim().toLowerCase()
     const badgeStatus = checkpointStatus || normalizeBotStatus(event?.status, '') || 'pending'
+    const rowKey = event?.event_id || `${event?.seq || '0'}-${event?.checkpoint_at || event?.created_at || 'event'}`
+    const identifiers = []
+    if (event?.event_id) identifiers.push(buildIdentifier('Event ID', `${rowKey}-event_id`, event.event_id))
+    if (failurePayload?.worker_id) identifiers.push(buildIdentifier('Worker ID', `${rowKey}-worker_id`, failurePayload.worker_id))
+    if (failurePayload?.symbol) identifiers.push(buildIdentifier('Symbol', `${rowKey}-symbol`, failurePayload.symbol))
     const details = []
-    if (failureJson) details.push({ label: 'Failure', tone: 'failure', value: failureJson })
-    if (metadataJson) details.push({ label: 'Metadata', tone: 'metadata', value: metadataJson })
+    if (failureJson) {
+      details.push({
+        label: 'Failure',
+        tone: 'failure',
+        value: failureJson,
+        copyItem: buildIdentifier('Failure JSON', `${rowKey}-failure_json`, failureJson, { displayValue: 'JSON payload' }),
+      })
+    }
+    if (metadataJson) {
+      details.push({
+        label: 'Metadata',
+        tone: 'metadata',
+        value: metadataJson,
+        copyItem: buildIdentifier('Metadata JSON', `${rowKey}-metadata_json`, metadataJson, { displayValue: 'JSON payload' }),
+      })
+    }
     return {
-      key: event?.event_id || `${event?.seq || '0'}-${event?.checkpoint_at || event?.created_at || 'event'}`,
+      key: rowKey,
       seq: Number(event?.seq || 0),
       owner: formatOwnerLabel(event?.owner || 'system'),
       phase: event?.phase ? formatLifecyclePhaseLabel(event.phase) : 'Unknown',
@@ -320,15 +417,28 @@ function buildLifecycleEventRows(events) {
       at: formatTimestamp(event?.checkpoint_at || event?.created_at),
       badgeStatus,
       badgeLabel: formatStatusLabel(badgeStatus),
+      identifiers,
       details,
     }
   })
 }
 
-export function buildDiagnosticsViewModel({ botId, runId, lifecycle, diagnostics, loading = false }) {
+export function buildBotDiagnosticsViewModel({
+  botId,
+  runId,
+  lifecycle,
+  diagnostics,
+  loading = false,
+  error = null,
+}) {
   const payload = diagnostics && typeof diagnostics === 'object' ? diagnostics : {}
   const events = Array.isArray(payload?.events) ? payload.events : []
   const summary = normalizeSummary(payload, lifecycle)
+  let lifecycleTrailMode = 'ready'
+  if (!runId) lifecycleTrailMode = 'missing_run'
+  else if (loading) lifecycleTrailMode = 'loading'
+  else if (error) lifecycleTrailMode = 'error'
+
   return {
     header: {
       title: 'Runtime Diagnostics',
@@ -344,10 +454,17 @@ export function buildDiagnosticsViewModel({ botId, runId, lifecycle, diagnostics
         buildIdentifier('Run ID', 'run_id', runId),
       ],
     },
+    refresh: {
+      disabled: loading || !runId,
+      loading,
+    },
     primaryFailure: buildPrimaryFailure(summary),
     finalState: buildFinalState(summary),
+    runtimeInsights: buildRuntimeInsights(payload),
     workerFailureSummary: buildWorkerFailureSummary(summary, events),
     lifecycleTrail: {
+      mode: lifecycleTrailMode,
+      message: error,
       title: 'Lifecycle Trail',
       subtitle: 'Supporting lifecycle evidence for the selected run.',
       rows: buildLifecycleEventRows(events),

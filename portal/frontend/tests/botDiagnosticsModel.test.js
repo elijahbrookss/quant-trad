@@ -2,10 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  buildDiagnosticsViewModel,
+  buildBotDiagnosticsViewModel,
   copyDiagnosticsIdentifier,
   DIAGNOSTICS_COPY_RESET_MS,
-} from '../src/components/bots/botDiagnosticsModel.js'
+} from '../src/features/bots/diagnostics/buildBotDiagnosticsViewModel.js'
 
 function buildLifecycle(overrides = {}) {
   return {
@@ -84,7 +84,7 @@ function factMap(card) {
 }
 
 test('root failure message wins over final observation in the header and primary failure card', () => {
-  const model = buildDiagnosticsViewModel({
+  const model = buildBotDiagnosticsViewModel({
     botId: 'bot-c11d3435-b48d-47eb-8c80-8dde4a649fbc',
     runId: 'run-86f47532-d9e5-40a9-b647-f8f1dfc2c315',
     lifecycle: buildLifecycle(),
@@ -105,14 +105,21 @@ test('root failure message wins over final observation in the header and primary
   assert.match(model.primaryFailure.contextLine, /Runtime/)
   assert.match(model.primaryFailure.contextLine, /First detected/)
   assert.deepEqual(model.primaryFailure.keyFacts, [
-    { label: 'First failure', value: 'worker-1 • BIP-20DEC30-CDE' },
+    {
+      label: 'First failure',
+      value: 'worker-1 • BIP-20DEC30-CDE',
+      copyItems: [
+        { label: 'Worker ID', key: 'root_failure_worker_id', value: 'worker-1', displayValue: 'worker-1' },
+        { label: 'Symbol', key: 'root_failure_symbol', value: 'BIP-20DEC30-CDE', displayValue: 'BIP-20DEC30-CDE' },
+      ],
+    },
     { label: 'Last successful', value: 'Waiting for series bootstrap' },
     { label: 'Before any series live', value: 'Yes' },
   ])
 })
 
 test('header subtitle falls back to final observation before generic status text', () => {
-  const model = buildDiagnosticsViewModel({
+  const model = buildBotDiagnosticsViewModel({
     botId: 'bot-1',
     runId: 'run-1',
     lifecycle: buildLifecycle({ status: 'crashed' }),
@@ -136,7 +143,7 @@ test('header subtitle falls back to final observation before generic status text
 })
 
 test('final state card renders the expected summary facts', () => {
-  const model = buildDiagnosticsViewModel({
+  const model = buildBotDiagnosticsViewModel({
     botId: 'bot-1',
     runId: 'run-1',
     lifecycle: buildLifecycle(),
@@ -156,7 +163,7 @@ test('final state card renders the expected summary facts', () => {
 })
 
 test('worker failure summary renders the first failed worker and symbol', () => {
-  const model = buildDiagnosticsViewModel({
+  const model = buildBotDiagnosticsViewModel({
     botId: 'bot-1',
     runId: 'run-1',
     lifecycle: buildLifecycle(),
@@ -173,12 +180,105 @@ test('worker failure summary renders the first failed worker and symbol', () => 
       key: 'worker-1',
       summary: 'worker-1 • BIP-20DEC30-CDE • exit code 1',
       message: 'worker exitcode 1',
+      copyItems: [
+        { label: 'Event ID', key: 'worker-1-event_id', value: 'evt-2', displayValue: 'evt-2' },
+        { label: 'Worker ID', key: 'worker-1-worker_id', value: 'worker-1', displayValue: 'worker-1' },
+        { label: 'Symbol', key: 'worker-1-symbol', value: 'BIP-20DEC30-CDE', displayValue: 'BIP-20DEC30-CDE' },
+      ],
     },
   ])
 })
 
+test('primary failure surfaces structured reason and exception details when available', () => {
+  const model = buildBotDiagnosticsViewModel({
+    botId: 'bot-1',
+    runId: 'run-1',
+    lifecycle: buildLifecycle(),
+    diagnostics: buildDiagnostics({
+      summary: {
+        ...buildDiagnostics().summary,
+        root_failure_reason_code: 'artifact_cleanup_race',
+        root_failure_exception_type: 'OSError',
+        root_failure: {
+          message: 'Run artifact spool cleanup raced with another worker finalizer.',
+          worker_id: 'worker-3',
+          symbol: 'XPP-20DEC30-CDE',
+          reason_code: 'artifact_cleanup_race',
+          exception_type: 'OSError',
+          component: 'report_artifacts',
+          operation: 'spool_cleanup',
+          path: 'indicators',
+        },
+      },
+    }),
+    loading: false,
+  })
+
+  assert.equal(model.primaryFailure.message, 'Run artifact spool cleanup raced with another worker finalizer.')
+  assert.deepEqual(model.primaryFailure.keyFacts.slice(0, 3), [
+    {
+      label: 'First failure',
+      value: 'worker-3 • XPP-20DEC30-CDE',
+      copyItems: [
+        { label: 'Worker ID', key: 'root_failure_worker_id', value: 'worker-3', displayValue: 'worker-3' },
+        { label: 'Symbol', key: 'root_failure_symbol', value: 'XPP-20DEC30-CDE', displayValue: 'XPP-20DEC30-CDE' },
+      ],
+    },
+    { label: 'Reason', value: 'Artifact Cleanup Race' },
+    { label: 'Exception', value: 'OSError' },
+  ])
+})
+
+test('runtime insights expose current state, progress timing, pressure, and recent transitions', () => {
+  const model = buildBotDiagnosticsViewModel({
+    botId: 'bot-1',
+    runId: 'run-1',
+    lifecycle: buildLifecycle(),
+    diagnostics: buildDiagnostics({
+      runtime: {
+        state: 'degraded',
+        progress_state: 'churning',
+        last_useful_progress_at: '2026-04-08T23:02:03Z',
+        degraded: {
+          started_at: '2026-04-08T23:02:04Z',
+          cleared_at: null,
+        },
+        churn: {
+          detected_at: '2026-04-08T23:02:09Z',
+        },
+        top_pressure: {
+          reason_code: 'telemetry_backpressure',
+          value: 0.75,
+          unit: 'ratio',
+        },
+        terminal: {
+          actor: 'process_exit',
+          reason: 'Container runtime supervision completed.',
+        },
+        recent_transitions: [
+          {
+            from_state: 'live',
+            to_state: 'degraded',
+            transition_reason: 'continuity_gap:subscriber_gap',
+            source_component: 'worker_bridge',
+            timestamp: '2026-04-08T23:02:04Z',
+          },
+        ],
+      },
+    }),
+    loading: false,
+  })
+
+  const facts = factMap(model.runtimeInsights)
+  assert.equal(facts['Runtime state'], 'Degraded')
+  assert.equal(facts['Progress state'], 'Churning')
+  assert.match(facts['Top pressure'], /Telemetry Backpressure/)
+  assert.equal(model.runtimeInsights.transitions.length, 1)
+  assert.equal(model.runtimeInsights.transitions[0].label, 'live -> degraded')
+})
+
 test('lifecycle trail remains available as supporting evidence with normalized row states', () => {
-  const model = buildDiagnosticsViewModel({
+  const model = buildBotDiagnosticsViewModel({
     botId: 'bot-1',
     runId: 'run-1',
     lifecycle: buildLifecycle(),
@@ -191,6 +291,34 @@ test('lifecycle trail remains available as supporting evidence with normalized r
   assert.equal(model.lifecycleTrail.rows[0].seq, 2)
   assert.equal(model.lifecycleTrail.rows[0].badgeLabel, 'Failed')
   assert.equal(model.lifecycleTrail.rows[0].message, 'Worker failed during warmup.')
+  assert.deepEqual(model.lifecycleTrail.rows[0].identifiers, [
+    { label: 'Event ID', key: 'evt-2-event_id', value: 'evt-2', displayValue: 'evt-2' },
+    { label: 'Worker ID', key: 'evt-2-worker_id', value: 'worker-1', displayValue: 'worker-1' },
+    { label: 'Symbol', key: 'evt-2-symbol', value: 'BIP-20DEC30-CDE', displayValue: 'BIP-20DEC30-CDE' },
+  ])
+  assert.deepEqual(model.lifecycleTrail.rows[0].details, [
+    {
+      label: 'Failure',
+      tone: 'failure',
+      value: `{
+  "message": "worker exitcode 1",
+  "worker_id": "worker-1",
+  "symbol": "BIP-20DEC30-CDE",
+  "exit_code": 1
+}`,
+      copyItem: {
+        label: 'Failure JSON',
+        key: 'evt-2-failure_json',
+        value: `{
+  "message": "worker exitcode 1",
+  "worker_id": "worker-1",
+  "symbol": "BIP-20DEC30-CDE",
+  "exit_code": 1
+}`,
+        displayValue: 'JSON payload',
+      },
+    },
+  ])
   assert.equal(model.lifecycleTrail.rows[1].seq, 1)
   assert.equal(model.lifecycleTrail.rows[1].badgeLabel, 'Completed')
 })
