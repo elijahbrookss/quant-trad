@@ -27,17 +27,7 @@
       "type": "link"
     },
     {
-      "title": "Queue Pressure & Backlog",
-      "url": "/d/qt-botlens-queues",
-      "type": "link"
-    },
-    {
-      "title": "Pipeline Latency & Throughput",
-      "url": "/d/qt-botlens-pipeline",
-      "type": "link"
-    },
-    {
-      "title": "Diagnostics & Failure Analysis",
+      "title": "Candle Continuity",
       "url": "/d/qt-botlens-diagnostics",
       "type": "link"
     },
@@ -94,7 +84,7 @@
     },
     {
       "id": 2,
-      "type": "stat",
+      "type": "timeseries",
       "title": "Ingest Messages",
       "datasource": {
         "type": "postgres",
@@ -109,24 +99,21 @@
       "targets": [
         {
           "refId": "A",
-          "format": "table",
+          "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT COALESCE(sum(m.value), 0)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name = 'ingest_messages_total'  AND COALESCE(m.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(m.run_id, '') ~ '${run_id:regex}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.queue_name, '') = '' OR COALESCE(m.queue_name, '') ~ '${queue_name:regex}') AND (COALESCE(m.storage_target, '') = '' OR COALESCE(m.storage_target, '') ~ '${storage_target:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}') ;"
+          "rawSql": "SELECT $__timeGroupAlias(m.observed_at, $__interval), COALESCE(NULLIF(m.labels ->> 'source_reason', ''), 'unknown') AS metric, sum(m.value)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name = 'ingest_messages_total'  AND COALESCE(m.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(m.run_id, '') ~ '${run_id:regex}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.queue_name, '') = '' OR COALESCE(m.queue_name, '') ~ '${queue_name:regex}') AND (COALESCE(m.storage_target, '') = '' OR COALESCE(m.storage_target, '') ~ '${storage_target:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}') GROUP BY 1, 2 ORDER BY 1;"
         }
       ],
       "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
         },
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "textMode": "auto"
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -134,7 +121,7 @@
         },
         "overrides": []
       },
-      "description": "Total ingest messages accepted by the backend."
+      "description": "Backend ingest throughput split by source classification."
     },
     {
       "id": 3,
@@ -182,7 +169,7 @@
     },
     {
       "id": 4,
-      "type": "stat",
+      "type": "timeseries",
       "title": "DB Writes",
       "datasource": {
         "type": "postgres",
@@ -197,24 +184,21 @@
       "targets": [
         {
           "refId": "A",
-          "format": "table",
+          "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT COALESCE(sum(m.value), 0)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name = 'db_write_total'  AND COALESCE(m.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(m.run_id, '') ~ '${run_id:regex}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.queue_name, '') = '' OR COALESCE(m.queue_name, '') ~ '${queue_name:regex}') AND (COALESCE(m.storage_target, '') = '' OR COALESCE(m.storage_target, '') ~ '${storage_target:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}') ;"
+          "rawSql": "SELECT $__timeGroupAlias(m.observed_at, $__interval), COALESCE(NULLIF(m.labels ->> 'outcome', ''), 'unknown') AS metric, sum(m.value)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name = 'db_write_rows_total' AND COALESCE(m.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(m.run_id, '') ~ '${run_id:regex}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.queue_name, '') = '' OR COALESCE(m.queue_name, '') ~ '${queue_name:regex}') AND (COALESCE(m.storage_target, '') = '' OR COALESCE(m.storage_target, '') ~ '${storage_target:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}') GROUP BY 1, 2 ORDER BY 1;"
         }
       ],
       "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
         },
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "textMode": "auto"
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -222,7 +206,7 @@
         },
         "overrides": []
       },
-      "description": "Total backend DB writes driven by the BotLens pipeline."
+      "description": "Attempted BotLens persistence rows split by write outcome."
     },
     {
       "id": 5,
@@ -325,7 +309,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(m.observed_at, $__interval), CASE WHEN metric_name = 'viewer_snapshot_load_ms' THEN 'viewer_snapshot_load_ms' WHEN metric_name = 'viewer_snapshot_total_ms' THEN 'viewer_snapshot_total_ms' WHEN metric_name = 'persistence_wait_ms' THEN 'persistence_wait_ms' WHEN metric_name = 'db_write_ms' THEN 'db_write_ms' WHEN metric_name = 'db_initial_load_ms' THEN 'db_initial_load_ms' ELSE COALESCE(queue_name, metric_name) END AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY m.value)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name IN ('viewer_snapshot_load_ms', 'viewer_snapshot_total_ms', 'persistence_wait_ms', 'db_write_ms', 'db_initial_load_ms')  AND COALESCE(m.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(m.run_id, '') ~ '${run_id:regex}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.queue_name, '') = '' OR COALESCE(m.queue_name, '') ~ '${queue_name:regex}') AND (COALESCE(m.storage_target, '') = '' OR COALESCE(m.storage_target, '') ~ '${storage_target:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}')  GROUP BY 1, 2 ORDER BY 1;"
+          "rawSql": "SELECT * FROM ( SELECT $__timeGroup(m.observed_at, $__interval) AS time, CASE WHEN metric_name = 'viewer_snapshot_load_ms' THEN 'viewer_snapshot_load_ms' WHEN metric_name = 'viewer_snapshot_total_ms' THEN 'viewer_snapshot_total_ms' WHEN metric_name = 'persistence_wait_ms' THEN 'persistence_wait_ms' WHEN metric_name = 'db_initial_load_ms' THEN 'db_initial_load_ms' ELSE COALESCE(queue_name, metric_name) END AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY m.value)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name IN ('viewer_snapshot_load_ms', 'viewer_snapshot_total_ms', 'persistence_wait_ms', 'db_initial_load_ms')  AND COALESCE(m.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(m.run_id, '') ~ '${run_id:regex}'  AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}')  AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}')  AND (COALESCE(m.queue_name, '') = '' OR COALESCE(m.queue_name, '') ~ '${queue_name:regex}')  AND (COALESCE(m.storage_target, '') = '' OR COALESCE(m.storage_target, '') ~ '${storage_target:regex}')  AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}') GROUP BY 1, 2 UNION ALL SELECT $__timeGroup(e.observed_at, $__interval) AS time, CONCAT('db_write_ms:', outcome.outcome, ':', COALESCE(NULLIF(e.details ->> 'payload_size_bucket', ''), 'small')) AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY COALESCE((e.details ->> 'write_ms')::double precision, 0.0))::double precision AS value FROM observability_events.botlens_backend_events_v1 e CROSS JOIN LATERAL (VALUES   ('inserted', COALESCE((e.details ->> 'inserted_rows')::int, 0)),   ('duplicate', COALESCE((e.details ->> 'duplicate_rows')::int, 0)),   ('updated', COALESCE((e.details ->> 'updated_rows')::int, 0)),   ('noop', COALESCE((e.details ->> 'noop_rows')::int, 0)),   ('failed', COALESCE((e.details ->> 'failed_rows')::int, 0)) ) AS outcome(outcome, row_count) WHERE $__timeFilter(e.observed_at) AND e.event_name = 'db_write_observed' AND outcome.row_count > 0  AND COALESCE(e.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(e.run_id, '') ~ '${run_id:regex}'  AND (COALESCE(e.series_key, '') = '' OR COALESCE(e.series_key, '') ~ '${series_key:regex}')  AND (COALESCE(e.component, '') = '' OR COALESCE(e.component, '') ~ '${component:regex}')  AND (COALESCE(e.storage_target, '') = '' OR COALESCE(e.storage_target, '') ~ '${storage_target:regex}')  AND (COALESCE(e.failure_mode, '') = '' OR COALESCE(e.failure_mode, '') ~ '${failure_mode:regex}') GROUP BY 1, 2) q ORDER BY time;"
         }
       ],
       "fieldConfig": {
@@ -345,7 +329,7 @@
           "sort": "desc"
         }
       },
-      "description": "Snapshot load/total, persistence wait, DB initial load, and DB write p95."
+      "description": "Snapshot and persistence latency, with DB write p95 split by outcome and payload bucket."
     },
     {
       "id": 8,
@@ -449,7 +433,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(m.observed_at, $__interval), CASE WHEN metric_name = 'fanout_enqueued_total' THEN 'fanout_enqueues' WHEN metric_name = 'fanout_delivery_items_total' THEN 'fanout_deliveries' WHEN metric_name = 'viewer_send_total' THEN 'viewer_sends' WHEN metric_name = 'db_write_total' THEN 'db_writes' ELSE COALESCE(queue_name, metric_name) END AS metric, sum(m.value)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name IN ('fanout_enqueued_total', 'fanout_delivery_items_total', 'viewer_send_total', 'db_write_total')  AND COALESCE(m.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(m.run_id, '') ~ '${run_id:regex}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.queue_name, '') = '' OR COALESCE(m.queue_name, '') ~ '${queue_name:regex}') AND (COALESCE(m.storage_target, '') = '' OR COALESCE(m.storage_target, '') ~ '${storage_target:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}')  GROUP BY 1, 2 ORDER BY 1;"
+          "rawSql": "SELECT $__timeGroupAlias(m.observed_at, $__interval), CASE   WHEN metric_name = 'fanout_enqueued_total' THEN 'fanout_enqueues'   WHEN metric_name = 'fanout_delivery_items_total' THEN 'fanout_deliveries'   WHEN metric_name = 'viewer_send_total' THEN 'viewer_sends'   WHEN metric_name = 'db_write_attempted_rows_total' THEN 'db_rows_attempted'   WHEN metric_name = 'db_write_rows_total' THEN CONCAT('db_rows_', COALESCE(NULLIF(m.labels ->> 'outcome', ''), 'unknown'))   ELSE COALESCE(queue_name, metric_name) END AS metric, sum(m.value)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at)  AND m.metric_name IN ('fanout_enqueued_total', 'fanout_delivery_items_total', 'viewer_send_total', 'db_write_attempted_rows_total', 'db_write_rows_total')  AND (m.metric_name <> 'db_write_rows_total' OR COALESCE(m.labels ->> 'outcome', '') IN ('inserted', 'duplicate'))  AND COALESCE(m.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(m.run_id, '') ~ '${run_id:regex}'  AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}')  AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}')  AND (COALESCE(m.queue_name, '') = '' OR COALESCE(m.queue_name, '') ~ '${queue_name:regex}')  AND (COALESCE(m.storage_target, '') = '' OR COALESCE(m.storage_target, '') ~ '${storage_target:regex}')  AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}') GROUP BY 1, 2 ORDER BY 1;"
         }
       ],
       "fieldConfig": {
@@ -469,7 +453,7 @@
           "sort": "desc"
         }
       },
-      "description": "Fanout delivery, viewer send, and DB write totals over time."
+      "description": "Fanout and viewer throughput with attempted, inserted, and duplicate DB-row overlays."
     },
     {
       "id": 11,
@@ -490,7 +474,7 @@
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT CASE WHEN metric_name = 'telemetry_emitted_total' THEN 'telemetry_emitted' WHEN metric_name = 'telemetry_transport_send_total' THEN 'telemetry_sent' WHEN metric_name = 'ingest_messages_total' THEN 'ingest_messages' WHEN metric_name = 'symbol_fact_enqueued_total' THEN 'symbol_fact_enqueues' WHEN metric_name = 'run_lifecycle_enqueued_total' THEN 'run_lifecycle_enqueues' WHEN metric_name = 'run_notification_enqueued_total' THEN 'run_notification_enqueues' WHEN metric_name = 'fanout_enqueued_total' THEN 'fanout_enqueues' WHEN metric_name = 'fanout_delivery_items_total' THEN 'fanout_deliveries' WHEN metric_name = 'viewer_send_total' THEN 'viewer_sends' WHEN metric_name = 'db_write_total' THEN 'db_writes' ELSE COALESCE(queue_name, metric_name) END AS metric, ROUND(sum(m.value)::numeric, 2)::double precision AS total, ROUND(avg(m.value)::numeric, 2)::double precision AS avg_sample_value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name IN ('telemetry_emitted_total', 'telemetry_transport_send_total', 'ingest_messages_total', 'symbol_fact_enqueued_total', 'run_lifecycle_enqueued_total', 'run_notification_enqueued_total', 'fanout_enqueued_total', 'fanout_delivery_items_total', 'viewer_send_total', 'db_write_total')  AND COALESCE(m.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(m.run_id, '') ~ '${run_id:regex}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.queue_name, '') = '' OR COALESCE(m.queue_name, '') ~ '${queue_name:regex}') AND (COALESCE(m.storage_target, '') = '' OR COALESCE(m.storage_target, '') ~ '${storage_target:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}')  GROUP BY 1 ORDER BY total DESC;"
+          "rawSql": "SELECT CASE WHEN metric_name = 'telemetry_emitted_total' THEN 'telemetry_emitted' WHEN metric_name = 'telemetry_transport_send_total' THEN 'telemetry_sent' WHEN metric_name = 'ingest_messages_total' THEN CONCAT('ingest_', COALESCE(NULLIF(m.labels ->> 'source_reason', ''), 'unknown')) WHEN metric_name = 'symbol_fact_enqueued_total' THEN 'symbol_fact_enqueues' WHEN metric_name = 'run_lifecycle_enqueued_total' THEN 'run_lifecycle_enqueues' WHEN metric_name = 'run_notification_enqueued_total' THEN 'run_notification_enqueues' WHEN metric_name = 'fanout_enqueued_total' THEN 'fanout_enqueues' WHEN metric_name = 'fanout_delivery_items_total' THEN 'fanout_deliveries' WHEN metric_name = 'viewer_send_total' THEN 'viewer_sends' WHEN metric_name = 'db_write_attempted_rows_total' THEN 'db_rows_attempted' WHEN metric_name = 'db_write_rows_total' THEN CONCAT('db_rows_', COALESCE(NULLIF(m.labels ->> 'outcome', ''), 'unknown')) ELSE COALESCE(queue_name, metric_name) END AS metric, ROUND(sum(m.value)::numeric, 2)::double precision AS total, ROUND(avg(m.value)::numeric, 2)::double precision AS avg_sample_value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at)  AND m.metric_name IN ('telemetry_emitted_total', 'telemetry_transport_send_total', 'ingest_messages_total', 'symbol_fact_enqueued_total', 'run_lifecycle_enqueued_total', 'run_notification_enqueued_total', 'fanout_enqueued_total', 'fanout_delivery_items_total', 'viewer_send_total', 'db_write_attempted_rows_total', 'db_write_rows_total')  AND (m.metric_name <> 'db_write_rows_total' OR COALESCE(m.labels ->> 'outcome', '') IN ('inserted', 'duplicate', 'updated', 'noop', 'failed'))  AND COALESCE(m.bot_id, '') ~ '${bot_id:regex}' AND COALESCE(m.run_id, '') ~ '${run_id:regex}'  AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}')  AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}')  AND (COALESCE(m.queue_name, '') = '' OR COALESCE(m.queue_name, '') ~ '${queue_name:regex}')  AND (COALESCE(m.storage_target, '') = '' OR COALESCE(m.storage_target, '') ~ '${storage_target:regex}')  AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}') GROUP BY 1 ORDER BY total DESC;"
         }
       ],
       "options": {
@@ -499,7 +483,7 @@
           "show": false
         }
       },
-      "description": "Rollup totals for throughput counters in the selected window."
+      "description": "Pipeline totals with DB attempted/inserted/duplicate/noop/failed row breakouts."
     }
   ],
   "refresh": "30s",
@@ -564,8 +548,8 @@
           "type": "postgres",
           "uid": "quanttrad-postgres"
         },
-        "definition": "SELECT DISTINCT series_key AS __value, series_key AS __text FROM portal_bot_run_view_state WHERE series_key <> '__run__' AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' ORDER BY 1;",
-        "query": "SELECT DISTINCT series_key AS __value, series_key AS __text FROM portal_bot_run_view_state WHERE series_key <> '__run__' AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' ORDER BY 1;",
+        "definition": "SELECT DISTINCT payload -> 'context' ->> 'series_key' AS __value, payload -> 'context' ->> 'series_key' AS __text FROM portal_bot_run_events WHERE event_type LIKE 'botlens_domain.%' AND COALESCE(payload -> 'context' ->> 'series_key', '') <> '' AND COALESCE(payload -> 'context' ->> 'series_key', '') <> '__run__' AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' ORDER BY 1;",
+        "query": "SELECT DISTINCT payload -> 'context' ->> 'series_key' AS __value, payload -> 'context' ->> 'series_key' AS __text FROM portal_bot_run_events WHERE event_type LIKE 'botlens_domain.%' AND COALESCE(payload -> 'context' ->> 'series_key', '') <> '' AND COALESCE(payload -> 'context' ->> 'series_key', '') <> '__run__' AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' ORDER BY 1;",
         "refresh": 2,
         "sort": 1,
         "includeAll": true,

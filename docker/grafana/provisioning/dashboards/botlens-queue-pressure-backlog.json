@@ -27,17 +27,7 @@
       "type": "link"
     },
     {
-      "title": "Queue Pressure & Backlog",
-      "url": "/d/qt-botlens-queues",
-      "type": "link"
-    },
-    {
-      "title": "Pipeline Latency & Throughput",
-      "url": "/d/qt-botlens-pipeline",
-      "type": "link"
-    },
-    {
-      "title": "Diagnostics & Failure Analysis",
+      "title": "Candle Continuity",
       "url": "/d/qt-botlens-diagnostics",
       "type": "link"
     },
@@ -388,8 +378,8 @@
           "type": "postgres",
           "uid": "quanttrad-postgres"
         },
-        "definition": "SELECT DISTINCT series_key AS __value, series_key AS __text FROM portal_bot_run_view_state WHERE series_key <> '__run__' AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' ORDER BY 1;",
-        "query": "SELECT DISTINCT series_key AS __value, series_key AS __text FROM portal_bot_run_view_state WHERE series_key <> '__run__' AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' ORDER BY 1;",
+        "definition": "SELECT DISTINCT payload -> 'context' ->> 'series_key' AS __value, payload -> 'context' ->> 'series_key' AS __text FROM portal_bot_run_events WHERE event_type LIKE 'botlens_domain.%' AND COALESCE(payload -> 'context' ->> 'series_key', '') <> '' AND COALESCE(payload -> 'context' ->> 'series_key', '') <> '__run__' AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' ORDER BY 1;",
+        "query": "SELECT DISTINCT payload -> 'context' ->> 'series_key' AS __value, payload -> 'context' ->> 'series_key' AS __text FROM portal_bot_run_events WHERE event_type LIKE 'botlens_domain.%' AND COALESCE(payload -> 'context' ->> 'series_key', '') <> '' AND COALESCE(payload -> 'context' ->> 'series_key', '') <> '__run__' AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' ORDER BY 1;",
         "refresh": 2,
         "sort": 1,
         "includeAll": true,

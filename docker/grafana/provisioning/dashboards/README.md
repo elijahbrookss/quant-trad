@@ -87,12 +87,16 @@ Example: `system-metrics.json` → Dashboard available at `/d/<uid>/system-metri
 
 ## Recommended Entry Dashboards
 
-For BotLens backend observability contract v1, start with:
+Primary BotLens dashboards:
 
 - `botlens-overview.json` (`uid=qt-botlens-overview`)
+- `botlens-diagnostics-failure-analysis.json` (`uid=qt-botlens-diagnostics`) — repurposed as `Candle Continuity`
+- `botlens-per-run-deep-dive.json` (`uid=qt-botlens-run-deep-dive`)
+
+Secondary focused dashboards:
+
 - `botlens-queue-pressure-backlog.json` (`uid=qt-botlens-queues`)
 - `botlens-pipeline-latency-throughput.json` (`uid=qt-botlens-pipeline`)
-- `botlens-diagnostics-failure-analysis.json` (`uid=qt-botlens-diagnostics`)
 
 For broader bot runtime process/thread health outside BotLens backend observability, start with:
 

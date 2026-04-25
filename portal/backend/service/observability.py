@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, Mapping, MutableMapping, Optional
 
 from core.settings import get_settings
+from core.metrics import Metric, MetricType
 from utils.log_context import build_log_context, with_log_context
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,11 @@ _ALLOWED_METRIC_LABELS = frozenset(
         "delta_type",
         "storage_target",
         "failure_mode",
+        "source_reason",
+        "outcome",
+        "duplicate_reason",
+        "payload_size_bucket",
+        "gap_type",
     }
 )
 _DISALLOWED_METRIC_LABELS = frozenset(
@@ -64,33 +70,33 @@ _DEPRECATED_MESSAGE_KINDS = frozenset({"bot_projection_refresh"})
 _ALLOWED_METRIC_MESSAGE_KINDS = frozenset(
     {
         "bootstrap",
+        "botlens_live_connected",
         "botlens_lifecycle_event",
-        "botlens_open_trades_delta",
-        "botlens_run_connected",
-        "botlens_run_summary_delta",
+        "botlens_run_fault_delta",
+        "botlens_run_health_delta",
+        "botlens_run_lifecycle_delta",
+        "botlens_run_open_trades_delta",
+        "botlens_run_symbol_catalog_delta",
         "botlens_runtime_bootstrap_facts",
         "botlens_runtime_facts",
-        "botlens_symbol_snapshot",
+        "botlens_symbol_candle_delta",
+        "botlens_symbol_decision_delta",
+        "botlens_symbol_diagnostic_delta",
+        "botlens_symbol_overlay_delta",
+        "botlens_symbol_signal_delta",
+        "botlens_symbol_stats_delta",
+        "botlens_symbol_trade_delta",
         "broadcast",
         "connected",
         "ephemeral",
         "facts",
         "ingest_ws",
         "legacy",
+        "reset_required",
+        "selected_symbol_snapshot",
+        "heartbeat",
         "lifecycle",
         "notification",
-        "open_trades_delta",
-        "snapshot",
-        "snapshot_buffer",
-        "snapshot_replay",
-        "summary_delta",
-        "symbol_candle_delta",
-        "symbol_decision_delta",
-        "symbol_log_delta",
-        "symbol_overlay_delta",
-        "symbol_runtime_delta",
-        "symbol_trade_delta",
-        "typed_delta",
         "unknown",
         "deprecated",
     }
@@ -185,15 +191,6 @@ def metric_labels(*contexts: Mapping[str, Any], **fields: Any) -> Dict[str, str]
 
 
 @dataclass(frozen=True)
-class MetricRecord:
-    kind: str
-    name: str
-    value: float
-    labels: Dict[str, str]
-    timestamp: str
-
-
-@dataclass(frozen=True)
 class EventRecord:
     name: str
     level: str
@@ -229,6 +226,36 @@ class QueueStateMetricOwner:
         )
 
 
+class _ObservabilityMetricSink:
+    def __init__(self, owner: "InMemoryObservabilitySink") -> None:
+        self._owner = owner
+
+    def emit(self, metric: Metric) -> None:
+        owner = self._owner
+        with owner._lock:
+            owner._metrics.append(metric)
+            if len(owner._pending_metrics) == owner._pending_metrics.maxlen:
+                owner._pending_metrics.popleft()
+                owner._dropped_pending_metrics += 1
+            owner._pending_metrics.append(metric)
+            owner._condition.notify_all()
+
+
+class _ObservabilityEventSink:
+    def __init__(self, owner: "InMemoryObservabilitySink") -> None:
+        self._owner = owner
+
+    def emit(self, event: EventRecord) -> None:
+        owner = self._owner
+        with owner._lock:
+            owner._events.append(event)
+            if len(owner._pending_events) == owner._pending_events.maxlen:
+                owner._pending_events.popleft()
+                owner._dropped_pending_events += 1
+            owner._pending_events.append(event)
+            owner._condition.notify_all()
+
+
 class InMemoryObservabilitySink:
     """Thread-safe process-local sink used by backend instrumentation."""
 
@@ -240,11 +267,11 @@ class InMemoryObservabilitySink:
         pending_metrics_max: Optional[int] = None,
         pending_events_max: Optional[int] = None,
     ) -> None:
-        self._metrics: deque[MetricRecord] = deque(maxlen=max_metrics)
+        self._metrics: deque[Metric] = deque(maxlen=max_metrics)
         self._events: deque[EventRecord] = deque(maxlen=max_events)
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
-        self._pending_metrics: deque[MetricRecord] = deque(
+        self._pending_metrics: deque[Metric] = deque(
             maxlen=max(
                 int(
                     pending_metrics_max
@@ -266,38 +293,19 @@ class InMemoryObservabilitySink:
         )
         self._dropped_pending_metrics = 0
         self._dropped_pending_events = 0
+        self._metric_sink = _ObservabilityMetricSink(self)
+        self._event_sink = _ObservabilityEventSink(self)
 
-    def emit_metric(self, record: MetricRecord) -> None:
-        with self._lock:
-            self._metrics.append(record)
-            if len(self._pending_metrics) == self._pending_metrics.maxlen:
-                self._pending_metrics.popleft()
-                self._dropped_pending_metrics += 1
-            self._pending_metrics.append(record)
-            self._condition.notify_all()
+    def emit_metric(self, record: Metric) -> None:
+        self._metric_sink.emit(record)
 
     def emit_event(self, record: EventRecord) -> None:
-        with self._lock:
-            self._events.append(record)
-            if len(self._pending_events) == self._pending_events.maxlen:
-                self._pending_events.popleft()
-                self._dropped_pending_events += 1
-            self._pending_events.append(record)
-            self._condition.notify_all()
+        self._event_sink.emit(record)
 
     def snapshot(self) -> Dict[str, list[Dict[str, Any]]]:
         with self._lock:
             return {
-                "metrics": [
-                    {
-                        "kind": item.kind,
-                        "name": item.name,
-                        "value": item.value,
-                        "labels": dict(item.labels),
-                        "timestamp": item.timestamp,
-                    }
-                    for item in list(self._metrics)
-                ],
+                "metrics": [item.to_dict() for item in list(self._metrics)],
                 "events": [
                     {
                         "name": item.name,
@@ -325,7 +333,7 @@ class InMemoryObservabilitySink:
         metric_limit: int,
         event_limit: int,
     ) -> Dict[str, Any]:
-        metrics: list[MetricRecord] = []
+        metrics: list[Metric] = []
         events: list[EventRecord] = []
         with self._lock:
             while self._pending_metrics and len(metrics) < max(int(metric_limit), 0):
@@ -433,7 +441,7 @@ class BackendObserver:
             yield mutable_fields
         finally:
             elapsed_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
-            self.observe(metric_name, elapsed_ms, **mutable_fields)
+            self.observe(metric_name, elapsed_ms, unit="ms", **mutable_fields)
 
     def maybe_emit_gauges(
         self,
@@ -473,13 +481,18 @@ class BackendObserver:
 
     def _emit_metric(self, kind: str, name: str, value: float, fields: Mapping[str, Any]) -> None:
         normalized = normalize_name(name)
-        labels = metric_labels(self.context(), fields)
-        record = MetricRecord(
-            kind=kind,
-            name=normalized,
+        mutable_fields = dict(fields)
+        unit = str(mutable_fields.pop("unit", "") or "")
+        labels = metric_labels(self.context(), mutable_fields)
+        labels.pop("component", None)
+        record = Metric(
+            metric_name=normalized,
+            metric_type=MetricType(kind),
             value=float(value),
-            labels=labels,
-            timestamp=_utcnow_iso(),
+            unit=unit,
+            timestamp=datetime.now(timezone.utc),
+            source=self.component,
+            tags=labels,
         )
         self._sink.emit_metric(record)
 
@@ -492,7 +505,6 @@ __all__ = [
     "BackendObserver",
     "EventRecord",
     "InMemoryObservabilitySink",
-    "MetricRecord",
     "canonical_context",
     "get_observability_sink",
     "metric_labels",

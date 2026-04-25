@@ -52,6 +52,8 @@ def test_exporter_flushes_metric_samples_and_events(capture_batches: dict[str, l
         run_id="run-1",
         series_key="instrument-btc|1m",
         queue_name="fanout_channel",
+        source_reason="ingest",
+        payload_size_bucket="large",
     )
     observer.event(
         "viewer_send_failed",
@@ -74,6 +76,10 @@ def test_exporter_flushes_metric_samples_and_events(capture_batches: dict[str, l
     assert metric_row["run_id"] == "run-1"
     assert metric_row["series_key"] == "instrument-btc|1m"
     assert metric_row["queue_name"] == "fanout_channel"
+    assert metric_row["labels"] == {
+        "source_reason": "ingest",
+        "payload_size_bucket": "large",
+    }
 
     event_row = capture_batches["events"][0]
     assert event_row["component"] == "test_component"

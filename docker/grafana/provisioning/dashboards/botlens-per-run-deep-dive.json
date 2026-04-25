@@ -27,17 +27,7 @@
       "type": "link"
     },
     {
-      "title": "Queue Pressure & Backlog",
-      "url": "/d/qt-botlens-queues",
-      "type": "link"
-    },
-    {
-      "title": "Pipeline Latency & Throughput",
-      "url": "/d/qt-botlens-pipeline",
-      "type": "link"
-    },
-    {
-      "title": "Diagnostics & Failure Analysis",
+      "title": "Candle Continuity",
       "url": "/d/qt-botlens-diagnostics",
       "type": "link"
     },
@@ -83,7 +73,7 @@
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT CASE WHEN '${run_id}' = '__none__' THEN 'Select run_id' ELSE COALESCE((SELECT CONCAT(COALESCE(l.status, 'unknown'), CASE WHEN COALESCE(l.phase, '') <> '' THEN ' • ' || l.phase ELSE '' END) FROM portal_bot_run_lifecycle l WHERE l.run_id = '${run_id}' LIMIT 1), (SELECT COALESCE(r.status, 'unknown') FROM portal_bot_runs r WHERE r.run_id = '${run_id}' LIMIT 1), 'missing') END AS value;"
+          "rawSql": "SELECT CASE WHEN '${run_id}' = '__none__' THEN 'Select run_id' ELSE COALESCE((SELECT CONCAT(COALESCE(l.status, 'unknown'), CASE WHEN COALESCE(l.phase, '') <> '' THEN ' \u2022 ' || l.phase ELSE '' END) FROM portal_bot_run_lifecycle l WHERE l.run_id = '${run_id}' LIMIT 1), (SELECT COALESCE(r.status, 'unknown') FROM portal_bot_runs r WHERE r.run_id = '${run_id}' LIMIT 1), 'missing') END AS value;"
         }
       ],
       "options": {
@@ -781,7 +771,7 @@
     {
       "id": 19,
       "type": "timeseries",
-      "title": "Pending / Replay / Buffer State",
+      "title": "Pending / Replay / Ring State",
       "datasource": {
         "type": "postgres",
         "uid": "quanttrad-postgres"
@@ -797,7 +787,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(m.observed_at, $__interval), CASE WHEN m.metric_name = 'snapshot_pending_viewers' THEN 'snapshot_pending_viewers' WHEN m.metric_name = 'snapshot_buffered_deltas' THEN 'snapshot_buffered_deltas' WHEN m.metric_name = 'snapshot_replay_count' THEN 'snapshot_replay_count' WHEN m.metric_name = 'bootstrap_pending_count' THEN 'bootstrap_pending_count' WHEN m.metric_name = 'bootstrap_superseded_total' THEN 'bootstrap_superseded_total' ELSE m.metric_name END AS metric, CASE WHEN m.metric_name IN ('snapshot_replay_count', 'bootstrap_superseded_total') THEN sum(m.value)::double precision ELSE avg(m.value)::double precision END AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name IN ('snapshot_pending_viewers', 'snapshot_buffered_deltas', 'snapshot_replay_count', 'bootstrap_pending_count', 'bootstrap_superseded_total') AND COALESCE(m.run_id, '') = '${run_id}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}') GROUP BY 1, 2, m.metric_name ORDER BY 1;"
+          "rawSql": "SELECT $__timeGroupAlias(m.observed_at, $__interval), CASE WHEN m.metric_name = 'snapshot_pending_viewers' THEN 'snapshot_pending_viewers' WHEN m.metric_name = 'snapshot_buffered_deltas' THEN 'snapshot_buffered_deltas' WHEN m.metric_name = 'snapshot_replay_count' THEN 'snapshot_replay_count' WHEN m.metric_name = 'bootstrap_pending_count' THEN 'bootstrap_pending_count' WHEN m.metric_name = 'bootstrap_superseded_total' THEN 'bootstrap_superseded_total' WHEN m.metric_name = 'replay_ring_occupancy' THEN 'replay_ring_occupancy_max' WHEN m.metric_name = 'replay_ring_high_water_mark' THEN 'replay_ring_high_water_mark' WHEN m.metric_name = 'reset_required_total' THEN 'reset_required_total' ELSE m.metric_name END AS metric, CASE WHEN m.metric_name IN ('snapshot_replay_count', 'bootstrap_superseded_total', 'reset_required_total') THEN sum(m.value)::double precision WHEN m.metric_name IN ('replay_ring_occupancy', 'replay_ring_high_water_mark', 'replay_ring_utilization') THEN max(m.value)::double precision ELSE avg(m.value)::double precision END AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name IN ('snapshot_pending_viewers', 'snapshot_buffered_deltas', 'snapshot_replay_count', 'bootstrap_pending_count', 'bootstrap_superseded_total', 'replay_ring_occupancy', 'replay_ring_high_water_mark', 'replay_ring_utilization', 'reset_required_total') AND COALESCE(m.run_id, '') = '${run_id}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}') GROUP BY 1, 2, m.metric_name ORDER BY 1;"
         }
       ],
       "fieldConfig": {
@@ -817,7 +807,7 @@
           "sort": "desc"
         }
       },
-      "description": "Snapshot replay counts plus pending/buffer gauges and bootstrap slot activity."
+      "description": "Snapshot replay counts, reset-required totals, and replay-ring gauges. Ring occupancy and high-water use max aggregation; reset/replay counters are summed."
     },
     {
       "id": 20,
@@ -962,7 +952,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(m.observed_at, $__interval), CASE WHEN m.metric_name = 'persistence_wait_ms' THEN 'persistence_wait_ms' WHEN m.metric_name = 'db_write_ms' THEN 'db_write_ms' WHEN m.metric_name = 'db_initial_load_ms' THEN 'db_initial_load_ms' ELSE m.metric_name END AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY m.value)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name IN ('persistence_wait_ms', 'db_write_ms', 'db_initial_load_ms') AND COALESCE(m.run_id, '') = '${run_id}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}') GROUP BY 1, 2 ORDER BY 1;"
+          "rawSql": "SELECT * FROM ( SELECT $__timeGroup(m.observed_at, $__interval) AS time, CASE WHEN m.metric_name = 'persistence_wait_ms' THEN 'persistence_wait_ms' WHEN m.metric_name = 'db_initial_load_ms' THEN 'db_initial_load_ms' ELSE m.metric_name END AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY m.value)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name IN ('persistence_wait_ms', 'db_initial_load_ms') AND COALESCE(m.run_id, '') = '${run_id}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}') GROUP BY 1, 2 UNION ALL SELECT $__timeGroup(e.observed_at, $__interval) AS time, CONCAT('db_write_ms:', outcome.outcome, ':', COALESCE(NULLIF(e.details ->> 'payload_size_bucket', ''), 'small')) AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY COALESCE((e.details ->> 'write_ms')::double precision, 0.0))::double precision AS value FROM observability_events.botlens_backend_events_v1 e CROSS JOIN LATERAL (VALUES   ('inserted', COALESCE((e.details ->> 'inserted_rows')::int, 0)),   ('duplicate', COALESCE((e.details ->> 'duplicate_rows')::int, 0)),   ('updated', COALESCE((e.details ->> 'updated_rows')::int, 0)),   ('noop', COALESCE((e.details ->> 'noop_rows')::int, 0)),   ('failed', COALESCE((e.details ->> 'failed_rows')::int, 0)) ) AS outcome(outcome, row_count) WHERE $__timeFilter(e.observed_at) AND e.event_name = 'db_write_observed' AND outcome.row_count > 0 AND COALESCE(e.run_id, '') = '${run_id}' AND (COALESCE(e.series_key, '') = '' OR COALESCE(e.series_key, '') ~ '${series_key:regex}') AND (COALESCE(e.component, '') = '' OR COALESCE(e.component, '') ~ '${component:regex}') AND (COALESCE(e.failure_mode, '') = '' OR COALESCE(e.failure_mode, '') ~ '${failure_mode:regex}') GROUP BY 1, 2) q ORDER BY time;"
         }
       ],
       "fieldConfig": {
@@ -982,7 +972,7 @@
           "sort": "desc"
         }
       },
-      "description": "Shows total persistence-induced blocking versus actual DB write or DB load latency."
+      "description": "Persistence blocking and DB write p95, split by outcome and payload bucket."
     },
     {
       "id": 24,
@@ -1003,7 +993,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(m.observed_at, $__interval), CASE WHEN m.metric_name = 'db_write_total' THEN 'db_write_total' WHEN m.metric_name = 'db_write_fail_total' THEN 'db_write_fail_total' WHEN m.metric_name = 'db_write_retry_total' THEN 'db_write_retry_total' WHEN m.metric_name = 'db_duplicate_skip_total' THEN 'db_duplicate_skip_total' WHEN m.metric_name = 'db_stale_update_total' THEN 'db_stale_update_total' ELSE m.metric_name END AS metric, sum(m.value)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name IN ('db_write_total', 'db_write_fail_total', 'db_write_retry_total', 'db_duplicate_skip_total', 'db_stale_update_total') AND COALESCE(m.run_id, '') = '${run_id}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}') GROUP BY 1, 2 ORDER BY 1;"
+          "rawSql": "SELECT * FROM ( SELECT $__timeGroup(m.observed_at, $__interval) AS time, CASE WHEN m.metric_name = 'db_write_attempted_rows_total' THEN 'attempted_rows' WHEN m.metric_name = 'db_write_rows_total' THEN CONCAT(COALESCE(NULLIF(m.labels ->> 'outcome', ''), 'unknown'), '_rows') ELSE m.metric_name END AS metric, sum(m.value)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name IN ('db_write_attempted_rows_total', 'db_write_rows_total') AND (m.metric_name <> 'db_write_rows_total' OR COALESCE(m.labels ->> 'outcome', '') IN ('inserted', 'duplicate', 'updated', 'noop', 'failed')) AND COALESCE(m.run_id, '') = '${run_id}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}') GROUP BY 1, 2 UNION ALL SELECT $__timeGroup(m.observed_at, $__interval) AS time, CONCAT('duplicate_reason:', COALESCE(NULLIF(m.labels ->> 'duplicate_reason', ''), 'unknown')) AS metric, sum(m.value)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name = 'db_write_duplicate_rows_total' AND COALESCE(m.run_id, '') = '${run_id}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}') GROUP BY 1, 2) q ORDER BY time;"
         }
       ],
       "fieldConfig": {
@@ -1023,7 +1013,7 @@
           "sort": "desc"
         }
       },
-      "description": "DB writes, retries, failures, duplicate skips, and stale-update no-ops over time."
+      "description": "Attempted/inserted/duplicate/noop/failed DB rows plus duplicate reason distributions."
     },
     {
       "id": 25,
@@ -1044,7 +1034,7 @@
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT CONCAT(COALESCE(NULLIF(m.component, ''), 'unknown'), ' • ', COALESCE(NULLIF(m.storage_target, ''), 'none')) AS metric, ROUND((percentile_cont(0.95) WITHIN GROUP (ORDER BY m.value))::numeric, 2)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name = 'persistence_wait_ms' AND COALESCE(m.run_id, '') = '${run_id}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}') GROUP BY 1 ORDER BY value DESC LIMIT 12;"
+          "rawSql": "SELECT CONCAT(COALESCE(NULLIF(m.component, ''), 'unknown'), ' \u2022 ', COALESCE(NULLIF(m.storage_target, ''), 'none')) AS metric, ROUND((percentile_cont(0.95) WITHIN GROUP (ORDER BY m.value))::numeric, 2)::double precision AS value FROM observability_metrics.botlens_backend_metric_samples_v1 m WHERE $__timeFilter(m.observed_at) AND m.metric_name = 'persistence_wait_ms' AND COALESCE(m.run_id, '') = '${run_id}' AND (COALESCE(m.series_key, '') = '' OR COALESCE(m.series_key, '') ~ '${series_key:regex}') AND (COALESCE(m.component, '') = '' OR COALESCE(m.component, '') ~ '${component:regex}') AND (COALESCE(m.failure_mode, '') = '' OR COALESCE(m.failure_mode, '') ~ '${failure_mode:regex}') GROUP BY 1 ORDER BY value DESC LIMIT 12;"
         }
       ],
       "fieldConfig": {
@@ -1416,8 +1406,8 @@
           "type": "postgres",
           "uid": "quanttrad-postgres"
         },
-        "definition": "SELECT __value, __text FROM ( SELECT 0 AS sort_key, '__none__' AS __value, 'Select run_id...' AS __text UNION ALL SELECT 1 AS sort_key, r.run_id AS __value, CONCAT(r.run_id, ' • ', COALESCE(l.status, r.status, 'unknown'), CASE WHEN COALESCE(r.bot_id, '') <> '' THEN ' • ' || r.bot_id ELSE '' END) AS __text FROM portal_bot_runs r LEFT JOIN portal_bot_run_lifecycle l ON l.run_id = r.run_id WHERE COALESCE(r.run_id, '') <> '' ) t ORDER BY sort_key, __text DESC;",
-        "query": "SELECT __value, __text FROM ( SELECT 0 AS sort_key, '__none__' AS __value, 'Select run_id...' AS __text UNION ALL SELECT 1 AS sort_key, r.run_id AS __value, CONCAT(r.run_id, ' • ', COALESCE(l.status, r.status, 'unknown'), CASE WHEN COALESCE(r.bot_id, '') <> '' THEN ' • ' || r.bot_id ELSE '' END) AS __text FROM portal_bot_runs r LEFT JOIN portal_bot_run_lifecycle l ON l.run_id = r.run_id WHERE COALESCE(r.run_id, '') <> '' ) t ORDER BY sort_key, __text DESC;",
+        "definition": "SELECT __value, __text FROM ( SELECT 0 AS sort_key, '__none__' AS __value, 'Select run_id...' AS __text UNION ALL SELECT 1 AS sort_key, r.run_id AS __value, CONCAT(r.run_id, ' \u2022 ', COALESCE(l.status, r.status, 'unknown'), CASE WHEN COALESCE(r.bot_id, '') <> '' THEN ' \u2022 ' || r.bot_id ELSE '' END) AS __text FROM portal_bot_runs r LEFT JOIN portal_bot_run_lifecycle l ON l.run_id = r.run_id WHERE COALESCE(r.run_id, '') <> '' ) t ORDER BY sort_key, __text DESC;",
+        "query": "SELECT __value, __text FROM ( SELECT 0 AS sort_key, '__none__' AS __value, 'Select run_id...' AS __text UNION ALL SELECT 1 AS sort_key, r.run_id AS __value, CONCAT(r.run_id, ' \u2022 ', COALESCE(l.status, r.status, 'unknown'), CASE WHEN COALESCE(r.bot_id, '') <> '' THEN ' \u2022 ' || r.bot_id ELSE '' END) AS __text FROM portal_bot_runs r LEFT JOIN portal_bot_run_lifecycle l ON l.run_id = r.run_id WHERE COALESCE(r.run_id, '') <> '' ) t ORDER BY sort_key, __text DESC;",
         "refresh": 2,
         "sort": 0,
         "includeAll": false,
@@ -1436,8 +1426,8 @@
           "type": "postgres",
           "uid": "quanttrad-postgres"
         },
-        "definition": "SELECT DISTINCT series_key AS __value, series_key AS __text FROM portal_bot_run_view_state WHERE series_key <> '__run__' AND COALESCE(run_id, '') = '${run_id}' ORDER BY 1;",
-        "query": "SELECT DISTINCT series_key AS __value, series_key AS __text FROM portal_bot_run_view_state WHERE series_key <> '__run__' AND COALESCE(run_id, '') = '${run_id}' ORDER BY 1;",
+        "definition": "SELECT DISTINCT payload -> 'context' ->> 'series_key' AS __value, payload -> 'context' ->> 'series_key' AS __text FROM portal_bot_run_events WHERE event_type LIKE 'botlens_domain.%' AND COALESCE(payload -> 'context' ->> 'series_key', '') <> '' AND COALESCE(payload -> 'context' ->> 'series_key', '') <> '__run__' AND COALESCE(run_id, '') = '${run_id}' ORDER BY 1;",
+        "query": "SELECT DISTINCT payload -> 'context' ->> 'series_key' AS __value, payload -> 'context' ->> 'series_key' AS __text FROM portal_bot_run_events WHERE event_type LIKE 'botlens_domain.%' AND COALESCE(payload -> 'context' ->> 'series_key', '') <> '' AND COALESCE(payload -> 'context' ->> 'series_key', '') <> '__run__' AND COALESCE(run_id, '') = '${run_id}' ORDER BY 1;",
         "refresh": 2,
         "sort": 1,
         "includeAll": true,

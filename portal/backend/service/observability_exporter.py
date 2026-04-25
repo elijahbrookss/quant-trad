@@ -9,7 +9,9 @@ from typing import Any, Dict, List, Optional
 
 from core.settings import get_settings
 
-from .observability import EventRecord, InMemoryObservabilitySink, MetricRecord, get_observability_sink
+from core.metrics import Metric
+
+from .observability import EventRecord, InMemoryObservabilitySink, get_observability_sink
 from .storage.repos.observability import (
     record_observability_events_batch,
     record_observability_metric_samples_batch,
@@ -33,13 +35,33 @@ def _clean_int(value: Any) -> int | None:
         return None
 
 
-def _metric_payload(record: MetricRecord) -> Dict[str, Any]:
-    labels = dict(record.labels or {})
+def _persisted_metric_labels(labels: Dict[str, Any]) -> Dict[str, Any]:
+    trimmed = dict(labels or {})
+    for key in (
+        "bot_id",
+        "run_id",
+        "instrument_id",
+        "series_key",
+        "worker_id",
+        "queue_name",
+        "pipeline_stage",
+        "message_kind",
+        "delta_type",
+        "storage_target",
+        "failure_mode",
+    ):
+        trimmed.pop(key, None)
+    return trimmed
+
+
+def _metric_payload(record: Metric) -> Dict[str, Any]:
+    labels = dict(record.tags or {})
+    persisted_labels = _persisted_metric_labels(labels)
     return {
-        "observed_at": record.timestamp,
-        "component": _clean_text(labels.get("component")) or "unknown",
-        "metric_name": record.name,
-        "metric_kind": record.kind,
+        "observed_at": record.to_dict().get("timestamp"),
+        "component": _clean_text(record.source) or "unknown",
+        "metric_name": record.metric_name,
+        "metric_kind": record.metric_type.value,
         "value": float(record.value),
         "bot_id": _clean_text(labels.get("bot_id")),
         "run_id": _clean_text(labels.get("run_id")),
@@ -52,7 +74,7 @@ def _metric_payload(record: MetricRecord) -> Dict[str, Any]:
         "delta_type": _clean_text(labels.get("delta_type")),
         "storage_target": _clean_text(labels.get("storage_target")),
         "failure_mode": _clean_text(labels.get("failure_mode")),
-        "labels": labels,
+        "labels": persisted_labels,
     }
 
 
