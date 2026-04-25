@@ -87,59 +87,44 @@ export async function fetchBotRuns(botId, { limit = 25 } = {}) {
   return request(`/api/bots/${encodeURIComponent(botId)}/runs?${params.toString()}`)
 }
 
-export async function fetchBotLensSeriesCatalog(runId) {
-  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series`)
-}
-
-export async function fetchBotLensSession(botId, { symbolKey, limit = 320 } = {}) {
-  const params = new URLSearchParams()
-  params.set('limit', String(Math.max(1, Number(limit) || 320)))
-  if (symbolKey) params.set('symbol_key', String(symbolKey))
-  const query = params.toString()
-  return request(`/api/bots/${encodeURIComponent(botId)}/botlens/session${query ? `?${query}` : ''}`)
+export async function fetchBotLensRunBootstrap(botId) {
+  return request(`/api/bots/${encodeURIComponent(botId)}/botlens/bootstrap/run`)
 }
 
 
-
-export async function fetchBotRunLedgerEvents(botId, runId, { afterSeq = 0, limit = 500, eventNames } = {}) {
-  const params = new URLSearchParams()
-  params.set('after_seq', String(Math.max(0, Number(afterSeq) || 0)))
-  params.set('limit', String(Math.max(1, Number(limit) || 500)))
-  if (Array.isArray(eventNames)) {
-    eventNames.forEach((name) => {
-      if (name === undefined || name === null) return
-      const normalized = String(name).trim()
-      if (!normalized) return
-      params.append('event_name', normalized)
-    })
-  }
-  const query = params.toString()
-  return request(
-    `/api/bots/${encodeURIComponent(botId)}/runs/${encodeURIComponent(runId)}/events${query ? `?${query}` : ''}`,
-  )
-}
 
 export async function fetchBotRunLifecycleEvents(botId, runId) {
   return request(`/api/bots/${encodeURIComponent(botId)}/runs/${encodeURIComponent(runId)}/lifecycle-events`)
 }
 
 
-export async function fetchBotLensSymbolDetail(runId, seriesKey, { limit = 320 } = {}) {
+export async function fetchBotLensSelectedSymbolSnapshot(runId, seriesKey, { limit = 320 } = {}) {
   const params = new URLSearchParams()
   params.set('limit', String(Math.max(1, Number(limit) || 320)))
-  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/detail?${params.toString()}`)
+  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/snapshot?${params.toString()}`)
 }
 
-export async function fetchBotLensSeriesHistory(runId, seriesKey, { beforeTs, limit = 320 } = {}) {
+export const fetchBotLensSelectedSymbolBootstrap = fetchBotLensSelectedSymbolSnapshot
+export const fetchBotLensSelectedSymbolVisual = fetchBotLensSelectedSymbolSnapshot
+
+export async function fetchBotLensChartHistory(runId, seriesKey, { startTime, endTime, limit = 320 } = {}) {
   const params = new URLSearchParams()
-  if (beforeTs) params.set('before_ts', String(beforeTs))
+  if (startTime) params.set('start_time', String(startTime))
+  if (endTime) params.set('end_time', String(endTime))
   params.set('limit', String(Math.max(1, Number(limit) || 320)))
-  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/history?${params.toString()}`)
+  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/chart?${params.toString()}`)
 }
 
-export function openBotLensLiveStream(botId, { symbolKey } = {}) {
+export function openBotLensLiveStream(botId, {
+  resumeFromSeq = 0,
+  streamSessionId = null,
+  selectedSymbolKey = null,
+} = {}) {
   const params = new URLSearchParams()
-  if (symbolKey) params.set('symbol_key', String(symbolKey))
-  const path = `/api/bots/ws/${encodeURIComponent(botId)}/botlens/live?${params.toString()}`
+  params.set('resume_from_seq', String(Math.max(0, Number(resumeFromSeq) || 0)))
+  if (streamSessionId) params.set('stream_session_id', String(streamSessionId))
+  if (selectedSymbolKey) params.set('selected_symbol_key', String(selectedSymbolKey))
+  const query = params.toString()
+  const path = `/api/bots/ws/${encodeURIComponent(botId)}/botlens/live${query ? `?${query}` : ''}`
   return openWebSocket(path, { base: BASE })
 }

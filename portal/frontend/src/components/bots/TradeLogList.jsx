@@ -7,18 +7,18 @@ export function TradeLogList({ logs, logTab, onTabChange, onFocusLog }) {
   const displayedLogs = logTab === 'trade' ? tradeLogs : systemLogs
 
   return (
-    <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
+    <div className="qt-ops-console space-y-3 p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
-          <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Runtime Log</p>
-          <div className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 p-1 text-xs text-white">
+          <p className="qt-ops-kicker">Runtime Log</p>
+          <div className="inline-flex items-center gap-1 rounded-[3px] border border-white/10 bg-black/25 p-1 text-xs text-white">
             <button
               type="button"
               onClick={() => onTabChange('trade')}
-              className={`rounded-md px-3 py-1.5 transition ${
+              className={`qt-mono rounded-[3px] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] transition ${
                 logTab === 'trade'
-                  ? 'bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)]'
-                  : 'text-slate-200 hover:bg-white/10'
+                  ? 'bg-[color:var(--accent-alpha-12)] text-[color:var(--accent-text-strong)]'
+                  : 'text-slate-400 hover:bg-white/8 hover:text-slate-200'
               }`}
             >
               Trade Events ({tradeLogs.length})
@@ -26,10 +26,10 @@ export function TradeLogList({ logs, logTab, onTabChange, onFocusLog }) {
             <button
               type="button"
               onClick={() => onTabChange('system')}
-              className={`rounded-md px-3 py-1.5 transition ${
+              className={`qt-mono rounded-[3px] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] transition ${
                 logTab === 'system'
-                  ? 'bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)]'
-                  : 'text-slate-200 hover:bg-white/10'
+                  ? 'bg-[color:var(--accent-alpha-12)] text-[color:var(--accent-text-strong)]'
+                  : 'text-slate-400 hover:bg-white/8 hover:text-slate-200'
               }`}
             >
               System Logs ({systemLogs.length})
@@ -47,9 +47,9 @@ export function TradeLogList({ logs, logTab, onTabChange, onFocusLog }) {
               <article
                 key={entry.id || `${entry.timestamp || 'log'}-${idx}`}
                 onClick={logTab === 'trade' ? () => onFocusLog(entry) : undefined}
-                className={`rounded-xl border border-white/10 bg-white/5 p-3 text-sm text-white ${
+                className={`rounded-[3px] border border-white/10 bg-black/25 p-3 text-sm text-white ${
                   logTab === 'trade'
-                    ? 'cursor-pointer transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-10)]'
+                    ? 'cursor-pointer transition hover:border-white/16 hover:bg-black/40'
                     : ''
                 }`}
               >

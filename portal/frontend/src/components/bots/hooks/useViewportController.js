@@ -11,6 +11,8 @@ export const CameraIntents = {
 }
 
 const USER_INTERACTION_TTL_MS = 8000
+const INTERACTION_SUPPRESS_MS = 600
+const LIVE_EDGE_THRESHOLD_BARS = 2
 
 const deriveSpacing = (candles = [], barSpacingRef) => {
   const last = candles[candles.length - 1]
@@ -35,7 +37,7 @@ const rangesClose = (left, right, epsilon = 1e-6) => {
   return Math.abs(leftFrom - rightFrom) <= epsilon && Math.abs(leftTo - rightTo) <= epsilon
 }
 
-const computeFollowRange = (candles = [], spacing, { lookbackBars = 24, forwardPadBars = 1.25 } = {}) => {
+export const computeFollowRange = (candles = [], spacing, { lookbackBars = 24, forwardPadBars = 1.25 } = {}) => {
   const lastIndex = candles.length - 1
   const lastTime = candles[lastIndex]?.time
   if (!Number.isFinite(lastTime)) return { range: null, logicalRange: null }
@@ -56,6 +58,17 @@ const computeFollowRange = (candles = [], spacing, { lookbackBars = 24, forwardP
   }
 
   return { range: { from, to }, logicalRange }
+}
+
+export const isLogicalRangePinnedToLatest = (
+  logicalRange,
+  liveLogicalRange,
+  thresholdBars = LIVE_EDGE_THRESHOLD_BARS,
+) => {
+  const currentTo = Number(logicalRange?.to)
+  const liveTo = Number(liveLogicalRange?.to)
+  if (!Number.isFinite(currentTo) || !Number.isFinite(liveTo)) return false
+  return currentTo >= liveTo - Math.max(thresholdBars, 0)
 }
 
 const buildGhostPoints = (candles = [], segments = []) => {
@@ -120,6 +133,16 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
     if (locked) {
       userOverrideUntilRef.current = 0
     }
+  }, [])
+
+  const resetViewport = useCallback((preferredSpanBars = 24) => {
+    lockedRef.current = true
+    userOverrideUntilRef.current = 0
+    pendingFollowRef.current = null
+    lastOverlaySignatureRef.current = null
+    preferredSpanBarsRef.current = clampBars(preferredSpanBars, 8, 480)
+    lastLogicalRangeRef.current = null
+    interactionRef.current = { dragging: false, wheelUntil: 0 }
   }, [])
 
   const notifyUserInteraction = useCallback((ttlMs = USER_INTERACTION_TTL_MS) => {
@@ -258,7 +281,14 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
         }
 
         if (interactionRef.current.dragging || now < Number(interactionRef.current.wheelUntil || 0)) {
-          notifyUserInteraction()
+          const candles = latestCandlesRef?.current || []
+          const spacing = deriveSpacing(candles, barSpacingRef)
+          const liveLogicalRange = computeFollowRange(candles, spacing, {
+            lookbackBars: preferredSpanBarsRef.current,
+            forwardPadBars: 1.25,
+          }).logicalRange
+          notifyUserInteraction(INTERACTION_SUPPRESS_MS)
+          setLocked(isLogicalRangePinnedToLatest(logicalRange, liveLogicalRange))
         }
       }
       const handleTimeRangeChange = (timeRange) => {
@@ -271,11 +301,11 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
 
       const markDragStart = () => {
         interactionRef.current.dragging = true
-        notifyUserInteraction()
+        notifyUserInteraction(INTERACTION_SUPPRESS_MS)
       }
       const markDragMove = () => {
         if (!interactionRef.current.dragging) return
-        notifyUserInteraction()
+        notifyUserInteraction(INTERACTION_SUPPRESS_MS)
       }
       const markDragEnd = () => {
         interactionRef.current.dragging = false
@@ -283,7 +313,7 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
       const markWheel = () => {
         interactionRef.current.dragging = false
         interactionRef.current.wheelUntil = performance.now() + 250
-        notifyUserInteraction()
+        notifyUserInteraction(INTERACTION_SUPPRESS_MS)
       }
 
       ts.subscribeVisibleLogicalRangeChange(handleRangeChange)
@@ -309,7 +339,7 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
         containerEl.removeEventListener('wheel', markWheel)
       }
     },
-    [chartRef, debugRanges, logger, notifyUserInteraction],
+    [barSpacingRef, chartRef, debugRanges, latestCandlesRef, logger, notifyUserInteraction, setLocked],
   )
 
   useEffect(() => {
@@ -327,5 +357,6 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
     attachRangeGuards,
     lockedRef,
     userOverrideUntilRef,
+    resetViewport,
   }
 }
