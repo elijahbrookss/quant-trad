@@ -28,6 +28,7 @@ const DEFAULT_SETTINGS = {
   uiDensity: 'compact',
   motion: 'full',
   logLevel: readDefaultLogLevel(),
+  particleField: true,
 }
 
 function normalizeHex(value) {
@@ -54,6 +55,7 @@ function normalizeSettings(candidate = {}) {
     uiDensity: VALID_DENSITY.has(candidate?.uiDensity) ? candidate.uiDensity : DEFAULT_SETTINGS.uiDensity,
     motion: VALID_MOTION.has(candidate?.motion) ? candidate.motion : DEFAULT_SETTINGS.motion,
     logLevel: VALID_LOG_LEVELS.has(candidate?.logLevel) ? candidate.logLevel : DEFAULT_SETTINGS.logLevel,
+    particleField: typeof candidate?.particleField === 'boolean' ? candidate.particleField : DEFAULT_SETTINGS.particleField,
   }
 }
 

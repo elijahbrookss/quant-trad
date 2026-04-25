@@ -6,6 +6,7 @@ import { Bot, ChevronLeft, ChevronRight, FileText, FlaskConical, Layers, Menu, R
 import { pingApi } from './adapters/health.adapter.js'
 import { usePortalSettings } from './contexts/PortalSettingsContext.jsx'
 import { useAccentColor } from './contexts/AccentColorContext.jsx'
+import { ParticleField } from './components/ui/ParticleField.jsx'
 
 const ChartComponent = lazy(() =>
   import('./components/ChartComponent/ChartComponent').then((module) => ({ default: module.ChartComponent })),
@@ -102,8 +103,11 @@ function SectionHeading({ title, description, kicker, actions }) {
 
 function RouteSectionFallback({ title }) {
   return (
-    <div className="rounded-[8px] border border-white/10 bg-[#151924]/70 p-4 text-[12px] text-slate-400">
-      Loading {title.toLowerCase()}…
+    <div className="rounded-[8px] border border-white/[0.08] bg-[#151924]/40 p-4 text-[12px] text-slate-500 backdrop-blur-sm">
+      <div className="flex items-center gap-2.5">
+        <span className="block h-1.5 w-1.5 rounded-full bg-[color:var(--accent-base)] opacity-50 animate-pulse" />
+        Loading {title.toLowerCase()}…
+      </div>
     </div>
   )
 }
@@ -117,7 +121,7 @@ function Sidebar({ collapsed, open, onClose, onToggleCollapse }) {
         aria-hidden={!open}
       />
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-white/5 bg-[#151924]/95 px-2.5 py-4 backdrop-blur transition lg:static lg:z-auto ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-white/[0.06] bg-[#151924]/72 px-2.5 py-4 backdrop-blur-xl transition lg:static lg:z-auto ${
           open ? 'translate-x-0' : '-translate-x-full'
         } ${collapsed ? 'lg:w-[5.25rem]' : 'lg:w-64'} lg:translate-x-0`}
       >
@@ -171,39 +175,44 @@ function Sidebar({ collapsed, open, onClose, onToggleCollapse }) {
           {navItems.map((item) => {
             const Icon = item.icon
             return (
-              <NavLink
-                key={item.id}
-                to={item.to}
-                title={item.label}
-                className={({ isActive }) =>
-                  [
-                    'rounded-[8px] border transition',
-                    collapsed ? 'flex justify-center px-3.5 py-3' : 'grid grid-cols-[3.25rem_minmax(0,1fr)] items-center gap-3 px-3.5 py-3',
-                    isActive
-                      ? 'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)] shadow-[0_20px_40px_-24px_var(--accent-shadow-strong)]'
-                      : 'border-transparent text-slate-300 hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-10)] hover:text-[color:var(--accent-text-strong)]',
-                 ]
-                    .filter(Boolean)
-                    .join(' ')
-                }
-              >
-                <span className="flex h-11 w-11 items-center justify-center rounded-[7px] bg-white/5 text-[color:var(--accent-text-soft)]">
-                  <Icon className="size-[1.25rem]" />
-                </span>
-                {!collapsed ? (
-                  <div className="min-w-0 space-y-0.5">
-                    <div className="truncate text-[13px] font-semibold leading-none">{item.label}</div>
-                    <div className="truncate text-[8px] uppercase tracking-[0.14em] text-slate-500">{item.kicker}</div>
+              <NavLink key={item.id} to={item.to} title={item.label}>
+                {({ isActive }) => (
+                  <div
+                    className={[
+                      'rounded-[8px] border transition',
+                      collapsed ? 'flex justify-center px-3.5 py-3' : 'grid grid-cols-[3.25rem_minmax(0,1fr)] items-center gap-3 px-3.5 py-3',
+                      isActive
+                        ? 'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)] shadow-[0_20px_40px_-24px_var(--accent-shadow-strong),inset_0_0_0_1px_var(--accent-alpha-15)]'
+                        : 'border-transparent text-slate-300 hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-10)] hover:text-[color:var(--accent-text-strong)]',
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
+                  >
+                    <span
+                      className={`flex h-11 w-11 items-center justify-center rounded-[7px] transition ${
+                        isActive
+                          ? 'bg-[color:var(--accent-alpha-25)] text-[color:var(--accent-text-bright)] shadow-[0_0_18px_-4px_var(--accent-shadow-soft)]'
+                          : 'bg-white/[0.05] text-[color:var(--accent-text-soft)]'
+                      }`}
+                    >
+                      <Icon className="size-[1.25rem]" />
+                    </span>
+                    {!collapsed ? (
+                      <div className="min-w-0 space-y-0.5">
+                        <div className="truncate text-[13px] font-semibold leading-none">{item.label}</div>
+                        <div className="truncate text-[8px] uppercase tracking-[0.14em] text-slate-500">{item.kicker}</div>
+                      </div>
+                    ) : null}
                   </div>
-                ) : null}
+                )}
               </NavLink>
             )
           })}
         </nav>
 
         {!collapsed ? (
-          <div className="mt-auto rounded-[8px] border border-white/10 bg-white/5 p-3.5 text-[10px] text-slate-300">
-            <div className="uppercase tracking-[0.22em] text-slate-500">Flow</div>
+          <div className="mt-auto rounded-[8px] border border-[color:var(--accent-alpha-20)] bg-[color:var(--accent-alpha-05)] p-3.5 text-[10px]">
+            <div className="text-[8px] uppercase tracking-[0.26em] text-[color:var(--accent-text-kicker)]">Flow</div>
             <p className="mt-2 text-[12px] text-slate-200">QuantLab → Strategy → Bot</p>
             <p className="mt-1 text-[9px] text-slate-500">Each lens stays isolated to preserve walk-forward integrity.</p>
           </div>
@@ -229,6 +238,7 @@ function AppShell({ chartId }) {
   const landingPage = settings?.landingPage || '/quantlab'
   const densityClass = settings?.uiDensity === 'comfortable' ? 'app-density-comfortable' : 'app-density-compact'
   const motionClass = settings?.motion === 'reduced' ? 'app-motion-reduced' : 'app-motion-full'
+  const showParticleField = settings?.particleField !== false && settings?.motion !== 'reduced'
 
   useEffect(() => {
     info('app_mounted')
@@ -326,8 +336,9 @@ function AppShell({ chartId }) {
   }, [location.pathname])
 
   return (
-    <div className={`${densityClass} ${motionClass} min-h-screen bg-[#14171f] bg-[radial-gradient(circle_at_top,_var(--accent-gradient-spot)_0%,_rgba(20,23,31,1)_55%)] text-slate-100`}>
-      <div className="flex min-h-screen">
+    <div className={`${densityClass} ${motionClass} min-h-screen text-slate-100`}>
+      {showParticleField && <ParticleField />}
+      <div className="relative z-[1] flex min-h-screen">
         <Sidebar
           collapsed={sidebarCollapsed}
           open={sidebarOpen}
@@ -342,7 +353,7 @@ function AppShell({ chartId }) {
         />
 
         <div className="flex min-w-0 flex-1 flex-col">
-          <header className="app-shell-header sticky top-0 z-30 border-b border-white/5 bg-[#1c1f2b]/90 backdrop-blur">
+          <header className="app-shell-header sticky top-0 z-30 border-b border-white/[0.06] bg-[#1c1f2b]/65 backdrop-blur-lg">
             <div className="flex items-center gap-3">
               <button
                 type="button"
@@ -406,7 +417,7 @@ function AppShell({ chartId }) {
                           <ChartComponent chartId={chartId} />
                         </Suspense>
 
-                        <section className="rounded-[8px] border border-white/10 bg-gradient-to-br from-[#0f1320]/95 via-[#0c101a]/95 to-[#0b0f18]/95 p-3.5 shadow-[0_40px_140px_-90px_rgba(0,0,0,0.85)]">
+                        <section className="rounded-[8px] border border-white/[0.08] bg-gradient-to-br from-[#0f1320]/52 via-[#0c101a]/50 to-[#0b0f18]/48 p-3.5 shadow-[0_40px_140px_-90px_rgba(0,0,0,0.7)] backdrop-blur-xl">
                           <header className="flex items-center justify-between border-b border-white/5 pb-2">
                             <div>
                               <h3 className="text-[12px] font-semibold text-slate-100">Indicators</h3>
@@ -431,7 +442,7 @@ function AppShell({ chartId }) {
                         title="Strategy"
                         description="Author decision logic, attach indicators, and preview rule outputs without execution realism."
                       />
-                      <section className="rounded-[8px] border border-white/8 bg-[#171b24]/70 p-3.5">
+                      <section className="rounded-[8px] border border-white/[0.08] bg-[#171b24]/42 p-3.5 backdrop-blur-lg">
                         <Suspense fallback={<RouteSectionFallback title="strategy workspace" />}>
                           <StrategyTab chartId={chartId} />
                         </Suspense>
@@ -447,7 +458,7 @@ function AppShell({ chartId }) {
                         title="Bots"
                         description="Run walk-forward bots, monitor runtime state, and investigate failures."
                       />
-                      <section className="rounded-[8px] border border-white/8 bg-[#171b24]/70 p-3.5">
+                      <section className="rounded-[8px] border border-white/[0.08] bg-[#171b24]/42 p-3.5 backdrop-blur-lg">
                         <Suspense fallback={<RouteSectionFallback title="bot panel" />}>
                           <BotPanel />
                         </Suspense>
@@ -456,18 +467,18 @@ function AppShell({ chartId }) {
                   }
                 />
                 <Route
-                  path="/reports"
+                  path="/reports/:routeRunId?"
                   element={
                     <div className="space-y-8">
                       <SectionHeading
                         title="Reports"
                         kicker="Analysis Lens"
-                        description="Review completed backtests, compare outcomes, and export performance summaries."
+                        description="Review report artifacts, inspect ratios, and prepare future run-to-run comparisons."
                         actions={
                           <div className="rounded-2xl border border-white/10 bg-white/5 p-3.5 text-[11px] text-slate-300">
                             <div className="uppercase tracking-[0.28em] text-slate-500">Archive</div>
-                            <p className="mt-2 text-[13px] text-slate-200">Every completed run becomes a report.</p>
-                            <p className="mt-1 text-[10px] text-slate-500">Open a report to see charts and trade analytics.</p>
+                            <p className="mt-2 text-[13px] text-slate-200">Reports own analytics and comparison workflows.</p>
+                            <p className="mt-1 text-[10px] text-slate-500">Unknown readiness means the backend has not exposed that state yet.</p>
                           </div>
                         }
                       />

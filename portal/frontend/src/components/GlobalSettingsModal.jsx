@@ -33,6 +33,11 @@ const ANIMATION_OPTIONS = [
   { value: 'reduced', label: 'Reduced' },
 ]
 
+const PARTICLE_FIELD_OPTIONS = [
+  { value: true, label: 'Enabled' },
+  { value: false, label: 'Disabled' },
+]
+
 const LOG_LEVEL_OPTIONS = [
   { value: 'debug', label: 'Debug' },
   { value: 'info', label: 'Info' },
@@ -42,7 +47,7 @@ const LOG_LEVEL_OPTIONS = [
 
 function ChoiceRow({ label, helper, children }) {
   return (
-    <section className="space-y-2 rounded-md border border-slate-800 bg-slate-900/40 p-4">
+    <section className="space-y-2 rounded-md border border-white/[0.08] bg-white/[0.03] p-4">
       <div className="space-y-1">
         <h4 className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-300">{label}</h4>
         {helper ? <p className="text-[11px] text-slate-500">{helper}</p> : null}
@@ -66,7 +71,7 @@ function OptionGrid({ options, currentValue, onSelect, columns = 'sm:grid-cols-2
               'rounded-md border px-3 py-2 text-left text-[12px] transition',
               active
                 ? 'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-15)] text-[color:var(--accent-text-strong)]'
-                : 'border-slate-800 bg-slate-950/70 text-slate-300 hover:border-slate-700 hover:bg-slate-900 hover:text-slate-100',
+                : 'border-white/[0.07] bg-[#080c12]/60 text-slate-300 hover:border-white/[0.14] hover:bg-white/[0.05] hover:text-slate-100',
             ].join(' ')}
           >
             {option.label}
@@ -84,12 +89,16 @@ export function GlobalSettingsModal({ open, onClose }) {
 
   return (
     <Dialog open={open} onClose={onClose} className="relative z-50">
-      <div className="fixed inset-0 bg-black/80 backdrop-blur-sm" aria-hidden="true" />
+      <div className="fixed inset-0 bg-black/75 backdrop-blur-sm" aria-hidden="true" />
       <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="flex max-h-[calc(100vh-2rem)] w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-slate-800 bg-slate-950 shadow-2xl">
-          <div className="flex items-start justify-between gap-4 border-b border-slate-800 px-6 pt-6 pb-4">
+        <DialogPanel className="flex max-h-[calc(100vh-2rem)] w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-white/[0.09] bg-[#0c1018]/90 shadow-[0_32px_80px_-20px_rgba(0,0,0,0.9)] backdrop-blur-2xl">
+
+          {/* accent top strip */}
+          <div className="h-px w-full bg-gradient-to-r from-transparent via-[color:var(--accent-alpha-60)] to-transparent" />
+
+          <div className="flex items-start justify-between gap-4 border-b border-white/[0.07] px-6 pt-5 pb-4">
             <div className="space-y-1">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-500">Portal</p>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-[color:var(--accent-text-kicker)]">Portal</p>
               <DialogTitle className="text-xl font-medium text-slate-50">Global Settings</DialogTitle>
               <p className="text-sm text-slate-400">
                 Local portal preferences only. Bot runtime and execution controls stay in their own workflows.
@@ -98,7 +107,7 @@ export function GlobalSettingsModal({ open, onClose }) {
             <button
               type="button"
               onClick={onClose}
-              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-800 bg-slate-900/50 text-slate-400 transition-colors hover:border-slate-700 hover:bg-slate-900 hover:text-slate-300"
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04] text-slate-400 transition-colors hover:border-white/[0.14] hover:bg-white/[0.07] hover:text-slate-200"
               aria-label="Close"
             >
               <X className="size-4" />
@@ -111,7 +120,7 @@ export function GlobalSettingsModal({ open, onClose }) {
                 label="Accent"
                 helper="Applied immediately in this browser."
               >
-                <div className="flex items-center gap-3 rounded-md border border-slate-800 bg-slate-950/70 px-3 py-3">
+                <div className="flex items-center gap-3 rounded-md border border-white/[0.07] bg-[#080c12]/60 px-3 py-3">
                   <span
                     className="h-9 w-9 rounded-sm border border-white/10"
                     style={{ backgroundColor: accentValue }}
@@ -127,7 +136,7 @@ export function GlobalSettingsModal({ open, onClose }) {
                       updateSettings({ accentColor: event.target.value })
                       setAccentColor(event.target.value)
                     }}
-                    className="h-9 w-9 cursor-pointer rounded border border-slate-700 bg-slate-900"
+                    className="h-9 w-9 cursor-pointer rounded border border-white/[0.08] bg-[#0c1018]"
                   />
                 </div>
                 <div className="grid gap-2 sm:grid-cols-4">
@@ -145,7 +154,7 @@ export function GlobalSettingsModal({ open, onClose }) {
                           'flex items-center gap-2 rounded-md border px-3 py-2 text-left text-[12px] transition',
                           active
                             ? 'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-15)] text-[color:var(--accent-text-strong)]'
-                            : 'border-slate-800 bg-slate-950/70 text-slate-300 hover:border-slate-700 hover:bg-slate-900 hover:text-slate-100',
+                            : 'border-white/[0.07] bg-[#080c12]/60 text-slate-300 hover:border-white/[0.14] hover:bg-white/[0.05] hover:text-slate-100',
                         ].join(' ')}
                       >
                         <span
@@ -208,21 +217,34 @@ export function GlobalSettingsModal({ open, onClose }) {
                 </ChoiceRow>
               </div>
 
-              <ChoiceRow
-                label="Client Logs"
-                helper="Browser-side portal logging level."
-              >
-                <OptionGrid
-                  options={LOG_LEVEL_OPTIONS}
-                  currentValue={settings?.logLevel}
-                  onSelect={(value) => updateSettings({ logLevel: value })}
-                  columns="grid-cols-2 lg:grid-cols-4"
-                />
-              </ChoiceRow>
+              <div className="grid gap-4 lg:grid-cols-2">
+                <ChoiceRow
+                  label="Background Field"
+                  helper="Floating particle network behind the interface."
+                >
+                  <OptionGrid
+                    options={PARTICLE_FIELD_OPTIONS}
+                    currentValue={settings?.particleField !== false}
+                    onSelect={(value) => updateSettings({ particleField: value })}
+                  />
+                </ChoiceRow>
+
+                <ChoiceRow
+                  label="Client Logs"
+                  helper="Browser-side portal logging level."
+                >
+                  <OptionGrid
+                    options={LOG_LEVEL_OPTIONS}
+                    currentValue={settings?.logLevel}
+                    onSelect={(value) => updateSettings({ logLevel: value })}
+                    columns="grid-cols-2"
+                  />
+                </ChoiceRow>
+              </div>
             </div>
           </div>
 
-          <div className="flex items-center justify-between gap-3 border-t border-slate-800 px-6 py-4">
+          <div className="flex items-center justify-between gap-3 border-t border-white/[0.07] px-6 py-4">
             <p className="text-[11px] text-slate-500">Stored locally for this browser.</p>
             <div className="flex items-center gap-3">
               <button
@@ -231,7 +253,7 @@ export function GlobalSettingsModal({ open, onClose }) {
                   resetSettings()
                   setAccentColor('#175a81')
                 }}
-                className="inline-flex items-center gap-2 rounded-md border border-slate-800 bg-slate-900/50 px-3 py-2 text-[12px] text-slate-300 transition-colors hover:border-slate-700 hover:bg-slate-900 hover:text-slate-100"
+                className="inline-flex items-center gap-2 rounded-md border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-[12px] text-slate-300 transition-colors hover:border-white/[0.14] hover:bg-white/[0.06] hover:text-slate-100"
               >
                 <RotateCcw className="size-3.5" />
                 Reset

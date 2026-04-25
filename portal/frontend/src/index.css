@@ -39,7 +39,7 @@
   --ui-radius-control: 2px;
   --ui-radius-panel: 3px;
   --ui-radius-shell: 4px;
-  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, 'Menlo', monospace;
+  --font-mono: 'Roboto Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, 'Menlo', monospace;
   --qt-chart-height: 640px;
   --qt-chart-height-2xl: 700px;
   --qt-rail-width-xl: 300px;
@@ -245,6 +245,98 @@ body {
 
 .qt-bot-trace-placeholder-active .qt-bot-trace-placeholder-line::before {
   animation: qt-bot-trace-placeholder-sweep 2s ease-in-out infinite;
+}
+
+.qt-ops-shell {
+  border-radius: var(--ui-radius-shell);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(12, 16, 22, 0.62), rgba(8, 12, 18, 0.66)),
+    radial-gradient(circle at top left, rgba(148, 163, 184, 0.05), transparent 44%);
+  backdrop-filter: blur(18px) saturate(1.2);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 18px 50px -38px rgba(0, 0, 0, 0.85);
+}
+
+.qt-ops-panel {
+  border-radius: var(--ui-radius-panel);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(13, 18, 25, 0.56), rgba(8, 11, 17, 0.60));
+  backdrop-filter: blur(12px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.qt-ops-panel-muted {
+  border-radius: var(--ui-radius-panel);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(7, 10, 15, 0.44);
+  backdrop-filter: blur(8px);
+}
+
+.qt-ops-grid {
+  background-image:
+    linear-gradient(90deg, rgba(148, 163, 184, 0.04) 0, rgba(148, 163, 184, 0.04) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(148, 163, 184, 0.03) 0, rgba(148, 163, 184, 0.03) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+.qt-ops-kicker {
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  font-weight: 600;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: rgba(148, 163, 184, 0.76);
+}
+
+.qt-ops-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 0.35rem 0.55rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgb(226, 232, 240);
+}
+
+.qt-ops-chip-muted {
+  color: rgb(148, 163, 184);
+}
+
+.qt-ops-console {
+  border-radius: var(--ui-radius-panel);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(8, 11, 16, 0.70), rgba(5, 8, 13, 0.76));
+  backdrop-filter: blur(8px);
+}
+
+.qt-ops-tab {
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgb(148, 163, 184);
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+
+.qt-ops-tab:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgb(226, 232, 240);
+}
+
+.qt-ops-tab[data-active="true"] {
+  border-color: var(--accent-alpha-40);
+  background: var(--accent-alpha-12);
+  color: var(--accent-text-strong);
 }
 
 * {
