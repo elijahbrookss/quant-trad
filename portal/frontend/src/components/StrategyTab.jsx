@@ -30,8 +30,8 @@ import useIndicatorCache from '../hooks/strategy/useIndicatorCache.js'
 import useInstrumentMetadata from '../hooks/strategy/useInstrumentMetadata.js'
 import useStrategyPreview from '../hooks/strategy/useStrategyPreview.js'
 import { extractRuleFlow } from './strategy/rules/ruleUtils.js'
-import { BotCreateModal } from './bots/create/BotCreateModal.jsx'
-import { useBotCreateController } from './bots/create/useBotCreateController.js'
+import { BotCreateModal } from '../features/bots/create/BotCreateModal.jsx'
+import { useBotCreateController } from '../features/bots/create/useBotCreateController.js'
 
 const StrategyTab = ({ chartId }) => {
   const { getChart, updateChart } = useChartState()

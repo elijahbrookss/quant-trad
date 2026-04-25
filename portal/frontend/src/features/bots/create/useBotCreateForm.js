@@ -78,13 +78,6 @@ export function useBotCreateForm(initialForm = buildDefaultForm()) {
     }))
   }, [])
 
-  const handleStrategyToggle = useCallback((strategyId) => {
-    setForm((prev) => ({
-      ...prev,
-      strategy_id: prev.strategy_id === strategyId ? '' : strategyId,
-    }))
-  }, [])
-
   const handleWalletBalanceChange = useCallback((index, patch) => {
     setForm((prev) => {
       const rows = normalizeWalletRows(prev.wallet_balances).slice()
@@ -121,7 +114,6 @@ export function useBotCreateForm(initialForm = buildDefaultForm()) {
     walletError,
     handleChange,
     handleBacktestRangeChange,
-    handleStrategyToggle,
     handleWalletBalanceChange,
     handleWalletBalanceAdd,
     handleWalletBalanceRemove,

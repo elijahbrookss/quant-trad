@@ -1,4 +1,4 @@
-import { DateRangePickerComponent } from '../../ChartComponent/DateTimePickerComponent.jsx'
+import { DateRangePickerComponent } from '../../../components/ChartComponent/DateTimePickerComponent.jsx'
 
 export function BacktestRangeField({ start, end, onChange, compact = false }) {
   if (compact) {
