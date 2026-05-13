@@ -9,12 +9,15 @@ from .startup_lifecycle import BotLifecyclePhase
 
 _FAILURE_PHASES = {
     BotLifecyclePhase.STARTUP_FAILED.value,
+    BotLifecyclePhase.FAILED.value,
     BotLifecyclePhase.CRASHED.value,
+    BotLifecyclePhase.DEGRADED_TERMINAL.value,
 }
-_ACTIVE_RUN_STATUSES = {"starting", "running", "degraded", "telemetry_degraded", "paused"}
+_ACTIVE_RUN_STATUSES = {"starting", "running", "degraded", "telemetry_degraded", "paused", "cancel_requested", "canceling", "stopping"}
 _TERMINAL_SUCCESS_PHASES = {
     BotLifecyclePhase.COMPLETED.value,
     BotLifecyclePhase.STOPPED.value,
+    BotLifecyclePhase.CANCELED.value,
 }
 _CONTAINER_BOOTED_PHASES = {
     BotLifecyclePhase.CONTAINER_BOOTING.value,
@@ -31,9 +34,12 @@ _CONTAINER_BOOTED_PHASES = {
     BotLifecyclePhase.LIVE.value,
     BotLifecyclePhase.DEGRADED.value,
     BotLifecyclePhase.TELEMETRY_DEGRADED.value,
+    BotLifecyclePhase.DEGRADED_TERMINAL.value,
     BotLifecyclePhase.STARTUP_FAILED.value,
+    BotLifecyclePhase.FAILED.value,
     BotLifecyclePhase.CRASHED.value,
     BotLifecyclePhase.STOPPED.value,
+    BotLifecyclePhase.CANCELED.value,
     BotLifecyclePhase.COMPLETED.value,
 }
 _PHASE_ORDER = [phase.value for phase in BotLifecyclePhase]
@@ -56,7 +62,7 @@ def _normalize_status(value: Any) -> str:
 def _checkpoint_status(*, event: Mapping[str, Any], latest_phase: str, latest_run_status: str) -> str:
     phase = str(event.get("phase") or "").strip()
     status = _normalize_status(event.get("status"))
-    if phase in _FAILURE_PHASES or status in {"failed", "error", "startup_failed", "crashed"} or _mapping(event.get("failure")):
+    if phase in _FAILURE_PHASES or status in {"failed", "error", "startup_failed", "crashed", "degraded_terminal"} or _mapping(event.get("failure")):
         return "failed"
     if phase in _TERMINAL_SUCCESS_PHASES:
         return "completed"

@@ -7,7 +7,14 @@ from unittest.mock import patch
 import pytest
 
 from portal.backend.service.observability import BackendObserver, get_observability_sink, reset_observability_sink
-from portal.backend.service.bots.botlens_mailbox import RunMailbox, SymbolMailbox
+from portal.backend.service.bots.botlens_mailbox import (
+    FanoutEnvelope,
+    FanoutSymbolDeltaBatch,
+    RunMailbox,
+    SymbolMailbox,
+    _FANOUT_STOP,
+)
+from portal.backend.service.bots.botlens_projector_registry import _fanout_delivery_loop
 from portal.backend.service.bots.botlens_run_stream import BotLensRunStream
 from portal.backend.service.bots.botlens_state import CandleDelta, ProjectionBatch
 from portal.backend.service.bots.botlens_transport import BotLensTransport
@@ -32,6 +39,14 @@ class _FakeWebSocket:
 class _FailingWebSocket(_FakeWebSocket):
     async def send_text(self, payload: str) -> None:
         raise RuntimeError("socket gone")
+
+
+class _QueueMetrics:
+    def __init__(self) -> None:
+        self.emissions: list[dict] = []
+
+    def emit(self, **payload) -> None:
+        self.emissions.append(dict(payload))
 
 
 def setup_function() -> None:
@@ -127,6 +142,8 @@ def test_run_stream_broadcast_emits_live_delta_metrics_without_snapshot_bufferin
             ws=ws,
             selected_symbol_key="instrument-btc|1m",
         )
+        assert stream.viewer_count_for_symbol("run-1", "instrument-btc|1m") == 1
+        assert stream.viewer_count_for_symbol("run-1", "instrument-eth|1m") == 0
 
         prepared = transport.build_symbol_prepared_deltas(
             run_id="run-1",
@@ -146,8 +163,69 @@ def test_run_stream_broadcast_emits_live_delta_metrics_without_snapshot_bufferin
         assert viewer_broadcasts
         assert all(metric["tags"].get("bot_id") == "bot-1" for metric in viewer_broadcasts)
         assert any(metric["metric_name"] == "viewer_payload_bytes" for metric in snapshot["metrics"])
+        assert any(metric["metric_name"] == "live_transport_payload_bytes" for metric in snapshot["metrics"])
+        assert any(metric["metric_name"] == "live_transport_serialize_ms" for metric in snapshot["metrics"])
         assert all(metric["metric_name"] != "snapshot_buffer_drop_total" for metric in snapshot["metrics"])
         assert all(event["name"] != "viewer_snapshot_buffer_overflow" for event in snapshot["events"])
+
+    asyncio.run(scenario())
+
+
+def test_fanout_skips_symbol_delta_transport_when_no_viewer_demands_symbol() -> None:
+    class _NoViewerRunStream:
+        class _Transport:
+            def build_symbol_prepared_deltas(self, **_kwargs):
+                raise AssertionError("symbol live payload should not be built without viewer demand")
+
+        transport = _Transport()
+
+        def viewer_count_for_symbol(self, _run_id, _symbol_key):
+            return 0
+
+        def viewer_count_for_run(self, _run_id):
+            return 0
+
+    async def scenario() -> None:
+        queue: asyncio.Queue = asyncio.Queue()
+        await queue.put(
+            FanoutEnvelope(
+                run_id="run-1",
+                item=FanoutSymbolDeltaBatch(
+                    run_id="run-1",
+                    deltas=(
+                        CandleDelta(
+                            symbol_key="instrument-btc|1m",
+                            seq=7,
+                            event_time="2026-01-01T00:00:00Z",
+                            candle={"time": 7, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0},
+                        ),
+                    ),
+                ),
+                message_kind="symbol_projection_delta",
+                payload_bytes=128,
+            )
+        )
+        await queue.put(_FANOUT_STOP)
+        metrics = _QueueMetrics()
+
+        await _fanout_delivery_loop(
+            bot_id="bot-1",
+            run_id="run-1",
+            fanout_channel=queue,
+            fanout_queue_metrics=metrics,
+            run_stream=_NoViewerRunStream(),
+        )
+
+        snapshot = get_observability_sink().snapshot()
+        dropped = [
+            metric
+            for metric in snapshot["metrics"]
+            if metric["metric_name"] == "live_transport_dropped_stale_count"
+        ]
+        assert dropped
+        assert dropped[-1]["tags"]["source_reason"] == "no_symbol_viewer"
+        assert dropped[-1]["tags"]["pipeline_stage"] == "candles"
+        assert metrics.emissions
 
     asyncio.run(scenario())
 

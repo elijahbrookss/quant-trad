@@ -101,7 +101,9 @@ _STARTUP_LIFECYCLE_PHASES = frozenset(
         "runtime_subscribing",
     }
 )
-_TERMINAL_LIFECYCLE_PHASES = frozenset({"startup_failed", "crashed", "stopped", "completed", "cancelled", "canceled"})
+_TERMINAL_LIFECYCLE_PHASES = frozenset(
+    {"startup_failed", "failed", "crashed", "stopped", "completed", "cancelled", "canceled", "degraded_terminal"}
+)
 
 
 class InvalidRuntimeStateTransition(RuntimeError):
@@ -235,7 +237,7 @@ def infer_runtime_state(
         return BotLensRuntimeState.STARTUP_FAILED.value
     if phase == "crashed":
         return BotLensRuntimeState.CRASHED.value
-    if phase in {"stopped", "completed", "cancelled", "canceled"}:
+    if phase in {"stopped", "completed", "cancelled", "canceled", "degraded_terminal"}:
         return BotLensRuntimeState.STOPPED.value
     if phase in _STARTUP_LIFECYCLE_PHASES:
         return BotLensRuntimeState.INITIALIZING.value

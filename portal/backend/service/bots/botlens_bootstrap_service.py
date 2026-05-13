@@ -44,6 +44,11 @@ def _mapping(value: Any) -> Dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def _normalize_execution_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"fast", "full"} else "fast"
+
+
 def _telemetry_hub():
     from .telemetry_stream import telemetry_hub
 
@@ -57,11 +62,23 @@ def _run_meta(
     health_state: Mapping[str, Any],
 ) -> Dict[str, Any]:
     row = _mapping(get_bot_run(run_id))
+    config_snapshot = _mapping(row.get("config_snapshot"))
+    bot_snapshot = _mapping(config_snapshot.get("bot"))
+    risk_snapshot = _mapping(bot_snapshot.get("risk")) or _mapping(projected_bot.get("risk"))
+    execution_mode = _normalize_execution_mode(
+        row.get("execution_mode")
+        or config_snapshot.get("execution_mode")
+        or bot_snapshot.get("execution_mode")
+        or projected_bot.get("execution_mode")
+        or risk_snapshot.get("execution_mode")
+    )
     summary_health = _mapping(health_state)
     return {
         "run_id": str(run_id),
         "bot_id": str(row.get("bot_id") or projected_bot.get("id") or "").strip() or None,
         "status": str(summary_health.get("status") or row.get("status") or projected_bot.get("status") or "").strip() or None,
+        "execution_mode": execution_mode,
+        "intrabar_execution": execution_mode == "full",
         "started_at": row.get("started_at"),
         "ended_at": row.get("ended_at"),
         "strategy_id": row.get("strategy_id"),

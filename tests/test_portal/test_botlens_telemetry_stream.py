@@ -34,7 +34,12 @@ from portal.backend.service.bots.botlens_contract import (
     BRIDGE_FACTS_KIND,
     LIFECYCLE_KIND,
 )
-from portal.backend.service.bots.botlens_domain_events import botlens_domain_event_type
+from portal.backend.service.bots.botlens_domain_events import (
+    botlens_domain_event_type,
+    build_botlens_domain_events_from_lifecycle,
+    build_botlens_domain_events_from_fact_batch,
+)
+from portal.backend.service.bots.botlens_projection_batches import projection_batch_from_payload
 from portal.backend.service.bots.botlens_mailbox import (
     BootstrapSlot,
     FanoutEnvelope,
@@ -49,7 +54,13 @@ from portal.backend.service.bots.botlens_symbol_projector import (
     SymbolSummaryNotification,
 )
 from portal.backend.service.bots.botlens_run_projector import RunProjector
-from portal.backend.service.bots.botlens_state import RunOpenTradesDelta, RunSymbolCatalogDelta
+from portal.backend.service.bots.botlens_state import (
+    ProjectionBatch,
+    RunOpenTradesDelta,
+    RunSymbolCatalogDelta,
+    apply_run_batch,
+    empty_run_projection_snapshot,
+)
 from portal.backend.service.bots.botlens_projector_registry import ProjectorRegistry
 from portal.backend.service.bots.botlens_intake_router import IntakeRouter
 import portal.backend.service.bots.botlens_symbol_projector as sym_mod
@@ -195,6 +206,56 @@ def _facts_payload(
         "event_time": "2026-01-01T00:01:00Z",
         "known_at": "2026-01-01T00:01:00Z",
     }
+
+
+def _projection_batch(payload: dict) -> Any:
+    payload = json.loads(json.dumps(payload))
+    for fact in payload.get("facts") or []:
+        candle = fact.get("candle") if isinstance(fact, dict) else None
+        if isinstance(candle, dict) and isinstance(candle.get("time"), int):
+            candle["time"] = f"2026-01-01T00:{int(candle['time']):02d}:00Z"
+        trade = fact.get("trade") if isinstance(fact, dict) else None
+        if isinstance(trade, dict) and not (trade.get("entry_time") or trade.get("opened_at")):
+            trade["entry_time"] = str(payload.get("event_time") or "2026-01-01T00:00:00Z")
+    events = build_botlens_domain_events_from_fact_batch(
+        bot_id=str(payload.get("bot_id") or ""),
+        run_id=str(payload.get("run_id") or ""),
+        payload=payload,
+    )
+    return projection_batch_from_payload(
+        batch_kind=str(payload.get("kind") or ""),
+        run_id=str(payload.get("run_id") or ""),
+        bot_id=str(payload.get("bot_id") or ""),
+        symbol_key=payload.get("series_key"),
+        payload=payload,
+        events=events,
+    )
+
+
+def _run_lifecycle_batch(*, phase: str, status: str, seq: int = 20) -> ProjectionBatch:
+    event_time = "2026-01-01T00:20:00Z"
+    events = build_botlens_domain_events_from_lifecycle(
+        bot_id="bot-1",
+        run_id="run-1",
+        lifecycle={
+            "bot_id": "bot-1",
+            "run_id": "run-1",
+            "phase": phase,
+            "status": status,
+            "owner": "runtime",
+            "message": f"Run {status}.",
+            "checkpoint_at": event_time,
+        },
+    )
+    return ProjectionBatch(
+        batch_kind=LIFECYCLE_KIND,
+        run_id="run-1",
+        bot_id="bot-1",
+        seq=seq,
+        event_time=event_time,
+        known_at=event_time,
+        events=tuple(events),
+    )
 
 
 def _make_symbol_projector(
@@ -724,25 +785,112 @@ class TestRunProjectorSymbolNotification:
 
         asyncio.run(scenario())
 
+    def test_stale_symbol_notification_does_not_reopen_closed_trade(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def scenario() -> None:
+            projector, fanout_channel = self._make_run_projector()
+            await projector._load_initial_state()
+
+            await projector._process_symbol_notification(
+                self._make_notification(
+                    seq=10,
+                    trade_upserts=[
+                        {
+                            "trade_id": "t-1",
+                            "symbol_key": "instrument-btc|1m",
+                            "status": "open",
+                        }
+                    ],
+                )
+            )
+            await projector._process_symbol_notification(
+                self._make_notification(
+                    seq=11,
+                    trade_removals=["t-1"],
+                )
+            )
+
+            assert "t-1" not in projector.get_snapshot().open_trades.entries
+
+            await projector._process_symbol_notification(
+                self._make_notification(
+                    seq=10,
+                    trade_upserts=[
+                        {
+                            "trade_id": "t-1",
+                            "symbol_key": "instrument-btc|1m",
+                            "status": "open",
+                        }
+                    ],
+                )
+            )
+
+            assert "t-1" not in projector.get_snapshot().open_trades.entries
+
+            open_trade_deltas = []
+            while not fanout_channel.empty():
+                item = fanout_channel.get_nowait()
+                if not isinstance(item, FanoutEnvelope) or not isinstance(item.item, FanoutRunDeltaBatch):
+                    continue
+                open_trade_deltas.extend(delta for delta in item.item.deltas if isinstance(delta, RunOpenTradesDelta))
+            assert [tuple(delta.removals) for delta in open_trade_deltas if delta.removals] == [("t-1",)]
+
+        asyncio.run(scenario())
+
+    def test_completed_lifecycle_reconciles_stale_open_trades_from_canonical_ledger(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def scenario() -> None:
+            projector, _fanout_channel = self._make_run_projector()
+            await projector._load_initial_state()
+            await projector._process_symbol_notification(
+                self._make_notification(
+                    seq=10,
+                    trade_upserts=[
+                        {
+                            "trade_id": "t-1",
+                            "symbol_key": "instrument-btc|1m",
+                            "status": "open",
+                        }
+                    ],
+                )
+            )
+            assert "t-1" in projector.get_snapshot().open_trades.entries
+
+            completed_batch = _run_lifecycle_batch(phase="completed", status="completed", seq=20)
+            rebuilt_state, _ = apply_run_batch(
+                empty_run_projection_snapshot(bot_id="bot-1", run_id="run-1"),
+                batch=completed_batch,
+            )
+            monkeypatch.setattr(run_mod, "rebuild_run_projection_snapshot", lambda **_kwargs: rebuilt_state)
+
+            await projector._apply_lifecycle_batch(completed_batch)
+
+            snapshot = projector.get_snapshot()
+            assert snapshot.lifecycle.status == "completed"
+            assert snapshot.open_trades.entries == {}
+            events = get_observability_sink().snapshot()["events"]
+            assert any(event["name"] == "run_projector_reconciled" for event in events)
+
+        asyncio.run(scenario())
+
     def test_run_projector_is_sole_writer_of_open_trades(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """SymbolProjector must never write run-level open_trades_index."""
         async def scenario() -> None:
             # Build a symbol projector and verify _apply_facts does NOT touch
             # any run-level summary — it only sends a notification.
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
-
             projector, run_notifications, _ = _make_symbol_projector()
             await projector._load_initial_state()
-            await projector._apply_bootstrap(_bootstrap_payload(candle_time=1))
+            await projector._apply_bootstrap(_projection_batch(_bootstrap_payload(candle_time=1)))
 
             # Drain the bootstrap notification.
             while not run_notifications.empty():
                 run_notifications.get_nowait()
 
-            await projector._apply_facts(_facts_payload(candle_time=2))
+            await projector._apply_facts(_projection_batch(_facts_payload(candle_time=2)))
 
             # Symbol projector has no open_trades_index — it must use notifications.
-            assert "open_trades_index" not in projector._state
+            assert not hasattr(projector._state, "open_trades_index")
 
             # But a notification was sent to the run projector.
             assert not run_notifications.empty()

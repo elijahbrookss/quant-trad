@@ -107,11 +107,7 @@ def emit_telemetry_ephemeral_message(url: str, message: str, *, instrument: bool
     return True
 
 
-def telemetry_message_context(message: str) -> Dict[str, Any]:
-    try:
-        payload = json.loads(str(message or "{}"))
-    except Exception:
-        return {}
+def telemetry_payload_context(payload: Mapping[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, Mapping):
         return {}
     summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
@@ -126,6 +122,16 @@ def telemetry_message_context(message: str) -> Dict[str, Any]:
         "payload_bytes": int(summary.get("payload_bytes") or 0),
         "known_at": payload.get("known_at"),
     }
+
+
+def telemetry_message_context(message: str) -> Dict[str, Any]:
+    try:
+        payload = json.loads(str(message or "{}"))
+    except Exception:
+        return {}
+    if not isinstance(payload, Mapping):
+        return {}
+    return telemetry_payload_context(payload)
 
 
 class TelemetryEmitter:
@@ -355,12 +361,18 @@ class TelemetryEmitter:
             self._transport_retry_pending = True
             time.sleep(self._retry_ms / 1000.0)
 
-    def send_message(self, message: str, *, queue_name: str | None = None) -> bool:
+    def send_message(
+        self,
+        message: str,
+        *,
+        queue_name: str | None = None,
+        context: Mapping[str, Any] | None = None,
+    ) -> bool:
         if not self.url:
             return False
-        context = telemetry_message_context(message)
-        resolved_queue_name = queue_name or self._lane_for_context(context)
-        labels = self._base_labels(context, queue_name=resolved_queue_name)
+        resolved_context = dict(context or telemetry_message_context(message))
+        resolved_queue_name = queue_name or self._lane_for_context(resolved_context)
+        labels = self._base_labels(resolved_context, queue_name=resolved_queue_name)
         _OBSERVER.increment("telemetry_enqueue_attempt_total", **labels)
         deadline = time.monotonic() + (self._queue_timeout_ms / 1000.0)
         with self._state_lock:
@@ -392,7 +404,7 @@ class TelemetryEmitter:
                         failure_mode="timeout",
                         **labels,
                     )
-                    self._emit_queue_gauges_locked(context=context)
+                    self._emit_queue_gauges_locked(context=resolved_context)
                     return False
                 self._state_lock.wait(timeout=remaining)
                 queue = self._pending_messages[resolved_queue_name]
@@ -401,11 +413,11 @@ class TelemetryEmitter:
             queue.append(
                 {
                     "message": str(message),
-                    "context": context,
+                    "context": resolved_context,
                     "enqueued_monotonic": time.monotonic(),
                 }
             )
-            self._emit_queue_gauges_locked(context=context)
+            self._emit_queue_gauges_locked(context=resolved_context)
             self._state_lock.notify_all()
         _OBSERVER.increment("telemetry_enqueue_success_total", **labels)
         return True
@@ -466,8 +478,8 @@ class TelemetryEmitter:
                 with self._state_lock:
                     self._suppressed_bootstrap_duplicates += 1
                 return True
-        message = json.dumps(payload)
-        context = telemetry_message_context(message)
+        message = json.dumps(payload, separators=(",", ":"), default=str)
+        context = telemetry_payload_context(payload)
         labels = self._base_labels(context, queue_name=queue_name)
         _OBSERVER.increment("telemetry_emitted_total", **labels)
         _OBSERVER.observe(
@@ -475,7 +487,7 @@ class TelemetryEmitter:
             float(payload_size_bytes(message)),
             **labels,
         )
-        accepted = self.send_message(message, queue_name=queue_name)
+        accepted = self.send_message(message, queue_name=queue_name, context=context)
         if accepted and dedupe_key is not None and dedupe_signature is not None:
             with self._state_lock:
                 self._bootstrap_dedupe[dedupe_key] = dedupe_signature
@@ -582,4 +594,9 @@ class TelemetryEmitter:
         self._close_sync_ws()
 
 
-__all__ = ["TelemetryEmitter", "emit_telemetry_ephemeral_message", "telemetry_message_context"]
+__all__ = [
+    "TelemetryEmitter",
+    "emit_telemetry_ephemeral_message",
+    "telemetry_message_context",
+    "telemetry_payload_context",
+]

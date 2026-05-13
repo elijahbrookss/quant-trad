@@ -8,6 +8,7 @@ from .botlens_chart_contracts import chart_history_response_contract
 from .botlens_contract import normalize_series_key
 from .botlens_domain_events import canonicalize_botlens_candle
 from .botlens_retrieval_queries import iter_all_run_domain_truth
+from ..storage import storage
 
 _CANDLE_EVENT_NAMES = ("CANDLE_OBSERVED",)
 
@@ -47,6 +48,15 @@ def _run_bot_id(*, run_id: str) -> str:
     if not bot_id:
         raise ValueError(f"bot_id missing for run_id={run_id}")
     return bot_id
+
+
+def _series_identity(symbol_key: str) -> tuple[str | None, str | None]:
+    if "|" not in str(symbol_key):
+        return None, None
+    instrument_id, timeframe = str(symbol_key).split("|", 1)
+    instrument_id = instrument_id.strip()
+    timeframe = timeframe.strip()
+    return instrument_id or None, timeframe or None
 
 
 def _fits_range(*, candle_time: int, start_epoch: Optional[int], end_epoch: Optional[int]) -> bool:
@@ -130,6 +140,20 @@ def get_symbol_chart_history(
                 has_more_before = True
             else:
                 has_more_after = True
+
+    if not candles_by_time:
+        instrument_id, timeframe = _series_identity(normalized_symbol_key)
+        source_candles = storage.list_candles_for_series(
+            instrument_id=instrument_id or "",
+            timeframe=timeframe or "",
+            start=start_dt,
+            end=end_dt,
+            limit=normalized_limit,
+            prefer_latest=prefer_latest_window,
+        )
+        for candle in source_candles:
+            candle_time = int(candle["time"])
+            candles_by_time[candle_time] = candle
 
     ordered = [candles_by_time[key] for key in sorted(candles_by_time.keys())]
     return chart_history_response_contract(

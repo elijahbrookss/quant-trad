@@ -27,7 +27,11 @@ def _symbol_state(symbol_key: str = "instrument-btc|1m"):
         seq=7,
         readiness=SymbolReadinessState(snapshot_ready=True, symbol_live=True),
         candles=SymbolCandlesState(candles=({"time": 1, "open": 1, "high": 1, "low": 1, "close": 1},)),
-        overlays=SymbolOverlaysState(overlays=({"type": "regime_overlay"},)),
+        overlays=SymbolOverlaysState(
+            overlays=({"type": "regime_overlay"},),
+            overlay_commit_seq=5,
+            overlay_commit_seq_status="overlay_scoped",
+        ),
         signals=SymbolSignalsState(signals=({"event_id": "signal-1"},)),
         decisions=SymbolDecisionsState(decisions=({"event_id": "decision-1"},)),
         trades=SymbolTradesState(trades=({"trade_id": "trade-1", "symbol_key": symbol_key},)),
@@ -136,6 +140,8 @@ def test_selected_symbol_snapshot_contract_is_symbol_scoped_and_not_detail_contr
     }
     assert payload["selected_symbol"]["current"]["candles"][0]["time"] == 1
     assert payload["selected_symbol"]["current"]["continuity"]["candle_count"] == 1
+    assert payload["selected_symbol"]["current"]["overlay_commit_seq"] == 5
+    assert payload["selected_symbol"]["current"]["overlay_commit_seq_status"] == "overlay_scoped"
     assert payload["selected_symbol"]["current"]["overlays"][0]["type"] == "regime_overlay"
     assert payload["selected_symbol"]["current"]["logs"][0]["message"] == "runtime log"
     assert payload["selected_symbol"]["current"]["runtime"]["status"] == "running"
@@ -175,6 +181,8 @@ def test_symbol_detail_contract_remains_separate_from_selected_symbol_snapshot_c
     assert snapshot_payload["scope"]["symbol_key"] == "instrument-btc|1m"
     assert "logs" in detail_payload["detail"]
     assert "logs" in snapshot_payload["selected_symbol"]["current"]
+    assert detail_payload["detail"]["overlay_commit_seq"] == 5
+    assert snapshot_payload["selected_symbol"]["current"]["overlay_commit_seq"] == 5
 
 
 def test_selected_symbol_snapshot_contract_can_report_unavailable_without_fabricating_state() -> None:

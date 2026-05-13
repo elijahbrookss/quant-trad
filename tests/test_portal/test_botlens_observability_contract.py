@@ -11,8 +11,10 @@ from portal.backend.service.observability import (
     BackendObserver,
     QueueStateMetricOwner,
     get_observability_sink,
+    normalize_metric_message_kind,
     reset_observability_sink,
 )
+from core.settings import get_settings
 from portal.backend.service.bots.botlens_candle_continuity import (
     CandleContinuityAccumulator,
     continuity_summary_from_candles,
@@ -20,13 +22,14 @@ from portal.backend.service.bots.botlens_candle_continuity import (
 )
 from portal.backend.service.bots.botlens_contract import BRIDGE_BOOTSTRAP_KIND
 from portal.backend.service.bots.botlens_domain_events import build_botlens_domain_events_from_fact_batch
-from portal.backend.service.bots.botlens_intake_router import IntakeRouter
-from portal.backend.service.bots.botlens_mailbox import RunMailbox, SymbolMailbox
+from portal.backend.service.bots.botlens_intake_router import IntakeRouter, _ingest_source_reason
+from portal.backend.service.bots.botlens_mailbox import QueueEnvelope, RunMailbox, SymbolMailbox
 from portal.backend.service.bots.botlens_projection_batches import projection_batch_from_payload
 from portal.backend.service.bots.botlens_projector_registry import ProjectorRegistry
 from portal.backend.service.bots.botlens_run_projector import RunProjector
-from portal.backend.service.bots.botlens_symbol_projector import SymbolProjector
+from portal.backend.service.bots.botlens_symbol_projector import SymbolProjector, SymbolSummaryNotification
 from portal.backend.service.storage.repos import runtime_events
+import portal.backend.service.bots.botlens_projector_registry as registry_mod
 import portal.backend.service.bots.botlens_run_projector as run_mod
 import portal.backend.service.bots.botlens_symbol_projector as sym_mod
 
@@ -40,6 +43,16 @@ class _FakeWebSocket:
 
     async def close(self, code: int = 1000) -> None:  # pragma: no cover - not used here
         return None
+
+
+def test_ingest_source_reason_preserves_provider_closure_evidence() -> None:
+    assert (
+        _ingest_source_reason(
+            kind=BRIDGE_BOOTSTRAP_KIND,
+            payload={"source_reason": "provider_closure"},
+        )
+        == "provider_closure"
+    )
 
 
 class _FakeScalarResult:
@@ -145,6 +158,24 @@ def _bootstrap_batch(payload: dict):
     )
 
 
+def test_projection_terminal_sets_include_degraded_terminal_and_canceled() -> None:
+    for terminal_status in ("degraded_terminal", "canceled"):
+        assert terminal_status in run_mod._TERMINAL_LIFECYCLE_PHASES
+        assert terminal_status in run_mod._TERMINAL_LIFECYCLE_STATUSES
+        assert terminal_status in registry_mod._TAIL_TERMINAL_PHASES
+        assert terminal_status in registry_mod._TAIL_TERMINAL_STATUSES
+
+
+def test_projection_message_kinds_are_bounded_metric_labels() -> None:
+    for message_kind in (
+        "domain_batch",
+        "symbol_summary",
+        "symbol_projection_delta",
+        "run_projection_delta",
+    ):
+        assert normalize_metric_message_kind(message_kind) == message_kind
+
+
 def test_backend_observer_interval_gauge_throttles_emission() -> None:
     observer = BackendObserver(component="test_observer")
 
@@ -155,6 +186,93 @@ def test_backend_observer_interval_gauge_throttles_emission() -> None:
 
     metrics = [m for m in get_observability_sink().snapshot()["metrics"] if m["metric_name"] == "viewer_active_count"]
     assert [metric["value"] for metric in metrics] == [1.0, 3.0]
+
+
+def test_backend_observer_source_budgets_high_volume_metrics() -> None:
+    observer = BackendObserver(component="botlens_run_stream")
+    sample_every = int(get_settings().observability.high_volume_metric_sample_every)
+
+    for value in range(sample_every + 1):
+        observer.observe(
+            "viewer_broadcast_ms",
+            float(value),
+            run_id="run-1",
+            message_kind="broadcast",
+        )
+
+    metrics = [
+        metric
+        for metric in get_observability_sink().snapshot()["metrics"]
+        if metric["metric_name"] == "viewer_broadcast_ms"
+    ]
+    assert len(metrics) == 2
+    assert metrics[0]["tags"]["capture_policy"] == "source_budgeted"
+    assert metrics[0]["tags"]["sample_count"] == "1"
+    coalesced = metrics[1]
+    assert coalesced["tags"]["capture_policy"] == "source_budgeted"
+    assert int(coalesced["tags"]["sample_count"]) == sample_every
+    assert float(coalesced["tags"]["value_min"]) == 1.0
+    assert float(coalesced["tags"]["value_max"]) == float(sample_every)
+    assert float(coalesced["tags"]["latest_value"]) == float(sample_every)
+
+
+def test_backend_observer_source_budgets_hotpath_wait_and_retention_metrics() -> None:
+    sample_every = int(get_settings().observability.high_volume_metric_sample_every)
+
+    fanout = BackendObserver(component="botlens_projector_registry")
+    for value in range(sample_every + 1):
+        fanout.observe(
+            "fanout_queue_wait_ms",
+            float(value),
+            run_id="run-1",
+            queue_name="fanout_channel",
+            message_kind="symbol_projection_delta",
+        )
+
+    intake = BackendObserver(component="botlens_intake_router")
+    for _value in range(sample_every + 1):
+        intake.increment(
+            "runtime_event_retention_dropped_total",
+            value=2.0,
+            run_id="run-1",
+            message_kind="botlens_runtime_facts",
+            source_reason="runtime_facts",
+        )
+
+    metrics = get_observability_sink().snapshot()["metrics"]
+    fanout_metrics = [metric for metric in metrics if metric["metric_name"] == "fanout_queue_wait_ms"]
+    retention_metrics = [
+        metric for metric in metrics if metric["metric_name"] == "runtime_event_retention_dropped_total"
+    ]
+
+    assert len(fanout_metrics) == 2
+    assert fanout_metrics[0]["tags"]["capture_policy"] == "source_budgeted"
+    assert fanout_metrics[1]["tags"]["capture_policy"] == "source_budgeted"
+    assert int(fanout_metrics[1]["tags"]["sample_count"]) == sample_every
+    assert float(fanout_metrics[1]["tags"]["value_min"]) == 1.0
+    assert float(fanout_metrics[1]["tags"]["value_max"]) == float(sample_every)
+
+    assert len(retention_metrics) == 2
+    assert retention_metrics[0]["tags"]["capture_policy"] == "source_budgeted"
+    assert retention_metrics[1]["tags"]["capture_policy"] == "source_budgeted"
+    assert int(retention_metrics[1]["tags"]["sample_count"]) == sample_every
+    assert float(retention_metrics[1]["value"]) == 2.0 * sample_every
+    assert float(retention_metrics[1]["tags"]["value_sum"]) == 2.0 * sample_every
+
+
+def test_backend_observer_does_not_budget_failure_metrics() -> None:
+    observer = BackendObserver(component="botlens_projector_registry")
+
+    observer.increment("fanout_delivery_error_total", run_id="run-1", failure_mode="delivery_error")
+    observer.increment("fanout_delivery_error_total", run_id="run-1", failure_mode="delivery_error")
+
+    metrics = [
+        metric
+        for metric in get_observability_sink().snapshot()["metrics"]
+        if metric["metric_name"] == "fanout_delivery_error_total"
+    ]
+    assert len(metrics) == 2
+    assert all("capture_policy" not in metric["tags"] for metric in metrics)
 
 
 def test_emit_candle_continuity_summary_reuses_existing_metric_and_event_surfaces() -> None:
@@ -240,6 +358,36 @@ def test_candle_continuity_classifies_gaps_conservatively() -> None:
     assert provider.defect_gap_count == 1
     assert ingestion.gap_count_by_type["ingestion_failure"] == 1
     assert ingestion.defect_gap_count == 1
+
+
+def test_candle_continuity_classifies_closure_backed_gap_as_provider_missing() -> None:
+    candles = [
+        {"time": "2026-01-11T09:00:00Z"},
+        {"time": "2026-01-11T11:00:00Z"},
+    ]
+
+    summary = continuity_summary_from_candles(
+        candles,
+        series_key="instrument-xpp|1h",
+        gap_classification=[
+            {
+                "start": "2026-01-11T10:00:00Z",
+                "end": "2026-01-11T11:00:00Z",
+                "classification": "provider_missing_data",
+                "reason_code": "source_sparse",
+                "evidence": "portal_candle_closure",
+                "provider_evidence": {"provider_message": "exchange closed"},
+            }
+        ],
+    )
+
+    assert summary.detected_gap_count == 1
+    assert summary.gap_count_by_type["provider_missing_data"] == 1
+    assert summary.gap_count_by_type["unknown_gap"] == 0
+    assert summary.defect_gap_count == 1
+    assert summary.gaps[0].reason_code == "source_sparse"
+    assert summary.gaps[0].provider_evidence == {"provider_message": "exchange closed"}
+    assert summary.to_dict()["gaps"][0]["provider_evidence"]["provider_message"] == "exchange closed"
 
 
 def test_candle_continuity_accumulator_detects_cross_batch_full_run_gaps() -> None:
@@ -413,6 +561,114 @@ async def test_fanout_drop_emits_metrics(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_run_notification_overflow_keeps_latest_notification_and_requires_replay() -> None:
+    run_notifications = __import__("asyncio").Queue(maxsize=1)
+    run_notifications.put_nowait(QueueEnvelope(payload={"stale": True}))
+    projector = SymbolProjector(
+        run_id="run-1",
+        bot_id="bot-1",
+        symbol_key="instrument-btc|1m",
+        mailbox=SymbolMailbox(run_id="run-1", bot_id="bot-1", symbol_key="instrument-btc|1m"),
+        run_notifications=run_notifications,
+        fanout_channel=__import__("asyncio").Queue(),
+        run_notification_queue_metrics=_queue_owner(
+            key="run_notification_queue:run-1",
+            depth_metric="run_notification_queue_depth",
+            utilization_metric="run_notification_queue_utilization",
+            oldest_age_metric="run_notification_queue_oldest_age_ms",
+            bot_id="bot-1",
+            run_id="run-1",
+            queue_name="run_notification_queue",
+        ),
+        fanout_queue_metrics=_queue_owner(
+            key="fanout_channel:run-1",
+            depth_metric="fanout_queue_depth",
+            utilization_metric="fanout_queue_utilization",
+            oldest_age_metric="fanout_queue_oldest_age_ms",
+            bot_id="bot-1",
+            run_id="run-1",
+            queue_name="fanout_channel",
+        ),
+    )
+    await projector._load_initial_state()
+    await projector._apply_bootstrap(
+        _bootstrap_batch(
+            {
+                "kind": "botlens_runtime_bootstrap_facts",
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "series_key": "instrument-btc|1m",
+                "run_seq": 1,
+                "bridge_session_id": "session-1",
+                "bridge_seq": 1,
+                "facts": [
+                    {"fact_type": "runtime_state_observed", "runtime": {"status": "running"}},
+                    {
+                        "fact_type": "series_state_observed",
+                        "series_key": "instrument-btc|1m",
+                        "instrument_id": "instrument-btc",
+                        "symbol": "BTC",
+                        "timeframe": "1m",
+                    },
+                ],
+                "event_time": "2026-01-01T00:00:00Z",
+                "known_at": "2026-01-01T00:00:00Z",
+            }
+        )
+    )
+
+    envelope = run_notifications.get_nowait()
+    assert isinstance(envelope.payload, SymbolSummaryNotification)
+    event = next(event for event in get_observability_sink().snapshot()["events"] if event["name"] == "run_notification_queue_overflow")
+    assert event["context"]["overflow_policy"] == "drop_oldest"
+    assert event["context"]["replay_required"] is True
+    assert event["context"]["recovery_action"] == "canonical_ledger_replay"
+    assert event["context"]["current_notification_enqueued"] is True
+
+
+def test_run_notification_coalesces_pending_symbol_summary_and_preserves_trade_delta() -> None:
+    run_notifications = __import__("asyncio").Queue()
+    first = SymbolSummaryNotification(
+        run_id="run-1",
+        bot_id="bot-1",
+        symbol_key="instrument-btc|1m",
+        seq=1,
+        event_time="2026-01-01T00:00:00Z",
+        known_at="2026-01-01T00:00:00Z",
+        symbol_summary={"symbol_key": "instrument-btc|1m", "last_bar_time": "2026-01-01T00:00:00Z"},
+        trade_upserts=({"trade_id": "trade-1", "status": "open"},),
+        trade_removals=(),
+        runtime={"status": "running"},
+    )
+    latest = SymbolSummaryNotification(
+        run_id="run-1",
+        bot_id="bot-1",
+        symbol_key="instrument-btc|1m",
+        seq=2,
+        event_time="2026-01-01T01:00:00Z",
+        known_at="2026-01-01T01:00:00Z",
+        symbol_summary={"symbol_key": "instrument-btc|1m", "last_bar_time": "2026-01-01T01:00:00Z"},
+        trade_upserts=({"trade_id": "trade-2", "status": "open"},),
+        trade_removals=("trade-1",),
+        runtime={"status": "running", "warning_count": 1},
+    )
+
+    run_notifications.put_nowait(QueueEnvelope(payload=first))
+
+    assert sym_mod._coalesce_pending_run_notification(run_notifications, latest) is True
+    assert run_notifications.qsize() == 1
+
+    envelope = run_notifications.get_nowait()
+    assert isinstance(envelope.payload, SymbolSummaryNotification)
+    notification = envelope.payload
+    assert notification.seq == 2
+    assert notification.symbol_summary["last_bar_time"] == "2026-01-01T01:00:00Z"
+    assert notification.runtime["warning_count"] == 1
+    assert notification.trade_upserts == ({"trade_id": "trade-2", "status": "open"},)
+    assert notification.trade_removals == ("trade-1",)
+
+
+@pytest.mark.asyncio
 async def test_symbol_projector_rebuild_failure_marks_projection_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -522,29 +778,32 @@ def test_record_bot_runtime_event_seq_collision_emits_event(monkeypatch: pytest.
 async def test_symbol_projector_emits_apply_metrics_without_persistence_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    run_id = "run-symbol-apply-metrics"
+    bot_id = "bot-symbol-apply-metrics"
+    symbol_key = "instrument-btc|1m"
     projector = SymbolProjector(
-        run_id="run-1",
-        bot_id="bot-1",
-        symbol_key="instrument-btc|1m",
-        mailbox=SymbolMailbox(run_id="run-1", bot_id="bot-1", symbol_key="instrument-btc|1m"),
+        run_id=run_id,
+        bot_id=bot_id,
+        symbol_key=symbol_key,
+        mailbox=SymbolMailbox(run_id=run_id, bot_id=bot_id, symbol_key=symbol_key),
         run_notifications=__import__("asyncio").Queue(),
         fanout_channel=__import__("asyncio").Queue(),
         run_notification_queue_metrics=_queue_owner(
-            key="run_notification_queue:run-1",
+            key=f"run_notification_queue:{run_id}",
             depth_metric="run_notification_queue_depth",
             utilization_metric="run_notification_queue_utilization",
             oldest_age_metric="run_notification_queue_oldest_age_ms",
-            bot_id="bot-1",
-            run_id="run-1",
+            bot_id=bot_id,
+            run_id=run_id,
             queue_name="run_notification_queue",
         ),
         fanout_queue_metrics=_queue_owner(
-            key="fanout_channel:run-1",
+            key=f"fanout_channel:{run_id}",
             depth_metric="fanout_queue_depth",
             utilization_metric="fanout_queue_utilization",
             oldest_age_metric="fanout_queue_oldest_age_ms",
-            bot_id="bot-1",
-            run_id="run-1",
+            bot_id=bot_id,
+            run_id=run_id,
             queue_name="fanout_channel",
         ),
     )
@@ -553,9 +812,9 @@ async def test_symbol_projector_emits_apply_metrics_without_persistence_wait(
         _bootstrap_batch(
             {
             "kind": "botlens_runtime_bootstrap_facts",
-            "bot_id": "bot-1",
-            "run_id": "run-1",
-            "series_key": "instrument-btc|1m",
+            "bot_id": bot_id,
+            "run_id": run_id,
+            "series_key": symbol_key,
             "run_seq": 1,
             "bridge_session_id": "session-1",
             "bridge_seq": 1,
@@ -563,7 +822,7 @@ async def test_symbol_projector_emits_apply_metrics_without_persistence_wait(
                 {"fact_type": "runtime_state_observed", "runtime": {"status": "running"}},
                 {
                     "fact_type": "series_state_observed",
-                    "series_key": "instrument-btc|1m",
+                    "series_key": symbol_key,
                     "instrument_id": "instrument-btc",
                     "symbol": "BTC",
                     "timeframe": "1m",
@@ -578,6 +837,87 @@ async def test_symbol_projector_emits_apply_metrics_without_persistence_wait(
     metric_names = {metric["metric_name"] for metric in get_observability_sink().snapshot()["metrics"]}
     assert "symbol_projector_apply_ms" in metric_names
     assert "persistence_wait_ms" not in metric_names
+
+
+@pytest.mark.asyncio
+async def test_symbol_projector_emits_projection_cursor_and_delta_metrics() -> None:
+    run_id = "run-projection-metrics"
+    bot_id = "bot-projection-metrics"
+    symbol_key = "instrument-projection|1m"
+    projector = SymbolProjector(
+        run_id=run_id,
+        bot_id=bot_id,
+        symbol_key=symbol_key,
+        mailbox=SymbolMailbox(run_id=run_id, bot_id=bot_id, symbol_key=symbol_key),
+        run_notifications=__import__("asyncio").Queue(),
+        fanout_channel=__import__("asyncio").Queue(),
+        run_notification_queue_metrics=_queue_owner(
+            key=f"run_notification_queue:{run_id}",
+            depth_metric="run_notification_queue_depth",
+            utilization_metric="run_notification_queue_utilization",
+            oldest_age_metric="run_notification_queue_oldest_age_ms",
+            bot_id=bot_id,
+            run_id=run_id,
+            queue_name="run_notification_queue",
+        ),
+        fanout_queue_metrics=_queue_owner(
+            key=f"fanout_channel:{run_id}",
+            depth_metric="fanout_queue_depth",
+            utilization_metric="fanout_queue_utilization",
+            oldest_age_metric="fanout_queue_oldest_age_ms",
+            bot_id=bot_id,
+            run_id=run_id,
+            queue_name="fanout_channel",
+        ),
+    )
+    await projector._load_initial_state()
+    await projector._apply_bootstrap(
+        _bootstrap_batch(
+            {
+                "kind": "botlens_runtime_bootstrap_facts",
+                "bot_id": bot_id,
+                "run_id": run_id,
+                "series_key": symbol_key,
+                "run_seq": 11,
+                "bridge_session_id": "session-projection-metrics",
+                "bridge_seq": 1,
+                "facts": [
+                    {"fact_type": "runtime_state_observed", "runtime": {"status": "running"}},
+                    {
+                        "fact_type": "series_state_observed",
+                        "series_key": symbol_key,
+                        "instrument_id": "instrument-projection",
+                        "symbol": "PROJ",
+                        "timeframe": "1m",
+                    },
+                    {
+                        "fact_type": "candle_upserted",
+                        "series_key": symbol_key,
+                        "candle": {
+                            "time": "2026-01-01T00:00:00Z",
+                            "open": 1.0,
+                            "high": 1.0,
+                            "low": 1.0,
+                            "close": 1.0,
+                        },
+                    },
+                ],
+                "event_time": "2026-01-01T00:00:00Z",
+                "known_at": "2026-01-01T00:00:00Z",
+            }
+        )
+    )
+
+    metrics = get_observability_sink().snapshot()["metrics"]
+    metric_names = {metric["metric_name"] for metric in metrics}
+    assert "symbol_projector_delta_count" in metric_names
+    projected_seq = next(
+        metric
+        for metric in metrics
+        if metric["metric_name"] == "symbol_projector_projected_seq"
+        and metric["tags"].get("series_key") == symbol_key
+    )
+    assert projected_seq["value"] >= 11.0
 
 
 @pytest.mark.asyncio

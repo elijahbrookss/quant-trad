@@ -33,6 +33,10 @@ _OBSERVER = BackendObserver(component="botlens_run_stream", event_logger=logger)
 _BOTLENS_SETTINGS = get_settings().bot_runtime.botlens
 
 
+def _stream_json(payload: Mapping[str, Any]) -> str:
+    return json.dumps(payload, separators=(",", ":"), default=str)
+
+
 class BotLensRunStream:
     def __init__(self, *, ring_size: int | None = None) -> None:
         self.transport = BotLensTransport()
@@ -339,7 +343,7 @@ class BotLensRunStream:
                 run_id=key,
                 failure_mode=reason,
             )
-            reset_message = json.dumps(
+            reset_message = _stream_json(
                 stream_reset_required_message(
                     run_id=key,
                     stream_session_id=resolved_stream_session_id,
@@ -375,7 +379,7 @@ class BotLensRunStream:
                 run_id=key,
             )
 
-        connected_message = json.dumps(
+        connected_message = _stream_json(
             stream_connected_message(
                 run_id=key,
                 stream_session_id=resolved_stream_session_id,
@@ -400,7 +404,7 @@ class BotLensRunStream:
                 continue
             sent = await self._send_message(
                 ws,
-                json.dumps(message),
+                _stream_json(message),
                 run_id=key,
                 message_kind=str(message.get("type") or "replay"),
                 series_key=normalize_series_key(message.get("symbol_key")),
@@ -432,7 +436,7 @@ class BotLensRunStream:
                     continue
                 sent = await self._send_message(
                     ws,
-                    json.dumps(message),
+                    _stream_json(message),
                     run_id=key,
                     message_kind=str(message.get("type") or "replay"),
                     series_key=normalize_series_key(message.get("symbol_key")),
@@ -511,7 +515,7 @@ class BotLensRunStream:
             )
             sent = await self._send_message(
                 ws,
-                json.dumps(reset_payload),
+                _stream_json(reset_payload),
                 run_id=key,
                 message_kind="reset_required",
             )
@@ -544,7 +548,7 @@ class BotLensRunStream:
         for message in replay_messages:
             sent = await self._send_message(
                 ws,
-                json.dumps(message),
+                _stream_json(message),
                 run_id=key,
                 message_kind=str(message.get("type") or "replay"),
                 series_key=normalize_series_key(message.get("symbol_key")),
@@ -601,7 +605,6 @@ class BotLensRunStream:
 
     async def _broadcast(self, *, run_id: str, message: Dict[str, Any]) -> Dict[str, int]:
         started = time.perf_counter()
-        serialized = json.dumps(message)
         targets: list[WebSocket] = []
         filtered_viewer_count = 0
         async with self._lock:
@@ -620,6 +623,49 @@ class BotLensRunStream:
                 targets.append(ws)
             self._emit_viewer_gauges_locked(run_id=key)
 
+        bot_id = self.bot_id_for_run(run_id)
+        message_kind = str(message.get("type") or "broadcast")
+        series_key = normalize_series_key(message.get("symbol_key"))
+        pipeline_stage = str(message.get("concern") or "unknown").strip().lower() or "unknown"
+        if not targets:
+            _OBSERVER.increment(
+                "viewer_broadcast_total",
+                value=0.0,
+                bot_id=bot_id,
+                run_id=str(run_id),
+                series_key=series_key,
+                message_kind=message_kind,
+                pipeline_stage=pipeline_stage,
+            )
+            _OBSERVER.increment(
+                "live_transport_dropped_stale_count",
+                value=float(filtered_viewer_count),
+                bot_id=bot_id,
+                run_id=str(run_id),
+                series_key=series_key,
+                message_kind=message_kind,
+                pipeline_stage=pipeline_stage,
+                source_reason="no_target_viewer",
+            )
+            return {
+                "viewer_count": 0,
+                "filtered_viewer_count": filtered_viewer_count,
+                "stale_viewer_count": 0,
+                "serialize_ms": 0.0,
+            }
+
+        serialize_started = time.perf_counter()
+        serialized = _stream_json(message)
+        serialize_ms = max((time.perf_counter() - serialize_started) * 1000.0, 0.0)
+        _OBSERVER.observe(
+            "live_transport_serialize_ms",
+            serialize_ms,
+            bot_id=bot_id,
+            run_id=str(run_id),
+            series_key=series_key,
+            message_kind=message_kind,
+            pipeline_stage=pipeline_stage,
+        )
         stale: list[WebSocket] = []
         successful = 0
         for ws in targets:
@@ -627,8 +673,8 @@ class BotLensRunStream:
                 ws,
                 serialized,
                 run_id=str(run_id),
-                message_kind=str(message.get("type") or "broadcast"),
-                series_key=normalize_series_key(message.get("symbol_key")),
+                message_kind=message_kind,
+                series_key=series_key,
             )
             if not sent:
                 stale.append(ws)
@@ -636,38 +682,52 @@ class BotLensRunStream:
             successful += 1
         for ws in stale:
             await self.remove_run_viewer(run_id=str(run_id), ws=ws)
-        bot_id = self.bot_id_for_run(run_id)
         _OBSERVER.increment(
             "viewer_broadcast_total",
             value=float(successful),
             bot_id=bot_id,
             run_id=str(run_id),
-            series_key=normalize_series_key(message.get("symbol_key")),
-            message_kind=str(message.get("type") or "broadcast"),
+            series_key=series_key,
+            message_kind=message_kind,
+            pipeline_stage=pipeline_stage,
         )
         _OBSERVER.observe(
             "viewer_broadcast_ms",
             max((time.perf_counter() - started) * 1000.0, 0.0),
             bot_id=bot_id,
             run_id=str(run_id),
-            series_key=normalize_series_key(message.get("symbol_key")),
-            message_kind=str(message.get("type") or "broadcast"),
+            series_key=series_key,
+            message_kind=message_kind,
+            pipeline_stage=pipeline_stage,
         )
         _OBSERVER.observe(
             "viewer_payload_bytes",
             float(payload_size_bytes(serialized)),
             bot_id=bot_id,
             run_id=str(run_id),
-            series_key=normalize_series_key(message.get("symbol_key")),
-            message_kind=str(message.get("type") or "broadcast"),
+            series_key=series_key,
+            message_kind=message_kind,
+            pipeline_stage=pipeline_stage,
         )
         return {
             "viewer_count": len(targets),
             "filtered_viewer_count": filtered_viewer_count,
             "stale_viewer_count": len(stale),
+            "serialize_ms": serialize_ms,
         }
 
     async def broadcast_live_delta(self, prepared_delta: PreparedLiveDelta) -> LiveDeliveryStats:
+        bot_id = self.bot_id_for_run(prepared_delta.event.run_id)
+        labels = {
+            "bot_id": bot_id,
+            "run_id": prepared_delta.event.run_id,
+            "series_key": normalize_series_key(prepared_delta.event.symbol_key),
+            "message_kind": prepared_delta.event.message_type,
+            "pipeline_stage": prepared_delta.event.concern,
+        }
+        _OBSERVER.increment("live_transport_fact_count", **labels)
+        _OBSERVER.observe("live_transport_payload_bytes", float(prepared_delta.payload_bytes), **labels)
+        _OBSERVER.observe("live_transport_build_ms", float(prepared_delta.build_ms), **labels)
         async with self._lock:
             stream_session_id = self._ensure_run_stream_session_id_locked(prepared_delta.event.run_id)
             stream_seq = self._next_stream_seq_locked(prepared_delta.event.run_id)
@@ -697,11 +757,14 @@ class BotLensRunStream:
             run_id=prepared_delta.event.run_id,
             message=message,
         )
+        emit_ms = max((time.perf_counter() - emit_started) * 1000.0, 0.0)
+        _OBSERVER.observe("live_transport_dispatch_ms", emit_ms, **labels)
         return LiveDeliveryStats(
-            emit_ms=max((time.perf_counter() - emit_started) * 1000.0, 0.0),
+            emit_ms=emit_ms,
             viewer_count=int(stats.get("viewer_count") or 0),
             filtered_viewer_count=int(stats.get("filtered_viewer_count") or 0),
             stale_viewer_count=int(stats.get("stale_viewer_count") or 0),
+            serialize_ms=float(stats.get("serialize_ms") or 0.0),
         )
 
     async def current_cursor(self, *, run_id: str, bot_id: str | None = None) -> Dict[str, Any]:
@@ -727,6 +790,16 @@ class BotLensRunStream:
 
     def viewer_count_for_run(self, run_id: str) -> int:
         return len(self._run_viewers.get(str(run_id), {}))
+
+    def viewer_count_for_symbol(self, run_id: str, symbol_key: str) -> int:
+        normalized = normalize_series_key(symbol_key)
+        if not normalized:
+            return 0
+        return sum(
+            1
+            for state in self._run_viewers.get(str(run_id), {}).values()
+            if self._viewer_wants_symbol(state, normalized)
+        )
 
     def viewer_run_count(self) -> int:
         return len(self._run_viewers)
