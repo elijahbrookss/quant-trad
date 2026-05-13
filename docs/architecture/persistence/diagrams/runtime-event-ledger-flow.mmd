@@ -1,0 +1,23 @@
+flowchart LR
+    runtime["Execution runtime"]
+    events["Runtime/domain events"]
+    trades["Trade lifecycle rows"]
+    ledger["portal_bot_run_events<br/>typed hot fields + payload"]
+    repos["Storage repositories"]
+    projectors["BotLens projectors"]
+    dataset["RunResearchDataset"]
+    forensics["Paged forensics"]
+
+    runtime --> events
+    runtime --> trades
+    events --> repos --> ledger
+    trades --> repos
+    ledger --> projectors
+    ledger --> dataset
+    ledger --> forensics
+    trades --> dataset
+
+    classDef truth fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
+    classDef view fill:#111827,stroke:#a78bfa,color:#ede9fe
+    class runtime,events,trades,ledger,repos truth
+    class projectors,dataset,forensics view
