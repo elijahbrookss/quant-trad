@@ -17,6 +17,7 @@ export function buildDefaultForm() {
   return {
     name: '',
     mode: 'instant',
+    execution_mode: 'fast',
     run_type: 'backtest',
     backtest_start: '',
     backtest_end: '',

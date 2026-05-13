@@ -1,3 +1,5 @@
+import { formatExecutionModeLabel, resolveExecutionMode } from '../executionMode.js'
+
 export const LIFECYCLE_STATES = new Set([
   'starting',
   'running',
@@ -190,6 +192,7 @@ export function mapRunToViewModel(apiRun = {}, options = {}) {
       apiRun.status ??
       display?.statusKey,
   )
+  const executionMode = resolveExecutionMode(apiRun)
 
   return {
     botId: firstString([apiRun.bot_id, apiRun.id]),
@@ -204,6 +207,8 @@ export function mapRunToViewModel(apiRun = {}, options = {}) {
     strategyName: firstString([apiRun.strategy_name, strategy?.name, apiRun.strategy_id]) || null,
     timeframe: firstString([apiRun.timeframe, strategy?.timeframe]) || null,
     mode: normalizeMode(apiRun.mode || apiRun.run_type),
+    executionMode,
+    executionModeLabel: formatExecutionModeLabel(executionMode),
     lifecycleState,
     healthState: normalizeHealthState(apiRun.health_state ?? apiRun.healthState),
     reportStatus: normalizeReportStatus(apiRun.report_status ?? apiRun.reportStatus),

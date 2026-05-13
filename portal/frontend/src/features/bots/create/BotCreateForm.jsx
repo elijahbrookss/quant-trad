@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { BacktestRangeField } from './BacktestRangeField.jsx'
 import { StrategySelector } from './StrategySelector.jsx'
 import { WalletBalancesSection } from './WalletBalancesSection.jsx'
+import { executionModeDescription, formatExecutionModeLabel } from '../executionMode.js'
 
 const DATE_PRESETS = [
   { label: '7d', days: 7 },
@@ -78,8 +79,8 @@ function RunTypeSelector({ value, onChange }) {
 
 function PlaybackModeSelector({ value, onChange }) {
   const options = [
-    { value: 'instant', label: 'Fast' },
-    { value: 'walk-forward', label: 'Full' },
+    { value: 'instant', label: 'Instant', description: 'No pacing delay' },
+    { value: 'walk-forward', label: 'Walk-forward', description: 'Step through runtime timeline' },
   ]
 
   return (
@@ -99,7 +100,41 @@ function PlaybackModeSelector({ value, onChange }) {
                   : 'border-white/[0.06] bg-black/30 text-slate-400 hover:border-white/[0.1] hover:bg-black/40'
               }`}
             >
-              {opt.label}
+              <span className="block font-medium">{opt.label}</span>
+              <span className="mt-1 block text-xs text-slate-500">{opt.description}</span>
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function ExecutionModeSelector({ value, onChange }) {
+  const options = [
+    { value: 'fast', label: 'FAST', description: 'Faster, conservative' },
+    { value: 'full', label: 'FULL (intrabar)', description: 'Slower, more realistic execution' },
+  ]
+
+  return (
+    <div className="space-y-2">
+      <label className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Execution Mode</label>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {options.map((opt) => {
+          const isActive = (value || 'fast') === opt.value
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => onChange(opt.value)}
+              className={`rounded-lg border px-3 py-3 text-left text-sm transition ${
+                isActive
+                  ? 'border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] text-slate-100'
+                  : 'border-white/[0.06] bg-black/30 text-slate-400 hover:border-white/[0.1] hover:bg-black/40'
+              }`}
+            >
+              <span className="block font-medium">{opt.label}</span>
+              <span className="mt-1 block text-xs text-slate-500">{opt.description}</span>
             </button>
           )
         })}
@@ -251,10 +286,11 @@ export function BotCreateForm({
   const canAdvance = currentStep?.complete ?? true
 
   const reviewMode = form.run_type === 'backtest'
-    ? `Backtest · ${(form.mode || 'instant') === 'walk-forward' ? 'Full' : 'Fast'}`
+    ? `Backtest · playback ${(form.mode || 'instant') === 'walk-forward' ? 'walk-forward' : 'instant'}`
     : form.run_type === 'paper'
       ? 'Paper'
       : 'Live'
+  const reviewExecutionMode = `${formatExecutionModeLabel(form.execution_mode)} · ${executionModeDescription(form.execution_mode)}`
   const reviewRange =
     form.run_type === 'backtest'
       ? form.backtest_start && form.backtest_end
@@ -372,6 +408,9 @@ export function BotCreateForm({
         <StepCard title="Choose run mode" hint="Backtest uses a date range. Paper and live keep execution context separate from strategy design.">
           <div className="space-y-4">
             <RunTypeSelector value={form.run_type} onChange={(value) => onChange('run_type', value)} />
+            <div className="rounded-lg border border-white/8 bg-black/20 p-4">
+              <ExecutionModeSelector value={form.execution_mode} onChange={(value) => onChange('execution_mode', value)} />
+            </div>
             {form.run_type === 'backtest' ? (
               <div className="space-y-4 rounded-lg border border-white/8 bg-black/20 p-4">
                 <PlaybackModeSelector value={form.mode} onChange={(value) => onChange('mode', value)} />
@@ -524,6 +563,7 @@ export function BotCreateForm({
             <ReviewItem label="Variant" value={selectedVariant?.name || 'Strategy defaults'} />
             <ReviewItem label="ATM" value={selectedATMLabel} />
             <ReviewItem label="Run mode" value={reviewMode} />
+            <ReviewItem label="Execution mode" value={reviewExecutionMode} />
             <ReviewItem label="Funding" value={fundingSummary} />
             <ReviewItem label="Date range" value={reviewRange} />
             <ReviewItem label="Bot name" value={form.name || suggestedName || 'Name required'} />

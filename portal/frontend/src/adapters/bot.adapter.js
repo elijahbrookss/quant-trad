@@ -60,11 +60,27 @@ export async function deleteBot(botId) {
 }
 
 export async function startBot(botId) {
-  return request(`/api/bots/${botId}/start`, { method: 'POST' })
+  const requestId =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `start-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  const payload = await request(`/api/bots/${botId}/start`, {
+    method: 'POST',
+    body: JSON.stringify({ request_id: requestId }),
+  })
+  return payload?.bot || payload
 }
 
 export async function stopBot(botId) {
-  return request(`/api/bots/${botId}/stop`, { method: 'POST' })
+  const requestId =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `cancel-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  const payload = await request(`/api/bots/${botId}/stop`, {
+    method: 'POST',
+    body: JSON.stringify({ request_id: requestId }),
+  })
+  return payload?.bot || payload
 }
 
 

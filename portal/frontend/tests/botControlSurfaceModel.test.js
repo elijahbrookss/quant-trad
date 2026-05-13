@@ -202,7 +202,7 @@ test('bot row view model shapes metadata, symbols, and warnings for faster scana
   )
 
   assert.equal(view.strategyLabel, 'Breakout Ladder')
-  assert.equal(view.headerMetaText, 'Breakout Ladder · Backtest · Fast · 1H')
+  assert.equal(view.headerMetaText, 'Breakout Ladder · Backtest · FAST · 1H')
   assert.equal(view.symbols.summaryLabel, '6 symbols')
   assert.equal(view.symbols.trackedLabel, '6 symbols tracked')
   assert.equal(view.symbols.preview, 'BTC, ETH, XRP, SOL +2 more')
@@ -245,6 +245,44 @@ test('completed bot rows keep completion timing in metadata instead of repeating
   assert.equal(view.metadataItems.find((item) => item.key === 'activity')?.label, 'Completed')
   assert.equal(view.metadataItems.find((item) => item.key === 'activity')?.value, '15s ago')
   assert.deepEqual(view.stateFacts.map((item) => item.key), [])
+})
+
+test('bot row view model carries compact performance trace for the card chart', () => {
+  const view = buildBotCardViewModel(
+    buildBot({
+      status: 'running',
+      active_run_id: 'run-live',
+      lifecycle: {
+        status: 'running',
+        phase: 'live',
+        reason: 'live_runtime',
+        updated_at: '2026-04-06T12:05:00Z',
+      },
+      runtime: {
+        status: 'running',
+        run_id: 'run-live',
+        stats: {
+          quote_currency: 'USD',
+          total_trades: 5,
+          net_pnl: 15,
+          equity_curve: [
+            { time: '2026-04-06T12:00:00Z', value: 1000 },
+            { time: '2026-04-06T12:05:00Z', value: 1015 },
+          ],
+        },
+      },
+    }),
+    {
+      strategyLookup: buildStrategyLookup(),
+      nowEpochMs: Date.parse('2026-04-06T12:05:10Z'),
+    },
+  )
+
+  assert.equal(view.performanceTrace.kind, 'series')
+  assert.equal(view.performanceTrace.source, 'equity')
+  assert.equal(view.performanceTrace.latestValue, 1015)
+  assert.equal(view.metricStats.find((item) => item.key === 'total-trades')?.value, '5')
+  assert.equal(view.metricStats.find((item) => item.key === 'net-pnl')?.value, '+15.00')
 })
 
 test('bot sort order lives with the fleet view model instead of the card component', () => {

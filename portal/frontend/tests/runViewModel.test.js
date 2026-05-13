@@ -16,6 +16,7 @@ test('run view model maps missing future backend fields to neutral unknown state
     name: 'CL Trend',
     status: 'completed',
     active_run_id: 'run-1',
+    execution_mode: 'full',
     run: {
       summary: {
         net_pnl: 12.5,
@@ -29,6 +30,8 @@ test('run view model maps missing future backend fields to neutral unknown state
   assert.equal(view.reportStatus, 'unknown')
   assert.equal(view.comparisonStatus, 'unknown')
   assert.equal(view.runId, 'run-1')
+  assert.equal(view.executionMode, 'full')
+  assert.equal(view.executionModeLabel, 'FULL (intrabar)')
   assert.equal(view.pnl, 12.5)
   assert.equal(view.totalTrades, 4)
 })

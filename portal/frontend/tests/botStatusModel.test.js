@@ -160,6 +160,49 @@ test('surfaces completed runs as Completed with rerun and lens actions', () => {
   )
 })
 
+test('surfaces canceled terminal runs without falling back to Starting', () => {
+  const state = getBotCardDisplayState(
+    buildBot({
+      status: 'canceled',
+      latest_run_id: 'run-canceled-1',
+      controls: {
+        can_start: true,
+        can_stop: false,
+        can_open_lens: true,
+        can_delete: true,
+        start_label: 'Start',
+      },
+      lifecycle: {
+        status: 'canceled',
+        phase: 'canceled',
+        reason: 'run_canceled',
+        message: 'Bot cancel completed; runtime container stopped.',
+        telemetry: { run_id: 'run-canceled-1' },
+      },
+      runtime: {
+        status: 'canceled',
+        run_id: 'run-canceled-1',
+      },
+      run: {
+        status: 'canceled',
+        started_at: '2026-04-06T12:00:00Z',
+        ended_at: '2026-04-06T12:02:30Z',
+      },
+    }),
+    { nowEpochMs: Date.parse('2026-04-06T12:05:00Z') },
+  )
+
+  assert.equal(state.displayStatus, 'Canceled')
+  assert.equal(state.tone, 'slate')
+  assert.equal(state.detail, 'Run canceled after 2m 30s')
+  assert.equal(state.runId, 'run-canceled-1')
+  assert.equal(state.isTerminal, true)
+  assert.deepEqual(
+    state.allowedActions.map((action) => action.label),
+    ['Start', 'View Report', 'Delete'],
+  )
+})
+
 test('surfaces startup_failed lifecycle as Startup failed', () => {
   const state = getBotCardDisplayState(
     buildBot({

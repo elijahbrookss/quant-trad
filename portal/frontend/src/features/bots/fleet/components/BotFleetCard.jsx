@@ -28,6 +28,7 @@ export const BotFleetCard = memo(function BotFleetCard({
   const metricStats = view.metricStats || []
   const stateFacts = view.stateFacts || []
   const runView = view.runView || {}
+  const performanceTrace = view.performanceTrace || {}
 
   return (
     <article className="qt-ops-panel group relative overflow-hidden transition-[border-color,background-color] duration-150 hover:border-white/14">
@@ -101,20 +102,10 @@ export const BotFleetCard = memo(function BotFleetCard({
             </div>
 
             <aside className="min-w-0 border-t border-white/8 pt-2.5 xl:border-t-0 xl:border-l xl:border-white/8 xl:pl-3 xl:pt-0">
-              <div className="space-y-1.5">
-                <p className="qt-ops-kicker text-slate-500">Operational</p>
-                <div className="divide-y divide-white/6 border-y border-white/6">
-                  {view.operationalRows.map((row) => (
-                    <OperationalRow key={row.key} {...row} />
-                  ))}
-                </div>
-                <div className="space-y-0.5">
-                  <p className="qt-ops-kicker">Operator Hint</p>
-                  <p title={view.actionHint} className="text-[11px] leading-4 text-slate-400">
-                    {view.actionHint}
-                  </p>
-                </div>
-              </div>
+              <PerformanceTracePanel
+                trace={performanceTrace}
+                rows={view.operationalRows}
+              />
             </aside>
           </div>
 
@@ -310,9 +301,135 @@ function SymbolsRow({ symbols }) {
   )
 }
 
-function OperationalRow({ label, value, mono = false }) {
+function formatTraceValue(value, quoteCurrency) {
+  if (value == null || value === '') return '—'
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return '—'
+  const formatted = new Intl.NumberFormat(undefined, {
+    maximumFractionDigits: Math.abs(numeric) >= 100 ? 0 : 2,
+    minimumFractionDigits: Math.abs(numeric) >= 100 ? 0 : 2,
+  }).format(numeric)
+  return quoteCurrency ? `${formatted} ${quoteCurrency}` : formatted
+}
+
+function traceDelta(trace) {
+  const points = Array.isArray(trace?.points) ? trace.points : []
+  if (points.length < 2) return null
+  const first = Number(points[0]?.y)
+  const last = Number(points[points.length - 1]?.y)
+  if (!Number.isFinite(first) || !Number.isFinite(last)) return null
+  return last - first
+}
+
+function buildSparkline(points) {
+  const normalized = Array.isArray(points)
+    ? points
+        .map((point, index) => ({
+          x: Number.isFinite(Number(point?.x)) ? Number(point.x) : index,
+          y: Number(point?.y),
+        }))
+        .filter((point) => Number.isFinite(point.y))
+    : []
+  if (normalized.length < 2) return null
+
+  const width = 240
+  const height = 84
+  const padX = 4
+  const padY = 8
+  const minX = Math.min(...normalized.map((point) => point.x))
+  const maxX = Math.max(...normalized.map((point) => point.x))
+  let minY = Math.min(...normalized.map((point) => point.y))
+  let maxY = Math.max(...normalized.map((point) => point.y))
+  if (minY === maxY) {
+    const padding = Math.max(1, Math.abs(minY) * 0.002)
+    minY -= padding
+    maxY += padding
+  }
+  const xRange = maxX - minX || normalized.length - 1 || 1
+  const yRange = maxY - minY || 1
+  const projected = normalized.map((point, index) => {
+    const x = minX === maxX
+      ? padX + ((width - padX * 2) * index) / Math.max(1, normalized.length - 1)
+      : padX + ((point.x - minX) / xRange) * (width - padX * 2)
+    const y = padY + (1 - ((point.y - minY) / yRange)) * (height - padY * 2)
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  })
+  return {
+    line: projected.join(' '),
+    area: `${padX},${height - padY} ${projected.join(' ')} ${width - padX},${height - padY}`,
+    minY,
+    maxY,
+  }
+}
+
+function PerformanceTracePanel({ trace, rows = [] }) {
+  const points = Array.isArray(trace?.points) ? trace.points : []
+  const chart = buildSparkline(points)
+  const delta = traceDelta(trace)
+  const hasSeries = trace?.kind === 'series' && chart
+  const trend = delta > 0 ? 'positive' : delta < 0 ? 'danger' : 'default'
+  const strokeClass = trend === 'positive'
+    ? 'stroke-emerald-300'
+    : trend === 'danger'
+      ? 'stroke-rose-300'
+      : 'stroke-slate-300'
+  const fillClass = trend === 'positive'
+    ? 'fill-emerald-400/10'
+    : trend === 'danger'
+      ? 'fill-rose-400/10'
+      : 'fill-slate-400/10'
+  const deltaClass = trend === 'positive'
+    ? 'text-emerald-200'
+    : trend === 'danger'
+      ? 'text-rose-200'
+      : 'text-slate-300'
+  const compactRows = rows.filter((row) => ['phase', 'heartbeat', 'container'].includes(row.key)).slice(0, 3)
+
   return (
-    <div className="flex items-center justify-between gap-3 py-[0.3125rem]">
+    <div className="space-y-2">
+      <div className="flex min-w-0 items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="qt-ops-kicker text-slate-500">{trace?.label || 'Equity'}</p>
+          <p className="mt-0.5 truncate text-[13px] font-semibold text-slate-100">
+            {hasSeries ? formatTraceValue(trace.latestValue, trace.quoteCurrency) : trace?.label || 'No trace'}
+          </p>
+        </div>
+        {hasSeries ? (
+          <div className="shrink-0 text-right">
+            <p className="qt-ops-kicker text-slate-600">Delta</p>
+            <p className={`qt-mono text-[12px] font-semibold tabular-nums ${deltaClass}`}>
+              {delta > 0 ? '+' : ''}{formatTraceValue(delta, trace.quoteCurrency)}
+            </p>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="h-24 overflow-hidden border-y border-white/6 py-1.5">
+        {hasSeries ? (
+          <svg viewBox="0 0 240 84" role="img" aria-label={`${trace.label} trace`} className="h-full w-full">
+            <line x1="4" y1="76" x2="236" y2="76" className="stroke-white/8" strokeWidth="1" />
+            <polygon points={chart.area} className={fillClass} />
+            <polyline points={chart.line} fill="none" className={strokeClass} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        ) : (
+          <div className="flex h-full items-center justify-center text-center">
+            <p className="text-[11px] leading-4 text-slate-500">{trace?.label || 'No performance trace'}</p>
+          </div>
+        )}
+      </div>
+
+      <div className="grid gap-1 sm:grid-cols-3 xl:grid-cols-1 2xl:grid-cols-3">
+        {compactRows.map((row) => (
+          <OperationalRow key={row.key} {...row} compact />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function OperationalRow({ label, value, mono = false, compact = false }) {
+  return (
+    <div className={`flex items-center justify-between gap-3 ${compact ? 'py-0' : 'py-[0.3125rem]'}`}>
       <span className="text-[9px] font-medium uppercase tracking-[0.16em] text-slate-600">{label}</span>
       <span className={`min-w-0 truncate text-right text-[11px] ${mono ? 'qt-mono tabular-nums text-slate-300' : 'text-slate-400'}`}>{value}</span>
     </div>

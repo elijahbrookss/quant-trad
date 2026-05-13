@@ -5,6 +5,8 @@ import {
 } from '../state/botRuntimeStatus.js'
 import { symbolsFromInstrumentSlots } from '../../../utils/instrumentSymbols.js'
 import { mapRunToViewModel } from '../viewModels/runViewModel.js'
+import { formatExecutionModeLabel, resolveExecutionMode } from '../executionMode.js'
+import { getBotPerformanceTrace } from '../../../components/bots/botPerformanceTrace.js'
 
 function truncateIdentifier(value, { head = 7, tail = 5 } = {}) {
   const normalized = String(value || '').trim()
@@ -63,16 +65,14 @@ function describeSymbols(bot, strategyLookup) {
 
 function describeExecution(bot) {
   const runType = String(bot?.run_type || 'backtest').trim().toLowerCase()
-  const mode = String(bot?.mode || '').trim().toLowerCase()
+  const executionLabel = formatExecutionModeLabel(resolveExecutionMode(bot))
   if (runType === 'backtest') {
-    if (mode === 'instant') return 'Backtest · Fast'
-    if (mode === 'walk-forward') return 'Backtest · Walk-forward'
-    return 'Backtest'
+    return `Backtest · ${executionLabel}`
   }
   if (runType === 'paper' || runType === 'paper_trade' || runType === 'sim_trade') {
-    return 'Paper'
+    return `Paper · ${executionLabel}`
   }
-  return 'Live'
+  return `Live · ${executionLabel}`
 }
 
 function buildHeaderMetaText(strategyLabel, executionLabel, timeframe) {
@@ -319,6 +319,7 @@ export function buildBotCardViewModel(
   { strategyLookup = new Map(), nowEpochMs = Date.now(), pendingStart = false } = {},
 ) {
   const display = getBotCardDisplayState(bot, { nowEpochMs, pendingStart })
+  const performanceTrace = getBotPerformanceTrace(bot, { statusKey: display.statusKey })
   const strategy = strategyFor(bot, strategyLookup)
   const runView = mapRunToViewModel(bot, { strategy, display })
   const strategyLabel = String(strategy?.name || bot?.strategy_id || '—').trim() || '—'
@@ -358,6 +359,13 @@ export function buildBotCardViewModel(
       copyable: Boolean(runId),
     }),
     buildActivityMetadataItem(activity),
+    buildMetadataItem({
+      key: 'execution-mode',
+      label: 'Execution',
+      rawValue: runView.executionMode,
+      value: runView.executionModeLabel,
+      title: runView.executionModeLabel,
+    }),
     buildMetadataItem({
       key: 'duration',
       label: 'Duration',
@@ -417,6 +425,7 @@ export function buildBotCardViewModel(
     statusLabel: display.displayStatus,
     statusDetail: display.detail,
     runView,
+    performanceTrace,
     metadataItems,
     metricStats,
     stateFacts,

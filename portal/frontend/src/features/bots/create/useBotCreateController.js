@@ -180,9 +180,11 @@ export function useBotCreateController({
       const startISO = form.backtest_start ? new Date(form.backtest_start).toISOString() : undefined
       const endISO = form.backtest_end ? new Date(form.backtest_end).toISOString() : undefined
       const normalizedMode = form.run_type === 'backtest' ? form.mode : 'walk-forward'
+      const executionMode = String(form.execution_mode || 'fast').trim().toLowerCase() === 'full' ? 'full' : 'fast'
       logger?.info?.('bot_create_request', {
         run_type: form.run_type,
         mode: normalizedMode,
+        execution_mode: executionMode,
         strategy_id: form.strategy_id,
         strategy_variant_id: form.strategy_variant_id || null,
         backtest_start: startISO,
@@ -194,6 +196,7 @@ export function useBotCreateController({
         snapshot_interval_ms: Number(form.snapshot_interval_ms || 1000),
         bot_env: form.bot_env || {},
         mode: normalizedMode,
+        execution_mode: executionMode,
         backtest_start: form.run_type === 'backtest' ? startISO : undefined,
         backtest_end: form.run_type === 'backtest' ? endISO : undefined,
         wallet_config: walletConfig,

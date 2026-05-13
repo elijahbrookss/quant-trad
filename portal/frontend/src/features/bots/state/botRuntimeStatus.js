@@ -48,6 +48,8 @@ const PHASE_LABELS = {
   startup_failed: 'Startup failed',
   crashed: 'Crashed',
   stopped: 'Stopped',
+  canceled: 'Canceled',
+  cancelled: 'Canceled',
   completed: 'Completed',
 }
 
@@ -134,6 +136,11 @@ function describeReason(reason, telemetry) {
       return {
         label: 'Stopped',
         detail: 'The runtime was stopped cleanly.',
+      }
+    case 'run_canceled':
+      return {
+        label: 'Canceled',
+        detail: 'The run was canceled cleanly.',
       }
     case 'runtime_failed':
       return {
@@ -225,6 +232,7 @@ const FAILURE_STATUSES = new Set(['error', 'failed', 'crashed', 'startup_failed'
 const RUNNING_STATUSES = new Set(['running'])
 const DEGRADED_STATUSES = new Set(['degraded', 'telemetry_degraded'])
 const STOPPED_STATUSES = new Set(['stopped'])
+const CANCELED_STATUSES = new Set(['canceled', 'cancelled'])
 const COMPLETED_STATUSES = new Set(['completed'])
 const HEALTHY_PHASES = new Set(['live', 'degraded', 'telemetry_degraded'])
 const FAILURE_REASONS = new Set(['container_exited', 'container_missing', 'runner_stale', 'runtime_crashed', 'runtime_failed', 'startup_failed'])
@@ -330,6 +338,7 @@ function extractBotCardFacts(bot, lifecycle, pendingStart) {
     DEGRADED_STATUSES.has(runtimePhase)
   )
   const completedSignal = statuses.some((status) => COMPLETED_STATUSES.has(status)) || phase === 'completed' || reason === 'run_completed'
+  const canceledSignal = statuses.some((status) => CANCELED_STATUSES.has(status)) || CANCELED_STATUSES.has(phase) || reason === 'run_canceled'
   const stoppedSignal = statuses.some((status) => STOPPED_STATUSES.has(status)) || phase === 'stopped' || reason === 'run_stopped'
   const startupFailureSignal =
     statuses.includes('startup_failed') || phase === 'startup_failed' || reason === 'startup_failed'
@@ -354,7 +363,7 @@ function extractBotCardFacts(bot, lifecycle, pendingStart) {
     STARTING_PHASES.has(phase) ||
     rawRuntimeStatus === 'starting' ||
     STARTING_PHASES.has(runtimePhase) ||
-    (!healthyEvidence && Boolean(projectedRunId || runtimeRunId) && !completedSignal && !stoppedSignal && !startupFailureSignal && !crashSignal)
+    (!healthyEvidence && Boolean(projectedRunId || runtimeRunId) && !completedSignal && !canceledSignal && !stoppedSignal && !startupFailureSignal && !crashSignal)
   const runId = projectedRunId || ((runningSignal || degradedSignal || startingContext) ? runtimeRunId : null)
 
   return {
@@ -376,6 +385,7 @@ function extractBotCardFacts(bot, lifecycle, pendingStart) {
     runningSignal,
     degradedSignal,
     completedSignal,
+    canceledSignal,
     stoppedSignal,
     startupFailureSignal,
     crashSignal,
@@ -399,6 +409,7 @@ function getBotCardStatusKey(facts) {
     return facts.startingContext && !facts.healthyEvidence ? 'failed_start' : 'crashed'
   }
   if (facts.completedSignal) return 'completed'
+  if (facts.canceledSignal) return 'canceled'
   if (facts.stoppedSignal) return 'stopped'
   if (facts.degradedSignal) return 'degraded'
   if (facts.runningSignal) return 'running'
@@ -502,6 +513,9 @@ function getCardStatusDetail(bot, lifecycle, facts, statusKey, nowEpochMs) {
   if (statusKey === 'completed') {
     return completedDuration ? `Run completed in ${completedDuration}` : 'Run completed'
   }
+  if (statusKey === 'canceled') {
+    return completedDuration ? `Run canceled after ${completedDuration}` : 'Run canceled'
+  }
   if (statusKey === 'failed_start' || statusKey === 'crashed') {
     return getFailureDetail(statusKey, facts)
   }
@@ -524,7 +538,7 @@ function resolveCardControls(bot, facts, statusKey) {
         : statusKey === 'running' || statusKey === 'degraded' || statusKey === 'paused'
           ? rawControls.can_stop !== false
           : false,
-    canStart: ['stopped', 'completed', 'crashed', 'failed_start'].includes(statusKey),
+    canStart: ['stopped', 'completed', 'canceled', 'crashed', 'failed_start'].includes(statusKey),
     canDelete: !active,
     startLabel:
       statusKey === 'completed'
@@ -648,7 +662,7 @@ export function getBotCardDisplayState(bot, { nowEpochMs = Date.now(), pendingSt
     heartbeatState: facts.heartbeatState,
     startedAt: facts.startedAt,
     endedAt: facts.endedAt,
-    isTerminal: ['failed_start', 'crashed', 'stopped', 'completed'].includes(statusKey),
+    isTerminal: ['failed_start', 'crashed', 'stopped', 'completed', 'canceled'].includes(statusKey),
     lifecycle,
     controls,
     allowedActions: buildCardActions(statusKey, controls, pendingStart),
