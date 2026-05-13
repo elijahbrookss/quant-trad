@@ -1,192 +1,234 @@
-# quant-trad
+# Quant-Trad
 
-Quant-trad is a quantitative trading platform for research, strategy evaluation, execution realism, and playback inspection.
+Quant-Trad is a deterministic trading engine for research, strategy evaluation, execution realism, and runtime inspection.
 
-The repo is organized around one core idea: trading behavior should be explainable from a single runtime timeline, not reconstructed later from loosely related artifacts.
+It is built around one question:
 
-## What This Repo Is
+> **What happened during a trade -- and why?**
 
-Quant-trad separates responsibilities into explicit layers:
+Every indicator output, strategy decision, fill, fee, wallet update, trade lifecycle event, BotLens view, and research dataset is derived from one walk-forward runtime timeline. The goal is not just to produce backtest results, but to make those results explainable from what the system knew at the time.
 
-- QuantLab: research and indicator exploration
-- Strategy: decision logic from indicator outputs
-- Bot: execution realism, fills, costs, risk, and lifecycle outcomes
-- Playback / BotLens: audit and debugging surfaces for what the runtime actually did
+<p align="center">
+  <img src="docs/assets/quant-trad-platform-flow.svg" alt="Quant-Trad platform flow" width="100%">
+</p>
 
-The system contract is strict about live-equivalent sequencing. Derived outputs are valid only when they respect known-at timing and can be explained by sequential candle arrival.
+---
 
-## Platform Guarantees
+## What Quant-Trad Does
 
-These are the semantics the repo is built around:
+Quant-Trad connects research, strategy logic, execution modeling, and inspection into one runtime-driven system.
 
-- Live-equivalent evaluation: logic must hold under sequential market-data arrival
-- Known-at causality: artifacts are usable only when `known_at <= evaluation_time`
-- Determinism: fixed inputs, params, and versions should produce stable outputs
-- Layer integrity: research, decision, execution, and playback stay separated
-- Single runtime path: `initialize -> apply_bar -> snapshot`
-- Playback is an audit surface, not a demo layer
+```text
+Data -> Indicators -> Signals -> Decisions -> Execution -> BotLens / Reports
+```
 
-If code conflicts with these semantics, the contracts in [`docs/contracts/`](docs/contracts/) are the source of truth.
+At a high level:
 
-## Main Components
+- **Data providers** supply market candles and source metadata.
+- **Indicators** advance through the runtime timeline and publish typed outputs.
+- **Strategies** consume typed outputs and produce decision artifacts.
+- **The bot runtime** executes decisions with deterministic ordering, fees, margin, wallet state, settlement, and trade lifecycle tracking.
+- **BotLens** replays and inspects what the runtime actually did.
+- **RunResearchDataset** turns runtime truth into comparison-ready research data.
 
-- `src/engines/indicator_engine`: indicator execution and snapshot flow
-- `src/engines/bot_runtime`: bot runtime engine and execution semantics
-- `src/indicators`: indicator implementations and runtime-facing payloads
-- `src/signals`: signal rules, overlays, and runtime signal plumbing
-- `src/strategies`: strategy logic built on indicator and signal outputs
-- `portal/backend`: FastAPI services for bots, data, storage, reports, and APIs
-- `portal/frontend`: React/Vite UI including bot cards, BotLens, and operational views
-- `docker/`: compose stack, observability services, database, and broker support
+Reports and visualizations are views over runtime truth. They do not create alternate execution logic.
+
+---
+
+## Core Runtime Principle
+
+The core runtime model is:
+
+```text
+initialize -> apply_bar -> snapshot
+```
+
+This means:
+
+- **initialize** prepares the runtime, symbols, strategies, indicators, wallet, and execution context.
+- **apply_bar** advances time one market event at a time.
+- **snapshot** captures the resulting state for inspection, reporting, and debugging.
+
+The runtime is the source of truth.
+
+---
+
+## Execution Modes
+
+Quant-Trad separates execution semantics from UI playback.
+
+### FAST
+
+FAST mode uses the strategy timeframe candle directly.
+
+- Uses strategy timeframe OHLC.
+- Does not use intrabar execution data.
+- If take-profit and stop-loss are both touched in the same candle, the pessimistic outcome wins.
+
+FAST is useful for quick, conservative approximation.
+
+### FULL
+
+FULL mode uses lower-timeframe intrabar data when available.
+
+- Uses 1-minute intrabar candles to resolve execution order.
+- Falls back to pessimistic behavior when intrabar data is missing, incomplete, or still ambiguous.
+- Keeps frontend animation separate from execution truth.
+
+FULL is the higher-fidelity execution mode.
+
+---
+
+## What Makes This System Different
+
+Quant-Trad is designed around a few core constraints:
+
+- **Deterministic execution**
+  Same inputs should produce the same decisions, trades, and results.
+
+- **Known-at correctness**
+  Strategies can only act on data available at that point in the runtime timeline.
+
+- **Execution realism**
+  Fees, margin, wallet state, collateral, settlement, terminal closes, and intrabar behavior are modeled explicitly.
+
+- **Inspection-first design**
+  BotLens exists to explain trades, not just display charts.
+
+- **Dataset-first reporting**
+  Research and comparison are built from canonical runtime data, not ad hoc report files.
+
+- **Separation of concerns**
+  Strategy logic, execution behavior, visualization, and reporting are separate layers.
+
+---
+
+## Core Components
+
+### Strategy Layer
+
+Strategies consume typed indicator outputs and produce decisions. Decisions can be accepted into execution or rejected with explicit reasons.
+
+### Indicator Engine
+
+Indicators advance through runtime time and publish typed outputs such as `signal`, `context`, and `metric`.
+
+### Bot Runtime
+
+The runtime owns walk-forward execution, deterministic ordering, fills, fees, margin, wallet state, trade lifecycle, and terminal run state.
+
+### BotLens
+
+BotLens is the inspection layer. It shows what the runtime knew and did: selected-symbol state, trade overlays, decision context, lifecycle facts, and diagnostics.
+
+### RunResearchDataset
+
+RunResearchDataset is the canonical research output. It summarizes decisions, trades, fees, PnL, execution mode, fallbacks, close reasons, per-symbol performance, and LLM-ready insights.
+
+---
 
 ## Quick Start
 
-Prerequisites:
+### Prerequisites
 
 - Docker
 - GNU Make
-- Python 3.12+ if you want to run local tooling outside Docker
+- Python 3.12+ for local tooling outside Docker
 
-Create local secrets:
+### Create local secrets
 
 ```bash
 cp secrets.env.example secrets.env
 ```
 
-Config file roles:
-
-- `.env`: checked-in local defaults for root Python tooling and test bootstrap
-- `.env.test`: docker-compose test defaults
-- `secrets.env`: private credentials and operator overrides
-- `portal/frontend/.env`: frontend Vite defaults
-
-Bring up the core stack:
+### Start the core stack
 
 ```bash
 make up BUILD=1 STACK_PROFILES=core
 ```
 
-This starts:
+Open:
 
 - Frontend: `http://localhost:5173`
 - Backend API: `http://localhost:8000`
 - TimescaleDB: `localhost:15432`
 - pgAdmin: `http://localhost:8080`
 
-If you want observability as well:
+### Add observability
 
 ```bash
 make up BUILD=1 STACK_PROFILES=all
 ```
 
-That adds:
+Open:
 
 - Grafana: `http://localhost:3000`
 - Loki: `http://localhost:3100`
 
-## Daily Workflow
+---
 
-Common commands:
+## Documentation
+
+Start here:
+
+- [Documentation homepage](docs/index.md)
+- [Overview](docs/overview.md)
+- [Getting started](docs/getting-started.md)
+
+Core concepts:
+
+- [Runtime timeline](docs/concepts/runtime-timeline.md)
+- [Execution model](docs/concepts/execution-model.md)
+- [Strategies and signals](docs/concepts/strategies-and-signals.md)
+- [BotLens](docs/concepts/botlens.md)
+- [Reporting datasets](docs/concepts/reporting-datasets.md)
+
+Engineering:
+
+- [Engineering architecture](docs/engineering/architecture.md)
+- [Data layer](docs/engineering/data-layer.md)
+- [Observability](docs/engineering/observability.md)
+- [Architecture component index](docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md)
+
+Guides:
+
+- [Creating an indicator](docs/guides/creating-an-indicator.md)
+- [Creating a strategy](docs/guides/creating-a-strategy.md)
+- [Adding a provider](docs/guides/adding-a-provider.md)
+
+Contracts:
+
+- [System contract](docs/contracts/platform/00_system_contract.md)
+- [Runtime contract](docs/contracts/platform/01_runtime_contract.md)
+- [Execution and playback contract](docs/contracts/platform/02_execution_playback_contract.md)
+- [Engineering contract](docs/contracts/platform/03_engineering_contract.md)
+
+Contracts are the source of truth when code and explanatory docs disagree.
+
+---
+
+## Useful Commands
 
 ```bash
-make up BUILD=1 STACK_PROFILES=core   # build and start the core stack
-make logs SERVICE=backend             # tail backend logs
-make restart BUILD=1                  # rebuild/restart the current stack
-make ps                               # inspect running services
-make down                             # stop and remove containers
-make test                             # run tests
-make fmt                              # format code
-make lint                             # lint code
-make sync-docs                        # sync docs to your Obsidian/docs target
+make help                            # list available commands
+make up BUILD=1 STACK_PROFILES=core  # build and start core services
+make up BUILD=1 STACK_PROFILES=all   # build and start core + observability
+make ps                              # inspect running services
+make logs SERVICE=backend            # tail backend logs
+make restart BUILD=1                 # rebuild/restart current stack
+make test                            # run tests
+make check                           # run standard developer/audit checks
+make down                            # stop and remove containers
 ```
 
-Run `make help` for the full command set.
+---
 
-## Configuration
+## Project Status
 
-Runtime configuration is split across a few files on purpose:
+Quant-Trad is in active development.
 
-- `.env`: tracked local defaults for Python tooling, local DB wiring, and root test bootstrap
-- `.env.test`: tracked defaults for `docker/docker-compose.test.yml`
-- `secrets.env`: untracked private credentials and machine-specific overrides
-- `portal/frontend/.env`: frontend API base defaults for Vite
+The runtime, execution semantics, reporting datasets, BotLens inspection, provider behavior, and operator workflows are still evolving. The system is intended for research, backtesting, paper trading, and controlled environments unless you have independently reviewed the execution path, provider configuration, and risk controls for your use case.
 
-Tests load `.env` and `secrets.env`. The Docker test stack uses `.env.test`.
+Do not treat this as production trading infrastructure without your own validation.
 
-Common integrations in this repo include:
-
-- Alpaca
-- Interactive Brokers
-- CCXT-backed crypto exchanges
-- TimescaleDB/Postgres
-- Grafana / Loki
-
-See [`secrets.env.example`](secrets.env.example) for the available settings and operational knobs. The platform uses a single database DSN: `PG_DSN`.
-Runtime services are expected to run in Docker and connect to the database over the internal `tsdb:5432` network path. Host port `localhost:15432` is for operator access.
-
-## Repository Map
-
-```text
-quant-trad/
-├── src/
-│   ├── engines/            # indicator and bot runtime engines
-│   ├── indicators/         # indicator implementations
-│   ├── signals/            # signal rules and overlays
-│   ├── strategies/         # strategy definitions
-│   ├── data_providers/     # provider integrations
-│   └── core/               # shared runtime utilities
-├── portal/
-│   ├── backend/            # FastAPI backend and services
-│   └── frontend/           # React/Vite frontend
-├── docker/                 # compose stack and service images
-├── docs/
-│   ├── agents/             # canonical system/runtime contracts
-│   └── architecture/       # focused architecture notes
-└── tests/                  # test coverage
-```
-
-## Recommended Reading
-
-Start here if you are new to the repo:
-
-1. [`docs/README.md`](docs/README.md)
-2. [`docs/contracts/README.md`](docs/contracts/README.md)
-3. [`docs/contracts/platform/00_system_contract.md`](docs/contracts/platform/00_system_contract.md)
-4. [`docs/contracts/platform/01_runtime_contract.md`](docs/contracts/platform/01_runtime_contract.md)
-5. [`docs/contracts/platform/02_execution_playback_contract.md`](docs/contracts/platform/02_execution_playback_contract.md)
-6. [`docs/contracts/platform/03_engineering_contract.md`](docs/contracts/platform/03_engineering_contract.md)
-
-Then use these architecture docs for current implementation details:
-
-- [`docs/architecture/engine/ENGINE_OVERVIEW.md`](docs/architecture/engine/ENGINE_OVERVIEW.md)
-- [`docs/architecture/signals/SIGNAL_PIPELINE_ARCHITECTURE.md`](docs/architecture/signals/SIGNAL_PIPELINE_ARCHITECTURE.md)
-- [`docs/architecture/runtime/BOT_RUNTIME_DOCS_HUB.md`](docs/architecture/runtime/BOT_RUNTIME_DOCS_HUB.md)
-- [`docs/architecture/runtime/RUNTIME_EVENT_MODEL_V1.md`](docs/architecture/runtime/RUNTIME_EVENT_MODEL_V1.md)
-- [`docs/architecture/runtime/WALLET_GATEWAY_ARCHITECTURE.md`](docs/architecture/runtime/WALLET_GATEWAY_ARCHITECTURE.md)
-
-## Current State
-
-This is an active development repo, not a polished end-user product.
-
-That means:
-
-- architecture and APIs are still evolving
-- correctness and semantic consistency are prioritized over convenience
-- logs are treated as part of the product
-- invalid runtime states should fail loudly, not be hidden
-
-Use caution before pointing this at real capital. The repo is built to be explainable first, optimized second.
-
-## Contributing
-
-Before making non-trivial changes:
-
-1. Read the system and runtime contracts in [`docs/contracts/`](docs/contracts/)
-2. Preserve the layer boundaries between research, strategy, execution, and playback
-3. Prefer extending canonical snapshot/runtime contracts over adding alternate reconstruction paths
-4. Add tests or targeted verification when behavior changes
-5. Run `make sync-docs` after doc updates
-
-## License
-
-MIT. See [`LICENSE`](LICENSE).
+---
