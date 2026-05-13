@@ -51,6 +51,12 @@ _ALLOWED_METRIC_LABELS = frozenset(
         "duplicate_reason",
         "payload_size_bucket",
         "gap_type",
+        "sample_count",
+        "value_sum",
+        "value_min",
+        "value_max",
+        "latest_value",
+        "capture_policy",
     }
 )
 _DISALLOWED_METRIC_LABELS = frozenset(
@@ -88,18 +94,95 @@ _ALLOWED_METRIC_MESSAGE_KINDS = frozenset(
         "botlens_symbol_trade_delta",
         "broadcast",
         "connected",
+        "domain_batch",
         "ephemeral",
         "facts",
         "ingest_ws",
         "legacy",
         "reset_required",
         "selected_symbol_snapshot",
+        "symbol_projection_delta",
+        "symbol_summary",
         "heartbeat",
         "lifecycle",
         "notification",
+        "run_projection_delta",
         "unknown",
         "deprecated",
     }
+)
+_SOURCE_BUDGETED_METRIC_COMPONENTS: dict[str, tuple[str, ...]] = {
+    "botlens_run_stream": (
+        "live_transport_",
+        "viewer_broadcast_",
+        "viewer_payload_bytes",
+    ),
+    "botlens_projector_registry": (
+        "fanout_delivery_items_total",
+        "fanout_delivery_ms",
+        "fanout_queue_wait_ms",
+        "live_transport_",
+    ),
+    "botlens_run_projector": (
+        "live_transport_",
+        "run_projector_apply_ms",
+        "run_notification_queue_wait_ms",
+    ),
+    "botlens_symbol_projector": (
+        "live_transport_",
+        "run_notification_coalesced_total",
+        "run_notification_enqueued_total",
+        "symbol_projector_apply_ms",
+        "symbol_fact_queue_wait_ms",
+    ),
+    "botlens_intake_router": (
+        "ingest_route_ms",
+        "ingest_messages_total",
+    ),
+    "botlens_mailbox": (
+        "run_notification_enqueued_total",
+        "symbol_fact_enqueued_total",
+    ),
+    "botlens_ingest_ws": (
+        "ingest_json_decode_ms",
+        "ingest_payload_bytes",
+        "ingest_receive_wait_ms",
+    ),
+    "container_runtime_telemetry": (
+        "telemetry_emitted_total",
+        "telemetry_enqueue_",
+        "telemetry_payload_bytes",
+        "telemetry_queue_wait_ms",
+        "telemetry_transport_payload_bytes",
+        "telemetry_transport_send_ms",
+        "telemetry_transport_send_total",
+    ),
+}
+_SOURCE_BUDGET_EXPLICIT_METRIC_NAMES: dict[str, frozenset[str]] = {
+    "botlens_intake_router": frozenset(
+        {
+            "runtime_event_retention_dropped_total",
+        }
+    ),
+}
+_SOURCE_BUDGET_ALWAYS_CAPTURE_SUFFIXES = (
+    "_drop_total",
+    "_dropped_total",
+    "_error",
+    "_error_total",
+    "_errors",
+    "_errors_total",
+    "_failed_total",
+    "_fail_total",
+    "_invalid_total",
+    "_overflow",
+    "_overflow_total",
+    "_rejected_total",
+    "_retries_total",
+)
+_SOURCE_BUDGET_ALWAYS_CAPTURE_PREFIXES = (
+    "db_write_",
+    "observability_",
 )
 
 
@@ -196,6 +279,16 @@ class EventRecord:
     level: str
     context: Dict[str, Any]
     timestamp: str
+
+
+@dataclass
+class _MetricBudgetState:
+    count: int = 0
+    value_sum: float = 0.0
+    value_min: float = 0.0
+    value_max: float = 0.0
+    latest_value: float = 0.0
+    first_sample_monotonic: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -396,6 +489,8 @@ class BackendObserver:
         self._event_logger = event_logger or logger
         self._gauge_interval_s = max(float(gauge_interval_s), 0.1)
         self._gauge_emit_at: Dict[str, float] = {}
+        self._budget_seen_keys: set[tuple[Any, ...]] = set()
+        self._budget_states: Dict[tuple[Any, ...], _MetricBudgetState] = {}
         self._lock = threading.Lock()
 
     def context(self, **fields: Any) -> Dict[str, Any]:
@@ -485,8 +580,134 @@ class BackendObserver:
         unit = str(mutable_fields.pop("unit", "") or "")
         labels = metric_labels(self.context(), mutable_fields)
         labels.pop("component", None)
+        sample_every = self._source_budget_sample_every(normalized)
+        if sample_every > 1:
+            self._emit_source_budgeted_metric(
+                kind=kind,
+                name=normalized,
+                value=float(value),
+                unit=unit,
+                labels=labels,
+                sample_every=sample_every,
+            )
+            return
+        self._emit_metric_record(
+            kind=kind,
+            name=normalized,
+            value=float(value),
+            unit=unit,
+            labels=labels,
+        )
+
+    def _source_budget_sample_every(self, metric_name: str) -> int:
+        normalized = normalize_name(metric_name)
+        explicit_names = _SOURCE_BUDGET_EXPLICIT_METRIC_NAMES.get(self.component, frozenset())
+        if normalized in explicit_names:
+            return max(int(_OBSERVABILITY_SETTINGS.high_volume_metric_sample_every or 50), 1)
+        if normalized.startswith(_SOURCE_BUDGET_ALWAYS_CAPTURE_PREFIXES):
+            return 1
+        if normalized.endswith(_SOURCE_BUDGET_ALWAYS_CAPTURE_SUFFIXES):
+            return 1
+        prefixes = _SOURCE_BUDGETED_METRIC_COMPONENTS.get(self.component, ())
+        if not prefixes or not any(normalized == prefix or normalized.startswith(prefix) for prefix in prefixes):
+            return 1
+        return max(int(_OBSERVABILITY_SETTINGS.high_volume_metric_sample_every or 50), 1)
+
+    def _emit_source_budgeted_metric(
+        self,
+        *,
+        kind: str,
+        name: str,
+        value: float,
+        unit: str,
+        labels: Dict[str, str],
+        sample_every: int,
+    ) -> None:
+        key = (
+            kind,
+            name,
+            unit,
+            tuple(sorted((str(label_key), str(label_value)) for label_key, label_value in labels.items())),
+        )
+        now = time.monotonic()
+        with self._lock:
+            if key not in self._budget_seen_keys:
+                self._budget_seen_keys.add(key)
+                emit_now: _MetricBudgetState | None = _MetricBudgetState(
+                    count=1,
+                    value_sum=float(value),
+                    value_min=float(value),
+                    value_max=float(value),
+                    latest_value=float(value),
+                    first_sample_monotonic=now,
+                )
+            else:
+                state = self._budget_states.get(key)
+                if state is None:
+                    state = _MetricBudgetState(
+                        count=0,
+                        value_sum=0.0,
+                        value_min=float(value),
+                        value_max=float(value),
+                        latest_value=float(value),
+                        first_sample_monotonic=now,
+                    )
+                    self._budget_states[key] = state
+                if state.count <= 0:
+                    state.value_min = float(value)
+                    state.value_max = float(value)
+                    state.first_sample_monotonic = now
+                state.count += 1
+                state.value_sum += float(value)
+                state.value_min = min(float(state.value_min), float(value))
+                state.value_max = max(float(state.value_max), float(value))
+                state.latest_value = float(value)
+                max_lag_s = max(float(_OBSERVABILITY_SETTINGS.high_volume_metric_max_lag_ms or 1000) / 1000.0, 0.01)
+                if state.count >= max(int(sample_every), 1) or now - state.first_sample_monotonic >= max_lag_s:
+                    emit_now = _MetricBudgetState(
+                        count=state.count,
+                        value_sum=state.value_sum,
+                        value_min=state.value_min,
+                        value_max=state.value_max,
+                        latest_value=state.latest_value,
+                        first_sample_monotonic=state.first_sample_monotonic,
+                    )
+                    self._budget_states.pop(key, None)
+                else:
+                    emit_now = None
+        if emit_now is None:
+            return
+        metric_value = emit_now.value_sum if kind == "counter" else emit_now.latest_value
+        budget_labels = dict(labels)
+        budget_labels.update(
+            {
+                "sample_count": str(max(int(emit_now.count), 1)),
+                "value_sum": repr(float(emit_now.value_sum)),
+                "value_min": repr(float(emit_now.value_min)),
+                "value_max": repr(float(emit_now.value_max)),
+                "latest_value": repr(float(emit_now.latest_value)),
+                "capture_policy": "source_budgeted",
+            }
+        )
+        self._emit_metric_record(
+            kind=kind,
+            name=name,
+            value=float(metric_value),
+            unit=unit,
+            labels=budget_labels,
+        )
+
+    def _emit_metric_record(
+        self,
+        *,
+        kind: str,
+        name: str,
+        value: float,
+        unit: str,
+        labels: Dict[str, str],
+    ) -> None:
         record = Metric(
-            metric_name=normalized,
+            metric_name=name,
             metric_type=MetricType(kind),
             value=float(value),
             unit=unit,

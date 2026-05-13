@@ -41,34 +41,8 @@ CREATE INDEX IF NOT EXISTS ix_botlens_backend_events_v1_event_name_observed_at
 CREATE INDEX IF NOT EXISTS ix_botlens_backend_events_v1_run_id_observed_at
     ON observability_events.botlens_backend_events_v1 (run_id, observed_at);
 
-CREATE TABLE IF NOT EXISTS observability_metrics.botlens_backend_metric_samples_v1 (
-    id SERIAL PRIMARY KEY,
-    observed_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    component VARCHAR(128) NOT NULL,
-    metric_name VARCHAR(128) NOT NULL,
-    metric_kind VARCHAR(32) NOT NULL,
-    value DOUBLE PRECISION NOT NULL,
-    bot_id VARCHAR(64),
-    run_id VARCHAR(64),
-    instrument_id VARCHAR(128),
-    series_key VARCHAR(255),
-    worker_id VARCHAR(128),
-    queue_name VARCHAR(128),
-    pipeline_stage VARCHAR(128),
-    message_kind VARCHAR(128),
-    delta_type VARCHAR(128),
-    storage_target VARCHAR(128),
-    failure_mode VARCHAR(128),
-    labels JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS ix_botlens_backend_metric_samples_v1_observed_at
-    ON observability_metrics.botlens_backend_metric_samples_v1 (observed_at);
-CREATE INDEX IF NOT EXISTS ix_botlens_backend_metric_samples_v1_metric_name_observed_at
-    ON observability_metrics.botlens_backend_metric_samples_v1 (metric_name, observed_at);
-CREATE INDEX IF NOT EXISTS ix_botlens_backend_metric_samples_v1_run_id_observed_at
-    ON observability_metrics.botlens_backend_metric_samples_v1 (run_id, observed_at);
+-- Raw metric samples were removed from the durable schema. Use
+-- observability_metrics.botlens_backend_metric_rollups_v1 for retained metrics.
 
 CREATE INDEX IF NOT EXISTS ix_portal_bot_run_events_bot_run_seq_id
     ON public.portal_bot_run_events (bot_id, run_id, seq, id);
@@ -81,6 +55,10 @@ CREATE INDEX IF NOT EXISTS ix_portal_bot_run_events_candle_series_bar_time_seq_i
     WHERE event_name = 'CANDLE_OBSERVED'
       AND series_key IS NOT NULL
       AND bar_time IS NOT NULL;
+
+ALTER TABLE public.portal_bot_run_events
+    ADD COLUMN IF NOT EXISTS run_seq INTEGER,
+    ADD COLUMN IF NOT EXISTS run_seq_status TEXT;
 
 CREATE OR REPLACE VIEW runtime_state.bot_runtime_events_v1 AS
 SELECT
@@ -103,11 +81,7 @@ SELECT
             THEN (e.payload #>> '{context,bridge_seq}')::INTEGER
         ELSE NULL
     END AS bridge_seq,
-    CASE
-        WHEN NULLIF(e.payload #>> '{context,run_seq}', '') ~ '^-?[0-9]+$'
-            THEN (e.payload #>> '{context,run_seq}')::INTEGER
-        ELSE NULL
-    END AS run_seq,
+    e.run_seq,
     e.instrument_id,
     e.symbol,
     e.timeframe,
