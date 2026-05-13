@@ -86,13 +86,15 @@ def _facts_payload(*, run_seq: int, candle_time: int) -> dict[str, Any]:
                     "trade_id": f"trade-{run_seq}",
                     "status": "open",
                     "direction": "long",
+                    "opened_at": f"2026-01-01T00:0{candle_time}:00Z",
+                    "bar_time": f"2026-01-01T00:0{candle_time}:00Z",
                 },
             },
         ],
     }
 
 
-def test_intake_router_persists_only_derived_fact_rows_and_skips_canonical_trade_truth(
+def test_intake_router_persists_only_budgeted_transport_rows_and_skips_canonical_trade_truth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
@@ -126,8 +128,117 @@ def test_intake_router_persists_only_derived_fact_rows_and_skips_canonical_trade
 
         assert mailbox.fact_queue.qsize() == 1
         assert len(persisted_batches) == 1
-        assert persisted_batches[0]["row_count"] == 2
-        assert set(persisted_batches[0]["event_names"]) == {"HEALTH_STATUS_REPORTED", "SERIES_METADATA_REPORTED"}
+        assert persisted_batches[0]["row_count"] == 1
+        assert set(persisted_batches[0]["event_names"]) == {"SERIES_METADATA_REPORTED"}
+
+    asyncio.run(scenario())
+
+
+def test_intake_router_treats_source_persisted_wallet_facts_as_canonical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        persisted_batches: list[dict[str, Any]] = []
+
+        async def _persist_rows(*, rows, context):
+            persisted_batches.append(
+                {
+                    "event_names": [
+                        str((row.get("payload") or {}).get("event_name") or "")
+                        for row in rows
+                    ],
+                    "context": dict(context or {}),
+                }
+            )
+            return len(rows)
+
+        registry = _FakeRegistry()
+        router = IntakeRouter(registry=registry)
+        monkeypatch.setattr(router, "_persist_rows", _persist_rows)
+
+        payload = _facts_payload(run_seq=2, candle_time=2)
+        payload["facts"].append(
+            {
+                "fact_type": "wallet_ledger_event",
+                "series_key": "instrument-btc|1m",
+                "wallet_event": {
+                    "event_name": "MARGIN_RESERVED",
+                    "event_id": "wallet-margin-reserved-1",
+                    "event_ts": "2026-01-01T00:02:00Z",
+                    "known_at": "2026-01-01T00:02:00Z",
+                    "source_run_seq": 2,
+                    "source_run_seq_status": "runtime_assigned",
+                    "wallet_commit_seq": 1,
+                    "wallet_commit_seq_status": "runtime_assigned",
+                    "wallet_eval_seq": 0,
+                    "wallet_event_order": 10,
+                    "run_id": "run-1",
+                    "bot_id": "bot-1",
+                    "series_key": "instrument-btc|1m",
+                    "instrument_id": "instrument-btc",
+                    "symbol": "BTC",
+                    "timeframe": "1m",
+                    "currency": "USD",
+                    "balance_before": 1000.0,
+                    "balance_after": 1000.0,
+                    "equity_before": 1000.0,
+                    "equity_after": 1000.0,
+                    "free_collateral_before": 1000.0,
+                    "free_collateral_after": 900.0,
+                    "locked_margin_before": 0.0,
+                    "locked_margin_after": 100.0,
+                    "margin_required": 100.0,
+                    "margin_reserved": 100.0,
+                    "margin_available": 1000.0,
+                    "reason": "entry_fill",
+                    "wallet_before": {
+                        "balances": {"USD": 1000.0},
+                        "locked_margin": {},
+                        "free_collateral": {"USD": 1000.0},
+                        "margin_positions": {},
+                    },
+                    "wallet_after": {
+                        "balances": {"USD": 1000.0},
+                        "locked_margin": {"USD": 100.0},
+                        "free_collateral": {"USD": 900.0},
+                        "margin_positions": {},
+                    },
+                },
+            }
+        )
+
+        await router.route(payload)
+
+        assert len(persisted_batches) == 1
+        assert set(persisted_batches[0]["event_names"]) == {
+            "SERIES_METADATA_REPORTED",
+        }
+        assert "MARGIN_RESERVED" not in persisted_batches[0]["event_names"]
+
+    asyncio.run(scenario())
+
+
+def test_intake_router_filters_repeated_derived_event_ids_before_db_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        persisted_batches: list[list[str]] = []
+
+        async def _persist_rows(*, rows, context):
+            _ = context
+            persisted_batches.append([str(row.get("event_id") or "") for row in rows])
+            return len(rows)
+
+        registry = _FakeRegistry()
+        router = IntakeRouter(registry=registry)
+        monkeypatch.setattr(router, "_persist_rows", _persist_rows)
+
+        payload = _facts_payload(run_seq=2, candle_time=2)
+        await router.route(payload)
+        await router.route(payload)
+
+        assert len(persisted_batches) == 1
+        assert len(persisted_batches[0]) == 1
 
     asyncio.run(scenario())
 

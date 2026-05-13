@@ -12,6 +12,7 @@ from portal.backend.service.bots.botlens_state import (
     CandleDelta,
     DecisionDelta,
     DiagnosticDelta,
+    OverlayDelta,
     RunFaultDelta,
     RunHealthDelta,
     RunLifecycleDelta,
@@ -58,6 +59,17 @@ def test_symbol_transport_maps_internal_concern_deltas_to_transport_owned_live_c
                 event_time="2026-01-01T00:01:00Z",
                 candle={"time": 1, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0},
             ),
+            OverlayDelta(
+                symbol_key="instrument-btc|1m",
+                seq=42,
+                event_time="2026-01-01T00:01:00Z",
+                overlay_ops={
+                    "overlay_commit_seq": 3,
+                    "base_overlay_commit_seq": 2,
+                    "overlay_commit_seq_status": "overlay_scoped",
+                    "ops": [{"op": "upsert", "key": "ovl-1", "overlay": {"kind": "line"}}],
+                },
+            ),
             SignalDelta(
                 symbol_key="instrument-btc|1m",
                 seq=42,
@@ -94,16 +106,20 @@ def test_symbol_transport_maps_internal_concern_deltas_to_transport_owned_live_c
 
     assert [entry.event.message_type for entry in prepared] == [
         "botlens_symbol_candle_delta",
+        "botlens_symbol_overlay_delta",
         "botlens_symbol_signal_delta",
         "botlens_symbol_decision_delta",
         "botlens_symbol_diagnostic_delta",
         "botlens_symbol_trade_delta",
         "botlens_symbol_stats_delta",
     ]
+    assert prepared[1].event.payload["overlay_commit_seq"] == 3
+    assert prepared[1].event.payload["base_overlay_commit_seq"] == 2
+    assert prepared[1].event.payload["overlay_commit_seq_status"] == "overlay_scoped"
     assert all(entry.event.scope == "symbol" for entry in prepared)
     assert all(entry.event.concern for entry in prepared)
     summary = LiveDeltaInstrumentation.emission_summary(prepared)
-    assert summary["event_count"] == 6
+    assert summary["event_count"] == 7
     assert summary["counts_by_type"]["botlens_symbol_signal_delta"] == 1
 
 

@@ -71,6 +71,7 @@ FACT_TYPE_SERIES_STATS = "series_stats_updated"
 FACT_TYPE_TRADE_OPENED = "trade_opened"
 FACT_TYPE_TRADE_UPDATED = "trade_updated"
 FACT_TYPE_TRADE_CLOSED = "trade_closed"
+FACT_TYPE_WALLET_LEDGER_EVENT = "wallet_ledger_event"
 FACT_TYPE_LOG_EMITTED = "log_emitted"
 FACT_TYPE_DECISION_EMITTED = "decision_emitted"
 

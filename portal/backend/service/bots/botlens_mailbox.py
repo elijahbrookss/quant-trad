@@ -314,6 +314,9 @@ class RunMailbox:
                     log_to_logger=False,
                     depth=self.notification_queue.qsize(),
                     overflow_policy="drop_oldest",
+                    replay_required=True,
+                    recovery_action="canonical_ledger_replay",
+                    current_notification_enqueued=True,
                     **labels,
                 )
             except (asyncio.QueueFull, asyncio.QueueEmpty):
@@ -325,6 +328,9 @@ class RunMailbox:
                     depth=self.notification_queue.qsize(),
                     failure_mode="queue_full",
                     overflow_policy="drop_oldest",
+                    replay_required=True,
+                    recovery_action="canonical_ledger_replay",
+                    current_notification_enqueued=False,
                     **labels,
                 )
             self._emit_notification_gauges()

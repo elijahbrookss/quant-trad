@@ -161,6 +161,126 @@ def test_accepted_decision_requires_signal_price() -> None:
         )
 
 
+def test_signal_emitted_fact_uses_series_key_from_runtime_context_without_series_state() -> None:
+    events = build_botlens_domain_events_from_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        payload={
+            "known_at": "2026-02-01T00:00:00Z",
+            "facts": [
+                {
+                    "fact_type": "decision_emitted",
+                    "decision": {
+                        "event_id": "evt-signal-1",
+                        "event_ts": "2026-02-01T00:00:00Z",
+                        "event_name": "SIGNAL_EMITTED",
+                        "root_id": "evt-signal-1",
+                        "parent_id": None,
+                        "correlation_id": "corr-1",
+                        "context": {
+                            "run_id": "run-1",
+                            "bot_id": "bot-1",
+                            "strategy_id": "strategy-1",
+                            "series_key": "instrument-btc|1m",
+                            "instrument_id": "instrument-btc",
+                            "symbol": "BTCUSD",
+                            "timeframe": "1m",
+                            "bar_ts": "2026-02-01T00:00:00Z",
+                            "signal_id": "signal-1",
+                            "decision_id": "decision-1",
+                            "signal_type": "strategy_signal",
+                            "direction": "long",
+                            "signal_price": 100.0,
+                        },
+                    },
+                },
+            ],
+        },
+    )
+
+    signal = next(event for event in events if event.event_name.value == "SIGNAL_EMITTED")
+    assert signal.context.series_key == "instrument-btc|1m"
+    assert signal.serialize()["context"]["series_key"] == "instrument-btc|1m"
+
+
+def test_signal_emitted_fact_preserves_compact_decision_artifact_context() -> None:
+    events = build_botlens_domain_events_from_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        payload={
+            "known_at": "2026-02-01T00:00:00Z",
+            "facts": [
+                {
+                    "fact_type": "decision_emitted",
+                    "decision": {
+                        "event_id": "evt-signal-1",
+                        "event_ts": "2026-02-01T00:00:00Z",
+                        "event_name": "SIGNAL_EMITTED",
+                        "root_id": "evt-signal-1",
+                        "parent_id": None,
+                        "correlation_id": "corr-1",
+                        "context": {
+                            "run_id": "run-1",
+                            "bot_id": "bot-1",
+                            "strategy_id": "strategy-1",
+                            "series_key": "instrument-btc|1m",
+                            "instrument_id": "instrument-btc",
+                            "symbol": "BTCUSD",
+                            "timeframe": "1m",
+                            "bar_ts": "2026-02-01T00:00:00Z",
+                            "signal_id": "signal-1",
+                            "decision_id": "decision-1",
+                            "signal_type": "strategy_signal",
+                            "direction": "long",
+                            "signal_price": 100.0,
+                            "decision_artifact": {
+                                "decision_id": "decision-1",
+                                "referenced_outputs": {
+                                    "ind-1.market_state": {
+                                        "type": "context",
+                                        "ready": True,
+                                        "fields": {"bias": "long"},
+                                    }
+                                },
+                                "observed_outputs": {
+                                    "ind-1.market_state": {
+                                        "type": "context",
+                                        "ready": True,
+                                        "fields": {"bias": "long"},
+                                    }
+                                },
+                            },
+                        },
+                    },
+                },
+            ],
+        },
+    )
+
+    signal = next(event for event in events if event.event_name.value == "SIGNAL_EMITTED")
+    assert signal.serialize()["context"]["decision_artifact"]["referenced_outputs"] == {
+        "ind-1.market_state": {
+            "type": "context",
+            "ready": True,
+            "fields": {"bias": "long"},
+        }
+    }
+    assert signal.serialize()["context"]["decision_artifact"]["observed_outputs"] == {
+        "ind-1.market_state": {
+            "type": "context",
+            "ready": True,
+            "fields": {"bias": "long"},
+        }
+    }
+    roundtripped = deserialize_botlens_domain_event(serialize_botlens_domain_event(signal))
+    assert roundtripped.serialize()["context"]["decision_artifact"]["referenced_outputs"]["ind-1.market_state"]["fields"] == {
+        "bias": "long",
+    }
+    assert roundtripped.serialize()["context"]["decision_artifact"]["observed_outputs"]["ind-1.market_state"]["fields"] == {
+        "bias": "long",
+    }
+
+
 def test_decision_events_keep_signal_domain_root_correlation() -> None:
     events = build_botlens_domain_events_from_fact_batch(
         bot_id="bot-1",
@@ -523,6 +643,7 @@ def test_trade_event_correlation_id_is_compacted_to_storage_limit() -> None:
                     "status": "open",
                     "opened_at": "2026-03-27T11:00:00Z",
                     "direction": "long",
+                    "position_commit_seq": 1,
                 },
             },
         ],
@@ -567,6 +688,7 @@ def test_trade_event_correlation_id_is_compacted_to_storage_limit() -> None:
                 "status": "open",
                 "opened_at": "2026-02-01T00:00:00Z",
                 "direction": "long",
+                "position_commit_seq": 1,
             },
             "TRADE_OPENED",
         ),
@@ -578,6 +700,7 @@ def test_trade_event_correlation_id_is_compacted_to_storage_limit() -> None:
                 "opened_at": "2026-02-01T00:00:00Z",
                 "direction": "long",
                 "entry_price": 100.5,
+                "position_commit_seq": 2,
             },
             "TRADE_UPDATED",
         ),
@@ -591,6 +714,7 @@ def test_trade_event_correlation_id_is_compacted_to_storage_limit() -> None:
                 "direction": "long",
                 "entry_price": 100.5,
                 "exit_price": 101.0,
+                "position_commit_seq": 3,
             },
             "TRADE_CLOSED",
         ),
@@ -627,6 +751,8 @@ def test_trade_facts_map_to_explicit_trade_lifecycle_events(
 
     assert trade_event.context.trade_id == "trade-1"
     assert trade_event.context.trade_state == ("closed" if event_name == "TRADE_CLOSED" else "open")
+    assert trade_event.context.position_commit_seq is not None
+    assert trade_event.context.position_commit_seq_status == "position_scoped"
 
 
 def test_trade_open_uses_simulated_entry_bar_time_not_batch_known_at() -> None:
@@ -655,6 +781,7 @@ def test_trade_open_uses_simulated_entry_bar_time_not_batch_known_at() -> None:
                         "strategy_id": "strategy-1",
                         "signal_id": "signal-1",
                         "decision_id": "decision-1",
+                        "position_commit_seq": 1,
                     },
                 },
             ],
@@ -671,6 +798,7 @@ def test_trade_open_uses_simulated_entry_bar_time_not_batch_known_at() -> None:
     assert payload["context"]["strategy_id"] == "strategy-1"
     assert payload["context"]["signal_id"] == "signal-1"
     assert payload["context"]["decision_id"] == "decision-1"
+    assert payload["context"]["position_commit_seq"] == 1
 
 
 def test_trade_close_uses_simulated_exit_bar_time_not_batch_known_at() -> None:
@@ -696,6 +824,7 @@ def test_trade_close_uses_simulated_exit_bar_time_not_batch_known_at() -> None:
                         "entry_time": "2026-02-01T00:05:00Z",
                         "closed_at": "2026-02-01T02:00:00Z",
                         "direction": "long",
+                        "position_commit_seq": 2,
                     },
                 },
             ],
@@ -708,6 +837,109 @@ def test_trade_close_uses_simulated_exit_bar_time_not_batch_known_at() -> None:
     assert payload["event_ts"] == "2026-02-01T02:00:00Z"
     assert payload["context"]["bar_time"] == "2026-02-01T02:00:00Z"
     assert payload["context"]["event_time"] == "2026-02-01T02:00:00Z"
+
+
+def test_terminal_trade_close_carries_backtest_end_reason_code() -> None:
+    events = build_botlens_domain_events_from_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        payload={
+            "known_at": "2026-04-25T07:43:04Z",
+            "facts": [
+                {
+                    "fact_type": "series_state_observed",
+                    "series_key": "instrument-btc|1m",
+                    "instrument_id": "instrument-btc",
+                    "symbol": "BTC",
+                    "timeframe": "1m",
+                },
+                {
+                    "fact_type": "trade_closed",
+                    "series_key": "instrument-btc|1m",
+                    "trade": {
+                        "trade_id": "trade-1",
+                        "status": "closed",
+                        "entry_time": "2026-02-01T00:05:00Z",
+                        "closed_at": "2026-02-01T02:00:00Z",
+                        "direction": "long",
+                        "reason_code": "BACKTEST_END",
+                        "position_commit_seq": 2,
+                    },
+                },
+            ],
+        },
+    )
+
+    trade_event = next(event for event in events if event.event_name.value == "TRADE_CLOSED")
+    payload = serialize_botlens_domain_event(trade_event)
+
+    assert trade_event.context.reason_code == "BACKTEST_END"
+    assert payload["context"]["reason_code"] == "BACKTEST_END"
+
+
+def test_trade_fact_preserves_visual_contract_fields() -> None:
+    events = build_botlens_domain_events_from_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        payload={
+            "known_at": "2026-04-25T07:43:04Z",
+            "facts": [
+                {
+                    "fact_type": "series_state_observed",
+                    "series_key": "instrument-btc|1m",
+                    "instrument_id": "instrument-btc",
+                    "symbol": "BTC",
+                    "timeframe": "1m",
+                },
+                {
+                    "fact_type": "trade_closed",
+                    "series_key": "instrument-btc|1m",
+                    "trade": {
+                        "trade_id": "trade-1",
+                        "status": "closed",
+                        "entry_time": "2026-02-01T00:05:00Z",
+                        "closed_at": "2026-02-01T02:00:00Z",
+                        "exit_time": "2026-02-01T02:00:00Z",
+                        "direction": "long",
+                        "quantity": 2,
+                        "entry_price": 100.0,
+                        "exit_price": 104.0,
+                        "stop_price": 96.0,
+                        "gross_pnl": 8.0,
+                        "fees_paid": 1.25,
+                        "net_pnl": 6.75,
+                        "reason_code": "BACKTEST_END",
+                        "position_commit_seq": 2,
+                        "legs": [
+                            {
+                                "id": "leg-1",
+                                "name": "TP1",
+                                "target_price": 104.0,
+                                "exit_time": "2026-02-01T02:00:00Z",
+                                "exit_price": 104.0,
+                                "status": "backtest_end",
+                                "contracts": 2,
+                                "pnl": 8.0,
+                            }
+                        ],
+                        "metrics": {"bars_held": 5},
+                    },
+                },
+            ],
+        },
+    )
+
+    trade_event = next(event for event in events if event.event_name.value == "TRADE_CLOSED")
+    payload = serialize_botlens_domain_event(trade_event)
+
+    assert trade_event.context.quantity == 2
+    assert trade_event.context.stop_price == 96.0
+    assert trade_event.context.fees_paid == 1.25
+    assert trade_event.context.net_pnl == 6.75
+    assert trade_event.context.close_reason == "BACKTEST_END"
+    assert trade_event.context.legs[0]["target_price"] == 104.0
+    assert payload["context"]["legs"][0]["status"] == "backtest_end"
+    assert payload["context"]["metrics"]["bars_held"] == 5
 
 
 def test_trade_fact_requires_simulated_trade_bar_time() -> None:
@@ -762,6 +994,37 @@ def test_trade_fact_rejects_event_time_that_disagrees_with_bar_time() -> None:
                             "status": "open",
                             "entry_time": "2026-02-01T00:05:00Z",
                             "event_time": "2026-04-25T07:36:35Z",
+                            "direction": "long",
+                            "position_commit_seq": 1,
+                        },
+                    },
+                ],
+            },
+        )
+
+
+def test_trade_fact_requires_position_commit_seq() -> None:
+    with pytest.raises(ValueError, match="context.position_commit_seq is required for TRADE"):
+        build_botlens_domain_events_from_fact_batch(
+            bot_id="bot-1",
+            run_id="run-1",
+            payload={
+                "known_at": "2026-04-25T07:36:35Z",
+                "facts": [
+                    {
+                        "fact_type": "series_state_observed",
+                        "series_key": "instrument-btc|1m",
+                        "instrument_id": "instrument-btc",
+                        "symbol": "BTC",
+                        "timeframe": "1m",
+                    },
+                    {
+                        "fact_type": "trade_opened",
+                        "series_key": "instrument-btc|1m",
+                        "trade": {
+                            "trade_id": "trade-1",
+                            "status": "open",
+                            "entry_time": "2026-02-01T00:05:00Z",
                             "direction": "long",
                         },
                     },
@@ -827,6 +1090,264 @@ def test_rejected_decision_uses_attempt_id_and_preserves_wallet_reason() -> None
     assert payload["context"]["settlement_attempt_id"] == "pending-trade-1"
     assert payload["context"]["order_request_id"] == "order-1"
     assert payload["context"]["reason_code"] == "WALLET_INSUFFICIENT_MARGIN"
+
+
+def test_decision_wallet_evidence_survives_domain_deserialize_roundtrip() -> None:
+    events = build_botlens_domain_events_from_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        payload={
+            "known_at": "2026-02-01T00:00:00Z",
+            "facts": [
+                {
+                    "fact_type": "series_state_observed",
+                    "series_key": "instrument-btc|1m",
+                    "instrument_id": "instrument-btc",
+                    "symbol": "BTC",
+                    "timeframe": "1m",
+                },
+                {
+                    "fact_type": "decision_emitted",
+                    "decision": {
+                        "event_id": "runtime-decision-1",
+                        "event_ts": "2026-02-01T00:00:00Z",
+                        "event_name": "DECISION_ACCEPTED",
+                        "root_id": "runtime-signal-1",
+                        "parent_id": "runtime-signal-1",
+                        "correlation_id": "corr-1",
+                        "context": {
+                            "run_id": "run-1",
+                            "bot_id": "bot-1",
+                            "strategy_id": "strategy-1",
+                            "symbol": "BTC",
+                            "timeframe": "1m",
+                            "bar_ts": "2026-02-01T00:00:00Z",
+                            "signal_id": "signal-1",
+                            "decision_id": "decision-1",
+                            "decision": "accepted",
+                            "direction": "long",
+                            "signal_price": 100.0,
+                            "wallet_snapshot": {
+                                "balances": {"USD": 1000.0},
+                                "free_collateral": {"USD": 900.0},
+                            },
+                            "margin_requirement": {
+                                "currency": "USD",
+                                "total_required_collateral": 100.0,
+                            },
+                            "reason_code": "DECISION_ACCEPTED",
+                        },
+                    },
+                },
+            ],
+        },
+    )
+    event = next(event for event in events if event.event_name.value == "DECISION_EMITTED")
+
+    roundtripped = deserialize_botlens_domain_event(serialize_botlens_domain_event(event))
+    payload = serialize_botlens_domain_event(roundtripped)
+
+    assert payload["context"]["wallet_snapshot"]["balances"]["USD"] == 1000.0
+    assert payload["context"]["margin_requirement"]["total_required_collateral"] == 100.0
+
+
+def test_rejected_decision_wallet_evidence_survives_domain_deserialize_roundtrip() -> None:
+    events = build_botlens_domain_events_from_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        payload={
+            "known_at": "2026-02-01T00:00:00Z",
+            "facts": [
+                {
+                    "fact_type": "series_state_observed",
+                    "series_key": "instrument-btc|1m",
+                    "instrument_id": "instrument-btc",
+                    "symbol": "BTC",
+                    "timeframe": "1m",
+                },
+                {
+                    "fact_type": "decision_emitted",
+                    "decision": {
+                        "event_id": "runtime-decision-1",
+                        "event_ts": "2026-02-01T00:00:00Z",
+                        "event_name": "DECISION_REJECTED",
+                        "root_id": "runtime-signal-1",
+                        "parent_id": "runtime-signal-1",
+                        "correlation_id": "corr-1",
+                        "context": {
+                            "run_id": "run-1",
+                            "bot_id": "bot-1",
+                            "strategy_id": "strategy-1",
+                            "symbol": "BTC",
+                            "timeframe": "1m",
+                            "bar_ts": "2026-02-01T00:00:00Z",
+                            "signal_id": "signal-1",
+                            "decision_id": "decision-1",
+                            "decision": "rejected",
+                            "direction": "long",
+                            "signal_price": 100.0,
+                            "wallet_snapshot": {
+                                "balances": {"USD": 100.0},
+                                "free_collateral": {"USD": 100.0},
+                            },
+                            "margin_requirement": {
+                                "currency": "USD",
+                                "total_required_collateral": 120.0,
+                            },
+                            "reason_code": "WALLET_INSUFFICIENT_MARGIN",
+                            "message": "WALLET_INSUFFICIENT_MARGIN",
+                        },
+                    },
+                },
+            ],
+        },
+    )
+    event = next(event for event in events if event.event_name.value == "DECISION_EMITTED")
+
+    roundtripped = deserialize_botlens_domain_event(serialize_botlens_domain_event(event))
+    payload = serialize_botlens_domain_event(roundtripped)
+
+    assert payload["context"]["decision_state"] == "rejected"
+    assert payload["context"]["wallet_snapshot"]["balances"]["USD"] == 100.0
+    assert payload["context"]["margin_requirement"]["total_required_collateral"] == 120.0
+
+
+def test_wallet_ledger_fact_builds_margin_rejection_domain_event() -> None:
+    events = build_botlens_domain_events_from_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        payload={
+            "known_at": "2026-02-01T00:00:00Z",
+            "run_seq": 42,
+            "run_seq_status": "runtime_assigned",
+            "facts": [
+                {
+                    "fact_type": "wallet_ledger_event",
+                    "series_key": "instrument-btc|1m",
+                    "wallet_event": {
+                        "event_name": "MARGIN_REJECTED",
+                        "event_ts": "2026-02-01T00:00:00Z",
+                        "known_at": "2026-02-01T00:00:00Z",
+                        "source_run_seq": 42,
+                        "source_run_seq_status": "runtime_assigned",
+                        "wallet_commit_seq": 7,
+                        "wallet_commit_seq_status": "runtime_assigned",
+                        "wallet_eval_seq": 6,
+                        "wallet_event_order": 10,
+                        "strategy_id": "strategy-1",
+                        "series_key": "instrument-btc|1m",
+                        "instrument_id": "instrument-btc",
+                        "symbol": "BTC",
+                        "timeframe": "1m",
+                        "decision_id": "decision-1",
+                        "currency": "USD",
+                        "balance_before": 100.0,
+                        "balance_after": 100.0,
+                        "equity_before": 100.0,
+                        "equity_after": 100.0,
+                        "free_collateral_before": 100.0,
+                        "free_collateral_after": 100.0,
+                        "locked_margin_before": 0.0,
+                        "locked_margin_after": 0.0,
+                        "margin_required": 120.0,
+                        "margin_available": 100.0,
+                        "selected_quantity": 1.0,
+                        "signal_id": "signal-1",
+                        "reason": "WALLET_INSUFFICIENT_MARGIN",
+                        "wallet_before": {
+                            "balances": {"USD": 100.0},
+                            "locked_margin": {},
+                            "free_collateral": {"USD": 100.0},
+                            "margin_positions": {},
+                        },
+                        "wallet_after": {
+                            "balances": {"USD": 100.0},
+                            "locked_margin": {},
+                            "free_collateral": {"USD": 100.0},
+                            "margin_positions": {},
+                        },
+                        "source_refs": [{"section": "signals", "signal_id": "signal-1"}],
+                    },
+                }
+            ],
+        },
+    )
+
+    event = next(event for event in events if event.event_name.value == "MARGIN_REJECTED")
+    payload = serialize_botlens_domain_event(event)
+
+    assert payload["context"]["run_seq"] == 42
+    assert payload["context"]["source_run_seq"] == 42
+    assert payload["context"]["wallet_commit_seq"] == 7
+    assert payload["context"]["wallet_eval_seq"] == 6
+    assert payload["context"]["wallet_event_order"] == 10
+    assert payload["context"]["decision_id"] == "decision-1"
+    assert payload["context"]["signal_id"] == "signal-1"
+    assert payload["context"]["margin_required"] == 120.0
+    assert payload["context"]["margin_available"] == 100.0
+    assert payload["context"]["free_collateral_before"] == 100.0
+    assert payload["context"]["selected_quantity"] == 1.0
+    assert payload["context"]["wallet_after"]["balances"]["USD"] == 100.0
+    assert payload["context"]["source_refs"][0]["signal_id"] == "signal-1"
+
+
+def test_wallet_ledger_round_trip_preserves_zero_commit_clocks() -> None:
+    events = build_botlens_domain_events_from_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        payload={
+            "known_at": "2026-02-01T00:00:00Z",
+            "run_seq": 15,
+            "run_seq_status": "runtime_assigned",
+            "facts": [
+                {
+                    "fact_type": "wallet_ledger_event",
+                    "wallet_event": {
+                        "event_name": "WALLET_INITIALIZED",
+                        "event_ts": "2026-02-01T00:00:00Z",
+                        "known_at": "2026-02-01T00:00:00Z",
+                        "source_run_seq": 15,
+                        "source_run_seq_status": "runtime_assigned",
+                        "wallet_commit_seq": 0,
+                        "wallet_commit_seq_status": "runtime_assigned",
+                        "wallet_eval_seq": 0,
+                        "wallet_event_order": 0,
+                        "currency": "USD",
+                        "balance_before": 10000.0,
+                        "balance_after": 10000.0,
+                        "equity_before": 10000.0,
+                        "equity_after": 10000.0,
+                        "free_collateral_before": 10000.0,
+                        "free_collateral_after": 10000.0,
+                        "locked_margin_before": 0.0,
+                        "locked_margin_after": 0.0,
+                        "wallet_before": {
+                            "balances": {"USD": 10000.0},
+                            "locked_margin": {},
+                            "free_collateral": {"USD": 10000.0},
+                            "margin_positions": {},
+                        },
+                        "wallet_after": {
+                            "balances": {"USD": 10000.0},
+                            "locked_margin": {},
+                            "free_collateral": {"USD": 10000.0},
+                            "margin_positions": {},
+                        },
+                    },
+                }
+            ],
+        },
+    )
+
+    event = next(event for event in events if event.event_name.value == "WALLET_INITIALIZED")
+    payload = serialize_botlens_domain_event(deserialize_botlens_domain_event(serialize_botlens_domain_event(event)))
+
+    assert payload["context"]["source_run_seq"] == 15
+    assert payload["context"]["source_run_seq_status"] == "runtime_assigned"
+    assert payload["context"]["wallet_commit_seq"] == 0
+    assert payload["context"]["wallet_commit_seq_status"] == "runtime_assigned"
+    assert payload["context"]["wallet_eval_seq"] == 0
+    assert payload["context"]["wallet_event_order"] == 0
 
 
 def test_pre_order_rejected_decision_uses_entry_request_identity() -> None:
@@ -909,6 +1430,7 @@ def test_runtime_rows_use_domain_event_time_as_known_at_for_trade_events() -> No
                         "status": "open",
                         "entry_time": "2026-02-01T00:05:00Z",
                         "direction": "long",
+                        "position_commit_seq": 1,
                     },
                 },
             ],
@@ -1353,8 +1875,9 @@ def test_serialize_botlens_domain_event_persists_bounded_overlay_render_payload(
                 {
                     "fact_type": "overlay_ops_emitted",
                     "overlay_delta": {
-                        "seq": 3,
-                        "base_seq": 2,
+                        "overlay_commit_seq": 3,
+                        "base_overlay_commit_seq": 2,
+                        "overlay_commit_seq_status": "overlay_scoped",
                         "ops": [
                             {
                                 "op": "upsert",
@@ -1390,8 +1913,9 @@ def test_serialize_botlens_domain_event_persists_bounded_overlay_render_payload(
     overlay_event = next(event for event in events if event.event_name.value == "OVERLAY_STATE_CHANGED")
     payload = serialize_botlens_domain_event(overlay_event)["context"]["overlay_delta"]
 
-    assert payload["seq"] == 3
-    assert payload["base_seq"] == 2
+    assert payload["overlay_commit_seq"] == 3
+    assert payload["base_overlay_commit_seq"] == 2
+    assert payload["overlay_commit_seq_status"] == "overlay_scoped"
     assert payload["op_counts"] == {"upsert": 1}
     assert payload["point_count"] == 3
     assert len(payload["ops"]) == 1
@@ -1432,8 +1956,9 @@ def test_serialize_botlens_domain_event_preserves_polyline_history_when_payload_
                 {
                     "fact_type": "overlay_ops_emitted",
                     "overlay_delta": {
-                        "seq": 3,
-                        "base_seq": 2,
+                        "overlay_commit_seq": 3,
+                        "base_overlay_commit_seq": 2,
+                        "overlay_commit_seq_status": "overlay_scoped",
                         "ops": [
                             {
                                 "op": "upsert",

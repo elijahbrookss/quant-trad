@@ -5,9 +5,10 @@ from typing import Any, Dict
 
 from .botlens_contract import BRIDGE_BOOTSTRAP_KIND, BRIDGE_FACTS_KIND, normalize_bridge_session_id, normalize_series_key
 from .botlens_domain_events import BotLensDomainEvent, BotLensDomainEventName, botlens_domain_event_type, serialize_botlens_domain_event
+from .botlens_event_retention import split_events_by_retention
 from .botlens_state import ProjectionBatch
 
-_CANONICAL_FACT_EVENT_NAMES = frozenset(
+_SOURCE_PERSISTED_EVENT_NAMES = frozenset(
     {
         BotLensDomainEventName.RUN_PHASE_REPORTED,
         BotLensDomainEventName.RUN_STARTED,
@@ -17,18 +18,26 @@ _CANONICAL_FACT_EVENT_NAMES = frozenset(
         BotLensDomainEventName.RUN_FAILED,
         BotLensDomainEventName.RUN_STOPPED,
         BotLensDomainEventName.RUN_CANCELLED,
-        BotLensDomainEventName.CANDLE_OBSERVED,
         BotLensDomainEventName.SIGNAL_EMITTED,
         BotLensDomainEventName.DECISION_EMITTED,
         BotLensDomainEventName.TRADE_OPENED,
         BotLensDomainEventName.TRADE_UPDATED,
         BotLensDomainEventName.TRADE_CLOSED,
+        BotLensDomainEventName.WALLET_INITIALIZED,
+        BotLensDomainEventName.MARGIN_RESERVED,
+        BotLensDomainEventName.MARGIN_REJECTED,
+        BotLensDomainEventName.MARGIN_RELEASED,
+        BotLensDomainEventName.FEE_APPLIED,
+        BotLensDomainEventName.REALIZED_PNL_APPLIED,
+        BotLensDomainEventName.POSITION_OPENED,
+        BotLensDomainEventName.POSITION_CLOSED,
+        BotLensDomainEventName.EQUITY_UPDATED,
     }
 )
 
 
 def is_canonical_fact_event(event: BotLensDomainEvent) -> bool:
-    return event.event_name in _CANONICAL_FACT_EVENT_NAMES
+    return event.event_name in _SOURCE_PERSISTED_EVENT_NAMES
 
 
 def split_fact_events(
@@ -97,4 +106,5 @@ __all__ = [
     "projection_batch_from_payload",
     "runtime_event_rows_from_batch",
     "split_fact_events",
+    "split_events_by_retention",
 ]

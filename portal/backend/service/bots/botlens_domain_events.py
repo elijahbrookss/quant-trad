@@ -20,6 +20,7 @@ from .botlens_contract import (
     FACT_TYPE_TRADE_CLOSED,
     FACT_TYPE_TRADE_OPENED,
     FACT_TYPE_TRADE_UPDATED,
+    FACT_TYPE_WALLET_LEDGER_EVENT,
     normalize_fact_entries,
     normalize_series_key,
 )
@@ -115,9 +116,33 @@ class BotLensDomainEventName(str, Enum):
     TRADE_OPENED = "TRADE_OPENED"
     TRADE_UPDATED = "TRADE_UPDATED"
     TRADE_CLOSED = "TRADE_CLOSED"
+    WALLET_INITIALIZED = "WALLET_INITIALIZED"
+    MARGIN_RESERVED = "MARGIN_RESERVED"
+    MARGIN_REJECTED = "MARGIN_REJECTED"
+    MARGIN_RELEASED = "MARGIN_RELEASED"
+    FEE_APPLIED = "FEE_APPLIED"
+    REALIZED_PNL_APPLIED = "REALIZED_PNL_APPLIED"
+    POSITION_OPENED = "POSITION_OPENED"
+    POSITION_CLOSED = "POSITION_CLOSED"
+    EQUITY_UPDATED = "EQUITY_UPDATED"
     DIAGNOSTIC_RECORDED = "DIAGNOSTIC_RECORDED"
     HEALTH_STATUS_REPORTED = "HEALTH_STATUS_REPORTED"
     FAULT_RECORDED = "FAULT_RECORDED"
+
+
+_WALLET_LEDGER_EVENT_NAMES = frozenset(
+    {
+        BotLensDomainEventName.WALLET_INITIALIZED,
+        BotLensDomainEventName.MARGIN_RESERVED,
+        BotLensDomainEventName.MARGIN_REJECTED,
+        BotLensDomainEventName.MARGIN_RELEASED,
+        BotLensDomainEventName.FEE_APPLIED,
+        BotLensDomainEventName.REALIZED_PNL_APPLIED,
+        BotLensDomainEventName.POSITION_OPENED,
+        BotLensDomainEventName.POSITION_CLOSED,
+        BotLensDomainEventName.EQUITY_UPDATED,
+    }
+)
 
 
 def botlens_domain_event_type(value: BotLensDomainEventName | str) -> str:
@@ -314,6 +339,7 @@ def _durable_overlay_entry(key: Any, overlay: Any) -> Dict[str, Any]:
 
 def _durable_overlay_delta(value: Any) -> Dict[str, Any]:
     payload = _mapping(value)
+    overlay_commit_seq, base_overlay_commit_seq, overlay_commit_seq_status = _overlay_delta_clock(payload)
     durable_ops: List[Dict[str, Any]] = []
     op_counts: Dict[str, int] = {}
     point_count = 0
@@ -333,8 +359,9 @@ def _durable_overlay_delta(value: Any) -> Dict[str, Any]:
         durable_ops.append(durable_op)
         op_counts[op_name] = op_counts.get(op_name, 0) + 1
     durable = {
-        "seq": _coerce_int(payload.get("seq")) if payload.get("seq") is not None else None,
-        "base_seq": _coerce_int(payload.get("base_seq")) if payload.get("base_seq") is not None else None,
+        "overlay_commit_seq": overlay_commit_seq,
+        "base_overlay_commit_seq": base_overlay_commit_seq,
+        "overlay_commit_seq_status": overlay_commit_seq_status,
         "ops": durable_ops,
         "op_counts": op_counts or None,
         "point_count": point_count or None,
@@ -344,6 +371,21 @@ def _durable_overlay_delta(value: Any) -> Dict[str, Any]:
         for entry_key, entry_value in durable.items()
         if entry_value not in (None, "", {}, [])
     }
+
+
+def _overlay_delta_clock(payload: Mapping[str, Any]) -> tuple[int, int, str]:
+    overlay_commit_seq = _coerce_int(payload.get("overlay_commit_seq"), 0)
+    base_overlay_commit_seq = _coerce_int(payload.get("base_overlay_commit_seq"), -1)
+    overlay_commit_seq_status = str(payload.get("overlay_commit_seq_status") or "").strip()
+    if overlay_commit_seq <= 0:
+        raise ValueError("context.overlay_delta.overlay_commit_seq is required")
+    if base_overlay_commit_seq < 0:
+        raise ValueError("context.overlay_delta.base_overlay_commit_seq is required")
+    if overlay_commit_seq <= base_overlay_commit_seq:
+        raise ValueError("context.overlay_delta.overlay_commit_seq must advance")
+    if overlay_commit_seq_status != "overlay_scoped":
+        raise ValueError("context.overlay_delta.overlay_commit_seq_status must be overlay_scoped")
+    return overlay_commit_seq, base_overlay_commit_seq, overlay_commit_seq_status
 
 
 def _durable_series_stats(value: Any) -> Dict[str, Any]:
@@ -632,12 +674,17 @@ def _normalize_symbol_list(value: Any) -> List[str]:
 class BotLensDomainContextBase:
     run_id: str
     bot_id: str
+    run_seq: Optional[int] = None
+    run_seq_status: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not str(self.run_id or "").strip():
             raise ValueError("context.run_id is required")
         if not str(self.bot_id or "").strip():
             raise ValueError("context.bot_id is required")
+        if self.run_seq is not None:
+            object.__setattr__(self, "run_seq", int(self.run_seq))
+        object.__setattr__(self, "run_seq_status", _optional_text(self.run_seq_status))
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(serialize_value(self))
@@ -779,7 +826,9 @@ class OverlayStateChangedContext(BotLensSeriesContextBase):
         self._require_series_key(event_name="OVERLAY_STATE_CHANGED")
         if not isinstance(self.overlay_delta, Mapping):
             raise ValueError("context.overlay_delta is required")
-        object.__setattr__(self, "overlay_delta", _mapping(self.overlay_delta))
+        normalized = _mapping(self.overlay_delta)
+        _overlay_delta_clock(normalized)
+        object.__setattr__(self, "overlay_delta", normalized)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -806,6 +855,7 @@ class SignalEmittedContext(BotLensSeriesContextBase):
     rule_id: Optional[str] = None
     intent: Optional[str] = None
     event_key: Optional[str] = None
+    decision_artifact: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -834,6 +884,7 @@ class SignalEmittedContext(BotLensSeriesContextBase):
         object.__setattr__(self, "rule_id", _optional_text(self.rule_id))
         object.__setattr__(self, "intent", _optional_text(self.intent))
         object.__setattr__(self, "event_key", _optional_text(self.event_key))
+        object.__setattr__(self, "decision_artifact", _mapping(self.decision_artifact))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -855,6 +906,11 @@ class DecisionEmittedContext(BotLensSeriesContextBase):
     intent: Optional[str] = None
     rule_id: Optional[str] = None
     event_key: Optional[str] = None
+    wallet_snapshot: Optional[Dict[str, Any]] = None
+    margin_requirement: Optional[Dict[str, Any]] = None
+    wallet_commit_seq: Optional[int] = None
+    wallet_eval_seq: Optional[int] = None
+    position_commit_seq: Optional[int] = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -894,6 +950,14 @@ class DecisionEmittedContext(BotLensSeriesContextBase):
         object.__setattr__(self, "intent", _optional_text(self.intent))
         object.__setattr__(self, "rule_id", _optional_text(self.rule_id))
         object.__setattr__(self, "event_key", _optional_text(self.event_key))
+        object.__setattr__(self, "wallet_snapshot", _mapping(self.wallet_snapshot))
+        object.__setattr__(self, "margin_requirement", _mapping(self.margin_requirement))
+        if self.wallet_commit_seq is not None:
+            object.__setattr__(self, "wallet_commit_seq", int(self.wallet_commit_seq))
+        if self.wallet_eval_seq is not None:
+            object.__setattr__(self, "wallet_eval_seq", int(self.wallet_eval_seq))
+        if self.position_commit_seq is not None:
+            object.__setattr__(self, "position_commit_seq", int(self.position_commit_seq))
         if self.decision_state == "accepted":
             if self.direction is None:
                 raise ValueError("context.direction is required for accepted decisions")
@@ -912,16 +976,28 @@ class TradeLifecycleContext(BotLensSeriesContextBase):
     side: Optional[str] = None
     direction: Optional[str] = None
     qty: Optional[float] = None
+    quantity: Optional[float] = None
     entry_price: Optional[float] = None
+    stop_price: Optional[float] = None
     exit_price: Optional[float] = None
     realized_pnl: Optional[float] = None
     event_impact_pnl: Optional[float] = None
     trade_net_pnl: Optional[float] = None
+    gross_pnl: Optional[float] = None
+    fees_paid: Optional[float] = None
+    net_pnl: Optional[float] = None
     signal_id: Optional[str] = None
     decision_id: Optional[str] = None
+    reason_code: Optional[str] = None
+    close_reason: Optional[str] = None
     event_time: Optional[datetime] = None
     opened_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
+    exit_time: Optional[datetime] = None
+    position_commit_seq: Optional[int] = None
+    position_commit_seq_status: Optional[str] = None
+    legs: tuple[Dict[str, Any], ...] = ()
+    metrics: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -936,7 +1012,19 @@ class TradeLifecycleContext(BotLensSeriesContextBase):
         direction = _optional_text(self.direction)
         object.__setattr__(self, "side", side.lower() if side else None)
         object.__setattr__(self, "direction", direction.lower() if direction else None)
-        for field_name in ("qty", "entry_price", "exit_price", "realized_pnl", "event_impact_pnl", "trade_net_pnl"):
+        for field_name in (
+            "qty",
+            "quantity",
+            "entry_price",
+            "stop_price",
+            "exit_price",
+            "realized_pnl",
+            "event_impact_pnl",
+            "trade_net_pnl",
+            "gross_pnl",
+            "fees_paid",
+            "net_pnl",
+        ):
             value = getattr(self, field_name)
             if value is not None:
                 object.__setattr__(self, field_name, _finite_float(value, field_name=f"context.{field_name}"))
@@ -949,12 +1037,138 @@ class TradeLifecycleContext(BotLensSeriesContextBase):
         )
         object.__setattr__(self, "signal_id", signal_id)
         object.__setattr__(self, "decision_id", decision_id)
+        object.__setattr__(self, "reason_code", _optional_text(self.reason_code))
+        object.__setattr__(self, "close_reason", _optional_text(self.close_reason))
         if self.event_time is not None:
             object.__setattr__(self, "event_time", normalize_utc_datetime(self.event_time))
         if self.opened_at is not None:
             object.__setattr__(self, "opened_at", normalize_utc_datetime(self.opened_at))
         if self.closed_at is not None:
             object.__setattr__(self, "closed_at", normalize_utc_datetime(self.closed_at))
+        if self.exit_time is not None:
+            object.__setattr__(self, "exit_time", normalize_utc_datetime(self.exit_time))
+        if self.position_commit_seq is None:
+            raise ValueError("context.position_commit_seq is required for TRADE")
+        position_commit_seq = int(self.position_commit_seq)
+        if position_commit_seq <= 0:
+            raise ValueError("context.position_commit_seq must be positive for TRADE")
+        object.__setattr__(self, "position_commit_seq", position_commit_seq)
+        object.__setattr__(
+            self,
+            "position_commit_seq_status",
+            _optional_text(self.position_commit_seq_status) or "position_scoped",
+        )
+        legs = self.legs if isinstance(self.legs, (list, tuple)) else ()
+        object.__setattr__(self, "legs", tuple(dict(entry) for entry in legs if isinstance(entry, Mapping)))
+        object.__setattr__(self, "metrics", _mapping_or_none(self.metrics))
+
+
+@dataclass(frozen=True, kw_only=True)
+class WalletLedgerContext(BotLensSeriesContextBase):
+    known_at: Optional[datetime] = None
+    decision_id: Optional[str] = None
+    source_event_id: Optional[str] = None
+    wallet_event_id: Optional[str] = None
+    source_run_seq: Optional[int] = None
+    source_run_seq_status: Optional[str] = None
+    wallet_commit_seq: Optional[int] = None
+    wallet_commit_seq_status: Optional[str] = None
+    wallet_eval_seq: Optional[int] = None
+    position_commit_seq: Optional[int] = None
+    position_commit_seq_status: Optional[str] = None
+    wallet_event_order: Optional[int] = None
+    currency: Optional[str] = None
+    balance_before: Optional[float] = None
+    balance_after: Optional[float] = None
+    equity_before: Optional[float] = None
+    equity_after: Optional[float] = None
+    free_collateral_before: Optional[float] = None
+    free_collateral_after: Optional[float] = None
+    locked_margin_before: Optional[float] = None
+    locked_margin_after: Optional[float] = None
+    margin_required: Optional[float] = None
+    margin_reserved: Optional[float] = None
+    margin_released: Optional[float] = None
+    margin_available: Optional[float] = None
+    fee: Optional[float] = None
+    realized_pnl: Optional[float] = None
+    reason: Optional[str] = None
+    qty: Optional[float] = None
+    selected_quantity: Optional[float] = None
+    price: Optional[float] = None
+    notional: Optional[float] = None
+    side: Optional[str] = None
+    direction: Optional[str] = None
+    signal_id: Optional[str] = None
+    wallet_delta: Optional[Dict[str, Any]] = None
+    margin_requirement: Optional[Dict[str, Any]] = None
+    wallet_before: Optional[Dict[str, Any]] = None
+    wallet_after: Optional[Dict[str, Any]] = None
+    source_refs: Optional[List[Dict[str, Any]]] = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.known_at is not None:
+            object.__setattr__(self, "known_at", normalize_utc_datetime(self.known_at))
+        decision_id = _optional_text(self.decision_id)
+        signal_id = _optional_text(self.signal_id)
+        _require_distinct_signal_id(
+            signal_id=signal_id,
+            decision_id=decision_id,
+            field_prefix="context",
+        )
+        object.__setattr__(self, "decision_id", decision_id)
+        object.__setattr__(self, "signal_id", signal_id)
+        object.__setattr__(self, "source_event_id", _optional_text(self.source_event_id))
+        object.__setattr__(self, "wallet_event_id", _optional_text(self.wallet_event_id))
+        if self.source_run_seq is not None:
+            object.__setattr__(self, "source_run_seq", int(self.source_run_seq))
+        object.__setattr__(self, "source_run_seq_status", _optional_text(self.source_run_seq_status))
+        if self.wallet_commit_seq is not None:
+            object.__setattr__(self, "wallet_commit_seq", int(self.wallet_commit_seq))
+        object.__setattr__(self, "wallet_commit_seq_status", _optional_text(self.wallet_commit_seq_status))
+        if self.wallet_eval_seq is not None:
+            object.__setattr__(self, "wallet_eval_seq", int(self.wallet_eval_seq))
+        if self.position_commit_seq is not None:
+            object.__setattr__(self, "position_commit_seq", int(self.position_commit_seq))
+        object.__setattr__(self, "position_commit_seq_status", _optional_text(self.position_commit_seq_status))
+        if self.wallet_event_order is not None:
+            object.__setattr__(self, "wallet_event_order", int(self.wallet_event_order))
+        currency = _optional_text(self.currency)
+        object.__setattr__(self, "currency", currency.upper() if currency else None)
+        for field_name in (
+            "balance_before",
+            "balance_after",
+            "equity_before",
+            "equity_after",
+            "free_collateral_before",
+            "free_collateral_after",
+            "locked_margin_before",
+            "locked_margin_after",
+            "margin_required",
+            "margin_reserved",
+            "margin_released",
+            "margin_available",
+            "fee",
+            "realized_pnl",
+            "qty",
+            "selected_quantity",
+            "price",
+            "notional",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, _finite_float(value, field_name=f"context.{field_name}"))
+        object.__setattr__(self, "reason", _optional_text(self.reason))
+        side = _optional_text(self.side)
+        direction = _optional_text(self.direction)
+        object.__setattr__(self, "side", side.lower() if side else None)
+        object.__setattr__(self, "direction", direction.lower() if direction else None)
+        object.__setattr__(self, "wallet_delta", _mapping_or_none(self.wallet_delta))
+        object.__setattr__(self, "margin_requirement", _mapping_or_none(self.margin_requirement))
+        object.__setattr__(self, "wallet_before", _mapping_or_none(self.wallet_before))
+        object.__setattr__(self, "wallet_after", _mapping_or_none(self.wallet_after))
+        object.__setattr__(self, "source_refs", tuple(_mapping_list(self.source_refs)))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1131,6 +1345,7 @@ BotLensDomainContext = (
     | SignalEmittedContext
     | DecisionEmittedContext
     | TradeLifecycleContext
+    | WalletLedgerContext
     | DiagnosticRecordedContext
     | HealthStatusReportedContext
     | FaultRecordedContext
@@ -1184,12 +1399,18 @@ def _durable_context_payload(
     context_payload: Mapping[str, Any],
 ) -> Dict[str, Any]:
     context = _mapping(context_payload)
+    ordering_context = {
+        key: context.get(key)
+        for key in ("run_seq", "run_seq_status")
+        if context.get(key) not in (None, "", [], {}, ())
+    }
     if event_name == BotLensDomainEventName.CANDLE_OBSERVED:
         durable = {
             key: context.get(key)
             for key in ("run_id", "bot_id", "series_key", "instrument_id", "symbol", "timeframe", "strategy_id", "trade_id", "bar_time")
             if context.get(key) not in (None, "", [], {}, ())
         }
+        durable.update(ordering_context)
         durable["candle"] = _durable_candle(context.get("candle"))
         return durable
     if event_name == BotLensDomainEventName.OVERLAY_STATE_CHANGED:
@@ -1198,6 +1419,7 @@ def _durable_context_payload(
             for key in ("run_id", "bot_id", "series_key", "instrument_id", "symbol", "timeframe", "strategy_id", "trade_id", "bar_time")
             if context.get(key) not in (None, "", [], {}, ())
         }
+        durable.update(ordering_context)
         durable["overlay_delta"] = _durable_overlay_delta(context.get("overlay_delta"))
         return durable
     if event_name == BotLensDomainEventName.SERIES_STATS_REPORTED:
@@ -1206,6 +1428,7 @@ def _durable_context_payload(
             for key in ("run_id", "bot_id", "series_key", "instrument_id", "symbol", "timeframe", "strategy_id", "trade_id", "bar_time")
             if context.get(key) not in (None, "", [], {}, ())
         }
+        durable.update(ordering_context)
         durable["stats"] = _durable_series_stats(context.get("stats"))
         return durable
     if event_name == BotLensDomainEventName.HEALTH_STATUS_REPORTED:
@@ -1238,6 +1461,7 @@ def _durable_context_payload(
         durable = {
             "run_id": context.get("run_id"),
             "bot_id": context.get("bot_id"),
+            **ordering_context,
             "status": _optional_text(context.get("status")),
             "warning_count": max(int(context.get("warning_count") or 0), len(warnings), 0),
             "warning_types": warning_types or None,
@@ -1260,6 +1484,9 @@ def _durable_context_payload(
             for key, value in durable.items()
             if value not in (None, "", [], {}, ())
         }
+    if not ordering_context:
+        context.pop("run_seq", None)
+        context.pop("run_seq_status", None)
     return context
 
 
@@ -1443,6 +1670,8 @@ def _decision_base_context(
         run_id=run_id,
         identity=identity
         | {
+            "series_key": decision_context.get("series_key") or identity.get("series_key"),
+            "instrument_id": decision_context.get("instrument_id") or identity.get("instrument_id"),
             "symbol": decision_context.get("symbol") or identity.get("symbol"),
             "timeframe": decision_context.get("timeframe") or identity.get("timeframe"),
         },
@@ -1478,7 +1707,13 @@ def _lifecycle_event_name(*, phase: Any, status: Any) -> BotLensDomainEventName:
         return BotLensDomainEventName.RUN_STOPPED
     if normalized_phase in {"cancelled", "canceled"} or normalized_status in {"cancelled", "canceled"}:
         return BotLensDomainEventName.RUN_CANCELLED
-    if normalized_phase in {"startup_failed", "crashed", "failed", "error"} or normalized_status in {"startup_failed", "crashed", "failed", "error"}:
+    if normalized_phase in {"startup_failed", "crashed", "failed", "error", "degraded_terminal"} or normalized_status in {
+        "startup_failed",
+        "crashed",
+        "failed",
+        "error",
+        "degraded_terminal",
+    }:
         return BotLensDomainEventName.RUN_FAILED
     return BotLensDomainEventName.RUN_PHASE_REPORTED
 
@@ -1487,6 +1722,8 @@ def _serialized_context_base_fields(context_payload: Mapping[str, Any]) -> Dict[
     return {
         "run_id": _require_text(context_payload.get("run_id"), field_name="context.run_id"),
         "bot_id": _require_text(context_payload.get("bot_id"), field_name="context.bot_id"),
+        "run_seq": _coerce_int(context_payload.get("run_seq")) if context_payload.get("run_seq") is not None else None,
+        "run_seq_status": context_payload.get("run_seq_status"),
     }
 
 
@@ -1518,6 +1755,8 @@ _SERIES_CONTEXT_BASE_KEYS = frozenset(
     {
         "run_id",
         "bot_id",
+        "run_seq",
+        "run_seq_status",
         "series_key",
         "instrument_id",
         "symbol",
@@ -1528,7 +1767,51 @@ _SERIES_CONTEXT_BASE_KEYS = frozenset(
         "observed_at",
     }
 )
-_RUN_CONTEXT_BASE_KEYS = frozenset({"run_id", "bot_id"})
+_RUN_CONTEXT_BASE_KEYS = frozenset({"run_id", "bot_id", "run_seq", "run_seq_status"})
+_WALLET_LEDGER_CONTEXT_KEYS = _SERIES_CONTEXT_BASE_KEYS | frozenset(
+    {
+        "known_at",
+        "decision_id",
+        "source_event_id",
+        "wallet_event_id",
+        "source_run_seq",
+        "source_run_seq_status",
+        "wallet_commit_seq",
+        "wallet_commit_seq_status",
+        "wallet_eval_seq",
+        "position_commit_seq",
+        "position_commit_seq_status",
+        "wallet_event_order",
+        "currency",
+        "balance_before",
+        "balance_after",
+        "equity_before",
+        "equity_after",
+        "free_collateral_before",
+        "free_collateral_after",
+        "locked_margin_before",
+        "locked_margin_after",
+        "margin_required",
+        "margin_reserved",
+        "margin_released",
+        "margin_available",
+        "fee",
+        "realized_pnl",
+        "reason",
+        "qty",
+        "selected_quantity",
+        "price",
+        "notional",
+        "side",
+        "direction",
+        "signal_id",
+        "wallet_delta",
+        "margin_requirement",
+        "wallet_before",
+        "wallet_after",
+        "source_refs",
+    }
+)
 _EVENT_ENVELOPE_KEYS = frozenset(
     {
         "schema_version",
@@ -1547,7 +1830,7 @@ _ALLOWED_CONTEXT_KEYS_BY_EVENT = {
     BotLensDomainEventName.OVERLAY_STATE_CHANGED: _SERIES_CONTEXT_BASE_KEYS | frozenset({"overlay_delta"}),
     BotLensDomainEventName.SERIES_STATS_REPORTED: _SERIES_CONTEXT_BASE_KEYS | frozenset({"stats"}),
     BotLensDomainEventName.SIGNAL_EMITTED: _SERIES_CONTEXT_BASE_KEYS
-    | frozenset({"signal_id", "signal_type", "direction", "signal_price", "strategy_hash", "bar_epoch", "decision_id", "rule_id", "intent", "event_key"}),
+    | frozenset({"signal_id", "signal_type", "direction", "signal_price", "strategy_hash", "bar_epoch", "decision_id", "rule_id", "intent", "event_key", "decision_artifact"}),
     BotLensDomainEventName.DECISION_EMITTED: _SERIES_CONTEXT_BASE_KEYS
     | frozenset(
         {
@@ -1568,14 +1851,28 @@ _ALLOWED_CONTEXT_KEYS_BY_EVENT = {
             "intent",
             "rule_id",
             "event_key",
+            "wallet_snapshot",
+            "margin_requirement",
+            "wallet_commit_seq",
+            "wallet_eval_seq",
+            "position_commit_seq",
         }
     ),
     BotLensDomainEventName.TRADE_OPENED: _SERIES_CONTEXT_BASE_KEYS
-    | frozenset({"trade_state", "side", "direction", "qty", "entry_price", "exit_price", "realized_pnl", "event_impact_pnl", "trade_net_pnl", "signal_id", "decision_id", "event_time", "opened_at", "closed_at"}),
+    | frozenset({"trade_state", "side", "direction", "qty", "quantity", "entry_price", "stop_price", "exit_price", "realized_pnl", "event_impact_pnl", "trade_net_pnl", "gross_pnl", "fees_paid", "net_pnl", "signal_id", "decision_id", "reason_code", "close_reason", "event_time", "opened_at", "closed_at", "exit_time", "position_commit_seq", "position_commit_seq_status", "legs", "metrics"}),
     BotLensDomainEventName.TRADE_UPDATED: _SERIES_CONTEXT_BASE_KEYS
-    | frozenset({"trade_state", "side", "direction", "qty", "entry_price", "exit_price", "realized_pnl", "event_impact_pnl", "trade_net_pnl", "signal_id", "decision_id", "event_time", "opened_at", "closed_at"}),
+    | frozenset({"trade_state", "side", "direction", "qty", "quantity", "entry_price", "stop_price", "exit_price", "realized_pnl", "event_impact_pnl", "trade_net_pnl", "gross_pnl", "fees_paid", "net_pnl", "signal_id", "decision_id", "reason_code", "close_reason", "event_time", "opened_at", "closed_at", "exit_time", "position_commit_seq", "position_commit_seq_status", "legs", "metrics"}),
     BotLensDomainEventName.TRADE_CLOSED: _SERIES_CONTEXT_BASE_KEYS
-    | frozenset({"trade_state", "side", "direction", "qty", "entry_price", "exit_price", "realized_pnl", "event_impact_pnl", "trade_net_pnl", "signal_id", "decision_id", "event_time", "opened_at", "closed_at"}),
+    | frozenset({"trade_state", "side", "direction", "qty", "quantity", "entry_price", "stop_price", "exit_price", "realized_pnl", "event_impact_pnl", "trade_net_pnl", "gross_pnl", "fees_paid", "net_pnl", "signal_id", "decision_id", "reason_code", "close_reason", "event_time", "opened_at", "closed_at", "exit_time", "position_commit_seq", "position_commit_seq_status", "legs", "metrics"}),
+    BotLensDomainEventName.WALLET_INITIALIZED: _WALLET_LEDGER_CONTEXT_KEYS,
+    BotLensDomainEventName.MARGIN_RESERVED: _WALLET_LEDGER_CONTEXT_KEYS,
+    BotLensDomainEventName.MARGIN_REJECTED: _WALLET_LEDGER_CONTEXT_KEYS,
+    BotLensDomainEventName.MARGIN_RELEASED: _WALLET_LEDGER_CONTEXT_KEYS,
+    BotLensDomainEventName.FEE_APPLIED: _WALLET_LEDGER_CONTEXT_KEYS,
+    BotLensDomainEventName.REALIZED_PNL_APPLIED: _WALLET_LEDGER_CONTEXT_KEYS,
+    BotLensDomainEventName.POSITION_OPENED: _WALLET_LEDGER_CONTEXT_KEYS,
+    BotLensDomainEventName.POSITION_CLOSED: _WALLET_LEDGER_CONTEXT_KEYS,
+    BotLensDomainEventName.EQUITY_UPDATED: _WALLET_LEDGER_CONTEXT_KEYS,
     BotLensDomainEventName.RUN_PHASE_REPORTED: _RUN_CONTEXT_BASE_KEYS | frozenset({"phase", "status", "component", "message", "live", "metadata", "failure"}),
     BotLensDomainEventName.RUN_STARTED: _RUN_CONTEXT_BASE_KEYS | frozenset({"phase", "status", "component", "message", "live", "metadata", "failure"}),
     BotLensDomainEventName.RUN_READY: _RUN_CONTEXT_BASE_KEYS | frozenset({"phase", "status", "component", "message", "live", "metadata", "failure"}),
@@ -1658,6 +1955,7 @@ def deserialize_botlens_domain_context(
             rule_id=context_payload.get("rule_id"),
             intent=context_payload.get("intent"),
             event_key=context_payload.get("event_key"),
+            decision_artifact=_mapping(context_payload.get("decision_artifact")),
         )
     if event_name == BotLensDomainEventName.DECISION_EMITTED:
         return DecisionEmittedContext(
@@ -1679,6 +1977,8 @@ def deserialize_botlens_domain_context(
             intent=context_payload.get("intent"),
             rule_id=context_payload.get("rule_id"),
             event_key=context_payload.get("event_key"),
+            wallet_snapshot=_mapping(context_payload.get("wallet_snapshot")),
+            margin_requirement=_mapping(context_payload.get("margin_requirement")),
         )
     if event_name in {
         BotLensDomainEventName.TRADE_OPENED,
@@ -1691,7 +1991,9 @@ def deserialize_botlens_domain_context(
             side=context_payload.get("side"),
             direction=context_payload.get("direction"),
             qty=_optional_float_field(context_payload, "qty", field_name="context.qty"),
+            quantity=_optional_float_field(context_payload, "quantity", field_name="context.quantity"),
             entry_price=_optional_float_field(context_payload, "entry_price", field_name="context.entry_price"),
+            stop_price=_optional_float_field(context_payload, "stop_price", field_name="context.stop_price"),
             exit_price=_optional_float_field(context_payload, "exit_price", field_name="context.exit_price"),
             realized_pnl=_optional_float_field(context_payload, "realized_pnl", field_name="context.realized_pnl"),
             event_impact_pnl=_optional_float_field(
@@ -1700,11 +2002,65 @@ def deserialize_botlens_domain_context(
                 field_name="context.event_impact_pnl",
             ),
             trade_net_pnl=_optional_float_field(context_payload, "trade_net_pnl", field_name="context.trade_net_pnl"),
+            gross_pnl=_optional_float_field(context_payload, "gross_pnl", field_name="context.gross_pnl"),
+            fees_paid=_optional_float_field(context_payload, "fees_paid", field_name="context.fees_paid"),
+            net_pnl=_optional_float_field(context_payload, "net_pnl", field_name="context.net_pnl"),
             signal_id=context_payload.get("signal_id"),
             decision_id=context_payload.get("decision_id"),
+            reason_code=context_payload.get("reason_code"),
+            close_reason=context_payload.get("close_reason"),
             event_time=parse_optional_datetime(context_payload.get("event_time")),
             opened_at=parse_optional_datetime(context_payload.get("opened_at")),
             closed_at=parse_optional_datetime(context_payload.get("closed_at")),
+            exit_time=parse_optional_datetime(context_payload.get("exit_time")),
+            position_commit_seq=context_payload.get("position_commit_seq"),
+            position_commit_seq_status=context_payload.get("position_commit_seq_status"),
+            legs=tuple(_mapping_list(context_payload.get("legs"))),
+            metrics=_mapping_or_none(context_payload.get("metrics")),
+        )
+    if event_name in _WALLET_LEDGER_EVENT_NAMES:
+        return WalletLedgerContext(
+            **_serialized_series_context_base_fields(context_payload),
+            known_at=parse_optional_datetime(context_payload.get("known_at")),
+            decision_id=context_payload.get("decision_id"),
+            source_event_id=context_payload.get("source_event_id"),
+            wallet_event_id=context_payload.get("wallet_event_id"),
+            source_run_seq=context_payload.get("source_run_seq"),
+            source_run_seq_status=context_payload.get("source_run_seq_status"),
+            wallet_commit_seq=context_payload.get("wallet_commit_seq"),
+            wallet_commit_seq_status=context_payload.get("wallet_commit_seq_status"),
+            wallet_eval_seq=context_payload.get("wallet_eval_seq"),
+            position_commit_seq=context_payload.get("position_commit_seq"),
+            position_commit_seq_status=context_payload.get("position_commit_seq_status"),
+            wallet_event_order=context_payload.get("wallet_event_order"),
+            currency=context_payload.get("currency"),
+            balance_before=_optional_float_field(context_payload, "balance_before", field_name="context.balance_before"),
+            balance_after=_optional_float_field(context_payload, "balance_after", field_name="context.balance_after"),
+            equity_before=_optional_float_field(context_payload, "equity_before", field_name="context.equity_before"),
+            equity_after=_optional_float_field(context_payload, "equity_after", field_name="context.equity_after"),
+            free_collateral_before=_optional_float_field(context_payload, "free_collateral_before", field_name="context.free_collateral_before"),
+            free_collateral_after=_optional_float_field(context_payload, "free_collateral_after", field_name="context.free_collateral_after"),
+            locked_margin_before=_optional_float_field(context_payload, "locked_margin_before", field_name="context.locked_margin_before"),
+            locked_margin_after=_optional_float_field(context_payload, "locked_margin_after", field_name="context.locked_margin_after"),
+            margin_required=_optional_float_field(context_payload, "margin_required", field_name="context.margin_required"),
+            margin_reserved=_optional_float_field(context_payload, "margin_reserved", field_name="context.margin_reserved"),
+            margin_released=_optional_float_field(context_payload, "margin_released", field_name="context.margin_released"),
+            margin_available=_optional_float_field(context_payload, "margin_available", field_name="context.margin_available"),
+            fee=_optional_float_field(context_payload, "fee", field_name="context.fee"),
+            realized_pnl=_optional_float_field(context_payload, "realized_pnl", field_name="context.realized_pnl"),
+            reason=context_payload.get("reason"),
+            qty=_optional_float_field(context_payload, "qty", field_name="context.qty"),
+            selected_quantity=_optional_float_field(context_payload, "selected_quantity", field_name="context.selected_quantity"),
+            price=_optional_float_field(context_payload, "price", field_name="context.price"),
+            notional=_optional_float_field(context_payload, "notional", field_name="context.notional"),
+            side=context_payload.get("side"),
+            direction=context_payload.get("direction"),
+            signal_id=context_payload.get("signal_id"),
+            wallet_delta=_mapping_or_none(context_payload.get("wallet_delta")),
+            margin_requirement=_mapping_or_none(context_payload.get("margin_requirement")),
+            wallet_before=_mapping_or_none(context_payload.get("wallet_before")),
+            wallet_after=_mapping_or_none(context_payload.get("wallet_after")),
+            source_refs=_mapping_list(context_payload.get("source_refs")),
         )
     if event_name.value in _LIFECYCLE_EVENT_NAMES:
         return RunLifecycleContext(
@@ -1855,15 +2211,26 @@ def build_botlens_domain_events_from_fact_batch(
             runtime = _mapping(fact.get("runtime"))
             status = _optional_text(runtime.get("status"))
             if status:
+                raw_warnings = runtime.get("warnings")
+                warnings = (
+                    [dict(entry) for entry in raw_warnings if isinstance(entry, Mapping)]
+                    if isinstance(raw_warnings, list)
+                    else []
+                )
+                raw_warning_count = len(raw_warnings) if isinstance(raw_warnings, list) else 0
                 context = HealthStatusReportedContext(
                     bot_id=str(bot_id),
                     run_id=str(run_id),
                     status=status,
-                    warning_count=len(runtime.get("warnings") or []) if isinstance(runtime.get("warnings"), list) else 0,
+                    warning_count=max(
+                        _coerce_int(runtime.get("warning_count"), 0),
+                        raw_warning_count,
+                        len(warnings),
+                    ),
                     worker_count=_coerce_int(runtime.get("worker_count"), 0) if runtime.get("worker_count") is not None else None,
                     active_workers=_coerce_int(runtime.get("active_workers"), 0) if runtime.get("active_workers") is not None else None,
                     trigger_event=_optional_text(fact.get("event")),
-                    warnings=[dict(entry) for entry in runtime.get("warnings", []) if isinstance(entry, Mapping)],
+                    warnings=warnings,
                     runtime_state=_optional_text(runtime.get("runtime_state")),
                     last_useful_progress_at=_optional_text(runtime.get("last_useful_progress_at")),
                     progress_state=_optional_text(runtime.get("progress_state")),
@@ -2015,6 +2382,7 @@ def build_botlens_domain_events_from_fact_batch(
                     rule_id=_optional_text(decision_context.get("rule_id")),
                     intent=_optional_text(decision_context.get("intent")),
                     event_key=_optional_text(decision_context.get("event_key")),
+                    decision_artifact=_mapping(decision_context.get("decision_artifact")),
                 )
                 event_name = BotLensDomainEventName.SIGNAL_EMITTED
             elif decision_name in {"DECISION_ACCEPTED", "DECISION_REJECTED"}:
@@ -2059,6 +2427,30 @@ def build_botlens_domain_events_from_fact_batch(
                     intent=_optional_text(decision_context.get("intent")),
                     rule_id=_optional_text(decision_context.get("rule_id")),
                     event_key=_optional_text(decision_context.get("event_key")),
+                    wallet_snapshot=_mapping(
+                        decision_context.get("wallet_snapshot")
+                        or decision_context.get("wallet_before")
+                        or rejection_context.get("wallet_snapshot")
+                        or rejection_context.get("wallet_before")
+                    ),
+                    margin_requirement=_mapping(
+                        decision_context.get("margin_requirement")
+                        or decision_context.get("required_delta")
+                        or rejection_context.get("margin_requirement")
+                        or rejection_context.get("required_delta")
+                        or rejection_context.get("margin_info")
+                    ),
+                    wallet_commit_seq=_coerce_int(
+                        decision_context.get("wallet_commit_seq")
+                        if decision_context.get("wallet_commit_seq") is not None
+                        else rejection_context.get("wallet_commit_seq")
+                    ),
+                    wallet_eval_seq=_coerce_int(
+                        decision_context.get("wallet_eval_seq")
+                        if decision_context.get("wallet_eval_seq") is not None
+                        else rejection_context.get("wallet_eval_seq")
+                    ),
+                    position_commit_seq=_coerce_int(decision_context.get("position_commit_seq")),
                 )
                 event_name = BotLensDomainEventName.DECISION_EMITTED
             elif decision_name == "RUNTIME_ERROR":
@@ -2162,27 +2554,51 @@ def build_botlens_domain_events_from_fact_batch(
                 trade_state=trade_state,
                 side=_optional_text(trade.get("side")),
                 direction=_optional_text(trade.get("direction")),
-                qty=_coerce_float(trade.get("qty") or trade.get("filled_qty")),
+                qty=_coerce_float(trade.get("qty") or trade.get("filled_qty") or trade.get("quantity")),
+                quantity=_coerce_float(trade.get("quantity") or trade.get("qty") or trade.get("filled_qty")),
                 entry_price=_coerce_float(trade.get("entry_price")),
+                stop_price=_coerce_float(trade.get("stop_price")),
                 exit_price=_coerce_float(trade.get("exit_price")),
                 realized_pnl=_coerce_float(trade.get("realized_pnl")),
                 event_impact_pnl=_coerce_float(trade.get("event_impact_pnl")),
                 trade_net_pnl=_coerce_float(trade.get("trade_net_pnl")),
+                gross_pnl=_coerce_float(trade.get("gross_pnl")),
+                fees_paid=_coerce_float(trade.get("fees_paid")),
+                net_pnl=_coerce_float(trade.get("net_pnl")),
                 signal_id=_optional_text(trade.get("signal_id")),
                 decision_id=_optional_text(trade.get("decision_id")),
+                reason_code=_optional_text(trade.get("reason_code") or trade.get("close_reason")),
+                close_reason=_optional_text(trade.get("close_reason") or trade.get("reason_code")),
                 event_time=explicit_event_time or trade_bar_time,
                 opened_at=opened_at,
                 closed_at=closed_at,
+                exit_time=parse_optional_datetime(trade.get("exit_time") or trade.get("closed_at")),
+                position_commit_seq=(
+                    _coerce_int(trade.get("position_commit_seq"))
+                    if trade.get("position_commit_seq") is not None
+                    else None
+                ),
+                position_commit_seq_status=_optional_text(trade.get("position_commit_seq_status")),
+                legs=tuple(_mapping_list(trade.get("legs"))),
+                metrics=_mapping_or_none(trade.get("metrics")),
             )
             revision = _event_hash(
                 trade_id,
                 trade_state,
                 trade.get("status"),
                 trade.get("entry_price"),
+                trade.get("stop_price"),
                 trade.get("exit_price"),
-                trade.get("qty"),
+                trade.get("qty") or trade.get("quantity"),
                 trade.get("closed_at"),
                 trade.get("realized_pnl"),
+                trade.get("gross_pnl"),
+                trade.get("fees_paid"),
+                trade.get("net_pnl"),
+                trade.get("position_commit_seq"),
+                trade.get("position_commit_seq_status"),
+                trade.get("legs"),
+                trade.get("reason_code") or trade.get("close_reason"),
             )
             event_id = f"botlens:{_event_hash('trade', run_id, context.series_key, trade_id, revision)}"
             event_ts = context.event_time or context.bar_time
@@ -2197,6 +2613,130 @@ def build_botlens_domain_events_from_fact_batch(
                         scope=f"trade:{trade_id}",
                         event_ts=event_ts,
                     ),
+                    context=context,
+                )
+            )
+            continue
+
+        if fact_type == FACT_TYPE_WALLET_LEDGER_EVENT:
+            wallet = _mapping(fact.get("wallet_event"))
+            event_name = _event_name(wallet.get("event_name"))
+            if event_name not in _WALLET_LEDGER_EVENT_NAMES:
+                raise ValueError(f"unsupported wallet ledger event_name={event_name.value!r}")
+            event_ts = (
+                parse_optional_datetime(wallet.get("event_ts"))
+                or parse_optional_datetime(wallet.get("known_at"))
+                or known_at
+            )
+            if event_ts is None:
+                raise ValueError("wallet_event.event_ts or known_at is required")
+            fact_identity = identity | {
+                "series_key": wallet.get("series_key") or fact.get("series_key") or identity.get("series_key"),
+                "instrument_id": wallet.get("instrument_id") or fact.get("instrument_id") or identity.get("instrument_id"),
+                "symbol": wallet.get("symbol") or fact.get("symbol") or identity.get("symbol"),
+                "timeframe": wallet.get("timeframe") or fact.get("timeframe") or identity.get("timeframe"),
+            }
+            base = _base_context(
+                bot_id=bot_id,
+                run_id=run_id,
+                identity=fact_identity,
+                strategy_id=wallet.get("strategy_id"),
+                trade_id=wallet.get("trade_id"),
+                bar_time=wallet.get("bar_time") or event_ts,
+                observed_at=observed_at,
+            )
+            wallet_run_seq = wallet.get("run_seq") if wallet.get("run_seq") is not None else payload.get("run_seq")
+            wallet_run_seq_status = (
+                wallet.get("run_seq_status")
+                if wallet.get("run_seq_status") is not None
+                else payload.get("run_seq_status")
+            )
+            base["run_seq"] = _coerce_int(wallet_run_seq)
+            base["run_seq_status"] = _optional_text(wallet_run_seq_status)
+            context = WalletLedgerContext(
+                **base,
+                known_at=parse_optional_datetime(wallet.get("known_at")) or event_ts,
+                decision_id=_optional_text(wallet.get("decision_id")),
+                source_event_id=_optional_text(wallet.get("source_event_id")),
+                wallet_event_id=_optional_text(wallet.get("wallet_event_id")),
+                source_run_seq=_coerce_int(
+                    wallet.get("source_run_seq") if wallet.get("source_run_seq") is not None else wallet.get("run_seq")
+                ),
+                source_run_seq_status=_optional_text(
+                    wallet.get("source_run_seq_status")
+                    if wallet.get("source_run_seq_status") is not None
+                    else wallet.get("run_seq_status")
+                ),
+                wallet_commit_seq=_coerce_int(wallet.get("wallet_commit_seq")),
+                wallet_commit_seq_status=_optional_text(wallet.get("wallet_commit_seq_status")),
+                wallet_eval_seq=_coerce_int(wallet.get("wallet_eval_seq")),
+                position_commit_seq=_coerce_int(wallet.get("position_commit_seq")),
+                position_commit_seq_status=_optional_text(wallet.get("position_commit_seq_status")),
+                wallet_event_order=_coerce_int(wallet.get("wallet_event_order")),
+                currency=_optional_text(wallet.get("currency")),
+                balance_before=_coerce_float(wallet.get("balance_before")),
+                balance_after=_coerce_float(wallet.get("balance_after")),
+                equity_before=_coerce_float(wallet.get("equity_before")),
+                equity_after=_coerce_float(wallet.get("equity_after")),
+                free_collateral_before=_coerce_float(wallet.get("free_collateral_before")),
+                free_collateral_after=_coerce_float(wallet.get("free_collateral_after")),
+                locked_margin_before=_coerce_float(wallet.get("locked_margin_before")),
+                locked_margin_after=_coerce_float(wallet.get("locked_margin_after")),
+                margin_required=_coerce_float(wallet.get("margin_required")),
+                margin_reserved=_coerce_float(wallet.get("margin_reserved")),
+                margin_released=_coerce_float(wallet.get("margin_released")),
+                margin_available=_coerce_float(wallet.get("margin_available")),
+                fee=_coerce_float(wallet.get("fee")),
+                realized_pnl=_coerce_float(wallet.get("realized_pnl")),
+                reason=_optional_text(wallet.get("reason")),
+                qty=_coerce_float(wallet.get("qty")),
+                selected_quantity=_coerce_float(wallet.get("selected_quantity")),
+                price=_coerce_float(wallet.get("price")),
+                notional=_coerce_float(wallet.get("notional")),
+                side=_optional_text(wallet.get("side")),
+                direction=_optional_text(wallet.get("direction")),
+                signal_id=_optional_text(wallet.get("signal_id")),
+                wallet_delta=_mapping_or_none(wallet.get("wallet_delta")),
+                margin_requirement=_mapping_or_none(wallet.get("margin_requirement")),
+                wallet_before=_mapping_or_none(wallet.get("wallet_before")),
+                wallet_after=_mapping_or_none(wallet.get("wallet_after")),
+                source_refs=_mapping_list(wallet.get("source_refs")),
+            )
+            source_event_id = _optional_text(wallet.get("source_event_id"))
+            natural_id = (
+                _optional_text(wallet.get("wallet_event_id"))
+                or _event_hash(
+                    event_name.value,
+                    source_event_id,
+                    context.decision_id,
+                    context.trade_id,
+                    context.instrument_id,
+                    context.symbol,
+                    context.bar_time,
+                    context.reason,
+                    context.balance_before,
+                    context.balance_after,
+                    context.margin_required,
+                    context.fee,
+                )
+            )
+            event_id = _optional_text(wallet.get("event_id")) or f"botlens:{event_name.value.lower()}:{natural_id}"
+            events.append(
+                _new_event(
+                    event_name=event_name,
+                    event_id=event_id,
+                    event_ts=event_ts,
+                    correlation_id=(
+                        _optional_text(wallet.get("correlation_id"))
+                        or _correlation_id(
+                            run_id=run_id,
+                            series_key=context.series_key,
+                            scope=f"wallet:{event_name.value.lower()}:{context.trade_id or context.decision_id or natural_id}",
+                            event_ts=event_ts,
+                        )
+                    ),
+                    root_id=_optional_text(wallet.get("root_id")) or None,
+                    parent_id=_optional_text(wallet.get("parent_id")) or source_event_id,
                     context=context,
                 )
             )
@@ -2349,6 +2889,7 @@ __all__ = [
     "BotLensCandle",
     "BotLensDomainEvent",
     "BotLensDomainEventName",
+    "WalletLedgerContext",
     "botlens_domain_event_type",
     "build_botlens_domain_events_from_fact_batch",
     "build_botlens_domain_events_from_lifecycle",

@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from collections.abc import Mapping
 from typing import Any, Dict
@@ -51,6 +52,7 @@ from .botlens_domain_events import (
     build_botlens_domain_events_from_lifecycle,
     serialize_botlens_domain_event,
 )
+from .botlens_event_retention import retention_summary_for_events, split_events_by_retention
 from .botlens_projection_batches import projection_batch_from_payload, runtime_event_rows_from_batch, split_fact_events
 from .botlens_projector_registry import ProjectorRegistry
 from .botlens_runtime_state import BotLensRuntimeState, startup_bootstrap_admission
@@ -58,14 +60,15 @@ from .botlens_state import ProjectionBatch
 
 logger = logging.getLogger(__name__)
 _OBSERVER = BackendObserver(component="botlens_intake_router", event_logger=logger)
-_PERSIST_BATCH_MAX_ROWS = 128
-_PERSIST_BATCH_MAX_DELAY_MS = 10
+_PERSIST_BATCH_MAX_ROWS = 512
+_PERSIST_BATCH_MAX_DELAY_MS = 25
+_PERSIST_IDEMPOTENCE_MAX_EVENT_IDS = 50_000
 _TERMINAL_LIFECYCLE_STATES = frozenset({"completed", "stopped", "cancelled", "canceled", "error", "failed", "crashed", "startup_failed"})
 
 
 def _ingest_source_reason(*, kind: str, payload: Mapping[str, Any]) -> str:
     explicit = str(payload.get("source_reason") or "").strip().lower()
-    if explicit in {"ingest", "replay", "retry", "bootstrap", "projector", "transport", "unknown"}:
+    if explicit in {"ingest", "replay", "retry", "bootstrap", "projector", "transport", "unknown", "provider_closure", "source_sparse"}:
         return explicit
     if kind == BRIDGE_BOOTSTRAP_KIND:
         return "bootstrap"
@@ -103,13 +106,17 @@ class IntakeRouter:
         *,
         persist_batch_max_rows: int = _PERSIST_BATCH_MAX_ROWS,
         persist_batch_max_delay_ms: int = _PERSIST_BATCH_MAX_DELAY_MS,
+        persist_idempotence_max_event_ids: int = _PERSIST_IDEMPOTENCE_MAX_EVENT_IDS,
     ) -> None:
         self._registry = registry
         self._persist_batch_max_rows = max(int(persist_batch_max_rows), 1)
         self._persist_batch_max_delay_s = max(float(persist_batch_max_delay_ms) / 1000.0, 0.0)
+        self._persist_idempotence_max_event_ids = max(int(persist_idempotence_max_event_ids), 0)
         self._persist_lock = asyncio.Lock()
         self._pending_persist_batches: dict[tuple[Any, ...], _PendingPersistBatch] = {}
+        self._persisted_event_ids: dict[tuple[str, str, str, str, str], OrderedDict[str, None]] = {}
         self._continuity_accumulators: dict[tuple[str, str], CandleContinuityAccumulator] = {}
+        self._continuity_identities: dict[tuple[str, str], dict[str, Any]] = {}
 
     @staticmethod
     def _persist_context_key(context: Mapping[str, Any]) -> tuple[Any, ...]:
@@ -123,6 +130,61 @@ class IntakeRouter:
             str(context.get("source_emitter") or "").strip(),
             str(context.get("source_reason") or "").strip(),
         )
+
+    def _persist_idempotence_key(self, context: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
+        return (
+            str(context.get("bot_id") or "").strip(),
+            str(context.get("run_id") or "").strip(),
+            str(context.get("series_key") or "").strip(),
+            str(context.get("message_kind") or "").strip(),
+            str(context.get("pipeline_stage") or "").strip(),
+        )
+
+    def _filter_new_persist_rows(
+        self,
+        *,
+        rows: list[Dict[str, Any]],
+        context: Mapping[str, Any],
+    ) -> list[Dict[str, Any]]:
+        if not rows or self._persist_idempotence_max_event_ids <= 0:
+            return rows
+        key = self._persist_idempotence_key(context)
+        seen = self._persisted_event_ids.get(key)
+        batch_seen: set[str] = set()
+        filtered: list[Dict[str, Any]] = []
+        for row in rows:
+            event_id = str(row.get("event_id") or "").strip()
+            if not event_id:
+                filtered.append(row)
+                continue
+            if event_id in batch_seen:
+                continue
+            if seen is not None and event_id in seen:
+                continue
+            batch_seen.add(event_id)
+            filtered.append(row)
+        return filtered
+
+    def _remember_persist_rows(
+        self,
+        *,
+        rows: list[Dict[str, Any]],
+        context: Mapping[str, Any],
+    ) -> None:
+        if not rows or self._persist_idempotence_max_event_ids <= 0:
+            return
+        key = self._persist_idempotence_key(context)
+        seen = self._persisted_event_ids.setdefault(key, OrderedDict())
+        for row in rows:
+            event_id = str(row.get("event_id") or "").strip()
+            if not event_id:
+                continue
+            if event_id in seen:
+                seen.move_to_end(event_id)
+            else:
+                seen[event_id] = None
+            while len(seen) > self._persist_idempotence_max_event_ids:
+                seen.popitem(last=False)
 
     async def _persist_rows(
         self,
@@ -203,6 +265,7 @@ class IntakeRouter:
         facts: Any,
         source_reason: str,
         gap_classification: Any = None,
+        identity: Mapping[str, Any] | None = None,
     ) -> None:
         candles = continuity_candles_from_fact_payload(facts if isinstance(facts, list) else [])
         if not candles:
@@ -219,6 +282,30 @@ class IntakeRouter:
             source_reason=source_reason,
             gap_classification=gap_classification,
         )
+        if identity:
+            current = self._continuity_identities.setdefault(key, {})
+            for field in ("instrument_id", "symbol", "timeframe"):
+                value = identity.get(field)
+                if value and not current.get(field):
+                    current[field] = value
+
+    @staticmethod
+    def _series_identity_from_facts(*, facts: Any, series_key: str) -> dict[str, Any]:
+        identity: dict[str, Any] = {"series_key": normalize_series_key(series_key) or series_key}
+        for fact in facts if isinstance(facts, list) else []:
+            if not isinstance(fact, Mapping):
+                continue
+            for field in ("instrument_id", "symbol", "timeframe"):
+                value = fact.get(field)
+                if value and not identity.get(field):
+                    identity[field] = value
+            if all(identity.get(field) for field in ("instrument_id", "symbol", "timeframe")):
+                break
+        if not identity.get("instrument_id") and "|" in str(series_key or ""):
+            identity["instrument_id"] = str(series_key).split("|", 1)[0]
+        if not identity.get("timeframe") and "|" in str(series_key or ""):
+            identity["timeframe"] = str(series_key).split("|", 1)[1]
+        return identity
 
     def _emit_final_continuity_summaries(self, *, run_id: str, bot_id: str, reason: str) -> None:
         prefix = str(run_id)
@@ -226,6 +313,7 @@ class IntakeRouter:
         for key in keys:
             _, series_key = key
             accumulator = self._continuity_accumulators.pop(key)
+            identity = self._continuity_identities.pop(key, {})
             summary = accumulator.summary()
             emit_candle_continuity_summary(
                 _OBSERVER,
@@ -234,6 +322,9 @@ class IntakeRouter:
                 bot_id=bot_id,
                 run_id=run_id,
                 series_key=series_key,
+                instrument_id=identity.get("instrument_id"),
+                symbol=identity.get("symbol"),
+                timeframe=identity.get("timeframe"),
                 message_kind=LIFECYCLE_KIND,
                 source_reason=reason,
                 boundary_name="run_final",
@@ -437,8 +528,10 @@ class IntakeRouter:
                 field="series_key",
             )
             return
+        facts = payload.get("facts") if isinstance(payload.get("facts"), list) else []
+        identity = self._series_identity_from_facts(facts=facts, series_key=symbol_key)
         continuity_summary = continuity_summary_from_fact_payload(
-            facts=payload.get("facts") if isinstance(payload.get("facts"), list) else [],
+            facts=facts,
             series_key=symbol_key,
             source_reason=_ingest_source_reason(kind=BRIDGE_FACTS_KIND, payload=payload),
             gap_classification=payload.get("gap_classification"),
@@ -446,9 +539,10 @@ class IntakeRouter:
         self._accumulate_continuity(
             run_id=run_id,
             series_key=symbol_key,
-            facts=payload.get("facts") if isinstance(payload.get("facts"), list) else [],
+            facts=facts,
             source_reason=_ingest_source_reason(kind=BRIDGE_FACTS_KIND, payload=payload),
             gap_classification=payload.get("gap_classification"),
+            identity=identity,
         )
         if continuity_summary.candle_count > 1 or continuity_summary.detected_gap_count > 0:
             emit_candle_continuity_summary(
@@ -458,6 +552,9 @@ class IntakeRouter:
                 bot_id=bot_id,
                 run_id=run_id,
                 series_key=symbol_key,
+                instrument_id=identity.get("instrument_id"),
+                symbol=identity.get("symbol"),
+                timeframe=identity.get("timeframe"),
                 message_kind=BRIDGE_FACTS_KIND,
                 source_reason=_ingest_source_reason(kind=BRIDGE_FACTS_KIND, payload=payload),
                 boundary_name="source_facts",
@@ -480,22 +577,38 @@ class IntakeRouter:
             payload=payload,
             events=events,
         )
-        _canonical_events, derived_events = split_fact_events(events)
-        rows = runtime_event_rows_from_batch(batch=batch, events=derived_events)
+        _canonical_events, transport_owned_events = split_fact_events(events)
+        durable_events, dropped_events = split_events_by_retention(transport_owned_events)
+        if dropped_events:
+            summary = retention_summary_for_events(transport_owned_events)
+            _OBSERVER.increment(
+                "runtime_event_retention_dropped_total",
+                value=float(summary["dropped_or_summarized_count"]),
+                bot_id=bot_id,
+                run_id=run_id,
+                series_key=symbol_key,
+                message_kind=BRIDGE_FACTS_KIND,
+                source_reason=_ingest_source_reason(kind=BRIDGE_FACTS_KIND, payload=payload),
+            )
+        rows = runtime_event_rows_from_batch(batch=batch, events=durable_events)
+        if rows:
+            persist_context = {
+                "bot_id": bot_id,
+                "run_id": run_id,
+                "series_key": symbol_key,
+                "worker_id": payload.get("worker_id"),
+                "message_kind": BRIDGE_FACTS_KIND,
+                "pipeline_stage": "botlens_ingest_facts",
+                "source_emitter": str(payload.get("source_emitter") or "container_runtime"),
+                "source_reason": _ingest_source_reason(kind=BRIDGE_FACTS_KIND, payload=payload),
+            }
+            rows = self._filter_new_persist_rows(rows=rows, context=persist_context)
         if rows:
             await self._persist_rows(
                 rows=rows,
-                context={
-                    "bot_id": bot_id,
-                    "run_id": run_id,
-                    "series_key": symbol_key,
-                    "worker_id": payload.get("worker_id"),
-                    "message_kind": BRIDGE_FACTS_KIND,
-                    "pipeline_stage": "botlens_ingest_facts",
-                    "source_emitter": str(payload.get("source_emitter") or "container_runtime"),
-                    "source_reason": _ingest_source_reason(kind=BRIDGE_FACTS_KIND, payload=payload),
-                },
+                context=persist_context,
             )
+            self._remember_persist_rows(rows=rows, context=persist_context)
         symbol_mailbox = await self._registry.ensure_symbol(
             run_id=run_id, bot_id=bot_id, symbol_key=symbol_key
         )
@@ -525,8 +638,10 @@ class IntakeRouter:
                 field="series_key",
             )
             return
+        facts = payload.get("facts") if isinstance(payload.get("facts"), list) else []
+        identity = self._series_identity_from_facts(facts=facts, series_key=symbol_key)
         continuity_summary = continuity_summary_from_fact_payload(
-            facts=payload.get("facts") if isinstance(payload.get("facts"), list) else [],
+            facts=facts,
             series_key=symbol_key,
             source_reason=_ingest_source_reason(kind=BRIDGE_BOOTSTRAP_KIND, payload=payload),
             gap_classification=payload.get("gap_classification"),
@@ -534,9 +649,10 @@ class IntakeRouter:
         self._accumulate_continuity(
             run_id=run_id,
             series_key=symbol_key,
-            facts=payload.get("facts") if isinstance(payload.get("facts"), list) else [],
+            facts=facts,
             source_reason=_ingest_source_reason(kind=BRIDGE_BOOTSTRAP_KIND, payload=payload),
             gap_classification=payload.get("gap_classification"),
+            identity=identity,
         )
         if continuity_summary.candle_count > 0:
             emit_candle_continuity_summary(
@@ -546,6 +662,9 @@ class IntakeRouter:
                 bot_id=bot_id,
                 run_id=run_id,
                 series_key=symbol_key,
+                instrument_id=identity.get("instrument_id"),
+                symbol=identity.get("symbol"),
+                timeframe=identity.get("timeframe"),
                 message_kind=BRIDGE_BOOTSTRAP_KIND,
                 source_reason=_ingest_source_reason(kind=BRIDGE_BOOTSTRAP_KIND, payload=payload),
                 boundary_name="source_bootstrap",
@@ -581,8 +700,20 @@ class IntakeRouter:
                 failure_mode="post_live_bootstrap_rejected",
             )
             return
-        _canonical_events, derived_events = split_fact_events(events)
-        rows = runtime_event_rows_from_batch(batch=batch, events=derived_events)
+        _canonical_events, transport_owned_events = split_fact_events(events)
+        durable_events, dropped_events = split_events_by_retention(transport_owned_events)
+        if dropped_events:
+            summary = retention_summary_for_events(transport_owned_events)
+            _OBSERVER.increment(
+                "runtime_event_retention_dropped_total",
+                value=float(summary["dropped_or_summarized_count"]),
+                bot_id=bot_id,
+                run_id=run_id,
+                series_key=symbol_key,
+                message_kind=BRIDGE_BOOTSTRAP_KIND,
+                source_reason=_ingest_source_reason(kind=BRIDGE_BOOTSTRAP_KIND, payload=payload),
+            )
+        rows = runtime_event_rows_from_batch(batch=batch, events=durable_events)
         if rows:
             await self._persist_rows(
                 rows=rows,
