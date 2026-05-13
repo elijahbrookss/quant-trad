@@ -92,11 +92,20 @@ def test_overlay_delta_uses_overlay_id_and_ignores_reorder_without_content_chang
         "overlay_id": "market_profile.breakout_markers",
         **build_overlay("strategy_signal", {"markers": [{"time": 2, "price": 101.0, "shape": "circle", "color": "#f87171"}]}),
     }
+    overlay_a["indicator_commit_seq"] = 1
+    overlay_a["indicator_commit_seq_status"] = "indicator_scoped"
+    overlay_b["indicator_commit_seq"] = 1
+    overlay_b["indicator_commit_seq_status"] = "indicator_scoped"
 
     first = runtime._build_overlay_delta(cache, [overlay_a, overlay_b])
-    second = runtime._build_overlay_delta(cache, [overlay_b, overlay_a])
+    overlay_a_next = {**overlay_a, "indicator_commit_seq": 2}
+    overlay_b_next = {**overlay_b, "indicator_commit_seq": 2}
+    second = runtime._build_overlay_delta(cache, [overlay_b_next, overlay_a_next])
 
     assert isinstance(first, dict)
+    assert first["overlay_commit_seq"] == 1
+    assert first["base_overlay_commit_seq"] == 0
+    assert first["overlay_commit_seq_status"] == "overlay_scoped"
     assert [op["key"] for op in first["ops"]] == [
         "market_profile.value_area",
         "market_profile.breakout_markers",

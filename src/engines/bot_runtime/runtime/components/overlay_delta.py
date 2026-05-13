@@ -6,6 +6,32 @@ import json
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 
+_OVERLAY_PAYLOAD_LIST_KEYS = (
+    "price_lines",
+    "markers",
+    "touchPoints",
+    "touch_points",
+    "boxes",
+    "segments",
+    "polylines",
+    "bubbles",
+    "regime_blocks",
+)
+_OVERLAY_PAYLOAD_FALLBACK_POINT_LIMIT = 160
+_OVERLAY_UI_TRANSPORT_KEYS = frozenset(
+    {
+        "label",
+        "color",
+        "lineColor",
+        "fillColor",
+        "style",
+        "visible",
+        "zIndex",
+        "pane",
+    }
+)
+
+
 def overlay_points_for_payload(payload: Mapping[str, Any]) -> int:
     points = 0
     for key in (
@@ -45,20 +71,155 @@ def overlay_cache_key(overlay: Mapping[str, Any], ordinal: int) -> str:
 
 
 def overlay_payload_fingerprint(overlay: Mapping[str, Any]) -> str:
+    fingerprint_payload = {
+        key: value
+        for key, value in dict(overlay).items()
+        if key
+        not in {
+            "indicator_commit_seq",
+            "indicator_commit_seq_status",
+            "overlay_commit_seq",
+            "base_overlay_commit_seq",
+            "overlay_commit_seq_status",
+        }
+    }
     try:
-        return json.dumps(overlay, sort_keys=True, separators=(",", ":"), default=str)
+        return json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":"), default=str)
     except (TypeError, ValueError):
-        return str(overlay)
+        return str(fingerprint_payload)
+
+
+def compact_overlay_payload(
+    value: Any,
+    *,
+    max_items: int = _OVERLAY_PAYLOAD_FALLBACK_POINT_LIMIT,
+    path: Tuple[str, ...] = (),
+) -> Any:
+    resolved_limit = max(int(max_items or _OVERLAY_PAYLOAD_FALLBACK_POINT_LIMIT), 1)
+    if isinstance(value, Mapping):
+        return {
+            str(key): compact_overlay_payload(
+                entry,
+                max_items=resolved_limit,
+                path=(*path, str(key)),
+            )
+            for key, entry in value.items()
+        }
+    if isinstance(value, list):
+        polyline_history_limit = max(resolved_limit, resolved_limit * 4)
+        preserve_polyline_history = bool(
+            path
+            and path[-1] == "points"
+            and "polylines" in path
+            and len(value) <= polyline_history_limit
+        )
+        subset = (
+            value
+            if preserve_polyline_history or len(value) <= resolved_limit
+            else value[-resolved_limit:]
+        )
+        return [
+            compact_overlay_payload(entry, max_items=resolved_limit, path=path)
+            for entry in subset
+        ]
+    return value
+
+
+def overlay_payload_summary(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        return {}
+    counts: Dict[str, int] = {}
+    geometry_keys: list[str] = []
+    point_count = 0
+    for key in _OVERLAY_PAYLOAD_LIST_KEYS:
+        entries = payload.get(key)
+        if not isinstance(entries, list) or not entries:
+            continue
+        counts[key] = len(entries)
+        geometry_keys.append(key)
+        if key == "polylines":
+            point_count += sum(
+                len(entry.get("points") or [])
+                for entry in entries
+                if isinstance(entry, Mapping)
+            )
+    summary: Dict[str, Any] = {}
+    if geometry_keys:
+        summary["geometry_keys"] = geometry_keys
+    if counts:
+        summary["payload_counts"] = counts
+    if point_count > 0:
+        summary["point_count"] = int(point_count)
+    return summary
+
+
+def compact_overlay_for_transport(
+    overlay: Mapping[str, Any],
+    *,
+    key: Optional[str] = None,
+    max_payload_items: int = _OVERLAY_PAYLOAD_FALLBACK_POINT_LIMIT,
+) -> Dict[str, Any]:
+    mapping = dict(overlay)
+    overlay_id = str(mapping.get("overlay_id") or mapping.get("id") or key or "").strip()
+    payload_value = mapping.get("payload")
+    compacted_payload = (
+        compact_overlay_payload(payload_value, max_items=max_payload_items)
+        if isinstance(payload_value, Mapping)
+        else None
+    )
+    pane_views = [
+        str(entry).strip()
+        for entry in (mapping.get("pane_views") if isinstance(mapping.get("pane_views"), list) else [])
+        if str(entry).strip()
+    ]
+    ui = {}
+    if isinstance(mapping.get("ui"), Mapping):
+        ui = {
+            str(entry_key): entry_value
+            for entry_key, entry_value in dict(mapping["ui"]).items()
+            if str(entry_key) in _OVERLAY_UI_TRANSPORT_KEYS and entry_value not in (None, "", [], {}, ())
+        }
+    compacted: Dict[str, Any] = {
+        "overlay_id": overlay_id or None,
+        "type": mapping.get("type"),
+        "strategy_id": mapping.get("strategy_id"),
+        "source": mapping.get("source"),
+        "pane_key": mapping.get("pane_key"),
+        "pane_views": pane_views or None,
+        "color": mapping.get("color"),
+        "ind_id": mapping.get("ind_id"),
+        "ui": ui or None,
+        "detail_level": "bounded_render",
+        "payload": compacted_payload,
+        "payload_summary": overlay_payload_summary(compacted_payload),
+    }
+    for seq_key in (
+        "indicator_commit_seq",
+        "indicator_commit_seq_status",
+        "overlay_commit_seq",
+        "base_overlay_commit_seq",
+        "overlay_commit_seq_status",
+    ):
+        value = mapping.get(seq_key)
+        if value not in (None, "", [], {}, ()):
+            compacted[seq_key] = value
+    return {
+        entry_key: entry_value
+        for entry_key, entry_value in compacted.items()
+        if entry_value not in (None, "", [], {}, ())
+    }
 
 
 def build_overlay_delta(
     cache: Dict[str, Any],
     overlays: Sequence[Mapping[str, Any]],
+    *,
+    max_payload_items: int = _OVERLAY_PAYLOAD_FALLBACK_POINT_LIMIT,
 ) -> Optional[Dict[str, Any]]:
     previous_entries = cache.get("overlay_entries")
     previous_fingerprints = cache.get("overlay_fingerprints")
     previous_order = cache.get("overlay_order")
-    previous_seq = int(cache.get("overlay_seq") or 0)
+    previous_seq = int(cache.get("overlay_commit_seq") or 0)
     if not isinstance(previous_entries, dict) or not isinstance(previous_fingerprints, dict) or not isinstance(previous_order, list):
         previous_entries = {}
         previous_fingerprints = {}
@@ -71,8 +232,13 @@ def build_overlay_delta(
         if not isinstance(overlay, Mapping):
             continue
         key = overlay_cache_key(overlay, idx)
-        next_entries[key] = dict(overlay)
-        next_fingerprints[key] = overlay_payload_fingerprint(overlay)
+        compacted_overlay = compact_overlay_for_transport(
+            overlay,
+            key=key,
+            max_payload_items=max_payload_items,
+        )
+        next_entries[key] = compacted_overlay
+        next_fingerprints[key] = overlay_payload_fingerprint(compacted_overlay)
         next_order.append(key)
 
     if (
@@ -94,10 +260,11 @@ def build_overlay_delta(
     cache["overlay_entries"] = next_entries
     cache["overlay_fingerprints"] = next_fingerprints
     cache["overlay_order"] = next_order
-    cache["overlay_seq"] = next_seq
+    cache["overlay_commit_seq"] = next_seq
     return {
-        "seq": next_seq,
-        "base_seq": previous_seq,
+        "overlay_commit_seq": next_seq,
+        "base_overlay_commit_seq": previous_seq,
+        "overlay_commit_seq_status": "overlay_scoped",
         "ops": ops,
     }
 

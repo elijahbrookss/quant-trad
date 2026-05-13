@@ -38,6 +38,7 @@ def test_step_trace_buffer_batches_and_flushes():
 
     assert sum(batches) == 7
     assert max(batches) <= 3
+    assert max(batches) == 3
 
 
 def test_step_trace_buffer_drop_oldest_when_queue_full():

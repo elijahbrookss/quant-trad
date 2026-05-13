@@ -27,8 +27,8 @@ class StepTracePersistenceBuffer:
         self,
         *,
         queue_max: int = 8192,
-        batch_size: int = 200,
-        flush_interval_s: float = 0.2,
+        batch_size: int = 512,
+        flush_interval_s: float = 0.5,
         overflow_policy: str = "drop_oldest",
         record_batch: Optional[Callable[[list[dict[str, Any]]], int]] = None,
     ) -> None:
@@ -74,11 +74,11 @@ class StepTracePersistenceBuffer:
         )
         batch_size = _int(
             config.get("step_trace_batch_size") or config.get("BOT_RUNTIME_STEP_TRACE_BATCH_SIZE"),
-            200,
+            512,
         )
         flush_interval_ms = _float(
             config.get("step_trace_flush_interval_ms") or config.get("BOT_RUNTIME_STEP_TRACE_FLUSH_INTERVAL_MS"),
-            200.0,
+            500.0,
         )
         overflow_policy = str(
             config.get("step_trace_overflow_policy")
@@ -187,9 +187,13 @@ class StepTracePersistenceBuffer:
                 continue
             batch.append(first)
             oldest_enqueued = float(first.get("enqueued_monotonic") or time.monotonic())
+            batch_deadline = time.monotonic() + self._flush_interval_s
             for _ in range(max(0, self._batch_size - 1)):
                 try:
-                    nxt = self._queue.get_nowait()
+                    remaining = max(batch_deadline - time.monotonic(), 0.0)
+                    if remaining <= 0.0:
+                        break
+                    nxt = self._queue.get(timeout=remaining)
                 except queue.Empty:
                     break
                 batch.append(nxt)

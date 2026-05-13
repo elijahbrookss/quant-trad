@@ -1,10 +1,15 @@
-from .canonical_facts import CanonicalFactAppender, LiveFactsBroadcastConsumer
+from .canonical_facts import CanonicalFactAppender, CanonicalFactPersistenceBuffer, LiveFactsBroadcastConsumer
 from .chart_state import ChartStateBuilder
 from .event_sink import InMemoryEventSink, RuntimeEventSink
-from .intrabar import IntrabarManager
+from .entry_decision_ordering import (
+    EntryDecisionOrderTicket,
+    SharedWalletEntryDecisionOrderCoordinator,
+    stable_entry_decision_sort_key,
+)
+from .intrabar import IntrabarManager, IntrabarSequence
 from .persistence_buffer import TradePersistenceBuffer
 from .run_context import RunContext
-from .runtime_policy import RuntimeModePolicy
+from .runtime_policy import ExecutionMode, RuntimeModePolicy
 from .series_bar_telemetry_buffer import SeriesBarTelemetryBuffer
 from .series_runner import InlineSeriesRunner, PoolSeriesRunner, SeriesRunnerContext
 from .settlement import SettlementApplier
@@ -14,13 +19,19 @@ from .step_trace_buffer import StepTracePersistenceBuffer
 
 __all__ = [
     "CanonicalFactAppender",
+    "CanonicalFactPersistenceBuffer",
     "LiveFactsBroadcastConsumer",
     "ChartStateBuilder",
     "InMemoryEventSink",
     "RuntimeEventSink",
+    "EntryDecisionOrderTicket",
+    "SharedWalletEntryDecisionOrderCoordinator",
+    "stable_entry_decision_sort_key",
     "IntrabarManager",
+    "IntrabarSequence",
     "TradePersistenceBuffer",
     "RunContext",
+    "ExecutionMode",
     "RuntimeModePolicy",
     "SeriesBarTelemetryBuffer",
     "InlineSeriesRunner",

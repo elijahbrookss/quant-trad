@@ -14,6 +14,7 @@ from utils.log_context import with_log_context
 from ..core import _isoformat
 
 logger = logging.getLogger(__name__)
+BOTLENS_CHART_CLOSED_TRADE_LIMIT = 240
 
 
 class RuntimeProjectionMixin:
@@ -93,6 +94,14 @@ class RuntimeProjectionMixin:
         payload.setdefault("bot_id", self.bot_id)
         if self._run_context is not None:
             payload.setdefault("run_id", self._run_context.run_id)
+        payload["execution_mode"] = self.execution_mode.value
+        payload["playback_mode"] = self.playback_mode
+        payload["runtime_metadata"] = {
+            "execution_mode": self.execution_mode.value,
+            "playback_mode": self.playback_mode,
+            "run_type": self.run_type,
+            "intrabar_execution": self.execution_mode.value == "full",
+        }
         payload.setdefault("stats", self._last_stats)
         payload.setdefault("progress_state", self._progress_state_for_status(payload.get("status")))
         if "next_bar_at" not in payload:
@@ -345,29 +354,128 @@ class RuntimeProjectionMixin:
             self._current_epoch(),
         )
 
-    def _series_payloads(self) -> List[Dict[str, Any]]:
+    def _chart_closed_trade_limit_value(self) -> int:
+        configured = getattr(
+            self,
+            "_botlens_chart_closed_trade_limit",
+            getattr(self, "_botlens_bootstrap_closed_trade_limit", None),
+        )
+        try:
+            resolved = int(configured)
+        except (TypeError, ValueError):
+            resolved = BOTLENS_CHART_CLOSED_TRADE_LIMIT
+        return max(resolved, 1)
+
+    @staticmethod
+    def _trade_payload_is_open_for_projection(trade_payload: Mapping[str, Any]) -> bool:
+        if trade_payload.get("closed_at"):
+            return False
+        trade_state = str(trade_payload.get("trade_state") or "").strip().lower()
+        if trade_state:
+            return trade_state != "closed"
+        status = str(trade_payload.get("status") or "").strip().lower()
+        if status in {"closed", "completed", "complete"}:
+            trade_id = str(trade_payload.get("trade_id") or "").strip() or "<missing>"
+            raise RuntimeError(
+                "bot_runtime_chart_trade_snapshot_invalid: closed trade snapshot missing closed_at "
+                f"trade_id={trade_id} status={status}"
+            )
+        return True
+
+    def _window_trade_payloads(
+        self,
+        trades: Sequence[Mapping[str, Any]],
+        *,
+        max_closed: int,
+    ) -> List[Dict[str, Any]]:
+        include_indexes: set[int] = set()
+        closed_indexes: List[int] = []
+        for index, trade in enumerate(trades):
+            if not isinstance(trade, Mapping):
+                continue
+            trade_payload = dict(trade)
+            if self._trade_payload_is_open_for_projection(trade_payload):
+                include_indexes.add(index)
+            else:
+                closed_indexes.append(index)
+        include_indexes.update(closed_indexes[-max_closed:])
+        return [dict(trades[index]) for index in sorted(include_indexes)]
+
+    def _series_chart_trades(
+        self,
+        series: Any,
+        *,
+        cache: Optional[Dict[int, List[Dict[str, Any]]]] = None,
+    ) -> List[Dict[str, Any]]:
+        cache_key = id(series)
+        if cache is not None and cache_key in cache:
+            return [dict(entry) for entry in cache[cache_key]]
+
+        engine = getattr(series, "risk_engine", None)
+        max_closed = self._chart_closed_trade_limit_value()
+        serialise_window = getattr(engine, "serialise_trade_window", None)
+        if callable(serialise_window):
+            raw_trades = serialise_window(max_closed=max_closed)
+        else:
+            serialise_trades = getattr(engine, "serialise_trades", None)
+            if not callable(serialise_trades):
+                raise RuntimeError(
+                    "bot_runtime_chart_trades_unavailable: risk engine cannot serialize chart trade window "
+                    f"strategy_id={getattr(series, 'strategy_id', None)} "
+                    f"symbol={getattr(series, 'symbol', None)} timeframe={getattr(series, 'timeframe', None)}"
+                )
+            logger.warning(
+                with_log_context(
+                    "bot_runtime_chart_trade_window_fallback",
+                    self._runtime_log_context(
+                        strategy_id=getattr(series, "strategy_id", None),
+                        symbol=getattr(series, "symbol", None),
+                        timeframe=getattr(series, "timeframe", None),
+                        max_closed_trades=max_closed,
+                    ),
+                )
+            )
+            raw_trades = self._window_trade_payloads(serialise_trades(), max_closed=max_closed)
+
+        trades: List[Dict[str, Any]] = []
+        for entry in raw_trades:
+            if not isinstance(entry, Mapping):
+                continue
+            payload = dict(entry)
+            payload.setdefault("strategy_id", getattr(series, "strategy_id", None))
+            payload.setdefault("symbol", getattr(series, "symbol", None))
+            trades.append(payload)
+        if cache is not None:
+            cache[cache_key] = [dict(entry) for entry in trades]
+        return trades
+
+    def _chart_trade_payloads(
+        self,
+        *,
+        cache: Optional[Dict[int, List[Dict[str, Any]]]] = None,
+    ) -> List[Dict[str, Any]]:
+        trades: List[Dict[str, Any]] = []
+        for series in self._series:
+            trades.extend(self._series_chart_trades(series, cache=cache))
+        return trades
+
+    def _series_payloads(
+        self,
+        *,
+        trade_cache: Optional[Dict[int, List[Dict[str, Any]]]] = None,
+    ) -> List[Dict[str, Any]]:
         status = str(self.state.get("status") or "").lower()
         payloads: List[Dict[str, Any]] = []
         for series in self._series:
             state = self._series_state_for(series)
             bar_index = state.bar_index if state else 0
-            series_stats = series.risk_engine.stats()
+            series_stats = dict(series.risk_engine.stats() or {})
             series_stats["total_fees"] = series_stats.get("fees_paid", 0.0)
-            tolerance = 1e-8
-            win_pnls = []
-            loss_pnls = []
-            for trade in series.risk_engine.trades:
-                if trade.is_active():
-                    continue
-                pnl = trade.net_pnl
-                if pnl > tolerance:
-                    win_pnls.append(pnl)
-                elif pnl < -tolerance:
-                    loss_pnls.append(pnl)
-            series_stats["avg_win"] = round(sum(win_pnls) / len(win_pnls), 4) if win_pnls else 0.0
-            series_stats["avg_loss"] = round(sum(loss_pnls) / len(loss_pnls), 4) if loss_pnls else 0.0
-            series_stats["largest_win"] = round(max(win_pnls), 4) if win_pnls else 0.0
-            series_stats["largest_loss"] = round(min(loss_pnls), 4) if loss_pnls else 0.0
+            series_stats.setdefault("avg_win", 0.0)
+            series_stats.setdefault("avg_loss", 0.0)
+            series_stats.setdefault("largest_win", 0.0)
+            series_stats.setdefault("largest_loss", 0.0)
+            series_stats.setdefault("max_drawdown", 0.0)
             instrument = series.instrument if isinstance(series.instrument, Mapping) else {}
             instrument_id = str(instrument.get("id") or "").strip()
             series_key = canonical_series_key(instrument_id, series.timeframe)
@@ -386,6 +494,7 @@ class RuntimeProjectionMixin:
                     "exchange": series.exchange,
                     "instrument_id": instrument_id,
                     "instrument": series.instrument,
+                    "bar_index": int(bar_index),
                     "candles": self._chart_state_builder.visible_candles(
                         series,
                         status,
@@ -393,7 +502,7 @@ class RuntimeProjectionMixin:
                         self._intrabar_manager,
                     ),
                     "overlays": self._series_visible_overlays(series, status=status),
-                    "trades": series.risk_engine.serialise_trades(),
+                    "trades": self._series_chart_trades(series, cache=trade_cache),
                     "stats": series_stats,
                 }
             )
@@ -402,13 +511,14 @@ class RuntimeProjectionMixin:
     def _chart_state(self) -> Dict[str, Any]:
         candles = self._visible_candles()
         overlays = self._visible_overlays()
+        trade_cache: Dict[int, List[Dict[str, Any]]] = {}
         payload = self._chart_state_builder.chart_state(
             candles,
-            self._aggregate_trades(),
+            self._chart_trade_payloads(cache=trade_cache),
             self._last_stats or self._aggregate_stats(),
             overlays,
             self.logs(),
             self.decision_events(),
         )
-        payload["series"] = self._series_payloads()
+        payload["series"] = self._series_payloads(trade_cache=trade_cache)
         return payload
