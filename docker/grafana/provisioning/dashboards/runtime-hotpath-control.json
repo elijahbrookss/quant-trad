@@ -1,6 +1,6 @@
 {
-  "uid": "qt-runtime-control-tower",
-  "title": "Quant-Trad: Runtime Process Control Tower",
+  "uid": "qt-runtime-hotpath-control",
+  "title": "Runtime Hotpath Control",
   "schemaVersion": 39,
   "version": 1,
   "refresh": "30s",

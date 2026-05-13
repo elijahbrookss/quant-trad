@@ -87,19 +87,15 @@ Example: `system-metrics.json` → Dashboard available at `/d/<uid>/system-metri
 
 ## Recommended Entry Dashboards
 
-Primary BotLens dashboards:
+Primary operator dashboards:
 
-- `botlens-overview.json` (`uid=qt-botlens-overview`)
-- `botlens-diagnostics-failure-analysis.json` (`uid=qt-botlens-diagnostics`) — repurposed as `Candle Continuity`
-- `botlens-per-run-deep-dive.json` (`uid=qt-botlens-run-deep-dive`)
+- `runtime-hotpath-control.json` (`uid=qt-runtime-hotpath-control`) — per-bar runtime attribution and worst-bar context
+- `botlens-transport-control.json` (`uid=qt-botlens-transport-control`) — bounded BotLens transport, payload, replay, and queue pressure
+- `observability-cost-control.json` (`uid=qt-observability-cost-control`) — exporter write cost, rollup reduction, and DB pressure
 
-Secondary focused dashboards:
+Focused supporting dashboards:
 
-- `botlens-queue-pressure-backlog.json` (`uid=qt-botlens-queues`)
-- `botlens-pipeline-latency-throughput.json` (`uid=qt-botlens-pipeline`)
+- `botlens-diagnostics-failure-analysis.json` (`uid=qt-botlens-diagnostics`) — candle continuity and projection failure inspection
+- `runtime-process-control-tower.json` (`uid=qt-runtime-control-tower`) — process/thread health outside BotLens backend observability
 
-For broader bot runtime process/thread health outside BotLens backend observability, start with:
-
-- `runtime-process-control-tower.json` (`uid=qt-runtime-control-tower`)
-
-That control-tower dashboard still links to profiler, attribution, workers, IO/DB, overlay optimization, and Loki error deep-dive dashboards.
+The older playground-style BotLens overview, queue, pipeline, per-run, attribution, and IO/DB dashboards were removed in favor of dashboards that map directly to runtime hot path, transport budget, and observability cost questions.
