@@ -108,12 +108,22 @@ def _symbol_identity_payload(state: SymbolProjectionSnapshot) -> Dict[str, Any]:
     }
 
 
+def _symbol_overlay_cursor_payload(state: SymbolProjectionSnapshot) -> Dict[str, Any]:
+    overlay_commit_seq = max(0, int(state.overlays.overlay_commit_seq or 0))
+    overlay_commit_seq_status = str(state.overlays.overlay_commit_seq_status or "").strip() or None
+    return {
+        "overlay_commit_seq": overlay_commit_seq,
+        "overlay_commit_seq_status": overlay_commit_seq_status,
+    }
+
+
 def _symbol_detail_payload(state: SymbolProjectionSnapshot, *, run_health: Mapping[str, Any] | None = None) -> Dict[str, Any]:
     identity = _symbol_identity_payload(state)
     return {
         **identity,
         "status": str((run_health or {}).get("status") or "waiting").strip() or "waiting",
         "last_event_at": state.last_event_at,
+        **_symbol_overlay_cursor_payload(state),
         "candles": [dict(entry) for entry in state.candles.candles],
         "overlays": [dict(entry) for entry in state.overlays.overlays],
         "recent_trades": [dict(entry) for entry in state.trades.trades],
@@ -135,6 +145,7 @@ def _symbol_current_payload(
         series_key=state.symbol_key,
     ).to_dict()
     return {
+        **_symbol_overlay_cursor_payload(state),
         "candles": [dict(entry) for entry in state.candles.candles],
         "overlays": [dict(entry) for entry in state.overlays.overlays],
         "signals": [dict(entry) for entry in state.signals.signals],
@@ -611,6 +622,7 @@ class LiveDeliveryStats:
     viewer_count: int
     filtered_viewer_count: int
     stale_viewer_count: int
+    serialize_ms: float = 0.0
 
 
 class BotLensTransport:
@@ -665,6 +677,12 @@ class BotLensTransport:
                     )
                 )
             elif isinstance(delta, OverlayDelta):
+                overlay_payload = {
+                    "overlay_commit_seq": delta.overlay_ops.get("overlay_commit_seq"),
+                    "base_overlay_commit_seq": delta.overlay_ops.get("base_overlay_commit_seq"),
+                    "overlay_commit_seq_status": delta.overlay_ops.get("overlay_commit_seq_status"),
+                    "ops": [dict(entry) for entry in delta.overlay_ops.get("ops", []) if isinstance(entry, Mapping)],
+                }
                 prepared.append(
                     self._build_prepared(
                         message_type=STREAM_SYMBOL_OVERLAY_DELTA_TYPE,
@@ -674,7 +692,7 @@ class BotLensTransport:
                         symbol_key=delta.symbol_key,
                         scope_seq=delta.seq,
                         event_time=delta.event_time,
-                        payload={"ops": [dict(entry) for entry in delta.overlay_ops.get("ops", []) if isinstance(entry, Mapping)]},
+                        payload=overlay_payload,
                     )
                 )
             elif isinstance(delta, SignalDelta) and delta.appended_signals:
@@ -856,6 +874,7 @@ class LiveDeltaInstrumentation:
         counts_by_type: Dict[str, int] = {}
         total_payload_bytes = 0
         total_build_ms = 0.0
+        total_serialize_ms = 0.0
         total_emit_ms = 0.0
         total_filtered = 0
         total_stale = 0
@@ -867,10 +886,12 @@ class LiveDeltaInstrumentation:
             total_payload_bytes += int(prepared.payload_bytes)
             total_build_ms += float(prepared.build_ms)
             emit_ms = float(delivery.emit_ms) if delivery is not None else 0.0
+            serialize_ms = float(delivery.serialize_ms) if delivery is not None else 0.0
             viewer_count = int(delivery.viewer_count) if delivery is not None else 0
             filtered_count = int(delivery.filtered_viewer_count) if delivery is not None else 0
             stale_count = int(delivery.stale_viewer_count) if delivery is not None else 0
             total_emit_ms += emit_ms
+            total_serialize_ms += serialize_ms
             total_filtered += filtered_count
             total_stale += stale_count
             max_viewers = max(max_viewers, viewer_count)
@@ -883,6 +904,7 @@ class LiveDeltaInstrumentation:
                     "scope_seq": int(event.scope_seq),
                     "payload_bytes": int(prepared.payload_bytes),
                     "build_ms": round(float(prepared.build_ms), 6),
+                    "serialize_ms": round(serialize_ms, 6),
                     "emit_ms": round(emit_ms, 6),
                     "viewer_count": viewer_count,
                     "filtered_viewer_count": filtered_count,
@@ -895,6 +917,7 @@ class LiveDeltaInstrumentation:
             "events": summary_events,
             "total_payload_bytes": total_payload_bytes,
             "total_build_ms": round(total_build_ms, 6),
+            "total_serialize_ms": round(total_serialize_ms, 6),
             "total_emit_ms": round(total_emit_ms, 6),
             "filtered_viewer_count": total_filtered,
             "stale_viewer_count": total_stale,

@@ -41,6 +41,14 @@ def _mapping(value: Any) -> Dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def _event_order(row: Mapping[str, Any]) -> int:
+    return int(row.get("run_seq") or row.get("seq") or 0)
+
+
+def _ordered_event_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(rows, key=lambda row: (_event_order(row), int(row.get("id") or 0)))
+
+
 def _list_bot_runtime_events(**kwargs):
     from ..storage.storage import list_bot_runtime_events
 
@@ -80,10 +88,10 @@ def load_domain_projection_batches(
             break
 
         stop = False
-        for row in rows:
+        for row in _ordered_event_rows([dict(row) for row in rows]):
             row_payload = _mapping(row.get("payload"))
             event = deserialize_botlens_domain_event(row_payload)
-            row_seq = int(row.get("seq") or 0)
+            row_seq = _event_order(row)
             if row_seq <= 0:
                 continue
             if bounded_max_seq is not None and row_seq > bounded_max_seq:
@@ -190,8 +198,8 @@ def load_live_series_projection_batches_after(
         current_rows = []
         current_events = []
 
-    for row in rows:
-        row_seq = int(row.get("seq") or 0)
+    for row in _ordered_event_rows([dict(row) for row in rows]):
+        row_seq = _event_order(row)
         row_id = int(row.get("id") or 0)
         cursor = (row_seq, row_id)
         if row_seq <= 0:
@@ -230,7 +238,7 @@ def load_run_live_or_terminal_cursor(
     row = dict(rows[0])
     event_name = str(row.get("event_name") or "").strip().upper()
     state = "live" if event_name == "RUN_READY" else "terminal"
-    return int(row.get("seq") or 0), int(row.get("id") or 0), state
+    return _event_order(row), int(row.get("id") or 0), state
 
 
 def rebuild_run_projection_snapshot(

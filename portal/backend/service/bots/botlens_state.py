@@ -67,6 +67,8 @@ class SymbolCandlesState:
 @dataclass(frozen=True)
 class SymbolOverlaysState:
     overlays: Tuple[Dict[str, Any], ...]
+    overlay_commit_seq: int = 0
+    overlay_commit_seq_status: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -220,6 +222,7 @@ class RunSymbolCatalogState:
 @dataclass(frozen=True)
 class RunOpenTradesState:
     entries: Dict[str, Dict[str, Any]]
+    closed_trades: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -710,9 +713,27 @@ def project_overlay_state(overlays: Any) -> Tuple[Dict[str, Any], ...]:
     return tuple(projected.values())
 
 
+def _overlay_clock_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def apply_overlay_delta(overlays: Any, delta: Any) -> Tuple[Dict[str, Any], ...]:
     current = project_overlay_state(overlays)
     payload = delta if isinstance(delta, Mapping) else {}
+    overlay_commit_seq = _overlay_clock_int(payload.get("overlay_commit_seq"), 0)
+    base_overlay_commit_seq = _overlay_clock_int(payload.get("base_overlay_commit_seq"), -1)
+    overlay_commit_seq_status = str(payload.get("overlay_commit_seq_status") or "").strip()
+    if overlay_commit_seq <= 0:
+        raise ValueError("overlay_delta.overlay_commit_seq is required")
+    if base_overlay_commit_seq < 0:
+        raise ValueError("overlay_delta.base_overlay_commit_seq is required")
+    if overlay_commit_seq <= base_overlay_commit_seq:
+        raise ValueError("overlay_delta.overlay_commit_seq must advance")
+    if overlay_commit_seq_status != "overlay_scoped":
+        raise ValueError("overlay_delta.overlay_commit_seq_status must be overlay_scoped")
     ops = payload.get("ops") if isinstance(payload.get("ops"), list) else []
     overlay_map: OrderedDict[str, Dict[str, Any]] = OrderedDict()
     for index, overlay in enumerate(current):
@@ -781,6 +802,128 @@ def _upsert_tail(
     if int(limit) > 0 and len(values) > int(limit):
         values = values[-int(limit) :]
     return tuple(values)
+
+
+_CLOSED_TRADE_PROTECTED_FIELDS = frozenset(
+    {
+        "trade_state",
+        "status",
+        "exit_time",
+        "closed_at",
+        "exit_price",
+        "close_reason",
+        "reason_code",
+        "gross_pnl",
+        "fees_paid",
+        "net_pnl",
+        "trade_net_pnl",
+        "realized_pnl",
+        "event_impact_pnl",
+        "legs",
+        "metrics",
+    }
+)
+
+
+def _has_projection_value(value: Any) -> bool:
+    if value is None or value == "":
+        return False
+    if isinstance(value, (list, tuple, dict)) and not value:
+        return False
+    return True
+
+
+def _projected_trade_is_closed(trade: Mapping[str, Any] | None) -> bool:
+    if not isinstance(trade, Mapping):
+        return False
+    if _has_projection_value(trade.get("closed_at")) or _has_projection_value(trade.get("exit_time")):
+        return True
+    trade_state = str(trade.get("trade_state") or "").strip().lower()
+    status = str(trade.get("status") or "").strip().lower()
+    return trade_state == "closed" or status in {"closed", "completed", "complete"}
+
+
+def _trade_by_trade_id(entries: Iterable[Mapping[str, Any]], trade_id: Any) -> Dict[str, Any] | None:
+    normalized_trade_id = str(trade_id or "").strip()
+    if not normalized_trade_id:
+        return None
+    for entry in entries:
+        if isinstance(entry, Mapping) and str(entry.get("trade_id") or "").strip() == normalized_trade_id:
+            return dict(entry)
+    return None
+
+
+def _position_commit_seq_value(trade: Mapping[str, Any] | None) -> Optional[int]:
+    if not isinstance(trade, Mapping):
+        return None
+    try:
+        value = int(trade.get("position_commit_seq") or 0)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _closed_trade_tombstone(trade: Mapping[str, Any]) -> Dict[str, Any]:
+    trade_id = str(trade.get("trade_id") or "").strip()
+    return {
+        "trade_id": trade_id,
+        "symbol_key": normalize_series_key(trade.get("symbol_key")),
+        "position_commit_seq": _position_commit_seq_value(trade),
+        "closed_at": trade.get("closed_at") or trade.get("exit_time"),
+        "event_id": trade.get("event_id"),
+        "event_ts": trade.get("event_ts"),
+    }
+
+
+def _closed_tombstone_dominates(closed_trade: Mapping[str, Any] | None, incoming: Mapping[str, Any]) -> bool:
+    if not isinstance(closed_trade, Mapping):
+        return False
+    closed_seq = _position_commit_seq_value(closed_trade)
+    incoming_seq = _position_commit_seq_value(incoming)
+    if closed_seq is None:
+        return True
+    if incoming_seq is None:
+        return True
+    return incoming_seq <= closed_seq
+
+
+def _merge_trade_projection_entry(
+    existing: Mapping[str, Any] | None,
+    incoming: Mapping[str, Any],
+    *,
+    event_name: BotLensDomainEventName,
+) -> Dict[str, Any]:
+    if not isinstance(existing, Mapping):
+        return dict(incoming)
+
+    merged = dict(existing)
+    existing_closed = _projected_trade_is_closed(existing)
+    incoming_closed = _projected_trade_is_closed(incoming)
+    close_authoritative = event_name == BotLensDomainEventName.TRADE_CLOSED
+
+    for key, value in incoming.items():
+        if not _has_projection_value(value):
+            continue
+        if (
+            existing_closed
+            and event_name == BotLensDomainEventName.TRADE_UPDATED
+            and key in _CLOSED_TRADE_PROTECTED_FIELDS
+            and _has_projection_value(merged.get(key))
+        ):
+            if key == "metrics" and isinstance(merged.get(key), Mapping) and isinstance(value, Mapping):
+                merged[key] = _mapping_copy(merged.get(key)) | _mapping_copy(value)
+            continue
+        merged[key] = _normalize_scalar_value(value)
+
+    if close_authoritative or existing_closed or incoming_closed:
+        merged["trade_state"] = "closed"
+        merged["status"] = "closed"
+        for key in _CLOSED_TRADE_PROTECTED_FIELDS:
+            if close_authoritative and _has_projection_value(incoming.get(key)):
+                merged[key] = _normalize_scalar_value(incoming.get(key))
+            elif _has_projection_value(existing.get(key)) and not _has_projection_value(merged.get(key)):
+                merged[key] = _normalize_scalar_value(existing.get(key))
+    return merged
 
 
 def is_open_trade(trade: Any) -> bool:
@@ -898,7 +1041,7 @@ def empty_run_projection_snapshot(*, bot_id: str, run_id: str) -> RunProjectionS
         health=empty_run_health_state(),
         faults=RunFaultsState(faults=()),
         symbol_catalog=RunSymbolCatalogState(entries={}),
-        open_trades=RunOpenTradesState(entries={}),
+        open_trades=RunOpenTradesState(entries={}, closed_trades={}),
         readiness=RunReadinessState(catalog_discovered=False, run_live=False),
     )
 
@@ -953,7 +1096,14 @@ def read_symbol_projection_snapshot(payload: Any, *, symbol_key: str) -> SymbolP
             timeframe=str(identity_payload.get("timeframe") or base.identity.timeframe or "").strip().lower() or None,
         ),
         candles=SymbolCandlesState(candles=merge_candles(_mapping(concerns.get("candles")).get("items"), limit=_MAX_CANDLES)),
-        overlays=SymbolOverlaysState(overlays=project_overlay_state(_mapping(concerns.get("overlays")).get("items"))),
+        overlays=SymbolOverlaysState(
+            overlays=project_overlay_state(_mapping(concerns.get("overlays")).get("items")),
+            overlay_commit_seq=max(0, _overlay_clock_int(_mapping(concerns.get("overlays")).get("overlay_commit_seq"), 0)),
+            overlay_commit_seq_status=(
+                str(_mapping(concerns.get("overlays")).get("overlay_commit_seq_status") or "").strip()
+                or None
+            ),
+        ),
         signals=SymbolSignalsState(signals=_copy_entries(entry for entry in _mapping(concerns.get("signals")).get("items", []) if isinstance(entry, Mapping))),
         decisions=SymbolDecisionsState(decisions=_copy_entries(entry for entry in _mapping(concerns.get("decisions")).get("items", []) if isinstance(entry, Mapping))),
         trades=SymbolTradesState(trades=_copy_entries(entry for entry in _mapping(concerns.get("trades")).get("items", []) if isinstance(entry, Mapping))),
@@ -984,9 +1134,15 @@ def read_run_projection_snapshot(payload: Any, *, bot_id: str, run_id: str) -> R
         for key, value in _mapping(_mapping(concerns.get("symbol_catalog")).get("entries")).items()
         if normalize_series_key(key) and isinstance(value, Mapping)
     }
+    open_trades_payload = _mapping(concerns.get("open_trades"))
     open_trade_entries = {
         str(key): dict(value)
-        for key, value in _mapping(_mapping(concerns.get("open_trades")).get("entries")).items()
+        for key, value in _mapping(open_trades_payload.get("entries")).items()
+        if str(key).strip() and isinstance(value, Mapping)
+    }
+    closed_trade_entries = {
+        str(key): dict(value)
+        for key, value in _mapping(open_trades_payload.get("closed_trades")).items()
         if str(key).strip() and isinstance(value, Mapping)
     }
     snapshot = RunProjectionSnapshot(
@@ -1042,7 +1198,7 @@ def read_run_projection_snapshot(payload: Any, *, bot_id: str, run_id: str) -> R
             faults=_copy_entries(entry for entry in _mapping(concerns.get("faults")).get("items", []) if isinstance(entry, Mapping))
         ),
         symbol_catalog=RunSymbolCatalogState(entries=catalog_entries),
-        open_trades=RunOpenTradesState(entries=open_trade_entries),
+        open_trades=RunOpenTradesState(entries=open_trade_entries, closed_trades=closed_trade_entries),
         readiness=RunReadinessState(
             catalog_discovered=bool(readiness_payload.get("catalog_discovered") or catalog_entries),
             run_live=bool(readiness_payload.get("run_live") or lifecycle_payload.get("live")),
@@ -1064,7 +1220,11 @@ def serialize_symbol_projection_snapshot(state: SymbolProjectionSnapshot) -> Dic
             "concerns": {
                 "identity": state.identity.to_dict(),
                 "candles": {"items": [dict(entry) for entry in state.candles.candles]},
-                "overlays": {"items": [dict(entry) for entry in state.overlays.overlays]},
+                "overlays": {
+                    "items": [dict(entry) for entry in state.overlays.overlays],
+                    "overlay_commit_seq": int(state.overlays.overlay_commit_seq or 0),
+                    "overlay_commit_seq_status": state.overlays.overlay_commit_seq_status,
+                },
                 "signals": {"items": [dict(entry) for entry in state.signals.signals]},
                 "decisions": {"items": [dict(entry) for entry in state.decisions.decisions]},
                 "trades": {"items": [dict(entry) for entry in state.trades.trades]},
@@ -1090,7 +1250,13 @@ def serialize_run_projection_snapshot(state: RunProjectionSnapshot) -> Dict[str,
                 "health": state.health.to_dict(),
                 "faults": {"items": [dict(entry) for entry in state.faults.faults]},
                 "symbol_catalog": {"entries": {key: dict(value) for key, value in state.symbol_catalog.entries.items()}},
-                "open_trades": {"entries": {key: dict(value) for key, value in state.open_trades.entries.items()}},
+                "open_trades": {
+                    "entries": {key: dict(value) for key, value in state.open_trades.entries.items()},
+                    "closed_trades": {
+                        key: dict(value)
+                        for key, value in state.open_trades.closed_trades.items()
+                    },
+                },
                 "readiness": state.readiness.to_dict(),
             },
         },
@@ -1108,10 +1274,15 @@ def reset_run_symbol_scope(snapshot: RunProjectionSnapshot, *, symbol_key: str) 
         for trade_id, trade in snapshot.open_trades.entries.items()
         if normalize_series_key(trade.get("symbol_key")) != normalized_symbol_key
     }
+    next_closed_trades = {
+        trade_id: dict(trade)
+        for trade_id, trade in snapshot.open_trades.closed_trades.items()
+        if normalize_series_key(trade.get("symbol_key")) != normalized_symbol_key
+    }
     return replace(
         snapshot,
         symbol_catalog=RunSymbolCatalogState(entries=next_catalog),
-        open_trades=RunOpenTradesState(entries=next_open_trades),
+        open_trades=RunOpenTradesState(entries=next_open_trades, closed_trades=next_closed_trades),
         readiness=RunReadinessState(
             catalog_discovered=bool(next_catalog),
             run_live=bool(snapshot.readiness.run_live),
@@ -1153,6 +1324,10 @@ def _decision_entry(event: BotLensDomainEvent) -> Dict[str, Any]:
 
 def _trade_entry(event: BotLensDomainEvent) -> Dict[str, Any]:
     context = event.context.to_dict()
+    entry_time = context.get("opened_at") or context.get("entry_time")
+    exit_time = context.get("exit_time") or context.get("closed_at")
+    quantity = context.get("quantity") if context.get("quantity") is not None else context.get("qty")
+    close_reason = context.get("close_reason") or context.get("reason_code")
     return {
         "event_id": event.event_id,
         "event_name": event.event_name.value,
@@ -1165,14 +1340,27 @@ def _trade_entry(event: BotLensDomainEvent) -> Dict[str, Any]:
         "trade_state": context.get("trade_state"),
         "side": context.get("side"),
         "direction": context.get("direction"),
-        "qty": context.get("qty"),
+        "qty": context.get("qty") if context.get("qty") is not None else quantity,
+        "quantity": quantity,
+        "entry_time": entry_time,
         "entry_price": context.get("entry_price"),
+        "stop_price": context.get("stop_price"),
+        "exit_time": exit_time,
         "exit_price": context.get("exit_price"),
         "realized_pnl": context.get("realized_pnl"),
         "event_impact_pnl": context.get("event_impact_pnl"),
         "trade_net_pnl": context.get("trade_net_pnl"),
+        "gross_pnl": context.get("gross_pnl"),
+        "fees_paid": context.get("fees_paid"),
+        "net_pnl": context.get("net_pnl"),
+        "reason_code": context.get("reason_code"),
+        "close_reason": close_reason,
+        "position_commit_seq": context.get("position_commit_seq"),
+        "position_commit_seq_status": context.get("position_commit_seq_status"),
+        "legs": tuple(dict(entry) for entry in context.get("legs", ()) if isinstance(entry, Mapping)),
+        "metrics": _mapping_copy(context.get("metrics")),
         "opened_at": context.get("opened_at"),
-        "closed_at": context.get("closed_at"),
+        "closed_at": context.get("closed_at") or exit_time,
         "updated_at": _iso_or_none(event.event_ts),
         "status": context.get("trade_state"),
     }
@@ -1287,7 +1475,19 @@ def apply_symbol_overlay_projector(
         if event.event_name != BotLensDomainEventName.OVERLAY_STATE_CHANGED:
             continue
         overlay_ops = _mapping(event.context.to_dict().get("overlay_delta"))
-        next_state = SymbolOverlaysState(overlays=apply_overlay_delta(next_state.overlays, overlay_ops))
+        next_state = SymbolOverlaysState(
+            overlays=apply_overlay_delta(next_state.overlays, overlay_ops),
+            overlay_commit_seq=_overlay_clock_int(
+                overlay_ops.get("overlay_commit_seq"),
+                next_state.overlay_commit_seq,
+            ),
+            overlay_commit_seq_status=str(
+                overlay_ops.get("overlay_commit_seq_status")
+                or next_state.overlay_commit_seq_status
+                or ""
+            ).strip()
+            or None,
+        )
         deltas.append(
             OverlayDelta(
                 symbol_key=symbol_key,
@@ -1367,15 +1567,21 @@ def apply_symbol_trade_projector(
         }:
             continue
         trade_entry = _trade_entry(event)
+        existing_trade = _trade_by_trade_id(next_state.trades, trade_entry.get("trade_id"))
+        trade_entry = _merge_trade_projection_entry(
+            existing_trade,
+            trade_entry,
+            event_name=event.event_name,
+        )
         next_state = SymbolTradesState(
             trades=_upsert_tail(next_state.trades, [trade_entry], key_fields=("trade_id", "event_id"), limit=_MAX_TRADES)
         )
         normalized_trade = normalize_trade(trade_entry, symbol_key=symbol_key)
         upserts: Tuple[Dict[str, Any], ...] = ()
         removals: Tuple[str, ...] = ()
-        if normalized_trade is not None and is_open_trade(normalized_trade):
+        if normalized_trade is not None:
             upserts = (normalized_trade,)
-        else:
+        if normalized_trade is None or not is_open_trade(normalized_trade):
             trade_id = str(trade_entry.get("trade_id") or "").strip()
             removals = (trade_id,) if trade_id else ()
         deltas.append(
@@ -1635,6 +1841,8 @@ def apply_run_open_trades_projector(
     batch: ProjectionBatch,
 ) -> tuple[RunOpenTradesState, Tuple[RunOpenTradesDelta, ...]]:
     next_entries = dict(state.entries)
+    next_closed_trades = {key: dict(value) for key, value in state.closed_trades.items()}
+    closed_trade_ids_in_batch: set[str] = set()
     deltas: List[RunOpenTradesDelta] = []
     for event in batch.events:
         if event.event_name not in {
@@ -1649,12 +1857,24 @@ def apply_run_open_trades_projector(
         upserts: Tuple[Dict[str, Any], ...] = ()
         removals: Tuple[str, ...] = ()
         trade_id = str(trade_entry.get("trade_id") or "").strip()
+        if not trade_id:
+            continue
         if is_open_trade(trade_entry):
+            if trade_id in closed_trade_ids_in_batch or _closed_tombstone_dominates(
+                next_closed_trades.get(trade_id),
+                trade_entry,
+            ):
+                continue
             next_entries[trade_id] = dict(trade_entry)
             upserts = (dict(trade_entry),)
-        elif trade_id in next_entries:
-            next_entries.pop(trade_id, None)
-            removals = (trade_id,)
+        else:
+            closed_trade_ids_in_batch.add(trade_id)
+            existing_closed = next_closed_trades.get(trade_id)
+            if existing_closed is None or not _closed_tombstone_dominates(existing_closed, trade_entry):
+                next_closed_trades[trade_id] = _closed_trade_tombstone(trade_entry)
+            if trade_id in next_entries:
+                next_entries.pop(trade_id, None)
+                removals = (trade_id,)
         if upserts or removals:
             deltas.append(
                 RunOpenTradesDelta(
@@ -1664,7 +1884,7 @@ def apply_run_open_trades_projector(
                     removals=removals,
                 )
             )
-    return RunOpenTradesState(entries=next_entries), tuple(deltas)
+    return RunOpenTradesState(entries=next_entries, closed_trades=next_closed_trades), tuple(deltas)
 
 
 def apply_run_symbol_catalog_projector(

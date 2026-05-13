@@ -45,8 +45,98 @@ _OBSERVER = BackendObserver(component="botlens_projector_registry", event_logger
 _LEDGER_TAIL_POLL_S = 0.25
 _LEDGER_TAIL_PAGE_SIZE = 1000
 _TERMINAL_TAIL_IDLE_POLLS = 3
-_TAIL_TERMINAL_PHASES = frozenset({"completed", "stopped", "cancelled", "error", "failed", "crashed", "startup_failed"})
-_TAIL_TERMINAL_STATUSES = frozenset({"completed", "stopped", "cancelled", "error", "failed", "crashed", "startup_failed"})
+_TAIL_TERMINAL_PHASES = frozenset(
+    {
+        "completed",
+        "stopped",
+        "cancelled",
+        "canceled",
+        "error",
+        "failed",
+        "crashed",
+        "startup_failed",
+        "degraded_terminal",
+    }
+)
+_TAIL_TERMINAL_STATUSES = frozenset(
+    {
+        "completed",
+        "stopped",
+        "cancelled",
+        "canceled",
+        "error",
+        "failed",
+        "crashed",
+        "startup_failed",
+        "degraded_terminal",
+    }
+)
+
+
+_DELTA_SURFACE_BY_TYPE = {
+    "CandleDelta": "candles",
+    "OverlayDelta": "overlays",
+    "SignalDelta": "decisions",
+    "DecisionDelta": "decisions",
+    "TradeDelta": "trades",
+    "DiagnosticDelta": "diagnostics",
+    "SeriesStatsDelta": "symbol_summary",
+    "RunLifecycleDelta": "run_summary",
+    "RunHealthDelta": "health_runtime_state",
+    "RunFaultDelta": "diagnostics",
+    "RunSymbolCatalogDelta": "symbol_summary",
+    "RunOpenTradesDelta": "trades",
+}
+
+
+def _delta_surface(delta: Any) -> str:
+    return _DELTA_SURFACE_BY_TYPE.get(delta.__class__.__name__, "diagnostics")
+
+
+def _first_symbol_key(deltas: tuple[Any, ...]) -> str | None:
+    for delta in deltas:
+        symbol_key = str(getattr(delta, "symbol_key", "") or "").strip()
+        if symbol_key:
+            return symbol_key
+    return None
+
+
+def _observe_live_transport_demand_drop(
+    *,
+    bot_id: str,
+    run_id: str,
+    deltas: tuple[Any, ...],
+    reason: str,
+    queue_wait_ms: float,
+    message_kind: str,
+    series_key: str | None = None,
+) -> None:
+    counts: dict[str, int] = {}
+    for delta in deltas:
+        surface = _delta_surface(delta)
+        counts[surface] = counts.get(surface, 0) + 1
+    for surface, count in counts.items():
+        _OBSERVER.increment(
+            "live_transport_dropped_stale_count",
+            value=float(count),
+            bot_id=bot_id,
+            run_id=run_id,
+            series_key=series_key,
+            queue_name="fanout_channel",
+            message_kind=message_kind,
+            pipeline_stage=surface,
+            source_reason=reason,
+        )
+    _OBSERVER.observe(
+        "live_transport_queue_wait_ms",
+        queue_wait_ms,
+        bot_id=bot_id,
+        run_id=run_id,
+        series_key=series_key,
+        queue_name="fanout_channel",
+        message_kind=message_kind,
+        pipeline_stage="demand_skip",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +459,14 @@ class ProjectorRegistry:
                 run_id=context.run_id,
                 run_seq=cursor_seq,
             )
+            _OBSERVER.maybe_gauge(
+                key=f"ledger_tail_cursor_seq:{context.run_id}",
+                name="ledger_tail_cursor_seq",
+                value=float(cursor_seq),
+                bot_id=context.bot_id,
+                run_id=context.run_id,
+                message_kind="facts",
+            )
             while True:
                 batches, (cursor_seq, cursor_row_id) = await asyncio.to_thread(
                     load_live_series_projection_batches_after,
@@ -406,6 +504,14 @@ class ProjectorRegistry:
                             message_kind="facts",
                         )
                         mailbox._emit_fact_gauges()
+                    _OBSERVER.maybe_gauge(
+                        key=f"ledger_tail_cursor_seq:{context.run_id}",
+                        name="ledger_tail_cursor_seq",
+                        value=float(cursor_seq),
+                        bot_id=context.bot_id,
+                        run_id=context.run_id,
+                        message_kind="facts",
+                    )
                     continue
 
                 snapshot = context.run_projector.get_snapshot()
@@ -470,6 +576,18 @@ async def _fanout_delivery_loop(
             deliver_started = time.perf_counter()
 
             if isinstance(envelope.item, FanoutSymbolDeltaBatch):
+                symbol_key = _first_symbol_key(tuple(envelope.item.deltas))
+                if run_stream.viewer_count_for_symbol(envelope.run_id, symbol_key or "") <= 0:
+                    _observe_live_transport_demand_drop(
+                        bot_id=bot_id,
+                        run_id=envelope.run_id,
+                        deltas=tuple(envelope.item.deltas),
+                        reason="no_symbol_viewer",
+                        queue_wait_ms=queue_wait_ms,
+                        message_kind=envelope.message_kind,
+                        series_key=symbol_key,
+                    )
+                    continue
                 _OBSERVER.increment(
                     "fanout_delivery_items_total",
                     value=float(len(envelope.item.deltas)),
@@ -478,13 +596,64 @@ async def _fanout_delivery_loop(
                     queue_name="fanout_channel",
                     message_kind=envelope.message_kind,
                 )
-                for prepared in run_stream.transport.build_symbol_prepared_deltas(
+                prepared_deltas = run_stream.transport.build_symbol_prepared_deltas(
                     run_id=envelope.run_id,
                     deltas=envelope.item.deltas,
-                ):
-                    await run_stream.broadcast_live_delta(prepared)
+                )
+                for prepared in prepared_deltas:
+                    _OBSERVER.observe(
+                        "live_transport_build_ms",
+                        float(prepared.build_ms),
+                        bot_id=bot_id,
+                        run_id=envelope.run_id,
+                        series_key=prepared.event.symbol_key,
+                        queue_name="fanout_channel",
+                        message_kind=prepared.event.message_type,
+                        pipeline_stage=prepared.event.concern,
+                    )
+                    _OBSERVER.observe(
+                        "live_transport_payload_bytes",
+                        float(prepared.payload_bytes),
+                        bot_id=bot_id,
+                        run_id=envelope.run_id,
+                        series_key=prepared.event.symbol_key,
+                        queue_name="fanout_channel",
+                        message_kind=prepared.event.message_type,
+                        pipeline_stage=prepared.event.concern,
+                    )
+                    _OBSERVER.observe(
+                        "live_transport_queue_wait_ms",
+                        queue_wait_ms,
+                        bot_id=bot_id,
+                        run_id=envelope.run_id,
+                        series_key=prepared.event.symbol_key,
+                        queue_name="fanout_channel",
+                        message_kind=prepared.event.message_type,
+                        pipeline_stage=prepared.event.concern,
+                    )
+                    delivery = await run_stream.broadcast_live_delta(prepared)
+                    _OBSERVER.observe(
+                        "live_transport_dispatch_ms",
+                        float(delivery.emit_ms),
+                        bot_id=bot_id,
+                        run_id=envelope.run_id,
+                        series_key=prepared.event.symbol_key,
+                        queue_name="fanout_channel",
+                        message_kind=prepared.event.message_type,
+                        pipeline_stage=prepared.event.concern,
+                    )
 
             elif isinstance(envelope.item, FanoutRunDeltaBatch):
+                if run_stream.viewer_count_for_run(envelope.run_id) <= 0:
+                    _observe_live_transport_demand_drop(
+                        bot_id=bot_id,
+                        run_id=envelope.run_id,
+                        deltas=tuple(envelope.item.deltas),
+                        reason="no_run_viewer",
+                        queue_wait_ms=queue_wait_ms,
+                        message_kind=envelope.message_kind,
+                    )
+                    continue
                 _OBSERVER.increment(
                     "fanout_delivery_items_total",
                     bot_id=bot_id,
@@ -492,11 +661,48 @@ async def _fanout_delivery_loop(
                     queue_name="fanout_channel",
                     message_kind=envelope.message_kind,
                 )
-                for prepared in run_stream.transport.build_run_prepared_deltas(
+                prepared_deltas = run_stream.transport.build_run_prepared_deltas(
                     state=envelope.item.state,
                     deltas=envelope.item.deltas,
-                ):
-                    await run_stream.broadcast_live_delta(prepared)
+                )
+                for prepared in prepared_deltas:
+                    _OBSERVER.observe(
+                        "live_transport_build_ms",
+                        float(prepared.build_ms),
+                        bot_id=bot_id,
+                        run_id=envelope.run_id,
+                        queue_name="fanout_channel",
+                        message_kind=prepared.event.message_type,
+                        pipeline_stage=prepared.event.concern,
+                    )
+                    _OBSERVER.observe(
+                        "live_transport_payload_bytes",
+                        float(prepared.payload_bytes),
+                        bot_id=bot_id,
+                        run_id=envelope.run_id,
+                        queue_name="fanout_channel",
+                        message_kind=prepared.event.message_type,
+                        pipeline_stage=prepared.event.concern,
+                    )
+                    _OBSERVER.observe(
+                        "live_transport_queue_wait_ms",
+                        queue_wait_ms,
+                        bot_id=bot_id,
+                        run_id=envelope.run_id,
+                        queue_name="fanout_channel",
+                        message_kind=prepared.event.message_type,
+                        pipeline_stage=prepared.event.concern,
+                    )
+                    delivery = await run_stream.broadcast_live_delta(prepared)
+                    _OBSERVER.observe(
+                        "live_transport_dispatch_ms",
+                        float(delivery.emit_ms),
+                        bot_id=bot_id,
+                        run_id=envelope.run_id,
+                        queue_name="fanout_channel",
+                        message_kind=prepared.event.message_type,
+                        pipeline_stage=prepared.event.concern,
+                    )
             _OBSERVER.observe(
                 "fanout_queue_wait_ms",
                 queue_wait_ms,

@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine
 
 from ..observability import BackendObserver, QueueStateMetricOwner
-from .botlens_event_replay import load_domain_projection_batches
+from .botlens_event_replay import load_domain_projection_batches, rebuild_run_projection_snapshot
 from .botlens_mailbox import FanoutEnvelope, FanoutRunDeltaBatch, QueueEnvelope, RunMailbox
 from .botlens_symbol_projector import SymbolSummaryNotification
 from .botlens_state import (
@@ -34,14 +34,55 @@ from .botlens_state import (
     _build_run_health_state,
     apply_run_batch,
     empty_run_projection_snapshot,
+    is_open_trade,
 )
 
 logger = logging.getLogger(__name__)
 _OBSERVER = BackendObserver(component="botlens_run_projector", event_logger=logger)
 
 _TERMINAL_RUN_TTL_S = 300.0
-_TERMINAL_LIFECYCLE_PHASES = frozenset({"completed", "stopped", "cancelled", "error", "failed", "crashed", "startup_failed"})
-_TERMINAL_LIFECYCLE_STATUSES = frozenset({"completed", "stopped", "cancelled", "error", "failed", "crashed", "startup_failed"})
+_TERMINAL_LIFECYCLE_PHASES = frozenset(
+    {
+        "completed",
+        "stopped",
+        "cancelled",
+        "canceled",
+        "error",
+        "failed",
+        "crashed",
+        "startup_failed",
+        "degraded_terminal",
+    }
+)
+_TERMINAL_LIFECYCLE_STATUSES = frozenset(
+    {
+        "completed",
+        "stopped",
+        "cancelled",
+        "canceled",
+        "error",
+        "failed",
+        "crashed",
+        "startup_failed",
+        "degraded_terminal",
+    }
+)
+
+
+def _batch_terminal_status(batch: ProjectionBatch) -> str | None:
+    for event in batch.events:
+        event_name = str(getattr(event.event_name, "value", event.event_name) or "").strip().upper()
+        if event_name not in {"RUN_COMPLETED", "RUN_FAILED", "RUN_STOPPED", "RUN_CANCELLED"}:
+            continue
+        context = event.context.to_dict() if hasattr(event.context, "to_dict") else {}
+        status = str(context.get("status") or "").strip().lower()
+        phase = str(context.get("phase") or "").strip().lower()
+        if status in _TERMINAL_LIFECYCLE_STATUSES:
+            return status
+        if phase in _TERMINAL_LIFECYCLE_PHASES:
+            return phase
+        return event_name.lower().replace("run_", "")
+    return None
 
 
 class RunProjector:
@@ -106,7 +147,7 @@ class RunProjector:
                             bot_id=self._bot_id,
                             run_id=self._run_id,
                             queue_name="run_lifecycle_queue",
-                            message_kind="domain_batch",
+                            message_kind="lifecycle",
                         )
                         self._mailbox._emit_lifecycle_gauges()
                         await self._apply_lifecycle_batch(batch)
@@ -141,7 +182,7 @@ class RunProjector:
                             bot_id=self._bot_id,
                             run_id=self._run_id,
                             queue_name="run_notification_queue",
-                            message_kind="symbol_summary",
+                            message_kind="notification",
                         )
                         self._mailbox._emit_notification_gauges()
                         if isinstance(notification, SymbolSummaryNotification):
@@ -177,16 +218,54 @@ class RunProjector:
 
     async def _apply_lifecycle_batch(self, batch: ProjectionBatch) -> None:
         started = time.perf_counter()
-        self._state, deltas = apply_run_batch(self._state, batch=batch)
+        terminal_status = _batch_terminal_status(batch)
+        if terminal_status and self._state.open_trades.entries:
+            await self._reconcile_from_canonical_ledger(
+                reason="terminal_lifecycle_with_open_projection_trades",
+                prior_open_trade_ids=tuple(sorted(self._state.open_trades.entries)),
+            )
+        try:
+            self._state, deltas = apply_run_batch(self._state, batch=batch)
+        except RuntimeError as exc:
+            if "completed run retains open trades" not in str(exc):
+                raise
+            await self._reconcile_from_canonical_ledger(
+                reason="terminal_lifecycle_projection_invariant",
+                prior_open_trade_ids=tuple(sorted(self._state.open_trades.entries)),
+            )
+            self._state, deltas = apply_run_batch(self._state, batch=batch)
         await self._emit_deltas(deltas=deltas)
         await self._publish_side_effects(deltas=deltas, batch=batch)
         self._refresh_terminal_state()
+        elapsed_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
         _OBSERVER.observe(
             "run_projector_apply_ms",
-            max((time.perf_counter() - started) * 1000.0, 0.0),
+            elapsed_ms,
             bot_id=self._bot_id,
             run_id=self._run_id,
             message_kind=batch.batch_kind,
+        )
+        _OBSERVER.observe(
+            "run_projector_event_count",
+            float(len(batch.events)),
+            bot_id=self._bot_id,
+            run_id=self._run_id,
+            message_kind="lifecycle",
+        )
+        _OBSERVER.observe(
+            "run_projector_delta_count",
+            float(len(deltas)),
+            bot_id=self._bot_id,
+            run_id=self._run_id,
+            message_kind="lifecycle",
+        )
+        _OBSERVER.maybe_gauge(
+            key=f"run_projector_projected_seq:{self._run_id}",
+            name="run_projector_projected_seq",
+            value=float(max(int(self._state.seq), int(batch.seq or 0))),
+            bot_id=self._bot_id,
+            run_id=self._run_id,
+            message_kind="lifecycle",
         )
 
     async def _process_symbol_notification(self, notification: SymbolSummaryNotification) -> None:
@@ -220,15 +299,36 @@ class RunProjector:
         if notification.trade_upserts or notification.trade_removals:
             next_open_trades = dict(self._state.open_trades.entries)
             changed = False
+            emitted_upserts: list[dict[str, Any]] = []
+            emitted_removals: list[str] = []
+            current_seq = int(self._state.seq or 0)
+            notification_seq = int(notification.seq or 0)
+            stale_notification = notification_seq < current_seq
+            removal_ids = {
+                str(entry).strip()
+                for entry in notification.trade_removals
+                if str(entry).strip()
+            }
             for trade in notification.trade_upserts:
                 trade_id = str(trade.get("trade_id") or "").strip()
                 if not trade_id:
                     continue
+                try:
+                    open_trade = is_open_trade(trade)
+                except RuntimeError:
+                    open_trade = False
+                if not open_trade:
+                    removal_ids.add(trade_id)
+                    continue
+                if stale_notification and trade_id not in next_open_trades:
+                    continue
                 if next_open_trades.get(trade_id) != trade:
                     next_open_trades[trade_id] = dict(trade)
+                    emitted_upserts.append(dict(trade))
                     changed = True
-            for trade_id in notification.trade_removals:
-                if next_open_trades.pop(str(trade_id), None) is not None:
+            for trade_id in sorted(removal_ids):
+                if next_open_trades.pop(trade_id, None) is not None:
+                    emitted_removals.append(trade_id)
                     changed = True
             if changed:
                 self._state = replace(
@@ -240,8 +340,8 @@ class RunProjector:
                     RunOpenTradesDelta(
                         seq=int(notification.seq),
                         event_time=notification.event_time,
-                        upserts=tuple(dict(entry) for entry in notification.trade_upserts),
-                        removals=tuple(str(entry) for entry in notification.trade_removals),
+                        upserts=tuple(emitted_upserts),
+                        removals=tuple(emitted_removals),
                     )
                 )
 
@@ -302,7 +402,22 @@ class RunProjector:
             max((time.perf_counter() - started) * 1000.0, 0.0),
             bot_id=self._bot_id,
             run_id=self._run_id,
-            message_kind="botlens_symbol_summary_notification",
+            message_kind="notification",
+        )
+        _OBSERVER.observe(
+            "run_projector_delta_count",
+            float(len(deltas)),
+            bot_id=self._bot_id,
+            run_id=self._run_id,
+            message_kind="notification",
+        )
+        _OBSERVER.maybe_gauge(
+            key=f"run_projector_projected_seq:{self._run_id}",
+            name="run_projector_projected_seq",
+            value=float(max(int(self._state.seq), int(notification.seq or 0))),
+            bot_id=self._bot_id,
+            run_id=self._run_id,
+            message_kind="notification",
         )
 
     def _refresh_terminal_state(self) -> None:
@@ -316,6 +431,7 @@ class RunProjector:
     async def _emit_deltas(self, *, deltas: tuple[RunConcernDelta, ...]) -> None:
         if not deltas:
             return
+        enqueue_started = time.perf_counter()
         try:
             self._fanout_channel.put_nowait(
                 FanoutEnvelope(
@@ -324,6 +440,15 @@ class RunProjector:
                     message_kind="run_projection_delta",
                     payload_bytes=0,
                 )
+            )
+            _OBSERVER.observe(
+                "live_transport_enqueue_ms",
+                max((time.perf_counter() - enqueue_started) * 1000.0, 0.0),
+                bot_id=self._bot_id,
+                run_id=self._run_id,
+                queue_name="fanout_channel",
+                message_kind="run_projection_delta",
+                pipeline_stage="run_projection",
             )
             self._emit_fanout_gauges()
         except asyncio.QueueFull:
@@ -334,6 +459,16 @@ class RunProjector:
                 queue_name="fanout_channel",
                 message_kind="run_projection_delta",
                 failure_mode="queue_full",
+            )
+            _OBSERVER.increment(
+                "live_transport_dropped_stale_count",
+                value=float(len(deltas)),
+                bot_id=self._bot_id,
+                run_id=self._run_id,
+                queue_name="fanout_channel",
+                message_kind="run_projection_delta",
+                pipeline_stage="run_projection",
+                source_reason="fanout_queue_full",
             )
 
     async def _publish_side_effects(self, *, deltas: tuple[RunConcernDelta, ...], batch: ProjectionBatch) -> None:
@@ -435,6 +570,62 @@ class RunProjector:
                 projection_state="projection_error",
                 error=error_text,
             )
+
+    async def _reconcile_from_canonical_ledger(
+        self,
+        *,
+        reason: str,
+        prior_open_trade_ids: tuple[str, ...],
+    ) -> None:
+        started = time.perf_counter()
+        snapshot = await asyncio.to_thread(
+            rebuild_run_projection_snapshot,
+            bot_id=self._bot_id,
+            run_id=self._run_id,
+        )
+        elapsed_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
+        if snapshot is None:
+            _OBSERVER.event(
+                "run_projector_reconcile_failed",
+                level=logging.ERROR,
+                bot_id=self._bot_id,
+                run_id=self._run_id,
+                failure_mode="canonical_replay_unavailable",
+                reason=reason,
+                prior_open_trade_count=len(prior_open_trade_ids),
+                prior_open_trade_ids=list(prior_open_trade_ids)[:20],
+                replay_required=True,
+                reconciliation_source="canonical_runtime_events",
+            )
+            raise RuntimeError(
+                "botlens_run_projection_reconcile_failed: canonical replay unavailable "
+                f"bot_id={self._bot_id} run_id={self._run_id}"
+            )
+        self._state = snapshot
+        self._refresh_terminal_state()
+        open_trade_ids = tuple(sorted(str(trade_id) for trade_id in self._state.open_trades.entries))
+        _OBSERVER.observe(
+            "run_projector_reconcile_ms",
+            elapsed_ms,
+            bot_id=self._bot_id,
+            run_id=self._run_id,
+            storage_target="bot_runtime_events",
+            message_kind="lifecycle",
+        )
+        _OBSERVER.event(
+            "run_projector_reconciled",
+            level=logging.WARN if prior_open_trade_ids else logging.INFO,
+            bot_id=self._bot_id,
+            run_id=self._run_id,
+            reason=reason,
+            prior_open_trade_count=len(prior_open_trade_ids),
+            open_trade_count=len(open_trade_ids),
+            prior_open_trade_ids=list(prior_open_trade_ids)[:20],
+            open_trade_ids=list(open_trade_ids)[:20],
+            replay_required=False,
+            reconciliation_source="canonical_runtime_events",
+            projection_state="reconciled" if not open_trade_ids else "replayed_with_open_trades",
+        )
 
     def _emit_fanout_gauges(self) -> None:
         oldest_age_ms = 0.0

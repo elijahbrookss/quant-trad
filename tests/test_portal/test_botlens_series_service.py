@@ -320,6 +320,7 @@ def test_get_symbol_chart_history_forwards_typed_bar_time_window(
         return iter([])
 
     monkeypatch.setattr(chart_svc, "iter_all_run_domain_truth", _iter)
+    monkeypatch.setattr(chart_svc.storage, "list_candles_for_series", lambda **kwargs: [])
 
     result = chart_svc.get_symbol_chart_history(
         run_id="run-1",
@@ -332,6 +333,35 @@ def test_get_symbol_chart_history_forwards_typed_bar_time_window(
     assert result["candles"] == []
     assert captured["bar_time_gte"] == "1970-01-01T00:00:00Z"
     assert captured["bar_time_lt"] == "1970-01-01T00:00:04Z"
+
+
+def test_get_symbol_chart_history_falls_back_to_source_candle_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(chart_svc, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
+    monkeypatch.setattr(chart_svc, "iter_all_run_domain_truth", lambda **kwargs: iter([]))
+
+    def _source_candles(**kwargs):
+        captured.update(kwargs)
+        return [
+            {"time": 1, "open": 1.0, "high": 1.5, "low": 0.5, "close": 1.25},
+            {"time": 2, "open": 2.0, "high": 2.5, "low": 1.5, "close": 2.25},
+        ]
+
+    monkeypatch.setattr(chart_svc.storage, "list_candles_for_series", _source_candles)
+
+    result = chart_svc.get_symbol_chart_history(
+        run_id="run-1",
+        symbol_key="instrument-btc|1m",
+        start_time="1970-01-01T00:00:00Z",
+        end_time="1970-01-01T00:00:04Z",
+        limit=10,
+    )
+
+    assert [row["time"] for row in result["candles"]] == [1, 2]
+    assert captured["instrument_id"] == "instrument-btc"
+    assert captured["timeframe"] == "1m"
 
 
 def test_get_symbol_chart_history_rejects_invalid_truth_candle_payload(monkeypatch: pytest.MonkeyPatch) -> None:

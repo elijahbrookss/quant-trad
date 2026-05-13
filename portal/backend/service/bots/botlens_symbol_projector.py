@@ -50,6 +50,68 @@ class SymbolSummaryNotification:
     runtime: dict[str, Any]
 
 
+def _trade_id_from_upsert(trade: Mapping[str, Any]) -> str:
+    return str(trade.get("trade_id") or "").strip()
+
+
+def _merge_trade_delta_notifications(
+    existing: SymbolSummaryNotification,
+    latest: SymbolSummaryNotification,
+) -> tuple[Tuple[dict[str, Any], ...], Tuple[str, ...]]:
+    upserts: dict[str, dict[str, Any]] = {}
+    removals: set[str] = set()
+
+    def apply(notification: SymbolSummaryNotification) -> None:
+        for trade in notification.trade_upserts:
+            if not isinstance(trade, Mapping):
+                continue
+            trade_id = _trade_id_from_upsert(trade)
+            if not trade_id:
+                continue
+            removals.discard(trade_id)
+            upserts[trade_id] = dict(trade)
+        for trade_id_raw in notification.trade_removals:
+            trade_id = str(trade_id_raw or "").strip()
+            if not trade_id:
+                continue
+            upserts.pop(trade_id, None)
+            removals.add(trade_id)
+
+    apply(existing)
+    apply(latest)
+    return tuple(upserts[key] for key in sorted(upserts)), tuple(sorted(removals))
+
+
+def _merge_symbol_summary_notification(
+    existing: SymbolSummaryNotification,
+    latest: SymbolSummaryNotification,
+) -> SymbolSummaryNotification:
+    trade_upserts, trade_removals = _merge_trade_delta_notifications(existing, latest)
+    return replace(latest, trade_upserts=trade_upserts, trade_removals=trade_removals)
+
+
+def _coalesce_pending_run_notification(
+    queue: "asyncio.Queue[Any]",
+    notification: SymbolSummaryNotification,
+) -> bool:
+    try:
+        pending = queue._queue
+    except Exception:
+        return False
+    for index in range(len(pending) - 1, -1, -1):
+        envelope = pending[index]
+        payload = envelope.payload if isinstance(envelope, QueueEnvelope) else envelope
+        if not isinstance(payload, SymbolSummaryNotification):
+            continue
+        if payload.run_id != notification.run_id or payload.symbol_key != notification.symbol_key:
+            continue
+        pending[index] = QueueEnvelope(
+            payload=_merge_symbol_summary_notification(payload, notification)
+        )
+        return True
+    return False
+
+
 class SymbolProjector:
     def __init__(
         self,
@@ -132,7 +194,7 @@ class SymbolProjector:
                             run_id=self._run_id,
                             series_key=self._symbol_key,
                             queue_name="symbol_fact_queue",
-                            message_kind="domain_batch",
+                            message_kind="facts",
                         )
                         self._mailbox._emit_fact_gauges()
                         await self._apply_batch(batch)
@@ -222,7 +284,7 @@ class SymbolProjector:
                     run_id=self._run_id,
                     series_key=self._symbol_key,
                     queue_name="symbol_fact_queue",
-                    message_kind="domain_batch",
+                    message_kind="facts",
                     failure_mode="queue_full",
                 )
         if stale:
@@ -232,7 +294,7 @@ class SymbolProjector:
                 bot_id=self._bot_id,
                 run_id=self._run_id,
                 series_key=self._symbol_key,
-                message_kind="domain_batch",
+                message_kind="facts",
             )
         return len(stale)
 
@@ -248,7 +310,7 @@ class SymbolProjector:
                 bot_id=self._bot_id,
                 run_id=self._run_id,
                 series_key=self._symbol_key,
-                message_kind="domain_batch",
+                message_kind="facts",
             )
             return
         if not self._current_session_id and batch.bridge_session_id:
@@ -293,9 +355,27 @@ class SymbolProjector:
         )
         await self._emit_run_notification(batch=batch, deltas=deltas)
         await self._emit_deltas(deltas=deltas)
+        elapsed_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
         _OBSERVER.observe(
             "symbol_projector_apply_ms",
-            max((time.perf_counter() - started) * 1000.0, 0.0),
+            elapsed_ms,
+            bot_id=self._bot_id,
+            run_id=self._run_id,
+            series_key=self._symbol_key,
+            message_kind=message_kind,
+        )
+        _OBSERVER.observe(
+            "symbol_projector_delta_count",
+            float(len(deltas)),
+            bot_id=self._bot_id,
+            run_id=self._run_id,
+            series_key=self._symbol_key,
+            message_kind=message_kind,
+        )
+        _OBSERVER.maybe_gauge(
+            key=f"symbol_projector_projected_seq:{self._run_id}:{self._symbol_key}",
+            name="symbol_projector_projected_seq",
+            value=float(max(int(self._state.seq), int(batch.seq or 0))),
             bot_id=self._bot_id,
             run_id=self._run_id,
             series_key=self._symbol_key,
@@ -341,6 +421,27 @@ class SymbolProjector:
             runtime=runtime_payload,
         )
         try:
+            if _coalesce_pending_run_notification(self._run_notifications, notification):
+                _OBSERVER.increment(
+                    "run_notification_coalesced_total",
+                    bot_id=self._bot_id,
+                    run_id=self._run_id,
+                    series_key=self._symbol_key,
+                    queue_name="run_notification_queue",
+                    message_kind="notification",
+                )
+                _OBSERVER.increment(
+                    "live_transport_coalesced_count",
+                    bot_id=self._bot_id,
+                    run_id=self._run_id,
+                    series_key=self._symbol_key,
+                    queue_name="run_notification_queue",
+                    message_kind="notification",
+                    pipeline_stage="symbol_summary",
+                    source_reason="latest_wins",
+                )
+                self._emit_run_notification_gauges()
+                return
             self._run_notifications.put_nowait(QueueEnvelope(payload=notification))
             _OBSERVER.increment(
                 "run_notification_enqueued_total",
@@ -348,18 +449,43 @@ class SymbolProjector:
                 run_id=self._run_id,
                 series_key=self._symbol_key,
                 queue_name="run_notification_queue",
-                message_kind="symbol_summary",
+                message_kind="notification",
             )
             self._emit_run_notification_gauges()
         except asyncio.QueueFull:
+            enqueued_after_drop = False
+            try:
+                self._run_notifications.get_nowait()
+                self._run_notifications.put_nowait(QueueEnvelope(payload=notification))
+                enqueued_after_drop = True
+                _OBSERVER.increment(
+                    "run_notification_enqueued_total",
+                    bot_id=self._bot_id,
+                    run_id=self._run_id,
+                    series_key=self._symbol_key,
+                    queue_name="run_notification_queue",
+                    message_kind="notification",
+                )
+            except (asyncio.QueueFull, asyncio.QueueEmpty):
+                enqueued_after_drop = False
             _OBSERVER.increment(
                 "run_notification_dropped_total",
                 bot_id=self._bot_id,
                 run_id=self._run_id,
                 series_key=self._symbol_key,
                 queue_name="run_notification_queue",
-                message_kind="symbol_summary",
+                message_kind="notification",
                 failure_mode="queue_full",
+            )
+            _OBSERVER.increment(
+                "live_transport_dropped_stale_count",
+                bot_id=self._bot_id,
+                run_id=self._run_id,
+                series_key=self._symbol_key,
+                queue_name="run_notification_queue",
+                message_kind="notification",
+                pipeline_stage="symbol_summary",
+                source_reason="queue_full_drop_oldest",
             )
             _OBSERVER.event(
                 "run_notification_queue_overflow",
@@ -369,9 +495,12 @@ class SymbolProjector:
                 run_id=self._run_id,
                 series_key=self._symbol_key,
                 queue_name="run_notification_queue",
-                message_kind="symbol_summary",
+                message_kind="notification",
                 depth=self._run_notifications.qsize(),
-                overflow_policy="drop_new",
+                overflow_policy="drop_oldest",
+                replay_required=True,
+                recovery_action="canonical_ledger_replay",
+                current_notification_enqueued=enqueued_after_drop,
             )
             self._emit_run_notification_gauges()
 
@@ -413,6 +542,7 @@ class SymbolProjector:
     async def _emit_deltas(self, *, deltas: Tuple[SymbolConcernDelta, ...]) -> None:
         if not deltas:
             return
+        enqueue_started = time.perf_counter()
         try:
             self._fanout_channel.put_nowait(
                 FanoutEnvelope(
@@ -421,6 +551,16 @@ class SymbolProjector:
                     message_kind="symbol_projection_delta",
                     payload_bytes=0,
                 )
+            )
+            _OBSERVER.observe(
+                "live_transport_enqueue_ms",
+                max((time.perf_counter() - enqueue_started) * 1000.0, 0.0),
+                bot_id=self._bot_id,
+                run_id=self._run_id,
+                series_key=self._symbol_key,
+                queue_name="fanout_channel",
+                message_kind="symbol_projection_delta",
+                pipeline_stage="symbol_projection",
             )
             self._emit_fanout_gauges()
         except asyncio.QueueFull:
@@ -432,6 +572,17 @@ class SymbolProjector:
                 queue_name="fanout_channel",
                 message_kind="symbol_projection_delta",
                 failure_mode="queue_full",
+            )
+            _OBSERVER.increment(
+                "live_transport_dropped_stale_count",
+                value=float(len(deltas)),
+                bot_id=self._bot_id,
+                run_id=self._run_id,
+                series_key=self._symbol_key,
+                queue_name="fanout_channel",
+                message_kind="symbol_projection_delta",
+                pipeline_stage="symbol_projection",
+                source_reason="fanout_queue_full",
             )
             _OBSERVER.event(
                 "fanout_channel_overflow",
