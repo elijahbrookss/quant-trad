@@ -4,6 +4,8 @@ This folder defines the platform-level contracts for agents and contributors.
 
 If implementation conflicts with these docs, the docs are the source of truth.
 
+For explanatory reading paths, start at [../index.md](../index.md). Return here when behavior needs normative detail.
+
 ## Read Order
 
 1. `platform/00_system_contract.md`

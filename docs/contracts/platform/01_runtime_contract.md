@@ -27,6 +27,7 @@ Rules:
 - outputs are the only strategy-visible indicator interface,
 - overlays are not strategy inputs,
 - runtime details are not strategy inputs,
+- normal trading evaluation advances indicators with output-only frames; overlays and runtime details are opt-in projection/debug reads,
 - decision artifacts must derive from the published typed outputs for the same bar,
 - indicator overlays represent the full current visual state for the bar,
 - indicator details are non-core inspection artifacts and must stay separate from render overlays,
@@ -44,6 +45,48 @@ Rules:
 - runtime never waits, retries, or substitutes missing values,
 - runtime and preview consumers must not fetch overlays through a parallel overlay service path.
 - runtime and preview consumers must not reconstruct decision artifacts through a parallel rule-evaluation path.
+
+## Shared-Wallet Entry Ordering
+
+Symbol-sharded shared-wallet runs must keep capital allocation deterministic without turning every bar into a global barrier.
+
+Rules:
+- wallet initialization is run-scoped and coordinator-owned; workers attach to
+  the shared wallet and must not publish mutating `WALLET_INITIALIZED` facts,
+- the coordinator-owned `WALLET_INITIALIZED` fact is durable canonical truth and
+  must be appended through the canonical persistence path, not live/projection transport,
+- every canonical wallet ledger fact must carry `wallet_commit_seq`,
+  `wallet_commit_seq_status`, and `wallet_event_order`; wallet replay orders by
+  the wallet commit clock, never by runtime publication order,
+- shared-wallet settlement must update the shared committed wallet-state
+  snapshot and append its internal fill marker inside the wallet-gateway lock
+  before workers publish transport/runtime events, so later decisions and
+  settlements cannot observe stale capital,
+- material position/trade lifecycle facts must carry `position_commit_seq`
+  when they describe a position state transition; that clock is position-scoped
+  and records durable causal order for trade replay,
+- typed indicator outputs must carry `indicator_commit_seq` when emitted by
+  the indicator execution engine; that clock is indicator-scoped and records
+  the durable causal order of `apply_bar -> snapshot` transitions,
+- indicator output deltas are engine-owned `set` operations over the declared
+  typed output surface; individual indicators must not stamp or override the
+  indicator commit clock,
+- overlay snapshots inherit the source `indicator_commit_seq` for provenance,
+  while overlay transport deltas use an explicit `overlay_commit_seq` /
+  `base_overlay_commit_seq` viewport clock; selected-symbol stream
+  `base_seq` remains only a websocket replay cursor,
+- selected-symbol snapshots must expose their current `overlay_commit_seq` and
+  `overlay_commit_seq_status` so reconnects and symbol handoffs resume overlay
+  projection from the exact snapshot cursor instead of an implicit zero,
+- wallet ledger facts for repeated exits on the same trade must be derived from
+  the prior committed wallet fact state for that trade; a stale source
+  `wallet_before` snapshot must not rewind balance, free collateral, locked
+  margin, or open quantity,
+- only real entry candidates enter deterministic wallet arbitration,
+- no-candidate bars publish lightweight participant progress/watermarks and must not block other workers,
+- candidate release waits until same-timeframe participants have submitted same-bar candidates, advanced past the candidate time, completed/failed, or provided compact sparse-gap evidence covering that time,
+- future-bar candidates must not overtake unresolved earlier same-timeframe candidates,
+- sparse candles must remain sparse truth; the coordinator may record compact gap metadata but must not synthesize OHLCV candles or per-missing-bar placeholders as source data.
 
 ## Cache Contract
 
@@ -115,9 +158,13 @@ Rules:
 
 - continuity signals are emitted as compact seam summaries, not per-candle logs,
 - the minimum audit boundaries are source fetch/admission, selected-symbol snapshot assembly, and final full-run per-series summary,
-- every detected gap must be classified as `expected_session_gap`, `provider_missing_data`, `ingestion_failure`, or `unknown_gap`,
+- every detected gap must be classified as `expected_session_gap`, `provider_missing_data`, `ingestion_failure`, `runtime_missing`, `projection_missing`, or `unknown_gap`,
 - classification is deterministic and conservative; unavailable calendar/session proof means `unknown_gap`,
 - expected session gaps do not count as defects, while provider, ingestion, and unknown gaps remain visible as defects/investigation items,
-- summaries carry `candle_count`, `first_ts`, `last_ts`, expected interval, duplicate/out-of-order/missing-OHLCV counts, classified gap counts, largest/max gap severity, continuity ratio, and `final_status`,
+- summaries carry `candle_count`, `first_ts`, `last_ts`, expected interval, duplicate/out-of-order/missing-OHLCV counts, classified gap counts, largest/max gap severity, continuity ratio, `final_status`, and compact first-order gap evidence,
+- provider sparse responses and fetch failures must preserve provider-agnostic evidence such as reason code, evidence source, provider response metadata if available, and exception type/message/stack trace for failed calls,
+- BotLens and reporting must preserve provider sparse source reasons such as `provider_closure`/`source_sparse`; if a final summary has only unknown gap labels, reporting must check canonical closure evidence before treating the gap as pipeline loss,
 - final run summaries must be emitted per run/series so a dashboard cannot look healthy while full-run persistence contains cross-batch gaps,
 - continuity summaries must stay scoped by run and series so the next fresh-run audit can identify the first broken boundary directly.
+
+Standalone gap facts such as `CANDLE_GAP_OBSERVED` are a projection-extension item, not a license to infer or synthesize missing OHLCV rows. Until that fact exists, runtime and BotLens paths must preserve classified continuity summaries and diagnostics so provider-backed sparse calendars remain visible without changing the candle series.
