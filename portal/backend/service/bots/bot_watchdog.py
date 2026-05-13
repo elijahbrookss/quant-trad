@@ -38,7 +38,7 @@ import logging
 import socket
 import threading
 from datetime import datetime, timedelta
-from typing import Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set
 
 from core.settings import get_settings
 from ..storage.storage import (
@@ -76,10 +76,63 @@ def _parse_bot_timestamp(value: object) -> Optional[datetime]:
 
 
 def _startup_launch_grace_active(bot: Dict[str, object]) -> bool:
-    started_at = _parse_bot_timestamp(bot.get("last_run_at"))
+    started_at = _active_startup_started_at(bot)
     if started_at is None:
         return False
     return datetime.utcnow() - started_at < timedelta(seconds=STARTUP_CONTAINER_GRACE_SECONDS)
+
+
+def _active_startup_started_at(bot: Mapping[str, Any]) -> Optional[datetime]:
+    artifact = bot.get("last_run_artifact")
+    if isinstance(artifact, Mapping):
+        startup = artifact.get("startup")
+        if isinstance(startup, Mapping):
+            started_at = _parse_bot_timestamp(startup.get("at"))
+            if started_at is not None:
+                return started_at
+    return _parse_bot_timestamp(bot.get("last_run_at"))
+
+
+def _active_startup_run_id(bot: Mapping[str, Any]) -> Optional[str]:
+    artifact = bot.get("last_run_artifact")
+    if isinstance(artifact, Mapping):
+        startup = artifact.get("startup")
+        if isinstance(startup, Mapping):
+            run_id = str(startup.get("run_id") or "").strip()
+            if run_id:
+                return run_id
+        run_id = str(artifact.get("run_id") or "").strip()
+        if run_id:
+            return run_id
+    run_id = str(bot.get("run_id") or bot.get("last_run_id") or "").strip()
+    return run_id or None
+
+
+def _has_active_startup_artifact(bot: Mapping[str, Any]) -> bool:
+    artifact = bot.get("last_run_artifact")
+    if not isinstance(artifact, Mapping):
+        return False
+    startup = artifact.get("startup")
+    return isinstance(startup, Mapping) and bool(startup)
+
+
+def _startup_container_ownership_pending(
+    *,
+    bot: Mapping[str, Any],
+    status: str,
+    current_run_id: Optional[str],
+    container_run_id: Optional[str],
+    ownership_confirmed: bool,
+) -> bool:
+    if ownership_confirmed:
+        return False
+    if status == "starting":
+        return True
+    if status not in {"degraded", "telemetry_degraded"}:
+        return False
+    if not current_run_id or not _has_active_startup_artifact(bot):
+        return False
+    return _startup_launch_grace_active(bot) or container_run_id is None
 
 
 def _generate_runner_id() -> str:
@@ -296,12 +349,58 @@ class BotWatchdog:
             if not bot_id:
                 continue
             container = DockerBotRunner.inspect_bot_container(bot_id)
+            current_run_id = _active_startup_run_id(bot)
+            container_run_id = str(container.get("runtime_run_id") or "").strip() or None
+            ownership_mismatch = bool(current_run_id and container_run_id and container_run_id != current_run_id)
             if bool(container.get("running")):
+                if ownership_mismatch:
+                    logger.warning(
+                        "bot_watchdog_container_ownership_mismatch_running | bot_id=%s | current_run_id=%s | container_run_id=%s",
+                        bot_id,
+                        current_run_id,
+                        container_run_id,
+                    )
+                    continue
                 continue
             container_status = str(container.get("status") or "").strip().lower()
-            if status == "starting" and not bot.get("heartbeat_at"):
-                if container_status in {"missing", "unknown", "created", "restarting"} and _startup_launch_grace_active(bot):
-                    continue
+            startup_in_progress = status == "starting"
+            launch_grace_active = startup_in_progress and _startup_launch_grace_active(bot)
+            ownership_confirmed = bool(current_run_id and container_run_id == current_run_id)
+            ownership_pending = _startup_container_ownership_pending(
+                bot=bot,
+                status=status,
+                current_run_id=current_run_id,
+                container_run_id=container_run_id,
+                ownership_confirmed=ownership_confirmed,
+            )
+            if launch_grace_active:
+                logger.warning(
+                    "bot_watchdog_startup_container_pending | bot_id=%s | current_run_id=%s | container_run_id=%s | container_status=%s",
+                    bot_id,
+                    current_run_id,
+                    container_run_id,
+                    container_status or None,
+                )
+                continue
+            if ownership_pending:
+                logger.warning(
+                    "bot_watchdog_startup_container_unconfirmed | bot_id=%s | status=%s | current_run_id=%s | container_run_id=%s | container_status=%s",
+                    bot_id,
+                    status,
+                    current_run_id,
+                    container_run_id,
+                    container_status or None,
+                )
+                continue
+            if ownership_mismatch:
+                logger.warning(
+                    "bot_watchdog_container_ownership_mismatch_skipped | bot_id=%s | current_run_id=%s | container_run_id=%s | container_status=%s",
+                    bot_id,
+                    current_run_id,
+                    container_run_id,
+                    container_status or None,
+                )
+                continue
             container_name = str(container.get("name") or "").strip()
             if mark_bot_crashed(bot_id, reason=f"container_not_running:{container_name}"):
                 failed.append(bot_id)

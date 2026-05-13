@@ -32,6 +32,8 @@ from portal.backend.service.bots.container_runtime_projection import (
 )
 from portal.backend.service.bots.container_runtime_telemetry import TelemetryEmitter
 from portal.backend.service.bots.container_runtime_telemetry import emit_telemetry_ephemeral_message
+from portal.backend.service.bots.botlens_canonical_facts import append_botlens_canonical_fact_batch
+from portal.backend.service.bots.botlens_contract import BRIDGE_FACTS_KIND, FACT_TYPE_WALLET_LEDGER_EVENT
 from portal.backend.service.bots.botlens_contract import normalize_series_key
 from portal.backend.service.bots.botlens_runtime_state import (
     BotLensRuntimeState,
@@ -68,9 +70,10 @@ from portal.backend.service.storage.storage import (
 
 logger = logging.getLogger(__name__)
 _OBSERVER = BackendObserver(component="container_runtime", event_logger=logger)
-_TERMINAL_STATUSES = {"completed", "stopped", "error", "failed", "startup_failed", "crashed"}
+_TERMINAL_STATUSES = {"completed", "stopped", "canceled", "cancelled", "error", "failed", "startup_failed", "crashed", "degraded_terminal"}
 _MAX_SYMBOL_WORKERS = 8
 _VIEW_STATE_SCHEMA_VERSION = 1
+_WALLET_INITIALIZATION_OWNER_CONTAINER = "container"
 _CHURN_NO_PROGRESS_MS = 15_000.0
 _CHURN_ACTIVITY_THRESHOLD = 3
 _SETTINGS = get_settings()
@@ -143,8 +146,19 @@ def _build_shared_wallet_proxy(
     bot_id: str,
     balances: Mapping[str, float],
     initial_seq: int = 0,
+    expected_decision_participants: int = 0,
 ) -> Dict[str, Any]:
     runtime_events = manager.list()
+    wallet_events = manager.list()
+    normalized_balances = dict(balances)
+    wallet_state = manager.dict(
+        {
+            "balances": dict(normalized_balances),
+            "locked_margin": {},
+            "free_collateral": dict(normalized_balances),
+            "margin_positions": {},
+        }
+    )
     init_event = new_runtime_event(
         event_name=RuntimeEventName.WALLET_INITIALIZED,
         correlation_id=build_correlation_id(
@@ -160,19 +174,180 @@ def _build_shared_wallet_proxy(
             symbol=None,
             timeframe=None,
             bar_ts=None,
-            balances=dict(balances),
+            balances=dict(normalized_balances),
             source="run_start",
+            wallet_commit_seq=0,
+            wallet_commit_seq_status="runtime_assigned",
+            wallet_eval_seq=0,
         ),
     )
     serialized_init = init_event.serialize()
     serialized_init["seq"] = 0
     runtime_events.append(serialized_init)
+    wallet_events.append(dict(serialized_init))
     return {
         "runtime_events": runtime_events,
+        "wallet_events": wallet_events,
+        "wallet_state": wallet_state,
         "runtime_event_seq": manager.Value("i", max(int(initial_seq or 0), 0)),
+        "wallet_event_seq": manager.Value("i", 0),
         "reservations": manager.dict(),
+        "decision_order_state": manager.dict(),
+        "decision_order_participants": manager.dict(),
+        "decision_order_expected_count": max(int(expected_decision_participants or 0), 0),
         "lock": manager.RLock(),
     }
+
+
+def _wallet_initialization_source_event_id(run_id: str) -> str:
+    return f"wallet:init:{str(run_id).strip()}"
+
+
+def _build_canonical_wallet_initialized_fact(
+    *,
+    bot_id: str,
+    run_id: str,
+    balances: Mapping[str, float],
+    run_seq: int,
+    observed_at: str,
+) -> Dict[str, Any]:
+    normalized = _normalise_balances(balances)
+    if not normalized:
+        raise RuntimeError(f"wallet initialization requires non-empty balances | bot_id={bot_id} run_id={run_id}")
+    currency = "USD" if "USD" in normalized else sorted(normalized.keys())[0]
+    balance_after = float(normalized[currency])
+    wallet_before = {
+        "balances": {code: 0.0 for code in normalized},
+        "locked_margin": {},
+        "free_collateral": {code: 0.0 for code in normalized},
+        "margin_positions": {},
+    }
+    wallet_after = {
+        "balances": dict(normalized),
+        "locked_margin": {},
+        "free_collateral": dict(normalized),
+        "margin_positions": {},
+    }
+    source_event_id = _wallet_initialization_source_event_id(run_id)
+    wallet_commit_seq = 0
+    wallet_event_id = f"{wallet_commit_seq:012d}:{source_event_id}:00:wallet_initialized"
+    return {
+        "fact_type": FACT_TYPE_WALLET_LEDGER_EVENT,
+        "wallet_event": {
+            "event_name": RuntimeEventName.WALLET_INITIALIZED.value,
+            "event_id": f"botlens:wallet:{wallet_commit_seq:012d}:{source_event_id}:00:wallet_initialized",
+            "event_ts": observed_at,
+            "known_at": observed_at,
+            "run_id": str(run_id),
+            "bot_id": str(bot_id),
+            "run_seq": int(run_seq),
+            "run_seq_status": "runtime_assigned",
+            "source_run_seq": int(run_seq),
+            "source_run_seq_status": "runtime_assigned",
+            "wallet_commit_seq": wallet_commit_seq,
+            "wallet_commit_seq_status": "runtime_assigned",
+            "wallet_eval_seq": 0,
+            "wallet_event_order": 0,
+            "strategy_id": "__runtime__",
+            "bar_time": observed_at,
+            "source_event_id": source_event_id,
+            "wallet_event_id": wallet_event_id,
+            "correlation_id": build_correlation_id(
+                run_id=str(run_id),
+                symbol=None,
+                timeframe=None,
+                bar_ts=None,
+            ),
+            "root_id": source_event_id,
+            "parent_id": None,
+            "currency": currency,
+            "balance_before": 0.0,
+            "balance_after": balance_after,
+            "equity_before": 0.0,
+            "equity_after": balance_after,
+            "free_collateral_before": 0.0,
+            "free_collateral_after": balance_after,
+            "locked_margin_before": 0.0,
+            "locked_margin_after": 0.0,
+            "margin_required": 0.0,
+            "margin_available": 0.0,
+            "fee": 0.0,
+            "reason": "run_start",
+            "wallet_before": wallet_before,
+            "wallet_after": wallet_after,
+            "source_refs": [
+                {
+                    "section": "container_runtime",
+                    "event_id": source_event_id,
+                    "owner": _WALLET_INITIALIZATION_OWNER_CONTAINER,
+                }
+            ],
+        },
+    }
+
+
+def _append_canonical_wallet_initialized_fact(
+    *,
+    bot_id: str,
+    run_id: str,
+    balances: Mapping[str, float],
+    shared_wallet_proxy: Mapping[str, Any],
+) -> Dict[str, Any]:
+    run_seq = _next_run_event_seq(shared_wallet_proxy)
+    observed_at = utc_now_iso()
+    payload = {
+        "kind": BRIDGE_FACTS_KIND,
+        "bot_id": str(bot_id),
+        "run_id": str(run_id),
+        "worker_id": _WALLET_INITIALIZATION_OWNER_CONTAINER,
+        "source_emitter": "container_runtime",
+        "source_reason": "wallet_initialized",
+        "run_seq": int(run_seq),
+        "series_key": None,
+        "known_at": observed_at,
+        "event_time": observed_at,
+        "facts": [
+            _build_canonical_wallet_initialized_fact(
+                bot_id=bot_id,
+                run_id=run_id,
+                balances=balances,
+                run_seq=run_seq,
+                observed_at=observed_at,
+            )
+        ],
+        "summary": {
+            "wallet_initialization_owner": _WALLET_INITIALIZATION_OWNER_CONTAINER,
+        },
+    }
+    payload["summary"]["payload_bytes"] = len(json.dumps(json_safe(payload)).encode("utf-8"))
+    append_result = append_botlens_canonical_fact_batch(
+        bot_id=str(bot_id),
+        run_id=str(run_id),
+        seq=int(run_seq),
+        batch_kind=BRIDGE_FACTS_KIND,
+        payload=payload,
+        context={
+            "worker_id": _WALLET_INITIALIZATION_OWNER_CONTAINER,
+            "source_emitter": "container_runtime",
+            "source_reason": "wallet_initialized",
+        },
+    )
+    row_count = int(append_result.get("row_count") or 0)
+    inserted_rows = int(append_result.get("inserted_rows") or 0)
+    if row_count <= 0 or inserted_rows != row_count:
+        raise RuntimeError(
+            "canonical wallet initialization fact did not persist exactly once"
+            f" | bot_id={bot_id} run_id={run_id} row_count={row_count} inserted_rows={inserted_rows}"
+        )
+    logger.info(
+        "bot_runtime_wallet_initialized_canonical_appended | bot_id=%s | run_id=%s | run_seq=%s | owner=%s | inserted_rows=%s",
+        bot_id,
+        run_id,
+        run_seq,
+        _WALLET_INITIALIZATION_OWNER_CONTAINER,
+        inserted_rows,
+    )
+    return {"payload": payload, "append_result": append_result}
 
 
 def _next_run_event_seq(shared_wallet_proxy: Mapping[str, Any]) -> int:
@@ -276,6 +451,8 @@ class ContainerStartupContext:
     terminal_status_source: str | None = None
     terminal_status_value: str | None = None
     telemetry_degraded_emitted: bool = False
+    request_id: str | None = None
+    final_readiness: Dict[str, Any] = field(default_factory=dict)
 
 
 def _resolve_backend_run_id(bot_id: str) -> str:
@@ -289,6 +466,11 @@ def _resolve_backend_run_id(bot_id: str) -> str:
         fallback,
     )
     return fallback
+
+
+def _resolve_backend_request_id() -> str | None:
+    value = str(os.environ.get("QT_BOT_RUNTIME_REQUEST_ID") or os.environ.get("QT_REQUEST_ID") or "").strip()
+    return value or None
 
 
 def _persist_lifecycle_phase(
@@ -321,9 +503,12 @@ def _persist_lifecycle_phase(
     if resolved_status in {
         BotLifecycleStatus.STOPPED.value,
         "failed",
+        BotLifecycleStatus.FAILED.value,
         BotLifecycleStatus.STARTUP_FAILED.value,
         BotLifecycleStatus.CRASHED.value,
         BotLifecycleStatus.COMPLETED.value,
+        BotLifecycleStatus.CANCELED.value,
+        BotLifecycleStatus.DEGRADED_TERMINAL.value,
     }:
         update_bot_runtime_status(
             bot_id=bot_id,
@@ -436,6 +621,8 @@ def _series_progress_metadata(ctx: ContainerStartupContext) -> Dict[str, Any]:
 
 def _runtime_observability_metadata(ctx: ContainerStartupContext) -> Dict[str, Any]:
     metadata = _series_progress_metadata(ctx)
+    if ctx.request_id:
+        metadata["request_id"] = ctx.request_id
     runtime_meta: Dict[str, Any] = {
         "runtime_state": ctx.runtime_state,
         "progress_state": ctx.progress_state,
@@ -456,6 +643,8 @@ def _runtime_observability_metadata(ctx: ContainerStartupContext) -> Dict[str, A
     terminal_payload = _terminal_payload(ctx)
     if terminal_payload:
         runtime_meta["terminal"] = terminal_payload
+    if ctx.final_readiness:
+        runtime_meta["readiness"] = dict(ctx.final_readiness)
     if runtime_meta:
         metadata["runtime_observability"] = runtime_meta
     return metadata
@@ -940,7 +1129,11 @@ def _runtime_state_for_phase(phase: str, *, current_state: str | None = None) ->
         return BotLensRuntimeState.STARTUP_FAILED.value
     if normalized_phase == BotLifecyclePhase.CRASHED.value:
         return BotLensRuntimeState.CRASHED.value
-    if normalized_phase == BotLifecyclePhase.STOPPED.value:
+    if normalized_phase in {
+        BotLifecyclePhase.STOPPED.value,
+        BotLifecyclePhase.CANCELED.value,
+        BotLifecyclePhase.DEGRADED_TERMINAL.value,
+    }:
         return BotLensRuntimeState.STOPPED.value
     if normalized_phase == BotLifecyclePhase.COMPLETED.value:
         return BotLensRuntimeState.STOPPED.value
@@ -1066,12 +1259,14 @@ def load_container_startup_context(
     telemetry_sender: TelemetryEmitter | None = None,
 ) -> ContainerStartupContext:
     run_id = _resolve_backend_run_id(bot_id)
+    request_id = _resolve_backend_request_id()
     _persist_lifecycle_phase(
         bot_id=bot_id,
         run_id=run_id,
         phase=BotLifecyclePhase.CONTAINER_BOOTING.value,
         owner=LifecycleOwner.CONTAINER.value,
         message="Container process booting with backend-owned startup contract.",
+        metadata={"request_id": request_id} if request_id else None,
         telemetry_sender=telemetry_sender,
     )
 
@@ -1084,17 +1279,20 @@ def load_container_startup_context(
         phase=BotLifecyclePhase.LOADING_BOT_CONFIG.value,
         owner=LifecycleOwner.CONTAINER.value,
         message="Loading bot config snapshot in runtime container.",
+        metadata={"request_id": request_id} if request_id else None,
         telemetry_sender=telemetry_sender,
     )
 
     runtime_bot_config = _materialize_bot_config(bot)
+    if request_id:
+        runtime_bot_config["request_id"] = request_id
     _persist_lifecycle_phase(
         bot_id=bot_id,
         run_id=run_id,
         phase=BotLifecyclePhase.CLAIMING_RUN.value,
         owner=LifecycleOwner.CONTAINER.value,
         message="Container claimed backend-owned run_id.",
-        metadata={"run_id": run_id},
+        metadata={"run_id": run_id, "request_id": request_id},
         telemetry_sender=telemetry_sender,
     )
     strategy_id = str(bot.get("strategy_id") or "").strip()
@@ -1134,6 +1332,14 @@ def load_container_startup_context(
         bot_id=bot_id,
         balances=_normalise_balances(balances),
         initial_seq=int(preparing_wallet_state.get("seq") or 0),
+        expected_decision_participants=len(all_symbols),
+    )
+    runtime_bot_config["wallet_initialization_owner"] = _WALLET_INITIALIZATION_OWNER_CONTAINER
+    _append_canonical_wallet_initialized_fact(
+        bot_id=bot_id,
+        run_id=run_id,
+        balances=_normalise_balances(balances),
+        shared_wallet_proxy=shared_wallet_proxy,
     )
 
     _persist_lifecycle_phase(
@@ -1171,6 +1377,7 @@ def load_container_startup_context(
         manager=manager,
         shared_wallet_proxy=shared_wallet_proxy,
         telemetry_sender=telemetry_sender,
+        request_id=request_id,
     )
     for symbols in ctx.symbol_shards:
         for symbol in symbols:
@@ -1266,6 +1473,7 @@ def _series_worker(
     child_config["series_runner"] = "inline"
     child_config["worker_id"] = worker_id
     child_config["report_artifact_role"] = "worker"
+    child_config["wallet_initialization_owner"] = _WALLET_INITIALIZATION_OWNER_CONTAINER
     if (
         "BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY" not in child_config
         and "push_payload_bytes_sample_every" not in child_config
@@ -2715,6 +2923,23 @@ def supervise_startup_and_runtime(ctx: ContainerStartupContext) -> None:
                 config=ctx.runtime_bot_config,
                 runtime_status=final_status,
             )
+            try:
+                from portal.backend.service.reports.report_data import get_result_readiness
+
+                ctx.final_readiness = get_result_readiness(ctx.run_id)
+            except Exception as readiness_exc:  # noqa: BLE001
+                ctx.final_readiness = {
+                    "results_ready": False,
+                    "safe_to_compare": False,
+                    "reason": "readiness_projection_failed",
+                    "error": str(readiness_exc),
+                }
+                logger.warning(
+                    "bot_runtime_readiness_projection_failed | bot_id=%s | run_id=%s | error=%s",
+                    ctx.bot_id,
+                    ctx.run_id,
+                    readiness_exc,
+                )
         except Exception as exc:  # noqa: BLE001
             failure_phase = BotLifecyclePhase.CRASHED.value if ctx.startup_live_emitted else BotLifecyclePhase.STARTUP_FAILED.value
             failure_status = BotLifecycleStatus.CRASHED.value if ctx.startup_live_emitted else BotLifecycleStatus.STARTUP_FAILED.value

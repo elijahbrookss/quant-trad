@@ -25,12 +25,21 @@ class LifecycleOwner(str, Enum):
 
 class BotLifecycleStatus(str, Enum):
     STARTING = "starting"
+    INITIALIZING = "initializing"
+    AWAITING_FIRST_SNAPSHOT = "awaiting_first_snapshot"
+    LIVE = "live"
     RUNNING = "running"
     DEGRADED = "degraded"
     TELEMETRY_DEGRADED = "telemetry_degraded"
+    STOPPING = "stopping"
+    CANCEL_REQUESTED = "cancel_requested"
+    CANCELING = "canceling"
     STARTUP_FAILED = "startup_failed"
+    FAILED = "failed"
     CRASHED = "crashed"
     STOPPED = "stopped"
+    CANCELED = "canceled"
+    DEGRADED_TERMINAL = "degraded_terminal"
     COMPLETED = "completed"
     IDLE = "idle"
 
@@ -59,9 +68,15 @@ class BotLifecyclePhase(str, Enum):
     LIVE = "live"
     DEGRADED = "degraded"
     TELEMETRY_DEGRADED = "telemetry_degraded"
+    STOPPING = "stopping"
+    CANCEL_REQUESTED = "cancel_requested"
+    CANCELING = "canceling"
     STARTUP_FAILED = "startup_failed"
+    FAILED = "failed"
     CRASHED = "crashed"
     STOPPED = "stopped"
+    CANCELED = "canceled"
+    DEGRADED_TERMINAL = "degraded_terminal"
     COMPLETED = "completed"
 
 
@@ -95,9 +110,15 @@ CONTAINER_REPORTED_PHASES = frozenset(
         BotLifecyclePhase.LIVE.value,
         BotLifecyclePhase.DEGRADED.value,
         BotLifecyclePhase.TELEMETRY_DEGRADED.value,
+        BotLifecyclePhase.STOPPING.value,
+        BotLifecyclePhase.CANCEL_REQUESTED.value,
+        BotLifecyclePhase.CANCELING.value,
         BotLifecyclePhase.STARTUP_FAILED.value,
+        BotLifecyclePhase.FAILED.value,
         BotLifecyclePhase.CRASHED.value,
         BotLifecyclePhase.STOPPED.value,
+        BotLifecyclePhase.CANCELED.value,
+        BotLifecyclePhase.DEGRADED_TERMINAL.value,
         BotLifecyclePhase.COMPLETED.value,
     }
 )
@@ -105,8 +126,11 @@ CONTAINER_REPORTED_PHASES = frozenset(
 TERMINAL_PHASES = frozenset(
     {
         BotLifecyclePhase.STARTUP_FAILED.value,
+        BotLifecyclePhase.FAILED.value,
         BotLifecyclePhase.CRASHED.value,
         BotLifecyclePhase.STOPPED.value,
+        BotLifecyclePhase.CANCELED.value,
+        BotLifecyclePhase.DEGRADED_TERMINAL.value,
         BotLifecyclePhase.COMPLETED.value,
     }
 )
@@ -136,8 +160,50 @@ ACTIVE_PHASES = frozenset(
         BotLifecyclePhase.LIVE.value,
         BotLifecyclePhase.DEGRADED.value,
         BotLifecyclePhase.TELEMETRY_DEGRADED.value,
+        BotLifecyclePhase.STOPPING.value,
+        BotLifecyclePhase.CANCEL_REQUESTED.value,
+        BotLifecyclePhase.CANCELING.value,
     }
 )
+
+ACTIVE_RUN_STATUSES = frozenset(
+    {
+        BotLifecycleStatus.STARTING.value,
+        BotLifecycleStatus.INITIALIZING.value,
+        BotLifecycleStatus.RUNNING.value,
+        BotLifecycleStatus.AWAITING_FIRST_SNAPSHOT.value,
+        BotLifecycleStatus.LIVE.value,
+        BotLifecycleStatus.DEGRADED.value,
+        BotLifecycleStatus.TELEMETRY_DEGRADED.value,
+        BotLifecycleStatus.STOPPING.value,
+        BotLifecycleStatus.CANCEL_REQUESTED.value,
+        BotLifecycleStatus.CANCELING.value,
+    }
+)
+
+TERMINAL_RUN_STATUSES = frozenset(
+    {
+        BotLifecycleStatus.COMPLETED.value,
+        BotLifecycleStatus.FAILED.value,
+        BotLifecycleStatus.STARTUP_FAILED.value,
+        BotLifecycleStatus.CRASHED.value,
+        BotLifecycleStatus.STOPPED.value,
+        BotLifecycleStatus.CANCELED.value,
+        BotLifecycleStatus.DEGRADED_TERMINAL.value,
+    }
+)
+
+
+def is_active_run_state(*, status: Any = None, phase: Any = None) -> bool:
+    normalized_status = str(status or "").strip().lower()
+    normalized_phase = str(phase or "").strip().lower()
+    return normalized_status in ACTIVE_RUN_STATUSES or normalized_phase in ACTIVE_PHASES
+
+
+def is_terminal_run_state(*, status: Any = None, phase: Any = None) -> bool:
+    normalized_status = str(status or "").strip().lower()
+    normalized_phase = str(phase or "").strip().lower()
+    return normalized_status in TERMINAL_RUN_STATUSES or normalized_phase in TERMINAL_PHASES
 
 
 def status_for_phase(phase: str) -> str:
@@ -147,12 +213,24 @@ def status_for_phase(phase: str) -> str:
         return BotLifecycleStatus.DEGRADED.value
     if phase == BotLifecyclePhase.TELEMETRY_DEGRADED.value:
         return BotLifecycleStatus.TELEMETRY_DEGRADED.value
+    if phase == BotLifecyclePhase.STOPPING.value:
+        return BotLifecycleStatus.STOPPING.value
+    if phase == BotLifecyclePhase.CANCEL_REQUESTED.value:
+        return BotLifecycleStatus.CANCEL_REQUESTED.value
+    if phase == BotLifecyclePhase.CANCELING.value:
+        return BotLifecycleStatus.CANCELING.value
     if phase == BotLifecyclePhase.STARTUP_FAILED.value:
         return BotLifecycleStatus.STARTUP_FAILED.value
+    if phase == BotLifecyclePhase.FAILED.value:
+        return BotLifecycleStatus.FAILED.value
     if phase == BotLifecyclePhase.CRASHED.value:
         return BotLifecycleStatus.CRASHED.value
     if phase == BotLifecyclePhase.STOPPED.value:
         return BotLifecycleStatus.STOPPED.value
+    if phase == BotLifecyclePhase.CANCELED.value:
+        return BotLifecycleStatus.CANCELED.value
+    if phase == BotLifecyclePhase.DEGRADED_TERMINAL.value:
+        return BotLifecycleStatus.DEGRADED_TERMINAL.value
     if phase == BotLifecyclePhase.COMPLETED.value:
         return BotLifecycleStatus.COMPLETED.value
     if phase in ACTIVE_PHASES:
@@ -175,10 +253,12 @@ def terminal_status_after_supervision(
     ]
     if int(degraded_symbols_count or 0) > 0:
         if startup_live_emitted:
-            return BotLifecyclePhase.DEGRADED.value, BotLifecycleStatus.DEGRADED.value
+            return BotLifecyclePhase.DEGRADED_TERMINAL.value, BotLifecycleStatus.DEGRADED_TERMINAL.value
         return BotLifecyclePhase.STARTUP_FAILED.value, BotLifecycleStatus.STARTUP_FAILED.value
     if telemetry_degraded:
-        return BotLifecyclePhase.TELEMETRY_DEGRADED.value, BotLifecycleStatus.TELEMETRY_DEGRADED.value
+        if startup_live_emitted:
+            return BotLifecyclePhase.DEGRADED_TERMINAL.value, BotLifecycleStatus.DEGRADED_TERMINAL.value
+        return BotLifecyclePhase.STARTUP_FAILED.value, BotLifecycleStatus.STARTUP_FAILED.value
     resolved_expected_workers = max(int(expected_worker_count or 0), 0)
     if resolved_expected_workers > 0 and len(normalized_worker_statuses) < resolved_expected_workers:
         if startup_live_emitted:
@@ -194,9 +274,11 @@ def terminal_status_after_supervision(
         return BotLifecyclePhase.STARTUP_FAILED.value, BotLifecycleStatus.STARTUP_FAILED.value
     if any(status in {BotLifecycleStatus.DEGRADED.value, BotLifecycleStatus.TELEMETRY_DEGRADED.value} for status in normalized_worker_statuses):
         if any(status == BotLifecycleStatus.TELEMETRY_DEGRADED.value for status in normalized_worker_statuses):
-            return BotLifecyclePhase.TELEMETRY_DEGRADED.value, BotLifecycleStatus.TELEMETRY_DEGRADED.value
+            if startup_live_emitted:
+                return BotLifecyclePhase.DEGRADED_TERMINAL.value, BotLifecycleStatus.DEGRADED_TERMINAL.value
+            return BotLifecyclePhase.STARTUP_FAILED.value, BotLifecycleStatus.STARTUP_FAILED.value
         if startup_live_emitted:
-            return BotLifecyclePhase.DEGRADED.value, BotLifecycleStatus.DEGRADED.value
+            return BotLifecyclePhase.DEGRADED_TERMINAL.value, BotLifecycleStatus.DEGRADED_TERMINAL.value
         return BotLifecyclePhase.STARTUP_FAILED.value, BotLifecycleStatus.STARTUP_FAILED.value
     if any(status == BotLifecycleStatus.STOPPED.value for status in normalized_worker_statuses):
         return BotLifecyclePhase.STOPPED.value, BotLifecycleStatus.STOPPED.value
@@ -228,6 +310,8 @@ class BotStartupContext:
     wallet_config: Dict[str, Any]
     runtime_readiness: Dict[str, Any]
     runtime_dependency_metadata: Dict[str, Any]
+    request_id: str = ""
+    config_hash: str = ""
     started_at: str = field(default_factory=utc_now_iso)
     lifecycle_metadata: Dict[str, Any] = field(default_factory=dict)
     current_phase: str = BotLifecyclePhase.START_REQUESTED.value
@@ -368,6 +452,7 @@ def build_series_progress_metadata(
 
 __all__ = [
     "ACTIVE_PHASES",
+    "ACTIVE_RUN_STATUSES",
     "BACKEND_OWNED_PHASES",
     "BotLifecyclePhase",
     "BotLifecycleStatus",
@@ -375,9 +460,12 @@ __all__ = [
     "CONTAINER_REPORTED_PHASES",
     "LifecycleOwner",
     "TERMINAL_PHASES",
+    "TERMINAL_RUN_STATUSES",
     "build_failure_payload",
     "build_series_progress_metadata",
     "deep_merge_dict",
+    "is_active_run_state",
+    "is_terminal_run_state",
     "lifecycle_checkpoint_payload",
     "status_for_phase",
     "utc_now",

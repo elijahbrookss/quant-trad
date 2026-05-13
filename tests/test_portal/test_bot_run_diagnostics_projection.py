@@ -372,8 +372,8 @@ def test_terminal_status_after_supervision_marks_startup_failed_before_live():
         degraded_symbols_count=1,
         telemetry_degraded=False,
     )
-    assert live_phase == "degraded"
-    assert live_status == "degraded"
+    assert live_phase == "degraded_terminal"
+    assert live_status == "degraded_terminal"
 
 
 def test_terminal_status_after_supervision_requires_explicit_completed_worker_reports():

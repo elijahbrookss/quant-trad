@@ -8,10 +8,17 @@ from typing import Any, Dict, Optional
 
 from .botlens_state import RunProjectionSnapshot
 from .runner import DockerBotRunner
-from .startup_lifecycle import ACTIVE_PHASES, BACKEND_OWNED_PHASES, TERMINAL_PHASES
+from .startup_lifecycle import (
+    ACTIVE_PHASES,
+    ACTIVE_RUN_STATUSES,
+    BACKEND_OWNED_PHASES,
+    TERMINAL_PHASES,
+    TERMINAL_RUN_STATUSES,
+    is_active_run_state,
+)
 
-_ACTIVE_STATUSES = {"starting", "running", "paused", "degraded", "telemetry_degraded"}
-_TERMINAL_STATUSES = {"idle", "stopped", "completed", "error", "failed", "crashed", "startup_failed"}
+_ACTIVE_STATUSES = set(ACTIVE_RUN_STATUSES) | {"paused"}
+_TERMINAL_STATUSES = set(TERMINAL_RUN_STATUSES) | {"idle", "error", "cancelled"}
 _TELEMETRY_REASON_NO_ACTIVE_RUN = "no_active_run"
 _TELEMETRY_REASON_SNAPSHOT_UNAVAILABLE = "snapshot_unavailable"
 
@@ -25,8 +32,21 @@ def _mapping(value: Any) -> Dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def _normalize_execution_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"fast", "full"} else "fast"
+
+
 def _sequence(value: Any) -> list[Any]:
     return list(value) if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) else []
+
+
+def _finite_number(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if numeric == numeric and numeric not in {float("inf"), float("-inf")} else None
 
 
 def _parse_timestamp(value: Any) -> Optional[datetime]:
@@ -99,7 +119,7 @@ def _resolve_status(
             return persisted_status
         return "degraded"
     if lifecycle_status in _ACTIVE_STATUSES | _TERMINAL_STATUSES:
-        if lifecycle_status in {"starting", "running", "degraded", "telemetry_degraded"} and container_status in {"exited", "dead"}:
+        if lifecycle_status in _ACTIVE_STATUSES and container_status in {"exited", "dead"}:
             return "crashed"
         return lifecycle_status
     if container_running and engine_status:
@@ -120,7 +140,7 @@ def _default_phase_for_status(status: str, *, container_running: bool, has_run_s
         return "live" if has_run_snapshot else "awaiting_first_snapshot"
     if status in {"degraded", "telemetry_degraded"}:
         return status
-    if status in {"startup_failed", "crashed", "stopped", "completed"}:
+    if status in {"startup_failed", "failed", "crashed", "stopped", "completed", "canceled", "cancelled", "degraded_terminal"}:
         return status
     return "idle"
 
@@ -149,6 +169,10 @@ def _resolve_reason(
         return "run_completed"
     if phase == "stopped":
         return "run_stopped"
+    if phase in {"canceled", "cancelled"}:
+        return "run_canceled"
+    if phase == "degraded_terminal":
+        return "run_degraded_terminal"
     if phase == "crashed":
         if container_status in {"exited", "dead"}:
             return "container_exited"
@@ -185,11 +209,11 @@ def _crash_summary(
 
 def _resolve_controls(*, status: str, phase: str, container_running: bool, has_run: bool) -> Dict[str, Any]:
     active = status in _ACTIVE_STATUSES
-    can_start = not active or not container_running
+    can_start = not active
     start_label = "Start"
     if status == "completed":
         start_label = "Rerun"
-    elif status in {"crashed", "error", "failed", "startup_failed", "stopped", "degraded", "telemetry_degraded"}:
+    elif status in {"crashed", "error", "failed", "startup_failed", "stopped", "canceled", "cancelled", "degraded", "telemetry_degraded", "degraded_terminal"}:
         start_label = "Restart"
     elif phase in ACTIVE_PHASES:
         start_label = "Starting"
@@ -208,6 +232,139 @@ def _telemetry_reason(*, selected_run_id: Optional[str], has_run_snapshot: bool)
     if selected_run_id:
         return _TELEMETRY_REASON_SNAPSHOT_UNAVAILABLE
     return _TELEMETRY_REASON_NO_ACTIVE_RUN
+
+
+def _active_run_id_for_projection(*, selected_run_id: Optional[str], status: str, phase: str) -> Optional[str]:
+    if not selected_run_id:
+        return None
+    return selected_run_id if is_active_run_state(status=status, phase=phase) else None
+
+
+def _aggregate_symbol_catalog_stats(summary_state: RunProjectionSnapshot | None) -> Dict[str, Any]:
+    entries = getattr(getattr(summary_state, "symbol_catalog", None), "entries", {}) or {}
+    if not isinstance(entries, Mapping):
+        return {}
+
+    numeric_sums = {
+        "wins": 0.0,
+        "losses": 0.0,
+        "gross_pnl": 0.0,
+        "net_pnl": 0.0,
+        "fees_paid": 0.0,
+        "total_fees": 0.0,
+        "total_trades": 0.0,
+        "completed_trades": 0.0,
+    }
+    seen: set[str] = set()
+    quote_currency: str | None = None
+    for entry in entries.values():
+        if not isinstance(entry, Mapping):
+            continue
+        stats = entry.get("stats") if isinstance(entry.get("stats"), Mapping) else {}
+        if not stats:
+            continue
+        seen.add(str(entry.get("symbol_key") or entry.get("symbol") or len(seen)))
+        for key in numeric_sums:
+            value = _finite_number(stats.get(key))
+            if value is not None:
+                numeric_sums[key] += value
+        if quote_currency is None:
+            candidate = str(stats.get("quote_currency") or "").strip().upper()
+            quote_currency = candidate or None
+
+    if not seen:
+        return {}
+
+    stats: Dict[str, Any] = {"stats_source": "botlens_symbol_catalog"}
+    integer_keys = {"wins", "losses", "total_trades", "completed_trades"}
+    for key, value in numeric_sums.items():
+        if value == 0:
+            stats[key] = 0 if key in integer_keys else 0.0
+        else:
+            stats[key] = int(value) if key in integer_keys else value
+    denominators = stats.get("wins", 0) + stats.get("losses", 0)
+    if denominators:
+        stats["win_rate"] = float(stats.get("wins", 0)) / float(denominators)
+    if quote_currency:
+        stats["quote_currency"] = quote_currency
+    return stats
+
+
+def _wallet_start_balance(config: Mapping[str, Any], quote_currency: str | None) -> tuple[float | None, str | None]:
+    balances = _mapping(_mapping(config.get("wallet_config")).get("balances"))
+    if not balances:
+        return None, quote_currency
+    normalized_quote = str(quote_currency or "").strip().upper() or None
+    if normalized_quote and normalized_quote in balances:
+        value = _finite_number(balances.get(normalized_quote))
+        if value is not None:
+            return value, normalized_quote
+    for key, raw_value in balances.items():
+        value = _finite_number(raw_value)
+        if value is not None:
+            return value, str(key or "").strip().upper() or normalized_quote
+    return None, normalized_quote
+
+
+def _latest_symbol_activity_at(summary_state: RunProjectionSnapshot | None) -> str | None:
+    entries = getattr(getattr(summary_state, "symbol_catalog", None), "entries", {}) or {}
+    timestamps = [
+        str(entry.get("last_activity_at") or entry.get("last_event_at") or "").strip()
+        for entry in entries.values()
+        if isinstance(entry, Mapping)
+    ]
+    timestamps = [value for value in timestamps if value]
+    return max(timestamps) if timestamps else None
+
+
+def _attach_lightweight_equity_trace(
+    stats: Dict[str, Any],
+    *,
+    bot_payload: Mapping[str, Any],
+    selected_run: Mapping[str, Any],
+    selected_run_config: Mapping[str, Any],
+    summary_state: RunProjectionSnapshot | None,
+) -> Dict[str, Any]:
+    if not stats or isinstance(stats.get("equity_curve"), list):
+        return stats
+    net_pnl = _finite_number(stats.get("net_pnl"))
+    if net_pnl is None:
+        return stats
+    selected_run_bot = _mapping(selected_run_config.get("bot"))
+    wallet_source = (
+        selected_run_bot
+        if _mapping(selected_run_bot.get("wallet_config"))
+        else selected_run_config
+        if _mapping(selected_run_config.get("wallet_config"))
+        else bot_payload
+    )
+    start_balance, quote_currency = _wallet_start_balance(
+        wallet_source,
+        str(stats.get("quote_currency") or "").strip().upper() or None,
+    )
+    if start_balance is None:
+        return stats
+    started_at = (
+        bot_payload.get("backtest_start")
+        or selected_run_bot.get("backtest_start")
+        or selected_run.get("started_at")
+        or bot_payload.get("last_run_at")
+    )
+    latest_at = _latest_symbol_activity_at(summary_state) or selected_run.get("ended_at") or selected_run.get("updated_at")
+    if not started_at or not latest_at:
+        return stats
+    equity_end = start_balance + net_pnl
+    next_stats = dict(stats)
+    next_stats["equity_start"] = start_balance
+    next_stats["equity_end"] = equity_end
+    if quote_currency and not next_stats.get("quote_currency"):
+        next_stats["quote_currency"] = quote_currency
+    next_stats["equity_curve"] = [
+        {"time": started_at, "value": start_balance},
+        {"time": latest_at, "value": equity_end},
+    ]
+    next_stats["equity_curve_source"] = "realized_pnl_summary"
+    return next_stats
 
 
 def project_bot_state(
@@ -279,12 +436,35 @@ def project_bot_state(
         selected_run_id=selected_run_id,
     )
 
+    selected_run_config = _mapping(selected_run.get("config_snapshot"))
+    selected_run_bot = _mapping(selected_run_config.get("bot"))
+    selected_run_risk = _mapping(selected_run_config.get("risk_settings")) or _mapping(selected_run_bot.get("risk"))
+    payload_risk = _mapping(payload.get("risk"))
     runtime_stats = _mapping(snapshot_runtime.get("stats"))
     if not runtime_stats:
+        runtime_stats = _aggregate_symbol_catalog_stats(summary_state)
+    if not runtime_stats:
         runtime_stats = _mapping(selected_run.get("summary")) or _mapping(payload.get("last_stats"))
+    runtime_stats = _attach_lightweight_equity_trace(
+        runtime_stats,
+        bot_payload=payload,
+        selected_run=selected_run,
+        selected_run_config=selected_run_config,
+        summary_state=summary_state,
+    )
+    execution_mode = _normalize_execution_mode(
+        payload.get("execution_mode")
+        or payload_risk.get("execution_mode")
+        or selected_run.get("execution_mode")
+        or selected_run_config.get("execution_mode")
+        or selected_run_bot.get("execution_mode")
+        or selected_run_risk.get("execution_mode")
+    )
     telemetry_reason = _telemetry_reason(selected_run_id=selected_run_id, has_run_snapshot=has_run_snapshot)
     telemetry = {
         "run_id": selected_run_id,
+        "execution_mode": execution_mode,
+        "intrabar_execution": execution_mode == "full",
         "seq": int(summary_state.seq or 0) if has_run_snapshot else None,
         "available": has_run_snapshot,
         "reason": telemetry_reason,
@@ -302,12 +482,15 @@ def project_bot_state(
         "status": status,
         "phase": phase,
         "engine_status": (engine_status or None) if has_run_snapshot else None,
+        "execution_mode": execution_mode,
+        "intrabar_execution": execution_mode == "full",
         "run_id": selected_run_id,
         "seq": telemetry["seq"],
         "known_at": telemetry["known_at"],
         "last_snapshot_at": telemetry["last_snapshot_at"],
         "warnings": warnings,
         "stats": runtime_stats,
+        "equity_curve": runtime_stats.get("equity_curve") if isinstance(runtime_stats.get("equity_curve"), list) else None,
         "started_at": snapshot_runtime.get("started_at") or selected_run.get("started_at") or payload.get("last_run_at"),
         "ended_at": snapshot_runtime.get("ended_at") or selected_run.get("ended_at"),
     }
@@ -340,12 +523,14 @@ def project_bot_state(
         container_running=bool(container.get("running")),
         has_run=bool(selected_run_id),
     )
+    active_run_id = _active_run_id_for_projection(selected_run_id=selected_run_id, status=status, phase=phase)
 
     payload["status"] = status
     payload["runtime"] = runtime
     payload["lifecycle"] = lifecycle_payload
     payload["controls"] = controls
-    payload["active_run_id"] = selected_run_id
+    payload["active_run_id"] = active_run_id
+    payload["latest_run_id"] = selected_run_id
     payload["run"] = dict(selected_run) if selected_run else None
     return payload
 

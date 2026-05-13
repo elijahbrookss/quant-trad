@@ -20,7 +20,7 @@ _SECURITY_SETTINGS = _SETTINGS.security
 class BotRunner(Protocol):
     def start_bot(self, *, bot: Mapping[str, object], run_id: str) -> str: ...
 
-    def stop_bot(self, *, bot_id: str, preserve_container: bool = False) -> None: ...
+    def stop_bot(self, *, bot_id: str, preserve_container: bool = False, run_id: str | None = None) -> None: ...
 
 
 @dataclass
@@ -73,7 +73,7 @@ class DockerBotRunner:
         )
 
     @staticmethod
-    def _runtime_process_env(bot_id: str, run_id: str) -> Dict[str, str]:
+    def _runtime_process_env(bot_id: str, run_id: str, *, request_id: str | None = None) -> Dict[str, str]:
         env_map = {key: str(value) for key, value in os.environ.items() if key.startswith("QT_")}
         if _DATABASE_SETTINGS.dsn:
             env_map["PG_DSN"] = str(_DATABASE_SETTINGS.dsn)
@@ -82,6 +82,9 @@ class DockerBotRunner:
             env_map["QT_SECURITY_PROVIDER_CREDENTIAL_KEY"] = provider_key
         env_map["QT_BOT_RUNTIME_BOT_ID"] = str(bot_id)
         env_map["QT_BOT_RUNTIME_RUN_ID"] = str(run_id)
+        if request_id:
+            env_map["QT_BOT_RUNTIME_REQUEST_ID"] = str(request_id)
+            env_map["QT_REQUEST_ID"] = str(request_id)
         return env_map
 
     @classmethod
@@ -123,6 +126,13 @@ class DockerBotRunner:
         container = payload[0] if isinstance(payload[0], dict) else {}
         state = container.get("State") if isinstance(container.get("State"), dict) else {}
         status = str(state.get("Status") or "").strip().lower() or "unknown"
+        config = container.get("Config") if isinstance(container.get("Config"), dict) else {}
+        env_entries = config.get("Env") if isinstance(config.get("Env"), list) else []
+        env_map: Dict[str, str] = {}
+        for entry in env_entries:
+            key, _, value = str(entry or "").partition("=")
+            if key:
+                env_map[key] = value
         return {
             "name": container_name,
             "status": status,
@@ -133,6 +143,8 @@ class DockerBotRunner:
             "exit_code": state.get("ExitCode"),
             "oom_killed": bool(state.get("OOMKilled")),
             "error": str(state.get("Error") or "").strip() or None,
+            "runtime_run_id": str(env_map.get("QT_BOT_RUNTIME_RUN_ID") or "").strip() or None,
+            "request_id": str(env_map.get("QT_BOT_RUNTIME_REQUEST_ID") or env_map.get("QT_REQUEST_ID") or "").strip() or None,
         }
 
     def start_bot(self, *, bot: Mapping[str, object], run_id: str) -> str:
@@ -152,9 +164,19 @@ class DockerBotRunner:
                 "Set it on the backend service environment before starting bots."
             )
         name = self._container_name(bot_id)
-        self.stop_bot(bot_id=bot_id)
+        existing = self.inspect_bot_container(bot_id, project=self.project)
+        existing_status = str(existing.get("status") or "").strip().lower()
+        if bool(existing.get("running")):
+            existing_run_id = str(existing.get("runtime_run_id") or "").strip() or "<unknown>"
+            raise RuntimeError(
+                "docker runtime container already running for bot "
+                f"bot_id={bot_id} existing_run_id={existing_run_id} requested_run_id={normalized_run_id}"
+            )
+        if existing_status in {"created", "exited", "dead"}:
+            self.stop_bot(bot_id=bot_id, run_id=str(existing.get("runtime_run_id") or "") or None)
         network = self._resolve_runtime_network()
-        runtime_env = self._runtime_process_env(bot_id, normalized_run_id)
+        request_id = str(bot.get("_runtime_request_id") or bot.get("request_id") or "").strip() or None
+        runtime_env = self._runtime_process_env(bot_id, normalized_run_id, request_id=request_id)
         cmd = [
             "docker",
             "run",
@@ -189,9 +211,27 @@ class DockerBotRunner:
             raise RuntimeError("docker start returned empty container id")
         return container_id
 
-    def stop_bot(self, *, bot_id: str, preserve_container: bool = False) -> None:
+    def stop_bot(self, *, bot_id: str, preserve_container: bool = False, run_id: str | None = None) -> None:
         name = self._container_name(bot_id)
-        cmd = ["docker", "stop", name] if preserve_container else ["docker", "rm", "-f", name]
-        proc = self._run_docker(cmd)
-        if proc.returncode != 0 and "No such container" not in (proc.stderr or ""):
-            raise RuntimeError(f"docker stop failed: {proc.stderr.strip()}")
+        expected_run_id = str(run_id or "").strip()
+        if expected_run_id:
+            state = self.inspect_bot_container(bot_id, project=self.project)
+            container_run_id = str(state.get("runtime_run_id") or "").strip()
+            if bool(state.get("running")) and container_run_id and container_run_id != expected_run_id:
+                raise RuntimeError(
+                    "refusing to stop same-bot container for a different active run "
+                    f"bot_id={bot_id} expected_run_id={expected_run_id} container_run_id={container_run_id}"
+                )
+            if str(state.get("status") or "").strip().lower() == "missing":
+                return
+        stop_proc = self._run_docker(["docker", "stop", name])
+        stop_text = f"{stop_proc.stderr or ''}\n{stop_proc.stdout or ''}"
+        benign_stop_markers = ("No such container", "is not running", "not running")
+        if stop_proc.returncode != 0 and not any(marker in stop_text for marker in benign_stop_markers):
+            raise RuntimeError(f"docker stop failed: {(stop_proc.stderr or stop_proc.stdout or '').strip()}")
+        if preserve_container:
+            return
+        rm_proc = self._run_docker(["docker", "rm", name])
+        rm_text = f"{rm_proc.stderr or ''}\n{rm_proc.stdout or ''}"
+        if rm_proc.returncode != 0 and "No such container" not in rm_text:
+            raise RuntimeError(f"docker rm failed: {(rm_proc.stderr or rm_proc.stdout or '').strip()}")

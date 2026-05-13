@@ -281,6 +281,97 @@ class _FakeSyncWebSocket:
         self.close_calls += 1
 
 
+class _ProxySeqCounter:
+    def __init__(self, value: int = 0) -> None:
+        self.value = int(value)
+
+    def get(self) -> int:
+        return self.value
+
+    def set(self, value: int) -> None:
+        self.value = int(value)
+
+
+class _ProxyLock:
+    def acquire(self) -> None:
+        return None
+
+    def release(self) -> None:
+        return None
+
+
+def test_build_canonical_wallet_initialized_fact_is_run_scoped_and_absolute() -> None:
+    fact = runtime_mod._build_canonical_wallet_initialized_fact(
+        bot_id="bot-1",
+        run_id="run-1",
+        balances={"usd": 10_000.0},
+        run_seq=7,
+        observed_at="2026-01-01T00:00:00Z",
+    )
+
+    wallet_event = fact["wallet_event"]
+
+    assert fact["fact_type"] == "wallet_ledger_event"
+    assert wallet_event["event_name"] == "WALLET_INITIALIZED"
+    assert "series_key" not in wallet_event or wallet_event["series_key"] is None
+    assert wallet_event["run_seq"] == 7
+    assert wallet_event["wallet_commit_seq"] == 0
+    assert wallet_event["wallet_commit_seq_status"] == "runtime_assigned"
+    assert wallet_event["wallet_event_order"] == 0
+    assert wallet_event["source_event_id"] == "wallet:init:run-1"
+    assert wallet_event["wallet_before"]["balances"] == {"USD": 0.0}
+    assert wallet_event["wallet_after"]["balances"] == {"USD": 10_000.0}
+    assert wallet_event["balance_before"] == 0.0
+    assert wallet_event["balance_after"] == 10_000.0
+    assert wallet_event["free_collateral_after"] == 10_000.0
+
+
+def test_append_canonical_wallet_initialized_fact_allocates_one_run_seq_and_persists_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    append_calls: list[dict[str, object]] = []
+
+    def _append_batch(**kwargs):  # noqa: ANN003
+        append_calls.append(dict(kwargs))
+        return {
+            "seq": kwargs["seq"],
+            "event_count": 1,
+            "row_count": 1,
+            "inserted_rows": 1,
+            "event_ids": ("event-1",),
+            "retention_summary": {},
+        }
+
+    monkeypatch.setattr(runtime_mod, "append_botlens_canonical_fact_batch", _append_batch)
+    proxy = {
+        "runtime_event_seq": _ProxySeqCounter(11),
+        "lock": _ProxyLock(),
+    }
+
+    result = runtime_mod._append_canonical_wallet_initialized_fact(
+        bot_id="bot-1",
+        run_id="run-1",
+        balances={"USD": 10_000.0},
+        shared_wallet_proxy=proxy,
+    )
+
+    assert len(append_calls) == 1
+    assert proxy["runtime_event_seq"].get() == 12
+    assert append_calls[0]["bot_id"] == "bot-1"
+    assert append_calls[0]["run_id"] == "run-1"
+    assert append_calls[0]["seq"] == 12
+    assert append_calls[0]["batch_kind"] == "botlens_runtime_facts"
+    payload = result["payload"]
+    assert payload["run_seq"] == 12
+    assert payload["worker_id"] == "container"
+    assert len(payload["facts"]) == 1
+    assert payload["facts"][0]["wallet_event"]["event_name"] == "WALLET_INITIALIZED"
+    assert payload["facts"][0]["wallet_event"]["run_seq"] == 12
+    assert payload["facts"][0]["wallet_event"]["wallet_commit_seq"] == 0
+    assert payload["facts"][0]["wallet_event"]["wallet_commit_seq_status"] == "runtime_assigned"
+    assert result["append_result"]["inserted_rows"] == 1
+
+
 def _large_runtime_facts_payload(
     *,
     bridge_session_id: str = "session-1",

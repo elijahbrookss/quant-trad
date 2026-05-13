@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+import time
 
 import pytest
 
@@ -93,10 +95,23 @@ class _FakeStorage:
     def get_bot_run(self, run_id):
         return dict(self.runs.get(str(run_id), {})) or None
 
+    def list_bot_runs(self, *, bot_id=None):
+        rows = list(self.runs.values())
+        if bot_id:
+            rows = [row for row in rows if str(row.get("bot_id")) == str(bot_id)]
+        return [dict(row) for row in rows]
+
     def get_latest_bot_runtime_run_id(self, bot_id):
         for run_id, row in reversed(list(self.runs.items())):
             if str(row.get("bot_id")) == str(bot_id):
                 return run_id
+        return None
+
+    def get_bot_run_lifecycle(self, run_id):
+        for rows in self.lifecycle.values():
+            for row in reversed(rows):
+                if str(row.get("run_id")) == str(run_id):
+                    return dict(row)
         return None
 
     def get_latest_bot_run_lifecycle(self, bot_id):
@@ -113,6 +128,26 @@ class _FakeStorage:
         _ = telemetry_degraded
         if str(run_id) in self.runs:
             self.runs[str(run_id)]["status"] = status
+        for bot in self.bots:
+            if str(bot.get("id")) == str(bot_id):
+                bot["status"] = status
+
+
+class _RecordingRunner:
+    def __init__(self, *, delay: float = 0.0) -> None:
+        self.delay = delay
+        self.starts: list[dict[str, object]] = []
+        self.stops: list[dict[str, object]] = []
+
+    def start_bot(self, *, bot, run_id):
+        if self.delay:
+            time.sleep(self.delay)
+        self.starts.append({"bot": dict(bot), "run_id": run_id})
+        return f"container-{run_id}"
+
+    def stop_bot(self, *, bot_id, preserve_container=False, run_id=None):
+        self.stops.append({"bot_id": bot_id, "preserve_container": preserve_container, "run_id": run_id})
+        return None
 
 
 class _FakeWatchdog:
@@ -177,6 +212,229 @@ def test_start_bot_persists_startup_failed_when_runner_fails():
     assert stream.messages[-1][0] == "bot"
 
 
+def test_start_bot_same_request_id_returns_existing_run(monkeypatch):
+    config = _FakeConfigService()
+    stream = _FakeStreamManager()
+    storage = _FakeStorage()
+    runner = _RecordingRunner()
+    service = BotRuntimeControlService(
+        config,
+        stream,
+        storage=storage,
+        watchdog=_FakeWatchdog(),
+        runner_factory=lambda: runner,
+    )
+
+    first = service.start_bot("bot-1", request_id="req-start-1")
+    run_id = first["run_id"]
+    monkeypatch.setattr(
+        "portal.backend.service.bots.runtime_control_service.DockerBotRunner.inspect_bot_container",
+        lambda _bot_id: {
+            "status": "running",
+            "running": True,
+            "runtime_run_id": run_id,
+            "exit_code": None,
+        },
+    )
+
+    second = service.start_bot("bot-1", request_id="req-start-1")
+
+    assert first["status"] == "started"
+    assert second["status"] == "already_started"
+    assert second["run_id"] == run_id
+    assert second["request_id"] == "req-start-1"
+    assert len(runner.starts) == 1
+    assert storage.runs[run_id]["config_snapshot"]["start_request"]["request_id"] == "req-start-1"
+    assert storage.lifecycle["bot-1"][0]["metadata"]["request_id"] == "req-start-1"
+
+
+def test_start_bot_different_request_while_active_returns_conflict(monkeypatch):
+    config = _FakeConfigService()
+    stream = _FakeStreamManager()
+    storage = _FakeStorage()
+    runner = _RecordingRunner()
+    service = BotRuntimeControlService(
+        config,
+        stream,
+        storage=storage,
+        watchdog=_FakeWatchdog(),
+        runner_factory=lambda: runner,
+    )
+
+    first = service.start_bot("bot-1", request_id="req-start-1")
+    run_id = first["run_id"]
+    monkeypatch.setattr(
+        "portal.backend.service.bots.runtime_control_service.DockerBotRunner.inspect_bot_container",
+        lambda _bot_id: {
+            "status": "running",
+            "running": True,
+            "runtime_run_id": run_id,
+            "exit_code": None,
+        },
+    )
+
+    second = service.start_bot("bot-1", request_id="req-start-2")
+
+    assert second["status"] == "conflict"
+    assert second["active_run_id"] == run_id
+    assert second["reason_code"] == "active_run_conflict"
+    assert len(runner.starts) == 1
+    assert runner.stops == []
+
+
+def test_start_bot_after_terminal_run_starts_new_run(monkeypatch):
+    config = _FakeConfigService()
+    stream = _FakeStreamManager()
+    storage = _FakeStorage()
+    runner = _RecordingRunner()
+    service = BotRuntimeControlService(
+        config,
+        stream,
+        storage=storage,
+        watchdog=_FakeWatchdog(),
+        runner_factory=lambda: runner,
+    )
+
+    first = service.start_bot("bot-1", request_id="req-start-1")
+    container_state = {
+        "status": "running",
+        "running": True,
+        "runtime_run_id": first["run_id"],
+        "exit_code": None,
+    }
+    monkeypatch.setattr(
+        "portal.backend.service.bots.runtime_control_service.DockerBotRunner.inspect_bot_container",
+        lambda _bot_id: dict(container_state),
+    )
+    service.stop_bot("bot-1", run_id=first["run_id"], request_id="req-cancel-1")
+    container_state.update({"status": "missing", "running": False, "runtime_run_id": None})
+
+    second = service.start_bot("bot-1", request_id="req-start-2")
+
+    assert second["status"] == "started"
+    assert second["run_id"] != first["run_id"]
+    assert len(runner.starts) == 2
+
+
+def test_concurrent_start_attempts_create_one_active_run(monkeypatch):
+    config = _FakeConfigService()
+    stream = _FakeStreamManager()
+    storage = _FakeStorage()
+    runner = _RecordingRunner(delay=0.01)
+
+    def _inspect(_bot_id):
+        run_id = storage.get_latest_bot_runtime_run_id("bot-1")
+        return {
+            "status": "running" if run_id else "missing",
+            "running": bool(run_id),
+            "runtime_run_id": run_id,
+            "exit_code": None,
+        }
+
+    monkeypatch.setattr(
+        "portal.backend.service.bots.runtime_control_service.DockerBotRunner.inspect_bot_container",
+        _inspect,
+    )
+    service = BotRuntimeControlService(
+        config,
+        stream,
+        storage=storage,
+        watchdog=_FakeWatchdog(),
+        runner_factory=lambda: runner,
+    )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: service.start_bot("bot-1", request_id="req-concurrent"), range(4)))
+
+    assert [result["status"] for result in results].count("started") == 1
+    assert [result["status"] for result in results].count("already_started") == 3
+    assert len({result["run_id"] for result in results}) == 1
+    assert len(runner.starts) == 1
+
+
+def test_stale_active_run_reconciles_before_new_start(monkeypatch):
+    config = _FakeConfigService()
+    stream = _FakeStreamManager()
+    storage = _FakeStorage()
+    storage.runs["run-stale"] = {"run_id": "run-stale", "bot_id": "bot-1", "status": "running"}
+    storage.lifecycle["bot-1"] = [
+        {
+            "bot_id": "bot-1",
+            "run_id": "run-stale",
+            "phase": "live",
+            "status": "running",
+            "owner": "runtime",
+            "message": "live",
+            "metadata": {},
+            "failure": {},
+        }
+    ]
+    runner = _RecordingRunner()
+    monkeypatch.setattr(
+        "portal.backend.service.bots.runtime_control_service.DockerBotRunner.inspect_bot_container",
+        lambda _bot_id: {"status": "missing", "running": False, "runtime_run_id": None, "exit_code": None},
+    )
+    service = BotRuntimeControlService(
+        config,
+        stream,
+        storage=storage,
+        watchdog=_FakeWatchdog(),
+        runner_factory=lambda: runner,
+    )
+
+    response = service.start_bot("bot-1", request_id="req-after-stale")
+
+    stale_events = [row for row in storage.lifecycle["bot-1"] if row["run_id"] == "run-stale"]
+    assert stale_events[-1]["phase"] == "crashed"
+    assert stale_events[-1]["metadata"]["reason_code"] == "container_missing"
+    assert response["status"] == "started"
+    assert response["run_id"] != "run-stale"
+
+
+@pytest.mark.parametrize(
+    ("container_state", "expected_phase", "expected_reason"),
+    [
+        ({"status": "exited", "running": False, "runtime_run_id": "run-stale", "exit_code": 0}, "completed", "container_exited_zero"),
+        ({"status": "exited", "running": False, "runtime_run_id": "run-stale", "exit_code": 2}, "crashed", "container_exited_nonzero"),
+    ],
+)
+def test_active_run_container_exit_reconciles_to_terminal(monkeypatch, container_state, expected_phase, expected_reason):
+    config = _FakeConfigService()
+    stream = _FakeStreamManager()
+    storage = _FakeStorage()
+    storage.runs["run-stale"] = {"run_id": "run-stale", "bot_id": "bot-1", "status": "running"}
+    storage.lifecycle["bot-1"] = [
+        {
+            "bot_id": "bot-1",
+            "run_id": "run-stale",
+            "phase": "live",
+            "status": "running",
+            "owner": "runtime",
+            "message": "live",
+            "metadata": {},
+            "failure": {},
+        }
+    ]
+    runner = _RecordingRunner()
+    monkeypatch.setattr(
+        "portal.backend.service.bots.runtime_control_service.DockerBotRunner.inspect_bot_container",
+        lambda _bot_id: dict(container_state),
+    )
+    service = BotRuntimeControlService(
+        config,
+        stream,
+        storage=storage,
+        watchdog=_FakeWatchdog(),
+        runner_factory=lambda: runner,
+    )
+
+    service.start_bot("bot-1", request_id="req-reconcile")
+
+    stale_events = [row for row in storage.lifecycle["bot-1"] if row["run_id"] == "run-stale"]
+    assert stale_events[-1]["phase"] == expected_phase
+    assert stale_events[-1]["metadata"]["reason_code"] == expected_reason
+
+
 def test_start_bot_rejects_unknown_runtime_target(monkeypatch):
     config = _FakeConfigService()
     stream = _FakeStreamManager()
@@ -218,8 +476,8 @@ def test_stop_bot_can_preserve_container_for_debugging(monkeypatch):
             _ = bot, run_id
             return "container-1"
 
-        def stop_bot(self, *, bot_id, preserve_container=False):
-            stop_calls.append({"bot_id": bot_id, "preserve_container": preserve_container})
+        def stop_bot(self, *, bot_id, preserve_container=False, run_id=None):
+            stop_calls.append({"bot_id": bot_id, "preserve_container": preserve_container, "run_id": run_id})
             return None
 
     monkeypatch.setattr(
@@ -245,12 +503,72 @@ def test_stop_bot_can_preserve_container_for_debugging(monkeypatch):
         runner_factory=lambda: _Runner(),
     )
 
-    projected = service.stop_bot("bot-1", preserve_container=True)
+    response = service.stop_bot("bot-1", preserve_container=True, request_id="cancel-1")
+    projected = response["bot"]
 
-    assert stop_calls == [{"bot_id": "bot-1", "preserve_container": True}]
-    assert storage.lifecycle["bot-1"][-1]["metadata"]["terminal_actor"] == "platform_stop"
+    assert response["status"] == "canceled"
+    assert response["request_id"] == "cancel-1"
+    assert stop_calls == [{"bot_id": "bot-1", "preserve_container": True, "run_id": "run-1"}]
+    assert [row["phase"] for row in storage.lifecycle["bot-1"][-3:]] == ["cancel_requested", "canceling", "canceled"]
+    assert storage.lifecycle["bot-1"][-1]["phase"] == "canceled"
+    assert storage.lifecycle["bot-1"][-1]["metadata"]["terminal_actor"] == "platform_cancel"
     assert storage.lifecycle["bot-1"][-1]["metadata"]["preserve_container"] is True
     assert projected["lifecycle"]["container"]["status"] == "exited"
+
+
+def test_cancel_terminal_run_is_idempotent_and_preserves_history(monkeypatch):
+    config = _FakeConfigService()
+    stream = _FakeStreamManager()
+    storage = _FakeStorage()
+    storage.runs["run-1"] = {
+        "run_id": "run-1",
+        "bot_id": "bot-1",
+        "status": "completed",
+        "summary": {"net_pnl": 1.0},
+    }
+    storage.lifecycle["bot-1"] = [
+        {
+            "bot_id": "bot-1",
+            "run_id": "run-1",
+            "phase": "completed",
+            "status": "completed",
+            "owner": "container",
+            "message": "completed",
+            "metadata": {"artifact": "kept"},
+            "failure": {},
+        }
+    ]
+    runner = _RecordingRunner()
+    monkeypatch.setattr(
+        "portal.backend.service.bots.runtime_control_service.DockerBotRunner.inspect_bot_container",
+        lambda _bot_id: {"status": "missing", "running": False, "runtime_run_id": None, "exit_code": None},
+    )
+    service = BotRuntimeControlService(
+        config,
+        stream,
+        storage=storage,
+        watchdog=_FakeWatchdog(),
+        runner_factory=lambda: runner,
+    )
+
+    response = service.stop_bot("bot-1", run_id="run-1", request_id="req-cancel-done")
+
+    assert response["status"] == "already_terminal"
+    assert response["run_id"] == "run-1"
+    assert runner.stops == []
+    assert storage.runs["run-1"]["summary"] == {"net_pnl": 1.0}
+    assert storage.lifecycle["bot-1"] == [
+        {
+            "bot_id": "bot-1",
+            "run_id": "run-1",
+            "phase": "completed",
+            "status": "completed",
+            "owner": "container",
+            "message": "completed",
+            "metadata": {"artifact": "kept"},
+            "failure": {},
+        }
+    ]
 
 
 def test_bots_stream_snapshot_uses_projected_bot_payload():
@@ -290,7 +608,8 @@ def test_bots_stream_snapshot_uses_projected_bot_payload():
 
     assert initial["type"] == "snapshot"
     assert initial["bots"][0]["status"] == "startup_failed"
-    assert initial["bots"][0]["active_run_id"] == "run-1"
+    assert initial["bots"][0]["active_run_id"] is None
+    assert initial["bots"][0]["latest_run_id"] == "run-1"
     assert initial["bots"][0]["lifecycle"]["status"] == "startup_failed"
     assert initial["bots"][0]["controls"]["can_start"] is True
 

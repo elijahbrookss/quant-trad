@@ -266,11 +266,17 @@ def test_next_signal_for_records_guard_warning_without_bar_time_name_error(monke
     assert warnings_recorded[0]["context"]["bar_time"] == "2026-04-10T00:40:00Z"
 
 
-def test_next_signal_for_uses_output_only_indicator_step(monkeypatch):
+def test_next_signal_for_skips_trading_overlay_and_detail_step(monkeypatch):
     runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=_runtime_deps())
+    evaluate_calls: list[dict] = []
+
+    def evaluate_spy(**kwargs):
+        evaluate_calls.append(dict(kwargs))
+        return SimpleNamespace(artifacts=[], selected_artifact=None)
+
     monkeypatch.setattr(
         "engines.bot_runtime.runtime.mixins.execution_loop.evaluate_strategy_bar",
-        lambda **_kwargs: SimpleNamespace(artifacts=[], selected_artifact=None),
+        evaluate_spy,
     )
     candle = Candle(
         time=datetime(2026, 4, 10, 0, 45, tzinfo=timezone.utc),
@@ -314,7 +320,7 @@ def test_next_signal_for_uses_output_only_indicator_step(monkeypatch):
             )
 
         def snapshot_overlays(self, *, bar_time):
-            raise AssertionError("overlay snapshots must not run during signal evaluation")
+            raise AssertionError("explicit overlay snapshots must not run during signal evaluation")
 
     series = SimpleNamespace(
         instrument={"id": "instrument-btc"},
@@ -338,7 +344,9 @@ def test_next_signal_for_uses_output_only_indicator_step(monkeypatch):
         }
     ]
     assert state.indicator_overlays == {}
+    assert state.last_overlay_refresh_epoch is None
     assert series.overlays == [{"overlay_id": "existing"}]
+    assert evaluate_calls[0]["minimal_decision_details"] is True
 
 
 def test_explicit_overlay_refresh_uses_current_indicator_state() -> None:

@@ -168,13 +168,24 @@ def delete_bot_record(bot_id: str) -> None:
     _broadcast_bot_stream("bot_deleted", {"bot_id": bot_id})
 
 
-def start_bot(bot_id: str) -> Dict[str, object]:
+def start_bot(bot_id: str, *, request_id: str | None = None) -> Dict[str, object]:
     _ensure_watchdog_callback()
-    return _composition().runtime_control_service.start_bot(bot_id)
+    return _composition().runtime_control_service.start_bot(bot_id, request_id=request_id)
 
 
-def stop_bot(bot_id: str, *, preserve_container: bool = False) -> Dict[str, object]:
-    return _composition().runtime_control_service.stop_bot(bot_id, preserve_container=preserve_container)
+def stop_bot(
+    bot_id: str,
+    *,
+    preserve_container: bool = False,
+    run_id: str | None = None,
+    request_id: str | None = None,
+) -> Dict[str, object]:
+    return _composition().runtime_control_service.stop_bot(
+        bot_id,
+        preserve_container=preserve_container,
+        run_id=run_id,
+        request_id=request_id,
+    )
 
 
 def get_bot(bot_id: str) -> Dict[str, object]:
