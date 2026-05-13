@@ -47,8 +47,9 @@ def _fact_payload() -> dict[str, Any]:
                 "fact_type": "overlay_ops_emitted",
                 "series_key": "instrument-btc|1m",
                 "overlay_delta": {
-                    "seq": 1,
-                    "base_seq": 0,
+                    "overlay_commit_seq": 1,
+                    "base_overlay_commit_seq": 0,
+                    "overlay_commit_seq_status": "overlay_scoped",
                     "ops": [
                         {
                             "op": "upsert",
@@ -133,6 +134,8 @@ def _fact_payload() -> dict[str, Any]:
                     "qty": 1.0,
                     "entry_price": 100.5,
                     "opened_at": "2026-04-19T12:00:00Z",
+                    "position_commit_seq": 1,
+                    "position_commit_seq_status": "position_scoped",
                 },
             },
             {
@@ -147,7 +150,7 @@ def _fact_payload() -> dict[str, Any]:
     }
 
 
-def test_append_botlens_canonical_fact_batch_persists_runtime_domain_rows(monkeypatch) -> None:
+def test_append_botlens_canonical_fact_batch_persists_only_budgeted_runtime_truth(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
     def _record(rows, *, context=None):
@@ -167,24 +170,65 @@ def test_append_botlens_canonical_fact_batch_persists_runtime_domain_rows(monkey
     )
 
     event_names = {row["payload"]["event_name"] for row in captured["rows"]}
-    overlay_row = next(row for row in captured["rows"] if row["payload"]["event_name"] == "OVERLAY_STATE_CHANGED")
-    overlay = overlay_row["payload"]["context"]["overlay_delta"]["ops"][0]["overlay"]
 
     assert result["seq"] == 11
-    assert result["row_count"] == 8
-    assert result["inserted_rows"] == 8
+    assert result["event_count"] == 8
+    assert result["row_count"] == 4
+    assert result["inserted_rows"] == 4
+    assert result["retention_summary"]["dropped_or_summarized_count"] == 4
     assert event_names == {
-        "HEALTH_STATUS_REPORTED",
         "SERIES_METADATA_REPORTED",
-        "CANDLE_OBSERVED",
-        "OVERLAY_STATE_CHANGED",
         "SIGNAL_EMITTED",
         "DECISION_EMITTED",
         "TRADE_OPENED",
-        "DIAGNOSTIC_RECORDED",
     }
-    assert overlay["detail_level"] == "bounded_render"
-    assert overlay["payload"]["polylines"][0]["points"][1]["price"] == 101.0
-    assert overlay["payload_summary"]["point_count"] == 2
     assert captured["context"]["source_reason"] == "producer"
     assert captured["context"]["pipeline_stage"] == "botlens_canonical_append"
+
+
+def test_append_botlens_canonical_fact_batches_persists_multiple_payloads_in_one_write(monkeypatch) -> None:
+    captured: dict[str, Any] = {"calls": []}
+
+    def _record(rows, *, context=None):
+        captured["calls"].append({"rows": [dict(row) for row in rows], "context": dict(context or {})})
+        return len(rows)
+
+    monkeypatch.setattr(canonical_mod, "record_bot_runtime_events_batch", _record)
+
+    second_payload = _fact_payload()
+    second_payload["known_at"] = "2026-04-19T13:00:00Z"
+    second_payload["event_time"] = "2026-04-19T13:00:00Z"
+    for fact in second_payload["facts"]:
+        if fact.get("fact_type") == "candle_upserted":
+            fact["candle"] = {**fact["candle"], "time": "2026-04-19T13:00:00Z", "close": 102.5}
+
+    result = canonical_mod.append_botlens_canonical_fact_batches(
+        [
+            {
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "seq": 11,
+                "batch_kind": "botlens_runtime_facts",
+                "payload": _fact_payload(),
+            },
+            {
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "seq": 12,
+                "batch_kind": "botlens_runtime_facts",
+                "payload": second_payload,
+            },
+        ]
+    )
+
+    assert len(captured["calls"]) == 1
+    assert result["batch_count"] == 2
+    assert result["event_count"] == 16
+    assert result["row_count"] == 8
+    assert result["inserted_rows"] == 8
+    assert result["retention_summary"]["dropped_or_summarized_count"] == 8
+    assert result["seq_min"] == 11
+    assert result["seq_max"] == 12
+    assert {row["seq"] for row in captured["calls"][0]["rows"]} == {11, 12}
+    assert captured["calls"][0]["context"]["pipeline_stage"] == "botlens_canonical_append_batch"
+    assert captured["calls"][0]["context"]["batch_count"] == 2

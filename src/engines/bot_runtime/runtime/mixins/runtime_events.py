@@ -29,9 +29,11 @@ from engines.bot_runtime.core.runtime_events import (
     decision_trace_entry_from_runtime_event,
     new_runtime_event,
 )
-from engines.bot_runtime.core.wallet import project_wallet_from_events
-from engines.bot_runtime.core.wallet import wallet_required_reservation
-from engines.bot_runtime.core.wallet_gateway import SharedWalletGateway
+from engines.bot_runtime.core.wallet import WalletState, project_wallet_from_events
+from engines.bot_runtime.core.wallet import wallet_required_reservation_details
+from engines.bot_runtime.core.wallet_gateway import BaseWalletGateway, SharedWalletGateway
+from engines.bot_runtime.core.fees import executed_notional
+from engines.bot_runtime.core.series_identity import canonical_series_key
 from utils.log_context import with_log_context
 
 from ..components import RunContext
@@ -54,6 +56,38 @@ def _parse_runtime_iso(value: Any) -> Optional[datetime]:
 
 
 class RuntimeEventsMixin:
+    def _wallet_initialization_is_container_owned(self) -> bool:
+        return str(self.config.get("wallet_initialization_owner") or "").strip().lower() == "container"
+
+    def _current_wallet_state_snapshot(self) -> Dict[str, Any]:
+        """Project the current canonical shared wallet state at emission time."""
+
+        shared_wallet_proxy = self.config.get("shared_wallet_proxy")
+        if isinstance(shared_wallet_proxy, Mapping) and shared_wallet_proxy.get("runtime_events") is not None:
+            wallet_state = shared_wallet_proxy.get("wallet_state")
+            runtime_events_proxy = shared_wallet_proxy.get("wallet_events") or shared_wallet_proxy.get("runtime_events")
+            proxy_lock = shared_wallet_proxy.get("lock")
+            if proxy_lock is not None:
+                proxy_lock.acquire()
+                try:
+                    if wallet_state is not None:
+                        return BaseWalletGateway._wallet_state_snapshot(
+                            BaseWalletGateway._wallet_state_from_snapshot(dict(wallet_state))
+                        )
+                    runtime_events = list(runtime_events_proxy)
+                finally:
+                    proxy_lock.release()
+            else:
+                if wallet_state is not None:
+                    return BaseWalletGateway._wallet_state_snapshot(
+                        BaseWalletGateway._wallet_state_from_snapshot(dict(wallet_state))
+                    )
+                runtime_events = list(runtime_events_proxy)
+            return BaseWalletGateway._wallet_state_snapshot(project_wallet_from_events(runtime_events))
+        if self._run_context is None:
+            return {}
+        return BaseWalletGateway._wallet_state_snapshot(project_wallet_from_events(self._run_context.runtime_events))
+
     def _allocate_shared_runtime_event_seq(
         self,
         *,
@@ -214,6 +248,7 @@ class RuntimeEventsMixin:
                 warnings.append(existing)
             self._warnings = deque(warnings, maxlen=self._warning_limit)
             self.state["warnings"] = list(self._warnings)
+            self._warning_revision = int(getattr(self, "_warning_revision", 0) or 0) + 1
 
     def warnings(self) -> List[Dict[str, object]]:
         """Return the current runtime warnings."""
@@ -275,10 +310,19 @@ class RuntimeEventsMixin:
     ) -> Dict[str, Any]:
         if self._run_context is None:
             raise ValueError("run context is required before building runtime event context")
+        identity: Dict[str, Any] = {"series_key": None, "instrument_id": None}
+        if series is not None:
+            series_instrument = getattr(series, "instrument", None)
+            instrument = series_instrument if isinstance(series_instrument, Mapping) else {}
+            instrument_id = str(instrument.get("id") or "").strip() or None
+            identity["instrument_id"] = instrument_id
+            identity["series_key"] = canonical_series_key(instrument_id, series.timeframe) if instrument_id else None
         return {
             "run_id": self._run_context.run_id,
             "bot_id": self.bot_id,
             "strategy_id": series.strategy_id if series is not None else "__runtime__",
+            "series_key": identity["series_key"],
+            "instrument_id": identity["instrument_id"],
             "symbol": series.symbol if series is not None else None,
             "timeframe": series.timeframe if series is not None else None,
             "bar_ts": bar_ts,
@@ -415,6 +459,9 @@ class RuntimeEventsMixin:
                 **self._runtime_context_base(series=None, bar_ts=None),
                 balances=normalized,
                 source="run_start",
+                wallet_commit_seq=0,
+                wallet_commit_seq_status="runtime_assigned",
+                wallet_eval_seq=0,
             ),
         )
 
@@ -499,6 +546,7 @@ class RuntimeEventsMixin:
         reason_code: str,
         message: Optional[str],
         trade_id: Optional[str],
+        wallet_evidence: Optional[Mapping[str, Any]] = None,
     ) -> RuntimeEvent:
         correlation_id = self._bar_correlation_id(series, candle.time)
         signal_event = self._find_signal_event(series=series, correlation_id=correlation_id)
@@ -518,6 +566,9 @@ class RuntimeEventsMixin:
             missing_parent_hint=missing_parent_hint,
         )
         if decision == "accepted":
+            evidence = dict(wallet_evidence or {})
+            wallet_snapshot = evidence.get("wallet_snapshot") or evidence.get("wallet_before")
+            margin_requirement = evidence.get("margin_requirement") or evidence.get("required_delta")
             context = DecisionAcceptedContext(
                 **base_kwargs,
                 signal_id=signal.signal_id,
@@ -532,6 +583,11 @@ class RuntimeEventsMixin:
                 rule_id=signal.rule_id,
                 intent=signal.intent,
                 event_key=signal.event_key,
+                wallet_snapshot=wallet_snapshot if isinstance(wallet_snapshot, Mapping) else {},
+                margin_requirement=margin_requirement if isinstance(margin_requirement, Mapping) else {},
+                wallet_commit_seq=evidence.get("wallet_commit_seq"),
+                wallet_eval_seq=evidence.get("wallet_eval_seq"),
+                position_commit_seq=evidence.get("position_commit_seq"),
                 reason_code=coerce_reason_code(reason_code) or ReasonCode.DECISION_ACCEPTED,
             )
         else:
@@ -540,6 +596,10 @@ class RuntimeEventsMixin:
                 raw_context = rejection_artifact.get("context")
                 if isinstance(raw_context, Mapping):
                     rejection_context = dict(raw_context)
+            if isinstance(wallet_evidence, Mapping):
+                for key, value in wallet_evidence.items():
+                    if value not in (None, "", [], {}):
+                        rejection_context.setdefault(key, value)
             instrument = series.instrument if isinstance(series.instrument, Mapping) else {}
             rejection_context = self._ensure_rejected_attempt_identity(
                 {
@@ -569,6 +629,12 @@ class RuntimeEventsMixin:
                     artifact_context.setdefault(key, value)
             if artifact_context:
                 rejection_artifact_payload["context"] = artifact_context
+            wallet_snapshot = rejection_context.get("wallet_snapshot") or rejection_context.get("wallet_before")
+            margin_requirement = (
+                rejection_context.get("margin_requirement")
+                or rejection_context.get("required_delta")
+                or rejection_context.get("margin_info")
+            )
             context = DecisionRejectedContext(
                 **base_kwargs,
                 signal_id=signal.signal_id,
@@ -594,6 +660,10 @@ class RuntimeEventsMixin:
                 intent=signal.intent,
                 event_key=signal.event_key,
                 rejection_artifact=rejection_artifact_payload,
+                wallet_snapshot=wallet_snapshot if isinstance(wallet_snapshot, Mapping) else {},
+                margin_requirement=margin_requirement if isinstance(margin_requirement, Mapping) else {},
+                wallet_commit_seq=rejection_context.get("wallet_commit_seq"),
+                wallet_eval_seq=rejection_context.get("wallet_eval_seq"),
                 message=message or "Decision rejected",
                 reason_code=coerce_reason_code(reason_code) or ReasonCode.RUNTIME_PARENT_MISSING,
             )
@@ -627,13 +697,27 @@ class RuntimeEventsMixin:
         qty = sum(max(getattr(leg, "contracts", 0.0), 0.0) for leg in getattr(trade, "legs", []))
         price = float(getattr(trade, "entry_price", candle.close) or candle.close)
         fee_paid = float(getattr(trade, "fees_paid", 0.0) or 0.0)
-        notional = abs(price * float(getattr(series.risk_engine, "contract_size", 1.0) or 1.0) * float(qty))
+        contract_size = float(getattr(series.risk_engine, "contract_size", 1.0) or 1.0)
+        notional = executed_notional(price=price, quantity=float(qty), contract_size=contract_size)
+        entry_outcome = (
+            dict(getattr(trade, "entry_outcome", {}) or {})
+            if isinstance(getattr(trade, "entry_outcome", None), Mapping)
+            else {}
+        )
+        fee_rate = _coerce_float(entry_outcome.get("fee_rate"), None)
+        if fee_rate is None and notional > 0.0:
+            fee_rate = float(fee_paid) / float(notional)
+        fee_type = str(entry_outcome.get("fee_role") or entry_outcome.get("fee_type") or "taker")
+        if fee_type == "unknown":
+            fee_type = "taker"
+        fee_source = str(entry_outcome.get("fee_source") or "template_or_instrument")
+        fee_version = entry_outcome.get("fee_version")
         accounting_mode = None
         if getattr(series, "execution_profile", None) is not None:
             accounting_mode = series.execution_profile.accounting_mode
         collateral_reserved = 0.0
         if accounting_mode == "margin":
-            _currency, collateral_reserved = wallet_required_reservation(
+            _currency, _reservation_total, reservation_details = wallet_required_reservation_details(
                 side="buy" if direction == "long" else "sell",
                 base_currency=str(getattr(trade, "base_currency", "") or ""),
                 quote_currency=str(getattr(trade, "quote_currency", "") or ""),
@@ -644,9 +728,24 @@ class RuntimeEventsMixin:
                 instrument=series.instrument if isinstance(series.instrument, Mapping) else None,
                 execution_profile=getattr(series, "execution_profile", None),
             )
+            collateral_reserved = float(
+                reservation_details.get("collateral_reserved")
+                if reservation_details.get("collateral_reserved") is not None
+                else reservation_details.get("collateral_to_lock", 0.0)
+            )
+        prior_wallet_snapshot = self._current_wallet_state_snapshot()
         wallet_fill_metadata = (
             dict(getattr(trade, "wallet_fill_metadata", {}) or {})
             if isinstance(getattr(trade, "wallet_fill_metadata", None), Mapping)
+            else {}
+        )
+        if getattr(trade, "position_commit_seq", None) is not None:
+            wallet_fill_metadata.setdefault("position_commit_seq", int(getattr(trade, "position_commit_seq") or 0))
+        wallet_before_payload = (
+            dict(wallet_fill_metadata.get("wallet_before"))
+            if isinstance(wallet_fill_metadata.get("wallet_before"), Mapping)
+            else prior_wallet_snapshot
+            if prior_wallet_snapshot
             else {}
         )
         wallet_delta_payload: Dict[str, Any] = {
@@ -691,12 +790,24 @@ class RuntimeEventsMixin:
             price=price,
             notional=float(notional),
             fee_paid=float(fee_paid),
+            fee_rate=float(fee_rate or 0.0),
+            fee_type=fee_type,
+            fee_source=fee_source,
+            fee_version=str(fee_version) if fee_version is not None else None,
             base_currency=str(getattr(trade, "base_currency", "") or ""),
             quote_currency=str(getattr(trade, "quote_currency", "") or ""),
             accounting_mode=accounting_mode,
             wallet_delta=WalletDelta(**wallet_delta_payload),
             reservation_id=str(reservation_id) if reservation_id else None,
             required_delta=dict(required_delta) if isinstance(required_delta, Mapping) else {},
+            wallet_before=(
+                wallet_before_payload
+                if isinstance(wallet_before_payload, Mapping)
+                else {}
+            ),
+            wallet_commit_seq=wallet_fill_metadata.get("wallet_commit_seq"),
+            wallet_eval_seq=wallet_fill_metadata.get("wallet_eval_seq"),
+            position_commit_seq=wallet_fill_metadata.get("position_commit_seq"),
             reason_code=ReasonCode.EXEC_ENTRY_FILLED if not missing_parent_hint else ReasonCode.RUNTIME_PARENT_MISSING,
         )
         return self._emit_runtime_event(
@@ -734,19 +845,51 @@ class RuntimeEventsMixin:
         elif subtype == "stop":
             exit_kind = ExitKind.STOP
             reason = ReasonCode.EXEC_EXIT_STOP
+        elif subtype == "backtest_end":
+            reason = ReasonCode.BACKTEST_END
+        elif subtype == "terminal_liquidation":
+            reason = ReasonCode.TERMINAL_LIQUIDATION
+        event_reason = coerce_reason_code(event.get("reason_code")) if event.get("reason_code") is not None else None
+        if event_reason is not None:
+            reason = event_reason
         qty = float(event.get("contracts") or 0.0)
         price = float(event.get("price") or candle.close)
-        notional = abs(price * float(getattr(series.risk_engine, "contract_size", 1.0) or 1.0) * qty)
-        fee_paid = 0.0
+        contract_size = float(getattr(series.risk_engine, "contract_size", 1.0) or 1.0)
+        notional = executed_notional(price=price, quantity=qty, contract_size=contract_size)
+        settlement = event.get("settlement") if isinstance(event.get("settlement"), Mapping) else {}
+        fee_paid = float(
+            _coerce_float(
+                event.get("fee_paid"),
+                _coerce_float(settlement.get("fee"), 0.0),
+            )
+            or 0.0
+        )
         if subtype == "close":
             fee_paid = float(event.get("fees_paid") or 0.0)
+        fee_rate = _coerce_float(
+            event.get("fee_rate"),
+            _coerce_float(settlement.get("fee_rate"), None),
+        )
+        if fee_rate is None and notional > 0.0:
+            fee_rate = float(fee_paid) / float(notional)
+        fee_type = str(event.get("fee_type") or settlement.get("fee_type") or "taker")
+        if fee_type == "unknown":
+            fee_type = "taker"
+        fee_source = str(event.get("fee_source") or settlement.get("fee_source") or "template_or_instrument")
+        fee_version = event.get("fee_version") if event.get("fee_version") is not None else settlement.get("fee_version")
         accounting_mode = None
         if getattr(series, "execution_profile", None) is not None:
             accounting_mode = series.execution_profile.accounting_mode
         realized_pnl = float(event.get("pnl") or 0.0)
         if subtype == "close":
             realized_pnl = float(event.get("net_pnl") or 0.0) + fee_paid
-        prior_state = project_wallet_from_events(self._run_context.runtime_events if self._run_context else [])
+        prior_wallet_snapshot = self._current_wallet_state_snapshot()
+        prior_state = WalletState(
+            balances=dict(prior_wallet_snapshot.get("balances") or {}),
+            locked_margin=dict(prior_wallet_snapshot.get("locked_margin") or {}),
+            free_collateral=dict(prior_wallet_snapshot.get("free_collateral") or {}),
+            margin_positions=dict(prior_wallet_snapshot.get("margin_positions") or {}),
+        )
         collateral_released = 0.0
         if accounting_mode == "margin":
             pos = prior_state.margin_positions.get(trade_id) if prior_state.margin_positions else None
@@ -756,6 +899,18 @@ class RuntimeEventsMixin:
                 if open_qty > 0 and locked > 0 and qty > 0:
                     collateral_released = min(locked * min(qty / open_qty, 1.0), locked)
         wallet_fill_metadata = dict(event.get("wallet_fill_metadata") or {}) if isinstance(event, Mapping) else {}
+        if wallet_fill_metadata.get("position_commit_seq") in (None, ""):
+            for trade in getattr(series.risk_engine, "trades", []) or []:
+                if str(getattr(trade, "trade_id", "") or "") == trade_id:
+                    wallet_fill_metadata["position_commit_seq"] = int(getattr(trade, "position_commit_seq", 0) or 0)
+                    break
+        wallet_before_payload = (
+            dict(wallet_fill_metadata.get("wallet_before"))
+            if isinstance(wallet_fill_metadata.get("wallet_before"), Mapping)
+            else prior_wallet_snapshot
+            if prior_wallet_snapshot
+            else {}
+        )
         wallet_delta_payload: Dict[str, Any] = {
             "collateral_reserved": 0.0,
             "collateral_released": float(collateral_released),
@@ -800,6 +955,10 @@ class RuntimeEventsMixin:
             price=price,
             notional=float(notional),
             fee_paid=float(fee_paid),
+            fee_rate=float(fee_rate or 0.0),
+            fee_type=fee_type,
+            fee_source=fee_source,
+            fee_version=str(fee_version) if fee_version is not None else None,
             realized_pnl=float(realized_pnl),
             base_currency=str(getattr(series.risk_engine, "base_currency", "") or ""),
             quote_currency=str(event.get("currency") or getattr(series.risk_engine, "quote_currency", "") or ""),
@@ -810,6 +969,14 @@ class RuntimeEventsMixin:
             wallet_delta=WalletDelta(**wallet_delta_payload),
             reservation_id=str(reservation_id) if reservation_id else None,
             required_delta=dict(required_delta) if isinstance(required_delta, Mapping) else {},
+            wallet_before=(
+                wallet_before_payload
+                if isinstance(wallet_before_payload, Mapping)
+                else {}
+            ),
+            wallet_commit_seq=wallet_fill_metadata.get("wallet_commit_seq"),
+            wallet_eval_seq=wallet_fill_metadata.get("wallet_eval_seq"),
+            position_commit_seq=wallet_fill_metadata.get("position_commit_seq"),
             event_subtype=subtype,
             reason_code=exit_reason,
         )
@@ -989,15 +1156,34 @@ class RuntimeEventsMixin:
                 }
             )
         performance_summary = self._runtime_performance_summary()
+        warnings = self.warnings()
+        execution_mode = self.execution_mode.value
+        request_id = str(self.config.get("request_id") or self.config.get("_runtime_request_id") or "").strip() or None
         return {
             "run_id": self._run_context.run_id,
             "bot_id": self.bot_id,
+            "request_id": request_id,
             "started_at": self._run_context.started_at,
             "ended_at": self._run_context.ended_at,
             "status": status,
+            "execution_mode": execution_mode,
+            "playback_mode": self.playback_mode,
+            "runtime_metadata": {
+                "execution_mode": execution_mode,
+                "playback_mode": self.playback_mode,
+                "run_type": self.run_type,
+                "intrabar_execution": execution_mode == "full",
+                "request_id": request_id,
+            },
             "performance_summary": performance_summary,
             "wallet_start": dict(self.config.get("wallet_config") or {}),
             "runtime_event_stream": runtime_event_stream,
+            "warnings": warnings,
+            "report_warnings": [
+                dict(entry)
+                for entry in warnings
+                if str(entry.get("warning_type") or "") == "execution_intrabar_fallback_pessimistic"
+            ],
             "wallet_end": {
                 "balances": wallet_state.balances,
                 "locked_margin": getattr(wallet_state, "locked_margin", {}) or {},
