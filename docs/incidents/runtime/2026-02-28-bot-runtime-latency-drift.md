@@ -11,7 +11,8 @@
 - `container_snapshot_cycle` p95 rose from low hundreds of ms to ~1s+.
 - `step_series_state` and `step_finalize_bar` trended upward with bar index.
 - `step_push_update` payload bytes rose continuously over time.
-- Snapshot payload size in `portal_bot_run_snapshots` grew from tiny initial rows to multi-MB rows as history grew.
+- Snapshot payload size in the former `portal_bot_run_snapshots` table grew
+  from tiny initial rows to multi-MB rows as history grew.
 
 ## Root Cause
 Latency drift was not one bug. It was compounded repeated work on growing state:
@@ -59,6 +60,9 @@ None of the above used hard caps; each became more expensive as run state grew.
 ### Storage
 - Removed per-write snapshot pre-check reads (`existing` + `max(snapshot_seq)`) in snapshot persistence hot path.
   - File: `portal/backend/service/storage/repos/runtime_events.py`
+- Later schema cleanup removed the legacy snapshot/view-state payload tables and
+  raw step rows from the active storage contract. Runtime profiler data now
+  lands in `portal_bot_run_step_rollups_v1`.
 
 ### Telemetry Hub Compatibility
 - Ingest now supports lightweight telemetry payloads (without embedded full snapshot) and reconstructs broadcast payload from latest DB snapshot when viewers are present.
