@@ -46,7 +46,7 @@ function runBootstrapPayload() {
       selected_symbol_snapshot_required: true,
     },
     run: {
-      meta: { run_id: 'run-1', strategy_name: 'Momentum' },
+      meta: { run_id: 'run-1', strategy_name: 'Momentum', execution_mode: 'full', intrabar_execution: true },
       lifecycle: { phase: 'live', status: 'running' },
       health: {
         status: 'running',
@@ -248,6 +248,10 @@ test('runtime view model keeps current-state rows separate from retrieval-backed
   const model = buildBotLensRuntimeViewModel(buildControllerLike(state))
 
   assert.equal(model.mode, 'ready')
+  assert.equal(model.topBar.stats.find((row) => row.key === 'execution-mode')?.value, 'FULL (intrabar)')
+  assert.equal(model.currentStatePanels.overview.runRows.find((row) => row.key === 'execution-mode')?.value, 'FULL (intrabar)')
+  assert.equal(model.currentStatePanels.overview.runRows.find((row) => row.key === 'intrabar-path')?.value, 'Enabled')
+  assert.equal(model.inspection.diagnostics.checks.find((row) => row.key === 'execution-mode')?.value, 'FULL (intrabar)')
   assert.equal(model.currentStatePanels.overview.selectedRows.find((row) => row.key === 'base-candles')?.value, '1')
   assert.equal(model.currentStatePanels.overview.selectedRows.find((row) => row.key === 'snapshot-ready')?.value, 'Yes')
   assert.equal(model.inspection.diagnostics.checks.find((row) => row.key === 'transport')?.value, 'Yes')
@@ -282,6 +286,23 @@ test('runtime view model shows symbol-switch loading without leaking prior selec
   assert.equal(model.currentStatePanels.overview.selectedRows.find((row) => row.key === 'bootstrap-status')?.value, 'loading')
   assert.equal(model.currentStatePanels.overview.selectedRows.find((row) => row.key === 'snapshot-ready')?.value, 'No')
   assert.match(model.retrievalPanels.chart.emptyMessage, /Loading symbol snapshot/)
+})
+
+test('runtime view model labels intrabar fallback warnings as execution diagnostics', () => {
+  const model = buildBotLensRuntimeViewModel(buildControllerLike(bootstrapState(), {
+    warningItems: [
+      {
+        warning_id: 'fallback-1',
+        warning_type: 'execution_intrabar_fallback_pessimistic',
+        symbol: 'BTCUSDT',
+        timeframe: '5m',
+        title: 'Intrabar fallback',
+        context: { reason: 'missing_1m_data', bar_time: '2026-01-01T00:00:00Z' },
+      },
+    ],
+  }))
+
+  assert.equal(model.currentStatePanels.warnings.items[0].title, 'BTCUSDT · 5M · Intrabar fallback')
 })
 
 test('runtime view model surfaces explicit selected-symbol snapshot unavailability', () => {

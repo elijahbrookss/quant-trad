@@ -60,6 +60,29 @@ test('falls back to run artifact equity curve when runtime trace is absent', () 
   assert.equal(trace.latestValue, 5088)
 })
 
+test('uses compact runtime stats equity curve when fleet payload exposes it', () => {
+  const trace = getBotPerformanceTrace(
+    buildBot({
+      runtime: {
+        stats: {
+          quote_currency: 'USD',
+          equity_curve: [
+            { time: '2026-04-06T12:00:00Z', value: 10000 },
+            { time: '2026-04-06T12:05:00Z', value: 9975.5 },
+          ],
+        },
+      },
+    }),
+    { statusKey: 'running' },
+  )
+
+  assert.equal(trace.kind, 'series')
+  assert.equal(trace.source, 'equity')
+  assert.equal(trace.label, 'Equity')
+  assert.equal(trace.quoteCurrency, 'USD')
+  assert.equal(trace.latestValue, 9975.5)
+})
+
 test('returns an honest placeholder when no performance series is exposed', () => {
   const trace = getBotPerformanceTrace(buildBot(), { statusKey: 'starting' })
 

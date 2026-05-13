@@ -6,6 +6,7 @@ import {
   normalizeBotStatus,
 } from '../state/botRuntimeStatus.js'
 import { normalizeSeriesKey } from '../../../components/bots/botlensProjection.js'
+import { executionModeUsesIntrabar, formatExecutionModeLabel, resolveExecutionMode } from '../executionMode.js'
 
 function formatPercent(value) {
   if (typeof value !== 'number' || Number.isNaN(value)) return '—'
@@ -68,6 +69,12 @@ function formatBooleanState(value, { trueLabel = 'Yes', falseLabel = 'No' } = {}
 }
 
 function warningRowTitle(warning) {
+  if (String(warning?.warning_type || '').trim() === 'execution_intrabar_fallback_pessimistic') {
+    const symbol = String(warning?.symbol || '').trim()
+    const timeframe = String(warning?.timeframe || '').trim().toUpperCase()
+    const title = String(warning?.title || 'Intrabar fallback').trim()
+    return [symbol, timeframe, title].filter(Boolean).join(' · ') || title
+  }
   const indicator = String(warning?.indicator_id || '').trim() || 'indicator'
   const symbol = String(warning?.symbol || '').trim()
   const title = String(warning?.title || '').trim()
@@ -497,6 +504,15 @@ export function buildBotLensRuntimeViewModel({
   const runReadiness = runState?.readiness && typeof runState.readiness === 'object'
     ? runState.readiness
     : {}
+  const executionMode = resolveExecutionMode({
+    ...(bot || {}),
+    ...(runState?.runMeta || {}),
+    run: { execution_mode: runState?.runMeta?.execution_mode },
+    runtime: runtimeSnapshot,
+    lifecycle: bot?.lifecycle,
+  })
+  const executionModeLabel = formatExecutionModeLabel(executionMode)
+  const intrabarExecution = executionModeUsesIntrabar(executionMode)
   const selectedReadiness = selectedSymbolState?.readiness && typeof selectedSymbolState.readiness === 'object'
     ? selectedSymbolState.readiness
     : selectedSymbolMetadata?.readiness && typeof selectedSymbolMetadata.readiness === 'object'
@@ -518,6 +534,7 @@ export function buildBotLensRuntimeViewModel({
     description: statusMessage || runSummaryText || botLifecycle.detail,
     meta: `bot_id=${bot?.id || '—'} · run_id=${resolvedRunId} · selected=${selectedLabel || '—'}`,
     pills: [
+      { key: 'execution-mode', label: 'Execution', value: executionModeLabel },
       { key: 'stream', label: 'Live Stream', value: streamState || 'idle' },
       { key: 'bootstrap', label: 'Bootstrap', value: selectedSymbolBootstrapStatus || 'idle' },
       { key: 'selected', label: 'Selected Symbol', value: selectedLabel || '—' },
@@ -569,6 +586,8 @@ export function buildBotLensRuntimeViewModel({
       runRows: [
         { key: 'run-status', label: 'Run Status', value: runState?.health?.status || botStatus || '—' },
         { key: 'phase', label: 'Phase', value: runState?.lifecycle?.phase || '—' },
+        { key: 'execution-mode', label: 'Execution Mode', value: executionModeLabel },
+        { key: 'intrabar-path', label: 'Intrabar Path', value: intrabarExecution ? 'Enabled' : 'Disabled' },
         { key: 'tracked-symbols', label: 'Tracked Symbols', value: String(symbolSelector.items.length) },
         { key: 'open-trades', label: 'Open Trades', value: String(openTradeCount) },
         { key: 'run-live', label: 'Run Live', value: formatBooleanState(runReadiness.run_live) },
@@ -674,7 +693,7 @@ export function buildBotLensRuntimeViewModel({
     topBar: {
       kicker: 'BotLens',
       title: bot?.name || 'Runtime workspace',
-      subtitle: [strategyName, bot?.run_type ? humanizeToken(bot.run_type) : null, `run ${shortId(resolvedRunId)}`]
+      subtitle: [strategyName, executionModeLabel, bot?.run_type ? humanizeToken(bot.run_type) : null, `run ${shortId(resolvedRunId)}`]
         .filter(Boolean)
         .join(' · '),
       status: {
@@ -687,6 +706,7 @@ export function buildBotLensRuntimeViewModel({
       ],
       stats: [
         { key: 'selected-symbol', label: 'Selected Symbol', value: selectedLabel || '—' },
+        { key: 'execution-mode', label: 'Execution Mode', value: executionModeLabel },
         { key: 'phase', label: 'Phase', value: formatLifecyclePhaseLabel(runState?.lifecycle?.phase || botLifecycle.phase || 'idle') },
         { key: 'open-trades', label: 'Open Trades', value: String(openTradeCount) },
         { key: 'warnings', label: 'Warnings', value: String(warningCount) },
@@ -724,6 +744,8 @@ export function buildBotLensRuntimeViewModel({
         warnings: currentStatePanels.warnings,
         checks: [
           { key: 'runtime', label: 'Runtime', value: humanizeToken(runtimeStatus || 'idle') },
+          { key: 'execution-mode', label: 'Execution Mode', value: executionModeLabel },
+          { key: 'intrabar-path', label: 'Intrabar Path', value: intrabarExecution ? 'Enabled' : 'Disabled' },
           { key: 'stream', label: 'Live Stream', value: humanizeToken(streamState || 'idle') },
           { key: 'catalog', label: 'Catalog Discovered', value: formatBooleanState(selectedReadiness.catalog_discovered) },
           { key: 'snapshot', label: 'Snapshot Ready', value: formatBooleanState(selectedReadiness.snapshot_ready) },

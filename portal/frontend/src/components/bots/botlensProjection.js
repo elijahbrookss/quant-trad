@@ -32,8 +32,36 @@ const SYMBOL_DELTA_TYPES = new Set([
   SYMBOL_STATS_DELTA_TYPE,
 ])
 
+const SYMBOL_CONCERN_BY_TYPE = {
+  [SYMBOL_CANDLE_DELTA_TYPE]: 'candles',
+  [SYMBOL_OVERLAY_DELTA_TYPE]: 'overlays',
+  [SYMBOL_SIGNAL_DELTA_TYPE]: 'signals',
+  [SYMBOL_TRADE_DELTA_TYPE]: 'trades',
+  [SYMBOL_LOG_DELTA_TYPE]: 'diagnostics',
+  [SYMBOL_DECISION_DELTA_TYPE]: 'decisions',
+  [SYMBOL_STATS_DELTA_TYPE]: 'stats',
+}
+
+const SYMBOL_CONCERNS = Object.values(SYMBOL_CONCERN_BY_TYPE)
+
 const MAX_SIGNALS = 600
 const MAX_RUN_FAULTS = 120
+
+function toPositiveInt(value) {
+  const numeric = Number(value)
+  return Number.isInteger(numeric) && numeric > 0 ? numeric : null
+}
+
+function toNonNegativeInt(value) {
+  const numeric = Number(value)
+  return Number.isInteger(numeric) && numeric >= 0 ? numeric : null
+}
+
+function symbolConcernForMessage(message) {
+  const explicit = String(message?.concern || '').trim()
+  if (explicit) return explicit
+  return SYMBOL_CONCERN_BY_TYPE[String(message?.type || '')] || String(message?.type || '').trim()
+}
 
 export function canonicalSeriesKey(instrumentId, timeframe) {
   const normalizedInstrumentId = String(instrumentId || '').trim()
@@ -246,6 +274,69 @@ function upsertTail(entries, item, keyFields, limit) {
   return values.slice(-limit)
 }
 
+const CLOSED_TRADE_PROTECTED_FIELDS = new Set([
+  'trade_state',
+  'status',
+  'exit_time',
+  'closed_at',
+  'exit_price',
+  'close_reason',
+  'reason_code',
+  'gross_pnl',
+  'fees_paid',
+  'net_pnl',
+  'trade_net_pnl',
+  'realized_pnl',
+  'event_impact_pnl',
+  'legs',
+  'metrics',
+])
+
+function hasTradeValue(value) {
+  if (value === null || value === undefined || value === '') return false
+  if (Array.isArray(value) && value.length === 0) return false
+  if (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0) return false
+  return true
+}
+
+function tradeIsClosed(trade) {
+  if (!trade || typeof trade !== 'object') return false
+  if (hasTradeValue(trade.closed_at) || hasTradeValue(trade.exit_time)) return true
+  const status = String(trade.status || '').trim().toLowerCase()
+  const tradeState = String(trade.trade_state || '').trim().toLowerCase()
+  return tradeState === 'closed' || ['closed', 'completed', 'complete'].includes(status)
+}
+
+function mergeTradeProjection(existing, incoming) {
+  if (!existing || typeof existing !== 'object') return incoming
+  const existingClosed = tradeIsClosed(existing)
+  const incomingClosed = tradeIsClosed(incoming)
+  const merged = { ...existing }
+  Object.entries(incoming || {}).forEach(([key, value]) => {
+    if (!hasTradeValue(value)) return
+    if (existingClosed && CLOSED_TRADE_PROTECTED_FIELDS.has(key) && hasTradeValue(merged[key])) {
+      if (
+        key === 'metrics'
+        && merged[key]
+        && typeof merged[key] === 'object'
+        && !Array.isArray(merged[key])
+        && value
+        && typeof value === 'object'
+        && !Array.isArray(value)
+      ) {
+        merged[key] = { ...merged[key], ...value }
+      }
+      return
+    }
+    merged[key] = value
+  })
+  if (existingClosed || incomingClosed) {
+    merged.trade_state = 'closed'
+    merged.status = 'closed'
+  }
+  return merged
+}
+
 function normalizeLiveSymbolSummary(summary) {
   if (!summary || typeof summary !== 'object') return null
   const symbolKey = normalizeSeriesKey(summary.symbol_key || '')
@@ -295,11 +386,17 @@ function normalizeTrade(trade) {
   if (!trade || typeof trade !== 'object') return null
   const tradeId = String(trade.trade_id || '').trim()
   if (!tradeId) return null
+  const positionCommitSeq = toPositiveInt(trade.position_commit_seq)
   return {
     ...trade,
     trade_id: tradeId,
     symbol_key: normalizeSeriesKey(trade.symbol_key || ''),
+    ...(positionCommitSeq ? { position_commit_seq: positionCommitSeq } : {}),
   }
+}
+
+function positionCommitSeq(trade) {
+  return toPositiveInt(trade?.position_commit_seq)
 }
 
 function warningSeverityRank(value) {
@@ -357,11 +454,95 @@ function normalizeHealth(health) {
   }
 }
 
+function normalizeScopeSeqByConcern(source, fallbackSeq = 0) {
+  const cursors = source?.live_cursors && typeof source.live_cursors === 'object'
+    ? source.live_cursors
+    : {}
+  const raw = cursors.scope_seq_by_concern && typeof cursors.scope_seq_by_concern === 'object'
+    ? cursors.scope_seq_by_concern
+    : source?.scope_seq_by_concern && typeof source.scope_seq_by_concern === 'object'
+      ? source.scope_seq_by_concern
+      : {}
+  const next = {}
+  SYMBOL_CONCERNS.forEach((concern) => {
+    next[concern] = Math.max(0, Number(raw[concern] ?? fallbackSeq ?? 0) || 0)
+  })
+  Object.entries(raw).forEach(([key, value]) => {
+    const normalizedKey = String(key || '').trim()
+    if (!normalizedKey) return
+    next[normalizedKey] = Math.max(0, Number(value || 0) || 0)
+  })
+  return next
+}
+
+function normalizePositionCommitSeqByTrade(source, trades = []) {
+  const cursors = source?.live_cursors && typeof source.live_cursors === 'object'
+    ? source.live_cursors
+    : {}
+  const raw = cursors.position_commit_seq_by_trade && typeof cursors.position_commit_seq_by_trade === 'object'
+    ? cursors.position_commit_seq_by_trade
+    : source?.position_commit_seq_by_trade && typeof source.position_commit_seq_by_trade === 'object'
+      ? source.position_commit_seq_by_trade
+      : {}
+  const next = {}
+  Object.entries(raw).forEach(([tradeId, value]) => {
+    const normalizedTradeId = String(tradeId || '').trim()
+    const seq = toPositiveInt(value)
+    if (normalizedTradeId && seq) next[normalizedTradeId] = seq
+  })
+  ;(Array.isArray(trades) ? trades : []).forEach((trade) => {
+    const tradeId = String(trade?.trade_id || '').trim()
+    const seq = positionCommitSeq(trade)
+    if (tradeId && seq) next[tradeId] = Math.max(Number(next[tradeId] || 0), seq)
+  })
+  return next
+}
+
+function normalizeScopedCursors(source, { seq = 0, trades = [] } = {}) {
+  const cursors = source?.live_cursors && typeof source.live_cursors === 'object'
+    ? source.live_cursors
+    : {}
+  return {
+    scope_seq_by_concern: normalizeScopeSeqByConcern(source, seq),
+    overlay_commit_seq: Math.max(
+      0,
+      Number(
+        source?.overlay_commit_seq
+        ?? cursors.overlay_commit_seq
+        ?? 0,
+      ) || 0,
+    ),
+    position_commit_seq_by_trade: normalizePositionCommitSeqByTrade(source, trades),
+  }
+}
+
+function mergeScopedCursors(base, patch) {
+  const baseCursors = base && typeof base === 'object' ? base : {}
+  const patchCursors = patch && typeof patch === 'object' ? patch : {}
+  return {
+    scope_seq_by_concern: {
+      ...(baseCursors.scope_seq_by_concern || {}),
+      ...(patchCursors.scope_seq_by_concern || {}),
+    },
+    overlay_commit_seq: Math.max(
+      Number(baseCursors.overlay_commit_seq || 0) || 0,
+      Number(patchCursors.overlay_commit_seq || 0) || 0,
+    ),
+    position_commit_seq_by_trade: {
+      ...(baseCursors.position_commit_seq_by_trade || {}),
+      ...(patchCursors.position_commit_seq_by_trade || {}),
+    },
+  }
+}
+
 export function normalizeSelectedSymbolState(selectedSymbol, { symbolKey = null, seq = 0 } = {}) {
   const source = selectedSymbol && typeof selectedSymbol === 'object' ? selectedSymbol : {}
   const normalizedSymbolKey = normalizeSeriesKey(source.symbol_key || symbolKey || '')
   const [instrumentId, timeframe] = normalizedSymbolKey.split('|')
   const normalizedSeq = Number(source.seq ?? seq ?? 0) || 0
+  const recentTrades = (Array.isArray(source.recent_trades) ? source.recent_trades : [])
+    .map((entry) => normalizeTrade(entry))
+    .filter(Boolean)
   return {
     symbol_key: normalizedSymbolKey,
     instrument_id: String(source.instrument_id || instrumentId || '').trim(),
@@ -380,14 +561,13 @@ export function normalizeSelectedSymbolState(selectedSymbol, { symbolKey = null,
     candles: mergeCanonicalCandles(source.candles || []),
     overlays: projectOverlayState(source.overlays || []),
     signals: Array.isArray(source.signals) ? source.signals.filter((entry) => entry && typeof entry === 'object').map((entry) => ({ ...entry })) : [],
-    recent_trades: (Array.isArray(source.recent_trades) ? source.recent_trades : [])
-      .map((entry) => normalizeTrade(entry))
-      .filter(Boolean),
+    recent_trades: recentTrades,
     logs: Array.isArray(source.logs) ? source.logs.filter((entry) => entry && typeof entry === 'object').map((entry) => ({ ...entry })) : [],
     decisions: Array.isArray(source.decisions) ? source.decisions.filter((entry) => entry && typeof entry === 'object').map((entry) => ({ ...entry })) : [],
     stats: source.stats && typeof source.stats === 'object' ? { ...source.stats } : {},
     runtime: source.runtime && typeof source.runtime === 'object' ? { ...source.runtime } : {},
     continuity: normalizeContinuity(source.continuity),
+    live_cursors: normalizeScopedCursors(source, { seq: normalizedSeq, trades: recentTrades }),
   }
 }
 
@@ -419,6 +599,22 @@ function warnDroppedSymbolDelta(symbolKey, message, store) {
     seq: Number(message?.seq || 0),
     selected_symbol_key: normalizeSeriesKey(store?.selectedSymbolKey || ''),
     state_cache_size: Object.keys(store?.symbolStates || {}).length,
+  })
+}
+
+function warnDroppedStaleSymbolDelta(symbolKey, message, reason, extra = {}) {
+  const now = Date.now()
+  const warningKey = `${symbolKey}:${String(message?.type || '')}:${reason}`
+  const last = Number(symbolDeltaDropWarnings.get(warningKey) || 0)
+  if (now - last < SYMBOL_DELTA_DROP_WARN_INTERVAL_MS) return
+  symbolDeltaDropWarnings.set(warningKey, now)
+  logger.warn('botlens_symbol_delta_dropped_stale_scope', {
+    symbol_key: symbolKey,
+    type: String(message?.type || ''),
+    concern: symbolConcernForMessage(message),
+    scope_seq: Number(message?.scope_seq || 0),
+    reason,
+    ...extra,
   })
 }
 
@@ -586,10 +782,26 @@ export function applyOpenTradesDelta(store, message) {
   ;(Array.isArray(payload.upserts) ? payload.upserts : []).forEach((trade) => {
     const normalized = normalizeTrade(trade)
     if (!normalized) return
+    const incomingPositionSeq = positionCommitSeq(normalized)
+    const existingPositionSeq = positionCommitSeq(openTradesIndex[normalized.trade_id])
+    if (incomingPositionSeq && existingPositionSeq && incomingPositionSeq <= existingPositionSeq) {
+      return
+    }
     openTradesIndex[normalized.trade_id] = normalized
   })
-  ;(Array.isArray(payload.removals) ? payload.removals : []).forEach((tradeId) => {
-    delete openTradesIndex[String(tradeId)]
+  ;(Array.isArray(payload.removals) ? payload.removals : []).forEach((removal) => {
+    const tradeId = typeof removal === 'object' && removal !== null
+      ? String(removal.trade_id || removal.id || '').trim()
+      : String(removal).trim()
+    if (!tradeId) return
+    const removalPositionSeq = typeof removal === 'object' && removal !== null
+      ? toPositiveInt(removal.position_commit_seq)
+      : null
+    const existingPositionSeq = positionCommitSeq(openTradesIndex[tradeId])
+    if (removalPositionSeq && existingPositionSeq && removalPositionSeq < existingPositionSeq) {
+      return
+    }
+    delete openTradesIndex[tradeId]
   })
   return {
     ...store,
@@ -703,6 +915,7 @@ export function applySelectedSymbolBootstrap(store, bootstrapPayload) {
     overlays: hasSnapshotField('overlays') ? symbolState.overlays : existingState?.overlays || symbolState.overlays,
     candles: hasSnapshotField('candles') ? symbolState.candles : existingState?.candles || symbolState.candles,
     continuity: hasSnapshotField('continuity') ? symbolState.continuity : existingState?.continuity || symbolState.continuity,
+    live_cursors: mergeScopedCursors(existingState?.live_cursors, symbolState.live_cursors),
   }
   const symbolStates = { ...(store?.symbolStates || {}), [nextSymbolState.symbol_key]: nextSymbolState }
   const symbolStateOrder = touchSymbolStateOrder(
@@ -773,6 +986,29 @@ function commitSymbolState(store, symbolKey, next) {
   }
 }
 
+function advanceSymbolConcernCursor(symbolState, concern, scopeSeq) {
+  const normalizedConcern = String(concern || '').trim()
+  const normalizedScopeSeq = Math.max(0, Number(scopeSeq || 0) || 0)
+  if (!normalizedConcern || normalizedScopeSeq <= 0) return symbolState
+  const cursors = normalizeScopedCursors(symbolState, {
+    seq: Number(symbolState?.seq || 0),
+    trades: symbolState?.recent_trades || [],
+  })
+  return {
+    ...symbolState,
+    live_cursors: {
+      ...cursors,
+      scope_seq_by_concern: {
+        ...cursors.scope_seq_by_concern,
+        [normalizedConcern]: Math.max(
+          Number(cursors.scope_seq_by_concern?.[normalizedConcern] || 0) || 0,
+          normalizedScopeSeq,
+        ),
+      },
+    },
+  }
+}
+
 function withSymbolState(store, message, applyChange) {
   const gated = advanceLiveCursor(store, message)
   if (!gated.apply) return store
@@ -784,9 +1020,22 @@ function withSymbolState(store, message, applyChange) {
     return store
   }
   const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {}
+  const concern = symbolConcernForMessage(message)
+  const scopeSeq = Math.max(0, Number(message?.scope_seq || 0) || 0)
+  const currentConcernSeq = Number(current.live_cursors?.scope_seq_by_concern?.[concern] || 0) || 0
+  if (scopeSeq > 0 && currentConcernSeq > 0 && scopeSeq <= currentConcernSeq) {
+    warnDroppedStaleSymbolDelta(symbolKey, message, 'stale_concern_scope_seq', {
+      current_scope_seq: currentConcernSeq,
+    })
+    return gated.store
+  }
   const next = applyChange({
     ...current,
     seq: Math.max(Number(current.seq || 0), Number(message?.scope_seq || 0)),
+    live_cursors: normalizeScopedCursors(current, {
+      seq: Number(current.seq || 0),
+      trades: current.recent_trades || [],
+    }),
     last_event_at: message?.event_time || current.last_event_at || null,
     readiness: normalizeSelectedSymbolReadiness(current.readiness, {
       catalog_discovered: true,
@@ -794,9 +1043,11 @@ function withSymbolState(store, message, applyChange) {
       symbol_live: true,
       run_live: store?.readiness?.run_live || current.readiness?.run_live,
     }),
-  }, payload, current)
+  }, payload, current, message)
+  if (!next) return gated.store
+  const advancedNext = advanceSymbolConcernCursor(next, concern, scopeSeq)
   return {
-    ...commitSymbolState(store, symbolKey, next),
+    ...commitSymbolState(store, symbolKey, advancedNext),
     streamSessionId: gated.streamSessionId,
     lastStreamSeq: gated.streamSeq,
   }
@@ -811,10 +1062,47 @@ export function applyCandleDelta(store, message) {
   })
 }
 
+function overlayDeltaClock(payload) {
+  const overlayCommitSeq = toPositiveInt(payload?.overlay_commit_seq)
+  const baseOverlayCommitSeq = toNonNegativeInt(payload?.base_overlay_commit_seq)
+  const status = String(payload?.overlay_commit_seq_status || '').trim()
+  if (!overlayCommitSeq || baseOverlayCommitSeq === null || status !== 'overlay_scoped') {
+    return null
+  }
+  return { overlayCommitSeq, baseOverlayCommitSeq, status }
+}
+
 export function applyOverlayDeltaMessage(store, message) {
-  return withSymbolState(store, message, (next, payload) => {
+  return withSymbolState(store, message, (next, payload, current) => {
+    const clock = overlayDeltaClock(payload)
+    if (!clock) {
+      warnDroppedStaleSymbolDelta(next.symbol_key, message, 'missing_overlay_clock')
+      return null
+    }
+    const currentOverlayCommitSeq = Number(current.live_cursors?.overlay_commit_seq || 0) || 0
+    if (currentOverlayCommitSeq > 0 && clock.overlayCommitSeq <= currentOverlayCommitSeq) {
+      warnDroppedStaleSymbolDelta(next.symbol_key, message, 'stale_overlay_commit_seq', {
+        current_overlay_commit_seq: currentOverlayCommitSeq,
+        overlay_commit_seq: clock.overlayCommitSeq,
+      })
+      return null
+    }
+    if (currentOverlayCommitSeq > 0 && clock.baseOverlayCommitSeq !== currentOverlayCommitSeq) {
+      warnDroppedStaleSymbolDelta(next.symbol_key, message, 'overlay_base_mismatch', {
+        current_overlay_commit_seq: currentOverlayCommitSeq,
+        base_overlay_commit_seq: clock.baseOverlayCommitSeq,
+        overlay_commit_seq: clock.overlayCommitSeq,
+      })
+      return null
+    }
     if (Array.isArray(payload.ops)) {
       next.overlays = applyOverlayDelta(next.overlays || [], { ops: payload.ops })
+      next.live_cursors = {
+        ...next.live_cursors,
+        overlay_commit_seq: clock.overlayCommitSeq,
+      }
+      next.overlay_commit_seq = clock.overlayCommitSeq
+      next.overlay_commit_seq_status = clock.status
     }
     return next
   })
@@ -832,16 +1120,50 @@ export function applySignalDelta(store, message) {
 
 export function applyTradeDelta(store, message) {
   return withSymbolState(store, message, (next, payload) => {
+    const positionCursors = {
+      ...(next.live_cursors?.position_commit_seq_by_trade || {}),
+    }
+    let applied = false
     ;(Array.isArray(payload.upserts) ? payload.upserts : []).forEach((trade) => {
       const normalized = normalizeTrade(trade)
       if (!normalized) return
-      next.recent_trades = upsertTail(next.recent_trades, normalized, ['trade_id', 'id'], MAX_TRADES)
-    })
-    ;(Array.isArray(payload.removals) ? payload.removals : []).forEach((tradeId) => {
-      next.recent_trades = (Array.isArray(next.recent_trades) ? next.recent_trades : []).filter(
-        (trade) => String(trade?.trade_id || '') !== String(tradeId),
+      const incomingPositionSeq = positionCommitSeq(normalized)
+      if (!incomingPositionSeq) {
+        warnDroppedStaleSymbolDelta(next.symbol_key, message, 'missing_position_commit_seq', {
+          trade_id: normalized.trade_id,
+        })
+        return
+      }
+      const existing = (Array.isArray(next.recent_trades) ? next.recent_trades : [])
+        .find((entry) => entry && typeof entry === 'object' && String(entry.trade_id || entry.id || '') === normalized.trade_id)
+      const currentPositionSeq = Math.max(
+        Number(positionCursors[normalized.trade_id] || 0) || 0,
+        Number(positionCommitSeq(existing) || 0) || 0,
       )
+      if (currentPositionSeq > 0 && incomingPositionSeq <= currentPositionSeq) {
+        warnDroppedStaleSymbolDelta(next.symbol_key, message, 'stale_position_commit_seq', {
+          trade_id: normalized.trade_id,
+          current_position_commit_seq: currentPositionSeq,
+          position_commit_seq: incomingPositionSeq,
+        })
+        return
+      }
+      next.recent_trades = upsertTail(
+        next.recent_trades,
+        mergeTradeProjection(existing, normalized),
+        ['trade_id', 'id'],
+        MAX_TRADES,
+      )
+      positionCursors[normalized.trade_id] = incomingPositionSeq
+      applied = true
     })
+    if (!applied && (Array.isArray(payload.upserts) ? payload.upserts : []).length > 0) {
+      return null
+    }
+    next.live_cursors = {
+      ...next.live_cursors,
+      position_commit_seq_by_trade: positionCursors,
+    }
     return next
   })
 }

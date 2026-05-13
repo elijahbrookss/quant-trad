@@ -2,9 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  DEFAULT_CAMERA_SPAN_BARS,
   computeFollowRange,
   isLogicalRangePinnedToLatest,
 } from '../src/components/bots/hooks/useViewportController.js'
+import { resolveCandleUpdateCameraIntent } from '../src/components/bots/chartCameraPolicy.js'
 
 function makeCandles(count = 200, start = 1_700_000_000, spacing = 60) {
   return Array.from({ length: count }, (_, index) => {
@@ -47,4 +49,29 @@ test('live-edge detection disengages once the viewport is panned away from the f
     isLogicalRangePinnedToLatest({ from: 40, to: 189.5 }, liveLogicalRange),
     false,
   )
+})
+
+test('default follow range opens a stable wide inspection window', () => {
+  const candles = makeCandles(320)
+  const follow = computeFollowRange(candles, 60)
+
+  assert.equal(DEFAULT_CAMERA_SPAN_BARS, 240)
+  assert.equal(Number(follow.logicalRange.from.toFixed(2)), 79)
+  assert.equal(Number(follow.logicalRange.to.toFixed(2)), 320.25)
+})
+
+test('camera policy follows only initial load and symbol reset, not live appends', () => {
+  const previous = makeCandles(200)
+  const appended = makeCandles(201)
+  const reset = makeCandles(260, 1_800_000_000)
+
+  assert.deepEqual(resolveCandleUpdateCameraIntent({ previous: [], next: previous }), {
+    intent: 'FOLLOW_LATEST',
+    reason: 'initial-load',
+  })
+  assert.equal(resolveCandleUpdateCameraIntent({ previous, next: appended }), null)
+  assert.deepEqual(resolveCandleUpdateCameraIntent({ previous, next: reset }), {
+    intent: 'FOLLOW_LATEST',
+    reason: 'series-reset',
+  })
 })

@@ -1,6 +1,7 @@
 import { useCallback, useRef } from 'react'
 import { collectActivePaneKeys } from '../../../chart/panes/registry.js'
 import { projectOverlayPayloads } from '../../../chart/overlays/projectOverlayPayloads.js'
+import { suppressLegacyTradeOverlays } from '../botlensOverlayFilters.js'
 import { BOTLENS_DEBUG, coalesce, toFiniteNumber, toSec } from '../chartDataUtils.js'
 
 const toRgba = (hex, alpha = 0.16) => {
@@ -29,13 +30,16 @@ export const useOverlaySync = ({
   const tradeViewportSignatureRef = useRef(null)
 
   const computeArtifacts = useCallback(
-    ({ overlayPayloads = [], tradeMarkers = [], tradeTooltips = [], tradeRegions = [], tradePriceLines = [], candleData = [] }) => {
+    ({ overlayPayloads = [], tradeMarkers = [], tradeTooltips = [], tradeRegions = [], tradeSegments: markerTradeSegments = [], tradePriceLines = [], candleData = [] }) => {
       const markerDetails = Array.isArray(tradeTooltips) ? [...tradeTooltips] : []
       const baseMarkersByPane = { price: [...tradeMarkers] }
       const boxesByPane = { price: [...tradeRegions] }
       const tradeSegments = []
       const priceLines = [...tradePriceLines]
-      const projectedTradeSegments = []
+      const renderableOverlayPayloads = suppressLegacyTradeOverlays(overlayPayloads)
+      const suppressedLegacyTradeOverlayCount = Array.isArray(overlayPayloads)
+        ? overlayPayloads.length - renderableOverlayPayloads.length
+        : 0
 
       const firstSeriesTime = candleData[0]?.time ?? null
       const lastSeriesTime = candleData[candleData.length - 1]?.time ?? null
@@ -108,14 +112,11 @@ export const useOverlaySync = ({
       }
 
       const projected = projectOverlayPayloads({
-        overlays: overlayPayloads,
+        overlays: renderableOverlayPayloads,
         bubbleAlpha: 0.16,
         normalizeTime: toSec,
-        onOverlayProjected: ({ overlay, paneViews, normalized }) => {
+        onOverlayProjected: ({ overlay, paneViews }) => {
           const { type, payload } = overlay || {}
-          if (type === 'bot_trade_rays' && Array.isArray(normalized?.segments) && normalized.segments.length) {
-            projectedTradeSegments.push(...normalized.segments)
-          }
           if (!(BOTLENS_DEBUG && type === 'regime_overlay')) return
           const boxes = Array.isArray(payload?.boxes) ? payload.boxes.length : 0
           const segmentsLen = Array.isArray(payload?.segments) ? payload.segments.length : 0
@@ -148,6 +149,12 @@ export const useOverlaySync = ({
           })
         },
       })
+      if (BOTLENS_DEBUG && suppressedLegacyTradeOverlayCount > 0) {
+        console.debug('[BotLensChart] legacy_trade_overlay_suppressed', {
+          count: suppressedLegacyTradeOverlayCount,
+          reason: 'trade_visuals_project_from_runtime_trade_facts',
+        })
+      }
 
       const overlayMarkersByPane = projected.markersByPane
       const touchPointsByPane = projected.touchPointsByPane
@@ -168,7 +175,7 @@ export const useOverlaySync = ({
           source: pl?.source || pl?.title || 'overlay',
         })
       })
-      tradeSegments.push(...projectedTradeSegments)
+      tradeSegments.push(...markerTradeSegments)
 
       const toScopedSegment = (segment) => {
         const normalised = normaliseSegment(segment)
@@ -264,6 +271,13 @@ export const useOverlaySync = ({
         (segment) =>
           `${segment.x1}|${segment.x2}|${segment.y1}|${segment.y2}|${segment.color || ''}|${segment.lineStyle || 0}|${segment.lineWidth || 1}`,
       )
+      const scopedSegmentsWithTradesByPane = {
+        ...scopedSegmentsByPane,
+        price: [
+          ...(scopedSegmentsByPane.price || []),
+          ...scopedTradeSegments,
+        ],
+      }
 
       const scopedPolylinesByPane = Object.fromEntries(
         Object.entries(polylinesByPane || {}).map(([paneKey, entries]) => [
@@ -361,7 +375,7 @@ export const useOverlaySync = ({
         markerDetails: scopedMarkerDetails,
         touchPointsByPane: scopedTouchPointsByPane,
         boxesByPane: scopedBoxesByPane,
-        segmentsByPane: scopedSegmentsByPane,
+        segmentsByPane: scopedSegmentsWithTradesByPane,
         polylinesByPane: scopedPolylinesByPane,
         bubblesByPane: scopedBubblesByPane,
         priceLines: groupedPriceLines,

@@ -86,7 +86,7 @@ function runBootstrapPayload() {
   }
 }
 
-function selectedSymbolBootstrapPayload({ symbolKey = 'instrument-btc|1M', seq = 22 } = {}) {
+function selectedSymbolBootstrapPayload({ symbolKey = 'instrument-btc|1M', seq = 22, overlayCommitSeq = 0 } = {}) {
   return {
     contract: 'botlens_selected_symbol_snapshot',
     contract_state: 'snapshot_ready',
@@ -131,6 +131,10 @@ function selectedSymbolBootstrapPayload({ symbolKey = 'instrument-btc|1M', seq =
       current: {
         candles: [{ time: '2026-01-01T00:00:00Z', open: 1, high: 1, low: 1, close: 1 }],
         overlays: [{ overlay_id: 'overlay-1', type: 'regime_overlay', payload: { regime_blocks: [{ x1: 1, x2: 2 }] } }],
+        ...(overlayCommitSeq > 0 ? {
+          overlay_commit_seq: overlayCommitSeq,
+          overlay_commit_seq_status: 'overlay_scoped',
+        } : {}),
         recent_trades: [],
         decisions: [],
         signals: [],
@@ -334,6 +338,9 @@ test('overlay delta updates selected symbol state without refresh polling', () =
     scope_seq: 26,
     symbol_key: 'instrument-btc|1m',
     payload: {
+      overlay_commit_seq: 2,
+      base_overlay_commit_seq: 0,
+      overlay_commit_seq_status: 'overlay_scoped',
       ops: [
         {
           op: 'upsert',
@@ -347,6 +354,245 @@ test('overlay delta updates selected symbol state without refresh polling', () =
   const selected = getSelectedSymbolState(store)
   assert.equal(selected.overlays.length, 2)
   assert.equal(selected.overlays[1].overlay_id, 'overlay-2')
+  assert.equal(selected.live_cursors.overlay_commit_seq, 2)
+})
+
+test('stale overlay commit delta is ignored even with a newer stream sequence', () => {
+  const payload = runBootstrapPayload()
+  payload.selected_symbol = selectedSymbolBootstrapPayload().selected_symbol
+  let store = createRunStore(payload)
+
+  store = applyTypedSymbolDelta(store, {
+    type: 'botlens_symbol_overlay_delta',
+    stream_session_id: 'stream-1',
+    stream_seq: 21,
+    scope_seq: 26,
+    symbol_key: 'instrument-btc|1m',
+    payload: {
+      overlay_commit_seq: 2,
+      base_overlay_commit_seq: 0,
+      overlay_commit_seq_status: 'overlay_scoped',
+      ops: [{
+        op: 'upsert',
+        key: 'overlay-2',
+        overlay: { type: 'ema_overlay', payload: { values: [1, 2, 3] } },
+      }],
+    },
+  })
+  store = applyTypedSymbolDelta(store, {
+    type: 'botlens_symbol_overlay_delta',
+    stream_session_id: 'stream-1',
+    stream_seq: 22,
+    scope_seq: 27,
+    symbol_key: 'instrument-btc|1m',
+    payload: {
+      overlay_commit_seq: 1,
+      base_overlay_commit_seq: 0,
+      overlay_commit_seq_status: 'overlay_scoped',
+      ops: [{
+        op: 'upsert',
+        key: 'overlay-stale',
+        overlay: { type: 'ema_overlay', payload: { values: [9] } },
+      }],
+    },
+  })
+
+  const selected = getSelectedSymbolState(store)
+  assert.equal(store.lastStreamSeq, 22)
+  assert.equal(selected.live_cursors.overlay_commit_seq, 2)
+  assert.equal(selected.overlays.some((entry) => entry.overlay_id === 'overlay-stale'), false)
+})
+
+test('selected-symbol snapshot overlay cursor guards post-bootstrap overlay deltas', () => {
+  const payload = runBootstrapPayload()
+  payload.selected_symbol = selectedSymbolBootstrapPayload({ overlayCommitSeq: 5 }).selected_symbol
+  let store = createRunStore(payload)
+
+  assert.equal(getSelectedSymbolState(store).live_cursors.overlay_commit_seq, 5)
+
+  store = applyTypedSymbolDelta(store, {
+    type: 'botlens_symbol_overlay_delta',
+    stream_session_id: 'stream-1',
+    stream_seq: 21,
+    scope_seq: 26,
+    symbol_key: 'instrument-btc|1m',
+    payload: {
+      overlay_commit_seq: 4,
+      base_overlay_commit_seq: 3,
+      overlay_commit_seq_status: 'overlay_scoped',
+      ops: [{
+        op: 'upsert',
+        key: 'overlay-stale',
+        overlay: { type: 'ema_overlay', payload: { values: [9] } },
+      }],
+    },
+  })
+  store = applyTypedSymbolDelta(store, {
+    type: 'botlens_symbol_overlay_delta',
+    stream_session_id: 'stream-1',
+    stream_seq: 22,
+    scope_seq: 27,
+    symbol_key: 'instrument-btc|1m',
+    payload: {
+      overlay_commit_seq: 6,
+      base_overlay_commit_seq: 5,
+      overlay_commit_seq_status: 'overlay_scoped',
+      ops: [{
+        op: 'upsert',
+        key: 'overlay-next',
+        overlay: { type: 'ema_overlay', payload: { values: [1] } },
+      }],
+    },
+  })
+
+  const selected = getSelectedSymbolState(store)
+  assert.equal(store.lastStreamSeq, 22)
+  assert.equal(selected.live_cursors.overlay_commit_seq, 6)
+  assert.equal(selected.overlays.some((entry) => entry.overlay_id === 'overlay-stale'), false)
+  assert.equal(selected.overlays.some((entry) => entry.overlay_id === 'overlay-next'), true)
+})
+
+test('duplicate concern scope delta advances transport cursor without mutating symbol state', () => {
+  const payload = runBootstrapPayload()
+  payload.selected_symbol = selectedSymbolBootstrapPayload().selected_symbol
+  let store = createRunStore(payload)
+
+  store = applyTypedSymbolDelta(store, {
+    type: 'botlens_symbol_candle_delta',
+    stream_session_id: 'stream-1',
+    stream_seq: 21,
+    scope_seq: 26,
+    symbol_key: 'instrument-btc|1m',
+    payload: {
+      candle: { time: 1767225660, open: 3, high: 3, low: 3, close: 3 },
+    },
+  })
+  store = applyTypedSymbolDelta(store, {
+    type: 'botlens_symbol_candle_delta',
+    stream_session_id: 'stream-1',
+    stream_seq: 22,
+    scope_seq: 26,
+    symbol_key: 'instrument-btc|1m',
+    payload: {
+      candle: { time: 1767225720, open: 4, high: 4, low: 4, close: 4 },
+    },
+  })
+
+  const selected = getSelectedSymbolState(store)
+  assert.equal(store.lastStreamSeq, 22)
+  assert.deepEqual(
+    selected.candles.map((entry) => entry.time),
+    [1767225600, 1767225660],
+  )
+  assert.equal(selected.live_cursors.scope_seq_by_concern.candles, 26)
+})
+
+test('closed trade delta remains in selected-symbol recent trades for visual inspection', () => {
+  const payload = runBootstrapPayload()
+  payload.selected_symbol = selectedSymbolBootstrapPayload().selected_symbol
+  let store = createRunStore(payload)
+
+  store = applyTypedSymbolDelta(store, {
+    type: 'botlens_symbol_trade_delta',
+    stream_session_id: 'stream-1',
+    stream_seq: 21,
+    scope_seq: 26,
+    symbol_key: 'instrument-btc|1m',
+    payload: {
+      upserts: [{
+        trade_id: 'trade-1',
+        symbol_key: 'instrument-btc|1m',
+        status: 'closed',
+        trade_state: 'closed',
+        entry_time: '2026-01-01T00:00:00Z',
+        exit_time: '2026-01-01T00:05:00Z',
+        entry_price: 100,
+        exit_price: 104,
+        stop_price: 98,
+        fees_paid: 0.5,
+        gross_pnl: 4,
+        net_pnl: 3.5,
+        close_reason: 'BACKTEST_END',
+        position_commit_seq: 2,
+        position_commit_seq_status: 'position_scoped',
+        legs: [{ target_price: 105, status: 'backtest_end', exit_time: '2026-01-01T00:05:00Z', exit_price: 104 }],
+      }],
+      removals: ['trade-1'],
+    },
+  })
+
+  const selected = getSelectedSymbolState(store)
+  assert.equal(selected.recent_trades.length, 1)
+  assert.equal(selected.recent_trades[0].trade_id, 'trade-1')
+  assert.equal(selected.recent_trades[0].status, 'closed')
+  assert.equal(selected.recent_trades[0].close_reason, 'BACKTEST_END')
+  assert.equal(selected.recent_trades[0].legs[0].target_price, 105)
+  assert.equal(selected.live_cursors.position_commit_seq_by_trade['trade-1'], 2)
+})
+
+test('stale closed trade update cannot erase selected-symbol close fields', () => {
+  const payload = runBootstrapPayload()
+  payload.selected_symbol = selectedSymbolBootstrapPayload().selected_symbol
+  let store = createRunStore(payload)
+
+  store = applyTypedSymbolDelta(store, {
+    type: 'botlens_symbol_trade_delta',
+    stream_session_id: 'stream-1',
+    stream_seq: 21,
+    scope_seq: 26,
+    symbol_key: 'instrument-btc|1m',
+    payload: {
+      upserts: [{
+        trade_id: 'trade-1',
+        symbol_key: 'instrument-btc|1m',
+        status: 'closed',
+        trade_state: 'closed',
+        entry_time: '2026-01-01T00:00:00Z',
+        closed_at: '2026-01-01T00:05:00Z',
+        exit_time: '2026-01-01T00:05:00Z',
+        entry_price: 100,
+        exit_price: 104,
+        close_reason: 'MIXED',
+        reason_code: 'MIXED',
+        position_commit_seq: 2,
+        position_commit_seq_status: 'position_scoped',
+      }],
+      removals: ['trade-1'],
+    },
+  })
+
+  store = applyTypedSymbolDelta(store, {
+    type: 'botlens_symbol_trade_delta',
+    stream_session_id: 'stream-1',
+    stream_seq: 22,
+    scope_seq: 27,
+    symbol_key: 'instrument-btc|1m',
+    payload: {
+      upserts: [{
+        trade_id: 'trade-1',
+        symbol_key: 'instrument-btc|1m',
+        status: 'closed',
+        trade_state: 'closed',
+        entry_time: '2026-01-01T00:00:00Z',
+        closed_at: '2026-01-01T00:05:00Z',
+        entry_price: 100,
+        position_commit_seq: 1,
+        position_commit_seq_status: 'position_scoped',
+      }],
+      removals: ['trade-1'],
+    },
+  })
+
+  const trade = getSelectedSymbolState(store).recent_trades[0]
+  assert.equal(trade.status, 'closed')
+  assert.equal(trade.trade_state, 'closed')
+  assert.equal(trade.closed_at, '2026-01-01T00:05:00Z')
+  assert.equal(trade.exit_time, '2026-01-01T00:05:00Z')
+  assert.equal(trade.exit_price, 104)
+  assert.equal(trade.close_reason, 'MIXED')
+  assert.equal(trade.reason_code, 'MIXED')
+  assert.equal(trade.position_commit_seq, 2)
+  assert.equal(store.lastStreamSeq, 22)
 })
 
 test('selected-symbol state preserves compact historical overlay summaries', () => {

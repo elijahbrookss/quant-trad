@@ -9,10 +9,11 @@ import { usePulseMarkers } from './hooks/usePulseMarkers.js'
 import { useMarkerTooltip } from './hooks/useMarkerTooltip.js'
 import { useIntrabarCandleAnimator, AnimatorStates } from './hooks/useIntrabarCandleAnimator.js'
 import { useMarkerManager } from './hooks/useMarkerManager.js'
-import { CameraIntents } from './hooks/useViewportController.js'
+import { CameraIntents, DEFAULT_CAMERA_SPAN_BARS } from './hooks/useViewportController.js'
 import { MarkerTooltip } from './MarkerTooltip.jsx'
 import { createLogger } from '../../utils/logger.js'
 import { validateCanonicalCandles } from './botlensProjection.js'
+import { resolveCandleUpdateCameraIntent } from './chartCameraPolicy.js'
 
 const parseTimeframeToSeconds = (rawTimeframe) => {
   const text = (rawTimeframe || '').toString().trim().toLowerCase()
@@ -254,7 +255,7 @@ export function BotLensChart({
     }
   }, [candleData, chartId, debugRanges, logger])
 
-  const { markers: tradeMarkers, tooltips: tradeMarkerTooltips, regions: tradeRegions, priceLines: tradePriceLines } =
+  const { markers: tradeMarkers, tooltips: tradeMarkerTooltips, regions: tradeRegions, segments: tradeSegments, priceLines: tradePriceLines } =
     useTradeMarkers(resolvedTrades, candleLookup, candleData)
 
   const showTradeMarkers = overlayVisibility.trade_markers !== false
@@ -278,7 +279,7 @@ export function BotLensChart({
   })
 
   useEffect(() => {
-    resetViewport()
+    resetViewport(DEFAULT_CAMERA_SPAN_BARS)
     requestIntent({
       intent: CameraIntents.FOLLOW_LATEST,
       reason: 'viewport-reset',
@@ -364,6 +365,7 @@ export function BotLensChart({
     const longJump = next.length > previous.length + 1
     const requiresReset = !previous.length || !next.length || historyRewound || longJump
     const shouldAnimate = isSameCandle && playbackProfile.allowIntrabar
+    const cameraIntent = resolveCandleUpdateCameraIntent({ previous, next })
 
     const sample = frameSampleRef.current
     const start = performance.now()
@@ -372,24 +374,19 @@ export function BotLensChart({
       cancelAnimator('reset')
       seriesRef.current.setData(next)
       frameSampleRef.current = { total: 0, count: 0, logged: false }
-      if (!previous.length || timeAdvanced) {
-        pendingCameraIntentRef.current = { intent: CameraIntents.FOLLOW_LATEST, reason: 'reset' }
-      }
+      if (cameraIntent) pendingCameraIntentRef.current = cameraIntent
     } else if (shouldAnimate) {
       const prevMatch = previous.find((candle) => Number.isFinite(candle?.time) && candle.time === nextLastTime)
-      pendingCameraIntentRef.current = { intent: CameraIntents.FOLLOW_LATEST, reason: 'intrabar-animate' }
       startAnimator({ series: seriesRef.current, fromCandle: prevMatch, toCandle: nextLast, speed: playbackSpeed })
     } else if (isAppend) {
       cancelAnimator('append')
       seriesRef.current.update(nextLast)
-      if (timeAdvanced) pendingCameraIntentRef.current = { intent: CameraIntents.FOLLOW_LATEST, reason: 'append' }
     } else if (isSameCandle) {
       cancelAnimator('same-candle')
       seriesRef.current.update(nextLast)
     } else {
       cancelAnimator('fallback')
       seriesRef.current.setData(next)
-      if (timeAdvanced) pendingCameraIntentRef.current = { intent: CameraIntents.FOLLOW_LATEST, reason: 'fallback' }
     }
 
     const duration = performance.now() - start
@@ -443,6 +440,7 @@ export function BotLensChart({
       tradeMarkers: showTradeMarkers ? tradeMarkers : [],
       tradeTooltips: showTradeMarkers ? tradeMarkerTooltips : [],
       tradeRegions: showTradeRegions ? tradeRegions : [],
+      tradeSegments: showTradeRegions ? tradeSegments : [],
       tradePriceLines: showTradeRays ? tradePriceLines : [],
       candleData,
     })
@@ -480,7 +478,7 @@ export function BotLensChart({
       })
       pendingCameraIntentRef.current = null
     }
-  }, [applyArtifacts, candleData, computeArtifacts, requestIntent, resolvedOverlays, tradeMarkerTooltips, tradeMarkers, tradePriceLines, tradeRegions])
+  }, [applyArtifacts, candleData, computeArtifacts, requestIntent, resolvedOverlays, tradeMarkerTooltips, tradeMarkers, tradePriceLines, tradeRegions, tradeSegments])
 
   const containerClasses = [
     'relative w-full overflow-hidden rounded-2xl border border-white/10 bg-[#0f1118]',

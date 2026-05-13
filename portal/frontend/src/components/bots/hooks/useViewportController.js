@@ -13,6 +13,7 @@ export const CameraIntents = {
 const USER_INTERACTION_TTL_MS = 8000
 const INTERACTION_SUPPRESS_MS = 600
 const LIVE_EDGE_THRESHOLD_BARS = 2
+export const DEFAULT_CAMERA_SPAN_BARS = 240
 
 const deriveSpacing = (candles = [], barSpacingRef) => {
   const last = candles[candles.length - 1]
@@ -37,7 +38,7 @@ const rangesClose = (left, right, epsilon = 1e-6) => {
   return Math.abs(leftFrom - rightFrom) <= epsilon && Math.abs(leftTo - rightTo) <= epsilon
 }
 
-export const computeFollowRange = (candles = [], spacing, { lookbackBars = 24, forwardPadBars = 1.25 } = {}) => {
+export const computeFollowRange = (candles = [], spacing, { lookbackBars = DEFAULT_CAMERA_SPAN_BARS, forwardPadBars = 1.25 } = {}) => {
   const lastIndex = candles.length - 1
   const lastTime = candles[lastIndex]?.time
   if (!Number.isFinite(lastTime)) return { range: null, logicalRange: null }
@@ -97,7 +98,7 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
   const userOverrideUntilRef = useRef(0)
   const pendingFollowRef = useRef(null)
   const lastOverlaySignatureRef = useRef(null)
-  const preferredSpanBarsRef = useRef(24)
+  const preferredSpanBarsRef = useRef(DEFAULT_CAMERA_SPAN_BARS)
   const lastLogicalRangeRef = useRef(null)
   const interactionRef = useRef({ dragging: false, wheelUntil: 0 })
   const logger = useMemo(() => createLogger('ViewportController'), [])
@@ -135,7 +136,7 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
     }
   }, [])
 
-  const resetViewport = useCallback((preferredSpanBars = 24) => {
+  const resetViewport = useCallback((preferredSpanBars = DEFAULT_CAMERA_SPAN_BARS) => {
     lockedRef.current = true
     userOverrideUntilRef.current = 0
     pendingFollowRef.current = null

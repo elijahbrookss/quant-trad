@@ -126,7 +126,7 @@ function TopBar({ topBar, onClose, refreshSession }) {
         </div>
       </div>
 
-      <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
         {topBar.stats.map((stat) => (
           <div key={stat.key} className="qt-ops-panel-muted px-3 py-2.5">
             <p className="qt-ops-kicker">{stat.label}</p>

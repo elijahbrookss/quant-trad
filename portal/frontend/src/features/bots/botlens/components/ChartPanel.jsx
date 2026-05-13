@@ -31,10 +31,10 @@ export function ChartPanel({
         onClick={() => centerView?.()}
         disabled={!canRefocus}
         className="qt-mono inline-flex items-center gap-1.5 rounded-[3px] border border-white/10 bg-black/25 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-300 transition hover:border-white/16 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
-        aria-label="Refocus chart to the front"
+        aria-label="Reset chart view to latest window"
       >
         <LocateFixed className="size-3.5" />
-        Refocus
+        Reset View
       </button>
       <button
         type="button"

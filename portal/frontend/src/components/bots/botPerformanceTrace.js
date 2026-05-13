@@ -107,6 +107,7 @@ const TRACE_CANDIDATES = [
   { path: ['runtime', 'balance_trace'], source: 'wallet', label: 'Wallet', valueKeys: ['balance'] },
   { path: ['runtime', 'wallet_trace'], source: 'wallet', label: 'Wallet', valueKeys: ['balance', 'wallet', 'value'] },
   { path: ['runtime', 'wallet_curve'], source: 'wallet', label: 'Wallet', valueKeys: ['value', 'balance', 'wallet'] },
+  { path: ['runtime', 'stats', 'equity_curve'], source: 'equity', label: 'Equity', valueKeys: ['value', 'equity'] },
   { path: ['runtime', 'equity_curve'], source: 'equity', label: 'Equity', valueKeys: ['value', 'equity'] },
   { path: ['last_run_artifact', 'charts', 'equity_curve'], source: 'equity', label: 'Equity', valueKeys: ['value', 'equity'] },
   { path: ['last_run_artifact', 'equity_curve'], source: 'equity', label: 'Equity', valueKeys: ['value', 'equity'] },
