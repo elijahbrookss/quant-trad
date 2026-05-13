@@ -11,7 +11,7 @@ from collections.abc import Mapping as AbcMapping
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Header, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.websockets import WebSocketState
@@ -84,6 +84,7 @@ class BotBase(BaseModel):
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     mode: str = Field(default="instant", pattern="^(instant|walk-forward)$")
+    execution_mode: Optional[str] = Field(default=None, pattern="^(fast|full|FAST|FULL)$")
     run_type: str = Field(default="backtest", pattern="^(backtest|sim_trade|paper|live)$")
     playback_speed: float = Field(default=0.0, ge=0)
     backtest_start: Optional[str] = None
@@ -111,12 +112,23 @@ class BotUpdateRequest(BaseModel):
     exchange: Optional[str] = None
     run_type: Optional[str] = Field(default=None, pattern="^(backtest|sim_trade|paper|live)$")
     mode: Optional[str] = Field(default=None, pattern="^(instant|walk-forward)$")
+    execution_mode: Optional[str] = Field(default=None, pattern="^(fast|full|FAST|FULL)$")
     playback_speed: Optional[float] = Field(default=None, ge=0)
     focus_symbol: Optional[str] = None
     wallet_config: Optional[Dict[str, Any]] = None
     snapshot_interval_ms: Optional[int] = Field(default=None, gt=0)
     bot_env: Optional[Dict[str, str]] = None
     instrument_type: Optional[str] = None
+
+
+class BotStartRequest(BaseModel):
+    request_id: Optional[str] = None
+
+
+class BotStopRequest(BaseModel):
+    run_id: Optional[str] = None
+    request_id: Optional[str] = None
+    preserve_container: bool = False
 
 
 class BotResponse(BotBase):
@@ -134,6 +146,7 @@ class BotResponse(BotBase):
     lifecycle: Optional[Dict[str, Any]] = None
     controls: Optional[Dict[str, Any]] = None
     active_run_id: Optional[str] = None
+    latest_run_id: Optional[str] = None
     run: Optional[Dict[str, Any]] = None
 
 
@@ -220,10 +233,15 @@ async def delete_bot(bot_id: str) -> Response:
     return Response(status_code=204)
 
 
-@router.post("/{bot_id}/start", response_model=BotResponse)
-async def start_bot(bot_id: str) -> Dict[str, Any]:
+@router.post("/{bot_id}/start")
+async def start_bot(
+    bot_id: str,
+    body: Optional[BotStartRequest] = None,
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-ID"),
+) -> Dict[str, Any]:
+    request_id = str((body.request_id if body else None) or x_request_id or "").strip() or None
     try:
-        return bot_service.start_bot(bot_id)
+        return bot_service.start_bot(bot_id, request_id=request_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -232,10 +250,44 @@ async def start_bot(bot_id: str) -> Dict[str, Any]:
         raise HTTPException(409, str(exc)) from exc
 
 
-@router.post("/{bot_id}/stop", response_model=BotResponse)
-async def stop_bot(bot_id: str, preserve_container: bool = False) -> Dict[str, Any]:
+@router.post("/{bot_id}/stop")
+async def stop_bot(
+    bot_id: str,
+    body: Optional[BotStopRequest] = None,
+    preserve_container: bool = False,
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-ID"),
+) -> Dict[str, Any]:
+    request_id = str((body.request_id if body else None) or x_request_id or "").strip() or None
+    target_run_id = str((body.run_id if body else None) or "").strip() or None
+    resolved_preserve_container = bool((body.preserve_container if body else preserve_container) or preserve_container)
     try:
-        return bot_service.stop_bot(bot_id, preserve_container=preserve_container)
+        return bot_service.stop_bot(
+            bot_id,
+            preserve_container=resolved_preserve_container,
+            run_id=target_run_id,
+            request_id=request_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/{bot_id}/runs/{run_id}/cancel")
+async def cancel_bot_run(
+    bot_id: str,
+    run_id: str,
+    body: Optional[BotStopRequest] = None,
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-ID"),
+) -> Dict[str, Any]:
+    request_id = str((body.request_id if body else None) or x_request_id or "").strip() or None
+    try:
+        return bot_service.stop_bot(
+            bot_id,
+            preserve_container=bool(body.preserve_container if body else False),
+            run_id=str(run_id),
+            request_id=request_id,
+        )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except RuntimeError as exc:
@@ -247,7 +299,14 @@ def bot_active_run(bot_id: str) -> Dict[str, Any]:
     try:
         bot = bot_service.get_bot(str(bot_id))
         run_id = bot.get("active_run_id")
-        return {"bot_id": str(bot_id), "run_id": run_id}
+        return {
+            "bot_id": str(bot_id),
+            "run_id": run_id,
+            "active": bool(run_id),
+            "latest_run_id": bot.get("latest_run_id"),
+            "status": bot.get("status"),
+            "reason": ((bot.get("lifecycle") or {}).get("reason") if isinstance(bot.get("lifecycle"), AbcMapping) else None),
+        }
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
 
@@ -444,9 +503,9 @@ async def bot_lens_series_chart_history(
 async def bot_telemetry_ingest(websocket: WebSocket) -> None:
     await websocket.accept()
     while True:
-        decode_started = time.perf_counter()
+        receive_started = time.perf_counter()
         try:
-            payload = await websocket.receive_json()
+            raw_message = await websocket.receive_text()
         except WebSocketDisconnect:
             break
         except Exception as exc:
@@ -463,13 +522,64 @@ async def bot_telemetry_ingest(websocket: WebSocket) -> None:
                 error=str(exc),
             )
             continue
+        receive_ms = max((time.perf_counter() - receive_started) * 1000.0, 0.0)
+        decode_started = time.perf_counter()
+        try:
+            payload = json.loads(raw_message)
+        except Exception as exc:
+            _INGEST_OBSERVER.increment(
+                "ingest_messages_invalid_total",
+                failure_mode="decode_error",
+                message_kind="ingest_ws",
+            )
+            _INGEST_OBSERVER.observe(
+                "ingest_receive_wait_ms",
+                receive_ms,
+                message_kind="ingest_ws",
+            )
+            _INGEST_OBSERVER.observe(
+                "ingest_json_decode_ms",
+                max((time.perf_counter() - decode_started) * 1000.0, 0.0),
+                message_kind="ingest_ws",
+                failure_mode="decode_error",
+            )
+            _INGEST_OBSERVER.event(
+                "intake_invalid_envelope",
+                level=logging.WARN,
+                failure_mode="decode_error",
+                message_kind="ingest_ws",
+                payload_bytes=len(str(raw_message or "").encode("utf-8")),
+                error=str(exc),
+            )
+            continue
+        if isinstance(payload, dict):
+            labels = {
+                "message_kind": str(payload.get("kind") or "unknown"),
+                "run_id": str(payload.get("run_id") or "").strip() or None,
+                "bot_id": str(payload.get("bot_id") or "").strip() or None,
+                "worker_id": str(payload.get("worker_id") or "").strip() or None,
+            }
+        else:
+            labels = {
+                "message_kind": "unknown",
+                "run_id": None,
+                "bot_id": None,
+                "worker_id": None,
+            }
         _INGEST_OBSERVER.observe(
-            "ingest_decode_ms",
+            "ingest_receive_wait_ms",
+            receive_ms,
+            **labels,
+        )
+        _INGEST_OBSERVER.observe(
+            "ingest_json_decode_ms",
             max((time.perf_counter() - decode_started) * 1000.0, 0.0),
-            message_kind=str(payload.get("kind") or "unknown") if isinstance(payload, dict) else "unknown",
-            run_id=str(payload.get("run_id") or "").strip() or None if isinstance(payload, dict) else None,
-            bot_id=str(payload.get("bot_id") or "").strip() or None if isinstance(payload, dict) else None,
-            worker_id=str(payload.get("worker_id") or "").strip() or None if isinstance(payload, dict) else None,
+            **labels,
+        )
+        _INGEST_OBSERVER.observe(
+            "ingest_payload_bytes",
+            float(len(str(raw_message or "").encode("utf-8"))),
+            **labels,
         )
         await telemetry_hub.ingest(payload)
 

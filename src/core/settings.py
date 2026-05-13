@@ -50,9 +50,13 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_OBSERVABILITY_PERSIST_METRIC_BATCH_SIZE", ("observability", "persist_metric_batch_size")),
     ("QT_OBSERVABILITY_PERSIST_EVENT_BATCH_SIZE", ("observability", "persist_event_batch_size")),
     ("QT_OBSERVABILITY_PERSIST_FLUSH_INTERVAL_MS", ("observability", "persist_flush_interval_ms")),
+    ("QT_OBSERVABILITY_PERSIST_ROLLUP_BUCKET_SECONDS", ("observability", "persist_rollup_bucket_seconds")),
+    ("QT_OBSERVABILITY_PERSIST_ROLLUP_FLUSH_LAG_MS", ("observability", "persist_rollup_flush_lag_ms")),
     ("QT_OBSERVABILITY_PERSIST_RETRY_INTERVAL_MS", ("observability", "persist_retry_interval_ms")),
     ("QT_OBSERVABILITY_PERSIST_PENDING_METRICS_MAX", ("observability", "persist_pending_metrics_max")),
     ("QT_OBSERVABILITY_PERSIST_PENDING_EVENTS_MAX", ("observability", "persist_pending_events_max")),
+    ("QT_OBSERVABILITY_HIGH_VOLUME_METRIC_SAMPLE_EVERY", ("observability", "high_volume_metric_sample_every")),
+    ("QT_OBSERVABILITY_HIGH_VOLUME_METRIC_MAX_LAG_MS", ("observability", "high_volume_metric_max_lag_ms")),
     ("QT_ASYNC_JOBS_RUNNING_TIMEOUT_SECONDS", ("async_jobs", "running_timeout_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_WAIT_TIMEOUT_SECONDS", ("async_jobs", "quantlab_job_wait_timeout_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_POLL_INTERVAL_SECONDS", ("async_jobs", "quantlab_job_poll_interval_seconds")),
@@ -370,9 +374,13 @@ class ObservabilitySettings:
     persist_metric_batch_size: int
     persist_event_batch_size: int
     persist_flush_interval_ms: int
+    persist_rollup_bucket_seconds: int
+    persist_rollup_flush_lag_ms: int
     persist_retry_interval_ms: int
     persist_pending_metrics_max: int
     persist_pending_events_max: int
+    high_volume_metric_sample_every: int
+    high_volume_metric_max_lag_ms: int
 
 
 @dataclass(frozen=True)
@@ -681,6 +689,12 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             persist_flush_interval_ms=_coerce_int(
                 observability_payload.get("persist_flush_interval_ms"), 1000, minimum=10
             ),
+            persist_rollup_bucket_seconds=_coerce_int(
+                observability_payload.get("persist_rollup_bucket_seconds"), 30, minimum=1
+            ),
+            persist_rollup_flush_lag_ms=_coerce_int(
+                observability_payload.get("persist_rollup_flush_lag_ms"), 10000, minimum=0
+            ),
             persist_retry_interval_ms=_coerce_int(
                 observability_payload.get("persist_retry_interval_ms"), 1000, minimum=10
             ),
@@ -689,6 +703,12 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             ),
             persist_pending_events_max=_coerce_int(
                 observability_payload.get("persist_pending_events_max"), 10000, minimum=100
+            ),
+            high_volume_metric_sample_every=_coerce_int(
+                observability_payload.get("high_volume_metric_sample_every"), 100, minimum=1
+            ),
+            high_volume_metric_max_lag_ms=_coerce_int(
+                observability_payload.get("high_volume_metric_max_lag_ms"), 5000, minimum=10
             ),
         ),
         async_jobs=AsyncJobSettings(
@@ -783,8 +803,8 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             ),
             step_trace=StepTraceSettings(
                 queue_max=_coerce_int(step_trace_payload.get("queue_max"), 8192, minimum=1),
-                batch_size=_coerce_int(step_trace_payload.get("batch_size"), 200, minimum=1),
-                flush_interval_ms=_coerce_int(step_trace_payload.get("flush_interval_ms"), 200, minimum=1),
+                batch_size=_coerce_int(step_trace_payload.get("batch_size"), 512, minimum=1),
+                flush_interval_ms=_coerce_int(step_trace_payload.get("flush_interval_ms"), 500, minimum=1),
                 overflow_policy=_coerce_str(step_trace_payload.get("overflow_policy"), "drop_oldest"),
             ),
             telemetry=TelemetrySettings(

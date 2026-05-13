@@ -38,9 +38,13 @@ observability:
   persist_metric_batch_size: 500
   persist_event_batch_size: 250
   persist_flush_interval_ms: 1000
+  persist_rollup_bucket_seconds: 30
+  persist_rollup_flush_lag_ms: 10000
   persist_retry_interval_ms: 1000
   persist_pending_metrics_max: 20000
   persist_pending_events_max: 10000
+  high_volume_metric_sample_every: 100
+  high_volume_metric_max_lag_ms: 5000
 
 async_jobs:
   running_timeout_seconds: 1800
@@ -101,8 +105,8 @@ bot_runtime:
     ingest_queue_max: 4096
   step_trace:
     queue_max: 8192
-    batch_size: 200
-    flush_interval_ms: 200
+    batch_size: 512
+    flush_interval_ms: 500
     overflow_policy: drop_oldest
   watchdog:
     heartbeat_interval_seconds: 15

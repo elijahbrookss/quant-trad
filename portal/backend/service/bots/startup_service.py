@@ -21,6 +21,13 @@ from .startup_lifecycle import (
 logger = logging.getLogger(__name__)
 
 
+def _execution_mode_from_bot(bot: Mapping[str, Any]) -> str:
+    risk = bot.get("risk") if isinstance(bot.get("risk"), Mapping) else {}
+    value = bot.get("execution_mode") or risk.get("execution_mode")
+    normalized = str(value or "fast").strip().lower()
+    return normalized if normalized in {"fast", "full"} else "fast"
+
+
 class StartupStorage(Protocol):
     def upsert_bot(self, payload: Mapping[str, Any]) -> None: ...
     def upsert_bot_run(self, payload: Mapping[str, Any]) -> Dict[str, Any]: ...
@@ -35,8 +42,10 @@ class BotStartupOrchestrator:
     runner: Any
     watchdog: Any
 
-    def start_bot(self, bot_id: str) -> BotStartupContext:
+    def start_bot(self, bot_id: str, *, request_id: str | None = None, config_hash: str | None = None) -> BotStartupContext:
         bot = self._load_bot(bot_id)
+        normalized_request_id = str(request_id or "").strip()
+        normalized_config_hash = str(config_hash or "").strip()
         ctx = BotStartupContext(
             bot_id=str(bot_id),
             bot_record=dict(bot),
@@ -46,7 +55,13 @@ class BotStartupOrchestrator:
             wallet_config={},
             runtime_readiness={},
             runtime_dependency_metadata={},
+            request_id=normalized_request_id,
+            config_hash=normalized_config_hash,
         )
+        if normalized_request_id:
+            ctx.lifecycle_metadata["request_id"] = normalized_request_id
+        if normalized_config_hash:
+            ctx.lifecycle_metadata["start_config_hash"] = normalized_config_hash
         # The backend owns run identity before the first lifecycle checkpoint so
         # lifecycle persistence can safely reference the active run via FK.
         self._ensure_run_record(ctx)
@@ -99,7 +114,7 @@ class BotStartupOrchestrator:
                 ctx,
                 BotLifecyclePhase.PREPARING_RUN.value,
                 message="Persisting backend-owned run record and startup snapshot.",
-                metadata={"run_id": ctx.run_id},
+                metadata={"run_id": ctx.run_id, "request_id": ctx.request_id or None, "start_config_hash": ctx.config_hash or None},
             )
             self._prepare_run_record(ctx)
             self._record_phase(
@@ -113,6 +128,7 @@ class BotStartupOrchestrator:
                 BotLifecyclePhase.LAUNCHING_CONTAINER.value,
                 message="Launching runtime container with backend-owned run_id.",
             )
+            ctx.bot_record["_runtime_request_id"] = ctx.request_id
             ctx.container_id = str(self.runner.start_bot(bot=ctx.bot_record, run_id=ctx.run_id))
             self._record_phase(
                 ctx,
@@ -157,11 +173,19 @@ class BotStartupOrchestrator:
                 "run_type": ctx.bot_record.get("run_type") or "backtest",
                 "status": BotLifecycleStatus.STARTING.value,
                 "started_at": ctx.started_at,
+                "config_snapshot": {
+                    "request_id": ctx.request_id or None,
+                    "start_request": {
+                        "request_id": ctx.request_id or None,
+                        "config_hash": ctx.config_hash or None,
+                    },
+                },
             }
         )
 
     def _prepare_run_record(self, ctx: BotStartupContext) -> None:
         strategy = ctx.strategy_snapshot
+        execution_mode = _execution_mode_from_bot(ctx.bot_record)
         self.storage.upsert_bot_run(
             {
                 "run_id": ctx.run_id,
@@ -179,6 +203,12 @@ class BotStartupOrchestrator:
                 "backtest_end": ctx.bot_record.get("backtest_end"),
                 "started_at": ctx.started_at,
                 "config_snapshot": {
+                    "execution_mode": execution_mode,
+                    "request_id": ctx.request_id or None,
+                    "start_request": {
+                        "request_id": ctx.request_id or None,
+                        "config_hash": ctx.config_hash or None,
+                    },
                     "bot": dict(ctx.bot_record),
                     "runtime_readiness": dict(ctx.runtime_readiness),
                 },
@@ -194,6 +224,7 @@ class BotStartupOrchestrator:
         payload["last_run_artifact"] = {
             "startup": {
                 "run_id": ctx.run_id,
+                "request_id": ctx.request_id or None,
                 "phase": ctx.current_phase,
                 "message": "Backend stamped starting state.",
                 "at": ctx.started_at,
@@ -257,6 +288,8 @@ class BotStartupOrchestrator:
             exception_type=type(exc).__name__,
             traceback=traceback_text.strip() if traceback_text else None,
         )
+        if ctx.request_id:
+            failure["request_id"] = ctx.request_id
         try:
             self._record_phase(
                 ctx,

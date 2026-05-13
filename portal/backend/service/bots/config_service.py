@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from core.settings import env_is_set, env_value, get_settings
 from engines.bot_runtime.core.execution_profile import compile_runtime_profile_or_error
+from engines.bot_runtime.runtime.components.runtime_policy import ExecutionMode
 
 from .strategy_loader import StrategyLoader
 from .startup_validation import validate_wallet_config as normalize_wallet_config
@@ -63,6 +64,13 @@ class BotConfigService:
             payload.get("risk_config") if isinstance(payload.get("risk_config"), Mapping) else strategy.risk_config
         )
 
+        execution_mode = self.validate_execution_mode(
+            payload.get("execution_mode"),
+            legacy_mode=payload.get("mode"),
+        )
+        risk_payload = dict(payload.get("risk") or {})
+        risk_payload["execution_mode"] = execution_mode
+
         record: Dict[str, object] = {
             "id": bot_id,
             "name": name,
@@ -74,11 +82,12 @@ class BotConfigService:
             "risk_config": normalise_risk_config(risk_config_payload),
             "timeframe": None,
             "mode": (payload.get("mode") or "instant").lower(),
+            "execution_mode": execution_mode,
             "run_type": run_type,
             "playback_speed": self.coerce_playback_speed(payload.get("playback_speed") or payload.get("fetch_seconds")),
             "backtest_start": self.coerce_isoformat(payload.get("backtest_start")),
             "backtest_end": self.coerce_isoformat(payload.get("backtest_end")),
-            "risk": dict(payload.get("risk") or {}),
+            "risk": risk_payload,
             "wallet_config": wallet_config,
             "snapshot_interval_ms": int(payload.get("snapshot_interval_ms") or 0),
             "bot_env": self.validate_bot_env(payload.get("bot_env") if isinstance(payload.get("bot_env"), Mapping) else {}),
@@ -117,6 +126,15 @@ class BotConfigService:
             record["run_type"] = str(payload["run_type"]).lower()
         if "mode" in payload and payload["mode"] is not None:
             record["mode"] = str(payload["mode"]).lower()
+        if "execution_mode" in payload:
+            execution_mode = self.validate_execution_mode(
+                payload.get("execution_mode"),
+                legacy_mode=record.get("mode"),
+            )
+            record["execution_mode"] = execution_mode
+            risk = dict(record.get("risk") or {})
+            risk["execution_mode"] = execution_mode
+            record["risk"] = risk
         if "playback_speed" in payload and payload["playback_speed"] is not None:
             record["playback_speed"] = self.coerce_playback_speed(payload["playback_speed"])
         elif "fetch_seconds" in payload and payload["fetch_seconds"] is not None:
@@ -156,6 +174,10 @@ class BotConfigService:
     def coerce_playback_speed(value: Optional[object]) -> float:
         _ = value
         return 0.0
+
+    @staticmethod
+    def validate_execution_mode(value: Optional[object], *, legacy_mode: Optional[object] = None) -> str:
+        return ExecutionMode.from_config(value, legacy_mode=legacy_mode).value
 
     @staticmethod
     def coerce_isoformat(value: Optional[object]) -> Optional[str]:
