@@ -14,11 +14,15 @@ from engines.bot_runtime.core.domain.time_utils import normalize_epoch, timefram
 EXPECTED_SESSION_GAP = "expected_session_gap"
 PROVIDER_MISSING_DATA = "provider_missing_data"
 INGESTION_FAILURE = "ingestion_failure"
+RUNTIME_MISSING = "runtime_missing"
+PROJECTION_MISSING = "projection_missing"
 UNKNOWN_GAP = "unknown_gap"
 GAP_CLASSIFICATION_TYPES = (
     EXPECTED_SESSION_GAP,
     PROVIDER_MISSING_DATA,
     INGESTION_FAILURE,
+    RUNTIME_MISSING,
+    PROJECTION_MISSING,
     UNKNOWN_GAP,
 )
 
@@ -67,7 +71,15 @@ def _classification_from_text(value: Any) -> Optional[str]:
         return text
     if "session" in text or "market_closed" in text or "market_holiday" in text:
         return EXPECTED_SESSION_GAP
-    if "provider" in text or "source_missing" in text or "vendor" in text:
+    if (
+        "provider" in text
+        or "source_missing" in text
+        or "source_sparse" in text
+        or "exchange_no_candle" in text
+        or "no_candle" in text
+        or "vendor" in text
+        or "closure" in text
+    ):
         return PROVIDER_MISSING_DATA
     if (
         "ingest_failed" in text
@@ -78,17 +90,87 @@ def _classification_from_text(value: Any) -> Optional[str]:
         or "write_failed" in text
     ):
         return INGESTION_FAILURE
+    if "runtime_missing" in text or "runtime_gap" in text or "runtime_skipped" in text:
+        return RUNTIME_MISSING
+    if "projection_missing" in text or "botlens_missing" in text or "chart_missing" in text:
+        return PROJECTION_MISSING
     return None
 
 
-def _classify_gap(*, source_reason: Any = None, gap_classification: Any = None) -> str:
-    explicit = _classification_from_text(gap_classification)
-    if explicit is not None:
-        return explicit
+def _classification_range_entries(value: Any) -> tuple[Mapping[str, Any], ...]:
+    if isinstance(value, Mapping):
+        return (value,)
+    if isinstance(value, (str, bytes)) or value is None:
+        return ()
+    try:
+        entries = list(value)
+    except TypeError:
+        return ()
+    return tuple(entry for entry in entries if isinstance(entry, Mapping))
+
+
+def _range_epoch(entry: Mapping[str, Any], *keys: str) -> Optional[int]:
+    for key in keys:
+        value = entry.get(key)
+        if value not in (None, ""):
+            return normalize_epoch(value)
+    return None
+
+
+def _classify_gap(
+    *,
+    source_reason: Any = None,
+    gap_classification: Any = None,
+    gap_start_epoch: Optional[int] = None,
+    gap_end_epoch: Optional[int] = None,
+) -> str:
+    return str(
+        _classify_gap_evidence(
+            source_reason=source_reason,
+            gap_classification=gap_classification,
+            gap_start_epoch=gap_start_epoch,
+            gap_end_epoch=gap_end_epoch,
+        ).get("classification")
+        or UNKNOWN_GAP
+    )
+
+
+def _classify_gap_evidence(
+    *,
+    source_reason: Any = None,
+    gap_classification: Any = None,
+    gap_start_epoch: Optional[int] = None,
+    gap_end_epoch: Optional[int] = None,
+) -> Dict[str, Any]:
+    if gap_start_epoch is not None and gap_end_epoch is not None:
+        for entry in _classification_range_entries(gap_classification):
+            start_epoch = _range_epoch(entry, "start", "start_ts", "missing_start", "previous_ts")
+            end_epoch = _range_epoch(entry, "end", "end_ts", "missing_end", "current_ts")
+            if start_epoch is None or end_epoch is None:
+                continue
+            if int(start_epoch) <= int(gap_start_epoch) and int(end_epoch) >= int(gap_end_epoch):
+                explicit = _classification_from_text(
+                    entry.get("classification")
+                    or entry.get("gap_classification")
+                    or entry.get("reason_code")
+                    or entry.get("source_reason")
+                )
+                if explicit is not None:
+                    evidence = {
+                        "classification": explicit,
+                        "reason_code": entry.get("reason_code"),
+                        "evidence": entry.get("evidence"),
+                        "provider_evidence": entry.get("provider_evidence"),
+                    }
+                    return {key: value for key, value in evidence.items() if value not in (None, "", {}, [])}
+    if not _classification_range_entries(gap_classification):
+        explicit = _classification_from_text(gap_classification)
+        if explicit is not None:
+            return {"classification": explicit, "reason_code": str(gap_classification)}
     inferred = _classification_from_text(source_reason)
     if inferred is not None:
-        return inferred
-    return UNKNOWN_GAP
+        return {"classification": inferred, "reason_code": str(source_reason)}
+    return {"classification": UNKNOWN_GAP}
 
 
 @dataclass(frozen=True)
@@ -99,16 +181,23 @@ class CandleGap:
     actual_interval_seconds: int
     missing_candle_estimate: int
     classification: str
+    reason_code: Optional[str] = None
+    evidence: Optional[str] = None
+    provider_evidence: Optional[Mapping[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "previous_ts": _iso_or_none(self.previous_epoch),
             "current_ts": _iso_or_none(self.current_epoch),
             "expected_interval_seconds": int(self.expected_interval_seconds),
             "actual_interval_seconds": int(self.actual_interval_seconds),
             "missing_candle_estimate": int(self.missing_candle_estimate),
             "classification": str(self.classification),
+            "reason_code": self.reason_code,
+            "evidence": self.evidence,
+            "provider_evidence": dict(self.provider_evidence or {}),
         }
+        return {key: value for key, value in payload.items() if value not in (None, "", {}, [])}
 
 
 @dataclass(frozen=True)
@@ -153,6 +242,7 @@ class CandleContinuitySummary:
             "out_of_order_count": self.out_of_order_count,
             "missing_ohlcv_count": self.missing_ohlcv_count,
             "gap_count_by_type": gap_count_by_type,
+            "gaps": [gap.to_dict() for gap in self.gaps],
             "final_status": self.final_status,
         }
         return {key: value for key, value in payload.items() if value is not None}
@@ -228,7 +318,14 @@ def summarize_candle_continuity(
         if delta_seconds <= expected_interval:
             continue
         gap_missing = max(int(math.floor(delta_seconds / expected_interval)) - 1, 1)
-        classification = _classify_gap(source_reason=source_reason, gap_classification=gap_classification)
+        gap_start_epoch = int(previous_epoch) + int(expected_interval)
+        gap_evidence = _classify_gap_evidence(
+            source_reason=source_reason,
+            gap_classification=gap_classification,
+            gap_start_epoch=gap_start_epoch,
+            gap_end_epoch=int(current_epoch),
+        )
+        classification = str(gap_evidence.get("classification") or UNKNOWN_GAP)
         gaps.append(
             CandleGap(
                 previous_epoch=int(previous_epoch),
@@ -237,6 +334,13 @@ def summarize_candle_continuity(
                 actual_interval_seconds=int(delta_seconds),
                 missing_candle_estimate=int(gap_missing),
                 classification=classification,
+                reason_code=str(gap_evidence.get("reason_code")) if gap_evidence.get("reason_code") else None,
+                evidence=str(gap_evidence.get("evidence")) if gap_evidence.get("evidence") else None,
+                provider_evidence=(
+                    gap_evidence.get("provider_evidence")
+                    if isinstance(gap_evidence.get("provider_evidence"), Mapping)
+                    else None
+                ),
             )
         )
         gap_count_by_type[classification] += 1
@@ -257,7 +361,7 @@ def summarize_candle_continuity(
     detected_gap_count = len(gaps)
     defect_gap_count = sum(
         int(gap_count_by_type.get(gap_type, 0))
-        for gap_type in (PROVIDER_MISSING_DATA, INGESTION_FAILURE, UNKNOWN_GAP)
+        for gap_type in (PROVIDER_MISSING_DATA, INGESTION_FAILURE, RUNTIME_MISSING, PROJECTION_MISSING, UNKNOWN_GAP)
     )
     data_defect_count = duplicate_count + out_of_order_count + missing_ohlcv_count
     if defect_gap_count > 0 or data_defect_count > 0:
@@ -295,6 +399,7 @@ class CandleContinuityAccumulator:
         self._entries: list[Any] = []
         self._source_reasons: set[str] = set()
         self._gap_classifications: set[str] = set()
+        self._gap_classification_ranges: list[Mapping[str, Any]] = []
 
     def add(
         self,
@@ -309,14 +414,20 @@ class CandleContinuityAccumulator:
         if source_reason:
             self._source_reasons.add(str(source_reason).strip().lower())
         if gap_classification:
-            classification = _classification_from_text(gap_classification)
-            if classification:
-                self._gap_classifications.add(classification)
+            range_entries = _classification_range_entries(gap_classification)
+            if range_entries:
+                self._gap_classification_ranges.extend(range_entries)
+            else:
+                classification = _classification_from_text(gap_classification)
+                if classification:
+                    self._gap_classifications.add(classification)
         self._entries.extend(list(entries or []))
 
     def summary(self) -> CandleContinuitySummary:
-        classification = None
-        if len(self._gap_classifications) == 1:
+        classification: Any = None
+        if self._gap_classification_ranges:
+            classification = tuple(self._gap_classification_ranges)
+        elif len(self._gap_classifications) == 1:
             classification = next(iter(self._gap_classifications))
         source_reason = None
         if len(self._source_reasons) == 1:
@@ -336,7 +447,9 @@ __all__ = [
     "EXPECTED_SESSION_GAP",
     "GAP_CLASSIFICATION_TYPES",
     "INGESTION_FAILURE",
+    "PROJECTION_MISSING",
     "PROVIDER_MISSING_DATA",
+    "RUNTIME_MISSING",
     "UNKNOWN_GAP",
     "expected_interval_seconds",
     "summarize_candle_continuity",
