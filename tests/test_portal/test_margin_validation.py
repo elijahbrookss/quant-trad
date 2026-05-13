@@ -29,6 +29,7 @@ from engines.bot_runtime.core.margin import (
     extract_margin_rates,
     resolve_instrument_type,
     create_margin_calculator,
+    calculate_margin_requirement,
     calculate_max_qty_by_margin,
     InstrumentType,
 )
@@ -36,6 +37,7 @@ from engines.bot_runtime.core.wallet import (
     WalletLedger,
     WalletState,
     wallet_can_apply,
+    wallet_required_reservation_details,
 )
 
 
@@ -794,6 +796,71 @@ class TestMaxQtyByMargin:
 
         reconstructed_max_qty = result.available_collateral / result.cost_per_contract
         assert result.max_qty == pytest.approx(reconstructed_max_qty, rel=1e-6)
+
+    def test_margin_requirement_object_feeds_sizing_validation_and_reservation(self):
+        """The same requirement shape should explain sizing, rejects, and reservations."""
+        requirement = calculate_margin_requirement(
+            notional=110660.0 * 0.01,
+            entry_fee=110660.0 * 0.01 * 0.0006,
+            estimated_exit_fee=110660.0 * 0.01 * 0.0006,
+            side="sell",
+            direction="short",
+            quantity=1.0,
+            price=110660.0,
+            contract_size=0.01,
+            instrument=COINBASE_FUTURE_INSTRUMENT,
+            margin_session=MarginSessionType.INTRADAY,
+            safety_multiplier=1.05,
+        )
+        sizing = calculate_max_qty_by_margin(
+            available_collateral=500.0,
+            price=110660.0,
+            contract_size=0.01,
+            direction="short",
+            instrument=COINBASE_FUTURE_INSTRUMENT,
+            fee_rate=0.0006,
+            safety_multiplier=1.05,
+            margin_session=MarginSessionType.INTRADAY,
+        )
+        _currency, reserved, reservation = wallet_required_reservation_details(
+            side="sell",
+            base_currency="BTC",
+            quote_currency="USD",
+            qty=1.0,
+            notional=110660.0 * 0.01,
+            fee=110660.0 * 0.01 * 0.0006,
+            short_requires_borrow=False,
+            instrument=COINBASE_FUTURE_INSTRUMENT,
+            margin_session=MarginSessionType.INTRADAY,
+        )
+
+        assert sizing.cost_per_contract == pytest.approx(requirement.total_required)
+        assert reserved == pytest.approx(requirement.total_required)
+        assert reservation["collateral_reserved"] == pytest.approx(requirement.collateral_to_lock)
+        assert reservation["estimated_entry_fee"] == pytest.approx(requirement.estimated_entry_fee)
+        assert reservation["estimated_exit_fee"] == pytest.approx(requirement.estimated_exit_fee)
+        assert reservation["fee_buffer"] == pytest.approx(requirement.fee_buffer)
+
+        constrained_state = WalletState(
+            balances={"USD": 100.0},
+            locked_margin={},
+            free_collateral={"USD": 100.0},
+        )
+        allowed, reason, payload = wallet_can_apply(
+            state=constrained_state,
+            side="sell",
+            base_currency="BTC",
+            quote_currency="USD",
+            qty=1.0,
+            notional=110660.0 * 0.01,
+            fee=110660.0 * 0.01 * 0.0006,
+            short_requires_borrow=False,
+            instrument=COINBASE_FUTURE_INSTRUMENT,
+            margin_session=MarginSessionType.INTRADAY,
+        )
+        assert allowed is False
+        assert reason == "WALLET_INSUFFICIENT_MARGIN"
+        assert payload["margin_requirement"]["total_required_collateral"] == pytest.approx(requirement.total_required)
 
 
 class TestQtyRoundingAfterMarginCap:

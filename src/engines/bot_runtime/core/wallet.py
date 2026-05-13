@@ -9,15 +9,42 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .execution_profile import SeriesExecutionProfile
 from .margin import (
     MarginRequirement,
     MarginSessionType,
+    calculate_margin_requirement,
     create_margin_calculator,
 )
 from .runtime_events import RuntimeEvent, RuntimeEventName
+
+WALLET_PROJECTION_EPSILON = 1e-9
+WALLET_LEDGER_EVENT_NAMES = frozenset(
+    {
+        "WALLET_INITIALIZED",
+        "MARGIN_RESERVED",
+        "MARGIN_REJECTED",
+        "MARGIN_RELEASED",
+        "FEE_APPLIED",
+        "REALIZED_PNL_APPLIED",
+        "POSITION_OPENED",
+        "POSITION_CLOSED",
+        "EQUITY_UPDATED",
+    }
+)
+WALLET_LEDGER_EVENT_ORDER = {
+    "WALLET_INITIALIZED": 0,
+    "MARGIN_RESERVED": 10,
+    "MARGIN_REJECTED": 10,
+    "MARGIN_RELEASED": 10,
+    "FEE_APPLIED": 20,
+    "REALIZED_PNL_APPLIED": 30,
+    "POSITION_OPENED": 40,
+    "POSITION_CLOSED": 40,
+    "EQUITY_UPDATED": 50,
+}
 
 
 @dataclass(frozen=True)
@@ -280,6 +307,98 @@ def _resolve_margin_model(
     return calculator, calc_type, instrument_type
 
 
+def _execution_profile_instrument_type(execution_profile: Optional[SeriesExecutionProfile]) -> Optional[str]:
+    if execution_profile is None:
+        return None
+    return execution_profile.instrument.instrument_type
+
+
+def _wallet_requirement_payload(
+    requirement: MarginRequirement,
+    *,
+    available_quote: Optional[float] = None,
+    quote: Optional[str] = None,
+    qty_raw: Optional[float] = None,
+    qty_final: Optional[float] = None,
+    margin_calc_type: Optional[str] = None,
+    margin_leg: Optional[str] = None,
+    margin_rate_source_path: Optional[str] = None,
+    instrument_type: Optional[str] = None,
+    shortfall: Optional[float] = None,
+    required_full_notional: Optional[float] = None,
+) -> Dict[str, Any]:
+    payload = {
+        "available": available_quote,
+        "available_collateral": available_quote,
+        "required": requirement.total_required,
+        "required_used": requirement.total_required,
+        "required_full_notional": required_full_notional,
+        "margin_total_required": requirement.total_required,
+        "currency": quote,
+        "notional": requirement.notional,
+        "fee": requirement.estimated_entry_fee,
+        "qty": requirement.quantity,
+        "qty_raw": qty_raw if qty_raw is not None else requirement.quantity,
+        "qty_final": qty_final if qty_final is not None else requirement.quantity,
+        "margin_rate": requirement.margin_rate,
+        "margin_method": requirement.calculation_method,
+        "margin_type": requirement.calculation_method,
+        "margin_session": requirement.session_type,
+        "session": requirement.session_type,
+        "margin_calc_type": margin_calc_type,
+        "margin_leg": margin_leg,
+        "margin_rate_source_path": margin_rate_source_path,
+        "instrument_type": instrument_type,
+        "required_margin": requirement.required_margin,
+        "initial_margin": requirement.initial_margin,
+        "collateral_to_lock": requirement.collateral_to_lock,
+        "estimated_entry_fee": requirement.estimated_entry_fee,
+        "estimated_exit_fee": requirement.estimated_exit_fee,
+        "fee_buffer": requirement.fee_buffer,
+        "safety_buffer": requirement.safety_buffer,
+        "total_required_collateral": requirement.total_required_collateral,
+        "margin_requirement": requirement.to_dict(),
+    }
+    if shortfall is not None:
+        payload["shortfall"] = shortfall
+    return payload
+
+
+def _requirement_for_wallet_order(
+    *,
+    side: str,
+    qty: float,
+    notional: float,
+    fee: float,
+    instrument: Optional[Mapping[str, Any]],
+    execution_profile: Optional[SeriesExecutionProfile],
+    margin_session: Optional[MarginSessionType],
+) -> Tuple[MarginRequirement, str, Optional[str]]:
+    calculator, calc_type, instrument_type = _resolve_margin_model(
+        instrument=instrument,
+        execution_profile=execution_profile,
+    )
+    del calculator
+    resolved_side = str(side or "").strip().lower()
+    direction = "long" if resolved_side in {"buy", "long"} else "short"
+    requirement = calculate_margin_requirement(
+        notional=notional,
+        entry_fee=fee,
+        side=resolved_side,
+        direction=direction,
+        quantity=qty,
+        price=0.0,
+        contract_size=1.0,
+        instrument=instrument,
+        execution_profile=execution_profile,
+        include_exit_fee_buffer=True,
+        safety_multiplier=1.05,
+        margin_session=margin_session,
+        apply_safety_to_full_notional=False,
+    )
+    return requirement, calc_type, instrument_type or _execution_profile_instrument_type(execution_profile)
+
+
 def _apply_margin_entry_lock(
     *,
     trade_id: Optional[str],
@@ -334,7 +453,7 @@ def _apply_margin_exit_release(
     margin_release = locked_total * release_ratio
     if explicit_release is not None:
         explicit = max(float(explicit_release), 0.0)
-        if explicit - locked_total > 1e-12:
+        if explicit - locked_total > WALLET_PROJECTION_EPSILON:
             raise ValueError(
                 f"wallet_projection_invariant: release exceeds reserve | trade_id={trade_key} release={explicit} reserve={locked_total}"
             )
@@ -352,11 +471,11 @@ def _apply_margin_exit_release(
         }
     if currency:
         next_locked = locked_margin.get(currency, 0.0) - margin_release
-        if next_locked < -1e-12:
+        if next_locked < -WALLET_PROJECTION_EPSILON:
             raise ValueError(
                 f"wallet_projection_invariant: locked margin negative | currency={currency} value={next_locked}"
             )
-        if next_locked <= 1e-12:
+        if abs(next_locked) <= WALLET_PROJECTION_EPSILON:
             locked_margin.pop(currency, None)
         else:
             locked_margin[currency] = next_locked
@@ -381,7 +500,13 @@ def _wallet_projection_event_id(event: Any) -> Optional[str]:
 
 def _normalize_wallet_projection_event(event: Any) -> Tuple[Optional[str], Dict[str, Any]]:
     if isinstance(event, WalletEvent):
-        return str(event.event_type or ""), dict(event.payload or {})
+        raw_name = str(event.event_type or "").strip()
+        payload = dict(event.payload or {})
+        if raw_name in {RuntimeEventName.WALLET_INITIALIZED.value, "INITIALIZE"}:
+            return "INITIALIZE", payload
+        if raw_name == RuntimeEventName.WALLET_DEPOSITED.value:
+            return "DEPOSIT_DELTA", payload
+        return raw_name, payload
     if isinstance(event, RuntimeEvent):
         payload = dict(event.context.to_dict())
         name = event.event_name
@@ -414,10 +539,80 @@ def _normalize_wallet_projection_event(event: Any) -> Tuple[Optional[str], Dict[
             return "ENTRY_FILL", payload
         if raw_name in {RuntimeEventName.EXIT_FILLED.value, "EXIT_FILL"}:
             return "EXIT_FILL", payload
+        if raw_name in WALLET_LEDGER_EVENT_NAMES:
+            return raw_name, payload
         if raw_name in {"TRADE_FILL", "REJECTED"}:
             return raw_name, payload
         return None, payload
     return None, {}
+
+
+def _wallet_ledger_currency(payload: Mapping[str, Any]) -> str:
+    for key in ("currency", "quote_currency", "asset"):
+        value = str(payload.get(key) or "").strip().upper()
+        if value:
+            return value
+    margin_requirement = payload.get("margin_requirement")
+    if isinstance(margin_requirement, Mapping):
+        value = str(margin_requirement.get("currency") or "").strip().upper()
+        if value:
+            return value
+    wallet_delta = payload.get("wallet_delta")
+    if isinstance(wallet_delta, Mapping):
+        value = str(wallet_delta.get("currency") or "").strip().upper()
+        if value:
+            return value
+    return "USD"
+
+
+def _wallet_ledger_number(payload: Mapping[str, Any], key: str, default: float = 0.0) -> float:
+    value = payload.get(key)
+    if value in (None, ""):
+        return float(default)
+    return _coerce_float(value, default)
+
+
+def _wallet_ledger_balance_delta(payload: Mapping[str, Any]) -> float:
+    before = payload.get("balance_before")
+    after = payload.get("balance_after")
+    if before not in (None, "") and after not in (None, ""):
+        return _coerce_float(after, 0.0) - _coerce_float(before, 0.0)
+    if payload.get("balance_delta") not in (None, ""):
+        return _coerce_float(payload.get("balance_delta"), 0.0)
+    return 0.0
+
+
+def _wallet_ledger_balances(value: Any) -> Dict[str, float]:
+    if not isinstance(value, Mapping):
+        return {}
+    balances = value.get("balances") if "balances" in value else value
+    if not isinstance(balances, Mapping):
+        return {}
+    normalized: Dict[str, float] = {}
+    for currency, amount in balances.items():
+        code = str(currency or "").strip().upper()
+        if not code or amount in (None, ""):
+            continue
+        normalized[code] = _coerce_float(amount, 0.0)
+    return normalized
+
+
+def _wallet_initial_balances(payload: Mapping[str, Any]) -> Dict[str, float]:
+    for candidate in (
+        payload.get("balances"),
+        payload.get("wallet_after"),
+        payload.get("wallet_snapshot"),
+        payload.get("wallet_before"),
+    ):
+        balances = _wallet_ledger_balances(candidate)
+        if balances:
+            return balances
+    balance_after = payload.get("balance_after")
+    if balance_after not in (None, ""):
+        return {_wallet_ledger_currency(payload): _coerce_float(balance_after, 0.0)}
+    raise ValueError(
+        "wallet_projection_initialization_invalid: WALLET_INITIALIZED missing balances or balance_after"
+    )
 
 
 def _validate_wallet_state_invariants(
@@ -428,18 +623,18 @@ def _validate_wallet_state_invariants(
     margin_positions: Mapping[str, Mapping[str, Any]],
 ) -> None:
     for currency, value in locked_margin.items():
-        if float(value) < -1e-12:
+        if float(value) < -WALLET_PROJECTION_EPSILON:
             raise ValueError(
                 f"wallet_projection_invariant: locked margin negative | currency={currency} value={value}"
             )
     for trade_id, payload in margin_positions.items():
         open_qty = float(payload.get("open_qty") or 0.0)
         locked_value = float(payload.get("locked_margin") or 0.0)
-        if open_qty < -1e-12:
+        if open_qty < -WALLET_PROJECTION_EPSILON:
             raise ValueError(
                 f"wallet_projection_invariant: open qty negative | trade_id={trade_id} open_qty={open_qty}"
             )
-        if locked_value < -1e-12:
+        if locked_value < -WALLET_PROJECTION_EPSILON:
             raise ValueError(
                 f"wallet_projection_invariant: trade lock negative | trade_id={trade_id} locked_margin={locked_value}"
             )
@@ -459,6 +654,8 @@ def project_wallet(events: Iterable[Any]) -> WalletState:
     locked_margin: Dict[str, float] = {}
     margin_positions: Dict[str, Dict[str, float]] = {}
     seen_event_ids: set[str] = set()
+    initialized = False
+    mutated_after_initialization = False
     for event in events:
         event_id = _wallet_projection_event_id(event)
         if event_id:
@@ -469,22 +666,69 @@ def project_wallet(events: Iterable[Any]) -> WalletState:
         if not event_type:
             continue
         if event_type == "INITIALIZE":
-            balances = {
-                str(currency).upper(): float(amount)
-                for currency, amount in (payload.get("balances") or {}).items()
-            }
+            initial_balances = _wallet_initial_balances(payload)
+            if initialized:
+                if initial_balances != balances:
+                    raise ValueError(
+                        "wallet_projection_initialization_invalid: duplicate WALLET_INITIALIZED changed balances"
+                    )
+                if mutated_after_initialization or locked_margin or margin_positions:
+                    raise ValueError(
+                        "wallet_projection_initialization_invalid: duplicate WALLET_INITIALIZED after wallet activity"
+                    )
+                continue
+            balances = initial_balances
             locked_margin = {}
             margin_positions = {}
+            initialized = True
         elif event_type == "DEPOSIT":
             for currency, amount in (payload.get("balances") or {}).items():
                 code = str(currency).upper()
                 balances[code] = balances.get(code, 0.0) + float(amount)
+            mutated_after_initialization = True
         elif event_type == "DEPOSIT_DELTA":
             code = str(payload.get("asset") or "").upper()
             if not code:
                 continue
             amount = float(payload.get("amount") or 0.0)
             balances[code] = balances.get(code, 0.0) + amount
+            mutated_after_initialization = True
+        elif event_type == "MARGIN_RESERVED":
+            currency = _wallet_ledger_currency(payload)
+            margin_required = _wallet_ledger_number(
+                payload,
+                "margin_required",
+                _wallet_ledger_number(payload, "collateral_reserved", 0.0),
+            )
+            _apply_margin_entry_lock(
+                trade_id=str(payload.get("trade_id")) if payload.get("trade_id") else None,
+                quote_currency=currency,
+                qty=_wallet_ledger_number(payload, "qty", 0.0),
+                margin_locked=margin_required,
+                locked_margin=locked_margin,
+                margin_positions=margin_positions,
+            )
+            mutated_after_initialization = True
+        elif event_type == "MARGIN_RELEASED":
+            _apply_margin_exit_release(
+                trade_id=str(payload.get("trade_id")) if payload.get("trade_id") else None,
+                qty=_wallet_ledger_number(payload, "qty", 0.0),
+                explicit_release=_wallet_ledger_number(payload, "margin_required", 0.0),
+                locked_margin=locked_margin,
+                margin_positions=margin_positions,
+            )
+            mutated_after_initialization = True
+        elif event_type in {"FEE_APPLIED", "REALIZED_PNL_APPLIED"}:
+            currency = _wallet_ledger_currency(payload)
+            balances[currency] = balances.get(currency, 0.0) + _wallet_ledger_balance_delta(payload)
+            mutated_after_initialization = True
+        elif event_type in {
+            "MARGIN_REJECTED",
+            "POSITION_OPENED",
+            "POSITION_CLOSED",
+            "EQUITY_UPDATED",
+        }:
+            continue
         elif event_type in {"TRADE_FILL", "ENTRY_FILL", "EXIT_FILL"}:
             side = str(payload.get("side") or "").lower()
             base = str(payload.get("base_currency") or "").upper()
@@ -548,13 +792,14 @@ def project_wallet(events: Iterable[Any]) -> WalletState:
             elif side in {"sell", "short"}:
                 balances[base] = balances.get(base, 0.0) - qty
                 balances[quote] = balances.get(quote, 0.0) + notional - fee
+            mutated_after_initialization = True
         elif event_type == "REJECTED":
             continue
     free_collateral: Dict[str, float] = {}
     currencies = set(balances.keys()) | set(locked_margin.keys())
     for currency in currencies:
         free_value = balances.get(currency, 0.0) - locked_margin.get(currency, 0.0)
-        free_collateral[currency] = 0.0 if abs(free_value) <= 1e-12 else free_value
+        free_collateral[currency] = 0.0 if abs(free_value) <= WALLET_PROJECTION_EPSILON else free_value
     _validate_wallet_state_invariants(
         balances=balances,
         locked_margin=locked_margin,
@@ -573,6 +818,277 @@ def project_wallet_from_events(events: Iterable[RuntimeEvent | Mapping[str, Any]
     """Project wallet state from canonical runtime events."""
 
     return project_wallet(events)
+
+
+def _wallet_state_as_payload(state: WalletState) -> Dict[str, Any]:
+    return {
+        "balances": dict(getattr(state, "balances", {}) or {}),
+        "locked_margin": dict(getattr(state, "locked_margin", {}) or {}),
+        "free_collateral": dict(getattr(state, "free_collateral", {}) or {}),
+        "margin_positions": dict(getattr(state, "margin_positions", {}) or {}),
+    }
+
+
+def _wallet_event_context_for_validation(event: Any) -> Tuple[Optional[str], Dict[str, Any]]:
+    event_type, payload = _normalize_wallet_projection_event(event)
+    if event_type == "INITIALIZE":
+        event_type = "WALLET_INITIALIZED"
+    return event_type, dict(payload or {})
+
+
+def _wallet_validation_event_identity(event: Any, event_type: Optional[str], payload: Mapping[str, Any]) -> Dict[str, Any]:
+    run_seq: Any = payload.get("run_seq")
+    if run_seq in (None, "") and isinstance(event, Mapping):
+        run_seq = event.get("run_seq") or event.get("seq")
+        raw_payload = event.get("payload")
+        if run_seq in (None, "") and isinstance(raw_payload, Mapping):
+            run_seq = raw_payload.get("run_seq") or raw_payload.get("seq")
+    return {
+        "event_id": _wallet_projection_event_id(event),
+        "event_name": event_type,
+        "run_seq": run_seq,
+        "bar_time": payload.get("bar_time") or payload.get("known_at"),
+        "trade_id": payload.get("trade_id"),
+        "decision_id": payload.get("decision_id"),
+    }
+
+
+def _wallet_optional_int(value: Any) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _wallet_event_order_from_id(value: Any) -> Optional[int]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parts = text.split(":")
+    if len(parts) >= 2:
+        return _wallet_optional_int(parts[-2])
+    return None
+
+
+def _wallet_ledger_sort_key(index: int, event: RuntimeEvent | Mapping[str, Any]) -> Tuple[int, int, int, int]:
+    event_type, payload = _wallet_event_context_for_validation(event)
+    if event_type not in WALLET_LEDGER_EVENT_NAMES:
+        return (2, index, 0, index)
+    wallet_commit_seq = _wallet_optional_int(payload.get("wallet_commit_seq"))
+    if wallet_commit_seq is None:
+        raise ValueError(
+            "wallet_ledger_order_invalid: wallet_commit_seq is required "
+            f"| event_name={event_type} | event_id={_wallet_projection_event_id(event)}"
+        )
+    event_id = _wallet_projection_event_id(event)
+    wallet_event_order = int(WALLET_LEDGER_EVENT_ORDER.get(str(event_type or ""), 99))
+    for candidate in (
+        _wallet_optional_int(payload.get("wallet_event_order")),
+        _wallet_event_order_from_id(payload.get("wallet_event_id")),
+        _wallet_event_order_from_id(event_id),
+    ):
+        if candidate is not None:
+            wallet_event_order = candidate
+            break
+    return (0, wallet_commit_seq, wallet_event_order, index)
+
+
+def canonical_wallet_ledger_events(
+    events: Iterable[RuntimeEvent | Mapping[str, Any]],
+) -> List[RuntimeEvent | Mapping[str, Any]]:
+    """Return wallet ledger events in wallet commit order plus event-local wallet order."""
+
+    return [
+        event
+        for _key, event in sorted(
+            ((_wallet_ledger_sort_key(index, event), event) for index, event in enumerate(list(events))),
+            key=lambda item: item[0],
+        )
+    ]
+
+
+def _wallet_state_amount(state: WalletState, section: str, currency: str) -> Optional[float]:
+    values = getattr(state, section, None)
+    if not isinstance(values, Mapping):
+        return None
+    code = str(currency or "").strip().upper()
+    if not code or code not in values:
+        return 0.0 if section in {"locked_margin", "free_collateral"} else None
+    return _coerce_float(values.get(code), 0.0)
+
+
+def _wallet_snapshot_amount(value: Any, section: str, currency: str) -> Optional[float]:
+    if not isinstance(value, Mapping):
+        return None
+    values = value.get(section)
+    if not isinstance(values, Mapping):
+        return None
+    code = str(currency or "").strip().upper()
+    if not code:
+        return None
+    if code not in values:
+        return 0.0 if section in {"locked_margin", "free_collateral"} else None
+    return _coerce_float(values.get(code), 0.0)
+
+
+def _wallet_issue_event_summary(event: RuntimeEvent | Mapping[str, Any]) -> Dict[str, Any]:
+    event_type, payload = _wallet_event_context_for_validation(event)
+    return _wallet_validation_event_identity(event, event_type, payload) | {
+        "wallet_commit_seq": payload.get("wallet_commit_seq"),
+        "wallet_eval_seq": payload.get("wallet_eval_seq"),
+        "source_run_seq": payload.get("source_run_seq"),
+        "wallet_event_order": payload.get("wallet_event_order"),
+    }
+
+
+def _wallet_issue_prior_events(
+    events: Sequence[RuntimeEvent | Mapping[str, Any]],
+    index: int,
+    *,
+    limit: int = 5,
+) -> List[Dict[str, Any]]:
+    start = max(index - limit, 0)
+    return [_wallet_issue_event_summary(event) for event in events[start:index]]
+
+
+def _wallet_issue_same_bar_group(
+    events: Sequence[RuntimeEvent | Mapping[str, Any]],
+    index: int,
+    payload: Mapping[str, Any],
+) -> List[Dict[str, Any]]:
+    bar_time = str(payload.get("bar_time") or payload.get("known_at") or "").strip()
+    if not bar_time:
+        return []
+    group: List[Dict[str, Any]] = []
+    for event in events:
+        event_type, event_payload = _wallet_event_context_for_validation(event)
+        if event_type not in WALLET_LEDGER_EVENT_NAMES:
+            continue
+        event_bar = str(event_payload.get("bar_time") or event_payload.get("known_at") or "").strip()
+        if event_bar == bar_time:
+            group.append(_wallet_issue_event_summary(event))
+    return group[:25]
+
+
+def _wallet_first_state_issue(events: Iterable[RuntimeEvent | Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    prefix: List[RuntimeEvent | Mapping[str, Any]] = []
+    raw_events = list(events)
+    for event in raw_events:
+        event_type, payload = _wallet_event_context_for_validation(event)
+        if event_type not in WALLET_LEDGER_EVENT_NAMES:
+            continue
+        if _wallet_optional_int(payload.get("wallet_commit_seq")) is None:
+            return {
+                **_wallet_validation_event_identity(event, event_type, payload),
+                "code": "wallet_ledger_order_missing",
+                "reason": "missing_wallet_commit_seq",
+                "wallet_commit_seq": payload.get("wallet_commit_seq"),
+                "wallet_event_order": payload.get("wallet_event_order"),
+            }
+    ordered_events = canonical_wallet_ledger_events(raw_events)
+    for event_index, event in enumerate(ordered_events):
+        event_type, payload = _wallet_event_context_for_validation(event)
+        if event_type not in WALLET_LEDGER_EVENT_NAMES:
+            prefix.append(event)
+            continue
+        currency = _wallet_ledger_currency(payload)
+        identity = _wallet_validation_event_identity(event, event_type, payload)
+        wallet_after = payload.get("wallet_after") if isinstance(payload.get("wallet_after"), Mapping) else None
+        wallet_before = payload.get("wallet_before") if isinstance(payload.get("wallet_before"), Mapping) else None
+        if event_type == "WALLET_INITIALIZED":
+            if wallet_after is None:
+                return {
+                    **identity,
+                    "code": "wallet_ledger_state_malformed",
+                    "reason": "missing_wallet_after",
+                    "prior_wallet_events": _wallet_issue_prior_events(ordered_events, event_index),
+                    "same_bar_operation_group": _wallet_issue_same_bar_group(ordered_events, event_index, payload),
+                }
+        else:
+            missing = []
+            for key in ("balance_before", "balance_after"):
+                if payload.get(key) in (None, ""):
+                    missing.append(key)
+            if wallet_before is None:
+                missing.append("wallet_before")
+            if wallet_after is None:
+                missing.append("wallet_after")
+            if missing:
+                return {
+                    **identity,
+                    "code": "wallet_ledger_state_malformed",
+                    "reason": "missing_absolute_wallet_state",
+                    "missing_fields": missing,
+                    "prior_wallet_events": _wallet_issue_prior_events(ordered_events, event_index),
+                    "same_bar_operation_group": _wallet_issue_same_bar_group(ordered_events, event_index, payload),
+                }
+
+        before_state = project_wallet_from_events(prefix)
+        prefix.append(event)
+        after_state = project_wallet_from_events(prefix)
+        if wallet_before is not None and event_type != "WALLET_INITIALIZED":
+            expected_before = _wallet_state_amount(before_state, "balances", currency)
+            observed_before = _wallet_snapshot_amount(wallet_before, "balances", currency)
+            if expected_before is not None and observed_before is not None and abs(expected_before - observed_before) > 0.01:
+                return {
+                    **identity,
+                    "code": "wallet_ledger_state_mismatch",
+                    "reason": "wallet_before_balance_mismatch",
+                    "currency": currency,
+                    "persisted": observed_before,
+                    "replayed": expected_before,
+                    "prior_wallet_events": _wallet_issue_prior_events(ordered_events, event_index),
+                    "same_bar_operation_group": _wallet_issue_same_bar_group(ordered_events, event_index, payload),
+                }
+        if wallet_after is not None:
+            expected_after = _wallet_state_amount(after_state, "balances", currency)
+            observed_after = _wallet_snapshot_amount(wallet_after, "balances", currency)
+            scalar_after = payload.get("balance_after")
+            scalar_after_float = None if scalar_after in (None, "") else _coerce_float(scalar_after, 0.0)
+            if expected_after is not None and observed_after is not None and abs(expected_after - observed_after) > 0.01:
+                return {
+                    **identity,
+                    "code": "wallet_ledger_state_mismatch",
+                    "reason": "wallet_after_balance_mismatch",
+                    "currency": currency,
+                    "persisted": observed_after,
+                    "replayed": expected_after,
+                    "prior_wallet_events": _wallet_issue_prior_events(ordered_events, event_index),
+                    "same_bar_operation_group": _wallet_issue_same_bar_group(ordered_events, event_index, payload),
+                }
+            if expected_after is not None and scalar_after_float is not None and abs(expected_after - scalar_after_float) > 0.01:
+                return {
+                    **identity,
+                    "code": "wallet_ledger_state_mismatch",
+                    "reason": "balance_after_mismatch",
+                    "currency": currency,
+                    "persisted": scalar_after_float,
+                    "replayed": expected_after,
+                    "prior_wallet_events": _wallet_issue_prior_events(ordered_events, event_index),
+                    "same_bar_operation_group": _wallet_issue_same_bar_group(ordered_events, event_index, payload),
+                }
+    return None
+
+
+def first_wallet_ledger_state_issue(events: Iterable[RuntimeEvent | Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Return the first malformed or inconsistent absolute wallet ledger state."""
+
+    return _wallet_first_state_issue(list(events))
+
+
+def validate_wallet_ledger_state(events: Iterable[RuntimeEvent | Mapping[str, Any]]) -> None:
+    """Fail loudly if wallet ledger events are not replayable absolute state events."""
+
+    issue = first_wallet_ledger_state_issue(events)
+    if issue:
+        raise ValueError(
+            "wallet_ledger_state_invalid: "
+            f"{issue.get('code')} | reason={issue.get('reason')} | "
+            f"event_name={issue.get('event_name')} | run_seq={issue.get('run_seq')} | "
+            f"event_id={issue.get('event_id')}"
+        )
 
 
 def wallet_can_apply(
@@ -692,59 +1208,174 @@ def wallet_required_reservation(
     Returns:
         Tuple of (currency_code, amount_to_reserve).
     """
+    currency, amount, _details = wallet_required_reservation_details(
+        side=side,
+        base_currency=base_currency,
+        quote_currency=quote_currency,
+        qty=qty,
+        notional=notional,
+        fee=fee,
+        short_requires_borrow=short_requires_borrow,
+        instrument=instrument,
+        execution_profile=execution_profile,
+        margin_session=margin_session,
+    )
+    return currency, amount
+
+
+def wallet_required_reservation_details(
+    *,
+    side: str,
+    base_currency: str,
+    quote_currency: str,
+    qty: float,
+    notional: float,
+    fee: float,
+    short_requires_borrow: bool,
+    instrument: Optional[Mapping[str, Any]] = None,
+    execution_profile: Optional[SeriesExecutionProfile] = None,
+    margin_session: Optional[MarginSessionType] = None,
+) -> Tuple[str, float, Dict[str, Any]]:
+    """Resolve reservation hold plus its canonical requirement breakdown."""
 
     normalized_side = str(side or "").lower()
     base = str(base_currency or "").upper()
     quote = str(quote_currency or "").upper()
-    session = margin_session or MarginSessionType.OVERNIGHT
     required_full_long = float(notional) + float(fee)
     required_full_short = float(notional) + float(fee) * 2.0
 
     if normalized_side in {"buy", "long"}:
         required = required_full_long
+        details: Dict[str, Any] = {
+            "currency": quote,
+            "collateral_reserved": max(float(notional), 0.0),
+            "estimated_entry_fee": max(float(fee), 0.0),
+            "estimated_exit_fee": 0.0,
+            "fee_buffer": max(float(fee), 0.0),
+            "total_required_collateral": max(required, 0.0),
+        }
         if instrument is not None or execution_profile is not None:
             try:
-                calculator, calc_type, _ = _resolve_margin_model(
+                requirement, calc_type, _instrument_type = _requirement_for_wallet_order(
+                    side=normalized_side,
+                    qty=qty,
+                    notional=notional,
+                    fee=fee,
                     instrument=instrument,
                     execution_profile=execution_profile,
+                    margin_session=margin_session,
                 )
                 if calc_type == "margin":
-                    margin_req = calculator.calculate(
-                        notional=notional,
-                        fee=fee,
-                        direction="long",
-                        session=session,
-                    )
-                    required = float(margin_req.total_required)
+                    required = float(requirement.total_required)
+                    details = {
+                        **requirement.to_dict(),
+                        "currency": quote,
+                        "collateral_reserved": float(requirement.collateral_to_lock),
+                    }
             except ValueError:
                 # Let can_apply report instrument misconfiguration. Use conservative hold.
                 required = required_full_long
-        return quote, max(required, 0.0)
+        return quote, max(required, 0.0), details
 
     if short_requires_borrow:
-        return base, max(float(qty), 0.0)
+        return base, max(float(qty), 0.0), {
+            "currency": base,
+            "qty_reserved": max(float(qty), 0.0),
+            "total_required_collateral": max(float(qty), 0.0),
+        }
 
     if normalized_side in {"sell", "short"}:
         required = required_full_short
+        details = {
+            "currency": quote,
+            "collateral_reserved": max(float(notional), 0.0),
+            "estimated_entry_fee": max(float(fee), 0.0),
+            "estimated_exit_fee": max(float(fee), 0.0),
+            "fee_buffer": max(float(fee) * 2.0, 0.0),
+            "total_required_collateral": max(required, 0.0),
+        }
         if instrument is not None or execution_profile is not None:
             try:
-                calculator, calc_type, _ = _resolve_margin_model(
+                requirement, calc_type, _instrument_type = _requirement_for_wallet_order(
+                    side=normalized_side,
+                    qty=qty,
+                    notional=notional,
+                    fee=fee,
                     instrument=instrument,
                     execution_profile=execution_profile,
+                    margin_session=margin_session,
                 )
                 if calc_type == "margin":
-                    margin_req = calculator.calculate(
-                        notional=notional,
-                        fee=fee,
-                        direction="short",
-                        session=session,
-                    )
-                    required = float(margin_req.total_required)
+                    required = float(requirement.total_required)
+                    details = {
+                        **requirement.to_dict(),
+                        "currency": quote,
+                        "collateral_reserved": float(requirement.collateral_to_lock),
+                    }
             except ValueError:
                 required = required_full_short
-        return quote, max(required, 0.0)
+        return quote, max(required, 0.0), details
 
-    return quote, 0.0
+    return quote, 0.0, {"currency": quote, "total_required_collateral": 0.0}
+
+
+def wallet_can_apply_exit(
+    *,
+    state: WalletState,
+    trade_id: Optional[str],
+    qty: float,
+    quote_currency: str,
+) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+    """Validate a margin exit against the open margin position, not free collateral."""
+
+    close_qty = max(float(qty or 0.0), 0.0)
+    if close_qty <= 0.0:
+        return False, "WALLET_INVALID_EXIT_QTY", {"qty": qty}
+    trade_key = str(trade_id or "").strip()
+    if not trade_key:
+        return False, "WALLET_MARGIN_POSITION_MISSING", {"trade_id": trade_id, "qty": close_qty}
+    position = state.margin_positions.get(trade_key) if state.margin_positions else None
+    if not isinstance(position, Mapping):
+        return (
+            True,
+            None,
+            {
+                "trade_id": trade_key,
+                "qty": close_qty,
+                "margin_position_found": False,
+                "collateral_released": 0.0,
+            },
+        )
+    open_qty = max(_coerce_float(position.get("open_qty"), 0.0), 0.0)
+    locked = max(_coerce_float(position.get("locked_margin"), 0.0), 0.0)
+    currency = str(position.get("currency") or quote_currency or "").upper()
+    if close_qty - open_qty > WALLET_PROJECTION_EPSILON:
+        return (
+            False,
+            "WALLET_EXIT_QTY_EXCEEDS_OPEN_POSITION",
+            {
+                "trade_id": trade_key,
+                "qty": close_qty,
+                "open_qty": open_qty,
+                "locked_margin": locked,
+                "currency": currency,
+            },
+        )
+    release_ratio = min(close_qty / open_qty, 1.0) if open_qty > 0 else 0.0
+    collateral_released = min(locked * release_ratio, locked)
+    return (
+        True,
+        None,
+        {
+            "trade_id": trade_key,
+            "qty": close_qty,
+            "open_qty": open_qty,
+            "locked_margin": locked,
+            "currency": currency,
+            "margin_position_found": True,
+            "collateral_released": collateral_released,
+        },
+    )
 
 
 def _validate_short_cash_requirement(
@@ -771,15 +1402,14 @@ def _validate_short_cash_requirement(
     # If instrument provided, try margin-based calculation
     if instrument is not None or execution_profile is not None:
         try:
-            calculator, calc_type, instrument_type = _resolve_margin_model(
-                instrument=instrument,
-                execution_profile=execution_profile,
-            )
-            margin_req = calculator.calculate(
+            margin_req, calc_type, instrument_type = _requirement_for_wallet_order(
+                side="short",
+                qty=qty,
                 notional=notional,
                 fee=fee,
-                direction="short",
-                session=session,
+                instrument=instrument,
+                execution_profile=execution_profile,
+                margin_session=session,
             )
             margin_rate_source = _margin_rate_source_path(
                 instrument,
@@ -799,33 +1429,19 @@ def _validate_short_cash_requirement(
                 return (
                     False,
                     reason,
-                    {
-                        "available": available_quote,
-                        "available_collateral": available_quote,
-                        "required": required_used,
-                        "required_used": required_used,
-                        "required_full_notional": required_full_notional,
-                        "margin_total_required": margin_total_required,
-                        "currency": quote,
-                        "notional": notional,
-                        "fee": fee,
-                        "qty": qty,
-                        "qty_raw": qty_raw,
-                        "qty_final": qty_final,
-                        "margin_rate": margin_req.margin_rate,
-                        "margin_method": margin_req.calculation_method,
-                        "margin_type": margin_req.calculation_method,
-                        "margin_session": margin_req.session_type,
-                        "session": margin_req.session_type,
-                        "margin_calc_type": calc_type,
-                        "margin_leg": "short",
-                        "margin_rate_source_path": margin_rate_source,
-                        "instrument_type": instrument_type,
-                        "required_margin": margin_req.required_margin,
-                        "fee_buffer": margin_req.fee_buffer,
-                        "safety_buffer": margin_req.safety_buffer,
-                        "shortfall": shortfall,
-                    },
+                    _wallet_requirement_payload(
+                        margin_req,
+                        available_quote=available_quote,
+                        quote=quote,
+                        qty_raw=qty_raw,
+                        qty_final=qty_final,
+                        margin_calc_type=calc_type,
+                        margin_leg="short",
+                        margin_rate_source_path=margin_rate_source,
+                        instrument_type=instrument_type,
+                        shortfall=shortfall,
+                        required_full_notional=required_full_notional,
+                    ),
                 )
             return True, None, {}
 
@@ -854,8 +1470,7 @@ def _validate_short_cash_requirement(
                 },
             )
 
-    # Fallback: No instrument provided, use legacy spot-style calculation
-    # This maintains backward compatibility
+    # No instrument metadata means cash-settlement validation only.
     if available_quote + 1e-12 < required_full_notional:
         return (
             False,
@@ -899,16 +1514,19 @@ def _validate_long_cash_requirement(
 
     if instrument is not None or execution_profile is not None:
         try:
-            calculator, calc_type, instrument_type = _resolve_margin_model(
+            _calculator, calc_type, instrument_type = _resolve_margin_model(
                 instrument=instrument,
                 execution_profile=execution_profile,
             )
             if calc_type == "margin":
-                margin_req = calculator.calculate(
+                margin_req, _calc_type, instrument_type = _requirement_for_wallet_order(
+                    side="long",
+                    qty=qty,
                     notional=notional,
                     fee=fee,
-                    direction="long",
-                    session=session,
+                    instrument=instrument,
+                    execution_profile=execution_profile,
+                    margin_session=session,
                 )
                 margin_rate_source = _margin_rate_source_path(
                     instrument,
@@ -923,33 +1541,19 @@ def _validate_long_cash_requirement(
                     return (
                         False,
                         "WALLET_INSUFFICIENT_MARGIN",
-                        {
-                            "available": available_quote,
-                            "available_collateral": available_quote,
-                            "required": required_used,
-                            "required_used": required_used,
-                            "required_full_notional": required_full_notional,
-                            "margin_total_required": margin_total_required,
-                            "currency": quote,
-                            "notional": notional,
-                            "fee": fee,
-                            "qty": qty,
-                            "qty_raw": qty_raw,
-                            "qty_final": qty_final,
-                            "margin_rate": margin_req.margin_rate,
-                            "margin_method": margin_req.calculation_method,
-                            "margin_type": margin_req.calculation_method,
-                            "margin_session": margin_req.session_type,
-                            "session": margin_req.session_type,
-                            "margin_calc_type": calc_type,
-                            "margin_leg": "long",
-                            "margin_rate_source_path": margin_rate_source,
-                            "instrument_type": instrument_type,
-                            "required_margin": margin_req.required_margin,
-                            "fee_buffer": margin_req.fee_buffer,
-                            "safety_buffer": margin_req.safety_buffer,
-                            "shortfall": shortfall,
-                        },
+                        _wallet_requirement_payload(
+                            margin_req,
+                            available_quote=available_quote,
+                            quote=quote,
+                            qty_raw=qty_raw,
+                            qty_final=qty_final,
+                            margin_calc_type=calc_type,
+                            margin_leg="long",
+                            margin_rate_source_path=margin_rate_source,
+                            instrument_type=instrument_type,
+                            shortfall=shortfall,
+                            required_full_notional=required_full_notional,
+                        ),
                     )
                 return True, None, {}
 
@@ -1081,9 +1685,14 @@ __all__ = [
     "WalletLedger",
     "LockedWalletLedger",
     "WalletState",
+    "canonical_wallet_ledger_events",
     "project_wallet",
     "project_wallet_from_events",
+    "first_wallet_ledger_state_issue",
     "trace_wallet_balance",
+    "validate_wallet_ledger_state",
     "wallet_can_apply",
+    "wallet_can_apply_exit",
     "wallet_required_reservation",
+    "wallet_required_reservation_details",
 ]

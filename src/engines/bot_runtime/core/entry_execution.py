@@ -52,9 +52,10 @@ class EntryExecutionCoordinator:
         request = engine.build_entry_request(candle, direction)
         if not request.validation.ok:
             engine.last_rejection_reason = request.validation.rejection_reason
-            engine.last_rejection_detail = self._entry_rejection_detail(
+            engine.last_rejection_detail = self._finalize_rejection_detail(
                 request,
                 request.validation.rejection_detail,
+                request.validation.rejection_reason,
             )
             return None
 
@@ -79,9 +80,10 @@ class EntryExecutionCoordinator:
         )
         if rejection:
             engine.last_rejection_reason = rejection.reason
-            engine.last_rejection_detail = self._entry_rejection_detail(
+            engine.last_rejection_detail = self._finalize_rejection_detail(
                 request,
                 {"requested_qty": request.requested_qty, **(rejection.metadata or {})},
+                rejection.reason,
             )
             context = build_log_context(
                 symbol=engine.instrument.get("symbol"),
@@ -164,7 +166,11 @@ class EntryExecutionCoordinator:
         )
         if rejection:
             engine.last_rejection_reason = rejection.reason
-            engine.last_rejection_detail = self._entry_rejection_detail(request, rejection.metadata)
+            engine.last_rejection_detail = self._finalize_rejection_detail(
+                request,
+                rejection.metadata,
+                rejection.reason,
+            )
             context = build_log_context(
                 symbol=engine.instrument.get("symbol"),
                 reason=rejection.reason,
@@ -239,6 +245,18 @@ class EntryExecutionCoordinator:
             detail.setdefault("order_request_id", str(request.order_intent_id))
         return detail
 
+    def _finalize_rejection_detail(
+        self,
+        request: "EntryRequest",
+        metadata: Optional[dict],
+        reason: Optional[str],
+    ) -> dict:
+        detail = self._entry_rejection_detail(request, metadata)
+        finalizer = getattr(self._engine, "finalize_entry_rejection_detail", None)
+        if callable(finalizer):
+            return finalizer(request=request, detail=detail, reason=reason)
+        return detail
+
     def _apply_entry_fallback(
         self,
         candle: Candle,
@@ -255,6 +273,7 @@ class EntryExecutionCoordinator:
                 symbol=pending.intent.symbol,
                 order_type="market",
                 requested_price=float(candle.close),
+                contract_size=float(getattr(pending.intent, "contract_size", 1.0) or 1.0),
                 limit_params=None,
                 metadata=dict(pending.intent.metadata),
             )
@@ -268,7 +287,11 @@ class EntryExecutionCoordinator:
             )
             if rejection:
                 engine.last_rejection_reason = rejection.reason
-                engine.last_rejection_detail = self._entry_rejection_detail(pending.request, rejection.metadata)
+                engine.last_rejection_detail = self._finalize_rejection_detail(
+                    pending.request,
+                    rejection.metadata,
+                    rejection.reason,
+                )
                 context = build_log_context(
                     symbol=engine.instrument.get("symbol"),
                     reason=rejection.reason,

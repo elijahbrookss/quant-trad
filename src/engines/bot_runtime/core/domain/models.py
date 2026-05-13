@@ -115,7 +115,16 @@ class StrategySignal:
                 "strategy_signal_invalid: decision artifact missing bar_epoch "
                 f"decision_id={decision_id or '<missing>'} rule_id={rule_id or '<missing>'}"
             ) from None
-        intent = cls._normalize_intent(artifact.get("emitted_intent") or artifact.get("intent"))
+        decision_context = (
+            artifact.get("decision_context")
+            if isinstance(artifact.get("decision_context"), Mapping)
+            else {}
+        )
+        intent = cls._normalize_intent(
+            artifact.get("emitted_intent")
+            or artifact.get("intent")
+            or decision_context.get("intent")
+        )
         trigger = artifact.get("trigger") if isinstance(artifact.get("trigger"), Mapping) else {}
         return cls(
             epoch=epoch,
@@ -132,7 +141,7 @@ class StrategySignal:
             decision_id=decision_id or None,
             rule_id=rule_id or None,
             intent=intent,
-            event_key=cls._optional_text(trigger.get("event_key")),
+            event_key=cls._optional_text(decision_context.get("event_key") or trigger.get("event_key")),
         )
 
     @classmethod
@@ -154,6 +163,10 @@ class StrategySignal:
         artifact.setdefault("strategy_hash", context.get("strategy_hash"))
         artifact.setdefault("signal_id", context.get("signal_id"))
         artifact.setdefault("emitted_intent", context.get("intent"))
+        artifact.setdefault(
+            "decision_context",
+            {"event_key": context.get("event_key"), "intent": context.get("intent")},
+        )
         artifact.setdefault(
             "trigger",
             {"event_key": context.get("event_key")},
@@ -330,6 +343,9 @@ class EntryFill:
     fee_paid: float
     liquidity_role: Optional[str]
     fill_time: Optional[str]
+    fee_rate: float = 0.0
+    fee_source: Optional[str] = None
+    fee_version: Optional[str] = None
     raw: Optional[Dict[str, Any]] = None
 
 

@@ -28,6 +28,7 @@ class ExecutionIntent:
     symbol: str
     order_type: str
     requested_price: float
+    contract_size: float = 1.0
     limit_params: Optional[LimitParams] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 

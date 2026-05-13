@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Any, Dict, Mapping, Optional
 
 from core.events import EventEnvelope, normalize_utc_datetime, parse_optional_datetime, serialize_value
+from engines.bot_runtime.core.series_identity import normalize_series_key
 
 
 SCHEMA_VERSION = 2
@@ -37,6 +38,7 @@ class RuntimeEventName(str, Enum):
     DECISION_REJECTED = "DECISION_REJECTED"
     ENTRY_FILLED = "ENTRY_FILLED"
     EXIT_FILLED = "EXIT_FILLED"
+    EXECUTION_INTRABAR_FALLBACK_PESSIMISTIC = "execution_intrabar_fallback_pessimistic"
     WALLET_INITIALIZED = "WALLET_INITIALIZED"
     WALLET_DEPOSITED = "WALLET_DEPOSITED"
     RUNTIME_ERROR = "RUNTIME_ERROR"
@@ -59,6 +61,9 @@ class ReasonCode(str, Enum):
     EXEC_EXIT_TARGET = "EXEC_EXIT_TARGET"
     EXEC_EXIT_STOP = "EXEC_EXIT_STOP"
     EXEC_EXIT_CLOSE = "EXEC_EXIT_CLOSE"
+    EXECUTION_INTRABAR_FALLBACK = "EXECUTION_INTRABAR_FALLBACK"
+    BACKTEST_END = "BACKTEST_END"
+    TERMINAL_LIQUIDATION = "TERMINAL_LIQUIDATION"
     RUNTIME_EXCEPTION = "RUNTIME_EXCEPTION"
     RUNTIME_PARENT_MISSING = "RUNTIME_PARENT_MISSING"
     SYMBOL_DEGRADED = "SYMBOL_DEGRADED"
@@ -72,6 +77,7 @@ _EVENT_DEFAULT_CATEGORY: Dict[RuntimeEventName, RuntimeEventCategory] = {
     RuntimeEventName.DECISION_REJECTED: RuntimeEventCategory.DECISION,
     RuntimeEventName.ENTRY_FILLED: RuntimeEventCategory.EXECUTION,
     RuntimeEventName.EXIT_FILLED: RuntimeEventCategory.OUTCOME,
+    RuntimeEventName.EXECUTION_INTRABAR_FALLBACK_PESSIMISTIC: RuntimeEventCategory.EXECUTION,
     RuntimeEventName.WALLET_INITIALIZED: RuntimeEventCategory.WALLET,
     RuntimeEventName.WALLET_DEPOSITED: RuntimeEventCategory.WALLET,
     RuntimeEventName.RUNTIME_ERROR: RuntimeEventCategory.RUNTIME,
@@ -243,6 +249,8 @@ class RuntimeEventContextBase:
     run_id: str
     bot_id: str
     strategy_id: str
+    series_key: Optional[str] = None
+    instrument_id: Optional[str] = None
     symbol: Optional[str]
     timeframe: Optional[str]
     bar_ts: Optional[datetime]
@@ -256,6 +264,8 @@ class RuntimeEventContextBase:
             raise ValueError("context.bot_id is required")
         if not str(self.strategy_id).strip():
             raise ValueError("context.strategy_id is required")
+        object.__setattr__(self, "series_key", normalize_series_key(self.series_key) or None)
+        object.__setattr__(self, "instrument_id", _optional_text(self.instrument_id))
         object.__setattr__(self, "symbol", _optional_text(self.symbol))
         object.__setattr__(self, "timeframe", _optional_text(self.timeframe))
         if self.bar_ts is not None:
@@ -287,6 +297,8 @@ class SignalEmittedContext(RuntimeEventContextBase):
         super().__post_init__()
         if not isinstance(self.bar, RuntimeBar):
             raise ValueError("context.bar is required")
+        if self.series_key is None:
+            raise ValueError("context.series_key is required for SIGNAL_EMITTED")
         if not str(self.signal_type).strip():
             raise ValueError("context.signal_type is required")
         if not str(self.direction).strip():
@@ -326,6 +338,11 @@ class DecisionAcceptedContext(RuntimeEventContextBase):
     rule_id: Optional[str] = None
     intent: Optional[str] = None
     event_key: Optional[str] = None
+    wallet_snapshot: Mapping[str, Any] | None = None
+    margin_requirement: Mapping[str, Any] | None = None
+    wallet_commit_seq: Optional[int] = None
+    wallet_eval_seq: Optional[int] = None
+    position_commit_seq: Optional[int] = None
     event_subtype: str = "signal_accepted"
     category: RuntimeEventCategory = RuntimeEventCategory.DECISION
     reason_code: Optional[ReasonCode] = ReasonCode.DECISION_ACCEPTED
@@ -351,6 +368,14 @@ class DecisionAcceptedContext(RuntimeEventContextBase):
         object.__setattr__(self, "rule_id", _optional_text(self.rule_id))
         object.__setattr__(self, "intent", _optional_text(self.intent))
         object.__setattr__(self, "event_key", _optional_text(self.event_key))
+        object.__setattr__(self, "wallet_snapshot", _copy_mapping(self.wallet_snapshot))
+        object.__setattr__(self, "margin_requirement", _copy_mapping(self.margin_requirement))
+        if self.wallet_commit_seq is not None:
+            object.__setattr__(self, "wallet_commit_seq", int(self.wallet_commit_seq))
+        if self.wallet_eval_seq is not None:
+            object.__setattr__(self, "wallet_eval_seq", int(self.wallet_eval_seq))
+        if self.position_commit_seq is not None:
+            object.__setattr__(self, "position_commit_seq", int(self.position_commit_seq))
         if self.signal_price is not None:
             object.__setattr__(self, "signal_price", float(self.signal_price))
 
@@ -376,6 +401,10 @@ class DecisionRejectedContext(RuntimeEventContextBase):
     intent: Optional[str] = None
     event_key: Optional[str] = None
     rejection_artifact: Mapping[str, Any] | None = None
+    wallet_snapshot: Mapping[str, Any] | None = None
+    margin_requirement: Mapping[str, Any] | None = None
+    wallet_commit_seq: Optional[int] = None
+    wallet_eval_seq: Optional[int] = None
     event_subtype: str = "signal_rejected"
     category: RuntimeEventCategory = RuntimeEventCategory.DECISION
     reason_code: Optional[ReasonCode] = None
@@ -408,6 +437,12 @@ class DecisionRejectedContext(RuntimeEventContextBase):
         object.__setattr__(self, "rule_id", _optional_text(self.rule_id))
         object.__setattr__(self, "intent", _optional_text(self.intent))
         object.__setattr__(self, "event_key", _optional_text(self.event_key))
+        object.__setattr__(self, "wallet_snapshot", _copy_mapping(self.wallet_snapshot))
+        object.__setattr__(self, "margin_requirement", _copy_mapping(self.margin_requirement))
+        if self.wallet_commit_seq is not None:
+            object.__setattr__(self, "wallet_commit_seq", int(self.wallet_commit_seq))
+        if self.wallet_eval_seq is not None:
+            object.__setattr__(self, "wallet_eval_seq", int(self.wallet_eval_seq))
         if self.signal_price is not None:
             object.__setattr__(self, "signal_price", float(self.signal_price))
         object.__setattr__(self, "rejection_artifact", _copy_mapping(self.rejection_artifact))
@@ -426,11 +461,19 @@ class EntryFilledContext(RuntimeEventContextBase):
     wallet_delta: WalletDelta
     direction: Optional[str] = None
     fee_paid: Optional[float] = None
+    fee_rate: Optional[float] = None
+    fee_type: Optional[str] = None
+    fee_source: Optional[str] = None
+    fee_version: Optional[str] = None
     base_currency: Optional[str] = None
     quote_currency: Optional[str] = None
     accounting_mode: Optional[str] = None
     reservation_id: Optional[str] = None
     required_delta: Mapping[str, Any] | None = None
+    wallet_before: Mapping[str, Any] | None = None
+    wallet_commit_seq: Optional[int] = None
+    wallet_eval_seq: Optional[int] = None
+    position_commit_seq: Optional[int] = None
     event_subtype: str = "entry"
     category: RuntimeEventCategory = RuntimeEventCategory.EXECUTION
     reason_code: Optional[ReasonCode] = ReasonCode.EXEC_ENTRY_FILLED
@@ -450,10 +493,22 @@ class EntryFilledContext(RuntimeEventContextBase):
         object.__setattr__(self, "notional", float(self.notional))
         if self.fee_paid is not None:
             object.__setattr__(self, "fee_paid", float(self.fee_paid))
+        if self.fee_rate is not None:
+            object.__setattr__(self, "fee_rate", float(self.fee_rate))
+        object.__setattr__(self, "fee_type", _optional_text(self.fee_type) or "taker")
+        object.__setattr__(self, "fee_source", _optional_text(self.fee_source) or "template_or_instrument")
+        object.__setattr__(self, "fee_version", _optional_text(self.fee_version))
         reservation_id = self.reservation_id
         if reservation_id is not None and not str(reservation_id).strip():
             raise ValueError("context.reservation_id must be non-empty when provided")
         object.__setattr__(self, "required_delta", _copy_mapping(self.required_delta))
+        object.__setattr__(self, "wallet_before", _copy_mapping(self.wallet_before))
+        if self.wallet_commit_seq is not None:
+            object.__setattr__(self, "wallet_commit_seq", int(self.wallet_commit_seq))
+        if self.wallet_eval_seq is not None:
+            object.__setattr__(self, "wallet_eval_seq", int(self.wallet_eval_seq))
+        if self.position_commit_seq is not None:
+            object.__setattr__(self, "position_commit_seq", int(self.position_commit_seq))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -468,6 +523,10 @@ class ExitFilledContext(RuntimeEventContextBase):
     wallet_delta: WalletDelta
     direction: Optional[str] = None
     fee_paid: Optional[float] = None
+    fee_rate: Optional[float] = None
+    fee_type: Optional[str] = None
+    fee_source: Optional[str] = None
+    fee_version: Optional[str] = None
     realized_pnl: Optional[float] = None
     base_currency: Optional[str] = None
     quote_currency: Optional[str] = None
@@ -476,6 +535,10 @@ class ExitFilledContext(RuntimeEventContextBase):
     trade_net_pnl: Optional[float] = None
     reservation_id: Optional[str] = None
     required_delta: Mapping[str, Any] | None = None
+    wallet_before: Mapping[str, Any] | None = None
+    wallet_commit_seq: Optional[int] = None
+    wallet_eval_seq: Optional[int] = None
+    position_commit_seq: Optional[int] = None
     event_subtype: str = "close"
     category: RuntimeEventCategory = RuntimeEventCategory.OUTCOME
     reason_code: Optional[ReasonCode] = ReasonCode.EXEC_EXIT_CLOSE
@@ -497,6 +560,11 @@ class ExitFilledContext(RuntimeEventContextBase):
         object.__setattr__(self, "notional", float(self.notional))
         if self.fee_paid is not None:
             object.__setattr__(self, "fee_paid", float(self.fee_paid))
+        if self.fee_rate is not None:
+            object.__setattr__(self, "fee_rate", float(self.fee_rate))
+        object.__setattr__(self, "fee_type", _optional_text(self.fee_type) or "taker")
+        object.__setattr__(self, "fee_source", _optional_text(self.fee_source) or "template_or_instrument")
+        object.__setattr__(self, "fee_version", _optional_text(self.fee_version))
         if self.realized_pnl is not None:
             object.__setattr__(self, "realized_pnl", float(self.realized_pnl))
         if self.event_impact_pnl is not None:
@@ -507,12 +575,22 @@ class ExitFilledContext(RuntimeEventContextBase):
         if reservation_id is not None and not str(reservation_id).strip():
             raise ValueError("context.reservation_id must be non-empty when provided")
         object.__setattr__(self, "required_delta", _copy_mapping(self.required_delta))
+        object.__setattr__(self, "wallet_before", _copy_mapping(self.wallet_before))
+        if self.wallet_commit_seq is not None:
+            object.__setattr__(self, "wallet_commit_seq", int(self.wallet_commit_seq))
+        if self.wallet_eval_seq is not None:
+            object.__setattr__(self, "wallet_eval_seq", int(self.wallet_eval_seq))
+        if self.position_commit_seq is not None:
+            object.__setattr__(self, "position_commit_seq", int(self.position_commit_seq))
 
 
 @dataclass(frozen=True, kw_only=True)
 class WalletInitializedContext(RuntimeEventContextBase):
     balances: Mapping[str, float]
     source: str
+    wallet_commit_seq: int = 0
+    wallet_commit_seq_status: str = "runtime_assigned"
+    wallet_eval_seq: int = 0
     category: RuntimeEventCategory = RuntimeEventCategory.WALLET
     reason_code: Optional[ReasonCode] = None
 
@@ -532,6 +610,13 @@ class WalletInitializedContext(RuntimeEventContextBase):
                 raise ValueError("context.balances values must be >= 0")
             normalized[code] = float_amount
         object.__setattr__(self, "balances", normalized)
+        object.__setattr__(self, "wallet_commit_seq", int(self.wallet_commit_seq))
+        object.__setattr__(
+            self,
+            "wallet_commit_seq_status",
+            _optional_text(self.wallet_commit_seq_status) or "runtime_assigned",
+        )
+        object.__setattr__(self, "wallet_eval_seq", int(self.wallet_eval_seq))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -582,6 +667,40 @@ class RuntimeStatusContext(RuntimeEventContextBase):
             raise ValueError("context.message is required")
 
 
+@dataclass(frozen=True, kw_only=True)
+class ExecutionIntrabarFallbackContext(RuntimeEventContextBase):
+    message: str
+    reason: str
+    execution_mode: str
+    fallback_policy: str
+    raw_reason: Optional[str] = None
+    expected_intrabar_count: Optional[int] = None
+    actual_intrabar_count: Optional[int] = None
+    event_subtype: str = "intrabar_fallback"
+    category: RuntimeEventCategory = RuntimeEventCategory.EXECUTION
+    reason_code: Optional[ReasonCode] = ReasonCode.EXECUTION_INTRABAR_FALLBACK
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not str(self.message).strip():
+            raise ValueError("context.message is required")
+        reason = _require_str({"reason": self.reason}, "reason")
+        if reason not in {
+            "missing_1m_data",
+            "incomplete_1m_sequence",
+            "ambiguous_1m_candle",
+        }:
+            raise ValueError("context.reason must be a supported intrabar fallback reason")
+        object.__setattr__(self, "reason", reason)
+        object.__setattr__(self, "execution_mode", _optional_text(self.execution_mode) or "full")
+        object.__setattr__(self, "fallback_policy", _optional_text(self.fallback_policy) or "pessimistic_stop")
+        object.__setattr__(self, "raw_reason", _optional_text(self.raw_reason))
+        if self.expected_intrabar_count is not None:
+            object.__setattr__(self, "expected_intrabar_count", int(self.expected_intrabar_count))
+        if self.actual_intrabar_count is not None:
+            object.__setattr__(self, "actual_intrabar_count", int(self.actual_intrabar_count))
+
+
 RuntimeEventContext = (
     SignalEmittedContext
     | DecisionAcceptedContext
@@ -592,6 +711,7 @@ RuntimeEventContext = (
     | WalletDepositedContext
     | RuntimeErrorContext
     | RuntimeStatusContext
+    | ExecutionIntrabarFallbackContext
 )
 
 
@@ -606,6 +726,7 @@ _CONTEXT_TYPE_BY_EVENT: Dict[RuntimeEventName, type[RuntimeEventContextBase]] = 
     RuntimeEventName.RUNTIME_ERROR: RuntimeErrorContext,
     RuntimeEventName.SYMBOL_DEGRADED: RuntimeStatusContext,
     RuntimeEventName.SYMBOL_RECOVERED: RuntimeStatusContext,
+    RuntimeEventName.EXECUTION_INTRABAR_FALLBACK_PESSIMISTIC: ExecutionIntrabarFallbackContext,
 }
 
 
@@ -631,6 +752,8 @@ def _runtime_common_context(data: Mapping[str, Any]) -> Dict[str, Any]:
         "run_id": _require_str(data, "run_id"),
         "bot_id": _require_str(data, "bot_id"),
         "strategy_id": _require_str(data, "strategy_id"),
+        "series_key": normalize_series_key(data.get("series_key")) or None,
+        "instrument_id": _optional_text(data.get("instrument_id")),
         "symbol": _optional_text(data.get("symbol")),
         "timeframe": _optional_text(data.get("timeframe")),
         "bar_ts": parse_optional_datetime(data.get("bar_ts")),
@@ -686,6 +809,8 @@ def _runtime_context_from_dict(
             rule_id=_optional_text(data.get("rule_id")),
             intent=_optional_text(data.get("intent")),
             event_key=_optional_text(data.get("event_key")),
+            wallet_snapshot=_copy_mapping(data.get("wallet_snapshot")),
+            margin_requirement=_copy_mapping(data.get("margin_requirement")),
             event_subtype=_optional_text(data.get("event_subtype")) or "signal_accepted",
             category=category,
             reason_code=reason_code or ReasonCode.DECISION_ACCEPTED,
@@ -712,6 +837,8 @@ def _runtime_context_from_dict(
             intent=_optional_text(data.get("intent")),
             event_key=_optional_text(data.get("event_key")),
             rejection_artifact=_copy_mapping(data.get("rejection_artifact")),
+            wallet_snapshot=_copy_mapping(data.get("wallet_snapshot")),
+            margin_requirement=_copy_mapping(data.get("margin_requirement")),
             event_subtype=_optional_text(data.get("event_subtype")) or "signal_rejected",
             category=category,
             reason_code=reason_code,
@@ -729,11 +856,16 @@ def _runtime_context_from_dict(
             wallet_delta=WalletDelta.from_dict(data.get("wallet_delta") if isinstance(data.get("wallet_delta"), Mapping) else {}),
             direction=_optional_text(data.get("direction")),
             fee_paid=(float(data.get("fee_paid")) if data.get("fee_paid") is not None else None),
+            fee_rate=(float(data.get("fee_rate")) if data.get("fee_rate") is not None else None),
+            fee_type=_optional_text(data.get("fee_type")),
+            fee_source=_optional_text(data.get("fee_source")),
+            fee_version=_optional_text(data.get("fee_version")),
             base_currency=_optional_text(data.get("base_currency")),
             quote_currency=_optional_text(data.get("quote_currency")),
             accounting_mode=_optional_text(data.get("accounting_mode")),
             reservation_id=_optional_text(data.get("reservation_id")),
             required_delta=_copy_mapping(data.get("required_delta")),
+            wallet_before=_copy_mapping(data.get("wallet_before")),
             event_subtype=_optional_text(data.get("event_subtype")) or "entry",
             category=category,
             reason_code=reason_code or ReasonCode.EXEC_ENTRY_FILLED,
@@ -753,6 +885,10 @@ def _runtime_context_from_dict(
             wallet_delta=WalletDelta.from_dict(data.get("wallet_delta") if isinstance(data.get("wallet_delta"), Mapping) else {}),
             direction=_optional_text(data.get("direction")),
             fee_paid=(float(data.get("fee_paid")) if data.get("fee_paid") is not None else None),
+            fee_rate=(float(data.get("fee_rate")) if data.get("fee_rate") is not None else None),
+            fee_type=_optional_text(data.get("fee_type")),
+            fee_source=_optional_text(data.get("fee_source")),
+            fee_version=_optional_text(data.get("fee_version")),
             realized_pnl=(float(data.get("realized_pnl")) if data.get("realized_pnl") is not None else None),
             base_currency=_optional_text(data.get("base_currency")),
             quote_currency=_optional_text(data.get("quote_currency")),
@@ -765,6 +901,7 @@ def _runtime_context_from_dict(
             trade_net_pnl=(float(data.get("trade_net_pnl")) if data.get("trade_net_pnl") is not None else None),
             reservation_id=_optional_text(data.get("reservation_id")),
             required_delta=_copy_mapping(data.get("required_delta")),
+            wallet_before=_copy_mapping(data.get("wallet_before")),
             event_subtype=_optional_text(data.get("event_subtype")) or str(data.get("exit_kind") or "close").lower(),
             category=category,
             reason_code=reason_code or ReasonCode.EXEC_EXIT_CLOSE,
@@ -775,6 +912,9 @@ def _runtime_context_from_dict(
             **common,
             balances=dict(data.get("balances") or {}),
             source=_require_str(data, "source"),
+            wallet_commit_seq=int(data.get("wallet_commit_seq") or 0),
+            wallet_commit_seq_status=_optional_text(data.get("wallet_commit_seq_status")) or "runtime_assigned",
+            wallet_eval_seq=int(data.get("wallet_eval_seq") or 0),
             category=category,
             reason_code=reason_code,
         )
@@ -796,6 +936,29 @@ def _runtime_context_from_dict(
             location=_require_str(data, "location"),
             category=category,
             reason_code=reason_code or ReasonCode.RUNTIME_EXCEPTION,
+        )
+
+    if event_name == RuntimeEventName.EXECUTION_INTRABAR_FALLBACK_PESSIMISTIC:
+        return ExecutionIntrabarFallbackContext(
+            **common,
+            message=_require_str(data, "message"),
+            reason=_require_str(data, "reason"),
+            execution_mode=_optional_text(data.get("execution_mode")) or "full",
+            fallback_policy=_optional_text(data.get("fallback_policy")) or "pessimistic_stop",
+            raw_reason=_optional_text(data.get("raw_reason")),
+            expected_intrabar_count=(
+                int(data.get("expected_intrabar_count"))
+                if data.get("expected_intrabar_count") is not None
+                else None
+            ),
+            actual_intrabar_count=(
+                int(data.get("actual_intrabar_count"))
+                if data.get("actual_intrabar_count") is not None
+                else None
+            ),
+            event_subtype=_optional_text(data.get("event_subtype")) or "intrabar_fallback",
+            category=category,
+            reason_code=reason_code or ReasonCode.EXECUTION_INTRABAR_FALLBACK,
         )
 
     if event_name in {RuntimeEventName.SYMBOL_DEGRADED, RuntimeEventName.SYMBOL_RECOVERED}:
@@ -851,6 +1014,7 @@ def new_runtime_event(
             RuntimeEventName.RUNTIME_ERROR,
             RuntimeEventName.SYMBOL_DEGRADED,
             RuntimeEventName.SYMBOL_RECOVERED,
+            RuntimeEventName.EXECUTION_INTRABAR_FALLBACK_PESSIMISTIC,
         }:
             resolved_root_id = resolved_id
             resolved_parent_id = None
@@ -884,6 +1048,7 @@ def decision_trace_entry_from_runtime_event(event: RuntimeEvent) -> Optional[Dic
     if event.event_name in {
         RuntimeEventName.WALLET_INITIALIZED,
         RuntimeEventName.WALLET_DEPOSITED,
+        RuntimeEventName.EXECUTION_INTRABAR_FALLBACK_PESSIMISTIC,
     }:
         return None
     serialized_context = dict(event.context.to_dict())
@@ -939,6 +1104,7 @@ __all__ = [
     "DecisionAcceptedContext",
     "DecisionRejectedContext",
     "EntryFilledContext",
+    "ExecutionIntrabarFallbackContext",
     "ExitFilledContext",
     "ExitKind",
     "ReasonCode",

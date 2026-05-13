@@ -11,7 +11,7 @@ from .models import (
     Leg,
     StrategySignal,
 )
-from .position import LadderPosition
+from .position import LadderPosition, SameBarResolutionPolicy
 from .time_utils import (
     coalesce_numeric,
     coerce_float,
@@ -31,6 +31,7 @@ __all__ = [
     "LadderPosition",
     "LadderRiskEngine",
     "Leg",
+    "SameBarResolutionPolicy",
     "StrategySignal",
     "coalesce_numeric",
     "coerce_float",
