@@ -31,9 +31,9 @@ def _storage():
 
 
 def _report_helpers():
-    from .report_service import _closed_trades, _compute_summary, _parse_iso
+    from .summary_metrics import closed_trades, compute_summary, parse_iso
 
-    return _closed_trades, _compute_summary, _parse_iso
+    return closed_trades, compute_summary, parse_iso
 
 
 def _utcnow_iso() -> str:
@@ -57,6 +57,13 @@ def _json_safe(value: Any) -> Any:
         except Exception:
             return str(value)
     return str(value)
+
+
+def _execution_mode_from_config(config: Mapping[str, Any]) -> str:
+    risk = config.get("risk") if isinstance(config.get("risk"), Mapping) else {}
+    value = config.get("execution_mode") or risk.get("execution_mode")
+    normalized = str(value or "fast").strip().lower()
+    return "full" if normalized == "full" else "fast"
 
 
 def _sanitize_segment(value: Any, default: str = "unknown") -> str:
@@ -270,6 +277,8 @@ def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> 
     datasource = getattr(series[0], "datasource", None) if series else None
     exchange = getattr(series[0], "exchange", None) if series else None
     return {
+        "execution_mode": _execution_mode_from_config(config),
+        "request_id": str(config.get("request_id") or config.get("_runtime_request_id") or "").strip() or None,
         "wallet_start": dict(config.get("wallet_config") or {}),
         "risk_settings": dict(config.get("risk") or {}),
         "date_range": {
@@ -356,6 +365,8 @@ class RunArtifactBundle:
                 "bot_id": self.bot_id,
                 "run_id": self.run_id,
                 "run_type": self.run_type,
+                "execution_mode": _execution_mode_from_config(self.config),
+                "request_id": str(self.config.get("request_id") or self.config.get("_runtime_request_id") or "").strip() or None,
                 "started_at": started_at,
             },
         )
@@ -385,7 +396,7 @@ class RunArtifactBundle:
         if self.settings.include_runtime_events:
             _append_jsonl(self._execution_spool_dir() / "runtime_events.jsonl", serialized)
 
-    def record_indicator_frame(self, *, state: Any, candle: Any) -> None:
+    def record_indicator_frame(self, *, state: Any, candle: Any, frame: Any = None) -> None:
         if not self.enabled:
             return
         series = getattr(state, "series", None)
@@ -394,9 +405,15 @@ class RunArtifactBundle:
         series_spool = self._series_spool_dir(series)
         if self.settings.include_indicator_outputs:
             outputs = dict(getattr(state, "indicator_outputs", {}) or {})
+            deltas = {
+                str(getattr(delta, "output_key", "")): delta
+                for delta in (getattr(frame, "output_deltas", ()) if frame is not None else ())
+                if getattr(delta, "output_key", None)
+            }
             for output_key, runtime_output in outputs.items():
                 indicator_id, _, output_name = str(output_key).partition(".")
                 indicator_meta = self._indicator_meta_by_id.get(indicator_id, {})
+                output_delta = deltas.get(str(output_key))
                 _append_jsonl(
                     series_spool / "indicators" / f"{_sanitize_segment(indicator_id)}.jsonl",
                     {
@@ -407,12 +424,17 @@ class RunArtifactBundle:
                         "indicator_version": indicator_meta.get("version") or "v1",
                         "output_name": output_name,
                         "output_type": (getattr(state, "indicator_output_types", {}) or {}).get(output_key),
+                        "output_op": getattr(output_delta, "op", "set") if output_delta is not None else "set",
+                        "base_indicator_commit_seq": getattr(output_delta, "base_indicator_commit_seq", None),
+                        "indicator_commit_seq": getattr(runtime_output, "indicator_commit_seq", None),
+                        "indicator_commit_seq_status": getattr(runtime_output, "indicator_commit_seq_status", None),
                         "ready": bool(getattr(runtime_output, "ready", False)),
                         "value_json": json.dumps(_json_safe(getattr(runtime_output, "value", {})), sort_keys=True),
                     },
                 )
         if self.settings.include_overlays:
-            overlays = dict(getattr(state, "indicator_overlays", {}) or {})
+            overlay_source = getattr(frame, "overlays", None) if frame is not None else getattr(state, "indicator_overlays", {})
+            overlays = dict(overlay_source or {})
             for overlay_key, runtime_overlay in overlays.items():
                 indicator_id, _, overlay_name = str(overlay_key).partition(".")
                 indicator_meta = self._indicator_meta_by_id.get(indicator_id, {})
@@ -425,6 +447,8 @@ class RunArtifactBundle:
                         "indicator_type": indicator_meta.get("type") or "unknown",
                         "indicator_version": indicator_meta.get("version") or "v1",
                         "overlay_name": overlay_name,
+                        "indicator_commit_seq": getattr(runtime_overlay, "indicator_commit_seq", None),
+                        "indicator_commit_seq_status": getattr(runtime_overlay, "indicator_commit_seq_status", None),
                         "ready": bool(getattr(runtime_overlay, "ready", False)),
                         "value": _json_safe(getattr(runtime_overlay, "value", {})),
                     },
@@ -449,6 +473,8 @@ class RunArtifactBundle:
 
         _write_json(self.run_meta_dir / "runtime_artifact.json", artifact)
         config_snapshot = _build_config_snapshot(self.config, self.series)
+        config_snapshot["runtime_warnings"] = list(artifact.get("warnings") or [])
+        config_snapshot["report_warnings"] = list(artifact.get("report_warnings") or [])
         storage = _storage()
         _closed_trades, _compute_summary, _parse_iso = _report_helpers()
 
@@ -661,6 +687,7 @@ class RunArtifactBundle:
             "",
             f"- Bot ID: `{self.bot_id}`",
             f"- Status: `{artifact_status}`",
+            f"- Execution Mode: `{_execution_mode_from_config(self.config)}`",
             f"- Net PnL: `{summary.get('net_pnl')}`",
             f"- Total Return: `{summary.get('total_return')}`",
             f"- Sharpe: `{summary.get('sharpe')}`",
@@ -800,6 +827,8 @@ def _build_config_snapshot_from_series_snapshot(
             }
         )
     return {
+        "execution_mode": _execution_mode_from_config(config),
+        "request_id": str(config.get("request_id") or config.get("_runtime_request_id") or "").strip() or None,
         "wallet_start": dict(config.get("wallet_config") or {}),
         "risk_settings": dict(config.get("risk") or {}),
         "date_range": {
@@ -828,6 +857,8 @@ def _aggregate_worker_artifact(
     decision_trace: list[dict[str, Any]] = []
     decision_artifacts: list[Any] = []
     rejection_artifacts: list[Any] = []
+    warnings: list[dict[str, Any]] = []
+    report_warnings: list[dict[str, Any]] = []
     started_at_values: list[str] = []
     ended_at_values: list[str] = []
     template_artifact: dict[str, Any] = {}
@@ -854,6 +885,12 @@ def _aggregate_worker_artifact(
         )
         decision_artifacts.extend(list(artifact.get("decision_artifacts") or []))
         rejection_artifacts.extend(list(artifact.get("rejection_artifacts") or []))
+        warnings.extend(
+            dict(entry) for entry in artifact.get("warnings") or [] if isinstance(entry, Mapping)
+        )
+        report_warnings.extend(
+            dict(entry) for entry in artifact.get("report_warnings") or [] if isinstance(entry, Mapping)
+        )
         if not template_artifact:
             template_artifact = dict(artifact)
     aggregate = dict(template_artifact or {})
@@ -866,6 +903,17 @@ def _aggregate_worker_artifact(
     aggregate["decision_trace"] = decision_trace
     aggregate["decision_artifacts"] = decision_artifacts
     aggregate["rejection_artifacts"] = rejection_artifacts
+    aggregate["execution_mode"] = _execution_mode_from_config(config)
+    aggregate["request_id"] = str(config.get("request_id") or config.get("_runtime_request_id") or "").strip() or None
+    aggregate["runtime_metadata"] = {
+        "execution_mode": _execution_mode_from_config(config),
+        "request_id": aggregate["request_id"],
+        "playback_mode": config.get("playback_mode") or config.get("mode") or "instant",
+        "run_type": str(config.get("run_type") or "backtest").strip().lower(),
+        "intrabar_execution": _execution_mode_from_config(config) == "full",
+    }
+    aggregate["warnings"] = warnings
+    aggregate["report_warnings"] = report_warnings
     aggregate["worker_artifacts"] = worker_artifacts
     return aggregate
 
@@ -908,6 +956,8 @@ def finalize_run_artifact_bundle_from_workers(
         runtime_status=runtime_status,
         worker_dirs=worker_dirs,
     )
+    config_snapshot["runtime_warnings"] = list(aggregate_artifact.get("warnings") or [])
+    config_snapshot["report_warnings"] = list(aggregate_artifact.get("report_warnings") or [])
     storage = _storage()
     _closed_trades, _compute_summary, _parse_iso = _report_helpers()
     execution_dir = run_dir / "execution"
@@ -935,6 +985,8 @@ def finalize_run_artifact_bundle_from_workers(
             "bot_id": bot_id,
             "run_id": run_id,
             "run_type": run_type,
+            "execution_mode": _execution_mode_from_config(config),
+            "request_id": str(config.get("request_id") or config.get("_runtime_request_id") or "").strip() or None,
             "started_at": aggregate_artifact.get("started_at"),
         },
     )
@@ -1062,6 +1114,7 @@ def finalize_run_artifact_bundle_from_workers(
                 "",
                 f"- Bot ID: `{bot_id}`",
                 f"- Status: `{artifact_status}`",
+                f"- Execution Mode: `{_execution_mode_from_config(config)}`",
                 f"- Net PnL: `{summary.get('net_pnl')}`",
                 f"- Total Return: `{summary.get('total_return')}`",
                 f"- Sharpe: `{summary.get('sharpe')}`",
@@ -1136,6 +1189,51 @@ def finalize_run_artifact_bundle_from_workers(
     logger.info(with_log_context("report_artifacts_finalize_done", log_context | {"files": len(files), "zip": zip_path}))
 
 
+def run_artifact_readiness(bot_id: str | None, run_id: str) -> Dict[str, Any]:
+    if bot_id:
+        candidate = _run_directory(str(bot_id), str(run_id))
+        run_dir = candidate if candidate.exists() else find_run_directory(str(run_id))
+    else:
+        run_dir = find_run_directory(str(run_id))
+    if run_dir is None:
+        return {
+            "ready": False,
+            "reason": "artifact_directory_missing",
+            "manifest_path": None,
+            "status": None,
+            "files": [],
+        }
+    manifest_path = _manifest_path(run_dir)
+    if not manifest_path.exists():
+        return {
+            "ready": False,
+            "reason": "artifact_manifest_missing",
+            "manifest_path": str(manifest_path),
+            "status": None,
+            "files": [],
+        }
+    manifest = _read_json(manifest_path)
+    status = str(manifest.get("status") or "").strip().lower()
+    files = [dict(entry) for entry in manifest.get("files") or [] if isinstance(entry, Mapping)]
+    missing_files = []
+    for entry in files:
+        path = str(entry.get("path") or "").strip()
+        if not path or path.endswith(".zip"):
+            continue
+        if not (run_dir / path).exists():
+            missing_files.append(path)
+    ready = status == "completed" and bool(files) and not missing_files
+    reason = "ready" if ready else "artifact_files_missing" if missing_files else "artifact_manifest_incomplete"
+    return {
+        "ready": ready,
+        "reason": reason,
+        "manifest_path": str(manifest_path),
+        "status": status or None,
+        "files": files,
+        "missing_files": missing_files,
+    }
+
+
 def build_run_archive(run_id: str) -> tuple[bytes, str]:
     run_dir = find_run_directory(run_id)
     if run_dir is None:
@@ -1163,4 +1261,5 @@ __all__ = [
     "build_run_artifact_bundle",
     "finalize_run_artifact_bundle_from_workers",
     "find_run_directory",
+    "run_artifact_readiness",
 ]

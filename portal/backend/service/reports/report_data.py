@@ -97,6 +97,9 @@ def _botlens_decision_entry_from_event(row: Dict[str, Any]) -> Optional[Dict[str
     reason_code = row.get("reason_code") or context.get("reason_code")
     return {
         "event_id": _event_id(row),
+        "seq": row.get("seq"),
+        "run_seq": row.get("run_seq"),
+        "run_seq_status": context.get("run_seq_status"),
         "event_ts": _event_ts(row, context),
         "event_type": "decision",
         "event_subtype": "signal_accepted" if decision_state == "accepted" else "signal_rejected",
@@ -118,6 +121,8 @@ def _botlens_decision_entry_from_event(row: Dict[str, Any]) -> Optional[Dict[str
         "event_key": context.get("event_key"),
         "qty": context.get("qty"),
         "price": context.get("signal_price") or context.get("price"),
+        "bar_time": row.get("bar_time") or context.get("bar_time"),
+        "known_at": row.get("known_at") or context.get("known_at") or context.get("bar_time") or _event_ts(row, context),
         "event_impact_pnl": context.get("event_impact_pnl"),
         "trade_net_pnl": context.get("trade_net_pnl"),
         "reason_detail": context.get("message"),
@@ -151,12 +156,14 @@ def list_run_events(
     if not bot_id:
         return []
     after_seq = 0
+    after_row_id = 0
     rows: List[Dict[str, Any]] = []
     while True:
         batch = storage.list_bot_runtime_events(
             bot_id=bot_id,
             run_id=run_id,
             after_seq=after_seq,
+            after_row_id=after_row_id,
             limit=5000,
             event_types=event_types,
             event_type_prefixes=event_type_prefixes,
@@ -164,7 +171,8 @@ def list_run_events(
         if not batch:
             break
         rows.extend(batch)
-        after_seq = int(batch[-1].get("seq") or after_seq)
+        after_seq = int(batch[-1].get("run_seq") or batch[-1].get("seq") or after_seq)
+        after_row_id = int(batch[-1].get("id") or after_row_id)
         if len(batch) < 5000:
             break
     return rows
@@ -219,14 +227,56 @@ def _trade_id(row: Mapping[str, Any]) -> str:
     return str(context.get("trade_id") or row.get("trade_id") or "").strip()
 
 
-def get_result_readiness(run_id: str, *, require_artifacts: bool = False) -> Dict[str, Any]:
+def _stored_trade_is_open(row: Mapping[str, Any]) -> bool:
+    status = str(row.get("status") or "").strip().lower()
+    exit_time = row.get("exit_time") or row.get("closed_at")
+    if exit_time not in (None, ""):
+        return False
+    return status not in {"closed", "completed", "complete"}
+
+
+def _summary_ready(summary: Any) -> bool:
+    return isinstance(summary, Mapping) and bool(summary)
+
+
+def _decision_summary_ready(summary: Any) -> bool:
+    if not isinstance(summary, Mapping):
+        return False
+    return all(key in summary for key in ("total", "accepted", "rejected"))
+
+
+def get_result_readiness(
+    run_id: str,
+    *,
+    decision_summary: Mapping[str, Any] | None = None,
+    financial_summary: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
     run = get_run(run_id)
     if not run:
         return {
             "run_id": run_id,
+            "results_ready": False,
             "safe_to_compare": False,
             "completed": False,
             "reason": "run_not_found",
+            "conditions": {
+                "run_completed": False,
+                "dataset_ready": False,
+                "report_available": False,
+                "report_read_model_available": False,
+                "export_ready": False,
+                "decision_summary_ready": False,
+                "financial_summary_ready": False,
+                "accepted_trade_lifecycle_complete": False,
+                "no_terminal_open_trades": False,
+                "comparable_metrics_available": False,
+            },
+            "dataset_ready": False,
+            "dataset_status": "blocked",
+            "results_status": "blocked",
+            "comparison_status": "blocked",
+            "export_status": "unavailable",
+            "caveats": ["run_not_found"],
         }
 
     completed = str(run.get("status") or "").strip().lower() == "completed"
@@ -234,6 +284,7 @@ def get_result_readiness(run_id: str, *, require_artifacts: bool = False) -> Dic
     ledger = list_decision_ledger(run_id)
     opened_rows = list_run_events(run_id, event_types=[BOTLENS_TRADE_OPENED_EVENT_TYPE])
     closed_rows = list_run_events(run_id, event_types=[BOTLENS_TRADE_CLOSED_EVENT_TYPE])
+    stored_trades = storage.list_bot_trades_for_run(run_id)
 
     accepted_trade_ids = {
         str(entry.get("trade_id") or "").strip()
@@ -248,35 +299,97 @@ def get_result_readiness(run_id: str, *, require_artifacts: bool = False) -> Dic
     closed_trade_ids = {_trade_id(row) for row in closed_rows if _trade_id(row)}
     missing_open = sorted(accepted_trade_ids - opened_trade_ids)
     missing_close = sorted(accepted_trade_ids - closed_trade_ids)
+    terminal_open_trade_ids = sorted(
+        str(row.get("trade_id") or row.get("id") or "").strip()
+        for row in stored_trades
+        if _stored_trade_is_open(row) and str(row.get("trade_id") or row.get("id") or "").strip()
+    )
     decision_ledger_ready = not decision_rows or len(ledger) >= len(decision_rows)
-    artifacts_ready = not require_artifacts
-    safe_to_compare = (
+    resolved_decision_summary = (
+        dict(decision_summary)
+        if isinstance(decision_summary, Mapping)
+        else summarize_decision_ledger(ledger)
+    )
+    resolved_financial_summary = (
+        dict(financial_summary)
+        if isinstance(financial_summary, Mapping)
+        else dict(run.get("summary") or {}) if isinstance(run.get("summary"), Mapping) else {}
+    )
+    decision_summary_ready = decision_ledger_ready and _decision_summary_ready(resolved_decision_summary)
+    financial_summary_ready = _summary_ready(resolved_financial_summary)
+    report_available = completed and financial_summary_ready
+    accepted_lifecycle_complete = not missing_open and not missing_close
+    no_terminal_open_trades = not terminal_open_trade_ids
+    report_read_model_available = bool(run)
+    comparable_metrics_available = financial_summary_ready and all(
+        key in resolved_financial_summary
+        for key in ("net_pnl", "total_trades")
+    )
+    dataset_ready = (
         completed
-        and decision_ledger_ready
-        and not missing_open
-        and not missing_close
-        and artifacts_ready
+        and report_read_model_available
+        and decision_summary_ready
+        and financial_summary_ready
+    )
+    results_ready = dataset_ready and accepted_lifecycle_complete
+    safe_to_compare = (
+        results_ready
+        and no_terminal_open_trades
+        and comparable_metrics_available
     )
     reason = "ready" if safe_to_compare else "not_ready"
     if not completed:
         reason = "run_not_completed"
+    elif not decision_summary_ready:
+        reason = "decision_summary_unavailable"
+    elif not financial_summary_ready:
+        reason = "financial_summary_unavailable"
     elif missing_open or missing_close:
         reason = "trade_lifecycle_incomplete"
-    elif not decision_ledger_ready:
-        reason = "decision_ledger_unavailable"
-    elif not artifacts_ready:
-        reason = "artifacts_unavailable"
+    elif terminal_open_trade_ids:
+        reason = "terminal_open_trades"
+    elif not comparable_metrics_available:
+        reason = "comparable_metrics_unavailable"
 
+    conditions = {
+        "run_completed": completed,
+        "dataset_ready": dataset_ready,
+        "report_available": report_available,
+        "report_read_model_available": report_read_model_available,
+        "export_ready": dataset_ready,
+        "decision_summary_ready": decision_summary_ready,
+        "financial_summary_ready": financial_summary_ready,
+        "accepted_trade_lifecycle_complete": accepted_lifecycle_complete,
+        "no_terminal_open_trades": no_terminal_open_trades,
+        "comparable_metrics_available": comparable_metrics_available,
+    }
+    caveats: List[str] = []
+    if terminal_open_trade_ids:
+        caveats.append("terminal_open_trades")
+    if missing_open or missing_close:
+        caveats.append("accepted_trade_lifecycle_incomplete")
     return {
         "run_id": run_id,
+        "dataset_ready": dataset_ready,
+        "dataset_status": "ready" if dataset_ready else "partial" if completed else "blocked",
+        "results_ready": results_ready,
+        "results_status": "ready" if results_ready else "partial" if dataset_ready else "blocked",
         "safe_to_compare": safe_to_compare,
+        "comparison_status": "ready" if safe_to_compare else "blocked",
         "completed": completed,
         "decision_ledger_ready": decision_ledger_ready,
-        "artifacts_ready": artifacts_ready,
+        "decision_summary_ready": decision_summary_ready,
+        "financial_summary_ready": financial_summary_ready,
+        "export_ready": dataset_ready,
+        "export_status": "available" if dataset_ready else "partial" if completed else "unavailable",
+        "report_available": report_available,
         "accepted_trade_count": len(accepted_trade_ids),
         "missing_trade_opened": missing_open,
         "missing_trade_closed": missing_close,
+        "terminal_open_trades": terminal_open_trade_ids,
+        "conditions": conditions,
         "reason": reason,
+        "caveats": caveats,
     }
 
 

@@ -30,7 +30,7 @@ class _FakeStorage:
         self.upserts.append(dict(payload))
 
 
-def _configure_artifact_settings(monkeypatch, tmp_path: Path, storage: _FakeStorage) -> None:
+def _configure_artifact_settings(monkeypatch, tmp_path: Path, storage: _FakeStorage) -> SimpleNamespace:
     settings = SimpleNamespace(
         enabled=True,
         capture_backtest=True,
@@ -68,6 +68,7 @@ def _configure_artifact_settings(monkeypatch, tmp_path: Path, storage: _FakeStor
             lambda value: value,
         ),
     )
+    return settings
 
 
 def _series(symbol: str, strategy_id: str, indicator_id: str):
@@ -115,6 +116,30 @@ def _worker_artifact(run_id: str, bot_id: str, worker_id: str) -> dict:
         "decision_artifacts": [],
         "rejection_artifacts": [],
     }
+
+
+def test_record_indicator_frame_uses_current_frame_overlays_not_stale_state(monkeypatch, tmp_path: Path) -> None:
+    storage = _FakeStorage()
+    settings = _configure_artifact_settings(monkeypatch, tmp_path, storage)
+    settings.include_overlays = True
+    series = _series("BTC", "strategy-1", "indicator-1")
+    bundle = artifacts.RunArtifactBundle(
+        bot_id="bot-1",
+        run_id="run-1",
+        config=_worker_config("worker-1"),
+        series=[series],
+    )
+    bundle.start(started_at="2026-01-01T00:00:00Z")
+    stale_overlay = SimpleNamespace(
+        bar_time="2026-01-01T00:00:00Z",
+        ready=True,
+        value={"type": "debug_overlay", "payload": {"markers": [{"time": 1}]}},
+    )
+    state = SimpleNamespace(series=series, indicator_overlays={"indicator-1.debug": stale_overlay})
+
+    bundle.record_indicator_frame(state=state, candle=series.candles[0], frame=SimpleNamespace(overlays={}))
+
+    assert not (bundle._series_spool_dir(series) / "overlays").exists()
 
 
 def test_finalize_run_artifact_bundle_from_workers_aggregates_worker_outputs(monkeypatch, tmp_path: Path) -> None:

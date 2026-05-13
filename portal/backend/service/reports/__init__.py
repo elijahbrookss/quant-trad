@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["compare_reports", "get_report", "list_reports"]
+__all__ = ["build_run_research_dataset"]
 
 
 def __getattr__(name: str) -> Any:
-    if name in __all__:
-        from . import report_service
+    if name == "build_run_research_dataset":
+        from . import run_research_dataset
 
-        return getattr(report_service, name)
+        return getattr(run_research_dataset, name)
     raise AttributeError(name)
