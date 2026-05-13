@@ -7,6 +7,7 @@ const STATUS_META = {
     completed: { label: 'Completed', variant: 'success', icon: CheckCircle2 },
     failed: { label: 'Failed', variant: 'danger', icon: XCircle },
     stopped: { label: 'Stopped', variant: 'neutral', icon: Circle },
+    canceled: { label: 'Canceled', variant: 'neutral', icon: Circle },
     cancelled: { label: 'Cancelled', variant: 'neutral', icon: Circle },
     unknown: { label: 'Unknown', variant: 'neutral', icon: Info },
   },
@@ -21,6 +22,7 @@ const STATUS_META = {
     not_started: { label: 'Report not started', variant: 'neutral', icon: Circle },
     preparing: { label: 'Report preparing', variant: 'info', icon: Clock },
     ready: { label: 'Report ready', variant: 'success', icon: CheckCircle2 },
+    partial: { label: 'Report partial', variant: 'warning', icon: AlertCircle },
     failed: { label: 'Report failed', variant: 'danger', icon: XCircle },
     unavailable: { label: 'Report unavailable', variant: 'neutral', icon: Info },
     stale: { label: 'Report stale', variant: 'warning', icon: AlertCircle },
@@ -28,6 +30,7 @@ const STATUS_META = {
   comparison: {
     unknown: { label: 'Comparison unknown', variant: 'neutral', icon: Info },
     eligible: { label: 'Comparison eligible', variant: 'success', icon: CheckCircle2 },
+    caution: { label: 'Comparison caveats', variant: 'warning', icon: AlertCircle },
     blocked: { label: 'Comparison blocked', variant: 'warning', icon: AlertCircle },
     not_applicable: { label: 'Comparison N/A', variant: 'neutral', icon: Circle },
   },

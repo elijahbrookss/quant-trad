@@ -2,7 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { ChartStateProvider, useChartState, useChartValue } from './contexts/ChartStateContext'
 import { createLogger } from './utils/logger.js'
-import { Bot, ChevronLeft, ChevronRight, FileText, FlaskConical, Layers, Menu, RefreshCw, Settings, X } from 'lucide-react'
+import { Bot, ChevronLeft, ChevronRight, FileText, FlaskConical, Layers, Menu, Network, RefreshCw, Settings, X } from 'lucide-react'
 import { pingApi } from './adapters/health.adapter.js'
 import { usePortalSettings } from './contexts/PortalSettingsContext.jsx'
 import { useAccentColor } from './contexts/AccentColorContext.jsx'
@@ -20,6 +20,9 @@ const BotPanel = lazy(() =>
 )
 const ReportsPage = lazy(() =>
   import('./components/reports/ReportsPage.jsx').then((module) => ({ default: module.ReportsPage })),
+)
+const SystemDeck = lazy(() =>
+  import('./features/system-deck/SystemDeck.jsx').then((module) => ({ default: module.default })),
 )
 const GlobalSettingsModal = lazy(() =>
   import('./components/GlobalSettingsModal.jsx').then((module) => ({ default: module.GlobalSettingsModal })),
@@ -57,6 +60,14 @@ const navItems = [
     kicker: 'Analysis Lens',
     to: '/reports',
     icon: FileText,
+  },
+  {
+    id: 'system-deck',
+    label: 'System Deck',
+    description: 'Animated architecture map for the whole platform.',
+    kicker: 'System Lens',
+    to: '/system-deck',
+    icon: Network,
   },
 ]
 
@@ -486,6 +497,14 @@ function AppShell({ chartId }) {
                         <ReportsPage />
                       </Suspense>
                     </div>
+                  }
+                />
+                <Route
+                  path="/system-deck"
+                  element={
+                    <Suspense fallback={<RouteSectionFallback title="system deck" />}>
+                      <SystemDeck />
+                    </Suspense>
                   }
                 />
                 <Route path="*" element={<Navigate to={landingPage} replace />} />
