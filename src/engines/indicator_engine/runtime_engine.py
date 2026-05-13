@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 import time
 from typing import Any, Deque, Dict, Iterable, Mapping
@@ -22,6 +22,7 @@ from .contracts import (
     RuntimeDetail,
     RuntimeOverlay,
     RuntimeOutput,
+    RuntimeOutputDelta,
     output_ref_key,
     validate_detail_definitions,
     validate_overlay_definitions,
@@ -78,6 +79,7 @@ class IndicatorExecutionEngine:
         self._guard_config = guard_config or IndicatorGuardConfig.disabled()
         self._guard_state_by_id: Dict[str, Dict[str, Any]] = {}
         self._last_outputs_by_ref: Dict[OutputRef, RuntimeOutput] = {}
+        self._indicator_commit_seq_by_id: Dict[str, int] = {}
         for indicator in indicators:
             runtime_spec = getattr(indicator, "runtime_spec", None)
             if runtime_spec is None:
@@ -92,6 +94,7 @@ class IndicatorExecutionEngine:
             validate_detail_definitions(runtime_spec.details)
             self._indicators_by_id[indicator_id] = indicator
             self._runtime_specs_by_id[indicator_id] = runtime_spec
+            self._indicator_commit_seq_by_id[indicator_id] = 0
             self._overlay_defs[indicator_id] = {
                 overlay.name: overlay for overlay in runtime_spec.overlays
             }
@@ -128,6 +131,7 @@ class IndicatorExecutionEngine:
         flat: Dict[str, RuntimeOutput] = {}
         flat_overlays: Dict[str, RuntimeOverlay] = {}
         flat_details: Dict[str, RuntimeDetail] = {}
+        output_deltas: list[RuntimeOutputDelta] = []
         guard_metrics: list[IndicatorGuardMetric] = []
         guard_warnings: list[IndicatorGuardWarning] = []
         for indicator_id in self._order:
@@ -144,6 +148,8 @@ class IndicatorExecutionEngine:
                     "indicator_output_invalid: output presence mismatch "
                     f"indicator_id={indicator_id} declared={sorted(declared.keys())} returned={sorted(outputs.keys())}"
                 )
+            base_indicator_commit_seq = int(self._indicator_commit_seq_by_id.get(indicator_id) or 0)
+            indicator_commit_seq = base_indicator_commit_seq + 1
             for output_name, definition in declared.items():
                 runtime_output = outputs[output_name]
                 validate_runtime_output(
@@ -152,10 +158,28 @@ class IndicatorExecutionEngine:
                     bar_time=bar_time,
                     dependency_inputs=inputs,
                 )
-                copied = runtime_output.copy()
+                copied = self._stamp_output(
+                    runtime_output,
+                    indicator_commit_seq=indicator_commit_seq,
+                )
                 ref = OutputRef(indicator_id=indicator_id, output_name=output_name)
+                output_key = output_ref_key(indicator_id, output_name)
                 by_ref[ref] = copied
-                flat[output_ref_key(indicator_id, output_name)] = copied
+                flat[output_key] = copied
+                output_deltas.append(
+                    RuntimeOutputDelta(
+                        indicator_id=indicator_id,
+                        output_name=output_name,
+                        output_key=output_key,
+                        output_type=definition.type,
+                        bar_time=bar_time,
+                        base_indicator_commit_seq=base_indicator_commit_seq,
+                        indicator_commit_seq=indicator_commit_seq,
+                        indicator_commit_seq_status="indicator_scoped",
+                        ready=bool(copied.ready),
+                        value=copied.copy().value,
+                    )
+                )
 
             detail_time_ms = 0.0
             if include_details:
@@ -176,7 +200,10 @@ class IndicatorExecutionEngine:
                         bar_time=bar_time,
                         dependency_inputs=inputs,
                     )
-                    flat_details[output_ref_key(indicator_id, detail_name)] = runtime_detail.copy()
+                    flat_details[output_ref_key(indicator_id, detail_name)] = self._stamp_detail(
+                        runtime_detail,
+                        indicator_commit_seq=indicator_commit_seq,
+                    )
 
             overlay_time_ms = 0.0
             overlay_count = 0
@@ -203,7 +230,10 @@ class IndicatorExecutionEngine:
                         bar_time=bar_time,
                         dependency_inputs=inputs,
                     )
-                    copied_overlay = runtime_overlay.copy()
+                    copied_overlay = self._stamp_overlay(
+                        runtime_overlay,
+                        indicator_commit_seq=indicator_commit_seq,
+                    )
                     if copied_overlay.ready:
                         ready_overlay_names.append(overlay_name)
                         overlay_count += 1
@@ -223,6 +253,8 @@ class IndicatorExecutionEngine:
                             bar_time=bar_time,
                             ready=False,
                             value={},
+                            indicator_commit_seq=indicator_commit_seq,
+                            indicator_commit_seq_status="indicator_scoped",
                         )
 
                 for overlay_name in declared_overlays.keys():
@@ -277,11 +309,13 @@ class IndicatorExecutionEngine:
                         execution_time_ms=total_time_ms,
                     )
                 )
+            self._indicator_commit_seq_by_id[indicator_id] = indicator_commit_seq
         self._last_outputs_by_ref = dict(by_ref)
         return EngineFrame(
             outputs=flat,
             overlays=flat_overlays,
             details=flat_details,
+            output_deltas=tuple(delta.copy() for delta in output_deltas),
             guard_metrics=tuple(guard_metrics),
             guard_warnings=tuple(guard_warnings),
         )
@@ -319,6 +353,12 @@ class IndicatorExecutionEngine:
             overlay_suppressed = False
             suppressed_overlay_names: tuple[str, ...] = ()
             ready_overlay_names: list[str] = []
+            indicator_commit_seq = int(self._indicator_commit_seq_by_id.get(indicator_id) or 0)
+            if declared_overlays and indicator_commit_seq <= 0:
+                raise RuntimeError(
+                    "indicator_overlay_snapshot_failed: indicator_commit_seq missing "
+                    f"indicator_id={indicator_id}"
+                )
             for overlay_name, definition in declared_overlays.items():
                 runtime_overlay = overlays[overlay_name]
                 validate_runtime_overlay(
@@ -327,7 +367,10 @@ class IndicatorExecutionEngine:
                     bar_time=bar_time,
                     dependency_inputs=inputs,
                 )
-                copied_overlay = runtime_overlay.copy()
+                copied_overlay = self._stamp_overlay(
+                    runtime_overlay,
+                    indicator_commit_seq=indicator_commit_seq,
+                )
                 if copied_overlay.ready:
                     ready_overlay_names.append(overlay_name)
                     overlay_count += 1
@@ -347,6 +390,8 @@ class IndicatorExecutionEngine:
                         bar_time=bar_time,
                         ready=False,
                         value={},
+                        indicator_commit_seq=indicator_commit_seq,
+                        indicator_commit_seq_status="indicator_scoped",
                     )
 
             for overlay_name in declared_overlays.keys():
@@ -407,6 +452,42 @@ class IndicatorExecutionEngine:
             details={},
             guard_metrics=tuple(guard_metrics),
             guard_warnings=tuple(guard_warnings),
+        )
+
+    @staticmethod
+    def _stamp_output(
+        runtime_output: RuntimeOutput,
+        *,
+        indicator_commit_seq: int,
+    ) -> RuntimeOutput:
+        return replace(
+            runtime_output.copy(),
+            indicator_commit_seq=int(indicator_commit_seq),
+            indicator_commit_seq_status="indicator_scoped",
+        )
+
+    @staticmethod
+    def _stamp_overlay(
+        runtime_overlay: RuntimeOverlay,
+        *,
+        indicator_commit_seq: int,
+    ) -> RuntimeOverlay:
+        return replace(
+            runtime_overlay.copy(),
+            indicator_commit_seq=int(indicator_commit_seq),
+            indicator_commit_seq_status="indicator_scoped",
+        )
+
+    @staticmethod
+    def _stamp_detail(
+        runtime_detail: RuntimeDetail,
+        *,
+        indicator_commit_seq: int,
+    ) -> RuntimeDetail:
+        return replace(
+            runtime_detail.copy(),
+            indicator_commit_seq=int(indicator_commit_seq),
+            indicator_commit_seq_status="indicator_scoped",
         )
 
     @staticmethod

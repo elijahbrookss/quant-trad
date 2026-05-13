@@ -63,18 +63,25 @@ def _build_marker(*, artifact: Mapping[str, Any], candle: Candle) -> Dict[str, A
     intent = str(artifact.get("emitted_intent") or "")
     is_long = intent == "enter_long"
     trigger = artifact.get("trigger") if isinstance(artifact.get("trigger"), Mapping) else {}
+    decision_context = (
+        artifact.get("decision_context")
+        if isinstance(artifact.get("decision_context"), Mapping)
+        else {}
+    )
+    output_ref = trigger.get("output_ref") or decision_context.get("trigger_output_ref")
+    event_key = trigger.get("event_key") or decision_context.get("event_key")
     return {
         "time": int(candle.time.timestamp()),
         "price": float(candle.close),
         "color": "#10b981" if is_long else "#f87171",
         "shape": "arrowUp" if is_long else "arrowDown",
         "position": "belowBar" if is_long else "aboveBar",
-        "text": str(artifact.get("rule_name") or trigger.get("event_key") or intent).strip(),
+        "text": str(artifact.get("rule_name") or event_key or intent).strip(),
         "subtype": "strategy_signal",
         "decision_id": artifact.get("decision_id"),
         "strategy_rule_id": artifact.get("rule_id"),
-        "indicator_id": trigger.get("output_ref"),
-        "event_key": trigger.get("event_key"),
+        "indicator_id": output_ref,
+        "event_key": event_key,
     }
 
 
@@ -184,6 +191,9 @@ def _collect_referenced_output_refs(artifact: Mapping[str, Any]) -> List[str]:
     trigger = artifact.get("trigger")
     if isinstance(trigger, Mapping):
         add(trigger.get("output_ref"))
+    decision_context = artifact.get("decision_context")
+    if isinstance(decision_context, Mapping):
+        add(decision_context.get("trigger_output_ref"))
     guard_results = artifact.get("guard_results")
     if isinstance(guard_results, list):
         for guard in guard_results:
@@ -238,8 +248,19 @@ def _build_strategy_preview_signal(
         source_type="strategy_preview",
         source_id=preview_id,
     )
-    intent = str(artifact.get("emitted_intent") or artifact.get("intent") or "").strip()
+    decision_context = (
+        artifact.get("decision_context")
+        if isinstance(artifact.get("decision_context"), Mapping)
+        else {}
+    )
+    intent = str(
+        artifact.get("emitted_intent")
+        or artifact.get("intent")
+        or decision_context.get("intent")
+        or ""
+    ).strip()
     trigger = artifact.get("trigger") if isinstance(artifact.get("trigger"), Mapping) else {}
+    event_key = trigger.get("event_key") or decision_context.get("event_key")
     return {
         "signal_id": signal_id,
         "source_type": "strategy_preview",
@@ -257,7 +278,7 @@ def _build_strategy_preview_signal(
         "rule_name": artifact.get("rule_name"),
         "intent": intent,
         "direction": _strategy_signal_direction(intent),
-        "event_key": trigger.get("event_key"),
+        "event_key": event_key,
     }
 
 

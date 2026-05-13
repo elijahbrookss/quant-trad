@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from core.candle_continuity import expected_interval_seconds, summarize_candle_continuity
 from engines.bot_runtime.core.domain import (
     Candle,
     LadderRiskEngine,
@@ -32,6 +33,19 @@ from .models import StrategySeries
 logger = logging.getLogger(__name__)
 
 class SeriesBuilderConstructionMixin:
+    @staticmethod
+    def _runtime_series_candle_continuity(
+        candles: Sequence[Candle],
+        *,
+        timeframe: str,
+        gap_classification: Any = None,
+    ):
+        return summarize_candle_continuity(
+            (candle.to_dict() for candle in candles),
+            expected_interval_seconds_value=expected_interval_seconds(timeframe=timeframe),
+            gap_classification=gap_classification,
+        )
+
     @staticmethod
     def _build_signals_from_decision_artifacts(artifacts: Sequence[Mapping[str, Any]]) -> Deque[StrategySignal]:
         queued: List[StrategySignal] = []
@@ -325,7 +339,7 @@ class SeriesBuilderConstructionMixin:
             start_iso = str(configured_start)
             end_iso = str(configured_end)
             warmup_bars = self._resolve_backtest_warmup_bars(strategy, timeframe)
-            candles, replay_start_index, window_start_iso = self._build_backtest_candles_with_warmup(
+            candles, replay_start_index, window_start_iso, candle_gap_classification = self._build_backtest_candles_with_warmup(
                 symbol=symbol,
                 timeframe=timeframe,
                 datasource=datasource,
@@ -343,6 +357,7 @@ class SeriesBuilderConstructionMixin:
                 symbol, start_iso, end_iso, timeframe, datasource, exchange, strategy.id
             )
             candles = self._build_candles(df, timeframe)
+            candle_gap_classification = df.attrs.get("gap_classification") if hasattr(df, "attrs") else None
         if not candles:
             raise RuntimeError(f"No valid candles could be built for strategy {strategy.id}")
         if self._log_candle_sequence:
@@ -425,6 +440,28 @@ class SeriesBuilderConstructionMixin:
             series_meta["instrument"] = instrument
         series_meta["atm_template"] = atm_template
         series_meta["risk_config"] = deepcopy(risk_config)
+        if candle_gap_classification:
+            series_meta["candle_gap_classification"] = candle_gap_classification
+        continuity_summary = self._runtime_series_candle_continuity(
+            candles,
+            timeframe=timeframe,
+            gap_classification=candle_gap_classification,
+        )
+        series_meta["candle_continuity"] = continuity_summary.to_dict()
+        if continuity_summary.detected_gap_count:
+            logger.warning(
+                with_log_context(
+                    "runtime_series_candle_gap_detected",
+                    self._strategy_log_context(
+                        strategy,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        gaps=continuity_summary.detected_gap_count,
+                        missing_candles=continuity_summary.missing_candle_estimate,
+                        gap_count_by_type=continuity_summary.gap_count_by_type,
+                    ),
+                )
+            )
 
         ready_context = self._strategy_log_context(
             strategy,
@@ -468,7 +505,7 @@ class SeriesBuilderConstructionMixin:
         backtest_start_iso: str,
         backtest_end_iso: str,
         warmup_bars: int = 100,
-    ) -> Tuple[List[Candle], int, str]:
+    ) -> Tuple[List[Candle], int, str, Optional[Any]]:
         import pandas as pd
 
         start_ts = pd.to_datetime(backtest_start_iso, utc=True)
@@ -486,6 +523,7 @@ class SeriesBuilderConstructionMixin:
         warmup_start_ts = start_ts - (tf_delta * safe_warmup_bars)
 
         warmup_candles: List[Candle] = []
+        gap_classification: List[Any] = []
         try:
             warmup_df = self._fetch_ohlcv_data(
                 symbol=symbol,
@@ -500,6 +538,8 @@ class SeriesBuilderConstructionMixin:
                 candle for candle in self._build_candles(warmup_df, timeframe)
                 if candle.time <= start_ts.to_pydatetime()
             ]
+            if getattr(warmup_df, "attrs", {}).get("gap_classification"):
+                gap_classification.extend(warmup_df.attrs["gap_classification"])
         except RuntimeError:
             # Warmup is bounded and best-effort; walk-forward candles remain mandatory.
             warmup_candles = []
@@ -519,6 +559,8 @@ class SeriesBuilderConstructionMixin:
             candle for candle in self._build_candles(replay_df, timeframe)
             if candle.time >= start_ts.to_pydatetime() and candle.time <= end_ts.to_pydatetime()
         ]
+        if getattr(replay_df, "attrs", {}).get("gap_classification"):
+            gap_classification.extend(replay_df.attrs["gap_classification"])
         if not replay_candles:
             raise RuntimeError(f"No walk-forward candles found between {backtest_start_iso} and {backtest_end_iso}")
 
@@ -532,7 +574,7 @@ class SeriesBuilderConstructionMixin:
             if candle.time >= start_ts.to_pydatetime():
                 replay_start_index = idx
                 break
-        return ordered, replay_start_index, isoformat(warmup_start_ts.to_pydatetime())
+        return ordered, replay_start_index, isoformat(warmup_start_ts.to_pydatetime()), gap_classification or None
 
     def _resolve_backtest_warmup_bars(self, strategy: Strategy, timeframe: str) -> int:
         # Strategy/runtime warmup is intentionally separate from indicator-

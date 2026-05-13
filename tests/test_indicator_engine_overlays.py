@@ -74,6 +74,31 @@ class _SourceIndicator(Indicator):
         }
 
 
+class _SourceWithDetailIndicator(_SourceIndicator):
+    def __init__(self) -> None:
+        self.runtime_spec = IndicatorRuntimeSpec(
+            instance_id="source",
+            manifest_type="source",
+            version="v1",
+            dependencies=(),
+            outputs=(OutputDefinition(name="signal", type="signal"),),
+            overlays=(OverlayDefinition(name="markers", overlay_type="test_indicator_overlay"),),
+            details=(DetailDefinition(name="debug"),),
+        )
+        self._bar_time = datetime.min.replace(tzinfo=timezone.utc)
+        self.detail_snapshot_calls = 0
+
+    def detail_snapshot(self) -> Mapping[str, RuntimeDetail]:
+        self.detail_snapshot_calls += 1
+        return {
+            "debug": RuntimeDetail(
+                bar_time=self._bar_time,
+                ready=True,
+                value={"source": "detail-only"},
+            )
+        }
+
+
 class _NotReadyIndicator(Indicator):
     def __init__(self) -> None:
         self.runtime_spec = IndicatorRuntimeSpec(
@@ -300,7 +325,14 @@ def test_indicator_engine_returns_outputs_and_overlays() -> None:
 
     assert frame.outputs["source.signal"].ready is True
     assert frame.outputs["source.signal"].value == {"events": [{"key": "go"}]}
+    assert frame.outputs["source.signal"].indicator_commit_seq == 1
+    assert frame.outputs["source.signal"].indicator_commit_seq_status == "indicator_scoped"
+    assert len(frame.output_deltas) == 1
+    assert frame.output_deltas[0].output_key == "source.signal"
+    assert frame.output_deltas[0].base_indicator_commit_seq == 0
+    assert frame.output_deltas[0].indicator_commit_seq == 1
     assert frame.overlays["source.markers"].ready is True
+    assert frame.overlays["source.markers"].indicator_commit_seq == 1
     assert frame.overlays["source.markers"].value["type"] == "test_indicator_overlay"
 
 
@@ -382,12 +414,20 @@ def test_indicator_engine_can_skip_overlay_snapshot_on_intermediate_steps() -> N
     frame = engine.step(bar=object(), bar_time=BAR_TIME, include_overlays=False)
 
     assert frame.overlays == {}
+    assert frame.outputs["counted.metric"].indicator_commit_seq == 1
     assert indicator.overlay_snapshot_calls == 0
+
+    overlay_frame = engine.snapshot_overlays(bar_time=BAR_TIME)
+
+    assert overlay_frame.overlays["counted.markers"].indicator_commit_seq == 1
+    assert indicator.overlay_snapshot_calls == 1
 
     frame = engine.step(bar=object(), bar_time=BAR_TIME, include_overlays=True)
 
     assert "counted.markers" in frame.overlays
-    assert indicator.overlay_snapshot_calls == 1
+    assert frame.outputs["counted.metric"].indicator_commit_seq == 2
+    assert frame.overlays["counted.markers"].indicator_commit_seq == 2
+    assert indicator.overlay_snapshot_calls == 2
 
 
 def test_indicator_guard_emits_time_budget_warning_after_repeated_breaches() -> None:
@@ -741,7 +781,7 @@ def test_market_profile_outputs_match_when_overlays_are_disabled() -> None:
     _assert_output_equivalence([_market_profile()], [_market_profile()])
 
 
-def test_strategy_decisions_match_when_indicator_overlays_are_disabled() -> None:
+def test_strategy_decisions_match_across_overlay_detail_modes() -> None:
     compiled = compile_strategy(
         strategy_id="strategy-1",
         timeframe="1m",
@@ -765,31 +805,35 @@ def test_strategy_decisions_match_when_indicator_overlays_are_disabled() -> None
             "typed_outputs": [{"name": "signal", "type": "signal", "event_keys": ["go"]}]
         },
     )
-    enabled_engine = IndicatorExecutionEngine([_SourceIndicator()])
-    disabled_engine = IndicatorExecutionEngine([_SourceIndicator()])
-    enabled_frame = enabled_engine.step(bar=object(), bar_time=BAR_TIME, include_overlays=True)
-    disabled_frame = disabled_engine.step(bar=object(), bar_time=BAR_TIME, include_overlays=False)
+    modes = {
+        "baseline": {"include_overlays": True, "include_details": True},
+        "overlays_off_details_on": {"include_overlays": False, "include_details": True},
+        "overlays_on_details_off": {"include_overlays": True, "include_details": False},
+        "output_only": {"include_overlays": False, "include_details": False},
+    }
+    results = {}
+    frames = {}
 
-    enabled_result = evaluate_strategy_bar(
-        compiled_strategy=compiled,
-        state=DecisionEvaluationState(),
-        outputs=enabled_frame.outputs,
-        output_types=enabled_engine.output_types,
-        instrument_id="instrument-1",
-        symbol="TEST",
-        timeframe="1m",
-        bar_time=BAR_TIME,
-    )
-    disabled_result = evaluate_strategy_bar(
-        compiled_strategy=compiled,
-        state=DecisionEvaluationState(),
-        outputs=disabled_frame.outputs,
-        output_types=disabled_engine.output_types,
-        instrument_id="instrument-1",
-        symbol="TEST",
-        timeframe="1m",
-        bar_time=BAR_TIME,
-    )
+    for mode_name, step_kwargs in modes.items():
+        engine = IndicatorExecutionEngine([_SourceWithDetailIndicator()])
+        frame = engine.step(bar=object(), bar_time=BAR_TIME, **step_kwargs)
+        frames[mode_name] = frame
+        results[mode_name] = evaluate_strategy_bar(
+            compiled_strategy=compiled,
+            state=DecisionEvaluationState(),
+            outputs=frame.outputs,
+            output_types=engine.output_types,
+            instrument_id="instrument-1",
+            symbol="TEST",
+            timeframe="1m",
+            bar_time=BAR_TIME,
+        )
 
-    assert disabled_result.artifacts == enabled_result.artifacts
-    assert disabled_result.selected_artifact == enabled_result.selected_artifact
+    baseline = results["baseline"]
+    for mode_name, result in results.items():
+        assert result.artifacts == baseline.artifacts, mode_name
+        assert result.selected_artifact == baseline.selected_artifact, mode_name
+    assert "source.debug" in frames["baseline"].details
+    assert "source.debug" in frames["overlays_off_details_on"].details
+    assert frames["overlays_on_details_off"].details == {}
+    assert frames["output_only"].details == {}

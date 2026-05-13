@@ -56,12 +56,16 @@ class RuntimeOutput:
     bar_time: datetime
     ready: bool
     value: dict[str, Any]
+    indicator_commit_seq: int = 0
+    indicator_commit_seq_status: str = "unassigned"
 
     def copy(self) -> "RuntimeOutput":
         return RuntimeOutput(
             bar_time=self.bar_time,
             ready=bool(self.ready),
             value=deepcopy(dict(self.value or {})),
+            indicator_commit_seq=int(self.indicator_commit_seq or 0),
+            indicator_commit_seq_status=str(self.indicator_commit_seq_status or "unassigned"),
         )
 
 
@@ -70,12 +74,16 @@ class RuntimeOverlay:
     bar_time: datetime
     ready: bool
     value: dict[str, Any]
+    indicator_commit_seq: int = 0
+    indicator_commit_seq_status: str = "unassigned"
 
     def copy(self) -> "RuntimeOverlay":
         return RuntimeOverlay(
             bar_time=self.bar_time,
             ready=bool(self.ready),
             value=deepcopy(dict(self.value or {})),
+            indicator_commit_seq=int(self.indicator_commit_seq or 0),
+            indicator_commit_seq_status=str(self.indicator_commit_seq_status or "unassigned"),
         )
 
 
@@ -84,12 +92,46 @@ class RuntimeDetail:
     bar_time: datetime
     ready: bool
     value: dict[str, Any]
+    indicator_commit_seq: int = 0
+    indicator_commit_seq_status: str = "unassigned"
 
     def copy(self) -> "RuntimeDetail":
         return RuntimeDetail(
             bar_time=self.bar_time,
             ready=bool(self.ready),
             value=deepcopy(dict(self.value or {})),
+            indicator_commit_seq=int(self.indicator_commit_seq or 0),
+            indicator_commit_seq_status=str(self.indicator_commit_seq_status or "unassigned"),
+        )
+
+
+@dataclass(frozen=True)
+class RuntimeOutputDelta:
+    indicator_id: str
+    output_name: str
+    output_key: str
+    output_type: OutputType
+    bar_time: datetime
+    base_indicator_commit_seq: int
+    indicator_commit_seq: int
+    indicator_commit_seq_status: str
+    ready: bool
+    value: dict[str, Any]
+    op: Literal["set"] = "set"
+
+    def copy(self) -> "RuntimeOutputDelta":
+        return RuntimeOutputDelta(
+            indicator_id=str(self.indicator_id),
+            output_name=str(self.output_name),
+            output_key=str(self.output_key),
+            output_type=self.output_type,
+            bar_time=self.bar_time,
+            base_indicator_commit_seq=int(self.base_indicator_commit_seq or 0),
+            indicator_commit_seq=int(self.indicator_commit_seq or 0),
+            indicator_commit_seq_status=str(self.indicator_commit_seq_status or "unassigned"),
+            ready=bool(self.ready),
+            value=deepcopy(dict(self.value or {})),
+            op="set",
         )
 
 
@@ -98,6 +140,7 @@ class EngineFrame:
     outputs: dict[str, RuntimeOutput]
     overlays: dict[str, RuntimeOverlay]
     details: dict[str, RuntimeDetail] = field(default_factory=dict)
+    output_deltas: Tuple[RuntimeOutputDelta, ...] = ()
     guard_metrics: Tuple["IndicatorGuardMetric", ...] = ()
     guard_warnings: Tuple["IndicatorGuardWarning", ...] = ()
 
@@ -419,6 +462,7 @@ __all__ = [
     "RuntimeDetail",
     "RuntimeOverlay",
     "RuntimeOutput",
+    "RuntimeOutputDelta",
     "output_ref_key",
     "validate_detail_definitions",
     "validate_overlay_definitions",
