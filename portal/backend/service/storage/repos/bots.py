@@ -19,6 +19,8 @@ from ....service.bots.startup_lifecycle import build_failure_payload
 
 def _watchdog_reason_code(reason: str) -> str:
     normalized = str(reason or "").strip().lower()
+    if normalized.startswith("startup_container_ambiguous:"):
+        return "startup_container_ambiguous"
     if normalized.startswith("container_not_running:"):
         return "container_not_running"
     if normalized.startswith("stale_heartbeat:"):
@@ -26,6 +28,17 @@ def _watchdog_reason_code(reason: str) -> str:
     if normalized.startswith("server_restart:"):
         return "server_restart"
     return "watchdog_orphaned"
+
+
+def _watchdog_recoverable(reason: str) -> bool:
+    normalized = str(reason or "").strip().lower()
+    return normalized.startswith("stale_heartbeat:") or normalized.startswith("startup_container_ambiguous:")
+
+
+def _row_value(row: Any, key: str) -> Any:
+    if isinstance(row, dict):
+        return row.get(key)
+    return getattr(row, key, None)
 
 
 def _watchdog_terminal_metadata(bot_id: str, reason: str) -> Dict[str, Any]:
@@ -122,6 +135,10 @@ def upsert_bot(payload: Dict[str, Any]) -> None:
             record.playback_speed = 0.0
             if "risk" in payload:
                 record.risk = dict(payload.get("risk") or {})
+            if "execution_mode" in payload:
+                risk_payload = dict(record.risk or {})
+                risk_payload["execution_mode"] = payload.get("execution_mode")
+                record.risk = risk_payload
             if "wallet_config" in payload:
                 record.wallet_config = dict(payload.get("wallet_config") or {})
             if "snapshot_interval_ms" in payload:
@@ -195,9 +212,9 @@ def mark_bot_crashed(bot_id: str, reason: str = "orphaned") -> bool:
                 return False
             previous_runner = record.runner_id
             latest_lifecycle = get_latest_bot_run_lifecycle(bot_id)
-            latest_run_id = str((latest_lifecycle or {}).get("run_id") or "").strip()
-            latest_phase = str((latest_lifecycle or {}).get("phase") or "").strip().lower()
-            latest_status = str((latest_lifecycle or {}).get("status") or "").strip().lower()
+            latest_run_id = str(_row_value(latest_lifecycle, "run_id") or "").strip()
+            latest_phase = str(_row_value(latest_lifecycle, "phase") or "").strip().lower()
+            latest_status = str(_row_value(latest_lifecycle, "status") or "").strip().lower()
             if latest_phase in {
                 BotLifecyclePhase.COMPLETED.value,
                 BotLifecyclePhase.STOPPED.value,
@@ -225,33 +242,70 @@ def mark_bot_crashed(bot_id: str, reason: str = "orphaned") -> bool:
                     previous_runner,
                 )
                 return False
+            recoverable_watchdog_condition = _watchdog_recoverable(reason)
             record.runner_id = None
             record.heartbeat_at = None
             record.updated_at = _utcnow()
-            logger.info(
-                "bot_marked_crashed | id=%s | reason=%s | previous_runner=%s",
-                bot_id,
-                reason,
-                previous_runner,
-            )
+            if recoverable_watchdog_condition:
+                logger.warning(
+                    "bot_watchdog_recoverable_condition_recorded | id=%s | reason=%s | previous_runner=%s",
+                    bot_id,
+                    reason,
+                    previous_runner,
+                )
+            else:
+                logger.info(
+                    "bot_marked_crashed | id=%s | reason=%s | previous_runner=%s",
+                    bot_id,
+                    reason,
+                    previous_runner,
+                )
         if latest_run_id:
-            terminal_metadata = _watchdog_terminal_metadata(bot_id, reason)
+            recoverable_watchdog_condition = _watchdog_recoverable(reason)
+            terminal_metadata = (
+                {
+                    "watchdog_condition": _watchdog_reason_code(reason),
+                    "watchdog_classification": "recoverable",
+                    "recoverable": True,
+                    "watchdog_reason_text": str(reason or "").strip() or "stale_heartbeat",
+                }
+                if recoverable_watchdog_condition
+                else _watchdog_terminal_metadata(bot_id, reason)
+            )
+            phase = (
+                BotLifecyclePhase.DEGRADED.value
+                if recoverable_watchdog_condition
+                else BotLifecyclePhase.CRASHED.value
+            )
+            status = (
+                BotLifecycleStatus.DEGRADED.value
+                if recoverable_watchdog_condition
+                else BotLifecycleStatus.CRASHED.value
+            )
+            reason_code = _watchdog_reason_code(reason)
+            message = (
+                f"Recoverable watchdog condition observed: {reason}"
+                if recoverable_watchdog_condition
+                else f"Bot marked crashed by watchdog: {reason}"
+            )
+            failure_type = f"watchdog_{reason_code}" if recoverable_watchdog_condition else "watchdog_crash"
             record_bot_run_lifecycle_checkpoint(
                 {
                     "bot_id": bot_id,
                     "run_id": latest_run_id,
-                    "phase": BotLifecyclePhase.CRASHED.value,
-                    "status": BotLifecycleStatus.CRASHED.value,
+                    "phase": phase,
+                    "status": status,
                     "owner": LifecycleOwner.WATCHDOG.value,
-                    "message": f"Bot marked crashed by watchdog: {reason}",
+                    "message": message,
                     "metadata": terminal_metadata,
                     "failure": build_failure_payload(
-                        phase=BotLifecyclePhase.CRASHED.value,
-                        message=f"Bot marked crashed by watchdog: {reason}",
-                        type="watchdog_crash",
-                        reason_code=_watchdog_reason_code(reason),
+                        phase=phase,
+                        message=message,
+                        type=failure_type,
+                        reason_code=reason_code,
                         owner=LifecycleOwner.WATCHDOG.value,
                     )
+                    | {"recoverable": recoverable_watchdog_condition}
                     | {"reason": reason}
                     | terminal_metadata,
                 }

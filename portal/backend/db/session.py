@@ -194,16 +194,16 @@ class Database:
             existing = {str(index.get("name") or "") for index in inspector.get_indexes(name, schema=schema)}
             missing = sorted(set(required) - existing)
             if missing:
-                logger.warning(
-                    "portal_db_required_indexes_missing | schema=%s | table=%s | missing=%s | migration=%s",
-                    schema or "public",
-                    name,
-                    ",".join(missing),
-                    "scripts/db/manual_migration_botlens_runtime_event_storage_efficiency_v2.sql",
-                )
+	                logger.warning(
+	                    "portal_db_required_indexes_missing | schema=%s | table=%s | missing=%s | migration=%s",
+	                    schema or "public",
+	                    name,
+	                    ",".join(missing),
+	                    "scripts/db/manual_migration_runtime_event_run_seq_v3.sql",
+	                )
 
         require_table("portal_bot_runs")
-        require_table("portal_bot_run_steps")
+        require_table("portal_bot_run_step_rollups_v1")
         require_table("portal_bot_run_lifecycle")
         require_table("portal_bot_run_lifecycle_events")
         require_table("portal_bot_trades")
@@ -215,9 +215,10 @@ class Database:
         require_table("portal_strategy_variants")
         require_table("portal_async_jobs")
         require_table("portal_bot_run_events")
+        require_table("portal_bot_run_event_seq_allocators")
         require_table("botlens_backend_events_v1", schema="observability_events")
-        require_table("botlens_backend_metric_samples_v1", schema="observability_metrics")
-        assert_columns("portal_bot_run_steps")
+        require_table("botlens_backend_metric_rollups_v1", schema="observability_metrics")
+        assert_columns("portal_bot_run_step_rollups_v1")
         assert_columns("portal_bot_run_lifecycle")
         assert_columns("portal_bot_run_lifecycle_events")
         assert_columns("portal_bot_trades")
@@ -229,8 +230,9 @@ class Database:
         assert_columns("portal_strategy_variants")
         assert_columns("portal_async_jobs")
         assert_columns("portal_bot_run_events")
+        assert_columns("portal_bot_run_event_seq_allocators")
         assert_columns("botlens_backend_events_v1", schema="observability_events")
-        assert_columns("botlens_backend_metric_samples_v1", schema="observability_metrics")
+        assert_columns("botlens_backend_metric_rollups_v1", schema="observability_metrics")
         warn_missing_indexes("portal_bot_run_events", REQUIRED_BOT_RUN_EVENT_INDEXES)
 
     @property

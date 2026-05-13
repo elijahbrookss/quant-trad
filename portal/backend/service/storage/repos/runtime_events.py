@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import logging
+import math
+import json
 import time
 from collections import defaultdict
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
 from engines.bot_runtime.core.series_identity import normalize_series_key as normalize_public_series_key
 from engines.bot_runtime.runtime.event_types import RUNTIME_PREFIX
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from ...observability import payload_size_bytes
@@ -29,7 +31,7 @@ from ._shared import (
     BotRunEventRecord,
     BotRunLifecycleRecord,
     BotRunRecord,
-    BotRunStepRecord,
+    BotRunStepRollupRecord,
     SQLAlchemyError,
     StorageWriteOutcome,
     _STORAGE_OBSERVER,
@@ -49,6 +51,224 @@ from ._shared import (
 
 _OBSERVER = _STORAGE_OBSERVER
 _RUNTIME_EVENT_ID_CONFLICT_CONSTRAINT = "uq_portal_bot_run_events_event_id"
+_RUN_SEQ_STATUS_RUNTIME_ASSIGNED = "runtime_assigned"
+_STEP_ROLLUP_BUCKET_SECONDS = 10
+_STEP_CONTEXT_METRIC_EXACT = frozenset(
+    {
+        "active_workers",
+        "botlens_fact_stream_candles_fact_count",
+        "botlens_fact_stream_candles_payload_bytes",
+        "botlens_fact_stream_coalesced_count",
+        "botlens_fact_stream_decisions_fact_count",
+        "botlens_fact_stream_decisions_payload_bytes",
+        "botlens_fact_stream_diagnostics_fact_count",
+        "botlens_fact_stream_diagnostics_payload_bytes",
+        "botlens_fact_stream_dropped_stale_count",
+        "botlens_fact_stream_fact_count",
+        "botlens_fact_stream_health_runtime_state_fact_count",
+        "botlens_fact_stream_health_runtime_state_payload_bytes",
+        "botlens_fact_stream_overlays_fact_count",
+        "botlens_fact_stream_overlays_payload_bytes",
+        "botlens_fact_stream_run_summary_fact_count",
+        "botlens_fact_stream_run_summary_payload_bytes",
+        "botlens_fact_stream_surface_count",
+        "botlens_fact_stream_symbol_summary_fact_count",
+        "botlens_fact_stream_symbol_summary_payload_bytes",
+        "botlens_fact_stream_trades_fact_count",
+        "botlens_fact_stream_trades_payload_bytes",
+        "botlens_fact_stream_wallet_fact_count",
+        "botlens_fact_stream_wallet_payload_bytes",
+        "build_state_ms",
+        "canonical_append_ms",
+        "canonical_fact_overflow_count",
+        "canonical_fact_persist_batch_ms",
+        "canonical_fact_persist_error_count",
+        "canonical_fact_persist_lag_ms",
+        "canonical_fact_persisted_batch_count",
+        "canonical_fact_persisted_row_count",
+        "canonical_fact_queue_depth",
+        "canonical_fact_queued_count",
+        "candle_update_ms",
+        "coalesced_count",
+        "db_commit_ms",
+        "degraded_symbols_count",
+        "delta_build_ms",
+        "delta_serialize_ms",
+        "dispatch_ms",
+        "dropped_stale_count",
+        "enqueue_ms",
+        "execution_decision_flow_ms",
+        "execution_ms",
+        "execution_prime_ms",
+        "execution_settlement_ms",
+        "execution_trade_event_processing_ms",
+        "finalize_residual_ms",
+        "indicator_eval_ms",
+        "indicator_state_update_ms",
+        "max_overlay_payload_bytes",
+        "overlay_payload_bytes",
+        "overlay_projection_delta_ms",
+        "overlay_projection_entries_total",
+        "overlay_projection_fingerprint_ms",
+        "overlay_projection_ms",
+        "overlay_projection_normalize_ms",
+        "overlay_projection_ops_count",
+        "overlay_projection_projector_ms",
+        "overlay_projection_skipped_count",
+        "overlays_update_ms",
+        "payload_bytes",
+        "pending_signals_append_ms",
+        "pending_signals_consume_ms",
+        "pending_signals_ops_ms",
+        "persist_ms",
+        "persistence_ms",
+        "queue_wait_ms",
+        "rule_eval_ms",
+        "serialize_ms",
+        "series_overlay_entries_ms",
+        "series_overlay_indicator_entries_count",
+        "series_overlay_indicator_entries_ms",
+        "series_overlay_regime_build_ms",
+        "series_overlay_regime_entries_count",
+        "series_overlay_total_entries_count",
+        "signal_eval_ms",
+        "snapshot_events_in_cycle",
+        "stats_update_ms",
+        "step_trace_dropped_count",
+        "step_trace_enqueue_ms",
+        "step_trace_persist_batch_ms",
+        "step_trace_persist_error_count",
+        "step_trace_persist_lag_ms",
+        "step_trace_queue_depth",
+        "strategy_eval_ms",
+        "stream_emit_ms",
+        "trace_persist_ms",
+        "trade_lock_hold_ms",
+        "trade_lock_wait_ms",
+        "worker_count",
+    }
+)
+_STEP_CONTEXT_METRIC_SUFFIXES: tuple[str, ...] = ()
+_STEP_CONTEXT_METRIC_SKIP = frozenset(
+    {
+        "bar_epoch",
+        "bar_index",
+        "bar_time",
+        "event",
+        "run_id",
+        "symbol",
+        "timeframe",
+    }
+)
+_STEP_HISTOGRAM_BOUNDS = (
+    0.0,
+    1.0,
+    2.0,
+    5.0,
+    10.0,
+    20.0,
+    50.0,
+    100.0,
+    200.0,
+    500.0,
+    1_000.0,
+    2_000.0,
+    5_000.0,
+    10_000.0,
+    30_000.0,
+    60_000.0,
+    300_000.0,
+    1_000_000.0,
+    1_000_000_000.0,
+    1_000_000_000_000.0,
+)
+
+
+def _session_has_real_bind(session: Any) -> bool:
+    return hasattr(session, "get_bind") or hasattr(session, "bind")
+
+
+def _lock_run_seq_allocator(session: Any, *, run_id: str) -> int:
+    if not _session_has_real_bind(session):
+        return 1
+    row = (
+        session.execute(
+            text(
+                """
+                INSERT INTO public.portal_bot_run_event_seq_allocators
+                    (run_id, next_run_seq, updated_at)
+                VALUES
+                    (:run_id, 1, NOW())
+                ON CONFLICT (run_id) DO UPDATE
+                SET next_run_seq = public.portal_bot_run_event_seq_allocators.next_run_seq
+                RETURNING next_run_seq
+                """
+            ),
+            {"run_id": str(run_id)},
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        raise RuntimeError(f"run_seq allocator lock did not return a row run_id={run_id}")
+    return max(int(row["next_run_seq"]), 1)
+
+
+def _reserve_run_seq_range(session: Any, *, run_id: str, count: int) -> tuple[int, int]:
+    requested = max(int(count or 0), 0)
+    if requested <= 0:
+        raise ValueError("run_seq allocation requires count > 0")
+    if not _session_has_real_bind(session):
+        return 1, requested
+    row = (
+        session.execute(
+            text(
+                """
+                UPDATE public.portal_bot_run_event_seq_allocators
+                SET next_run_seq = next_run_seq + :count,
+                    updated_at = NOW()
+                WHERE run_id = :run_id
+                RETURNING
+                    next_run_seq - :count AS first_run_seq,
+                    next_run_seq - 1 AS last_run_seq
+                """
+            ),
+            {
+                "run_id": str(run_id),
+                "count": requested,
+            },
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        raise RuntimeError(f"run_seq allocator did not return a range run_id={run_id}")
+    first_run_seq = int(row["first_run_seq"])
+    last_run_seq = int(row["last_run_seq"])
+    if last_run_seq - first_run_seq + 1 != requested:
+        raise RuntimeError(
+            "run_seq allocator returned invalid range "
+            f"run_id={run_id} requested={requested} first={first_run_seq} last={last_run_seq}"
+        )
+    return first_run_seq, last_run_seq
+
+
+def _stamp_runtime_order_payload(
+    payload: Mapping[str, Any],
+    *,
+    run_seq: int,
+    run_seq_status: str = _RUN_SEQ_STATUS_RUNTIME_ASSIGNED,
+) -> Dict[str, Any]:
+    stamped = _json_safe(dict(payload or {}))
+    context = stamped.get("context")
+    if not isinstance(context, Mapping):
+        context = {}
+    stamped["context"] = {
+        **dict(context),
+        "run_seq": int(run_seq),
+        "run_seq_status": str(run_seq_status),
+    }
+    return stamped
 
 
 def _normalize_botlens_series_key(value: Any) -> str:
@@ -107,6 +327,7 @@ def _runtime_event_payload_hot_fields(
         "bridge_session_id": _optional_text(source.get("bridge_session_id")),
         "bridge_seq": _coerce_int(source.get("bridge_seq")),
         "run_seq": _coerce_int(source.get("run_seq")),
+        "run_seq_status": _optional_text(source.get("run_seq_status")),
         "strategy_id": _optional_text(source.get("strategy_id")),
         "category": _optional_text(source.get("category")),
     }
@@ -145,7 +366,7 @@ def _iso8601_or_none(value: Any) -> str | None:
 
 def _runtime_event_row_to_dict(row: BotRunEventRecord | Mapping[str, Any]) -> Dict[str, Any]:
     if isinstance(row, BotRunEventRecord):
-        return row.to_dict()
+        return _project_runtime_event_row(row.to_dict())
     raw = dict(row or {})
     payload = raw.get("payload") if isinstance(raw.get("payload"), Mapping) else {}
     result = {
@@ -158,6 +379,8 @@ def _runtime_event_row_to_dict(row: BotRunEventRecord | Mapping[str, Any]) -> Di
         "critical": bool(raw.get("critical", False)),
         "schema_version": int(raw.get("schema_version") or 1),
         "payload": dict(payload),
+        "run_seq": _coerce_int(raw.get("run_seq")),
+        "run_seq_status": _optional_text(raw.get("run_seq_status")),
         "event_name": _optional_text(raw.get("event_name"), uppercase=True),
         "series_key": _normalize_botlens_series_key(raw.get("series_key")) or None,
         "correlation_id": _optional_text(raw.get("correlation_id")),
@@ -174,7 +397,7 @@ def _runtime_event_row_to_dict(row: BotRunEventRecord | Mapping[str, Any]) -> Di
         "known_at": _iso8601_or_none(raw.get("known_at")) or _iso8601_or_none(_utcnow()),
         "created_at": _iso8601_or_none(raw.get("created_at")) or _iso8601_or_none(_utcnow()),
     }
-    return result
+    return _project_runtime_event_row(result)
 
 
 _WRITE_SOURCE_VALUES = frozenset({"ingest", "producer", "replay", "retry", "bootstrap", "projector", "transport", "unknown"})
@@ -354,10 +577,6 @@ def _project_runtime_event_row(
     if bridge_seq is not None:
         projected["bridge_seq"] = int(bridge_seq)
     run_seq = _coerce_int(projected.get("run_seq"))
-    if run_seq is None:
-        run_seq = _coerce_int(payload.get("run_seq"))
-    if run_seq is None:
-        run_seq = _coerce_int(runtime_context.get("run_seq"))
     if run_seq is not None:
         projected["run_seq"] = int(run_seq)
     category = projected.get("category")
@@ -375,7 +594,11 @@ def _project_runtime_event_row(
 
 
 def _row_cursor_tuple(row: Mapping[str, Any]) -> tuple[int, int]:
-    return (int(row.get("seq") or 0), int(row.get("id") or 0))
+    return (int(row.get("run_seq") or 0), int(row.get("id") or 0))
+
+
+def _runtime_order_expression():
+    return BotRunEventRecord.run_seq
 
 
 def _matches_runtime_event_filters(
@@ -450,6 +673,8 @@ def _runtime_event_row_values(
         "critical": critical,
         "schema_version": schema_version,
         "payload": dict(payload),
+        "run_seq": hot_fields.get("run_seq"),
+        "run_seq_status": hot_fields.get("run_seq_status"),
         "event_name": hot_fields.get("event_name"),
         "series_key": hot_fields.get("series_key"),
         "correlation_id": hot_fields.get("correlation_id"),
@@ -472,9 +697,27 @@ def _runtime_event_insert_statement(*, rows: Sequence[Mapping[str, Any]], return
     return (
         pg_insert(BotRunEventRecord.__table__)
         .values([dict(row) for row in rows])
-        .on_conflict_do_nothing(constraint=_RUNTIME_EVENT_ID_CONFLICT_CONSTRAINT)
         .returning(*returning_columns)
     )
+
+
+def _existing_runtime_event_rows_for_event_ids(
+    session: Any,
+    *,
+    event_ids: Sequence[str],
+) -> Dict[str, BotRunEventRecord]:
+    normalized_event_ids = sorted({str(event_id or "").strip() for event_id in event_ids if str(event_id or "").strip()})
+    if not normalized_event_ids or not _session_has_real_bind(session):
+        return {}
+    rows = (
+        session.execute(
+            select(BotRunEventRecord)
+            .where(BotRunEventRecord.event_id.in_(normalized_event_ids))
+        )
+        .scalars()
+        .all()
+    )
+    return {str(row.event_id): row for row in rows if str(row.event_id or "").strip()}
 
 
 def _existing_runtime_event_rows_for_seq(
@@ -510,10 +753,7 @@ def _first_conflicting_seq_row(
             existing
             for existing in conflicts
             if str(existing.event_id or "").strip() != event_id
-            and not (
-                _allows_duplicate_seq(event_type)
-                and _allows_duplicate_seq(str(existing.event_type or ""))
-            )
+            and not (_allows_duplicate_seq(event_type) and _allows_duplicate_seq(str(existing.event_type or "")))
         ),
         None,
     )
@@ -531,45 +771,277 @@ def _existing_runtime_event_by_event_id(session: Any, *, event_id: str) -> BotRu
     )
 
 
-def record_bot_run_step(payload: Dict[str, Any]) -> None:
-    """Persist a timed bot runtime step for profiler dashboards."""
+def _step_bucket_start(value: datetime, bucket_seconds: int = _STEP_ROLLUP_BUCKET_SECONDS) -> datetime:
+    epoch = int(value.replace(tzinfo=timezone.utc).timestamp())
+    bucket_epoch = epoch - (epoch % max(int(bucket_seconds or _STEP_ROLLUP_BUCKET_SECONDS), 1))
+    return datetime.fromtimestamp(bucket_epoch, tz=timezone.utc).replace(tzinfo=None)
 
-    if not db.available:
-        return
-    run_id = str(payload.get("run_id") or "").strip()
-    step_name = str(payload.get("step_name") or "").strip()
-    if not run_id or not step_name:
-        return
+
+def _clean_step_identity(value: Any, max_len: int) -> str:
+    return str(value or "").strip()[:max_len]
+
+
+def _clean_step_metric_name(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    cleaned = "".join(ch if ch.isalnum() or ch in {"_", "."} else "_" for ch in raw)
+    return cleaned[:128]
+
+
+def _finite_step_float(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
+def _should_rollup_step_context_metric(key: str) -> bool:
+    metric_name = _clean_step_metric_name(key)
+    if not metric_name or metric_name in _STEP_CONTEXT_METRIC_SKIP:
+        return False
+    return metric_name in _STEP_CONTEXT_METRIC_EXACT or metric_name.endswith(_STEP_CONTEXT_METRIC_SUFFIXES)
+
+
+def _step_histogram_counts(values: Sequence[float]) -> List[int]:
+    counts = [0 for _ in _STEP_HISTOGRAM_BOUNDS]
+    for raw_value in values:
+        value = float(raw_value)
+        bucket_index = len(_STEP_HISTOGRAM_BOUNDS) - 1
+        for index, bound in enumerate(_STEP_HISTOGRAM_BOUNDS):
+            if value <= bound:
+                bucket_index = index
+                break
+        counts[bucket_index] += 1
+    return counts
+
+
+def _step_histogram_quantile(
+    bounds: Sequence[float],
+    counts: Sequence[int],
+    quantile: float,
+    *,
+    value_max: Optional[float] = None,
+) -> float:
+    total = sum(max(int(count), 0) for count in counts)
+    if total <= 0:
+        return 0.0
+    threshold = max(int(math.ceil(total * min(max(float(quantile), 0.0), 1.0))), 1)
+    cumulative = 0
+    max_value = float(value_max) if value_max is not None else None
+    for bound, count in zip(bounds, counts):
+        cumulative += max(int(count), 0)
+        if cumulative >= threshold:
+            value = float(bound)
+            return min(value, max_value) if max_value is not None else value
+    return max_value if max_value is not None else float(bounds[-1])
+
+
+def _step_metric_samples(payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    run_id = _clean_step_identity(payload.get("run_id"), 64)
+    step_name = _clean_step_identity(payload.get("step_name"), 64)
     started_at = _parse_optional_timestamp(payload.get("started_at"))
     ended_at = _parse_optional_timestamp(payload.get("ended_at"))
-    duration_ms = _coerce_float(payload.get("duration_ms"))
-    if started_at is None or ended_at is None or duration_ms is None:
-        return
-    try:
-        with db.session() as session:
-            now = _utcnow()
-            record = BotRunStepRecord(
-                run_id=run_id,
-                bot_id=str(payload.get("bot_id") or "") or None,
-                step_name=step_name,
-                started_at=started_at,
-                ended_at=ended_at,
-                duration_ms=float(duration_ms),
-                ok=bool(payload.get("ok", True)),
-                strategy_id=str(payload.get("strategy_id") or "") or None,
-                symbol=str(payload.get("symbol") or "") or None,
-                timeframe=str(payload.get("timeframe") or "") or None,
-                error=(str(payload.get("error"))[:1024] if payload.get("error") else None),
-                context=_json_safe(dict(payload.get("context") or {})),
-                created_at=now,
+    duration_ms = _finite_step_float(payload.get("duration_ms"))
+    if not run_id or not step_name or started_at is None or ended_at is None or duration_ms is None:
+        return []
+    base = {
+        "bucket_start": _step_bucket_start(started_at),
+        "bucket_seconds": _STEP_ROLLUP_BUCKET_SECONDS,
+        "first_seen": started_at,
+        "last_seen": ended_at,
+        "run_id": run_id,
+        "bot_id": _clean_step_identity(payload.get("bot_id"), 64),
+        "step_name": step_name,
+        "strategy_id": _clean_step_identity(payload.get("strategy_id"), 64),
+        "symbol": _clean_step_identity(payload.get("symbol"), 64),
+        "timeframe": _clean_step_identity(payload.get("timeframe"), 32),
+        "status": "ok" if bool(payload.get("ok", True)) else "failed",
+        "error_count": 1 if payload.get("error") else 0,
+    }
+    samples = [{**base, "metric_name": "duration_ms", "value": float(duration_ms)}]
+    context = payload.get("context") if isinstance(payload.get("context"), Mapping) else {}
+    for key, raw_value in context.items():
+        metric_name = _clean_step_metric_name(key)
+        if not _should_rollup_step_context_metric(metric_name):
+            continue
+        value = _finite_step_float(raw_value)
+        if value is None:
+            continue
+        samples.append({**base, "metric_name": metric_name, "value": value})
+    return samples
+
+
+def _rollup_step_metric_samples(payloads: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
+    for payload in payloads:
+        if not isinstance(payload, Mapping):
+            continue
+        for sample in _step_metric_samples(payload):
+            key = (
+                sample["bucket_start"],
+                int(sample["bucket_seconds"]),
+                sample["run_id"],
+                sample["bot_id"],
+                sample["step_name"],
+                sample["metric_name"],
+                sample["strategy_id"],
+                sample["symbol"],
+                sample["timeframe"],
+                sample["status"],
             )
-            session.add(record)
-    except SQLAlchemyError as exc:
-        logger.warning("bot_run_step_persist_failed | run_id=%s | step=%s | error=%s", run_id, step_name, exc)
+            grouped[key].append(sample)
+
+    rollups: List[Dict[str, Any]] = []
+    now = _utcnow()
+    for key, samples in grouped.items():
+        values = [float(sample["value"]) for sample in samples]
+        latest = max(samples, key=lambda sample: sample["last_seen"])
+        histogram_counts = _step_histogram_counts(values)
+        value_max = float(max(values))
+        rollups.append(
+            {
+                "bucket_start": key[0],
+                "bucket_seconds": int(key[1]),
+                "run_id": key[2],
+                "bot_id": key[3],
+                "step_name": key[4],
+                "metric_name": key[5],
+                "strategy_id": key[6],
+                "symbol": key[7],
+                "timeframe": key[8],
+                "status": key[9],
+                "first_seen": min(sample["first_seen"] for sample in samples),
+                "last_seen": max(sample["last_seen"] for sample in samples),
+                "sample_count": len(values),
+                "value_sum": float(sum(values)),
+                "value_min": float(min(values)),
+                "value_max": value_max,
+                "latest_value": float(latest["value"]),
+                "p95_value": _step_histogram_quantile(_STEP_HISTOGRAM_BOUNDS, histogram_counts, 0.95, value_max=value_max),
+                "p99_value": _step_histogram_quantile(_STEP_HISTOGRAM_BOUNDS, histogram_counts, 0.99, value_max=value_max),
+                "histogram_bounds": list(_STEP_HISTOGRAM_BOUNDS),
+                "histogram_counts": histogram_counts,
+                "raw_sample_count": len(values),
+                "error_count": sum(int(sample.get("error_count") or 0) for sample in samples),
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+    return rollups
+
+
+def _upsert_step_rollups(session: Any, rollups: Sequence[Mapping[str, Any]]) -> int:
+    if not rollups:
+        return 0
+    statement = text(
+        """
+        INSERT INTO public.portal_bot_run_step_rollups_v1 AS rollup (
+            bucket_start,
+            bucket_seconds,
+            first_seen,
+            last_seen,
+            run_id,
+            bot_id,
+            step_name,
+            metric_name,
+            strategy_id,
+            symbol,
+            timeframe,
+            status,
+            sample_count,
+            value_sum,
+            value_min,
+            value_max,
+            latest_value,
+            p95_value,
+            p99_value,
+            histogram_bounds,
+            histogram_counts,
+            raw_sample_count,
+            error_count,
+            created_at,
+            updated_at
+        )
+        VALUES (
+            :bucket_start,
+            :bucket_seconds,
+            :first_seen,
+            :last_seen,
+            :run_id,
+            :bot_id,
+            :step_name,
+            :metric_name,
+            :strategy_id,
+            :symbol,
+            :timeframe,
+            :status,
+            :sample_count,
+            :value_sum,
+            :value_min,
+            :value_max,
+            :latest_value,
+            :p95_value,
+            :p99_value,
+            CAST(:histogram_bounds AS jsonb),
+            CAST(:histogram_counts AS jsonb),
+            :raw_sample_count,
+            :error_count,
+            :created_at,
+            :updated_at
+        )
+        ON CONFLICT ON CONSTRAINT uq_portal_bot_run_step_rollups_v1_bucket_identity
+        DO UPDATE SET
+            first_seen = LEAST(rollup.first_seen, EXCLUDED.first_seen),
+            last_seen = GREATEST(rollup.last_seen, EXCLUDED.last_seen),
+            sample_count = rollup.sample_count + EXCLUDED.sample_count,
+            value_sum = rollup.value_sum + EXCLUDED.value_sum,
+            value_min = LEAST(rollup.value_min, EXCLUDED.value_min),
+            value_max = GREATEST(rollup.value_max, EXCLUDED.value_max),
+            latest_value = EXCLUDED.latest_value,
+            histogram_bounds = EXCLUDED.histogram_bounds,
+            histogram_counts = public.quanttrad_jsonb_histogram_counts_add(
+                rollup.histogram_counts,
+                EXCLUDED.histogram_counts
+            ),
+            p95_value = public.quanttrad_jsonb_histogram_quantile(
+                EXCLUDED.histogram_bounds,
+                public.quanttrad_jsonb_histogram_counts_add(rollup.histogram_counts, EXCLUDED.histogram_counts),
+                0.95,
+                GREATEST(rollup.value_max, EXCLUDED.value_max)
+            ),
+            p99_value = public.quanttrad_jsonb_histogram_quantile(
+                EXCLUDED.histogram_bounds,
+                public.quanttrad_jsonb_histogram_counts_add(rollup.histogram_counts, EXCLUDED.histogram_counts),
+                0.99,
+                GREATEST(rollup.value_max, EXCLUDED.value_max)
+            ),
+            raw_sample_count = rollup.raw_sample_count + EXCLUDED.raw_sample_count,
+            error_count = rollup.error_count + EXCLUDED.error_count,
+            updated_at = EXCLUDED.updated_at
+        """
+    )
+    rows = []
+    for row in rollups:
+        item = dict(row)
+        item["histogram_bounds"] = json.dumps(item.get("histogram_bounds") or [])
+        item["histogram_counts"] = json.dumps(item.get("histogram_counts") or [])
+        rows.append(item)
+    session.execute(statement, rows)
+    return len(rollups)
+
+
+def record_bot_run_step(payload: Dict[str, Any]) -> None:
+    """Persist a timed bot runtime step as typed profiler rollups."""
+
+    record_bot_run_steps_batch([payload])
 
 
 def record_bot_run_steps_batch(payloads: Sequence[Dict[str, Any]]) -> int:
-    """Persist many runtime step trace rows in one DB transaction."""
+    """Persist runtime step trace batches as typed metric rollups."""
 
     if not db.available:
         return 0
@@ -577,47 +1049,43 @@ def record_bot_run_steps_batch(payloads: Sequence[Dict[str, Any]]) -> int:
     if not items:
         return 0
 
-    rows: List[BotRunStepRecord] = []
-    now = _utcnow()
-    for payload in items:
-        if not isinstance(payload, dict):
-            continue
-        run_id = str(payload.get("run_id") or "").strip()
-        step_name = str(payload.get("step_name") or "").strip()
-        if not run_id or not step_name:
-            continue
-        started_at = _parse_optional_timestamp(payload.get("started_at"))
-        ended_at = _parse_optional_timestamp(payload.get("ended_at"))
-        duration_ms = _coerce_float(payload.get("duration_ms"))
-        if started_at is None or ended_at is None or duration_ms is None:
-            continue
-        rows.append(
-            BotRunStepRecord(
-                run_id=run_id,
-                bot_id=str(payload.get("bot_id") or "") or None,
-                step_name=step_name,
-                started_at=started_at,
-                ended_at=ended_at,
-                duration_ms=float(duration_ms),
-                ok=bool(payload.get("ok", True)),
-                strategy_id=str(payload.get("strategy_id") or "") or None,
-                symbol=str(payload.get("symbol") or "") or None,
-                timeframe=str(payload.get("timeframe") or "") or None,
-                error=(str(payload.get("error"))[:1024] if payload.get("error") else None),
-                context=_json_safe(dict(payload.get("context") or {})),
-                created_at=now,
-            )
-        )
-    if not rows:
+    rollups = _rollup_step_metric_samples(items)
+    if not rollups:
         return 0
 
     try:
         with db.session() as session:
-            session.add_all(rows)
-        return len(rows)
+            return _upsert_step_rollups(session, rollups)
     except SQLAlchemyError as exc:
-        logger.warning("bot_run_step_batch_persist_failed | rows=%s | error=%s", len(rows), exc)
+        logger.warning(
+            "bot_run_step_rollup_batch_persist_failed | payloads=%s | rollups=%s | error=%s",
+            len(items),
+            len(rollups),
+            exc,
+        )
         return 0
+
+
+def list_bot_run_steps_for_run(run_id: str) -> List[Dict[str, Any]]:
+    """Return profiler duration rollups for a run."""
+
+    if not db.available:
+        return []
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return []
+    with db.session() as session:
+        rows = (
+            session.execute(
+                select(BotRunStepRollupRecord)
+                .where(BotRunStepRollupRecord.run_id == normalized_run_id)
+                .where(BotRunStepRollupRecord.metric_name == "duration_ms")
+                .order_by(BotRunStepRollupRecord.bucket_start.asc(), BotRunStepRollupRecord.id.asc())
+            )
+            .scalars()
+            .all()
+        )
+        return [row.to_dict() for row in rows]
 
 
 def record_bot_runtime_event(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -662,28 +1130,39 @@ def record_bot_runtime_event(payload: Dict[str, Any]) -> Dict[str, Any]:
             message_kind=event_type,
             pipeline_stage="runtime_event_persist",
         ),
-        "conflict_strategy": "seq_guard_then_insert_on_conflict_do_nothing",
+        "conflict_strategy": "event_id_precheck_allocator_then_plain_insert",
         "conflict_target_name": _RUNTIME_EVENT_ID_CONFLICT_CONSTRAINT,
-        "write_contract": "insert_first_event_id_dedupe",
-        "precheck_mode": "seq_guard_only",
+        "write_contract": "event_id_dedupe_before_run_seq_allocation",
+        "precheck_mode": "event_id_then_seq_guard",
     }
     db_round_trip_ms = {"value": None}
-    row_values = _runtime_event_row_values(
-        event_id=event_id,
-        bot_id=bot_id,
-        run_id=run_id,
-        seq=seq,
-        event_type=event_type,
-        critical=bool(payload.get("critical", False)),
-        schema_version=schema_version,
-        payload=persisted_payload,
-        event_time=_parse_optional_timestamp(payload.get("event_time")),
-        known_at=_parse_optional_timestamp(payload.get("known_at")) or _utcnow(),
-    )
-
     def _write() -> StorageWriteOutcome:
         write_started = time.perf_counter()
         with db.session() as session:
+            _lock_run_seq_allocator(session, run_id=run_id)
+            existing_by_id = (
+                _existing_runtime_event_by_event_id(session, event_id=event_id)
+                if _session_has_real_bind(session)
+                else None
+            )
+            if existing_by_id is not None:
+                db_round_trip_ms["value"] = max((time.perf_counter() - write_started) * 1000.0, 0.0)
+                return StorageWriteOutcome(
+                    result=_runtime_event_row_to_dict(existing_by_id),
+                    noop_reason="duplicate_skip",
+                    noop_count=1,
+                    attempted_rows=1,
+                    duplicate_rows=1,
+                    payload_build_ms=payload_build_ms,
+                    db_round_trip_ms=db_round_trip_ms["value"],
+                    duplicate_reasons={
+                        _classify_duplicate_reason(
+                            source_reason=str(write_context.get("source_reason") or ""),
+                            existing_event_id=True,
+                        ): 1
+                    },
+                    **payload_shape,
+                )
             existing_seq_rows = _existing_runtime_event_rows_for_seq(
                 session,
                 bot_id=bot_id,
@@ -699,6 +1178,19 @@ def record_bot_runtime_event(payload: Dict[str, Any]) -> Dict[str, Any]:
                 raise ValueError(
                     f"seq collision for bot/run (incoming={seq}, existing_event_id={conflicting_seq_row.event_id}, event_id={event_id})"
                 )
+            run_seq, _last_run_seq = _reserve_run_seq_range(session, run_id=run_id, count=1)
+            row_values = _runtime_event_row_values(
+                event_id=event_id,
+                bot_id=bot_id,
+                run_id=run_id,
+                seq=seq,
+                event_type=event_type,
+                critical=bool(payload.get("critical", False)),
+                schema_version=schema_version,
+                payload=_stamp_runtime_order_payload(persisted_payload, run_seq=run_seq),
+                event_time=_parse_optional_timestamp(payload.get("event_time")),
+                known_at=_parse_optional_timestamp(payload.get("known_at")) or _utcnow(),
+            )
             inserted = (
                 session.execute(
                     _runtime_event_insert_statement(
@@ -720,32 +1212,7 @@ def record_bot_runtime_event(payload: Dict[str, Any]) -> Dict[str, Any]:
                     db_round_trip_ms=db_round_trip_ms["value"],
                     **payload_shape,
                 )
-            existing = (
-                session.execute(
-                    select(BotRunEventRecord)
-                    .where(BotRunEventRecord.event_id == event_id)
-                    .limit(1)
-                )
-                .scalars()
-                .first()
-            )
-            db_round_trip_ms["value"] = max((time.perf_counter() - write_started) * 1000.0, 0.0)
-            return StorageWriteOutcome(
-                result=_runtime_event_row_to_dict(existing or row_values),
-                noop_reason="duplicate_skip",
-                noop_count=1,
-                attempted_rows=1,
-                duplicate_rows=1,
-                payload_build_ms=payload_build_ms,
-                db_round_trip_ms=db_round_trip_ms["value"],
-                duplicate_reasons={
-                    _classify_duplicate_reason(
-                        source_reason=str(write_context.get("source_reason") or ""),
-                        existing_event_id=True,
-                    ): 1
-                },
-                **payload_shape,
-            )
+            raise RuntimeError(f"runtime event insert returned no row event_id={event_id}")
 
     try:
         outcome = _execute_write_with_retry(
@@ -864,10 +1331,10 @@ def record_bot_runtime_events_batch(
         "event_name": _resolved_event_name(normalized),
         "source_emitter": str(raw_context.get("source_emitter") or "").strip() or None,
         "source_reason": source_reason,
-        "conflict_strategy": "seq_guard_then_insert_on_conflict_do_nothing",
+        "conflict_strategy": "event_id_precheck_allocator_then_plain_insert",
         "conflict_target_name": _RUNTIME_EVENT_ID_CONFLICT_CONSTRAINT,
-        "write_contract": "insert_first_event_id_dedupe",
-        "precheck_mode": "seq_guard_only",
+        "write_contract": "event_id_dedupe_before_run_seq_allocation",
+        "precheck_mode": "event_id_then_seq_guard",
     }
     continuity_summary = continuity_summary_from_runtime_event_rows(
         normalized,
@@ -905,7 +1372,38 @@ def record_bot_runtime_events_batch(
         with db.session() as session:
             for (bot_id, run_id), rows in grouped.items():
                 rows.sort(key=lambda item: (int(item["seq"]), str(item["event_id"])))
-                seqs = [int(item["seq"]) for item in rows]
+                unique_rows: List[Dict[str, Any]] = []
+                pending_event_ids: set[str] = set()
+                for row in rows:
+                    event_id = str(row["event_id"])
+                    if event_id in pending_event_ids:
+                        duplicate_skips += 1
+                        _increment_reason(
+                            duplicate_reason_counts,
+                            _classify_duplicate_reason(source_reason=source_reason, same_batch_event_id=True),
+                        )
+                        continue
+                    unique_rows.append(row)
+                    pending_event_ids.add(event_id)
+                _lock_run_seq_allocator(session, run_id=run_id)
+                existing_by_event_id = _existing_runtime_event_rows_for_event_ids(
+                    session,
+                    event_ids=[str(item["event_id"]) for item in unique_rows],
+                )
+                candidate_rows: List[Dict[str, Any]] = []
+                for row in unique_rows:
+                    event_id = str(row["event_id"])
+                    if event_id in existing_by_event_id:
+                        duplicate_skips += 1
+                        _increment_reason(
+                            duplicate_reason_counts,
+                            _classify_duplicate_reason(source_reason=source_reason, existing_event_id=True),
+                        )
+                        continue
+                    candidate_rows.append(row)
+                if not candidate_rows:
+                    continue
+                seqs = [int(item["seq"]) for item in candidate_rows]
                 existing_rows = _existing_runtime_event_rows_for_seq(
                     session,
                     bot_id=bot_id,
@@ -915,19 +1413,21 @@ def record_bot_runtime_events_batch(
                 existing_by_seq: Dict[int, List[BotRunEventRecord]] = {}
                 for existing_row in existing_rows:
                     existing_by_seq.setdefault(int(existing_row.seq or 0), []).append(existing_row)
-                pending_event_ids: set[str] = set()
                 seen_seq_types: Dict[int, List[str]] = {}
-                for row in rows:
+                first_run_seq, _last_run_seq = _reserve_run_seq_range(
+                    session,
+                    run_id=run_id,
+                    count=len(candidate_rows),
+                )
+                next_run_seq = first_run_seq
+                for row in candidate_rows:
                     event_id = str(row["event_id"])
                     seq = int(row["seq"])
                     event_type = str(row["event_type"])
-                    if event_id in pending_event_ids:
-                        duplicate_skips += 1
-                        _increment_reason(
-                            duplicate_reason_counts,
-                            _classify_duplicate_reason(source_reason=source_reason, same_batch_event_id=True),
-                        )
-                        continue
+                    stamped_payload = _stamp_runtime_order_payload(
+                        row["payload"],
+                        run_seq=next_run_seq,
+                    )
                     conflicts = existing_by_seq.get(seq, [])
                     conflicting_seq_row = _first_conflicting_seq_row(
                         event_id=event_id,
@@ -953,12 +1453,12 @@ def record_bot_runtime_events_batch(
                             event_type=str(row["event_type"]),
                             critical=bool(row["critical"]),
                             schema_version=int(row["schema_version"]),
-                            payload=dict(row["payload"]),
+                            payload=stamped_payload,
                             event_time=row["event_time"],
                             known_at=row["known_at"],
                         )
                     )
-                    pending_event_ids.add(event_id)
+                    next_run_seq += 1
             inserted_event_ids: set[str] = set()
             if pending_rows:
                 inserted_event_ids = {
@@ -1079,6 +1579,7 @@ def list_bot_runtime_events(
         while len(matched_rows) < max_rows:
             remaining = max_rows - len(matched_rows)
             batch_limit = max(1, min(remaining, 5000))
+            order_expr = _runtime_order_expression()
             query = (
                 select(BotRunEventRecord)
                 .where(BotRunEventRecord.bot_id == str(bot_id))
@@ -1087,9 +1588,9 @@ def list_bot_runtime_events(
             if scan_cursor_seq > 0 or scan_cursor_row_id > 0:
                 query = query.where(
                     or_(
-                        BotRunEventRecord.seq > scan_cursor_seq,
+                        order_expr > scan_cursor_seq,
                         and_(
-                            BotRunEventRecord.seq == scan_cursor_seq,
+                            order_expr == scan_cursor_seq,
                             BotRunEventRecord.id > scan_cursor_row_id,
                         ),
                     )
@@ -1119,7 +1620,7 @@ def list_bot_runtime_events(
                 for prefix in filter_prefixes:
                     clauses.append(BotRunEventRecord.event_type.like(f"{prefix}%"))
                 query = query.where(or_(*clauses))
-            query = query.order_by(BotRunEventRecord.seq.asc(), BotRunEventRecord.id.asc()).limit(batch_limit)
+            query = query.order_by(order_expr.asc(), BotRunEventRecord.id.asc()).limit(batch_limit)
             rows = session.execute(query).scalars().all()
             if not rows:
                 break
@@ -1140,7 +1641,7 @@ def list_bot_runtime_events(
                     matched_rows.append(projected)
                     if len(matched_rows) >= max_rows:
                         break
-            scan_cursor_seq, scan_cursor_row_id = _row_cursor_tuple(rows[-1].to_dict())
+            scan_cursor_seq, scan_cursor_row_id = _row_cursor_tuple(_project_runtime_event_row(rows[-1].to_dict()))
             if (scan_cursor_seq, scan_cursor_row_id) <= previous_cursor:
                 raise RuntimeError(
                     "list_bot_runtime_events scan cursor did not advance "
@@ -1211,7 +1712,7 @@ def get_latest_bot_runtime_event(
         query = select(BotRunEventRecord).where(BotRunEventRecord.bot_id == str(bot_id))
         if run_id:
             query = query.where(BotRunEventRecord.run_id == str(run_id))
-            query = query.order_by(BotRunEventRecord.seq.desc(), BotRunEventRecord.id.desc())
+            query = query.order_by(_runtime_order_expression().desc(), BotRunEventRecord.id.desc())
         else:
             query = query.order_by(BotRunEventRecord.id.desc())
         if filter_event_types:
@@ -1269,7 +1770,7 @@ def update_bot_runtime_status(*, bot_id: str, run_id: str, status: str, telemetr
                 run.backtest_end = bot.backtest_end
             run.status = "telemetry_degraded" if telemetry_degraded else status
             run.updated_at = _utcnow()
-            if status in {"stopped", "failed", "startup_failed", "crashed", "completed"}:
+            if status in {"stopped", "failed", "startup_failed", "crashed", "completed", "canceled", "cancelled", "degraded_terminal"}:
                 run.ended_at = _utcnow()
         return StorageWriteOutcome(
             result=None,

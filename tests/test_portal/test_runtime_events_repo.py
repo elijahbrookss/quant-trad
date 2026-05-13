@@ -14,6 +14,66 @@ from portal.backend.service.storage.repos import _shared as storage_shared
 from portal.backend.service.observability import get_observability_sink, reset_observability_sink
 
 
+def test_step_rollups_include_mergeable_histogram_percentiles():
+    payloads = [
+        {
+            "run_id": "run-1",
+            "bot_id": "bot-1",
+            "step_name": "runtime_loop",
+            "started_at": f"2026-03-01T00:00:0{index}Z",
+            "ended_at": f"2026-03-01T00:00:0{index}.001000Z",
+            "duration_ms": value,
+            "context": {"canonical_append_ms": value / 2},
+        }
+        for index, value in enumerate((1.0, 2.0, 25.0, 400.0), start=1)
+    ]
+
+    rollups = runtime_events._rollup_step_metric_samples(payloads)
+    duration_rollup = next(row for row in rollups if row["metric_name"] == "duration_ms")
+    append_rollup = next(row for row in rollups if row["metric_name"] == "canonical_append_ms")
+
+    assert duration_rollup["sample_count"] == 4
+    assert len(duration_rollup["histogram_bounds"]) == len(duration_rollup["histogram_counts"])
+    assert sum(duration_rollup["histogram_counts"]) == 4
+    assert duration_rollup["p95_value"] == 400.0
+    assert duration_rollup["p99_value"] == 400.0
+    assert sum(append_rollup["histogram_counts"]) == 4
+
+
+def test_step_rollups_keep_only_budgeted_context_metrics():
+    payload = {
+        "run_id": "run-1",
+        "bot_id": "bot-1",
+        "step_name": "step_signal_eval",
+        "started_at": "2026-03-01T00:00:01Z",
+        "ended_at": "2026-03-01T00:00:01.100000Z",
+        "duration_ms": 100.0,
+        "context": {
+            "strategy_eval_ms": 12.5,
+            "overlay_projection_ms": 3.25,
+            "payload_bytes": 4096,
+            "botlens_fact_stream_overlays_payload_bytes": 2048,
+            "botlens_live_overlays_payload_bytes": 2048,
+            "consumed_signals_count": 2,
+            "one_off_internal_wait_ms": 999.0,
+        },
+    }
+
+    rollups = runtime_events._rollup_step_metric_samples([payload])
+    metric_names = {row["metric_name"] for row in rollups}
+
+    assert {
+        "duration_ms",
+        "strategy_eval_ms",
+        "overlay_projection_ms",
+        "payload_bytes",
+        "botlens_fact_stream_overlays_payload_bytes",
+    } <= metric_names
+    assert "botlens_live_overlays_payload_bytes" not in metric_names
+    assert "consumed_signals_count" not in metric_names
+    assert "one_off_internal_wait_ms" not in metric_names
+
+
 class _FakeScalarResult:
     def __init__(self, value):
         self._value = value
@@ -48,19 +108,23 @@ class _FakeViewStateRow:
 
 
 class _SequencedSession:
-    def __init__(self, values):
+    def __init__(self, values, *, has_bind: bool = False):
         self._values = list(values)
         self.execute_calls = 0
         self.added = []
         self.statements = []
+        self.statement_params = []
+        if has_bind:
+            self.bind = object()
 
-    def execute(self, _stmt):
+    def execute(self, _stmt, params=None):
         if not self._values:
             raise AssertionError("session requires at least one result")
         index = min(self.execute_calls, len(self._values) - 1)
         value = self._values[index]
         self.execute_calls += 1
         self.statements.append(_stmt)
+        self.statement_params.append(dict(params or {}))
         if isinstance(value, Exception):
             raise value
         return _FakeScalarResult(value)
@@ -78,8 +142,8 @@ class _SequencedSession:
 class _FakeDb:
     available = True
 
-    def __init__(self, values):
-        self.session_handle = _SequencedSession(values)
+    def __init__(self, values, *, has_bind: bool = False):
+        self.session_handle = _SequencedSession(values, has_bind=has_bind)
 
     @contextmanager
     def session(self):
@@ -106,6 +170,7 @@ def _domain_row(*, row_id: int, event_id: str, seq: int, event_name: str, contex
             "id": row_id,
             "event_id": event_id,
             "seq": seq,
+            "run_seq": seq,
             "event_type": event_type or f"botlens_domain.{event_name.lower()}",
             "event_name": event_name,
             "series_key": normalized_context.get("series_key"),
@@ -209,10 +274,10 @@ def test_record_bot_runtime_events_batch_records_observation_started_timer(
         "event_name": None,
         "source_emitter": None,
         "source_reason": "ingest",
-        "conflict_strategy": "seq_guard_then_insert_on_conflict_do_nothing",
+        "conflict_strategy": "event_id_precheck_allocator_then_plain_insert",
         "conflict_target_name": "uq_portal_bot_run_events_event_id",
-        "write_contract": "insert_first_event_id_dedupe",
-        "precheck_mode": "seq_guard_only",
+        "write_contract": "event_id_dedupe_before_run_seq_allocation",
+        "precheck_mode": "event_id_then_seq_guard",
     }
     assert isinstance(observed["started"], float)
     assert observed["started"] >= 0.0
@@ -364,8 +429,9 @@ def test_record_bot_runtime_events_batch_observes_compacted_botlens_domain_paylo
                         "bot_id": "bot-1",
                         "series_key": "instrument-btc|1m",
                         "overlay_delta": {
-                            "seq": 4,
-                            "base_seq": 3,
+                            "overlay_commit_seq": 4,
+                            "base_overlay_commit_seq": 3,
+                            "overlay_commit_seq_status": "overlay_scoped",
                             "ops": [
                                 {
                                     "op": "upsert",
@@ -605,7 +671,185 @@ def test_record_bot_runtime_events_batch_counts_same_batch_event_id_duplicates(
     assert observed["error"] is None
 
 
-def test_record_bot_runtime_event_uses_conflict_insert_without_event_id_precheck(
+def test_record_bot_runtime_events_batch_skips_existing_event_ids_before_run_seq_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = _FakeViewStateRow(
+        {
+            "event_id": "evt-existing",
+            "seq": 1,
+            "event_type": "botlens_domain.health_status_reported",
+        }
+    )
+    fake_db = _FakeDb([{"next_run_seq": 1}, [existing]], has_bind=True)
+    observed: dict[str, object] = {}
+
+    def _capture_outcome(*, storage_target, context, started, outcome, error=None):
+        observed["outcome"] = outcome
+        observed["error"] = error
+
+    monkeypatch.setattr(runtime_events, "db", fake_db)
+    monkeypatch.setattr(runtime_events, "_observe_db_write_outcome", _capture_outcome)
+
+    result = runtime_events.record_bot_runtime_events_batch(
+        [
+            {
+                "event_id": "evt-existing",
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "seq": 9,
+                "event_type": "botlens_domain.health_status_reported",
+                "payload": {
+                    "schema_version": 1,
+                    "event_id": "evt-existing",
+                    "event_ts": "2026-02-01T00:00:00Z",
+                    "event_name": "HEALTH_STATUS_REPORTED",
+                    "root_id": "evt-existing",
+                    "parent_id": None,
+                    "correlation_id": "corr-1",
+                    "context": {"run_id": "run-1", "bot_id": "bot-1", "status": "running", "warning_types": ["runtime"]},
+                },
+            }
+        ],
+        context={"message_kind": "botlens_runtime_facts", "source_reason": "ingest"},
+    )
+
+    sql = "\n".join(_statement_sql(statement) for statement in fake_db.session_handle.statements)
+    outcome = observed["outcome"]
+    assert result == 0
+    assert "next_run_seq = next_run_seq +" not in sql
+    assert "INSERT INTO portal_bot_run_events" not in sql
+    assert outcome.inserted_rows == 0
+    assert outcome.duplicate_rows == 1
+    assert outcome.duplicate_reasons == {"already_persisted_same_event_id": 1}
+    assert observed["error"] is None
+
+
+def test_record_bot_runtime_events_batch_allocates_run_seq_only_for_insert_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = _FakeViewStateRow(
+        {
+            "event_id": "evt-existing",
+            "seq": 1,
+            "event_type": "botlens_domain.health_status_reported",
+        }
+    )
+    fake_db = _FakeDb(
+        [
+            {"next_run_seq": 8},
+            [existing],
+            [],
+            {"first_run_seq": 8, "last_run_seq": 9},
+            ["evt-new-a", "evt-new-b"],
+        ],
+        has_bind=True,
+    )
+    monkeypatch.setattr(runtime_events, "db", fake_db)
+
+    def _payload(event_id: str, seq: int) -> dict:
+        return {
+            "event_id": event_id,
+            "bot_id": "bot-1",
+            "run_id": "run-1",
+            "seq": seq,
+            "event_type": "botlens_domain.health_status_reported",
+            "payload": {
+                "schema_version": 1,
+                "event_id": event_id,
+                "event_ts": "2026-02-01T00:00:00Z",
+                "event_name": "HEALTH_STATUS_REPORTED",
+                "root_id": event_id,
+                "parent_id": None,
+                "correlation_id": f"corr-{event_id}",
+                "context": {"run_id": "run-1", "bot_id": "bot-1", "status": "running", "warning_types": ["runtime"]},
+            },
+        }
+
+    result = runtime_events.record_bot_runtime_events_batch(
+        [_payload("evt-existing", 7), _payload("evt-new-a", 8), _payload("evt-new-b", 9)],
+        context={"message_kind": "botlens_runtime_facts", "source_reason": "ingest"},
+    )
+
+    allocator_sql = _statement_sql(fake_db.session_handle.statements[3])
+    compiled = fake_db.session_handle.statements[4].compile(dialect=postgresql.dialect())
+    assert result == 2
+    assert "portal_bot_run_event_seq_allocators" in allocator_sql
+    assert "UPDATE public.portal_bot_run_event_seq_allocators" in allocator_sql
+    assert fake_db.session_handle.statement_params[3]["count"] == 2
+    assert _compiled_param(compiled.params, "event_id_m0") == "evt-new-a"
+    assert _compiled_param(compiled.params, "event_id_m1") == "evt-new-b"
+    assert _compiled_param(compiled.params, "run_seq_m0") == 8
+    assert _compiled_param(compiled.params, "run_seq_m1") == 9
+    assert _compiled_param(compiled.params, "payload_m0")["context"]["run_seq"] == 8
+    assert _compiled_param(compiled.params, "payload_m1")["context"]["run_seq"] == 9
+
+
+def test_record_bot_runtime_events_batch_high_volume_duplicates_use_bounded_db_round_trips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unique_count = 250
+    event_ids = [f"evt-{index}" for index in range(unique_count)]
+    fake_db = _FakeDb(
+        [
+            {"next_run_seq": 1},
+            [],
+            [],
+            {"first_run_seq": 1, "last_run_seq": unique_count},
+            event_ids,
+        ],
+        has_bind=True,
+    )
+    observed: dict[str, object] = {}
+
+    def _capture_outcome(*, storage_target, context, started, outcome, error=None):
+        observed["outcome"] = outcome
+        observed["error"] = error
+
+    def _payload(event_id: str, seq: int) -> dict:
+        return {
+            "event_id": event_id,
+            "bot_id": "bot-1",
+            "run_id": "run-1",
+            "seq": seq,
+            "event_type": "botlens_domain.health_status_reported",
+            "payload": {
+                "schema_version": 1,
+                "event_id": event_id,
+                "event_ts": "2026-02-01T00:00:00Z",
+                "event_name": "HEALTH_STATUS_REPORTED",
+                "root_id": event_id,
+                "parent_id": None,
+                "correlation_id": f"corr-{event_id}",
+                "context": {"run_id": "run-1", "bot_id": "bot-1", "status": "running", "warning_types": ["runtime"]},
+            },
+        }
+
+    payloads = []
+    for index, event_id in enumerate(event_ids, start=1):
+        payloads.append(_payload(event_id, index))
+        payloads.append(_payload(event_id, index + unique_count))
+
+    monkeypatch.setattr(runtime_events, "db", fake_db)
+    monkeypatch.setattr(runtime_events, "_observe_db_write_outcome", _capture_outcome)
+
+    result = runtime_events.record_bot_runtime_events_batch(
+        payloads,
+        context={"message_kind": "botlens_runtime_facts", "source_reason": "retry"},
+    )
+
+    outcome = observed["outcome"]
+    assert result == unique_count
+    assert fake_db.session_handle.execute_calls == 5
+    assert fake_db.session_handle.statement_params[3]["count"] == unique_count
+    assert outcome.attempted_rows == unique_count * 2
+    assert outcome.inserted_rows == unique_count
+    assert outcome.duplicate_rows == unique_count
+    assert outcome.duplicate_reasons == {"same_batch_event_id_duplicate": unique_count}
+    assert observed["error"] is None
+
+
+def test_record_bot_runtime_event_uses_plain_insert_after_duplicate_precheck(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_db = _FakeDb(
@@ -669,7 +913,7 @@ def test_record_bot_runtime_event_uses_conflict_insert_without_event_id_precheck
     assert "portal_bot_run_events.event_id = " not in select_sql
     assert "portal_bot_run_events.seq IN" in select_sql
     assert "INSERT INTO portal_bot_run_events" in insert_sql
-    assert "ON CONFLICT ON CONSTRAINT uq_portal_bot_run_events_event_id DO NOTHING" in insert_sql
+    assert "ON CONFLICT" not in insert_sql
     assert result["event_id"] == "evt-1"
 
 
@@ -737,6 +981,8 @@ def test_record_bot_runtime_events_batch_fieldizes_hot_columns_in_insert_values(
                         "event_time": "2026-02-01T00:02:00Z",
                         "trade_state": "open",
                         "direction": "long",
+                        "position_commit_seq": 1,
+                        "position_commit_seq_status": "position_scoped",
                     },
                 },
             },
@@ -756,6 +1002,96 @@ def test_record_bot_runtime_events_batch_fieldizes_hot_columns_in_insert_values(
     assert _compiled_param(compiled.params, "decision_id_m0") == "decision-1"
     assert _compiled_param(compiled.params, "reason_code_m0") == "rule_blocked"
     assert _compiled_param(compiled.params, "trade_id_m1") == "trade-1"
+    assert _compiled_param(compiled.params, "payload_m0")["context"]["run_seq"] == 1
+    assert _compiled_param(compiled.params, "payload_m0")["context"]["run_seq_status"] == "runtime_assigned"
+    assert _compiled_param(compiled.params, "payload_m1")["context"]["run_seq"] == 2
+
+
+def test_record_bot_runtime_events_batch_assigns_dense_run_seq_with_duplicate_source_seq(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_db = _FakeDb([[], ["evt-1", "evt-2", "evt-3"]])
+    monkeypatch.setattr(runtime_events, "db", fake_db)
+
+    result = runtime_events.record_bot_runtime_events_batch(
+        [
+            {
+                "event_id": f"evt-{index}",
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "seq": 8,
+                "event_type": "botlens_domain.health_status_reported",
+                "payload": {
+                    "schema_version": 1,
+                    "event_id": f"evt-{index}",
+                    "event_ts": "2026-02-01T00:00:00Z",
+                    "event_name": "HEALTH_STATUS_REPORTED",
+                    "root_id": f"evt-{index}",
+                    "parent_id": None,
+                    "correlation_id": f"corr-{index}",
+                    "context": {
+                        "run_id": "run-1",
+                        "bot_id": "bot-1",
+                        "status": "running",
+                        "warning_types": ["runtime"],
+                    },
+                },
+            }
+            for index in range(1, 4)
+        ]
+    )
+
+    compiled = fake_db.session_handle.statements[1].compile(dialect=postgresql.dialect())
+    assert result == 3
+    assert [_compiled_param(compiled.params, f"payload_m{index}")["context"]["run_seq"] for index in range(3)] == [1, 2, 3]
+
+
+def test_record_bot_runtime_events_batch_allows_existing_botlens_source_seq(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = _domain_row(
+        row_id=1,
+        event_id="evt-existing",
+        seq=8,
+        event_name="FAULT_RECORDED",
+        event_type="botlens_domain.fault_recorded",
+        context={"reason_code": "startup_warning"},
+    )
+    fake_db = _FakeDb([[existing], ["evt-new"]])
+    monkeypatch.setattr(runtime_events, "db", fake_db)
+
+    result = runtime_events.record_bot_runtime_events_batch(
+        [
+            {
+                "event_id": "evt-new",
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "seq": 8,
+                "event_type": "botlens_domain.run_degraded",
+                "payload": {
+                    "schema_version": 1,
+                    "event_id": "evt-new",
+                    "event_ts": "2026-02-01T00:00:00Z",
+                    "event_name": "RUN_DEGRADED",
+                    "root_id": "evt-new",
+                    "parent_id": None,
+                    "correlation_id": "corr-new",
+                    "context": {
+                        "run_id": "run-1",
+                        "bot_id": "bot-1",
+                        "phase": "startup",
+                        "status": "degraded",
+                        "component": "runtime",
+                        "message": "startup warning",
+                    },
+                },
+            }
+        ]
+    )
+
+    compiled = fake_db.session_handle.statements[1].compile(dialect=postgresql.dialect())
+    assert result == 1
+    assert _compiled_param(compiled.params, "payload_m0")["context"]["run_seq"] == 1
 
 
 def test_runtime_event_row_values_reject_signal_id_aliasing_decision_id() -> None:
@@ -886,7 +1222,8 @@ def test_list_bot_runtime_events_queries_typed_columns_for_hot_filters(
     assert "portal_bot_run_events.bar_time >= " in sql
     assert "portal_bot_run_events.bar_time < " in sql
     assert "payload ->>" not in sql
-    assert "payload #>>" not in sql
+    assert "payload #>> '{context,run_seq}'" not in sql
+    assert "portal_bot_run_events.run_seq" in sql
 
 
 def test_list_bot_runtime_events_does_not_backfill_typed_hot_fields_from_payload(
@@ -896,8 +1233,10 @@ def test_list_bot_runtime_events_does_not_backfill_typed_hot_fields_from_payload
         [[
             _FakeViewStateRow(
                 {
+                    "id": 1,
                     "event_id": "evt-1",
                     "seq": 4,
+                    "run_seq": 8,
                     "payload": {
                         "series_key": "instrument-btc|1M",
                         "bridge_session_id": "bridge-1",
@@ -918,7 +1257,9 @@ def test_list_bot_runtime_events_does_not_backfill_typed_hot_fields_from_payload
     assert rows == [
         {
             "event_id": "evt-1",
+            "id": 1,
             "seq": 4,
+            "run_seq": 8,
             "payload": {
                 "series_key": "instrument-btc|1M",
                 "bridge_session_id": "bridge-1",
@@ -930,7 +1271,6 @@ def test_list_bot_runtime_events_does_not_backfill_typed_hot_fields_from_payload
             },
             "bridge_session_id": "bridge-1",
             "bridge_seq": 7,
-            "run_seq": 9,
         }
     ]
 
@@ -942,9 +1282,11 @@ def test_list_bot_runtime_events_projects_domain_context_fields(
         [[
             _FakeViewStateRow(
                 {
+                    "id": 1,
                     "event_id": "evt-1",
                     "event_type": "botlens_domain.candle_observed",
                     "seq": 4,
+                    "run_seq": 4,
                     "event_name": "CANDLE_OBSERVED",
                     "series_key": "instrument-btc|1m",
                     "root_id": "evt-1",
@@ -1027,9 +1369,11 @@ def test_list_bot_runtime_events_preserves_bounded_overlay_render_payloads_on_re
         [[
             _FakeViewStateRow(
                 {
+                    "id": 1,
                     "event_id": "evt-overlay",
                     "event_type": "botlens_domain.overlay_state_changed",
                     "seq": 4,
+                    "run_seq": 4,
                     "payload": {
                         "schema_version": 1,
                         "event_id": "evt-overlay",
@@ -1043,8 +1387,9 @@ def test_list_bot_runtime_events_preserves_bounded_overlay_render_payloads_on_re
                             "bot_id": "bot-1",
                             "series_key": "instrument-btc|1m",
                             "overlay_delta": {
-                                "seq": 9,
-                                "base_seq": 8,
+                                "overlay_commit_seq": 9,
+                                "base_overlay_commit_seq": 8,
+                                "overlay_commit_seq_status": "overlay_scoped",
                                 "ops": [
                                     {
                                         "op": "upsert",
@@ -1100,90 +1445,62 @@ def test_list_bot_runtime_events_preserves_bounded_overlay_render_payloads_on_re
 def test_record_bot_runtime_event_allows_duplicate_seq_for_botlens_domain_siblings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    existing = _FakeViewStateRow(
-        {
-            "event_id": "existing-event",
-            "event_type": "botlens_domain.health_status_reported",
-            "seq": 7,
-        }
-    )
     fake_db = _FakeDb(
         [
-            [existing],
-            [
-                {
-                    "id": 14,
-                    "event_id": "incoming-event",
-                    "bot_id": "bot-1",
-                    "run_id": "run-1",
-                    "seq": 7,
-                        "event_type": "botlens_domain.candle_observed",
-                        "critical": False,
-                        "schema_version": 1,
-                        "payload": {
-                            "schema_version": 1,
-                            "event_id": "incoming-event",
-                            "event_ts": "2026-02-01T00:00:00Z",
-                            "event_name": "CANDLE_OBSERVED",
-                            "root_id": "incoming-event",
-                            "parent_id": None,
-                            "correlation_id": "corr-1",
-                            "context": {
-                                "run_id": "run-1",
-                                "bot_id": "bot-1",
-                                "series_key": "instrument-btc|1m",
-                                "candle": {
-                                    "time": "2026-02-01T00:00:00Z",
-                                    "open": 1.0,
-                                    "high": 2.0,
-                                    "low": 0.5,
-                                    "close": 1.5,
-                                },
-                            },
-                        },
-                        "event_name": "CANDLE_OBSERVED",
-                        "series_key": "instrument-btc|1m",
-                        "known_at": "2026-02-01T00:00:00Z",
-                        "created_at": "2026-02-01T00:00:00Z",
-                }
-            ],
+            [],
+            ["health-event", "candle-event"],
         ]
     )
     monkeypatch.setattr(runtime_events, "db", fake_db)
 
-    result = runtime_events.record_bot_runtime_event(
-        {
-            "event_id": "incoming-event",
-            "bot_id": "bot-1",
-            "run_id": "run-1",
+    result = runtime_events.record_bot_runtime_events_batch(
+        [
+            {
+                "event_id": "health-event",
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "seq": 7,
+                "event_type": "botlens_domain.health_status_reported",
+                "schema_version": 1,
+                "payload": {
+                    "schema_version": 1,
+                    "event_id": "health-event",
+                    "event_ts": "2026-02-01T00:00:00Z",
+                    "event_name": "HEALTH_STATUS_REPORTED",
+                    "root_id": "health-event",
+                    "parent_id": None,
+                    "correlation_id": "corr-1",
+                    "context": {"run_id": "run-1", "bot_id": "bot-1", "status": "running", "warning_types": ["runtime"]},
+                },
+            },
+            {
+                "event_id": "candle-event",
+                "bot_id": "bot-1",
+                "run_id": "run-1",
                 "seq": 7,
                 "event_type": "botlens_domain.candle_observed",
                 "schema_version": 1,
                 "payload": {
                     "schema_version": 1,
-                    "event_id": "incoming-event",
+                    "event_id": "candle-event",
                     "event_ts": "2026-02-01T00:00:00Z",
                     "event_name": "CANDLE_OBSERVED",
-                    "root_id": "incoming-event",
+                    "root_id": "candle-event",
                     "parent_id": None,
-                    "correlation_id": "corr-1",
+                    "correlation_id": "corr-2",
                     "context": {
                         "run_id": "run-1",
                         "bot_id": "bot-1",
                         "series_key": "instrument-btc|1m",
-                        "candle": {
-                            "time": "2026-02-01T00:00:00Z",
-                            "open": 1.0,
-                            "high": 2.0,
-                            "low": 0.5,
-                            "close": 1.5,
-                        },
+                        "candle": {"time": "2026-02-01T00:00:00Z", "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
                     },
                 },
-            }
-        )
+            },
+        ],
+        context={"message_kind": "botlens_runtime_facts", "source_reason": "producer"},
+    )
 
-    assert result["event_id"] == "incoming-event"
+    assert result == 2
 
 
 def test_record_bot_runtime_event_observes_seq_collision_without_secondary_exception(
@@ -1319,6 +1636,7 @@ def test_list_bot_runtime_events_filters_runtime_rows_when_querying_botlens_doma
                     "event_id": "evt-runtime",
                     "event_type": "runtime.signal_emitted",
                     "seq": 9,
+                    "run_seq": 9,
                     "payload": {
                         "event_name": "SIGNAL_EMITTED",
                         "context": {"series_key": "instrument-btc|1m"},

@@ -39,7 +39,9 @@ from ._shared import (
 from .runtime_events import get_latest_bot_runtime_run_id, record_bot_runtime_events_batch
 
 _OBSERVER = _STORAGE_OBSERVER
-_TERMINAL_LIFECYCLE_STATUSES = frozenset({"stopped", "failed", "startup_failed", "crashed", "completed"})
+_TERMINAL_LIFECYCLE_STATUSES = frozenset(
+    {"stopped", "failed", "startup_failed", "crashed", "completed", "canceled", "cancelled", "degraded_terminal"}
+)
 _LIFECYCLE_MESSAGE_MAX_CHARS = 1024
 _LIFECYCLE_SEQ_LOCK_PERSON = b"qt_lifecycle_seq"
 _CANONICAL_LIFECYCLE_EVENT_NAMES = tuple(

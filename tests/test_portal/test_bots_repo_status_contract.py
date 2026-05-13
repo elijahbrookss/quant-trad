@@ -66,6 +66,11 @@ def test_mark_bot_crashed_skips_terminal_completed_run(monkeypatch: pytest.Monke
     recorded = []
 
     monkeypatch.setattr(bots, "db", fake_db)
+    monkeypatch.setattr(
+        lifecycle_repo,
+        "get_latest_bot_run_lifecycle",
+        lambda bot_id: fake_db.session_handle.latest_lifecycle,
+    )
     monkeypatch.setattr(lifecycle_repo, "record_bot_run_lifecycle_checkpoint", lambda payload: recorded.append(payload))
 
     result = bots.mark_bot_crashed("bot-1", "container_not_running:quant-trad-bots-bot-1")
@@ -89,6 +94,11 @@ def test_mark_bot_crashed_rejects_missing_run_context(monkeypatch: pytest.Monkey
     recorded = []
 
     monkeypatch.setattr(bots, "db", fake_db)
+    monkeypatch.setattr(
+        lifecycle_repo,
+        "get_latest_bot_run_lifecycle",
+        lambda bot_id: fake_db.session_handle.latest_lifecycle,
+    )
     monkeypatch.setattr(lifecycle_repo, "record_bot_run_lifecycle_checkpoint", lambda payload: recorded.append(payload))
 
     result = bots.mark_bot_crashed("bot-1", "container_not_running:quant-trad-bots-bot-1")
@@ -97,3 +107,44 @@ def test_mark_bot_crashed_rejects_missing_run_context(monkeypatch: pytest.Monkey
     assert bot_row.runner_id == "runner-1"
     assert bot_row.heartbeat_at == "2026-04-17T13:44:00Z"
     assert recorded == []
+
+
+def test_mark_bot_crashed_classifies_stale_heartbeat_as_recoverable_lifecycle_degradation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot_row = SimpleNamespace(
+        runner_id="runner-1",
+        heartbeat_at="2026-04-17T13:44:00Z",
+        updated_at=None,
+    )
+    fake_db = _FakeDb(
+        bot_row=bot_row,
+        latest_lifecycle=SimpleNamespace(
+            run_id="run-1",
+            phase="live",
+            status="running",
+            checkpoint_at="2026-04-17T13:43:00Z",
+            updated_at="2026-04-17T13:43:00Z",
+        ),
+    )
+    recorded = []
+
+    monkeypatch.setattr(bots, "db", fake_db)
+    monkeypatch.setattr(
+        lifecycle_repo,
+        "get_latest_bot_run_lifecycle",
+        lambda bot_id: fake_db.session_handle.latest_lifecycle,
+    )
+    monkeypatch.setattr(lifecycle_repo, "record_bot_run_lifecycle_checkpoint", lambda payload: recorded.append(payload))
+
+    result = bots.mark_bot_crashed("bot-1", "stale_heartbeat:prev=backend.quanttrad")
+
+    assert result is True
+    assert bot_row.runner_id is None
+    assert bot_row.heartbeat_at is None
+    assert len(recorded) == 1
+    assert recorded[0]["phase"] == "degraded"
+    assert recorded[0]["status"] == "degraded"
+    assert recorded[0]["metadata"]["watchdog_classification"] == "recoverable"
+    assert recorded[0]["failure"]["reason_code"] == "stale_heartbeat"
+    assert recorded[0]["failure"]["recoverable"] is True

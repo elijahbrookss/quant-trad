@@ -52,6 +52,10 @@ CREATE INDEX IF NOT EXISTS ix_portal_bot_run_events_bot_run_bar_time_seq_id
 
 DROP INDEX IF EXISTS public.ix_portal_bot_run_events_payload_series_key;
 
+ALTER TABLE public.portal_bot_run_events
+    ADD COLUMN IF NOT EXISTS run_seq INTEGER,
+    ADD COLUMN IF NOT EXISTS run_seq_status TEXT;
+
 CREATE OR REPLACE VIEW runtime_state.bot_runtime_events_v1 AS
 SELECT
     e.id,
@@ -73,11 +77,7 @@ SELECT
             THEN (e.payload #>> '{context,bridge_seq}')::INTEGER
         ELSE NULL
     END AS bridge_seq,
-    CASE
-        WHEN NULLIF(e.payload #>> '{context,run_seq}', '') ~ '^-?[0-9]+$'
-            THEN (e.payload #>> '{context,run_seq}')::INTEGER
-        ELSE NULL
-    END AS run_seq,
+    e.run_seq,
     e.instrument_id,
     e.symbol,
     e.timeframe,

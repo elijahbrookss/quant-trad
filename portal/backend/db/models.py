@@ -31,12 +31,14 @@ Base = declarative_base()
 REQUIRED_BOT_RUN_EVENT_INDEXES = frozenset(
     {
         "ix_portal_bot_run_events_bot_run_seq_id",
+        "ix_portal_bot_run_events_bot_run_run_seq_id",
         "ix_portal_bot_run_events_bot_run_series_seq_id",
         "ix_portal_bot_run_events_candle_series_bar_time_seq_id",
         "ix_portal_bot_run_events_bot_run_event_name_seq_id",
         "ix_portal_bot_run_events_bot_run_correlation_seq_id",
         "ix_portal_bot_run_events_bot_run_root_seq_id",
         "ix_portal_bot_run_events_bot_run_bar_time_seq_id",
+        "uq_portal_bot_run_events_run_seq",
     }
 )
 
@@ -421,6 +423,10 @@ class BotRecord(Base):
     def to_dict(self) -> Dict[str, Any]:
         """Return the bot configuration in API-friendly form."""
 
+        risk_payload = dict(self.risk or {})
+        execution_mode = str(risk_payload.get("execution_mode") or "fast").strip().lower()
+        if execution_mode not in {"fast", "full"}:
+            execution_mode = "fast"
         return {
             "id": self.id,
             "name": self.name,
@@ -431,11 +437,12 @@ class BotRecord(Base):
             "resolved_params": dict(self.resolved_params or {}),
             "risk_config": dict(self.risk_config or {}),
             "mode": self.mode,
+            "execution_mode": execution_mode,
             "run_type": self.run_type,
             "playback_speed": float(self.playback_speed if self.playback_speed is not None else 0.0),
             "backtest_start": (self.backtest_start.isoformat() + "Z") if self.backtest_start else None,
             "backtest_end": (self.backtest_end.isoformat() + "Z") if self.backtest_end else None,
-            "risk": dict(self.risk or {}),
+            "risk": risk_payload,
             "wallet_config": dict(self.wallet_config or {}),
             "snapshot_interval_ms": int(self.snapshot_interval_ms or 0),
             "bot_env": dict(self.bot_env or {}),
@@ -568,6 +575,19 @@ class BotRunRecord(Base):
     def to_dict(self) -> Dict[str, Any]:
         """Serialise the stored run snapshot."""
 
+        config_snapshot = dict(self.config_snapshot or {})
+        risk_settings = dict(config_snapshot.get("risk_settings") or {})
+        bot_snapshot = dict(config_snapshot.get("bot") or {})
+        bot_risk = dict(bot_snapshot.get("risk") or {})
+        execution_mode = str(
+            config_snapshot.get("execution_mode")
+            or bot_snapshot.get("execution_mode")
+            or risk_settings.get("execution_mode")
+            or bot_risk.get("execution_mode")
+            or "fast"
+        ).strip().lower()
+        if execution_mode not in {"fast", "full"}:
+            execution_mode = "fast"
         return {
             "run_id": self.run_id,
             "bot_id": self.bot_id,
@@ -585,7 +605,8 @@ class BotRunRecord(Base):
             "started_at": (self.started_at.isoformat() + "Z") if self.started_at else None,
             "ended_at": (self.ended_at.isoformat() + "Z") if self.ended_at else None,
             "summary": dict(self.summary or {}),
-            "config_snapshot": dict(self.config_snapshot or {}),
+            "execution_mode": execution_mode,
+            "config_snapshot": config_snapshot,
             "decision_ledger": list(self.decision_ledger or []),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
@@ -666,42 +687,93 @@ class BotRunLifecycleEventRecord(Base):
         }
 
 
-class BotRunStepRecord(Base):
-    """Timed runtime step trace entry for bot-run profiling."""
+class BotRunStepRollupRecord(Base):
+    """Bucketed runtime step profiler metric rollup."""
 
-    __tablename__ = "portal_bot_run_steps"
+    __tablename__ = "portal_bot_run_step_rollups_v1"
+    __table_args__ = (
+        UniqueConstraint(
+            "bucket_start",
+            "bucket_seconds",
+            "run_id",
+            "bot_id",
+            "step_name",
+            "metric_name",
+            "strategy_id",
+            "symbol",
+            "timeframe",
+            "status",
+            name="uq_portal_bot_run_step_rollups_v1_bucket_identity",
+        ),
+        Index("ix_portal_bot_run_step_rollups_v1_run_bucket", "run_id", "bucket_start"),
+        Index(
+            "ix_portal_bot_run_step_rollups_v1_run_step_metric_bucket",
+            "run_id",
+            "step_name",
+            "metric_name",
+            "bucket_start",
+        ),
+        Index("ix_portal_bot_run_step_rollups_v1_bot_bucket", "bot_id", "bucket_start"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    bucket_start = Column(DateTime, nullable=False)
+    bucket_seconds = Column(Integer, nullable=False, default=10)
+    first_seen = Column(DateTime, nullable=False)
+    last_seen = Column(DateTime, nullable=False)
     run_id = Column(String(64), nullable=False)
-    bot_id = Column(String(64), nullable=True)
+    bot_id = Column(String(64), nullable=False, default="")
     step_name = Column(String(64), nullable=False)
-    started_at = Column(DateTime, nullable=False)
-    ended_at = Column(DateTime, nullable=False)
-    duration_ms = Column(Float, nullable=False)
-    ok = Column(Boolean, nullable=False, default=True)
-    strategy_id = Column(String(64), nullable=True)
-    symbol = Column(String(64), nullable=True)
-    timeframe = Column(String(32), nullable=True)
-    error = Column(String(1024), nullable=True)
-    context = Column(JSONB, nullable=True)
+    metric_name = Column(String(128), nullable=False)
+    strategy_id = Column(String(64), nullable=False, default="")
+    symbol = Column(String(64), nullable=False, default="")
+    timeframe = Column(String(32), nullable=False, default="")
+    status = Column(String(32), nullable=False, default="ok")
+    sample_count = Column(Integer, nullable=False, default=0)
+    value_sum = Column(Float, nullable=False, default=0.0)
+    value_min = Column(Float, nullable=False, default=0.0)
+    value_max = Column(Float, nullable=False, default=0.0)
+    latest_value = Column(Float, nullable=False, default=0.0)
+    p95_value = Column(Float, nullable=False, default=0.0)
+    p99_value = Column(Float, nullable=False, default=0.0)
+    histogram_bounds = Column(JSONB, nullable=False, default=list)
+    histogram_counts = Column(JSONB, nullable=False, default=list)
+    raw_sample_count = Column(Integer, nullable=False, default=0)
+    error_count = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
+        sample_count = int(self.sample_count or 0)
+        avg_value = (float(self.value_sum or 0.0) / sample_count) if sample_count > 0 else None
         return {
             "id": self.id,
+            "bucket_start": (self.bucket_start.isoformat() + "Z") if self.bucket_start else None,
+            "bucket_seconds": int(self.bucket_seconds or 0),
+            "first_seen": (self.first_seen.isoformat() + "Z") if self.first_seen else None,
+            "last_seen": (self.last_seen.isoformat() + "Z") if self.last_seen else None,
             "run_id": self.run_id,
-            "bot_id": self.bot_id,
+            "bot_id": self.bot_id or None,
             "step_name": self.step_name,
-            "started_at": (self.started_at.isoformat() + "Z") if self.started_at else None,
-            "ended_at": (self.ended_at.isoformat() + "Z") if self.ended_at else None,
-            "duration_ms": self.duration_ms,
-            "ok": bool(self.ok),
-            "strategy_id": self.strategy_id,
-            "symbol": self.symbol,
-            "timeframe": self.timeframe,
-            "error": self.error,
-            "context": dict(self.context or {}),
+            "metric_name": self.metric_name,
+            "strategy_id": self.strategy_id or None,
+            "symbol": self.symbol or None,
+            "timeframe": self.timeframe or None,
+            "status": self.status,
+            "sample_count": sample_count,
+            "value_sum": float(self.value_sum or 0.0),
+            "value_min": float(self.value_min or 0.0),
+            "value_max": float(self.value_max or 0.0),
+            "latest_value": float(self.latest_value or 0.0),
+            "avg_value": avg_value,
+            "p95_value": float(self.p95_value or 0.0),
+            "p99_value": float(self.p99_value or 0.0),
+            "histogram_bounds": list(self.histogram_bounds or []),
+            "histogram_counts": list(self.histogram_counts or []),
+            "raw_sample_count": int(self.raw_sample_count or 0),
+            "error_count": int(self.error_count or 0),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
 
 class BotRunEventRecord(Base):
@@ -711,6 +783,7 @@ class BotRunEventRecord(Base):
     __table_args__ = (
         UniqueConstraint("event_id", name="uq_portal_bot_run_events_event_id"),
         Index("ix_portal_bot_run_events_bot_run_seq_id", "bot_id", "run_id", "seq", "id"),
+        Index("ix_portal_bot_run_events_bot_run_run_seq_id", "bot_id", "run_id", "run_seq", "id"),
         Index("ix_portal_bot_run_events_bot_run_series_seq_id", "bot_id", "run_id", "series_key", "seq", "id"),
         Index("ix_portal_bot_run_events_bot_run_event_name_seq_id", "bot_id", "run_id", "event_name", "seq", "id"),
     )
@@ -724,6 +797,8 @@ class BotRunEventRecord(Base):
     critical = Column(Boolean, nullable=False, default=False)
     schema_version = Column(Integer, nullable=False, default=1)
     payload = Column(JSONB, nullable=False, default=dict)
+    run_seq = Column(Integer, nullable=True)
+    run_seq_status = Column(String(64), nullable=True)
     event_name = Column(String(128), nullable=True)
     series_key = Column(String(255), nullable=True)
     correlation_id = Column(String(128), nullable=True)
@@ -751,6 +826,8 @@ class BotRunEventRecord(Base):
             "critical": bool(self.critical),
             "schema_version": int(self.schema_version or 1),
             "payload": dict(self.payload or {}),
+            "run_seq": int(self.run_seq) if self.run_seq is not None else None,
+            "run_seq_status": self.run_seq_status,
             "event_name": self.event_name,
             "series_key": self.series_key,
             "correlation_id": self.correlation_id,
@@ -768,6 +845,14 @@ class BotRunEventRecord(Base):
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
         }
 
+
+Index(
+    "uq_portal_bot_run_events_run_seq",
+    BotRunEventRecord.run_id,
+    BotRunEventRecord.run_seq,
+    unique=True,
+    postgresql_where=BotRunEventRecord.run_seq.isnot(None),
+)
 
 Index(
     "ix_portal_bot_run_events_candle_series_bar_time_seq_id",
@@ -813,6 +898,23 @@ Index(
     BotRunEventRecord.id,
     postgresql_where=BotRunEventRecord.bar_time.isnot(None),
 )
+
+
+class BotRunEventSeqAllocatorRecord(Base):
+    """Per-run allocator for dense runtime event replay sequence numbers."""
+
+    __tablename__ = "portal_bot_run_event_seq_allocators"
+
+    run_id = Column(String(64), primary_key=True)
+    next_run_seq = Column(Integer, nullable=False, default=1)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "next_run_seq": int(self.next_run_seq or 1),
+            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
+        }
 
 
 class BotlensBackendEventRecord(Base):
@@ -880,62 +982,108 @@ class BotlensBackendEventRecord(Base):
         }
 
 
-class BotlensBackendMetricSampleRecord(Base):
-    """Durable backend observability metric sample row for BotLens/Grafana queries."""
+class BotlensBackendMetricRollupRecord(Base):
+    """Bucketed durable backend observability metric rollup row."""
 
-    __tablename__ = "botlens_backend_metric_samples_v1"
+    __tablename__ = "botlens_backend_metric_rollups_v1"
     __table_args__ = (
-        Index("ix_botlens_backend_metric_samples_v1_observed_at", "observed_at"),
-        Index(
-            "ix_botlens_backend_metric_samples_v1_metric_name_observed_at",
+        UniqueConstraint(
+            "bucket_start",
+            "bucket_seconds",
+            "component",
             "metric_name",
-            "observed_at",
+            "metric_kind",
+            "bot_id",
+            "run_id",
+            "instrument_id",
+            "series_key",
+            "worker_id",
+            "queue_name",
+            "pipeline_stage",
+            "message_kind",
+            "delta_type",
+            "storage_target",
+            "failure_mode",
+            "label_hash",
+            name="uq_botlens_backend_metric_rollups_v1_bucket_identity",
         ),
-        Index("ix_botlens_backend_metric_samples_v1_run_id_observed_at", "run_id", "observed_at"),
+        Index("ix_botlens_backend_metric_rollups_v1_bucket_start", "bucket_start"),
+        Index(
+            "ix_botlens_backend_metric_rollups_v1_metric_bucket",
+            "metric_name",
+            "bucket_start",
+        ),
+        Index("ix_botlens_backend_metric_rollups_v1_run_bucket", "run_id", "bucket_start"),
         {"schema": "observability_metrics"},
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    observed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    bucket_start = Column(DateTime, nullable=False)
+    bucket_seconds = Column(Integer, nullable=False, default=10)
+    first_seen = Column(DateTime, nullable=False)
+    last_seen = Column(DateTime, nullable=False)
     component = Column(String(128), nullable=False)
     metric_name = Column(String(128), nullable=False)
     metric_kind = Column(String(32), nullable=False)
-    value = Column(Float, nullable=False)
-    bot_id = Column(String(64), nullable=True)
-    run_id = Column(String(64), nullable=True)
-    instrument_id = Column(String(128), nullable=True)
-    series_key = Column(String(255), nullable=True)
-    worker_id = Column(String(128), nullable=True)
-    queue_name = Column(String(128), nullable=True)
-    pipeline_stage = Column(String(128), nullable=True)
-    message_kind = Column(String(128), nullable=True)
-    delta_type = Column(String(128), nullable=True)
-    storage_target = Column(String(128), nullable=True)
-    failure_mode = Column(String(128), nullable=True)
+    bot_id = Column(String(64), nullable=False, default="")
+    run_id = Column(String(64), nullable=False, default="")
+    instrument_id = Column(String(128), nullable=False, default="")
+    series_key = Column(String(255), nullable=False, default="")
+    worker_id = Column(String(128), nullable=False, default="")
+    queue_name = Column(String(128), nullable=False, default="")
+    pipeline_stage = Column(String(128), nullable=False, default="")
+    message_kind = Column(String(128), nullable=False, default="")
+    delta_type = Column(String(128), nullable=False, default="")
+    storage_target = Column(String(128), nullable=False, default="")
+    failure_mode = Column(String(128), nullable=False, default="")
+    label_hash = Column(String(64), nullable=False, default="none")
     labels = Column(JSONB, nullable=False, default=dict)
+    sample_count = Column(Integer, nullable=False, default=0)
+    value_sum = Column(Float, nullable=False, default=0.0)
+    value_min = Column(Float, nullable=False, default=0.0)
+    value_max = Column(Float, nullable=False, default=0.0)
+    latest_value = Column(Float, nullable=False, default=0.0)
+    p95_value = Column(Float, nullable=False, default=0.0)
+    p99_value = Column(Float, nullable=False, default=0.0)
+    raw_sample_count = Column(Integer, nullable=False, default=0)
+    source_metric_record_count = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": int(self.id or 0),
-            "observed_at": (self.observed_at or datetime.utcnow()).isoformat() + "Z",
+            "bucket_start": (self.bucket_start or datetime.utcnow()).isoformat() + "Z",
+            "bucket_seconds": int(self.bucket_seconds or 0),
+            "first_seen": (self.first_seen or datetime.utcnow()).isoformat() + "Z",
+            "last_seen": (self.last_seen or datetime.utcnow()).isoformat() + "Z",
             "component": self.component,
             "metric_name": self.metric_name,
             "metric_kind": self.metric_kind,
-            "value": float(self.value or 0.0),
-            "bot_id": self.bot_id,
-            "run_id": self.run_id,
-            "instrument_id": self.instrument_id,
-            "series_key": self.series_key,
-            "worker_id": self.worker_id,
-            "queue_name": self.queue_name,
-            "pipeline_stage": self.pipeline_stage,
-            "message_kind": self.message_kind,
-            "delta_type": self.delta_type,
-            "storage_target": self.storage_target,
-            "failure_mode": self.failure_mode,
+            "bot_id": self.bot_id or None,
+            "run_id": self.run_id or None,
+            "instrument_id": self.instrument_id or None,
+            "series_key": self.series_key or None,
+            "worker_id": self.worker_id or None,
+            "queue_name": self.queue_name or None,
+            "pipeline_stage": self.pipeline_stage or None,
+            "message_kind": self.message_kind or None,
+            "delta_type": self.delta_type or None,
+            "storage_target": self.storage_target or None,
+            "failure_mode": self.failure_mode or None,
+            "label_hash": self.label_hash,
             "labels": dict(self.labels or {}),
+            "sample_count": int(self.sample_count or 0),
+            "value_sum": float(self.value_sum or 0.0),
+            "value_min": float(self.value_min or 0.0),
+            "value_max": float(self.value_max or 0.0),
+            "latest_value": float(self.latest_value or 0.0),
+            "p95_value": float(self.p95_value or 0.0),
+            "p99_value": float(self.p99_value or 0.0),
+            "raw_sample_count": int(self.raw_sample_count or 0),
+            "source_metric_record_count": int(self.source_metric_record_count or 0),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
 
 

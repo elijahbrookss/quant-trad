@@ -13,6 +13,7 @@ from .bots import (
     update_bot_run_artifact,
     upsert_bot,
 )
+from .candles import get_candle_storage_summary, list_candle_closure_evidence, list_candles_for_series
 from .lifecycle import (
     get_bot_run_lifecycle,
     get_latest_bot_run_lifecycle,
@@ -37,15 +38,16 @@ from .instruments import (
 )
 from .observability import (
     list_observability_events,
-    list_observability_metric_samples,
+    list_observability_metric_rollups,
     record_observability_events_batch,
-    record_observability_metric_samples_batch,
+    record_observability_metric_rollups_batch,
 )
 from .presets import delete_symbol_preset, list_symbol_presets, upsert_symbol_preset
 from .runs import get_bot_run, list_bot_runs, upsert_bot_run
 from .runtime_events import (
     get_latest_bot_runtime_event,
     get_latest_bot_runtime_run_id,
+    list_bot_run_steps_for_run,
     list_bot_runtime_events,
     record_bot_run_step,
     record_bot_run_steps_batch,
@@ -99,6 +101,8 @@ __all__ = [
     "get_atm_template",
     "get_bot",
     "get_bot_run_lifecycle",
+    "get_candle_storage_summary",
+    "list_candle_closure_evidence",
     "get_bot_run",
     "get_indicator",
     "get_instrument",
@@ -107,12 +111,14 @@ __all__ = [
     "get_latest_bot_runtime_event",
     "get_latest_bot_runtime_run_id",
     "list_bot_run_lifecycle_events",
+    "list_bot_run_steps_for_run",
     "list_bot_runs",
     "list_bot_runtime_events",
+    "list_candles_for_series",
     "list_bot_trade_events_for_trades",
     "list_bot_trades_for_run",
     "list_observability_events",
-    "list_observability_metric_samples",
+    "list_observability_metric_rollups",
     "list_strategy_variants",
     "list_strategy_instrument_links",
     "list_strategy_instrument_symbols",
@@ -127,7 +133,7 @@ __all__ = [
     "record_bot_run_steps_batch",
     "record_bot_run_lifecycle_checkpoint",
     "record_observability_events_batch",
-    "record_observability_metric_samples_batch",
+    "record_observability_metric_rollups_batch",
     "record_bot_runtime_event",
     "record_bot_runtime_events_batch",
     "record_bot_trade",
