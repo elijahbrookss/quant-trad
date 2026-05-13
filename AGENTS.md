@@ -184,6 +184,16 @@ Performance, polish, and optimization come second.
   - or `OBSIDIAN_SYNC_DOCS_DEST`
   - optional local override file: `.sync-docs.mk`
 
+## Developer/Audit Workflow
+
+- Use `make help` as the repo-native command index for Docker, DB, reporting,
+  BotLens, validation, git, and commit workflows.
+- Use `docs/engineering/developer-audit-workflow.md` for the standard Codex
+  and local audit workflow before inventing new one-off commands.
+- Keep workflow helpers in existing locations such as the root `Makefile`,
+  `scripts/reporting/`, and `docs/engineering/`; do not add new root-level
+  workflow files or folders.
+
 ## Architecture Docs Tagging + Index Workflow
 
 When a change materially affects runtime/service/provider/storage/reporting architecture, docs updates are required in the same pass.
