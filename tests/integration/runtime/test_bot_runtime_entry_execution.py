@@ -4,8 +4,10 @@ from typing import Optional
 
 from engines.bot_runtime.core import CandleSnapshot, EntryFill, EntryFillResult, PendingEntry
 from engines.bot_runtime.core.domain import Candle, EntryRequest, EntryValidation, LadderRiskEngine
-from engines.bot_runtime.core.execution import FillRejection
+from engines.bot_runtime.core.execution import FillRejection, FillResult
 from engines.bot_runtime.core.execution_intent import ExecutionIntent, ExecutionOutcome
+from engines.bot_runtime.core.exit_settlement import ExitSettlementContext
+from engines.bot_runtime.core.fees import executed_fee, executed_notional
 from engines.bot_runtime.core.runtime_events import (
     RuntimeEventName,
     WalletInitializedContext,
@@ -20,17 +22,21 @@ def _build_spot_engine(
     execution_mode: str = "market",
     limit_maker: Optional[dict] = None,
     base_risk_per_trade: float = 100,
+    take_profit_orders: Optional[list[dict]] = None,
+    extra_config: Optional[dict] = None,
 ) -> LadderRiskEngine:
     config = {
         "tick_size": 1.0,
         "contract_size": 1.0,
         "tick_value": 1.0,
         "initial_stop": {"atr_multiplier": 2.0},
-        "take_profit_orders": [{"id": "tp-1", "ticks": 10}],
+        "take_profit_orders": take_profit_orders or [{"id": "tp-1", "ticks": 10}],
         "execution_mode": execution_mode,
     }
     if limit_maker is not None:
         config["limit_maker"] = limit_maker
+    if extra_config:
+        config.update(extra_config)
     instrument = {
         "symbol": "TEST-SPOT",
         "instrument_type": "spot",
@@ -100,6 +106,37 @@ def _build_candle(*, close: float, atr: float) -> Candle:
     )
 
 
+class _FillAdapter:
+    def fill_market(
+        self,
+        *,
+        side: str,
+        requested_qty: float,
+        price: float,
+        fee_rate: float,
+        enforce_price_tick: bool,
+    ):
+        _ = enforce_price_tick
+        notional = executed_notional(price=price, quantity=requested_qty, contract_size=1.0)
+        return (
+            FillResult(
+                filled_qty=float(requested_qty),
+                fill_price=float(price),
+                notional=notional,
+                fee=executed_fee(price=price, quantity=requested_qty, contract_size=1.0, fee_rate=fee_rate),
+                fee_rate=float(fee_rate or 0.0),
+                side=side,
+                metadata={"source": "test"},
+            ),
+            None,
+        )
+
+
+def _enable_runtime_execution(engine: LadderRiskEngine) -> None:
+    engine.attach_wallet_gateway(SharedWalletGateway(_wallet_proxy({"USD": 1_000_000.0})))
+    engine.attach_execution_adapter(_FillAdapter())
+
+
 def _build_pending(request: EntryRequest, validity_remaining: int = 0) -> PendingEntry:
     intent = request.intent
     assert intent is not None
@@ -159,6 +196,42 @@ def _wallet_proxy(balances: dict[str, float]) -> dict:
         "reservations": {},
         "lock": threading.RLock(),
     }
+
+
+def test_attach_wallet_gateway_wires_exit_settlement_to_shared_gateway() -> None:
+    engine = _build_future_engine()
+    gateway = SharedWalletGateway(_wallet_proxy({"USD": 1_000_000.0}))
+
+    engine.attach_wallet_gateway(gateway)
+
+    assert getattr(engine.exit_settlement, "_wallet_gateway", None) is gateway
+    applied, metadata = engine.exit_settlement.apply_exit_fill(
+        ExitSettlementContext(
+            event_type="EXIT_FILL",
+            exit_kind="CLOSE",
+            side="sell",
+            base_currency="BTC",
+            quote_currency="USD",
+            qty=1.0,
+            price=100.0,
+            fee=0.0,
+            notional=100.0,
+            trade_id="trade-1",
+            leg_id="tp-1",
+            position_direction="long",
+            accounting_mode="margin",
+            realized_pnl=1.0,
+            allow_short_borrow=False,
+            instrument={"symbol": "TEST-FUTURE", "instrument_type": "future"},
+            execution_profile=engine.execution_profile,
+        ),
+        force=True,
+    )
+
+    assert applied is True
+    assert metadata["wallet_commit_seq"] is not None
+    assert metadata["wallet_commit_seq_status"] == "runtime_assigned"
+    assert metadata["wallet_eval_seq"] is not None
 
 
 def test_build_entry_request_matches_expected_values():
@@ -240,6 +313,121 @@ def test_submit_entry_margin_capped_uses_request_qty():
     assert position.entry_order["qty"] == request.requested_qty
 
 
+def test_trade_open_bumps_trade_revision_once():
+    engine = _build_spot_engine(base_risk_per_trade=8)
+    _enable_runtime_execution(engine)
+    candle = _build_candle(close=100.0, atr=2.0)
+
+    position = engine.maybe_enter(candle, "long")
+
+    assert position is not None
+    assert engine.trade_revision == 1
+
+
+def test_active_noop_bar_does_not_bump_trade_revision():
+    engine = _build_spot_engine(base_risk_per_trade=8)
+    _enable_runtime_execution(engine)
+    entry = _build_candle(close=100.0, atr=2.0)
+    position = engine.maybe_enter(entry, "long")
+    assert position is not None
+    revision_after_open = engine.trade_revision
+
+    noop = Candle(
+        time=datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+        open=100.0,
+        high=102.0,
+        low=98.0,
+        close=101.0,
+        atr=2.0,
+    )
+    events = engine.step(noop)
+
+    assert events == []
+    assert engine.active_trade is position
+    assert position.bars_held == 1
+    assert position.mfe_ticks == 2.0
+    assert engine.trade_revision == revision_after_open
+
+
+def test_trade_close_bumps_trade_revision():
+    engine = _build_spot_engine(base_risk_per_trade=8)
+    _enable_runtime_execution(engine)
+    entry = _build_candle(close=100.0, atr=2.0)
+    position = engine.maybe_enter(entry, "long")
+    assert position is not None
+    revision_after_open = engine.trade_revision
+
+    stop = Candle(
+        time=datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=95.0,
+        close=96.0,
+        atr=2.0,
+    )
+    events = engine.step(stop)
+
+    assert any(event["type"] == "close" for event in events)
+    assert engine.active_trade is None
+    assert engine.trade_revision == revision_after_open + 1
+
+
+def test_stop_movement_bumps_trade_revision_without_trade_event():
+    engine = _build_spot_engine(base_risk_per_trade=8)
+    _enable_runtime_execution(engine)
+    entry = _build_candle(close=100.0, atr=2.0)
+    position = engine.maybe_enter(entry, "long")
+    assert position is not None
+    position.trailing_activation_ticks = 5
+    position.trailing_distance_ticks = 2
+    revision_after_open = engine.trade_revision
+
+    trailing = Candle(
+        time=datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+        open=105.0,
+        high=106.0,
+        low=104.5,
+        close=105.5,
+        atr=2.0,
+    )
+    events = engine.step(trailing)
+
+    assert events == []
+    assert position.stop_price == 104.0
+    assert position.trailing_active is True
+    assert engine.trade_revision == revision_after_open + 1
+
+
+def test_target_fill_status_and_quantity_change_bumps_trade_revision():
+    engine = _build_spot_engine(
+        base_risk_per_trade=8,
+        take_profit_orders=[
+            {"id": "tp-1", "ticks": 5},
+            {"id": "tp-2", "ticks": 10},
+        ],
+    )
+    _enable_runtime_execution(engine)
+    entry = _build_candle(close=100.0, atr=2.0)
+    position = engine.maybe_enter(entry, "long")
+    assert position is not None
+    revision_after_open = engine.trade_revision
+
+    first_target = Candle(
+        time=datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+        open=100.0,
+        high=106.0,
+        low=101.0,
+        close=105.0,
+        atr=2.0,
+    )
+    events = engine.step(first_target)
+
+    assert any(event["type"] == "target" for event in events)
+    assert position.is_active()
+    assert [leg.status for leg in position.legs] == ["target", "open"]
+    assert engine.trade_revision == revision_after_open + 1
+
+
 def test_pre_order_insufficient_margin_rejection_has_entry_request_identity():
     engine = _build_future_engine()
     engine.attach_wallet_gateway(SharedWalletGateway(_wallet_proxy({"USD": 0.0})))
@@ -259,6 +447,7 @@ def test_pre_order_insufficient_margin_rejection_has_entry_request_identity():
     assert request.validation.rejection_detail is not None
     assert request.validation.rejection_detail["entry_request_id"] == request.entry_request_id
     assert request.validation.rejection_detail["attempt_id"] == request.entry_request_id
+    assert "wallet_commit_seq" not in request.validation.rejection_detail
 
     position = engine.entry_execution.submit_entry(candle, "long")
 
@@ -267,6 +456,13 @@ def test_pre_order_insufficient_margin_rejection_has_entry_request_identity():
     assert engine.last_rejection_detail is not None
     assert engine.last_rejection_detail["entry_request_id"] == request.entry_request_id
     assert engine.last_rejection_detail["attempt_id"] == request.entry_request_id
+    assert engine.last_rejection_detail["wallet_commit_seq"] == 2
+    assert engine.last_rejection_detail["wallet_commit_seq_status"] == "runtime_assigned"
+    assert engine.last_rejection_detail["wallet_eval_seq"] == 1
+    assert engine.last_rejection_detail["wallet_before"]["balances"]["USD"] == 0.0
+    assert engine.last_rejection_detail["wallet_after"]["balances"]["USD"] == 0.0
+    assert engine.last_rejection_detail["selected_quantity"] > 0.0
+    assert engine.last_rejection_detail["required_margin"] > 0.0
     assert "trade_id" not in engine.last_rejection_detail
 
 
@@ -372,6 +568,37 @@ def test_apply_entry_fill_opens_position_with_expected_stop():
     assert serialized["strategy_id"] == "strategy-1"
     assert serialized["signal_id"] == "signal-1"
     assert serialized["decision_id"] == "decision-1"
+
+
+def test_entry_settlement_reservation_released_when_position_build_rejects(monkeypatch):
+    proxy = _wallet_proxy({"USD": 1_000_000.0})
+    engine = _build_spot_engine(base_risk_per_trade=8)
+    engine.attach_wallet_gateway(SharedWalletGateway(proxy))
+    engine.attach_execution_adapter(_FillAdapter())
+    candle = _build_candle(close=100.0, atr=2.0)
+    request = engine.build_entry_request(candle, "long")
+    pending = _build_pending(request)
+    fill = EntryFill(
+        order_intent_id=str(request.order_intent_id),
+        trade_id=str(request.trade_id),
+        candle=_snapshot(candle),
+        filled_qty=request.requested_qty,
+        fill_price=100.0,
+        fee_paid=0.2,
+        liquidity_role="taker",
+        fill_time="t1",
+        raw={"outcome": {}},
+    )
+    monkeypatch.setattr(engine, "_build_legs", lambda *args, **kwargs: [])
+
+    result = engine.apply_entry_fill(request=request, pending=pending, fill=fill)
+
+    assert result.status == "rejected"
+    assert result.rejection_reason == "TP_LEGS_EMPTY"
+    reservations = dict(proxy["reservations"])
+    assert reservations
+    assert {payload["status"] for payload in reservations.values()} == {"RELEASED"}
+    assert engine._wallet_fill_metadata_by_trade == {}
 
 
 def test_submit_entry_uses_facade_only(monkeypatch):

@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from engines.bot_runtime.core.domain import Candle, StrategySignal, isoformat
 from engines.bot_runtime.core.series_identity import canonical_series_key
 from strategies.evaluator import (
+    MINIMAL_DECISION_ARTIFACT_FIELDS,
     build_rejection_artifact,
     classify_rejection_stage,
     evaluate_strategy_bar,
@@ -80,8 +81,20 @@ class RuntimeExecutionLoopMixin:
             self._push_log_marker = None
             self._push_decision_marker = None
             self._push_payload_size_probe_count = 0
+            self._warning_revision = 0
+            self._push_runtime_health_fingerprint = None
+            self._push_runtime_health_emitted_monotonic = 0.0
+            self._push_runtime_health_warning_revision = 0
+            self._push_runtime_health_status = None
             self._report_artifact_bundle = None
-            self.state = {"status": "idle", "progress": 0.0, "paused": False}
+            self.state = {
+                "status": "idle",
+                "progress": 0.0,
+                "paused": False,
+                "mode": self.mode,
+                "playback_mode": self.playback_mode,
+                "execution_mode": self.execution_mode.value,
+            }
         self._stop.clear()
         self._pause_event.set()
         self._paused = False
@@ -148,8 +161,15 @@ class RuntimeExecutionLoopMixin:
             self._report_artifact_bundle.start(started_at=self._run_context.started_at)
         wallet_config = self.config.get("wallet_config") if isinstance(self.config.get("wallet_config"), Mapping) else {}
         balances = wallet_config.get("balances") if isinstance(wallet_config, Mapping) else {}
-        if isinstance(balances, Mapping):
+        if isinstance(balances, Mapping) and not self._wallet_initialization_is_container_owned():
             self._emit_wallet_initialized_event(balances)
+        elif self._wallet_initialization_is_container_owned():
+            logger.info(
+                with_log_context(
+                    "bot_runtime_wallet_initialized_worker_attach",
+                    self._runtime_log_context(owner="container"),
+                )
+            )
         logger.info(with_log_context("bot_runtime_run_context_ready", self._runtime_log_context()))
         with self._lock:
             self.state.update(
@@ -167,7 +187,14 @@ class RuntimeExecutionLoopMixin:
                 ),
             )
         )
-        self._log_event("start", message="Bot runtime started", mode=self.mode, run_type=self.run_type)
+        self._log_event(
+            "start",
+            message="Bot runtime started",
+            mode=self.mode,
+            playback_mode=self.playback_mode,
+            execution_mode=self.execution_mode.value,
+            run_type=self.run_type,
+        )
         self._push_update("start")
         self._run()
 
@@ -184,7 +211,14 @@ class RuntimeExecutionLoopMixin:
             except Exception:
                 logger.exception(with_log_context("bot_runtime_runtime_error_emit_failed", context))
             self._set_error_state(str(exc))
-            self._push_update("error")
+            try:
+                self._push_update("error")
+            except Exception:
+                logger.exception(with_log_context("bot_runtime_error_push_failed", context))
+            try:
+                self._flush_canonical_fact_appender("runtime_loop_failed", shutdown=True)
+            except Exception:
+                logger.exception(with_log_context("bot_runtime_canonical_fact_failed_drain_failed", context))
             self._flush_persistence_buffer("runtime_loop_failed")
             self._flush_step_trace_buffer("runtime_loop_failed", shutdown=True)
             self._persist_runtime_state("error")
@@ -223,6 +257,9 @@ class RuntimeExecutionLoopMixin:
             status = "stopped"
         elif not self._live_mode:
             status = "completed"
+        terminal_close_count = 0
+        if status == "completed" and not self._live_mode:
+            terminal_close_count = self._terminalize_backtest_open_trades()
         self._next_bar_at = None
         self._record_step_trace(
             "run_loop",
@@ -232,6 +269,7 @@ class RuntimeExecutionLoopMixin:
             context={
                 "status": status,
                 "series_count": len(self._series_states),
+                "terminal_closes": terminal_close_count,
             },
         )
         self._log_event(status, message=f"Bot runtime {status}")
@@ -259,13 +297,126 @@ class RuntimeExecutionLoopMixin:
             with self._lock:
                 self.state.update({"status": status})
         drain_started = datetime.now(timezone.utc)
+        self._flush_canonical_fact_appender("runtime_loop_before_terminal_status")
         self._flush_persistence_buffer("runtime_loop_complete")
-        self._flush_step_trace_buffer("runtime_loop_complete", shutdown=True)
-        self._runtime_flush_drain_duration_seconds = max((datetime.now(timezone.utc) - drain_started).total_seconds(), 0.0)
         self._flush_overlay_suppression_logs()
         self._push_update(status)
+        self._flush_canonical_fact_appender("runtime_loop_terminal_status", shutdown=True)
+        self._flush_step_trace_buffer("runtime_loop_complete", shutdown=True)
+        self._runtime_flush_drain_duration_seconds = max((datetime.now(timezone.utc) - drain_started).total_seconds(), 0.0)
         self._persist_runtime_state(status)
         self._persist_run_artifact(status)
+
+    def _terminalize_backtest_open_trades(self) -> int:
+        closed_count = 0
+        for state in self._series_states:
+            series = state.series
+            engine = getattr(series, "risk_engine", None)
+            active_trade = getattr(engine, "active_trade", None) if engine is not None else None
+            if active_trade is None:
+                continue
+            candles = list(getattr(series, "candles", []) or [])
+            if not candles:
+                raise RuntimeError(
+                    "backtest_terminal_close_missing_candle "
+                    f"strategy_id={getattr(series, 'strategy_id', None)} "
+                    f"symbol={getattr(series, 'symbol', None)} "
+                    f"timeframe={getattr(series, 'timeframe', None)}"
+                )
+            total_bars = int(getattr(state, "total_bars", len(candles)) or len(candles))
+            terminal_index = min(max(total_bars - 1, 0), len(candles) - 1)
+            terminal_candle = candles[terminal_index]
+            started_at = datetime.now(timezone.utc)
+            events: List[Dict[str, Any]] = []
+            try:
+                events = engine.force_close_active_trade_at_backtest_end(
+                    terminal_candle,
+                    reason_code="BACKTEST_END",
+                )
+                exit_settlement = getattr(engine, "exit_settlement", None)
+                self._settlement_applier.apply(
+                    events,
+                    exit_settlement,
+                    execution_profile=getattr(series, "execution_profile", None),
+                )
+                for event in events:
+                    trade_time = self._trade_entry_time(series, event.get("trade_id"))
+                    self._log_event(
+                        event.get("type", "event"),
+                        series,
+                        terminal_candle,
+                        trade_id=event.get("trade_id"),
+                        leg=event.get("leg"),
+                        price=event.get("price"),
+                        event_time=event.get("time"),
+                        bar_index=terminal_index,
+                        contracts=event.get("contracts"),
+                        pnl=event.get("pnl"),
+                        net_pnl=event.get("net_pnl"),
+                        gross_pnl=event.get("gross_pnl"),
+                        fees_paid=event.get("fees_paid"),
+                        currency=event.get("currency"),
+                        trade_time=trade_time,
+                    )
+                    raw_subtype = event.get("type")
+                    event_ts = event.get("time")
+                    if raw_subtype and event_ts:
+                        event_subtype = str(raw_subtype)
+                        if event_subtype in {"backtest_end", "terminal_liquidation"}:
+                            self._emit_exit_filled_event(
+                                series=series,
+                                candle=terminal_candle,
+                                event=event,
+                            )
+                        if event_subtype == "close":
+                            self._persist_trade_close(series, event)
+                self._update_trade_overlay(series)
+                if getattr(engine, "active_trade", None) is not None:
+                    raise RuntimeError(
+                        "backtest_terminal_close_incomplete "
+                        f"trade_id={getattr(getattr(engine, 'active_trade', None), 'trade_id', None)}"
+                    )
+                if events:
+                    closed_count += sum(1 for event in events if str(event.get("type") or "") == "close")
+                    self._push_update(
+                        "backtest_terminal_close",
+                        series=series,
+                        candle=terminal_candle,
+                        replace_last=False,
+                    )
+                self._record_step_trace(
+                    "backtest_terminal_close",
+                    started_at=started_at,
+                    ended_at=datetime.now(timezone.utc),
+                    ok=True,
+                    strategy_id=getattr(series, "strategy_id", None),
+                    symbol=getattr(series, "symbol", None),
+                    timeframe=getattr(series, "timeframe", None),
+                    context={
+                        "bar_index": terminal_index,
+                        "bar_time": _isoformat(terminal_candle.time),
+                        "events": len(events),
+                        "closed_trades": sum(1 for event in events if str(event.get("type") or "") == "close"),
+                    },
+                )
+            except Exception as exc:
+                self._record_step_trace(
+                    "backtest_terminal_close",
+                    started_at=started_at,
+                    ended_at=datetime.now(timezone.utc),
+                    ok=False,
+                    strategy_id=getattr(series, "strategy_id", None),
+                    symbol=getattr(series, "symbol", None),
+                    timeframe=getattr(series, "timeframe", None),
+                    error=str(exc),
+                    context={
+                        "bar_index": terminal_index,
+                        "bar_time": _isoformat(terminal_candle.time),
+                        "events": len(events),
+                    },
+                )
+                raise
+        return closed_count
 
     def _log_overlay_suppressed_warning(
         self,
@@ -352,6 +503,9 @@ class RuntimeExecutionLoopMixin:
 
     def _step_series_state(self, state: SeriesExecutionState) -> None:
         if state.done:
+            self._decision_order_coordinator().mark_participant_complete(
+                self._decision_order_participant_payload(state.series, state)
+            )
             return
         if state.intrabar_active():
             self._step_intrabar(state)
@@ -606,12 +760,51 @@ class RuntimeExecutionLoopMixin:
             decision_flow_started_perf = time.perf_counter()
             blocking_trade = None
             new_trade = None
+            decision_order_ticket = None
+            decision_order_completed = False
+            decision_order_outcome = "none"
             try:
+                instrument_id = None
+                if isinstance(series.instrument, Mapping):
+                    instrument_id = series.instrument.get("id")
+                if direction is not None and series.risk_engine is not None:
+                    setattr(series.risk_engine, "last_signal_id", getattr(chosen_signal, "signal_id", None))
+                    setattr(series.risk_engine, "last_decision_id", getattr(chosen_signal, "decision_id", None))
+                    setattr(series.risk_engine, "strategy_id", getattr(series, "strategy_id", None))
+                    setattr(
+                        series.risk_engine,
+                        "run_id",
+                        self._run_context.run_id if self._run_context is not None else None,
+                    )
+                entry_request_id = None
+                if direction is not None and instrument_id and series.risk_engine is not None:
+                    request_id_builder = getattr(series.risk_engine, "_entry_request_id", None)
+                    if callable(request_id_builder):
+                        entry_request_id = request_id_builder(candle, direction)
+                decision_candidate = None
+                if direction is not None and instrument_id and isinstance(selected_decision, Mapping):
+                    decision_candidate = {
+                        "bar_time": bar_time,
+                        "strategy_id": getattr(series, "strategy_id", None),
+                        "instrument_id": instrument_id,
+                        "symbol": getattr(series, "symbol", None),
+                        "timeframe": getattr(series, "timeframe", None),
+                        "signal_priority": selected_decision.get("priority"),
+                        "direction": direction,
+                        "side": "buy" if direction == "long" else "sell",
+                        "decision_id": getattr(chosen_signal, "decision_id", None),
+                        "entry_request_id": entry_request_id,
+                        "rule_id": getattr(chosen_signal, "rule_id", None),
+                        "event_key": getattr(chosen_signal, "event_key", None),
+                    }
+                if decision_candidate is not None:
+                    decision_order_ticket = self._decision_order_coordinator().arrive_and_wait_turn(
+                        participant=self._decision_order_participant_payload(series, state),
+                        bar={"bar_time": bar_time, "timeframe": getattr(series, "timeframe", None)},
+                        candidate=decision_candidate,
+                    )
                 # Attempt to create trade from signal
                 if direction is not None:
-                    instrument_id = None
-                    if isinstance(series.instrument, Mapping):
-                        instrument_id = series.instrument.get("id")
                     if not instrument_id:
                         decision_events_logged += 1
                         rejection_artifact = (
@@ -641,6 +834,7 @@ class RuntimeExecutionLoopMixin:
                             message="Instrument id missing.",
                             trade_id=None,
                         )
+                        decision_order_outcome = "rejected"
                         direction = None
                     else:
                         trade_lock_wait_started = time.perf_counter()
@@ -652,14 +846,6 @@ class RuntimeExecutionLoopMixin:
                                 skip_series=series,
                             )
                             if blocking_trade is None:
-                                setattr(series.risk_engine, "last_signal_id", getattr(chosen_signal, "signal_id", None))
-                                setattr(series.risk_engine, "last_decision_id", getattr(chosen_signal, "decision_id", None))
-                                setattr(series.risk_engine, "strategy_id", getattr(series, "strategy_id", None))
-                                setattr(
-                                    series.risk_engine,
-                                    "run_id",
-                                    self._run_context.run_id if self._run_context is not None else None,
-                                )
                                 new_trade = series.risk_engine.maybe_enter(candle, direction)
                             trade_lock_hold_ms = max((time.perf_counter() - trade_lock_hold_started) * 1000.0, 0.0)
 
@@ -679,7 +865,16 @@ class RuntimeExecutionLoopMixin:
                             reason_code="DECISION_ACCEPTED",
                             message=None,
                             trade_id=new_trade.trade_id,
+                            wallet_evidence=(
+                                {
+                                    **dict(getattr(new_trade, "wallet_fill_metadata", {}) or {}),
+                                    "position_commit_seq": int(getattr(new_trade, "position_commit_seq", 0) or 0),
+                                }
+                                if isinstance(getattr(new_trade, "wallet_fill_metadata", None), Mapping)
+                                else {"position_commit_seq": int(getattr(new_trade, "position_commit_seq", 0) or 0)}
+                            ),
                         )
+                        decision_order_outcome = "accepted"
                     else:
                         # Signal was rejected (no trade opened)
                         # Determine rejection reason
@@ -742,7 +937,9 @@ class RuntimeExecutionLoopMixin:
                             reason_code=rejection_code or "DECISION_REJECTED",
                             message=rejection_reason,
                             trade_id=resolved_trade_id,
+                            wallet_evidence=rejection_context,
                         )
+                        decision_order_outcome = "rejected"
 
                 if new_trade is not None:
                     entry_created = True
@@ -775,6 +972,13 @@ class RuntimeExecutionLoopMixin:
                         new_trade,
                     )
                     self._update_trade_overlay(series)
+                if decision_order_ticket is not None and decision_order_ticket.has_candidate:
+                    self._decision_order_coordinator().complete_candidate(
+                        decision_order_ticket,
+                        outcome=decision_order_outcome,
+                    )
+                    decision_order_completed = True
+                    self._decision_order_coordinator().wait_until_complete(decision_order_ticket)
                 self._record_step_trace(
                     "step_decision_flow",
                     started_at=decision_flow_started,
@@ -793,6 +997,19 @@ class RuntimeExecutionLoopMixin:
                     },
                 )
             except Exception as exc:
+                self._decision_order_coordinator().mark_participant_failed(
+                    self._decision_order_participant_payload(series, state),
+                    error=exc,
+                )
+                if (
+                    decision_order_ticket is not None
+                    and decision_order_ticket.has_candidate
+                    and not decision_order_completed
+                ):
+                    self._decision_order_coordinator().complete_candidate(
+                        decision_order_ticket,
+                        outcome="error",
+                    )
                 self._record_step_trace(
                     "step_decision_flow",
                     started_at=decision_flow_started,
@@ -855,7 +1072,11 @@ class RuntimeExecutionLoopMixin:
             settlement_started = datetime.now(timezone.utc)
             settlement_started_perf = time.perf_counter()
             try:
-                self._settlement_applier.apply(trade_events, exit_settlement)
+                self._settlement_applier.apply(
+                    trade_events,
+                    exit_settlement,
+                    execution_profile=getattr(series, "execution_profile", None),
+                )
                 self._record_step_trace(
                     "settlement_apply",
                     started_at=settlement_started,
@@ -907,15 +1128,15 @@ class RuntimeExecutionLoopMixin:
                     event_ts = event.get("time")
                     if raw_subtype and event_ts:
                         event_subtype = str(raw_subtype)
-                        if event_subtype in {"target", "stop", "close"}:
+                        if event_subtype in {"target", "stop", "backtest_end", "terminal_liquidation"}:
                             execution_events_logged += 1
                             self._emit_exit_filled_event(
                                 series=series,
                                 candle=candle,
                                 event=event,
                             )
-                            if event_subtype == "close":
-                                self._persist_trade_close(series, event)
+                        if event_subtype == "close":
+                            self._persist_trade_close(series, event)
                 self._update_trade_overlay(series)
                 state.last_evaluated_epoch = max(state.last_evaluated_epoch, next_last_evaluated_epoch)
                 state.last_consumed_epoch = max(state.last_consumed_epoch, next_last_consumed_epoch)
@@ -1189,7 +1410,6 @@ class RuntimeExecutionLoopMixin:
         )
         outputs = frame.outputs
         state.indicator_outputs = outputs
-        state.indicator_overlays = frame.overlays
         self._record_indicator_frame_warnings(
             frame=frame,
             state=state,
@@ -1198,7 +1418,7 @@ class RuntimeExecutionLoopMixin:
             series=series,
         )
         if self._report_artifact_bundle is not None:
-            self._report_artifact_bundle.record_indicator_frame(state=state, candle=candle)
+            self._report_artifact_bundle.record_indicator_frame(state=state, candle=candle, frame=frame)
         indicator_state_update_ms = max((time.perf_counter() - indicator_started) * 1000.0, 0.0)
 
         signal_started = time.perf_counter()
@@ -1214,15 +1434,17 @@ class RuntimeExecutionLoopMixin:
             symbol=str(series.symbol or ""),
             timeframe=str(series.timeframe or ""),
             bar_time=candle.time,
+            minimal_decision_details=True,
         )
         for artifact in decision_result.artifacts:
-            state.decision_artifacts.append(deepcopy(artifact))
+            state.decision_artifacts.append(self._copy_decision_artifact_for_runtime(artifact))
             if self._run_context is not None:
-                self._run_context.decision_artifacts.append(deepcopy(artifact))
+                self._run_context.decision_artifacts.append(self._copy_decision_artifact_for_runtime(artifact))
         signal_eval_ms = max((time.perf_counter() - signal_started) * 1000.0, 0.0)
 
-        previous_overlay_count = float(len(series.overlays or []))
-        previous_overlay_points = float(count_overlay_points(series.overlays or []))
+        previous_overlays = list(series.overlays or [])
+        previous_overlay_count = float(len(previous_overlays))
+        previous_overlay_points = float(count_overlay_points(previous_overlays))
         overlay_projection_ms = 0.0
         overlay_projection_skipped_count = 0
         overlay_projection_projector_ms = 0.0
@@ -1234,7 +1456,6 @@ class RuntimeExecutionLoopMixin:
         overlay_projection_ops_count = 0.0
         overlay_projection_normalize_cache_hits = 0.0
         overlay_projection_normalize_cache_misses = 0.0
-        overlays = list(series.overlays or [])
         series_overlay_entries_ms = 0.0
         series_overlay_indicator_entries_ms = 0.0
         series_overlay_regime_build_ms = 0.0
@@ -1298,9 +1519,9 @@ class RuntimeExecutionLoopMixin:
             "overlays_changed_count": overlays_changed_count,
             "overlay_points_changed": overlay_points_changed,
             "overlay_count_before": previous_overlay_count,
-            "overlay_count_after": float(len(overlays)),
+            "overlay_count_after": previous_overlay_count,
             "overlay_points_before": previous_overlay_points,
-            "overlay_points_after": float(count_overlay_points(overlays)),
+            "overlay_points_after": previous_overlay_points,
         }
 
         next_last_evaluated = epoch
@@ -1339,12 +1560,58 @@ class RuntimeExecutionLoopMixin:
                 continue
             if str(artifact.get("evaluation_result") or "") != "matched_selected":
                 continue
-            return deepcopy(artifact)
+            return RuntimeExecutionLoopMixin._copy_decision_artifact_for_runtime(artifact)
         raise RuntimeError(
             "selected_decision_artifact_missing: queued signal has no matching decision artifact "
             f"decision_id={decision_id} rule_id={signal.rule_id or '<missing>'} "
             f"strategy_hash={signal.strategy_hash or '<missing>'}"
         )
+
+    @staticmethod
+    def _copy_decision_artifact_for_runtime(artifact: Mapping[str, Any]) -> Dict[str, Any]:
+        copied: Dict[str, Any] = {}
+        for key, value in artifact.items():
+            if key not in MINIMAL_DECISION_ARTIFACT_FIELDS:
+                continue
+            if key in {"referenced_outputs", "observed_outputs"} and isinstance(value, Mapping):
+                compact_value = RuntimeExecutionLoopMixin._copy_compact_artifact_tree(value)
+                if isinstance(compact_value, Mapping):
+                    copied[key] = dict(compact_value)
+            elif isinstance(value, Mapping):
+                copied[key] = {
+                    str(nested_key): nested_value
+                    for nested_key, nested_value in value.items()
+                    if RuntimeExecutionLoopMixin._artifact_value_is_compact(nested_value)
+                }
+            else:
+                copied[key] = value
+        return copied
+
+    @staticmethod
+    def _copy_compact_artifact_tree(value: Any) -> Any:
+        if RuntimeExecutionLoopMixin._artifact_value_is_compact(value):
+            return value
+        if isinstance(value, Mapping):
+            copied: Dict[str, Any] = {}
+            for nested_key, nested_value in value.items():
+                if str(nested_key) in {"debug", "details", "overlays", "overlay", "projection", "trigger", "raw"}:
+                    continue
+                compact_value = RuntimeExecutionLoopMixin._copy_compact_artifact_tree(nested_value)
+                if compact_value is not None:
+                    copied[str(nested_key)] = compact_value
+            return copied
+        if isinstance(value, (list, tuple)):
+            copied_items = [
+                compact_value
+                for item in value
+                if (compact_value := RuntimeExecutionLoopMixin._copy_compact_artifact_tree(item)) is not None
+            ]
+            return copied_items
+        return None
+
+    @staticmethod
+    def _artifact_value_is_compact(value: Any) -> bool:
+        return value is None or isinstance(value, (str, int, float, bool))
 
     def _compute_playback_interval(self, base_seconds: float = 1.0) -> float:
         return 0.0

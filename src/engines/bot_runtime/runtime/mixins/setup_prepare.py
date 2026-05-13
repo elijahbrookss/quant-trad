@@ -16,8 +16,10 @@ from core.settings import get_settings
 from indicators.config import IndicatorExecutionContext
 from engines.bot_runtime.deps import BotRuntimeDeps
 from engines.bot_runtime.core.domain import Candle, normalize_epoch
+from engines.bot_runtime.core import SameBarResolutionPolicy
 from engines.bot_runtime.core.series_identity import canonical_series_key
 from engines.bot_runtime.core.runtime_events import (
+    ExecutionIntrabarFallbackContext,
     ReasonCode,
     RuntimeEvent,
     RuntimeEventName,
@@ -42,9 +44,11 @@ from utils.perf_log import get_obs_enabled, get_obs_slow_ms, get_obs_step_sample
 
 from ..components import (
     CanonicalFactAppender,
+    CanonicalFactPersistenceBuffer,
     ChartStateBuilder,
     InMemoryEventSink,
     InlineSeriesRunner,
+    ExecutionMode,
     IntrabarManager,
     LiveFactsBroadcastConsumer,
     RuntimeEventSink,
@@ -52,6 +56,7 @@ from ..components import (
     RunContext,
     SeriesRunnerContext,
     SettlementApplier,
+    SharedWalletEntryDecisionOrderCoordinator,
     SignalConsumption,
     StartContext,
     StepTracePersistenceBuffer,
@@ -87,7 +92,12 @@ class RuntimeSetupPrepareMixin:
         self.bot_id = bot_id
         self.config = dict(config)
         self._deps = deps
-        self.mode = (self.config.get("mode") or "instant").lower()
+        self.playback_mode = (self.config.get("playback_mode") or self.config.get("mode") or "instant").lower()
+        self.mode = self.playback_mode
+        self.execution_mode = ExecutionMode.from_config(
+            self.config.get("execution_mode"),
+            legacy_mode=self.config.get("mode"),
+        )
         self.run_type = (self.config.get("run_type") or "backtest").lower()
         self.playback_speed = 0.0
         self.focus_symbol = self.config.get("focus_symbol")
@@ -96,6 +106,8 @@ class RuntimeSetupPrepareMixin:
             "progress": 0.0,
             "paused": False,
             "mode": self.mode,
+            "playback_mode": self.playback_mode,
+            "execution_mode": self.execution_mode.value,
         }
         self._lock = threading.Lock()
         # Serialize bootstrap so concurrent callers (start thread + snapshot polling)
@@ -200,6 +212,7 @@ class RuntimeSetupPrepareMixin:
             normalise_epoch_fn=self._normalise_epoch,
             log_sequence_fn=self._log_candle_sequence,
             strategy_key_fn=self._strategy_key,
+            max_candles=_SETTINGS.bot_runtime.botlens.max_candles,
         )
         self._phase: Optional[str] = None
         # Stream payload cache: keep last derived slices so push_update emits true fact batches.
@@ -209,23 +222,63 @@ class RuntimeSetupPrepareMixin:
         self._push_log_marker: Optional[str] = None
         self._push_decision_marker: Optional[str] = None
         self._push_payload_size_probe_count: int = 0
+        self._warning_revision: int = 0
         self._push_payload_bytes_sample_every: int = self._coerce_positive_int(
             self.config.get("push_payload_bytes_sample_every")
             or self.config.get("BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY"),
             default=10,
+        )
+        self._botlens_fact_stream_log_fact_limit: int = self._coerce_positive_int(
+            self.config.get("botlens_fact_stream_log_fact_limit")
+            or self.config.get("BOTLENS_FACT_STREAM_LOG_FACT_LIMIT"),
+            default=min(int(_SETTINGS.bot_runtime.botlens.max_logs or 300), 32),
+        )
+        self._botlens_fact_stream_decision_fact_limit: int = self._coerce_positive_int(
+            self.config.get("botlens_fact_stream_decision_fact_limit")
+            or self.config.get("BOTLENS_FACT_STREAM_DECISION_FACT_LIMIT"),
+            default=min(int(_SETTINGS.bot_runtime.botlens.max_decisions or 600), 64),
+        )
+        self._botlens_fact_stream_overlay_point_limit: int = self._coerce_positive_int(
+            self.config.get("botlens_fact_stream_overlay_point_limit")
+            or self.config.get("BOTLENS_FACT_STREAM_OVERLAY_POINT_LIMIT"),
+            default=int(_SETTINGS.bot_runtime.botlens.max_overlay_points or 160),
+        )
+        self._botlens_bootstrap_closed_trade_limit: int = self._coerce_positive_int(
+            self.config.get("botlens_bootstrap_closed_trade_limit")
+            or self.config.get("BOTLENS_BOOTSTRAP_CLOSED_TRADE_LIMIT"),
+            default=int(_SETTINGS.bot_runtime.botlens.max_closed_trades or 240),
+        )
+        self._botlens_chart_closed_trade_limit: int = self._coerce_positive_int(
+            self.config.get("botlens_chart_closed_trade_limit")
+            or self.config.get("BOTLENS_CHART_CLOSED_TRADE_LIMIT"),
+            default=int(_SETTINGS.bot_runtime.botlens.max_closed_trades or 240),
         )
         self._runtime_health_emit_interval_ms: int = self._coerce_positive_int(
             self.config.get("runtime_health_emit_interval_ms")
             or self.config.get("BOT_RUNTIME_HEALTH_EMIT_INTERVAL_MS"),
             default=15_000,
         )
+        canonical_async_flag = self.config.get("canonical_fact_async_enabled")
+        if canonical_async_flag is None:
+            canonical_async_flag = self.config.get("BOT_RUNTIME_CANONICAL_FACT_ASYNC_ENABLED")
+        canonical_async_enabled = self._coerce_bool(canonical_async_flag, default=True)
+        canonical_fact_buffer = None
+        if canonical_async_enabled and self._deps.append_botlens_canonical_fact_batches is not None:
+            canonical_fact_buffer = CanonicalFactPersistenceBuffer.from_config(
+                self.config,
+                append_batch=self._deps.append_botlens_canonical_fact_batch,
+                append_batches=self._deps.append_botlens_canonical_fact_batches,
+            )
         self._canonical_fact_appender = CanonicalFactAppender(
             allocate_seq=self._allocate_canonical_fact_seq,
             append_batch=self._deps.append_botlens_canonical_fact_batch,
+            persistence_buffer=canonical_fact_buffer,
             consumers=(LiveFactsBroadcastConsumer(self._broadcast),),
         )
         self._push_runtime_health_fingerprint: Optional[str] = None
         self._push_runtime_health_emitted_monotonic: float = 0.0
+        self._push_runtime_health_warning_revision: int = 0
+        self._push_runtime_health_status: Optional[str] = None
         self._runtime_regime_overlay_rebuild: bool = self._coerce_bool(
             self.config.get("runtime_regime_overlay_rebuild")
             or self.config.get("BOT_RUNTIME_REGIME_OVERLAY_REBUILD"),
@@ -431,7 +484,14 @@ class RuntimeSetupPrepareMixin:
         run_id = self._run_context.run_id if self._run_context else None
         if run_id is None and self._start_context is not None:
             run_id = self._start_context.run_id
-        return build_log_context(bot_id=self.bot_id, bot_mode=self.run_type, run_id=run_id, **fields)
+        return build_log_context(
+            bot_id=self.bot_id,
+            bot_mode=self.run_type,
+            run_id=run_id,
+            playback_mode=self.playback_mode,
+            execution_mode=self.execution_mode.value,
+            **fields,
+        )
 
     def _build_start_context(self) -> StartContext:
         configured_run_id = str(self.config.get("run_id") or "").strip()
@@ -483,9 +543,21 @@ class RuntimeSetupPrepareMixin:
         if "OBS_SLOW_MS" in payload or "obs_slow_ms" in payload:
             self._obs_slow_ms = get_obs_slow_ms(self.config)
         if "mode" in payload:
-            self.mode = str(payload.get("mode") or "instant").lower()
+            self.playback_mode = str(payload.get("mode") or "instant").lower()
+            self.mode = self.playback_mode
             with self._lock:
                 self.state["mode"] = self.mode
+                self.state["playback_mode"] = self.playback_mode
+        if "playback_mode" in payload:
+            self.playback_mode = str(payload.get("playback_mode") or "instant").lower()
+            self.mode = self.playback_mode
+            with self._lock:
+                self.state["mode"] = self.mode
+                self.state["playback_mode"] = self.playback_mode
+        if "execution_mode" in payload:
+            self.execution_mode = ExecutionMode.from_config(payload.get("execution_mode"), legacy_mode=self.mode)
+            with self._lock:
+                self.state["execution_mode"] = self.execution_mode.value
         if "focus_symbol" in payload:
             self.focus_symbol = payload.get("focus_symbol") or None
         if "series_runner" in payload:
@@ -597,6 +669,7 @@ class RuntimeSetupPrepareMixin:
             self._total_bars = max(len(series.candles) for series in self._series) if self._series else 0
             try:
                 self._build_series_states()
+                self._register_decision_order_participants()
                 self._set_phase("prepare_indicators", "bot_runtime_indicator_bootstrap_start")
                 with self._series_update_lock:
                     for state in self._series_states:
@@ -711,6 +784,68 @@ class RuntimeSetupPrepareMixin:
             if self._primary_series_key is None:
                 self._primary_series_key = key
 
+    def _decision_order_coordinator(self) -> SharedWalletEntryDecisionOrderCoordinator:
+        timeout_seconds = self.config.get("decision_order_timeout_seconds")
+        try:
+            timeout_value = float(timeout_seconds) if timeout_seconds is not None else 120.0
+        except (TypeError, ValueError):
+            timeout_value = 120.0
+        shared_wallet_proxy = self.config.get("shared_wallet_proxy")
+        return SharedWalletEntryDecisionOrderCoordinator(
+            shared_wallet_proxy if isinstance(shared_wallet_proxy, Mapping) else None,
+            timeout_seconds=timeout_value,
+        )
+
+    def _decision_order_participant_payload(
+        self,
+        series: StrategySeries,
+        state: Optional[SeriesExecutionState] = None,
+    ) -> Dict[str, Any]:
+        instrument = series.instrument if isinstance(series.instrument, Mapping) else {}
+        instrument_id = str(instrument.get("id") or "").strip()
+        strategy_id = str(getattr(series, "strategy_id", "") or "").strip()
+        symbol = str(getattr(series, "symbol", "") or "").strip().upper()
+        timeframe = str(getattr(series, "timeframe", "") or "").strip()
+        participant_key = "|".join((strategy_id, instrument_id, symbol, timeframe))
+        next_bar_time = None
+        current_bar_index = None
+        total_bars = len(getattr(series, "candles", []) or [])
+        if state is not None:
+            current_bar_index = max(int(getattr(state, "bar_index", 0) or 0), 0)
+            total_bars = int(getattr(state, "total_bars", total_bars) or total_bars)
+            candles = getattr(series, "candles", []) or []
+            if current_bar_index < len(candles):
+                next_bar_time = _isoformat(candles[current_bar_index].time)
+        raw_gap_classification = (series.meta or {}).get("candle_gap_classification")
+        gap_classification = None
+        if isinstance(raw_gap_classification, list) and raw_gap_classification:
+            first_entry = raw_gap_classification[0]
+            if isinstance(first_entry, Mapping):
+                gap_classification = first_entry.get("classification") or first_entry.get("reason_code")
+        elif isinstance(raw_gap_classification, Mapping):
+            gap_classification = raw_gap_classification.get("classification") or raw_gap_classification.get("reason_code")
+        elif raw_gap_classification:
+            gap_classification = str(raw_gap_classification)
+        return {
+            "participant_key": participant_key,
+            "strategy_id": strategy_id,
+            "instrument_id": instrument_id,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "worker_id": getattr(self._start_context, "worker_id", None) if self._start_context is not None else None,
+            "next_bar_time": next_bar_time,
+            "bar_index": current_bar_index,
+            "total_bars": total_bars,
+            "gap_classification": gap_classification,
+        }
+
+    def _register_decision_order_participants(self) -> None:
+        coordinator = self._decision_order_coordinator()
+        if not coordinator.enabled:
+            return
+        for state in self._series_states:
+            coordinator.register_participant(self._decision_order_participant_payload(state.series, state))
+
     def _initialize_indicator_runtime_state(self, state: SeriesExecutionState) -> None:
         series = state.series
         strategy_meta = series.meta or {}
@@ -774,13 +909,13 @@ class RuntimeSetupPrepareMixin:
                 last_frame = state.indicator_engine.step(
                     bar=warmup_candle,
                     bar_time=warmup_candle.time,
-                    include_overlays=index == (warmup_count - 1),
+                    include_overlays=False,
+                    include_details=False,
                 )
             if last_frame is not None:
                 state.indicator_outputs = dict(last_frame.outputs)
-                state.indicator_overlays = dict(last_frame.overlays)
 
-        series.overlays = self._series_overlay_entries(state)
+        series.overlays = []
         logger.info(
             with_log_context(
                 "indicator_runtime_initialized",
@@ -974,6 +1109,13 @@ class RuntimeSetupPrepareMixin:
             entry.setdefault("overlay_id", overlay_key)
             entry.setdefault("indicator_id", indicator_id)
             entry.setdefault("overlay_name", overlay_name)
+            indicator_commit_seq = int(getattr(runtime_overlay, "indicator_commit_seq", 0) or 0)
+            if indicator_commit_seq > 0:
+                entry["indicator_commit_seq"] = indicator_commit_seq
+                entry["indicator_commit_seq_status"] = str(
+                    getattr(runtime_overlay, "indicator_commit_seq_status", None)
+                    or "indicator_scoped"
+                )
             overlays.append(entry)
         state.overlay_runtime_metrics = {
             "series_overlay_entries_ms": 0.0,
@@ -1112,6 +1254,8 @@ class RuntimeSetupPrepareMixin:
         if series is None:
             return
         overlay = self._build_trade_overlay(series)
+        if series.trade_overlay == overlay:
+            return
         series.trade_overlay = overlay
         self._rebuild_overlay_cache()
 
@@ -1260,38 +1404,162 @@ class RuntimeSetupPrepareMixin:
         engine = series.risk_engine
         if engine is None:
             return []
+        if self.execution_mode == ExecutionMode.FAST:
+            return engine.step(
+                candle,
+                same_bar_policy=SameBarResolutionPolicy.PESSIMISTIC_STOP,
+            )
+        if getattr(engine, "active_trade", None) is None:
+            return engine.step(candle)
         if not self._policy.use_intrabar:
-            return engine.step(candle)
-        intrabar = self._intrabar_manager.intrabar_candles(series, candle)
-        if not intrabar:
-            return engine.step(candle)
+            self._log_intrabar_fallback(
+                series,
+                candle,
+                reason="runtime_policy_intrabar_disabled",
+            )
+            return engine.step(
+                candle,
+                same_bar_policy=SameBarResolutionPolicy.PESSIMISTIC_STOP,
+            )
+        sequence = self._intrabar_manager.intrabar_sequence(series, candle)
+        intrabar = sequence.candles
+        if not sequence.complete or not intrabar:
+            self._log_intrabar_fallback(
+                series,
+                candle,
+                reason=sequence.fallback_reason or "intrabar_missing",
+                expected_count=sequence.expected_count,
+                actual_count=sequence.actual_count,
+            )
+            return engine.step(
+                candle,
+                same_bar_policy=SameBarResolutionPolicy.PESSIMISTIC_STOP,
+            )
         if self.mode == "instant":
-            return self._run_intrabar_batch(series, intrabar)
+            return self._run_intrabar_batch(series, candle, intrabar)
         state.intrabar_candles = intrabar
         state.intrabar_index = 0
         self._schedule_next_step(state, self._intrabar_interval())
-        context = self._series_log_context(series, bars=len(intrabar))
+        context = self._series_log_context(
+            series,
+            bars=len(intrabar),
+            execution_mode=self.execution_mode.value,
+            playback_mode=self.playback_mode,
+        )
         logger.debug(with_log_context("intrabar_start", context))
         return []
 
     def _run_intrabar_batch(
         self,
         series: StrategySeries,
+        parent_candle: Candle,
         intrabar: Sequence[Candle],
     ) -> List[Dict[str, Any]]:
         engine = series.risk_engine
         if engine is None:
             return []
-        events: List[Dict[str, Any]] = []
-        steps = 0
-        for minute_bar in intrabar:
-            steps += 1
-            events.extend(engine.step(minute_bar))
-            if engine.active_trade is None:
-                break
-        context = self._series_log_context(series, bars=len(intrabar), steps=steps, mode=self.mode)
+        result = engine.step_intrabar_sequence(
+            parent_candle=parent_candle,
+            intrabar_candles=intrabar,
+        )
+        if result.fallback_reason:
+            self._log_intrabar_fallback(series, parent_candle, reason=result.fallback_reason)
+        context = self._series_log_context(
+            series,
+            bars=len(intrabar),
+            steps=result.steps,
+            mode=self.mode,
+            execution_mode=self.execution_mode.value,
+        )
         logger.debug(with_log_context("intrabar_batch", context))
-        return events
+        return result.events
+
+    def _log_intrabar_fallback(
+        self,
+        series: StrategySeries,
+        candle: Candle,
+        *,
+        reason: str,
+        expected_count: Optional[int] = None,
+        actual_count: Optional[int] = None,
+    ) -> None:
+        normalized_reason = self._normalize_intrabar_fallback_reason(reason)
+        raw_reason = str(reason or "").strip() or normalized_reason
+        bar_time = _isoformat(candle.time)
+        context = self._series_log_context(
+            series,
+            bar_time=bar_time,
+            reason=normalized_reason,
+            raw_reason=raw_reason,
+            expected_intrabar_count=expected_count,
+            actual_intrabar_count=actual_count,
+            fallback_policy=SameBarResolutionPolicy.PESSIMISTIC_STOP.value,
+        )
+        logger.warning(with_log_context("execution_intrabar_fallback_pessimistic", context))
+        instrument = series.instrument if isinstance(series.instrument, Mapping) else {}
+        instrument_id = str(instrument.get("id") or "").strip()
+        symbol_key = canonical_series_key(instrument_id, series.timeframe) if instrument_id else ""
+        warning_id_parts = [
+            "execution_intrabar_fallback_pessimistic",
+            symbol_key or str(series.symbol or "").strip().upper(),
+            str(series.timeframe or "").strip().lower(),
+            bar_time,
+            normalized_reason,
+        ]
+        warning_id = "::".join(part for part in warning_id_parts if part)
+        message = (
+            "FULL execution fell back to pessimistic same-bar policy "
+            f"for {series.symbol} {series.timeframe}: {normalized_reason}."
+        )
+        warning_context = {
+            "bar_time": bar_time,
+            "reason": normalized_reason,
+            "raw_reason": raw_reason,
+            "execution_mode": self.execution_mode.value,
+            "fallback_policy": SameBarResolutionPolicy.PESSIMISTIC_STOP.value,
+            "expected_intrabar_count": expected_count,
+            "actual_intrabar_count": actual_count,
+        }
+        self._record_runtime_warning(
+            {
+                "warning_id": warning_id,
+                "warning_type": "execution_intrabar_fallback_pessimistic",
+                "severity": "warning",
+                "source": "execution",
+                "symbol_key": symbol_key,
+                "symbol": series.symbol,
+                "timeframe": series.timeframe,
+                "title": "Intrabar fallback",
+                "message": message,
+                "context": warning_context,
+            }
+        )
+        if self._run_context is None:
+            return
+        self._emit_runtime_event(
+            event_name=RuntimeEventName.EXECUTION_INTRABAR_FALLBACK_PESSIMISTIC,
+            correlation_id=self._bar_correlation_id(series, candle.time),
+            context=ExecutionIntrabarFallbackContext(
+                **self._runtime_context_base(series=series, bar_ts=candle.time),
+                message=message,
+                reason=normalized_reason,
+                raw_reason=raw_reason,
+                execution_mode=self.execution_mode.value,
+                fallback_policy=SameBarResolutionPolicy.PESSIMISTIC_STOP.value,
+                expected_intrabar_count=expected_count,
+                actual_intrabar_count=actual_count,
+            ),
+            event_ts=candle.time,
+        )
+
+    @staticmethod
+    def _normalize_intrabar_fallback_reason(reason: object) -> str:
+        raw = str(reason or "").strip().lower()
+        if raw in {"intrabar_missing", "missing_1m_data", "intrabar_fetch_failed"}:
+            return "missing_1m_data"
+        if raw in {"single_intrabar_candle_hit_tp_and_stop", "ambiguous_1m_candle"}:
+            return "ambiguous_1m_candle"
+        return "incomplete_1m_sequence"
 
     def _step_intrabar(self, state: SeriesExecutionState) -> None:
         series = state.series
@@ -1306,9 +1574,26 @@ class RuntimeSetupPrepareMixin:
             state.active_candle = series.candles[min(state.bar_index, state.total_bars - 1)]
         minute_bar = state.intrabar_candles[state.intrabar_index]
         state.intrabar_index += 1
-        events = engine.step(minute_bar)
-        snapshot = self._intrabar_manager.update_snapshot(series, state.active_candle, minute_bar)
-        temp_candle = self._snapshot_candle_for_state(state.active_candle, snapshot)
+        result = engine.step_intrabar_candle(
+            parent_candle=state.active_candle,
+            intrabar_candle=minute_bar,
+        )
+        events = result.events
+        fallback_triggered = result.fallback_reason is not None
+        if fallback_triggered:
+            self._log_intrabar_fallback(series, state.active_candle, reason=str(result.fallback_reason))
+        exit_settlement = getattr(engine, "exit_settlement", None)
+        self._settlement_applier.apply(
+            events,
+            exit_settlement,
+            execution_profile=getattr(series, "execution_profile", None),
+        )
+        if fallback_triggered:
+            state.intrabar_candles = []
+            temp_candle = state.active_candle
+        else:
+            snapshot = self._intrabar_manager.update_snapshot(series, state.active_candle, minute_bar)
+            temp_candle = self._snapshot_candle_for_state(state.active_candle, snapshot)
         update_metrics = self._update_state(self._state_candle_for(series, temp_candle))
         self._push_update(
             "intrabar",
@@ -1339,14 +1624,14 @@ class RuntimeSetupPrepareMixin:
             event_ts = event.get("time")
             if raw_subtype and event_ts:
                 event_subtype = str(raw_subtype)
-                if event_subtype in {"target", "stop", "close"}:
+                if event_subtype in {"target", "stop", "backtest_end", "terminal_liquidation"}:
                     self._emit_exit_filled_event(
                         series=series,
                         candle=state.active_candle,
                         event=event,
                     )
-                    if event_subtype == "close":
-                        self._persist_trade_close(series, event)
+                if event_subtype == "close":
+                    self._persist_trade_close(series, event)
         if engine.active_trade is None or not state.intrabar_active():
             self._finish_intrabar(state)
         else:
@@ -1375,6 +1660,13 @@ class RuntimeSetupPrepareMixin:
         state.bar_index += 1
         if state.bar_index >= state.total_bars:
             state.done = True
+            self._decision_order_coordinator().mark_participant_complete(
+                self._decision_order_participant_payload(state.series, state)
+            )
+        else:
+            self._decision_order_coordinator().update_participant_bar_state(
+                self._decision_order_participant_payload(state.series, state)
+            )
         if state.bar_index % 50 == 0 or state.done:
             context = self._series_log_context(
                 state.series,

@@ -7,16 +7,18 @@ import math
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import risk as risk_math
 
-from utils.log_context import build_log_context, merge_log_context, with_log_context
+from utils.log_context import build_log_context, with_log_context
 from ..execution import FillRejection, FillResult
 from ..execution_adapter import ExecutionAdapter
 from ..events import ExitSettlementPayload
 from ..execution_profile import SeriesExecutionProfile
 from ..exit_settlement import ExitSettlement, ExitSettlementService
+from ..fees import executed_fee, executed_notional
 from ..margin import resolve_instrument_type, InstrumentType
 from ..wallet_gateway import WalletGateway
 from .models import Candle, Leg
@@ -26,6 +28,22 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..execution import SpotExecutionModel
+
+
+class SameBarResolutionPolicy(str, Enum):
+    """Policy for bars whose range contains both a target and the active stop."""
+
+    TARGET_FIRST = "target_first"
+    PESSIMISTIC_STOP = "pessimistic_stop"
+
+    @classmethod
+    def normalize(cls, value: Optional[object]) -> "SameBarResolutionPolicy":
+        if isinstance(value, SameBarResolutionPolicy):
+            return value
+        normalized = str(value or cls.TARGET_FIRST.value).strip().lower()
+        if normalized in {"pessimistic", "pessimistic_stop", "stop_first", "stop"}:
+            return cls.PESSIMISTIC_STOP
+        return cls.TARGET_FIRST
 
 
 @dataclass
@@ -51,6 +69,8 @@ class LadderPosition:
     contract_size: float = 1.0
     maker_fee_rate: float = 0.0
     taker_fee_rate: float = 0.0
+    fee_source: str = "template_or_instrument"
+    fee_version: Optional[str] = None
     quote_currency: str = "USD"
     short_requires_borrow: bool = False
     instrument: Optional[Dict[str, Any]] = None  # For margin-based validation
@@ -81,7 +101,9 @@ class LadderPosition:
     trailing_atr_multiple: float = 0.0
     pre_entry_context: Optional[Dict[str, Optional[float]]] = None
     wallet_fill_metadata: Dict[str, Any] = field(default_factory=dict)
+    position_commit_seq: int = 0
     stop_adjustments: List[Dict[str, Any]] = field(default_factory=list)
+    close_reason: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.best_price = self.entry_price
@@ -120,24 +142,6 @@ class LadderPosition:
             price=price,
             fee_rate=self.taker_fee_rate or 0.0,
             enforce_price_tick=False,
-        )
-
-    def _wallet_can_apply_fill(self, fill: FillResult, side: str) -> Tuple[bool, Optional[str], Dict[str, Any]]:
-        if not self.wallet_gateway:
-            return True, None, {}
-        return self.wallet_gateway.can_apply(
-            side=side,
-            base_currency=self.base_currency or "",
-            quote_currency=self.quote_currency_code or "",
-            qty=fill.filled_qty,
-            qty_raw=fill.metadata.get("qty_raw") if isinstance(fill.metadata, dict) else None,
-            qty_final=fill.metadata.get("qty_final") if isinstance(fill.metadata, dict) else None,
-            notional=fill.notional,
-            fee=fill.fee,
-            short_requires_borrow=bool(self.short_requires_borrow),
-            instrument=self.instrument,
-            execution_profile=self.execution_profile,
-            reserve=False,
         )
 
     def _exit_settlement(self) -> ExitSettlement:
@@ -217,45 +221,6 @@ class LadderPosition:
                         }
                     )
                     continue
-                allowed, reason, payload = self._wallet_can_apply_fill(fill_result, side=side)
-                if not allowed:
-                    # CRITICAL: Position exits must ALWAYS execute to close positions
-                    # Log the wallet insufficient balance but force the execution anyway
-                    if self.wallet_gateway:
-                        self.wallet_gateway.reject(reason, payload, trade_id=self.trade_id, leg_id=leg.leg_id)
-                    context = merge_log_context(
-                        build_log_context(
-                            trade_id=self.trade_id,
-                            leg_id=leg.leg_id,
-                            leg=leg.name,
-                            reason=reason,
-                            price=round(leg.target_price, 4),
-                            direction=self.direction,
-                        ),
-                        build_log_context(
-                            available=payload.get("available"),
-                            required=payload.get("required"),
-                            required_used=payload.get("required_used"),
-                            required_full_notional=payload.get("required_full_notional"),
-                            available_collateral=payload.get("available_collateral"),
-                            currency=payload.get("currency"),
-                            qty=payload.get("qty"),
-                            qty_raw=payload.get("qty_raw"),
-                            qty_final=payload.get("qty_final"),
-                            notional=payload.get("notional"),
-                            fee=payload.get("fee"),
-                            margin_total_required=payload.get("margin_total_required"),
-                            margin_calc_type=payload.get("margin_calc_type"),
-                            margin_method=payload.get("margin_method"),
-                            margin_session=payload.get("margin_session"),
-                            margin_leg=payload.get("margin_leg"),
-                            margin_rate_source_path=payload.get("margin_rate_source_path"),
-                            shortfall=payload.get("shortfall"),
-                        ),
-                    )
-                    logger.warning(with_log_context("wallet_exit_forced_despite_insufficient_balance", context))
-                    # Note: We do NOT continue here - we force the exit execution below
-
             exit_price = fill_result.fill_price if fill_result else leg.target_price
             exit_qty = fill_result.filled_qty if fill_result else leg.contracts
             pnl = self._pnl_for_exit(exit_price, exit_qty)
@@ -269,13 +234,11 @@ class LadderPosition:
             fee_value = (
                 float(fill_result.fee)
                 if fill_result
-                else abs(exit_price * self.contract_size * exit_qty) * float(self.taker_fee_rate or 0.0)
+                else self._fee_for_fill(exit_price, exit_qty)
             )
-            notional = float(fill_result.notional) if fill_result else abs(exit_price * self.contract_size * exit_qty)
-            if fill_result:
-                self._apply_fee_amount(fill_result.fee)
-            else:
-                self._apply_fee(exit_price, exit_qty)
+            notional = float(fill_result.notional) if fill_result else self._notional_for_fill(exit_price, exit_qty)
+            self._apply_fee_amount(fee_value)
+            fee_metadata = self._fee_metadata_for_fill(fill_result)
 
             settlement_payload: ExitSettlementPayload = {
                 "event_type": "EXIT_FILL",
@@ -287,6 +250,10 @@ class LadderPosition:
                 "price": exit_price,
                 "fee": fee_value,
                 "notional": notional,
+                "fee_rate": fee_metadata["fee_rate"],
+                "fee_type": fee_metadata["fee_type"],
+                "fee_source": fee_metadata["fee_source"],
+                "fee_version": fee_metadata["fee_version"],
                 "trade_id": self.trade_id,
                 "leg_id": leg.leg_id or "",
                 "position_direction": self.direction,
@@ -309,6 +276,12 @@ class LadderPosition:
                     "contracts": exit_qty,
                     "ticks": leg.ticks,
                     "direction": self.direction,
+                    "notional": notional,
+                    "fee_paid": fee_value,
+                    "fee_rate": fee_metadata["fee_rate"],
+                    "fee_type": fee_metadata["fee_type"],
+                    "fee_source": fee_metadata["fee_source"],
+                    "fee_version": fee_metadata["fee_version"],
                     "settlement": settlement_payload,
                 }
             )
@@ -420,45 +393,6 @@ class LadderPosition:
                             }
                         )
                         continue
-                    allowed, reason, payload = self._wallet_can_apply_fill(fill_result, side=side)
-                    if not allowed:
-                        # CRITICAL: Stop losses must ALWAYS execute to close positions
-                        # Log the wallet insufficient balance but force the execution anyway
-                        if self.wallet_gateway:
-                            self.wallet_gateway.reject(reason, payload, trade_id=self.trade_id, leg_id=leg.leg_id)
-                        context = merge_log_context(
-                            build_log_context(
-                                trade_id=self.trade_id,
-                                leg_id=leg.leg_id,
-                                leg=leg.name,
-                                reason=reason,
-                                price=round(self.stop_price, 4),
-                                direction=self.direction,
-                            ),
-                            build_log_context(
-                                available=payload.get("available"),
-                                required=payload.get("required"),
-                                required_used=payload.get("required_used"),
-                                required_full_notional=payload.get("required_full_notional"),
-                                available_collateral=payload.get("available_collateral"),
-                                currency=payload.get("currency"),
-                                qty=payload.get("qty"),
-                                qty_raw=payload.get("qty_raw"),
-                                qty_final=payload.get("qty_final"),
-                                notional=payload.get("notional"),
-                                fee=payload.get("fee"),
-                                margin_total_required=payload.get("margin_total_required"),
-                                margin_calc_type=payload.get("margin_calc_type"),
-                                margin_method=payload.get("margin_method"),
-                                margin_session=payload.get("margin_session"),
-                                margin_leg=payload.get("margin_leg"),
-                                margin_rate_source_path=payload.get("margin_rate_source_path"),
-                                shortfall=payload.get("shortfall"),
-                            ),
-                        )
-                        logger.warning(with_log_context("wallet_stop_forced_despite_insufficient_balance", context))
-                        # Note: We do NOT continue here - we force the stop execution below
-
                 exit_price = fill_result.fill_price if fill_result else self.stop_price
                 exit_qty = fill_result.filled_qty if fill_result else leg.contracts
                 pnl = self._pnl_for_exit(exit_price, exit_qty)
@@ -472,13 +406,11 @@ class LadderPosition:
                 fee_value = (
                     float(fill_result.fee)
                     if fill_result
-                    else abs(exit_price * self.contract_size * exit_qty) * float(self.taker_fee_rate or 0.0)
+                    else self._fee_for_fill(exit_price, exit_qty)
                 )
-                notional = float(fill_result.notional) if fill_result else abs(exit_price * self.contract_size * exit_qty)
-                if fill_result:
-                    self._apply_fee_amount(fill_result.fee)
-                else:
-                    self._apply_fee(exit_price, exit_qty)
+                notional = float(fill_result.notional) if fill_result else self._notional_for_fill(exit_price, exit_qty)
+                self._apply_fee_amount(fee_value)
+                fee_metadata = self._fee_metadata_for_fill(fill_result)
                 settlement_payload: ExitSettlementPayload = {
                     "event_type": "EXIT_FILL",
                     "exit_kind": "STOP",
@@ -489,6 +421,10 @@ class LadderPosition:
                     "price": exit_price,
                     "fee": fee_value,
                     "notional": notional,
+                    "fee_rate": fee_metadata["fee_rate"],
+                    "fee_type": fee_metadata["fee_type"],
+                    "fee_source": fee_metadata["fee_source"],
+                    "fee_version": fee_metadata["fee_version"],
                     "trade_id": self.trade_id,
                     "leg_id": leg.leg_id or "",
                     "position_direction": self.direction,
@@ -510,6 +446,12 @@ class LadderPosition:
                         "pnl": round(pnl, 4),
                         "ticks": tick_distance,
                         "direction": self.direction,
+                        "notional": notional,
+                        "fee_paid": fee_value,
+                        "fee_rate": fee_metadata["fee_rate"],
+                        "fee_type": fee_metadata["fee_type"],
+                        "fee_source": fee_metadata["fee_source"],
+                        "fee_version": fee_metadata["fee_version"],
                         "settlement": settlement_payload,
                     }
                 )
@@ -518,17 +460,54 @@ class LadderPosition:
             self.closed_at = candle.time
         return events
 
-    def apply_bar(self, candle: Candle) -> List[Dict[str, Any]]:
+    def hits_open_target(self, candle: Candle) -> bool:
+        """Return True when the bar range reaches any open take-profit target."""
+
+        for leg in self.legs:
+            if leg.status != "open":
+                continue
+            if self.direction == "long" and candle.high >= leg.target_price:
+                return True
+            if self.direction == "short" and candle.low <= leg.target_price:
+                return True
+        return False
+
+    def hits_active_stop(self, candle: Candle) -> bool:
+        """Return True when the bar range reaches the active stop."""
+
+        if self.direction == "long":
+            return candle.low <= self.stop_price
+        if self.direction == "short":
+            return candle.high >= self.stop_price
+        return False
+
+    def hits_target_and_stop(self, candle: Candle) -> bool:
+        """Return True when TP and stop are both inside the same bar range."""
+
+        return self.hits_open_target(candle) and self.hits_active_stop(candle)
+
+    def apply_bar(
+        self,
+        candle: Candle,
+        *,
+        same_bar_policy: SameBarResolutionPolicy | str = SameBarResolutionPolicy.TARGET_FIRST,
+    ) -> List[Dict[str, Any]]:
         """Advance the position with the latest candle."""
 
         events: List[Dict[str, Any]] = []
+        policy = SameBarResolutionPolicy.normalize(same_bar_policy)
+        same_bar_target_and_stop = self.hits_target_and_stop(candle)
         self._update_excursions(candle)
-        leg_events = self._apply_leg_fills(candle)
-        events.extend(leg_events)
-        self._maybe_apply_stop_adjustments()
-        self._maybe_move_breakeven()
-        self._maybe_trail_stop()
-        stop_events = self._apply_stop(candle)
+
+        if policy == SameBarResolutionPolicy.PESSIMISTIC_STOP and same_bar_target_and_stop:
+            stop_events = self._apply_stop(candle)
+        else:
+            leg_events = self._apply_leg_fills(candle)
+            events.extend(leg_events)
+            self._maybe_apply_stop_adjustments()
+            self._maybe_move_breakeven()
+            self._maybe_trail_stop()
+            stop_events = self._apply_stop(candle)
         if stop_events:
             events.extend(stop_events)
         if not self.is_active():
@@ -548,11 +527,140 @@ class LadderPosition:
             )
         return events
 
+    def force_close_at_backtest_end(
+        self,
+        candle: Candle,
+        *,
+        reason_code: str = "BACKTEST_END",
+    ) -> List[Dict[str, Any]]:
+        """Close any remaining open legs at the final executable backtest price."""
+
+        if not self.is_active():
+            return []
+
+        events: List[Dict[str, Any]] = []
+        exit_price_source = float(candle.close)
+        event_time = isoformat(candle.time)
+        side = "sell" if self.direction == "long" else "buy"
+        normalized_reason = str(reason_code or "BACKTEST_END").strip().upper() or "BACKTEST_END"
+
+        for leg in self.legs:
+            if leg.status != "open":
+                continue
+            fill_result = None
+            if self._uses_wallet_execution():
+                fill_result, rejection = self._execute_spot_fill(
+                    exit_price_source,
+                    leg.contracts,
+                    side=side,
+                )
+                if rejection:
+                    context = build_log_context(
+                        trade_id=self.trade_id,
+                        leg_id=leg.leg_id,
+                        leg=leg.name,
+                        reason=rejection.reason,
+                        price=round(exit_price_source, 4),
+                        direction=self.direction,
+                    )
+                    logger.error(with_log_context("backtest_terminal_close_rejected", context))
+                    raise RuntimeError(
+                        "backtest_terminal_close_rejected "
+                        f"trade_id={self.trade_id} leg_id={leg.leg_id} reason={rejection.reason}"
+                    )
+
+            exit_price = fill_result.fill_price if fill_result else exit_price_source
+            exit_qty = fill_result.filled_qty if fill_result else leg.contracts
+            pnl = self._pnl_for_exit(exit_price, exit_qty)
+            leg.status = "backtest_end"
+            leg.exit_price = exit_price
+            leg.exit_time = event_time
+            leg.exit_created_at = isoformat(datetime.now(timezone.utc))
+            leg.contracts = exit_qty
+            leg.pnl = pnl
+            self._record_pnl(pnl)
+            fee_value = (
+                float(fill_result.fee)
+                if fill_result
+                else self._fee_for_fill(exit_price, exit_qty)
+            )
+            notional = float(fill_result.notional) if fill_result else self._notional_for_fill(exit_price, exit_qty)
+            self._apply_fee_amount(fee_value)
+            fee_metadata = self._fee_metadata_for_fill(fill_result)
+            settlement_payload: ExitSettlementPayload = {
+                "event_type": "EXIT_FILL",
+                "exit_kind": "CLOSE",
+                "side": side,
+                "base_currency": self.base_currency or "",
+                "quote_currency": self.quote_currency_code or "",
+                "qty": exit_qty,
+                "price": exit_price,
+                "fee": fee_value,
+                "notional": notional,
+                "fee_rate": fee_metadata["fee_rate"],
+                "fee_type": fee_metadata["fee_type"],
+                "fee_source": fee_metadata["fee_source"],
+                "fee_version": fee_metadata["fee_version"],
+                "trade_id": self.trade_id,
+                "leg_id": leg.leg_id or "",
+                "position_direction": self.direction,
+                "accounting_mode": self._accounting_mode(),
+                "realized_pnl": pnl,
+                "allow_short_borrow": bool(self.short_requires_borrow),
+                "instrument": self.instrument or {},
+            }
+            events.append(
+                {
+                    "type": "backtest_end",
+                    "trade_id": self.trade_id,
+                    "price": round(exit_price, 4),
+                    "time": event_time,
+                    "currency": self.quote_currency,
+                    "leg": leg.name,
+                    "leg_id": leg.leg_id,
+                    "contracts": exit_qty,
+                    "pnl": round(pnl, 4),
+                    "ticks": round(self._ticks_from_entry(exit_price), 4),
+                    "direction": self.direction,
+                    "notional": notional,
+                    "fee_paid": fee_value,
+                    "fee_rate": fee_metadata["fee_rate"],
+                    "fee_type": fee_metadata["fee_type"],
+                    "fee_source": fee_metadata["fee_source"],
+                    "fee_version": fee_metadata["fee_version"],
+                    "reason_code": normalized_reason,
+                    "close_reason": normalized_reason,
+                    "settlement": settlement_payload,
+                }
+            )
+
+        if events or all(leg.status != "open" for leg in self.legs):
+            self.closed_at = candle.time
+            self.close_reason = normalized_reason
+            events.append(
+                {
+                    "type": "close",
+                    "trade_id": self.trade_id,
+                    "time": event_time,
+                    "gross_pnl": round(self.gross_pnl, 4),
+                    "fees_paid": round(self.fees_paid, 4),
+                    "net_pnl": round(self.net_pnl, 4),
+                    "currency": self.quote_currency,
+                    "contracts": sum(max(leg.contracts, 0) for leg in self.legs),
+                    "direction": self.direction,
+                    "metrics": self._metrics_snapshot(),
+                    "reason_code": normalized_reason,
+                    "close_reason": normalized_reason,
+                    "exit_price": round(exit_price_source, 4),
+                }
+            )
+        return events
+
     def is_active(self) -> bool:
         return self.closed_at is None
 
     def serialize(self) -> Dict[str, object]:
-        return {
+        payload: Dict[str, object] = {
             "trade_id": self.trade_id,
             "created_at": self.created_at,
             "entry_time": isoformat(self.entry_time),
@@ -582,7 +690,26 @@ class LadderPosition:
             "mfe_ticks": round(self.mfe_ticks, 4),
             "bars_held": self.bars_held,
             "metrics": self._metrics_snapshot(),
+            "position_commit_seq": int(self.position_commit_seq),
+            "position_commit_seq_status": "position_scoped",
         }
+        if self.close_reason:
+            payload["close_reason"] = self.close_reason
+            payload["reason_code"] = self.close_reason
+            payload["exit_time"] = isoformat(self.closed_at)
+            closed_legs = [leg for leg in self.legs if leg.status != "open" and leg.exit_price is not None]
+            if closed_legs:
+                total_contracts = sum(max(float(leg.contracts or 0.0), 0.0) for leg in closed_legs)
+                if total_contracts > 0:
+                    weighted_exit = sum(
+                        float(leg.exit_price or 0.0) * max(float(leg.contracts or 0.0), 0.0)
+                        for leg in closed_legs
+                    )
+                    payload["exit_price"] = round(
+                        weighted_exit / total_contracts,
+                        4,
+                    )
+        return payload
 
     def _pnl_for_exit(self, exit_price: float, contracts: float) -> float:
         if contracts <= 0:
@@ -600,12 +727,37 @@ class LadderPosition:
     def _apply_fee(self, price: float, contracts: float) -> None:
         if contracts <= 0:
             return
-        notional = abs(price * self.contract_size * contracts)
-        fee_rate = self.taker_fee_rate or 0.0
-        fee = notional * fee_rate
+        fee = self._fee_for_fill(price, contracts)
         if fee:
             self.fees_paid += fee
             self._update_net()
+
+    def _notional_for_fill(self, price: float, contracts: float) -> float:
+        return executed_notional(
+            price=price,
+            quantity=contracts,
+            contract_size=self.contract_size,
+        )
+
+    def _fee_for_fill(self, price: float, contracts: float) -> float:
+        return executed_fee(
+            price=price,
+            quantity=contracts,
+            contract_size=self.contract_size,
+            fee_rate=self.taker_fee_rate or 0.0,
+        )
+
+    def _fee_metadata_for_fill(self, fill: Optional[FillResult]) -> Dict[str, Any]:
+        fee_rate = getattr(fill, "fee_rate", None) if fill is not None else None
+        fee_type = getattr(fill, "fee_role", None) if fill is not None else None
+        fee_source = getattr(fill, "fee_source", None) if fill is not None else None
+        fee_version = getattr(fill, "fee_version", None) if fill is not None else None
+        return {
+            "fee_rate": float(fee_rate if fee_rate is not None else self.taker_fee_rate or 0.0),
+            "fee_type": str(fee_type or "taker"),
+            "fee_source": str(fee_source or self.fee_source or "template_or_instrument"),
+            "fee_version": fee_version if fee_version is not None else self.fee_version,
+        }
 
     def _record_pnl(self, pnl: float) -> None:
         self.gross_pnl += pnl

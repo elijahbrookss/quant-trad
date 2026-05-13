@@ -3,6 +3,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
+
+
+class ExecutionMode(str, Enum):
+    """Runtime execution semantics, independent from playback pacing."""
+
+    FAST = "fast"
+    FULL = "full"
+
+    @classmethod
+    def normalize(cls, value: object) -> "ExecutionMode":
+        normalized = str(value or "").strip().lower().replace("_", "-")
+        if normalized in {"fast", "instant"}:
+            return cls.FAST
+        if normalized in {"full", "walk-forward", "walkforward"}:
+            return cls.FULL
+        raise ValueError(f"Unknown execution_mode '{value}'. Expected FAST or FULL.")
+
+    @classmethod
+    def from_config(cls, value: object, *, legacy_mode: object = None) -> "ExecutionMode":
+        if value not in (None, ""):
+            return cls.normalize(value)
+        legacy = str(legacy_mode or "").strip().lower().replace("_", "-")
+        if legacy in {"walk-forward", "walkforward"}:
+            return cls.FULL
+        return cls.FAST
 
 
 @dataclass(frozen=True)
@@ -28,4 +54,4 @@ class RuntimeModePolicy:
         )
 
 
-__all__ = ["RuntimeModePolicy"]
+__all__ = ["ExecutionMode", "RuntimeModePolicy"]
