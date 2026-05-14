@@ -168,6 +168,8 @@ was rebuilt from canonical runtime events.
 - [Persistence boundary](../persistence/PERSISTENCE_BOUNDARY.md)
 - [Execution runtime boundary](../execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md)
 - [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
+- [ADR 0015: Split semantic and operational golden fingerprints](../decisions/0015-split-semantic-and-operational-golden-fingerprints.md)
+- [ADR 0016: Treat runtime event ledger order as operational evidence](../decisions/0016-treat-runtime-event-ledger-order-as-operational-evidence.md)
 
 ## Known Gaps
 

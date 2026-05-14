@@ -207,3 +207,4 @@ fact without `wallet_commit_seq` is malformed and must block certification.
 - [Identity and correlation boundary](../identity/IDENTITY_AND_CORRELATION_BOUNDARY.md)
 - [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
 - [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)
+- [ADR 0016: Treat runtime event ledger order as operational evidence](../decisions/0016-treat-runtime-event-ledger-order-as-operational-evidence.md)

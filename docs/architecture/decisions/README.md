@@ -31,4 +31,7 @@ respect.
 | [0010](0010-use-run-research-dataset-as-reporting-contract.md) | Use RunResearchDataset v1 as the reporting contract | Accepted, backfilled |
 | [0011](0011-keep-observability-bounded-and-non-canonical.md) | Keep observability bounded and non-canonical | Accepted, backfilled |
 | [0012](0012-use-runtime-composition-root-for-mode-aware-wiring.md) | Use a runtime composition root for mode-aware wiring | Accepted, backfilled |
-
+| [0013](0013-use-market-time-ordering-for-shared-wallet-backtests.md) | Use market-time ordering for shared-wallet backtests | Accepted |
+| [0014](0014-use-shared-wallet-arbitration-policy-by-runtime-mode.md) | Use shared-wallet arbitration policy by runtime mode | Accepted |
+| [0015](0015-split-semantic-and-operational-golden-fingerprints.md) | Split semantic and operational golden fingerprints | Accepted |
+| [0016](0016-treat-runtime-event-ledger-order-as-operational-evidence.md) | Treat runtime event ledger order as operational evidence | Accepted |

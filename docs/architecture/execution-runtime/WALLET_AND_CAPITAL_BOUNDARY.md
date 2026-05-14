@@ -166,3 +166,5 @@ snapshot has absorbed the fill.
 - [Execution runtime boundary](EXECUTION_RUNTIME_BOUNDARY.md)
 - [Identity and correlation boundary](../identity/IDENTITY_AND_CORRELATION_BOUNDARY.md)
 - [Persistence boundary](../persistence/PERSISTENCE_BOUNDARY.md)
+- [ADR 0013: Use market-time ordering for shared-wallet backtests](../decisions/0013-use-market-time-ordering-for-shared-wallet-backtests.md)
+- [ADR 0014: Use shared-wallet arbitration policy by runtime mode](../decisions/0014-use-shared-wallet-arbitration-policy-by-runtime-mode.md)
