@@ -4,10 +4,13 @@ import threading
 import time
 from typing import Callable, Dict, List, Mapping, Optional
 
+import pytest
+
 from engines.bot_runtime.runtime.components.entry_decision_ordering import (
     SharedWalletEntryDecisionOrderCoordinator,
     stable_entry_decision_sort_key,
 )
+from engines.bot_runtime.runtime.components.runtime_policy import BacktestSharedWalletArbitrationPolicy
 
 
 BAR_TIME = "2026-01-14T04:00:00Z"
@@ -21,6 +24,19 @@ def _proxy(expected_count: int) -> Dict[str, object]:
         "decision_order_participants": {},
         "decision_order_expected_count": expected_count,
     }
+
+
+def _backtest_coordinator(
+    proxy: Mapping[str, object],
+    *,
+    timeout_seconds: float = 0.01,
+) -> SharedWalletEntryDecisionOrderCoordinator:
+    return SharedWalletEntryDecisionOrderCoordinator(
+        proxy,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=0.001,
+        arbitration_policy=BacktestSharedWalletArbitrationPolicy(),
+    )
 
 
 def _participant(symbol: str, *, next_bar_time: Optional[str] = None) -> Dict[str, object]:
@@ -126,6 +142,23 @@ def _join(threads: List[threading.Thread], errors: List[BaseException]) -> None:
     assert alive == []
     if errors:
         raise errors[0]
+
+
+def _wait_until(predicate: Callable[[], bool], *, timeout_seconds: float = 1.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.001)
+    assert predicate()
+
+
+def _missing_participants(proxy: Mapping[str, object], bar_key: str) -> str:
+    state_store = proxy["decision_order_state"]
+    assert isinstance(state_store, Mapping)
+    state = state_store.get(bar_key) or {}
+    assert isinstance(state, Mapping)
+    return "".join(str(participant) for participant in state.get("missing_participants") or [])
 
 
 def test_delayed_same_bar_candidate_releases_in_deterministic_order() -> None:
@@ -452,9 +485,10 @@ def test_sparse_calendar_wallet_contention_waits_for_same_bar_candidate() -> Non
     assert order == ["BIP", "ETP"]
 
 
-def test_future_bar_worker_can_advance_without_prior_bar_wait() -> None:
+def test_future_bar_candidate_waits_for_prior_wallet_candidate() -> None:
     ten = "2026-01-11T10:00:00Z"
     eleven = "2026-01-11T11:00:00Z"
+    twelve = "2026-01-11T12:00:00Z"
     proxy = _proxy(expected_count=3)
     coordinator = SharedWalletEntryDecisionOrderCoordinator(proxy, timeout_seconds=2.0, poll_interval_seconds=0.001)
     bip = _participant("BIP", next_bar_time=ten)
@@ -467,6 +501,7 @@ def test_future_bar_worker_can_advance_without_prior_bar_wait() -> None:
 
     threads = [
         threading.Thread(
+            name="xpp-future",
             target=_run_candidate,
             kwargs={
                 "coordinator": coordinator,
@@ -478,6 +513,7 @@ def test_future_bar_worker_can_advance_without_prior_bar_wait() -> None:
             },
         ),
         threading.Thread(
+            name="bip-prior",
             target=_run_candidate,
             kwargs={
                 "coordinator": coordinator,
@@ -485,29 +521,23 @@ def test_future_bar_worker_can_advance_without_prior_bar_wait() -> None:
                 "candidate": _candidate("BIP", bar_time=ten),
                 "bar_time": ten,
                 "delay_seconds": 0.05,
-                "on_turn": lambda: time.sleep(0.05) or events.append("BIP-10-turn") or "accepted",
-                "mark_complete": True,
-                "errors": errors,
-            },
-        ),
-        threading.Thread(
-            target=_run_no_candidate,
-            kwargs={
-                "coordinator": coordinator,
-                "participant": etp,
-                "bar_time": ten,
-                "next_bar_time": eleven,
-                "delay_seconds": 0.05,
+                "on_turn": lambda: events.append("BIP-10-turn") or "accepted",
                 "mark_complete": True,
                 "errors": errors,
             },
         ),
     ]
-    for thread in threads:
-        thread.start()
+
+    threads[0].start()
+    _wait_until(lambda: "BIP" in _missing_participants(proxy, f"{eleven}|1h"))
+    assert events == []
+    assert threads[0].is_alive()
+
+    threads[1].start()
+    coordinator.update_participant_bar_state({**etp, "next_bar_time": twelve})
     _join(threads, errors)
 
-    assert events == ["XPP-11-turn", "BIP-10-turn"]
+    assert events == ["BIP-10-turn", "XPP-11-turn"]
 
 
 def test_sparse_gaps_use_compact_progress_metadata_not_bar_placeholders() -> None:
@@ -551,28 +581,125 @@ def test_coordinator_state_stays_bounded_across_many_no_candidate_bars() -> None
     assert proxy["decision_order_state"] == {}
 
 
-def test_far_ahead_backtest_candidate_does_not_wait_for_lagging_symbols() -> None:
+def test_backtest_future_candidate_waits_without_wall_clock_timeout() -> None:
     candidate_bar = "2026-02-15T00:00:00Z"
+    after_candidate = "2026-02-15T01:00:00Z"
     proxy = _proxy(expected_count=3)
-    coordinator = SharedWalletEntryDecisionOrderCoordinator(proxy, timeout_seconds=0.2, poll_interval_seconds=0.001)
-    bip = _participant("BIP", next_bar_time="2025-12-17T16:00:00Z")
+    coordinator = _backtest_coordinator(proxy, timeout_seconds=0.01)
+    bip = _participant("BIP", next_bar_time="2026-01-30T05:00:00Z")
+    etp = _participant("ETP", next_bar_time="2026-01-30T02:00:00Z")
+    xpp = _participant("XPP", next_bar_time=candidate_bar)
+    for participant in (bip, etp, xpp):
+        coordinator.register_participant(participant)
+    events: List[str] = []
+    errors: List[BaseException] = []
+
+    thread = threading.Thread(
+        name="xpp-backtest-wait",
+        target=_run_candidate,
+        kwargs={
+            "coordinator": coordinator,
+            "participant": xpp,
+            "candidate": _candidate("XPP", bar_time=candidate_bar),
+            "bar_time": candidate_bar,
+            "on_turn": lambda: events.append("XPP-turn") or "accepted",
+            "errors": errors,
+        },
+    )
+    thread.start()
+
+    try:
+        _wait_until(
+            lambda: "BIP" in _missing_participants(proxy, f"{candidate_bar}|1h")
+            and "ETP" in _missing_participants(proxy, f"{candidate_bar}|1h")
+        )
+        time.sleep(0.05)
+        state = proxy["decision_order_state"][f"{candidate_bar}|1h"]
+
+        assert errors == []
+        assert events == []
+        assert thread.is_alive()
+        assert state.get("error") in (None, "")
+        assert state.get("missing_participants")
+        assert state["diagnostics"]["arbitration_policy"] == "backtest_shared_wallet_arbitration"
+        assert state["diagnostics"]["policy_action"] == "wait"
+        assert state["diagnostics"]["wait_decision_reason"] == "backtest_waiting_for_market_progress"
+        assert state["diagnostics"]["waiting_candidate_symbol"] == "XPP"
+    finally:
+        coordinator.update_participant_bar_state({**bip, "next_bar_time": after_candidate})
+        coordinator.update_participant_bar_state({**etp, "next_bar_time": after_candidate})
+        _join([thread], errors)
+
+    assert events == ["XPP-turn"]
+
+
+def test_default_arbitration_policy_preserves_turn_timeout() -> None:
+    candidate_bar = "2026-02-15T00:00:00Z"
+    proxy = _proxy(expected_count=2)
+    coordinator = SharedWalletEntryDecisionOrderCoordinator(proxy, timeout_seconds=0.01, poll_interval_seconds=0.001)
+    bip = _participant("BIP", next_bar_time="2026-01-30T05:00:00Z")
+    xpp = _participant("XPP", next_bar_time=candidate_bar)
+    for participant in (bip, xpp):
+        coordinator.register_participant(participant)
+
+    with pytest.raises(RuntimeError, match="entry_decision_order_turn_timeout"):
+        coordinator.arrive_and_wait_turn(
+            participant=xpp,
+            bar={"bar_time": candidate_bar, "timeframe": "1h"},
+            candidate=_candidate("XPP", bar_time=candidate_bar),
+        )
+
+    state = proxy["decision_order_state"][f"{candidate_bar}|1h"]
+    diagnostics = state["diagnostics"]
+    assert state["error"] == "entry_decision_order_turn_timeout"
+    assert diagnostics["arbitration_policy"] == "wall_clock_shared_wallet_arbitration"
+    assert diagnostics["policy_action"] == "fail"
+    assert diagnostics["wait_decision_reason"] == "wall_clock_turn_timeout"
+
+
+def test_far_ahead_backtest_candidate_waits_for_lagging_symbols() -> None:
+    candidate_bar = "2026-02-15T00:00:00Z"
+    after_candidate = "2026-02-15T01:00:00Z"
+    proxy = _proxy(expected_count=3)
+    coordinator = _backtest_coordinator(proxy, timeout_seconds=0.01)
+    bip = _participant("BIP", next_bar_time="2025-12-15T15:00:00Z")
     etp = _participant("ETP", next_bar_time="2025-12-17T19:00:00Z")
     xpp = _participant("XPP", next_bar_time=candidate_bar)
     for participant in (bip, etp, xpp):
         coordinator.register_participant(participant)
+    events: List[str] = []
+    errors: List[BaseException] = []
 
-    started = time.monotonic()
-    ticket = coordinator.arrive_and_wait_turn(
-        participant=xpp,
-        bar={"bar_time": candidate_bar, "timeframe": "1h"},
-        candidate=_candidate("XPP", bar_time=candidate_bar),
+    thread = threading.Thread(
+        name="xpp-far-ahead",
+        target=_run_candidate,
+        kwargs={
+            "coordinator": coordinator,
+            "participant": xpp,
+            "candidate": _candidate("XPP", bar_time=candidate_bar),
+            "bar_time": candidate_bar,
+            "on_turn": lambda: events.append("XPP-turn") or "accepted",
+            "errors": errors,
+        },
     )
-    elapsed = time.monotonic() - started
+    thread.start()
 
-    assert ticket is not None
-    assert elapsed < 0.1
-    coordinator.complete_candidate(ticket, outcome="accepted")
-    coordinator.wait_until_complete(ticket)
+    _wait_until(
+        lambda: "BIP" in _missing_participants(proxy, f"{candidate_bar}|1h")
+        and "ETP" in _missing_participants(proxy, f"{candidate_bar}|1h")
+    )
+    assert events == []
+    assert thread.is_alive()
+
+    coordinator.update_participant_bar_state({**bip, "next_bar_time": after_candidate})
+    time.sleep(0.01)
+    assert events == []
+    assert thread.is_alive()
+
+    coordinator.update_participant_bar_state({**etp, "next_bar_time": after_candidate})
+    _join([thread], errors)
+
+    assert events == ["XPP-turn"]
 
     state = proxy["decision_order_state"][f"{candidate_bar}|1h"]
     assert state["complete"] is True
@@ -580,11 +707,12 @@ def test_far_ahead_backtest_candidate_does_not_wait_for_lagging_symbols() -> Non
     assert state.get("error") in (None, "")
 
 
-def test_unresolved_prior_sparse_bar_does_not_block_future_bar_candidate() -> None:
+def test_unresolved_prior_sparse_bar_blocks_future_bar_candidate() -> None:
     ten = "2026-01-11T10:00:00Z"
     eleven = "2026-01-11T11:00:00Z"
+    twelve = "2026-01-11T12:00:00Z"
     proxy = _proxy(expected_count=3)
-    coordinator = SharedWalletEntryDecisionOrderCoordinator(proxy, timeout_seconds=1.0, poll_interval_seconds=0.001)
+    coordinator = SharedWalletEntryDecisionOrderCoordinator(proxy, timeout_seconds=2.0, poll_interval_seconds=0.001)
     bip = _participant("BIP", next_bar_time=ten)
     etp = _participant("ETP", next_bar_time=ten)
     xpp = _participant("XPP", next_bar_time=eleven)
@@ -593,53 +721,50 @@ def test_unresolved_prior_sparse_bar_does_not_block_future_bar_candidate() -> No
 
     events: List[str] = []
     errors: List[BaseException] = []
-    bip_entered = threading.Event()
-
-    def decide_bip() -> str:
-        events.append("BIP-10-turn")
-        return "accepted"
 
     bip_thread = threading.Thread(
+        name="bip-prior",
         target=_run_candidate,
         kwargs={
             "coordinator": coordinator,
             "participant": bip,
             "candidate": _candidate("BIP", bar_time=ten),
             "bar_time": ten,
-            "on_turn": lambda: bip_entered.set() or decide_bip(),
+            "on_turn": lambda: events.append("BIP-10-turn") or "accepted",
+            "mark_complete": True,
             "errors": errors,
         },
     )
     bip_thread.start()
 
-    deadline = time.monotonic() + 1.0
-    while time.monotonic() < deadline:
-        state = proxy["decision_order_state"].get(f"{ten}|1h") or {}
-        if "ETP" in "".join(state.get("missing_participants") or []):
-            break
-        time.sleep(0.001)
+    _wait_until(lambda: "ETP" in _missing_participants(proxy, f"{ten}|1h"))
 
-    started = time.monotonic()
-    xpp_ticket = coordinator.arrive_and_wait_turn(
-        participant=xpp,
-        bar={"bar_time": eleven, "timeframe": "1h"},
-        candidate=_candidate("XPP", bar_time=eleven),
+    xpp_thread = threading.Thread(
+        name="xpp-future",
+        target=_run_candidate,
+        kwargs={
+            "coordinator": coordinator,
+            "participant": xpp,
+            "candidate": _candidate("XPP", bar_time=eleven),
+            "bar_time": eleven,
+            "on_turn": lambda: events.append("XPP-11-turn") or "accepted",
+            "errors": errors,
+        },
     )
-    elapsed = time.monotonic() - started
+    xpp_thread.start()
 
-    assert xpp_ticket is not None
-    assert elapsed < 0.1
-    events.append("XPP-11-turn")
-    coordinator.complete_candidate(xpp_ticket, outcome="accepted")
-    coordinator.wait_until_complete(xpp_ticket)
+    _wait_until(
+        lambda: "BIP" in _missing_participants(proxy, f"{eleven}|1h")
+        and "ETP" in _missing_participants(proxy, f"{eleven}|1h")
+    )
+    assert events == []
+    assert bip_thread.is_alive()
+    assert xpp_thread.is_alive()
 
-    assert not bip_entered.is_set()
-    coordinator.update_participant_bar_state({**etp, "next_bar_time": eleven})
-    bip_thread.join(timeout=1.0)
+    coordinator.update_participant_bar_state({**etp, "next_bar_time": twelve})
+    _join([bip_thread, xpp_thread], errors)
 
-    assert not bip_thread.is_alive()
-    assert errors == []
-    assert events == ["XPP-11-turn", "BIP-10-turn"]
+    assert events == ["BIP-10-turn", "XPP-11-turn"]
 
 
 def test_unrelated_participant_failure_does_not_abort_arrived_candidate() -> None:

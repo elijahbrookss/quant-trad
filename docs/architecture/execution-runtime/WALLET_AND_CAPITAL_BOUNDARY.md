@@ -19,6 +19,7 @@ code_paths:
   - src/engines/bot_runtime/core/entry_settlement.py
   - src/engines/bot_runtime/core/exit_settlement.py
   - src/engines/bot_runtime/runtime/components/entry_decision_ordering.py
+  - src/engines/bot_runtime/runtime/components/runtime_policy.py
   - src/engines/bot_runtime/runtime/mixins/runtime_events.py
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
   - docs/architecture/execution-runtime/diagrams/wallet-capital-flow.mmd
@@ -137,11 +138,17 @@ snapshot has absorbed the fill.
 - Missing instrument metadata fails before settlement math depends on it.
 - Reservation leaks are runtime defects and should be visible in diagnostics/reports.
 - Shared-wallet ordering must not turn sparse symbol timelines into a global
-  bar barrier. It arbitrates candidates within the same bar key; cross-bar
-  wallet causality is proven by `wallet_commit_seq`.
+  bar barrier for candle/indicator computation, but wallet-affecting commits are
+  gated by portfolio market progress.
+- In backtest mode, future-bar wallet-affecting candidates must not overtake
+  unresolved earlier-or-equal same-timeframe wallet-sharing participant work.
 - Same-bar shared-wallet candidates wait until expected participants have either
   arrived or advanced past that bar, then mutate wallet state in stable
   candidate order.
+- The entry-decision coordinator owns candidate buffering, participant progress,
+  and deterministic release mechanics. Runtime policy owns arbitration
+  semantics: backtests wait on market progress, while current non-backtest
+  fallback behavior preserves the bounded wall-clock timeout.
 
 ## Invariants
 

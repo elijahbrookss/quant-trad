@@ -57,6 +57,7 @@ from ..components import (
     SeriesRunnerContext,
     SettlementApplier,
     SharedWalletEntryDecisionOrderCoordinator,
+    SharedWalletArbitrationPolicy,
     SignalConsumption,
     StartContext,
     StepTracePersistenceBuffer,
@@ -794,6 +795,10 @@ class RuntimeSetupPrepareMixin:
         return SharedWalletEntryDecisionOrderCoordinator(
             shared_wallet_proxy if isinstance(shared_wallet_proxy, Mapping) else None,
             timeout_seconds=timeout_value,
+            arbitration_policy=SharedWalletArbitrationPolicy.for_run_type(
+                self.run_type,
+                timeout_seconds=timeout_value,
+            ),
         )
 
     def _decision_order_participant_payload(

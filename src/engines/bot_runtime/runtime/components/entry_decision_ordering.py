@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
+from .runtime_policy import SharedWalletArbitrationDecision, SharedWalletArbitrationPolicy
+
 
 DecisionSortKey = Tuple[str, str, str, str, int, str, str, str]
 _COMPLETED_STATE_RETENTION = 32
@@ -58,10 +60,15 @@ class SharedWalletEntryDecisionOrderCoordinator:
         *,
         timeout_seconds: float = 120.0,
         poll_interval_seconds: float = 0.005,
+        arbitration_policy: Optional[SharedWalletArbitrationPolicy] = None,
     ) -> None:
         self._proxy = shared_proxy if isinstance(shared_proxy, Mapping) else None
         self._timeout_seconds = max(float(timeout_seconds or 0.0), 0.001)
         self._poll_interval_seconds = max(float(poll_interval_seconds or 0.0), 0.001)
+        self._arbitration_policy = arbitration_policy or SharedWalletArbitrationPolicy.for_run_type(
+            "default",
+            timeout_seconds=self._timeout_seconds,
+        )
 
     @property
     def enabled(self) -> bool:
@@ -267,7 +274,8 @@ class SharedWalletEntryDecisionOrderCoordinator:
             self._refresh_releases_locked()
 
     def _wait_until_turn(self, ticket: EntryDecisionOrderTicket) -> None:
-        deadline = time.monotonic() + self._timeout_seconds
+        started_at = time.monotonic()
+        last_wait_signature: Optional[Tuple[Any, ...]] = None
         while True:
             with _ProxyLock(self._lock()):
                 state = self._bar_state(ticket.bar_key)
@@ -281,10 +289,40 @@ class SharedWalletEntryDecisionOrderCoordinator:
                 self._refresh_releases_locked()
                 state = self._bar_state(ticket.bar_key)
                 self._raise_if_error(state, ticket)
-                if _text(state.get("active_candidate")) == ticket.candidate_id:
+                elapsed_seconds = max(time.monotonic() - started_at, 0.0)
+                diagnostics = self._diagnostics_for_state(state, elapsed_wait_seconds=elapsed_seconds)
+                decision = self._arbitration_policy.decide_candidate_turn(
+                    candidate_has_turn=_text(state.get("active_candidate")) == ticket.candidate_id,
+                    blocking_participants=tuple(str(item) for item in diagnostics.get("missing_participants") or ()),
+                    elapsed_seconds=elapsed_seconds,
+                    timeout_seconds=self._timeout_seconds,
+                    state=state,
+                    diagnostics=diagnostics,
+                )
+                if decision.action == "release":
                     return
-            if time.monotonic() >= deadline:
-                self._raise_timeout("entry_decision_order_turn_timeout", ticket)
+                if decision.action == "fail":
+                    self._raise_turn_policy_failure_locked(
+                        reason="entry_decision_order_turn_timeout",
+                        ticket=ticket,
+                        decision=decision,
+                        elapsed_seconds=elapsed_seconds,
+                        state=state,
+                    )
+                wait_signature = (
+                    decision.reason,
+                    tuple(decision.blocking_participants),
+                    decision.portfolio_watermark,
+                    elapsed_seconds >= self._timeout_seconds,
+                )
+                if wait_signature != last_wait_signature:
+                    self._record_wait_decision_locked(
+                        ticket=ticket,
+                        decision=decision,
+                        elapsed_seconds=elapsed_seconds,
+                        state=state,
+                    )
+                    last_wait_signature = wait_signature
             time.sleep(self._poll_interval_seconds)
 
     def _refresh_releases_locked(self) -> None:
@@ -304,6 +342,7 @@ class SharedWalletEntryDecisionOrderCoordinator:
                 continue
             order = list(self._ordered_candidate_ids(state))
             state["expected_participants"] = list(self._expected_participants_for_state(state))
+            state["missing_participants"] = []
             state["candidate_order"] = list(order)
             processed = set(state.get("processed") or [])
             remaining = [candidate_id for candidate_id in order if candidate_id not in processed]
@@ -347,11 +386,7 @@ class SharedWalletEntryDecisionOrderCoordinator:
         next_epoch = _coerce_epoch(payload.get("next_bar_time"))
         if next_epoch is None:
             return False
-        if int(next_epoch) > int(bar_epoch):
-            return True
-        if int(next_epoch) < int(bar_epoch):
-            return True
-        return False
+        return int(next_epoch) > int(bar_epoch)
 
     def _expected_participants_for_state(self, state: Mapping[str, Any]) -> Sequence[str]:
         state_info = _state_epoch_timeframe(state)
@@ -505,7 +540,80 @@ class SharedWalletEntryDecisionOrderCoordinator:
             f"diagnostics={_diagnostic_json(state.get('diagnostics') or state)}"
         )
 
-    def _diagnostics_for_state(self, state: Mapping[str, Any]) -> Dict[str, Any]:
+    def _raise_turn_policy_failure_locked(
+        self,
+        *,
+        reason: str,
+        ticket: EntryDecisionOrderTicket,
+        decision: SharedWalletArbitrationDecision,
+        elapsed_seconds: float,
+        state: Mapping[str, Any],
+    ) -> None:
+        next_state = dict(state or {})
+        next_state.setdefault("bar_key", ticket.bar_key)
+        next_state["error"] = reason
+        next_state["error_at"] = _utc_now_iso()
+        next_state["error_participant_key"] = ticket.participant_key
+        next_state["error_candidate_id"] = ticket.candidate_id
+        next_state["timeout_ms"] = int(round(self._timeout_seconds * 1000.0))
+        next_state["elapsed_wait_ms"] = int(round(max(float(elapsed_seconds or 0.0), 0.0) * 1000.0))
+        next_state["arbitration_policy"] = self._arbitration_policy.name
+        next_state["policy_action"] = decision.action
+        next_state["wait_decision_reason"] = decision.reason
+        if decision.portfolio_watermark:
+            next_state["portfolio_watermark"] = decision.portfolio_watermark
+        next_state["diagnostics"] = self._diagnostics_for_state(
+            next_state,
+            elapsed_wait_seconds=elapsed_seconds,
+            policy_decision=decision,
+        )
+        self._set_bar_state(ticket.bar_key, next_state)
+        raise RuntimeError(
+            f"{reason}: bar_key={ticket.bar_key} participant_key={ticket.participant_key} "
+            f"candidate_id={ticket.candidate_id or '<none>'} "
+            f"policy={self._arbitration_policy.name} policy_reason={decision.reason} "
+            f"elapsed_wait_ms={int(round(max(float(elapsed_seconds or 0.0), 0.0) * 1000.0))} "
+            f"timeout_ms={int(round(self._timeout_seconds * 1000.0))} "
+            f"diagnostics={_diagnostic_json(next_state.get('diagnostics') or next_state)}"
+        )
+
+    def _record_wait_decision_locked(
+        self,
+        *,
+        ticket: EntryDecisionOrderTicket,
+        decision: SharedWalletArbitrationDecision,
+        elapsed_seconds: float,
+        state: Mapping[str, Any],
+    ) -> None:
+        next_state = dict(state or {})
+        next_state["waiting_participant_key"] = ticket.participant_key
+        next_state["waiting_candidate_id"] = ticket.candidate_id
+        candidate_payload = dict(dict(next_state.get("candidates") or {}).get(str(ticket.candidate_id)) or {})
+        if candidate_payload:
+            next_state["waiting_candidate_symbol"] = candidate_payload.get("symbol")
+            next_state["waiting_candidate_timeframe"] = candidate_payload.get("timeframe")
+            next_state["waiting_candidate_bar_time"] = candidate_payload.get("bar_time")
+            next_state["waiting_candidate_decision_id"] = candidate_payload.get("decision_id")
+        next_state["arbitration_policy"] = self._arbitration_policy.name
+        next_state["policy_action"] = decision.action
+        next_state["wait_decision_reason"] = decision.reason
+        next_state["elapsed_wait_ms"] = int(round(max(float(elapsed_seconds or 0.0), 0.0) * 1000.0))
+        if decision.portfolio_watermark:
+            next_state["portfolio_watermark"] = decision.portfolio_watermark
+        next_state["diagnostics"] = self._diagnostics_for_state(
+            next_state,
+            elapsed_wait_seconds=elapsed_seconds,
+            policy_decision=decision,
+        )
+        self._set_bar_state(ticket.bar_key, next_state)
+
+    def _diagnostics_for_state(
+        self,
+        state: Mapping[str, Any],
+        *,
+        elapsed_wait_seconds: Optional[float] = None,
+        policy_decision: Optional[SharedWalletArbitrationDecision] = None,
+    ) -> Dict[str, Any]:
         expected = list(self._expected_participants_for_state(state))
         candidate_participants = sorted(dict(state.get("candidate_participants") or {}).keys())
         safe, missing = self._candidate_group_safe(state)
@@ -525,7 +633,7 @@ class SharedWalletEntryDecisionOrderCoordinator:
                 participant_failures[participant_key] = payload.get("failure_error")
             if payload.get("gap_ranges"):
                 known_sparse_gaps[participant_key] = list(payload.get("gap_ranges") or [])
-        return {
+        diagnostics = {
             "bar_key": state.get("bar_key"),
             "expected_participants": expected,
             "arrived_participants": candidate_participants,
@@ -536,7 +644,22 @@ class SharedWalletEntryDecisionOrderCoordinator:
             "safe_to_release": bool(safe),
             "participant_failures": participant_failures,
             "timeout_ms": int(round(self._timeout_seconds * 1000.0)),
+            "arbitration_policy": self._arbitration_policy.name,
+            "waiting_candidate_id": state.get("waiting_candidate_id"),
+            "waiting_participant_key": state.get("waiting_participant_key"),
+            "waiting_candidate_symbol": state.get("waiting_candidate_symbol"),
+            "waiting_candidate_timeframe": state.get("waiting_candidate_timeframe"),
+            "waiting_candidate_bar_time": state.get("waiting_candidate_bar_time"),
+            "waiting_candidate_decision_id": state.get("waiting_candidate_decision_id"),
         }
+        if elapsed_wait_seconds is not None:
+            diagnostics["elapsed_wait_ms"] = int(round(max(float(elapsed_wait_seconds or 0.0), 0.0) * 1000.0))
+        if policy_decision is not None:
+            diagnostics["policy_action"] = policy_decision.action
+            diagnostics["wait_decision_reason"] = policy_decision.reason
+            diagnostics["blocking_participants"] = list(policy_decision.blocking_participants)
+            diagnostics["portfolio_watermark"] = policy_decision.portfolio_watermark
+        return diagnostics
 
 
 class _ProxyLock:
