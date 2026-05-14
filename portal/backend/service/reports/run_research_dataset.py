@@ -85,6 +85,8 @@ class RunResearchMetadata:
     material_config_hash: Optional[str]
     data_snapshot_hash: Optional[str]
     report_material_fingerprint: Optional[str]
+    report_semantic_fingerprint: Optional[str]
+    report_operational_fingerprint: Optional[str]
     dataset_schema_version: str
     generated_at: str
 
@@ -110,6 +112,8 @@ class RunResearchReadiness:
     golden_blocking_reasons: List[str] = field(default_factory=list)
     repeatability_status: str = "unknown"
     material_fingerprint: Optional[str] = None
+    semantic_fingerprint: Optional[str] = None
+    operational_fingerprint: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -3322,7 +3326,185 @@ def _context_material_rows(context: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _report_material_fingerprint(
+def _context_semantic_rows(context: Mapping[str, Any]) -> Dict[str, Any]:
+    indicator_rows: List[Dict[str, Any]] = []
+    for row in _mapping(context.get("indicator_snapshots")).get("items") or []:
+        if not isinstance(row, Mapping):
+            continue
+        indicator_rows.append(
+            {
+                "instrument_id": row.get("instrument_id"),
+                "symbol": row.get("symbol"),
+                "timeframe": row.get("timeframe"),
+                "bar_time": row.get("bar_time"),
+                "known_at": row.get("known_at"),
+                "decision_id": row.get("decision_id"),
+                "indicator_id": row.get("indicator_id"),
+                "output_name": row.get("output_name"),
+                "output_type": row.get("output_type"),
+                "indicator_commit_seq": row.get("indicator_commit_seq"),
+                "indicator_commit_seq_status": row.get("indicator_commit_seq_status"),
+                "values": row.get("values"),
+            }
+        )
+    market_rows: List[Dict[str, Any]] = []
+    for row in _mapping(context.get("market_state")).get("items") or []:
+        if not isinstance(row, Mapping):
+            continue
+        market_rows.append(
+            {
+                "instrument_id": row.get("instrument_id"),
+                "symbol": row.get("symbol"),
+                "timeframe": row.get("timeframe"),
+                "bar_time": row.get("bar_time"),
+                "known_at": row.get("known_at"),
+                "decision_id": row.get("decision_id"),
+                "context_values": row.get("context_values"),
+            }
+        )
+    indicator_rows.sort(
+        key=lambda row: (
+            str(row.get("decision_id") or ""),
+            str(row.get("indicator_id") or ""),
+            str(row.get("output_name") or ""),
+            str(row.get("bar_time") or ""),
+        )
+    )
+    market_rows.sort(
+        key=lambda row: (
+            str(row.get("decision_id") or ""),
+            str(row.get("bar_time") or ""),
+            str(row.get("symbol") or ""),
+        )
+    )
+    return {
+        "indicator_snapshots": indicator_rows,
+        "market_state": market_rows,
+    }
+
+
+def _report_semantic_fingerprint(
+    *,
+    metadata: RunResearchMetadata,
+    summary: RunResearchSummary,
+    decisions: Sequence[Mapping[str, Any]],
+    signals: Sequence[Mapping[str, Any]],
+    trades: Sequence[Mapping[str, Any]],
+    context: Mapping[str, Any],
+) -> str:
+    decision_rows = [
+        {
+            "decision_id": row.get("decision_id"),
+            "strategy_id": row.get("strategy_id"),
+            "strategy_hash": row.get("strategy_hash"),
+            "instrument_id": row.get("instrument_id"),
+            "symbol": row.get("symbol"),
+            "timeframe": row.get("timeframe"),
+            "bar_time": row.get("bar_time"),
+            "known_at": row.get("known_at"),
+            "action": row.get("action"),
+            "status": row.get("status"),
+            "reason_code": row.get("reason_code"),
+        }
+        for row in decisions
+    ]
+    signal_rows = [
+        {
+            "decision_id": row.get("decision_id"),
+            "strategy_id": row.get("strategy_id"),
+            "strategy_hash": row.get("strategy_hash"),
+            "instrument_id": row.get("instrument_id"),
+            "symbol": row.get("symbol"),
+            "timeframe": row.get("timeframe"),
+            "bar_time": row.get("bar_time"),
+            "known_at": row.get("known_at"),
+            "action": row.get("action"),
+            "direction": row.get("direction"),
+            "price": row.get("price"),
+            "quantity": row.get("quantity"),
+        }
+        for row in signals
+    ]
+    trade_rows = [
+        {
+            "strategy_id": row.get("strategy_id"),
+            "strategy_hash": row.get("strategy_hash"),
+            "instrument_id": row.get("instrument_id"),
+            "symbol": row.get("symbol"),
+            "timeframe": row.get("timeframe"),
+            "side": row.get("side"),
+            "entry_time": row.get("entry_time"),
+            "entry_price": row.get("entry_price"),
+            "exit_time": row.get("exit_time"),
+            "exit_price": row.get("exit_price"),
+            "close_reason": row.get("close_reason"),
+            "position_commit_seq": row.get("position_commit_seq"),
+            "gross_pnl": row.get("gross_pnl"),
+            "fees_paid": row.get("fees_paid"),
+            "net_pnl": row.get("net_pnl"),
+            "quantity": row.get("quantity"),
+            "decision_id": row.get("decision_id"),
+        }
+        for row in trades
+    ]
+    payload = {
+        "schema_version": DATASET_SCHEMA_VERSION,
+        "fingerprint_type": "semantic",
+        "identity": {
+            "strategy_id": metadata.strategy_id,
+            "strategy_hash": metadata.strategy_hash,
+            "material_config_hash": metadata.material_config_hash,
+            "data_snapshot_hash": metadata.data_snapshot_hash,
+            "execution_mode": metadata.execution_mode,
+            "simulated_window": metadata.simulated_window,
+            "symbols": metadata.symbols,
+            "instrument_ids": metadata.instrument_ids,
+            "timeframes": metadata.timeframes,
+        },
+        "summary": {
+            "total_decisions": summary.total_decisions,
+            "accepted_decisions": summary.accepted_decisions,
+            "rejected_decisions": summary.rejected_decisions,
+            "closed_trades": summary.closed_trades,
+            "open_trades": summary.open_trades,
+            "gross_pnl": summary.gross_pnl,
+            "fees": summary.fees,
+            "net_pnl": summary.net_pnl,
+            "equity_start": summary.equity_start,
+            "equity_end": summary.equity_end,
+            "max_drawdown_pct": summary.max_drawdown_pct,
+        },
+        "decisions": sorted(
+            decision_rows,
+            key=lambda row: (
+                str(row.get("bar_time") or ""),
+                str(row.get("symbol") or ""),
+                str(row.get("decision_id") or ""),
+            ),
+        ),
+        "signals": sorted(
+            signal_rows,
+            key=lambda row: (
+                str(row.get("bar_time") or ""),
+                str(row.get("symbol") or ""),
+                str(row.get("decision_id") or ""),
+            ),
+        ),
+        "trades": sorted(
+            trade_rows,
+            key=lambda row: (
+                str(row.get("decision_id") or ""),
+                str(row.get("entry_time") or ""),
+                str(row.get("symbol") or ""),
+                int(row.get("position_commit_seq") or 0),
+            ),
+        ),
+        "context": _context_semantic_rows(context),
+    }
+    return _stable_hash(payload)
+
+
+def _report_operational_fingerprint(
     *,
     metadata: RunResearchMetadata,
     readiness: RunResearchReadiness,
@@ -3410,6 +3592,7 @@ def _report_material_fingerprint(
     ]
     payload = {
         "schema_version": DATASET_SCHEMA_VERSION,
+        "fingerprint_type": "operational",
         "identity": {
             "strategy_id": metadata.strategy_id,
             "strategy_hash": metadata.strategy_hash,
@@ -3542,9 +3725,15 @@ def _with_golden_status(
     diagnostics: Mapping[str, Any],
     candle_catalog: Mapping[str, Any],
     context: Mapping[str, Any],
-    material_fingerprint: Optional[str],
+    semantic_fingerprint: Optional[str],
+    operational_fingerprint: Optional[str],
 ) -> RunResearchReadiness:
-    staged = replace(readiness, material_fingerprint=material_fingerprint)
+    staged = replace(
+        readiness,
+        material_fingerprint=semantic_fingerprint,
+        semantic_fingerprint=semantic_fingerprint,
+        operational_fingerprint=operational_fingerprint,
+    )
     reasons = _golden_blocking_reasons(
         metadata=metadata,
         readiness=staged,
@@ -3553,7 +3742,7 @@ def _with_golden_status(
         context=context,
     )
     status = "certified" if not reasons and staged.safe_to_compare else "blocked" if reasons else "failed"
-    repeatability_status = "fingerprinted" if material_fingerprint and not reasons else "blocked" if reasons else "unknown"
+    repeatability_status = "fingerprinted" if semantic_fingerprint and not reasons else "blocked" if reasons else "unknown"
     return replace(
         staged,
         golden_candidate_status=status,
@@ -3735,6 +3924,8 @@ def _metadata(run: Mapping[str, Any]) -> RunResearchMetadata:
         material_config_hash=material_hash,
         data_snapshot_hash=None,
         report_material_fingerprint=None,
+        report_semantic_fingerprint=None,
+        report_operational_fingerprint=None,
         dataset_schema_version=DATASET_SCHEMA_VERSION,
         generated_at=generated_at,
     )
@@ -4028,7 +4219,15 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     )
     data_snapshot_hash = _data_snapshot_hash(candle_catalog)
     metadata = replace(metadata, data_snapshot_hash=data_snapshot_hash)
-    material_fingerprint = _report_material_fingerprint(
+    semantic_fingerprint = _report_semantic_fingerprint(
+        metadata=metadata,
+        summary=summary,
+        decisions=decisions,
+        signals=signals,
+        trades=trades,
+        context=context,
+    )
+    operational_fingerprint = _report_operational_fingerprint(
         metadata=metadata,
         readiness=readiness,
         summary=summary,
@@ -4041,14 +4240,20 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         diagnostics=diagnostics,
         sections=sections,
     )
-    metadata = replace(metadata, report_material_fingerprint=material_fingerprint)
+    metadata = replace(
+        metadata,
+        report_material_fingerprint=semantic_fingerprint,
+        report_semantic_fingerprint=semantic_fingerprint,
+        report_operational_fingerprint=operational_fingerprint,
+    )
     readiness = _with_golden_status(
         readiness=readiness,
         metadata=metadata,
         diagnostics=diagnostics,
         candle_catalog=candle_catalog,
         context=context,
-        material_fingerprint=material_fingerprint,
+        semantic_fingerprint=semantic_fingerprint,
+        operational_fingerprint=operational_fingerprint,
     )
     sections = _sections(
         readiness=readiness,

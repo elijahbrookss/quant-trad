@@ -75,10 +75,16 @@ window, with raw trades retained for audit and independent recompute.
 - `golden_blocking_reasons`: deterministic reasons a run cannot be used as a
   golden run.
 - `repeatability_status`: status of material identity and fingerprint evidence.
-- `material_fingerprint`: stable report data product fingerprint when all
-  required material identity fields are available. It covers the material
-  decisions, signals, trades, section statuses, diagnostics, candle continuity
-  evidence, and compact decision-boundary indicator/market-state context.
+- `semantic_fingerprint`: stable trading-behavior fingerprint when required
+  material identity fields are available. It covers deterministic strategy/data
+  identity, summary metrics, logical decision/signal order, trade lifecycle, and
+  compact decision-boundary indicator/market-state context while excluding
+  run-instance identifiers such as generated signal or trade IDs.
+- `operational_fingerprint`: runtime evidence fingerprint for diagnostics,
+  section availability, candle continuity evidence, and run-instance/runtime
+  identifiers. Differences here are useful audit evidence but do not by
+  themselves prove trading-behavior divergence.
+- `material_fingerprint`: compatibility alias for `semantic_fingerprint`.
 
 Boolean fields such as `dataset_ready`, `results_ready`, and `safe_to_compare`
 are compatibility summaries. Consumers should prefer the status fields for new

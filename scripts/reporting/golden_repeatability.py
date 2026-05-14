@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -133,11 +134,23 @@ def _diagnostics_signature(dataset: Mapping[str, Any]) -> dict[str, Any]:
 def _material(dataset: Mapping[str, Any]) -> dict[str, Any]:
     metadata = _mapping(dataset.get("metadata"))
     readiness = _mapping(dataset.get("readiness"))
+    semantic_fingerprint = (
+        metadata.get("report_semantic_fingerprint")
+        or readiness.get("semantic_fingerprint")
+        or metadata.get("report_material_fingerprint")
+        or readiness.get("material_fingerprint")
+    )
+    operational_fingerprint = (
+        metadata.get("report_operational_fingerprint")
+        or readiness.get("operational_fingerprint")
+    )
     return {
         "strategy_hash": metadata.get("strategy_hash"),
         "material_config_hash": metadata.get("material_config_hash"),
         "data_snapshot_hash": metadata.get("data_snapshot_hash"),
         "report_material_fingerprint": metadata.get("report_material_fingerprint"),
+        "report_semantic_fingerprint": semantic_fingerprint,
+        "report_operational_fingerprint": operational_fingerprint,
         "golden_candidate_status": readiness.get("golden_candidate_status"),
         "golden_blocking_reasons": readiness.get("golden_blocking_reasons") or [],
         "repeatability_status": readiness.get("repeatability_status"),
@@ -163,6 +176,134 @@ def _wallet_summary(dataset: Mapping[str, Any]) -> dict[str, Any]:
         "missing_wallet_trace_count": len(missing),
         "missing_wallet_trace_first": missing[:3],
     }
+
+
+def _coerce_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(float(text))
+    except ValueError:
+        return None
+
+
+def _coerce_epoch(value: Any) -> int | None:
+    numeric = _coerce_int(value)
+    if numeric is not None:
+        return numeric
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def _wallet_market_time_check_enabled(dataset: Mapping[str, Any]) -> bool:
+    metadata = _mapping(dataset.get("metadata"))
+    if str(metadata.get("run_type") or "").strip().lower() != "backtest":
+        return False
+    symbols = metadata.get("symbols")
+    if isinstance(symbols, Sequence) and not isinstance(symbols, (str, bytes, bytearray)):
+        return len({str(symbol) for symbol in symbols if str(symbol).strip()}) > 1
+    decision_symbols = {
+        str(row.get("symbol") or "").strip()
+        for row in dataset.get("decisions") or []
+        if isinstance(row, Mapping) and str(row.get("symbol") or "").strip()
+    }
+    return len(decision_symbols) > 1
+
+
+def _is_wallet_affecting_decision(row: Mapping[str, Any]) -> bool:
+    context = _decision_context(row)
+    action = str(row.get("action") or context.get("intent") or context.get("action") or "").strip().lower()
+    reason = str(row.get("reason_code") or context.get("reason_code") or row.get("reason") or "").strip().upper()
+    status = _decision_status(row)
+    if bool(row.get("accepted")) or status == "accepted":
+        return True
+    if action.startswith("enter_") or action in {"buy", "sell", "enter"}:
+        return True
+    if reason.startswith("WALLET_") or "MARGIN" in reason:
+        return True
+    return False
+
+
+def _decision_market_order_row(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    context = _decision_context(row)
+    run_seq = _coerce_int(row.get("run_seq") or context.get("run_seq"))
+    bar_epoch = _coerce_epoch(
+        context.get("bar_epoch")
+        or row.get("bar_time")
+        or context.get("bar_time")
+        or row.get("known_at")
+    )
+    if run_seq is None or bar_epoch is None:
+        return None
+    return {
+        "run_seq": run_seq,
+        "seq": _coerce_int(row.get("seq")),
+        "bar_epoch": bar_epoch,
+        "bar_time": row.get("bar_time") or context.get("bar_time") or row.get("known_at"),
+        "symbol": row.get("symbol") or context.get("symbol"),
+        "decision_id": row.get("decision_id") or context.get("decision_id"),
+    }
+
+
+def _wallet_market_time_overtake_summary(dataset: Mapping[str, Any]) -> dict[str, Any]:
+    if not _wallet_market_time_check_enabled(dataset):
+        return {
+            "checked": False,
+            "reason": "not_multi_symbol_backtest",
+            "decision_count": 0,
+            "first_overtake": None,
+        }
+    sequence = []
+    for row in dataset.get("decisions") or []:
+        if not isinstance(row, Mapping) or not _is_wallet_affecting_decision(row):
+            continue
+        order_row = _decision_market_order_row(row)
+        if order_row is not None:
+            sequence.append(order_row)
+    sequence.sort(
+        key=lambda row: (
+            row["run_seq"],
+            row["seq"] if row.get("seq") is not None else 0,
+            str(row.get("decision_id") or ""),
+        )
+    )
+    latest_market_time: dict[str, Any] | None = None
+    for row in sequence:
+        if latest_market_time is not None and int(row["bar_epoch"]) < int(latest_market_time["bar_epoch"]):
+            return {
+                "checked": True,
+                "decision_count": len(sequence),
+                "first_overtake": {
+                    "prior_run_seq": latest_market_time.get("run_seq"),
+                    "prior_bar_time": latest_market_time.get("bar_time"),
+                    "prior_symbol": latest_market_time.get("symbol"),
+                    "prior_decision_id": latest_market_time.get("decision_id"),
+                    "current_run_seq": row.get("run_seq"),
+                    "current_bar_time": row.get("bar_time"),
+                    "current_symbol": row.get("symbol"),
+                    "current_decision_id": row.get("decision_id"),
+                },
+            }
+        if latest_market_time is None or int(row["bar_epoch"]) > int(latest_market_time["bar_epoch"]):
+            latest_market_time = row
+    return {"checked": True, "decision_count": len(sequence), "first_overtake": None}
 
 
 def _runtime_ordering_summary(run_id: str) -> dict[str, Any]:
@@ -235,7 +376,7 @@ def _first_divergence(
     summary_diff: Mapping[str, Any],
     diagnostics_diff: Mapping[str, Any],
 ) -> dict[str, Any] | None:
-    for field in ("material_config_hash", "data_snapshot_hash", "strategy_hash", "report_material_fingerprint", "golden_candidate_status"):
+    for field in ("material_config_hash", "data_snapshot_hash", "strategy_hash", "report_semantic_fingerprint", "golden_candidate_status"):
         if field in material_diff:
             return {"section": "material", "field": field, **material_diff[field]}
     if decision_first:
@@ -321,6 +462,10 @@ def compare_runs(left_run_id: str, right_run_id: str, *, out_dir: Path, check_pr
     trade_first = _first_list_diff(left_trades, right_trades, "trade_lifecycle")
     decision_compare = _decision_compare(left_decisions, right_decisions)
     wallet = {run_ids[0]: _wallet_summary(left), run_ids[1]: _wallet_summary(right)}
+    wallet_market_time = {
+        run_ids[0]: _wallet_market_time_overtake_summary(left),
+        run_ids[1]: _wallet_market_time_overtake_summary(right),
+    }
     runtime_ordering = {run_id: _runtime_ordering_summary(run_id) for run_id in run_ids}
 
     blocking_codes = set(left_diagnostics["blocking_codes"]) | set(right_diagnostics["blocking_codes"])
@@ -330,10 +475,12 @@ def compare_runs(left_run_id: str, right_run_id: str, *, out_dir: Path, check_pr
         fail_reasons.append("run_not_completed")
     if any(entry["missing_wallet_trace_count"] for entry in wallet.values()):
         fail_reasons.append("wallet_trace_missing")
+    if any(entry.get("first_overtake") for entry in wallet_market_time.values()):
+        fail_reasons.append("wallet_market_time_overtake")
     if any("ordering" in code or "projection" in code or "lifecycle" in code for code in blocking_codes | blocking_reasons):
         fail_reasons.append("lifecycle_projection_or_ordering_blocker")
-    if left_material.get("report_material_fingerprint") != right_material.get("report_material_fingerprint"):
-        fail_reasons.append("material_fingerprint_mismatch")
+    if left_material.get("report_semantic_fingerprint") != right_material.get("report_semantic_fingerprint"):
+        fail_reasons.append("semantic_fingerprint_mismatch")
     if (
         decision_compare["missing_ids_count"]
         or decision_compare["extra_ids_count"]
@@ -356,8 +503,14 @@ def compare_runs(left_run_id: str, right_run_id: str, *, out_dir: Path, check_pr
         "fail_reasons": sorted(set(fail_reasons)),
         "material": {run_ids[0]: left_material, run_ids[1]: right_material},
         "material_diff": material_diff,
+        "operational_diff": {
+            key: value
+            for key, value in material_diff.items()
+            if key in {"report_operational_fingerprint"}
+        },
         "decision_compare": decision_compare,
         "wallet_trace": wallet,
+        "wallet_market_time_ordering": wallet_market_time,
         "trade_lifecycle_compare": {
             "left_count": len(left_trades),
             "right_count": len(right_trades),

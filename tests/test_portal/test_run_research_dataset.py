@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import pytest
@@ -1045,7 +1046,7 @@ def test_wallet_ledger_state_mismatch_blocks_golden_candidate(monkeypatch: pytes
     assert "wallet_ledger_state_mismatch" in dataset["diagnostics"]["summary"]["blocking_codes"]
 
 
-def test_material_fingerprint_changes_when_logical_event_order_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_operational_fingerprint_changes_when_runtime_event_order_changes(monkeypatch: pytest.MonkeyPatch) -> None:
     baseline = _build(monkeypatch, events=_events())
     reordered_events = _events()
     for row in reordered_events:
@@ -1058,7 +1059,9 @@ def test_material_fingerprint_changes_when_logical_event_order_changes(monkeypat
 
     reordered = _build(monkeypatch, events=reordered_events)
 
-    assert reordered["readiness"]["material_fingerprint"] != baseline["readiness"]["material_fingerprint"]
+    assert reordered["readiness"]["material_fingerprint"] == baseline["readiness"]["material_fingerprint"]
+    assert reordered["readiness"]["semantic_fingerprint"] == baseline["readiness"]["semantic_fingerprint"]
+    assert reordered["readiness"]["operational_fingerprint"] != baseline["readiness"]["operational_fingerprint"]
 
 
 def test_material_fingerprint_changes_when_runtime_context_evidence_changes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1101,6 +1104,30 @@ def test_material_fingerprint_changes_when_runtime_context_evidence_changes(monk
     changed = _build(monkeypatch, events=[signal_event(bias="short")], trades=[])
 
     assert changed["readiness"]["material_fingerprint"] != baseline["readiness"]["material_fingerprint"]
+
+
+def test_semantic_fingerprint_ignores_run_instance_identifiers(monkeypatch: pytest.MonkeyPatch) -> None:
+    baseline = _build(monkeypatch, events=_events(), trades=_trades())
+    changed_events = copy.deepcopy(_events())
+    for row in changed_events:
+        context = row.get("payload", {}).get("context", {})
+        if context.get("signal_id"):
+            context["signal_id"] = f"run-two-{context['signal_id']}"
+            row["signal_id"] = context["signal_id"]
+        if context.get("trade_id"):
+            context["trade_id"] = f"run-two-{context['trade_id']}"
+            row["trade_id"] = context["trade_id"]
+    changed_trades = copy.deepcopy(_trades())
+    for row in changed_trades:
+        row["id"] = f"run-two-{row['id']}"
+
+    changed = _build(monkeypatch, events=changed_events, trades=changed_trades)
+
+    assert changed["readiness"]["semantic_fingerprint"] == baseline["readiness"]["semantic_fingerprint"]
+    assert changed["readiness"]["material_fingerprint"] == baseline["readiness"]["material_fingerprint"]
+    assert changed["metadata"]["report_semantic_fingerprint"] == baseline["metadata"]["report_semantic_fingerprint"]
+    assert changed["readiness"]["operational_fingerprint"] != baseline["readiness"]["operational_fingerprint"]
+    assert changed["metadata"]["report_operational_fingerprint"] != baseline["metadata"]["report_operational_fingerprint"]
 
 
 def test_data_snapshot_hash_changes_when_candle_gap_window_changes(monkeypatch: pytest.MonkeyPatch) -> None:

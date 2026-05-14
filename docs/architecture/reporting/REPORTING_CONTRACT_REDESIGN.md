@@ -99,10 +99,13 @@ Readiness uses explicit sectioned status, not a single ready boolean:
 - `golden_blocking_reasons`: deterministic reasons a reproducible golden run
   cannot be certified.
 - `repeatability_status`: material identity and fingerprint readiness.
-- `material_fingerprint`: stable fingerprint over the material report data
-  product when strategy, config, data, execution, diagnostics, candle continuity,
-  compact indicator/market-state context, and section availability evidence are
-  present.
+- `semantic_fingerprint`: stable trading-behavior fingerprint over strategy,
+  config, data identity, logical decisions/signals, trade lifecycle, summary
+  metrics, and compact decision-boundary context.
+- `operational_fingerprint`: runtime evidence fingerprint over diagnostics,
+  section availability, candle continuity evidence, generated IDs, and other
+  operational traces.
+- `material_fingerprint`: compatibility alias for `semantic_fingerprint`.
 
 The legacy booleans remain as summary flags for existing clients, but the
 status fields are the reporting contract. Candle gaps, intrabar fallback,

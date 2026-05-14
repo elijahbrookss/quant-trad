@@ -47,6 +47,8 @@ class ReportReadinessResponse(BaseModel):
     golden_blocking_reasons: List[str] = Field(default_factory=list)
     repeatability_status: str = "unknown"
     material_fingerprint: Optional[str] = None
+    semantic_fingerprint: Optional[str] = None
+    operational_fingerprint: Optional[str] = None
     caveats: List[str] = Field(default_factory=list)
     diagnostics: ReportDiagnosticsResponse
 
