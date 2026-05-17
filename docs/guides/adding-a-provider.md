@@ -57,4 +57,5 @@ Useful examples:
 
 - Data overview: [data layer](../engineering/data-layer.md).
 - Provider boundary: [data boundary](../architecture/data/DATA_BOUNDARY.md).
+- Archive-backed example: [Binance futures public data setup](binance-futures-public-data.md).
 - Runtime contract: [runtime contract](../contracts/platform/01_runtime_contract.md).

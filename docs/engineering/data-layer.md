@@ -46,6 +46,7 @@ Provider data feeds indicators and runtime. Runtime and BotLens can surface gap 
 ## Next
 
 - Minimal extension guide: [adding a provider](../guides/adding-a-provider.md).
+- Archive-backed research data setup: [Binance futures public data](../guides/binance-futures-public-data.md).
 - Provider and candle architecture: [data boundary](../architecture/data/DATA_BOUNDARY.md).
 - Runtime contract: [runtime contract](../contracts/platform/01_runtime_contract.md).
 - Runtime diagnostics: [execution runtime boundary](../architecture/execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md).

@@ -29,6 +29,7 @@ Quant-Trad documentation is layered so readers do not have to start in deep arch
 - [Creating an indicator](guides/creating-an-indicator.md): minimal authoring checklist and example links.
 - [Creating a strategy](guides/creating-a-strategy.md): typed-output decision flow and test expectations.
 - [Adding a provider](guides/adding-a-provider.md): adapter, candle, cache, gap, and test expectations.
+- [Binance futures public data setup](guides/binance-futures-public-data.md): target setup and ingestion contract for archive-backed USD-M perpetual research data.
 
 ## Contracts
 
