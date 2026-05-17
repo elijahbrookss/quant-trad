@@ -67,7 +67,7 @@ export function getBotStatus(bot) {
 }
 
 export function getBotRunId(bot) {
-  const value = bot?.active_run_id || bot?.lifecycle?.telemetry?.run_id || null
+  const value = bot?.active_run_id || bot?.latest_run_id || bot?.run?.run_id || bot?.lifecycle?.telemetry?.run_id || null
   const normalized = String(value || '').trim()
   return normalized || null
 }
@@ -313,9 +313,20 @@ function extractBotCardFacts(bot, lifecycle, pendingStart) {
   const containerStatus = String(lifecycle?.containerStatus || lifecycle?.container?.status || 'missing').trim().toLowerCase()
   const heartbeatState = String(lifecycle?.heartbeatState || lifecycle?.heartbeat?.state || 'inactive').trim().toLowerCase()
   const telemetrySeq = Number(lifecycle?.telemetry?.seq || 0)
-  const warningCount = Number(lifecycle?.telemetry?.warning_count || 0)
+  const warningCount = Math.max(
+    Number(lifecycle?.telemetry?.warning_count || 0) || 0,
+    Number(bot?.runtime?.warning_count || 0) || 0,
+    Number(Array.isArray(bot?.runtime?.warnings) ? bot.runtime.warnings.length : 0) || 0,
+  )
   const projectedRunId = getBotRunId(bot)
   const runtimeRunId = String(bot?.runtime?.run_id || '').trim() || null
+  const reportStatus = String(
+    bot?.report_materialization?.status ||
+      run?.report_materialization?.status ||
+      bot?.report_status ||
+      run?.report_status ||
+      'unknown',
+  ).trim().toLowerCase()
   const failureMessage = normalizeFailureMessage(bot, lifecycle)
   const crashSummary = String(lifecycle?.crashSummary || '').trim()
   const startedAt = run?.started_at || bot?.last_run_artifact?.started_at || bot?.last_run_at || null
@@ -377,6 +388,7 @@ function extractBotCardFacts(bot, lifecycle, pendingStart) {
     containerStatus,
     heartbeatState,
     warningCount,
+    reportStatus,
     runId,
     startedAt,
     endedAt,
@@ -527,10 +539,13 @@ function resolveCardControls(bot, facts, statusKey) {
   const active = ['starting', 'running', 'degraded', 'paused'].includes(statusKey)
   const lensEligible = ['running', 'degraded', 'paused'].includes(statusKey) && Boolean(facts.runId)
   const diagnosticsEligible = ['crashed', 'failed_start'].includes(statusKey) && Boolean(facts.runId)
+  const terminal = ['completed', 'canceled', 'stopped', 'crashed', 'failed_start'].includes(statusKey)
+  const reportStatus = String(facts.reportStatus || 'unknown').toLowerCase()
 
   return {
     canOpenLens: lensEligible && rawControls.can_open_lens !== false,
-    canViewReport: Boolean(facts.runId),
+    canViewReport: terminal && Boolean(facts.runId) && reportStatus === 'ready',
+    reportStatus,
     canViewDiagnostics: diagnosticsEligible,
     canStop:
       statusKey === 'starting'
@@ -586,13 +601,18 @@ function buildCardActions(statusKey, controls, pendingStart) {
     actions.push({ key: 'delete', label: 'Delete', tone: 'ghost' })
   }
 
-  actions.push({
-    key: 'report',
-    label: 'View Report',
-    tone: 'secondary',
-    disabled: !controls.canViewReport,
-    title: controls.canViewReport ? undefined : 'No run id available.',
-  })
+  const reportStatus = String(controls.reportStatus || 'unknown').toLowerCase()
+  const reportBusy = ['building', 'preparing'].includes(reportStatus)
+  const reportFailed = reportStatus === 'failed'
+  if (!['starting', 'running', 'paused', 'degraded'].includes(statusKey)) {
+    actions.push({
+      key: 'report',
+      label: controls.canViewReport ? 'View Report' : reportBusy ? 'Report Generating...' : reportFailed ? 'Report Failed' : 'Report Unavailable',
+      tone: 'secondary',
+      disabled: !controls.canViewReport,
+      title: controls.canViewReport ? undefined : reportBusy ? 'The report artifact is still building.' : 'A terminal report artifact is not ready.',
+    })
+  }
 
   return rankBotCardActions(actions)
 }

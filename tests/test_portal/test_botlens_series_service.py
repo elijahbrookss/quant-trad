@@ -10,6 +10,7 @@ import pytest
 from portal.backend.service.bots import botlens_chart_service as chart_svc
 from portal.backend.service.bots import botlens_symbol_service as svc
 from portal.backend.service.bots.botlens_state import SymbolReadinessState
+from portal.backend.service.observability import get_observability_sink, reset_observability_sink
 
 
 def _summary_payload() -> dict:
@@ -132,6 +133,7 @@ def test_get_symbol_detail_uses_http_detail_transport_contract(monkeypatch: pyte
 
 
 def test_get_selected_symbol_bootstrap_reads_projected_snapshots_without_replay(monkeypatch: pytest.MonkeyPatch) -> None:
+    reset_observability_sink()
     projected_symbol = replace(
         svc.empty_symbol_projection_snapshot("instrument-btc|1m"),
         seq=17,
@@ -190,6 +192,171 @@ def test_get_selected_symbol_bootstrap_reads_projected_snapshots_without_replay(
     assert result["stream_session_id"] == "stream-1"
     assert result["run_live"] is True
     assert result["transport_eligible"] is True
+    metrics = get_observability_sink().snapshot()["metrics"]
+    metric_names = {metric["metric_name"] for metric in metrics}
+    assert "botlens_selected_symbol_request_ms" in metric_names
+    assert "botlens_selected_symbol_response_payload_bytes" in metric_names
+    request_metrics = [metric for metric in metrics if metric["metric_name"] == "botlens_selected_symbol_request_ms"]
+    assert request_metrics
+    assert request_metrics[0]["tags"]["pipeline_stage"] == "botlens_selected_symbol_snapshot"
+    assert request_metrics[0]["tags"]["message_kind"] == "ephemeral"
+    assert request_metrics[0]["tags"]["source_reason"] == "active_runtime"
+
+
+def test_get_selected_symbol_bootstrap_records_projection_read_cost_on_cache_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_observability_sink()
+    projected_symbol = replace(
+        svc.empty_symbol_projection_snapshot("instrument-btc|1m"),
+        seq=17,
+        readiness=SymbolReadinessState(snapshot_ready=True, symbol_live=True),
+    )
+    monkeypatch.setattr(
+        svc,
+        "_telemetry_hub",
+        lambda: _FakeTelemetryHub(
+            symbol_snapshot=None,
+            run_snapshot=SimpleNamespace(
+                seq=11,
+                symbol_catalog=SimpleNamespace(
+                    entries={
+                        "instrument-btc|1m": {
+                            "symbol_key": "instrument-btc|1m",
+                            "symbol": "BTC",
+                            "timeframe": "1m",
+                            "display_label": "BTC · 1m",
+                        }
+                    }
+                ),
+                lifecycle=SimpleNamespace(live=True),
+                health=SimpleNamespace(to_dict=lambda: {"status": "running"}),
+                readiness=SimpleNamespace(catalog_discovered=True, run_live=True),
+            ),
+            cursor={"base_seq": 23, "stream_session_id": "stream-1"},
+        ),
+    )
+    hub = svc._telemetry_hub()
+    monkeypatch.setattr(svc, "_telemetry_hub", lambda: hub)
+    monkeypatch.setattr(hub, "ensure_symbol_snapshot", lambda **kwargs: asyncio.sleep(0, result=projected_symbol))
+    monkeypatch.setattr(svc, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
+
+    result = asyncio.run(svc.get_selected_symbol_bootstrap(run_id="run-1", symbol_key="instrument-btc|1m", limit=2))
+
+    assert result["state"] == "ready"
+    metrics = get_observability_sink().snapshot()["metrics"]
+    projection_reads = [metric for metric in metrics if metric["metric_name"] == "botlens_projection_read_ms"]
+    assert projection_reads
+    assert {metric["tags"]["source_reason"] for metric in projection_reads} == {"ensure_symbol_snapshot"}
+    assert all(metric["tags"]["pipeline_stage"] == "botlens_selected_symbol_snapshot" for metric in projection_reads)
+    assert all(metric["tags"]["message_kind"] == "ephemeral" for metric in projection_reads)
+
+
+def test_get_selected_symbol_bootstrap_does_not_persist_observer_continuity_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projected_symbol = replace(
+        svc.empty_symbol_projection_snapshot("instrument-btc|1m"),
+        seq=17,
+        readiness=SymbolReadinessState(snapshot_ready=True, symbol_live=True),
+        candles=svc.SymbolCandlesState(
+            candles=(
+                {"time": "2026-04-09T10:00:00Z", "open": 1, "high": 1, "low": 1, "close": 1},
+            )
+        ),
+    )
+    monkeypatch.setattr(svc, "should_persist_observer_continuity", lambda **kwargs: False)
+    monkeypatch.setattr(
+        svc,
+        "_telemetry_hub",
+        lambda: _FakeTelemetryHub(
+            symbol_snapshot=projected_symbol,
+            run_snapshot=SimpleNamespace(
+                seq=11,
+                symbol_catalog=SimpleNamespace(
+                    entries={
+                        "instrument-btc|1m": {
+                            "symbol_key": "instrument-btc|1m",
+                            "symbol": "BTC",
+                            "timeframe": "1m",
+                            "display_label": "BTC · 1m",
+                        }
+                    }
+                ),
+                lifecycle=SimpleNamespace(live=True),
+                health=SimpleNamespace(to_dict=lambda: {"status": "running"}),
+                readiness=SimpleNamespace(catalog_discovered=True, run_live=True),
+            ),
+            cursor={"base_seq": 23, "stream_session_id": "stream-1"},
+        ),
+    )
+    monkeypatch.setattr(svc, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
+    monkeypatch.setattr(
+        svc,
+        "emit_candle_continuity_summary",
+        lambda *args, **kwargs: pytest.fail("ordinary selected-symbol reads must not durably emit observer continuity"),
+    )
+
+    result = asyncio.run(svc.get_selected_symbol_bootstrap(run_id="run-1", symbol_key="instrument-btc|1m", limit=2))
+
+    assert result["selected_symbol"]["current"]["continuity"]["candle_count"] == 1
+
+
+def test_get_selected_symbol_bootstrap_can_persist_diagnostic_continuity_in_debug_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+    projected_symbol = replace(
+        svc.empty_symbol_projection_snapshot("instrument-btc|1m"),
+        seq=17,
+        readiness=SymbolReadinessState(snapshot_ready=True, symbol_live=True),
+        candles=svc.SymbolCandlesState(
+            candles=(
+                {"time": "2026-04-09T10:00:00Z", "open": 1, "high": 1, "low": 1, "close": 1},
+            )
+        ),
+    )
+    monkeypatch.setattr(svc, "should_persist_observer_continuity", lambda **kwargs: True)
+    monkeypatch.setattr(
+        svc,
+        "_telemetry_hub",
+        lambda: _FakeTelemetryHub(
+            symbol_snapshot=projected_symbol,
+            run_snapshot=SimpleNamespace(
+                seq=11,
+                symbol_catalog=SimpleNamespace(
+                    entries={
+                        "instrument-btc|1m": {
+                            "symbol_key": "instrument-btc|1m",
+                            "symbol": "BTC",
+                            "timeframe": "1m",
+                            "display_label": "BTC · 1m",
+                        }
+                    }
+                ),
+                lifecycle=SimpleNamespace(live=True),
+                health=SimpleNamespace(to_dict=lambda: {"status": "running"}),
+                readiness=SimpleNamespace(catalog_discovered=True, run_live=True),
+            ),
+            cursor={"base_seq": 23, "stream_session_id": "stream-1"},
+        ),
+    )
+    monkeypatch.setattr(svc, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
+
+    def _emit(*args, **kwargs):
+        _ = args
+        captured.append(dict(kwargs))
+        return {}
+
+    monkeypatch.setattr(svc, "emit_candle_continuity_summary", _emit)
+
+    asyncio.run(svc.get_selected_symbol_bootstrap(run_id="run-1", symbol_key="instrument-btc|1m", limit=2))
+
+    assert captured
+    assert captured[0]["boundary_name"] == "selected_symbol_snapshot"
+    assert captured[0]["message_kind"] == "ephemeral"
+    assert captured[0]["extra"]["materiality"] == "diagnostic"
+    assert captured[0]["extra"]["diagnostic_scope"] == "botlens_observer"
 
 
 def test_get_selected_symbol_bootstrap_returns_unavailable_when_projected_symbol_state_is_missing(

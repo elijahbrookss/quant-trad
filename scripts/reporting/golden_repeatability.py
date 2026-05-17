@@ -349,22 +349,46 @@ def _decision_compare(left: Sequence[Mapping[str, Any]], right: Sequence[Mapping
     missing_ids = sorted(set(left_by_id) - set(right_by_id))
     extra_ids = sorted(set(right_by_id) - set(left_by_id))
     verdict_changes = []
+    legacy_verdict_changes = []
     for decision_id in sorted(set(left_by_id) & set(right_by_id)):
         left_row = left_by_id[decision_id]
         right_row = right_by_id[decision_id]
         left_verdict = (left_row.get("status"), left_row.get("accepted"), left_row.get("reason_code"))
         right_verdict = (right_row.get("status"), right_row.get("accepted"), right_row.get("reason_code"))
         if left_verdict != right_verdict:
-            verdict_changes.append({"decision_id": decision_id, "left": left_row, "right": right_row})
+            legacy_verdict_changes.append({"decision_id": decision_id, "left": left_row, "right": right_row})
+            verdict_changes.append(_verdict_change_row(decision_id, left_row, right_row))
     return {
         "left_count": len(left),
         "right_count": len(right),
         "missing_ids_count": len(missing_ids),
         "extra_ids_count": len(extra_ids),
+        "missing_decision_count": len(missing_ids),
+        "extra_decision_count": len(extra_ids),
         "verdict_change_count": len(verdict_changes),
+        "missing_decision_ids": missing_ids,
+        "extra_decision_ids": extra_ids,
+        "verdict_changes": verdict_changes,
         "first_missing_id": missing_ids[0] if missing_ids else None,
         "first_extra_id": extra_ids[0] if extra_ids else None,
-        "first_verdict_change": verdict_changes[0] if verdict_changes else None,
+        "first_verdict_change": legacy_verdict_changes[0] if legacy_verdict_changes else None,
+    }
+
+
+def _verdict_change_row(decision_id: str, left_row: Mapping[str, Any], right_row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "decision_id": decision_id,
+        "symbol": left_row.get("symbol") or right_row.get("symbol"),
+        "timeframe": left_row.get("timeframe") or right_row.get("timeframe"),
+        "bar_time": left_row.get("bar_time") or right_row.get("bar_time"),
+        "left_verdict": left_row.get("status"),
+        "right_verdict": right_row.get("status"),
+        "left_reason": left_row.get("reason_code"),
+        "right_reason": right_row.get("reason_code"),
+        "left_action": left_row.get("action"),
+        "right_action": right_row.get("action"),
+        "left_accepted": left_row.get("accepted"),
+        "right_accepted": right_row.get("accepted"),
     }
 
 

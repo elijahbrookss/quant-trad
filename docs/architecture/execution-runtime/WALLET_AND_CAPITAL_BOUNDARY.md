@@ -149,6 +149,13 @@ snapshot has absorbed the fill.
   and deterministic release mechanics. Runtime policy owns arbitration
   semantics: backtests wait on market progress, while current non-backtest
   fallback behavior preserves the bounded wall-clock timeout.
+- Coordinator wait attribution is operational explainability, not wallet truth.
+  Runtime may emit worker-level `decision_order_top_waits` snapshots for
+  compatibility, but consumers that need run-level attribution must use the
+  merged `decision_order_top_waits_merged` diagnostic emitted at run final.
+  That merged record preserves the top waits across workers, first blocker
+  watermark, release watermark, wait/release reason, and worker context without
+  changing release order or wallet mutation semantics.
 
 ## Invariants
 

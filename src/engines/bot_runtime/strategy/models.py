@@ -85,8 +85,12 @@ class Strategy:
     instrument_links: List[StrategyInstrumentLink]
     rules: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # rule_id -> rule dict
     template_id: Optional[str] = None
+    variant_id: Optional[str] = None
     variant_name: Optional[str] = None
     resolved_params: Dict[str, Any] = field(default_factory=dict)
+    param_source_map: Dict[str, str] = field(default_factory=dict)
+    effective_strategy_config: Dict[str, Any] = field(default_factory=dict)
+    run_strategy_snapshot: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_template(
@@ -129,6 +133,10 @@ class Strategy:
             template_id=template.template_id,
             variant_name=variant_name,
             resolved_params=dict(resolved_params),
+            param_source_map={
+                key: "base_params" if not variant_name else "variant_overrides"
+                for key in resolved_params
+            },
         )
 
     @property
@@ -188,8 +196,17 @@ class Strategy:
         }
         if self.template_id is not None:
             payload["template_id"] = self.template_id
+        if self.variant_id is not None:
+            payload["variant_id"] = self.variant_id
         if self.variant_name is not None:
             payload["variant_name"] = self.variant_name
         if self.resolved_params:
             payload["resolved_params"] = deepcopy(self.resolved_params)
+            payload["effective_params"] = deepcopy(self.resolved_params)
+        if self.param_source_map:
+            payload["param_source_map"] = deepcopy(self.param_source_map)
+        if self.effective_strategy_config:
+            payload["effective_strategy_config"] = deepcopy(self.effective_strategy_config)
+        if self.run_strategy_snapshot:
+            payload["run_strategy_snapshot"] = deepcopy(self.run_strategy_snapshot)
         return payload

@@ -9,9 +9,23 @@ from core.candle_continuity import (
     expected_interval_seconds,
     summarize_candle_continuity,
 )
+from core.settings import get_settings
 
 from ..observability import BackendObserver
 from .botlens_contract import FACT_TYPE_CANDLE_UPSERTED, normalize_series_key
+
+_OBSERVER_CONTINUITY_BOUNDARIES = frozenset(
+    {
+        "selected_symbol_snapshot",
+        "run_bootstrap_selected_symbol",
+    }
+)
+_OBSERVER_CONTINUITY_STAGES = frozenset(
+    {
+        "botlens_selected_symbol_snapshot",
+        "botlens_run_bootstrap_snapshot",
+    }
+)
 
 
 def _timeframe_from_series_key(series_key: Any) -> Optional[str]:
@@ -110,6 +124,25 @@ def continuity_summary_from_runtime_event_rows(
         source_reason=source_reason,
         gap_classification=gap_classification,
     )
+
+
+def should_persist_observer_continuity(
+    *,
+    stage: Any = None,
+    boundary_name: Any = None,
+    message_kind: Any = None,
+) -> bool:
+    stage_name = str(stage or "").strip().lower()
+    boundary = str(boundary_name or stage_name).strip().lower()
+    kind = str(message_kind or "").strip().lower()
+    observer_fact = (
+        boundary in _OBSERVER_CONTINUITY_BOUNDARIES
+        or stage_name in _OBSERVER_CONTINUITY_STAGES
+        or kind == "ephemeral"
+    )
+    if not observer_fact:
+        return True
+    return bool(get_settings().bot_runtime.botlens.persist_observer_continuity)
 
 
 def emit_candle_continuity_summary(
@@ -256,4 +289,5 @@ __all__ = [
     "continuity_summary_from_fact_payload",
     "continuity_summary_from_runtime_event_rows",
     "emit_candle_continuity_summary",
+    "should_persist_observer_continuity",
 ]

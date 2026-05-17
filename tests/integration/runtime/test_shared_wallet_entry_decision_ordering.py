@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+import multiprocessing as mp
 from typing import Callable, Dict, List, Mapping, Optional
 
 import pytest
@@ -23,6 +24,10 @@ def _proxy(expected_count: int) -> Dict[str, object]:
         "decision_order_state": {},
         "decision_order_participants": {},
         "decision_order_expected_count": expected_count,
+        "decision_order_wait_top": [],
+        "decision_order_wait_control": {},
+        "decision_order_wait_total_ms": 0.0,
+        "decision_order_wait_record_count": 0.0,
     }
 
 
@@ -159,6 +164,222 @@ def _missing_participants(proxy: Mapping[str, object], bar_key: str) -> str:
     state = state_store.get(bar_key) or {}
     assert isinstance(state, Mapping)
     return "".join(str(participant) for participant in state.get("missing_participants") or [])
+
+
+def test_candidate_ticket_records_wait_pressure_without_changing_release_semantics() -> None:
+    proxy = _proxy(expected_count=2)
+    coordinator = _backtest_coordinator(proxy, timeout_seconds=2.0)
+    bip = _participant("BIP", next_bar_time=BAR_TIME)
+    etp = _participant("ETP", next_bar_time=BAR_TIME)
+    coordinator.register_participant(bip)
+    coordinator.register_participant(etp)
+    tickets = []
+    errors: List[BaseException] = []
+
+    def _run_waiting_candidate() -> None:
+        try:
+            ticket = coordinator.arrive_and_wait_turn(
+                participant=etp,
+                bar={"bar_time": BAR_TIME, "timeframe": "1h"},
+                candidate=_candidate("ETP"),
+            )
+            tickets.append(ticket)
+            coordinator.complete_candidate(ticket, outcome="accepted")
+            coordinator.wait_until_complete(ticket)
+        except BaseException as exc:  # noqa: BLE001 - tests need to re-raise thread failures.
+            errors.append(exc)
+
+    thread = threading.Thread(target=_run_waiting_candidate)
+    thread.start()
+    time.sleep(0.02)
+    coordinator.update_participant_bar_state(
+        {
+            **bip,
+            "next_bar_time": "2026-01-14T05:00:00Z",
+        }
+    )
+
+    _join([thread], errors)
+
+    assert tickets
+    summary = dict(tickets[0].wait_summary)
+    assert summary["outcome"] == "release"
+    assert summary["release_count"] == 1
+    assert summary["fail_count"] == 0
+    assert summary["wait_count"] == 1
+    assert summary["wait_poll_count"] >= 1
+    assert summary["max_blocking_participant_count"] >= 1
+    assert summary["candidate_symbol"] == "ETP"
+    assert summary["candidate_timeframe"] == "1h"
+    assert summary["candidate_bar_time"] == BAR_TIME
+    assert summary["policy_name"] == "backtest_shared_wallet_arbitration"
+    assert summary["wait_reason"] == "backtest_waiting_for_market_progress"
+    assert summary["release_reason"] == "candidate_has_active_turn"
+    diagnostic = dict(summary["wait_diagnostic"])
+    assert diagnostic["materiality"] == "diagnostic"
+    assert diagnostic["diagnostic_scope"] == "coordinator_wait_attribution"
+    assert diagnostic["final_action"] == "released"
+    assert diagnostic["candidate_symbol"] == "ETP"
+    assert diagnostic["candidate_timeframe"] == "1h"
+    assert diagnostic["candidate_bar_time"] == BAR_TIME
+    assert diagnostic["wait_reason"] == "backtest_waiting_for_market_progress"
+    assert diagnostic["release_reason"] == "candidate_has_active_turn"
+    assert diagnostic["wait_elapsed_ms"] >= 1
+    assert diagnostic["wait_poll_count"] >= 1
+    assert diagnostic["blocking_participant_count"] == 1
+    blockers = list(diagnostic["blocking_participants"])
+    assert len(blockers) == 1
+    assert blockers[0]["participant_symbol"] == "BIP"
+    assert blockers[0]["participant_timeframe"] == "1h"
+    assert blockers[0]["next_bar_time"] == BAR_TIME
+    assert blockers[0]["next_bar_epoch"] is not None
+    assert blockers[0]["first_next_bar_time"] == BAR_TIME
+    assert blockers[0]["first_status"] == "active"
+    assert blockers[0]["release_next_bar_time"] == "2026-01-14T05:00:00Z"
+    assert blockers[0]["release_context"]["next_bar_time"] == "2026-01-14T05:00:00Z"
+    assert diagnostic["wait_started_at"]
+    assert diagnostic["wait_ended_at"]
+    top_waits = list(coordinator.top_wait_diagnostics())
+    assert len(top_waits) == 1
+    assert top_waits[0]["candidate_symbol"] == "ETP"
+    assert top_waits[0]["blocking_participants"][0]["participant_symbol"] == "BIP"
+
+
+def test_merged_top_waits_include_true_longest_wait_across_workers() -> None:
+    proxy = _proxy(expected_count=3)
+    proxy["decision_order_wait_top_n"] = 2
+    coordinator_a = _backtest_coordinator(proxy, timeout_seconds=2.0)
+    coordinator_b = _backtest_coordinator(proxy, timeout_seconds=2.0)
+    coordinator_c = _backtest_coordinator(proxy, timeout_seconds=2.0)
+    for participant in (
+        {**_participant("BIP"), "worker_id": "worker-a"},
+        {**_participant("ETP"), "worker_id": "worker-b"},
+        {**_participant("XPP"), "worker_id": "worker-c"},
+    ):
+        coordinator_a.register_participant(participant)
+
+    with proxy["lock"]:
+        coordinator_a._record_wait_diagnostic_locked(  # noqa: SLF001 - regression targets diagnostic retention.
+            {
+                "materiality": "diagnostic",
+                "diagnostic_scope": "coordinator_wait_attribution",
+                "candidate_symbol": "BIP",
+                "candidate_timeframe": "1h",
+                "candidate_bar_time": "2026-01-01T00:00:00Z",
+                "wait_elapsed_ms": 50,
+                "wait_count": 1,
+                "wait_poll_count": 5,
+                "final_action": "released",
+                "release_reason": "candidate_has_active_turn",
+                "worker_id": "worker-a",
+            }
+        )
+        coordinator_b._record_wait_diagnostic_locked(  # noqa: SLF001
+            {
+                "materiality": "diagnostic",
+                "diagnostic_scope": "coordinator_wait_attribution",
+                "candidate_symbol": "XPP",
+                "candidate_timeframe": "1h",
+                "candidate_bar_time": "2026-02-15T00:00:00Z",
+                "wait_elapsed_ms": 219000,
+                "wait_count": 1,
+                "wait_poll_count": 4800,
+                "final_action": "released",
+                "release_reason": "candidate_has_active_turn",
+                "worker_id": "worker-b",
+            }
+        )
+        coordinator_c._record_wait_diagnostic_locked(  # noqa: SLF001
+            {
+                "materiality": "diagnostic",
+                "diagnostic_scope": "coordinator_wait_attribution",
+                "candidate_symbol": "ETP",
+                "candidate_timeframe": "1h",
+                "candidate_bar_time": "2026-01-13T16:00:00Z",
+                "wait_elapsed_ms": 26000,
+                "wait_count": 1,
+                "wait_poll_count": 540,
+                "final_action": "released",
+                "release_reason": "candidate_has_active_turn",
+                "worker_id": "worker-c",
+            }
+        )
+
+    for participant in (
+        {**_participant("BIP"), "worker_id": "worker-a"},
+        {**_participant("ETP"), "worker_id": "worker-b"},
+        {**_participant("XPP"), "worker_id": "worker-c"},
+    ):
+        coordinator_a.mark_participant_complete(participant)
+
+    latest_worker_snapshot = [
+        item for item in coordinator_a.top_wait_diagnostics() if item.get("worker_id") == "worker-a"
+    ]
+    assert latest_worker_snapshot == []
+
+    merged = coordinator_a.claim_merged_wait_diagnostics()
+    assert merged is not None
+    assert merged["aggregation_level"] == "run"
+    assert merged["materiality"] == "diagnostic"
+    assert merged["source_reason"] == "run_final"
+    assert merged["top_n"] == 2
+    assert merged["total_wait_count"] == 3.0
+    assert merged["total_wait_ms"] == 245050.0
+    assert merged["workers_included"] == ["worker-a", "worker-b", "worker-c"]
+    assert merged["top_wait_workers_included"] == ["worker-b", "worker-c"]
+    waits = list(merged["top_waits"])
+    assert [item["candidate_symbol"] for item in waits] == ["XPP", "ETP"]
+    assert [item["wait_elapsed_ms"] for item in waits] == [219000, 26000]
+    assert [item["diagnostic_rank"] for item in waits] == [1, 2]
+    assert coordinator_b.claim_merged_wait_diagnostics() is None
+
+
+def test_top_waits_are_shared_when_worker_config_copies_proxy_mapping() -> None:
+    with mp.Manager() as manager:
+        shared_proxy = {
+            "lock": manager.RLock(),
+            "decision_order_state": manager.dict(),
+            "decision_order_participants": manager.dict(),
+            "decision_order_expected_count": 2,
+            "decision_order_wait_top": manager.list(),
+            "decision_order_wait_control": manager.dict(),
+            "decision_order_wait_total_ms": manager.Value("d", 0.0),
+            "decision_order_wait_record_count": manager.Value("i", 0),
+        }
+        coordinator_a = _backtest_coordinator(dict(shared_proxy), timeout_seconds=2.0)
+        coordinator_b = _backtest_coordinator(dict(shared_proxy), timeout_seconds=2.0)
+        coordinator_a.register_participant({**_participant("BIP"), "worker_id": "worker-a"})
+        coordinator_b.register_participant({**_participant("XPP"), "worker_id": "worker-b"})
+
+        with shared_proxy["lock"]:
+            coordinator_a._record_wait_diagnostic_locked(  # noqa: SLF001 - simulates worker-local terminal snapshot.
+                {
+                    "materiality": "diagnostic",
+                    "diagnostic_scope": "coordinator_wait_attribution",
+                    "candidate_symbol": "BIP",
+                    "wait_elapsed_ms": 100,
+                    "wait_count": 1,
+                    "wait_poll_count": 10,
+                    "final_action": "released",
+                    "worker_id": "worker-a",
+                }
+            )
+            coordinator_b._record_wait_diagnostic_locked(  # noqa: SLF001
+                {
+                    "materiality": "diagnostic",
+                    "diagnostic_scope": "coordinator_wait_attribution",
+                    "candidate_symbol": "XPP",
+                    "wait_elapsed_ms": 500,
+                    "wait_count": 1,
+                    "wait_poll_count": 50,
+                    "final_action": "released",
+                    "worker_id": "worker-b",
+                }
+            )
+
+        top_waits = list(coordinator_a.top_wait_diagnostics())
+        assert [item["candidate_symbol"] for item in top_waits[:2]] == ["XPP", "BIP"]
+        assert shared_proxy["decision_order_wait_record_count"].value == 2
 
 
 def test_delayed_same_bar_candidate_releases_in_deterministic_order() -> None:
@@ -655,6 +876,17 @@ def test_default_arbitration_policy_preserves_turn_timeout() -> None:
     assert diagnostics["arbitration_policy"] == "wall_clock_shared_wallet_arbitration"
     assert diagnostics["policy_action"] == "fail"
     assert diagnostics["wait_decision_reason"] == "wall_clock_turn_timeout"
+    wait_diagnostic = diagnostics["wait_diagnostic"]
+    assert wait_diagnostic["materiality"] == "diagnostic"
+    assert wait_diagnostic["final_action"] == "failed"
+    assert wait_diagnostic["candidate_symbol"] == "XPP"
+    assert wait_diagnostic["wait_reason"] == "wall_clock_waiting_for_candidate_turn"
+    assert wait_diagnostic["failure_reason"] == "wall_clock_turn_timeout"
+    assert wait_diagnostic["blocking_participants"][0]["participant_symbol"] == "BIP"
+    top_waits = list(coordinator.top_wait_diagnostics())
+    assert len(top_waits) == 1
+    assert top_waits[0]["final_action"] == "failed"
+    assert top_waits[0]["candidate_symbol"] == "XPP"
 
 
 def test_far_ahead_backtest_candidate_waits_for_lagging_symbols() -> None:

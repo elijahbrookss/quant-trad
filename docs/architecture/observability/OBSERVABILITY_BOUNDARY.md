@@ -15,6 +15,7 @@ code_paths:
   - portal/backend/service/observability.py
   - portal/backend/service/observability_exporter.py
   - portal/backend/service/bots/container_runtime_telemetry.py
+  - portal/backend/service/bots/botlens_candle_continuity.py
   - portal/backend/service/bots/botlens_run_stream.py
   - src/engines/bot_runtime/runtime/components/overlay_delta.py
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
@@ -50,6 +51,14 @@ It cannot answer by itself:
 - whether PnL is correct,
 - whether a decision was valid,
 - what wallet truth is.
+- whether a run is golden-certified or research-valid.
+
+Observability rows are not certification evidence unless a material runtime or
+reporting boundary explicitly promotes the same fact into canonical evidence.
+BotLens-selected-symbol, bootstrap, viewer, and debug rows are diagnostic by
+default. They may explain what an observer saw, but they must not change
+`data_snapshot_hash`, semantic fingerprints, golden certification, lifecycle
+truth, wallet/order/trade facts, or research-valid status.
 
 ## Diagram Walkthrough
 
@@ -116,6 +125,9 @@ complete database pressure signal.
 - projection failures,
 - continuity summaries,
 - lifecycle and startup timing.
+- coordinator wait attribution such as `decision_order_top_waits_merged`,
+  which explains shared-wallet market-progress waits but is not material
+  wallet/order/trade evidence.
 
 ## What Does Not Belong Here
 
@@ -129,6 +141,8 @@ complete database pressure signal.
 
 - Observability drop/overflow must itself be visible.
 - Missing observability weakens debugging but must not alter execution results.
+- Missing observability must not be repaired by certifying from viewer/debug
+  facts. Reports should fail loudly when canonical evidence is missing.
 - Runtime fallbacks should emit WARN-level or metric diagnostics with enough context to investigate.
 - Dashboard gaps should point back to missing instrumentation or storage, not hidden execution semantics.
 
@@ -139,6 +153,9 @@ complete database pressure signal.
 - Observability is designed for traceability from QuantLab to strategy to bot to trade to playback.
 - Durable observability rows must be bounded enough that observing pressure does
   not become the pressure source.
+- Future MCP inspection/debug calls are observationally safe by default: pure
+  reads must not create material evidence, and optional diagnostic writes remain
+  non-material and best-effort.
 
 ## Related Docs
 

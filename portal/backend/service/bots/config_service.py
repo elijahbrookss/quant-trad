@@ -13,7 +13,15 @@ from engines.bot_runtime.runtime.components.runtime_policy import ExecutionMode
 from .strategy_loader import StrategyLoader
 from .startup_validation import validate_wallet_config as normalize_wallet_config
 from ..market import instrument_service
-from ..storage.storage import delete_bot, get_strategy_variant, load_bots, load_strategies, upsert_bot
+from ..storage.storage import (
+    delete_bot,
+    get_strategy_variant,
+    list_strategy_variants,
+    load_bots,
+    load_strategies,
+    upsert_bot,
+)
+from ..strategy_variant_resolution import EffectiveStrategyConfig, resolve_strategy_variant
 from risk import normalise_risk_config
 
 _DERIVATIVE_TYPES = {"perp", "perps", "swap", "future", "futures", "derivative", "derivatives"}
@@ -38,6 +46,23 @@ class BotConfigService:
         variant_atm_template_id = str(variant.get("atm_template_id") or "").strip() if isinstance(variant, Mapping) else ""
         return variant_atm_template_id or str(strategy_atm_template_id or "").strip() or None
 
+    @staticmethod
+    def _resolve_effective_strategy_config(
+        strategy: Any,
+        variant: Optional[Mapping[str, object]],
+        *,
+        bot_overrides: Optional[Mapping[str, Any]] = None,
+    ) -> EffectiveStrategyConfig:
+        strategy_id = str(getattr(strategy, "id", "") or "").strip()
+        variants = list_strategy_variants(strategy_id) if strategy_id else []
+        default_variant = next((item for item in variants if bool(item.get("is_default", False))), None)
+        return resolve_strategy_variant(
+            strategy,
+            variant,
+            default_variant=default_variant,
+            bot_overrides=bot_overrides,
+        )
+
     def list_bots(self) -> List[Dict[str, object]]:
         bots = load_bots()
         for bot in bots:
@@ -59,7 +84,17 @@ class BotConfigService:
         strategy = StrategyLoader.fetch_strategy(strategy_id)
         variant_id = str(payload.get("strategy_variant_id") or "").strip() or None
         variant = self._resolve_variant(strategy_id, variant_id)
-        effective_atm_template_id = self._resolve_effective_atm_template_id(strategy.atm_template_id, variant)
+        legacy_bot_overrides = self.validate_resolved_params(payload.get("resolved_params")) if variant is None else {}
+        effective_strategy_config = self._resolve_effective_strategy_config(
+            strategy,
+            variant,
+            bot_overrides=legacy_bot_overrides,
+        )
+        variant_name = (
+            str(variant.get("name") or "").strip()
+            if isinstance(variant, Mapping)
+            else str(payload.get("strategy_variant_name") or "").strip()
+        ) or None
         risk_config_payload = (
             payload.get("risk_config") if isinstance(payload.get("risk_config"), Mapping) else strategy.risk_config
         )
@@ -76,9 +111,9 @@ class BotConfigService:
             "name": name,
             "strategy_id": strategy_id,
             "strategy_variant_id": str(payload.get("strategy_variant_id") or "").strip() or None,
-            "strategy_variant_name": str(payload.get("strategy_variant_name") or "").strip() or None,
-            "atm_template_id": effective_atm_template_id,
-            "resolved_params": self.validate_resolved_params(payload.get("resolved_params")),
+            "strategy_variant_name": variant_name,
+            "atm_template_id": effective_strategy_config.effective_atm_template_id,
+            "resolved_params": effective_strategy_config.effective_params,
             "risk_config": normalise_risk_config(risk_config_payload),
             "timeframe": None,
             "mode": (payload.get("mode") or "instant").lower(),
@@ -162,7 +197,19 @@ class BotConfigService:
         record["strategy_id"] = strategy_id
         strategy = StrategyLoader.fetch_strategy(strategy_id)
         variant = self._resolve_variant(strategy_id, record.get("strategy_variant_id"))
-        record["atm_template_id"] = self._resolve_effective_atm_template_id(strategy.atm_template_id, variant)
+        legacy_bot_overrides = self.validate_resolved_params(record.get("resolved_params")) if variant is None else {}
+        effective_strategy_config = self._resolve_effective_strategy_config(
+            strategy,
+            variant,
+            bot_overrides=legacy_bot_overrides,
+        )
+        record["strategy_variant_name"] = (
+            str(variant.get("name") or "").strip()
+            if isinstance(variant, Mapping)
+            else str(record.get("strategy_variant_name") or "").strip()
+        ) or None
+        record["atm_template_id"] = effective_strategy_config.effective_atm_template_id
+        record["resolved_params"] = effective_strategy_config.effective_params
         self.validate_backtest_window(record)
         upsert_bot(record)
         return record
@@ -527,6 +574,8 @@ class BotConfigService:
             "strategy": strategy,
             "wallet_config": wallet_config,
             "symbols": symbols,
+            "run_strategy_snapshot": dict(getattr(strategy, "run_strategy_snapshot", {}) or {}),
+            "effective_strategy_config": dict(getattr(strategy, "effective_strategy_config", {}) or {}),
             "runtime_readiness": {
                 "datasource": strategy.datasource,
                 "exchange": strategy.exchange,

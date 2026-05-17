@@ -12,6 +12,7 @@ from sqlalchemy.orm import sessionmaker
 from portal.backend.db.models import (
     ATMTemplateRecord,
     Base,
+    StrategyIndicatorLink,
     StrategyInstrumentLink,
     StrategyRecord,
     StrategyRuleRecord,
@@ -26,7 +27,17 @@ class _SqliteDb:
 
     def __init__(self) -> None:
         self._engine = create_engine("sqlite:///:memory:")
-        Base.metadata.create_all(self._engine)
+        Base.metadata.create_all(
+            self._engine,
+            tables=[
+                ATMTemplateRecord.__table__,
+                StrategyRecord.__table__,
+                StrategyVariantRecord.__table__,
+                StrategyIndicatorLink.__table__,
+                StrategyInstrumentLink.__table__,
+                StrategyRuleRecord.__table__,
+            ],
+        )
         self._session_factory = sessionmaker(
             bind=self._engine,
             expire_on_commit=False,
@@ -83,6 +94,15 @@ def test_strategy_loader_materializes_variant_atm_and_risk_config_without_bot_at
                     risk_config={"base_risk_per_trade": 100.0, "global_risk_multiplier": 1.0},
                 ),
                 StrategyVariantRecord(
+                    id="variant-default",
+                    strategy_id="strategy-1",
+                    name="default",
+                    description=None,
+                    param_overrides={"risk_multiple": 1.0},
+                    atm_template_id=None,
+                    is_default=True,
+                ),
+                StrategyVariantRecord(
                     id="variant-1",
                     strategy_id="strategy-1",
                     name="aggressive",
@@ -127,7 +147,6 @@ def test_strategy_loader_materializes_variant_atm_and_risk_config_without_bot_at
         {
             "strategy_variant_id": "variant-1",
             "strategy_variant_name": "aggressive",
-            "resolved_params": {"conviction_min": 0.55},
             "atm_template_id": "atm-bot-override-should-be-ignored",
             "risk_config": {"base_risk_per_trade": 250.0, "global_risk_multiplier": 1.2},
         },
@@ -135,8 +154,14 @@ def test_strategy_loader_materializes_variant_atm_and_risk_config_without_bot_at
 
     assert strategy.atm_template_id == "atm-variant"
     assert strategy.atm_template["name"] == "Variant ATM"
+    assert strategy.variant_id == "variant-1"
     assert strategy.variant_name == "aggressive"
-    assert strategy.resolved_params == {"conviction_min": 0.55}
+    assert strategy.resolved_params == {"risk_multiple": 1.0, "conviction_min": 0.55}
+    assert strategy.param_source_map == {
+        "risk_multiple": "default_variant",
+        "conviction_min": "variant_overrides",
+    }
+    assert strategy.run_strategy_snapshot["variant_id"] == "variant-1"
     assert strategy.risk_config == normalise_risk_config(
         {"base_risk_per_trade": 250.0, "global_risk_multiplier": 1.2}
     )

@@ -103,6 +103,7 @@ bot_runtime:
     max_warnings: 120
     ring_size: 8192
     ingest_queue_max: 4096
+    persist_observer_continuity: false
   step_trace:
     queue_max: 8192
     batch_size: 512

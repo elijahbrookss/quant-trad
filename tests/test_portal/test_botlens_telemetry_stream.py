@@ -785,6 +785,64 @@ class TestRunProjectorSymbolNotification:
 
         asyncio.run(scenario())
 
+    def test_symbol_notification_publishes_runtime_summary_for_card_metrics(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def scenario() -> None:
+            import portal.backend.service.bots.bot_service as bot_service
+
+            published: list[tuple[str, dict[str, Any]]] = []
+            monkeypatch.setattr(
+                bot_service,
+                "publish_runtime_update",
+                lambda bot_id, runtime: published.append((bot_id, dict(runtime))),
+            )
+            monkeypatch.setattr(run_mod, "load_domain_projection_batches", lambda **_kwargs: ())
+
+            async def _to_thread_inline(func, *args, **kwargs):
+                return func(*args, **kwargs)
+
+            monkeypatch.setattr(run_mod.asyncio, "to_thread", _to_thread_inline)
+            projector, _fanout_channel = self._make_run_projector()
+            await projector._load_initial_state()
+
+            await projector._process_symbol_notification(self._make_notification(seq=1))
+            published.clear()
+
+            await projector._process_symbol_notification(
+                self._make_notification(
+                    seq=2,
+                    trade_upserts=[
+                        {
+                            "trade_id": "t-1",
+                            "symbol_key": "instrument-btc|1m",
+                            "status": "open",
+                        }
+                    ],
+                )
+            )
+
+            assert published
+            bot_id, payload = published[-1]
+            assert bot_id == "bot-1"
+            assert payload["run_id"] == "run-1"
+            assert payload["open_trade_count"] == 1
+            assert payload["trade_count"] == 1
+            assert payload["stats"]["total_trades"] == 1
+
+            published.clear()
+            stats_notification = self._make_notification(seq=3)
+            stats_notification.symbol_summary["stats"] = {"total_trades": 3, "net_pnl": 7.5}
+            await projector._process_symbol_notification(stats_notification)
+
+            assert published
+            assert published[-1][1]["open_trade_count"] == 1
+            assert published[-1][1]["stats"]["total_trades"] == 3
+            assert published[-1][1]["stats"]["net_pnl"] == 7.5
+
+        asyncio.run(scenario())
+
     def test_stale_symbol_notification_does_not_reopen_closed_trade(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
             projector, fanout_channel = self._make_run_projector()

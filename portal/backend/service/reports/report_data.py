@@ -40,6 +40,48 @@ def get_run(run_id: str) -> Optional[Dict[str, Any]]:
     return storage.get_bot_run(run_id)
 
 
+def get_report_materialization_status(run_id: str) -> Dict[str, Any]:
+    return storage.get_report_materialization_status(run_id)
+
+
+def get_materialized_run_report(run_id: str) -> Optional[Dict[str, Any]]:
+    return storage.get_materialized_run_report(run_id)
+
+
+def claim_report_materialization_build(
+    run_id: str,
+    *,
+    cache_key: Optional[str] = None,
+    force: bool = False,
+) -> tuple[Dict[str, Any], bool, bool]:
+    return storage.claim_report_materialization_build(run_id, cache_key=cache_key, force=force)
+
+
+def store_materialized_run_report(
+    run_id: str,
+    payload: Mapping[str, Any],
+    *,
+    cache_key: Optional[str] = None,
+    duration_ms: Optional[float] = None,
+) -> Dict[str, Any]:
+    return storage.store_materialized_run_report(run_id, payload, cache_key=cache_key, duration_ms=duration_ms)
+
+
+def mark_report_materialization_failed(
+    run_id: str,
+    *,
+    error: str,
+    cache_key: Optional[str] = None,
+    duration_ms: Optional[float] = None,
+) -> Dict[str, Any]:
+    return storage.mark_report_materialization_failed(
+        run_id,
+        error=error,
+        cache_key=cache_key,
+        duration_ms=duration_ms,
+    )
+
+
 def _runtime_decision_entry_from_event(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
     event = runtime_event_from_dict(payload)
@@ -203,6 +245,23 @@ def list_decision_ledger(run_id: str) -> List[Dict[str, Any]]:
         if projected is not None:
             ledger.append(projected)
     return ledger
+
+
+def list_observability_events(run_id: str, *, limit: int = 2000) -> List[Dict[str, Any]]:
+    """Return operational observability rows for report diagnostics.
+
+    Observability rows are diagnostic-only. Callers must not treat them as
+    canonical report identity unless a later contract explicitly promotes them.
+    """
+
+    list_events = getattr(storage, "list_observability_events", None)
+    if not callable(list_events):
+        return []
+    try:
+        return [dict(row) for row in list_events(run_id=run_id, limit=limit)]
+    except TypeError:
+        rows = list_events(limit=limit)
+        return [dict(row) for row in rows if str(row.get("run_id") or "") == str(run_id)]
 
 
 def summarize_decision_ledger(ledger: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
@@ -413,10 +472,16 @@ __all__ = [
     "find_instrument",
     "get_run",
     "get_result_readiness",
+    "get_materialized_run_report",
+    "get_report_materialization_status",
+    "claim_report_materialization_build",
     "list_decision_ledger",
+    "list_observability_events",
     "list_run_events",
     "list_runs",
     "list_trade_events_for_trades",
     "list_trades_for_run",
+    "mark_report_materialization_failed",
+    "store_materialized_run_report",
     "summarize_decision_ledger",
 ]

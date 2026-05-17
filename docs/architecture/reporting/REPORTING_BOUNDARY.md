@@ -13,6 +13,9 @@ tags:
 code_paths:
   - portal/backend/service/reports
   - portal/backend/controller/reports.py
+  - portal/backend/service/reports/comparison.py
+  - portal/backend/service/reports/golden_evidence.py
+  - portal/backend/service/storage/repos/report_materializations.py
   - portal/backend/service/storage/repos/candles.py
   - portal/backend/service/storage/repos/runtime_events.py
   - docs/architecture/reporting/diagrams/run-research-dataset-flow.mmd
@@ -28,6 +31,30 @@ Related diagram: [run-research-dataset-flow.mmd](diagrams/run-research-dataset-f
 ## Boundary Contract
 
 Reports are views. `RunResearchDataset v1` is the canonical run-level data product. Export bundles are generated from the dataset and are not comparison truth.
+
+`RunReportDTO v2` is the typed single-run report contract for frontend and
+future MCP consumers. It wraps canonical dataset facts into research-trust and
+research-performance sections while keeping raw rows available only as
+referenced/debug data.
+
+Terminal report artifacts are materialized separately from run lifecycle truth.
+When a run reaches a terminal status, the backend may enqueue a
+`RunReportDTO v2` build and persist the artifact/status in
+`portal_report_materializations_v1`. Report states (`not_started`, `building`,
+`ready`, `failed`, `stale`) do not alter run terminal status; report build
+failure is a reporting condition, not a runtime failure.
+
+Paired run-report comparison reads ready `RunReportDTO v2` artifacts from
+`portal_report_materializations_v1`. It returns structured blockers for
+non-terminal, missing, building, failed, or stale report artifacts and does not
+enqueue cold report builds by default. Semantic, performance, behavior, wallet,
+symbol, coordinator-wait, and operational drift deltas are derived from the
+materialized report contracts. When an existing golden repeatability
+`comparison_summary*.json` artifact is available for the pair, comparison may
+include it as read-only evidence for decision equality, verdict changes, trade
+lifecycle equality, wallet/order checks, runtime ordering, and first semantic
+divergence. The comparison API must not generate golden artifacts unless a
+future explicit build path is requested.
 
 Reporting does not mutate strategy, execution, fee, wallet, trade, or BotLens semantics.
 
@@ -51,6 +78,13 @@ The dataset is rebuildable from durable DB/read-model truth:
 - observability events for normalized report diagnostics.
 - the reporting candle service for bounded candle windows when requested.
 
+Run configuration metadata preserves strategy variant provenance when available.
+`run_strategy_snapshot` records the exact effective strategy configuration at run
+start, including `effective_params`, `variant_overrides`, `base_params`, and
+`param_source_map`. Reports expose this as provenance only. Reporting must not
+re-resolve variants from mutable strategy storage or let provenance enrichment
+change evaluator or execution behavior.
+
 Decision-boundary indicator and market-state context comes from compact typed
 runtime output snapshots embedded in selected decision artifacts. `observed_outputs`
 captures the current signal, context, and metric outputs from the same indicator
@@ -62,6 +96,25 @@ Computed portfolio metrics are part of reporting truth. Standard values such as
 Sharpe, Sortino, Calmar, annualized volatility, drawdown duration, and exposure
 are derived by the reporting layer from closed trades and the simulated run
 window, with raw trades retained for audit and independent recompute.
+
+Trade rows may include report-only lifecycle enrichment such as entry stop
+distance, entry R, persisted runtime MAE/MFE, bounded candle-derived excursion,
+per-leg excursion, and intrabar fallback flags. These fields are downstream
+research evidence only. They must not mutate order fills, wallet accounting,
+fee/slippage semantics, stop/target behavior, or trade lifecycle truth. When
+bounded candle evidence is missing or truncated, reporting marks the enrichment
+unavailable or caveated instead of inferring hidden intrabar state.
+
+Signal rows may expose `indicator_context` extracted from the typed runtime
+outputs embedded in the selected decision artifact. Indicator-owned signal event
+metadata, such as breakout timing, confirmation counters, value-area references,
+and distance-from-reference values, remains part of indicator output context;
+reporting must not add strategy-specific signal fields that reinterpret an
+indicator's private state.
+
+Display-facing metrics must use `MetricValueDTO` validity metadata. Consumers
+must render `invalid`, `not_available`, or `not_computed` states instead of
+inventing values or silently treating missing ratios as zero.
 
 ## Readiness Vocabulary
 
@@ -120,6 +173,17 @@ events show as closed. Queue overflow and projector failure remain
 golden-blocking until a later reconciliation/replay event proves the projection
 was rebuilt from canonical runtime events.
 
+Material report and golden identity run in strict canonical-input mode. Candle
+continuity evidence is material only when it is terminal `run_final` continuity
+evidence. Observer/debug facts such as `selected_symbol_snapshot`,
+`run_bootstrap_selected_symbol`, `message_kind=ephemeral`, viewer-triggered
+continuity rows, and non-terminal bootstrap snapshots stay operational
+diagnostics. They must not feed `data_snapshot_hash`, semantic fingerprints,
+golden certification, or research-valid status. If terminal `run_final`
+continuity evidence is absent, reporting blocks certification with
+`missing_canonical_continuity_evidence` instead of silently certifying from
+observer facts.
+
 ## Outputs
 
 - report API payloads,
@@ -147,7 +211,10 @@ was rebuilt from canonical runtime events.
 ## Invariants
 
 - Reporting is downstream of runtime truth.
-- Compare uses canonical dataset readiness, not ad hoc report-file existence.
+- Legacy dataset compare uses canonical dataset readiness, not ad hoc
+  report-file existence. Materialized run-report compare additionally requires
+  both `RunReportDTO v2` artifacts to be `ready` so the comparison UI can use
+  the same artifact truth source as single-run reports.
 - Standard computed metrics are exposed by the dataset; consumers should not need
   private formula implementations for normal report views.
 - Narrative summaries are bounded views over dataset facts.
@@ -156,12 +223,18 @@ was rebuilt from canonical runtime events.
   identity. Reporting must not cross-join symbols and instruments from metadata
   arrays.
 - Candle catalog counts, gaps, missing values, and continuity status come from
-  candle storage facts when storage is available; compact continuity summaries
-  supply classification and first-gap evidence. If a compact continuity summary
-  lost provider classification, reporting may reclassify unknown gaps from
-  `portal_candle_closures` evidence for the same instrument/timeframe/window.
-  Unknown continuity is a data quality caveat, and unclassified/runtime/
-  projection/ingestion gaps block golden readiness.
+  candle storage facts when storage is available; terminal `run_final` compact
+  continuity summaries supply classification and first-gap evidence. If a
+  compact continuity summary lost provider classification, reporting may
+  reclassify unknown gaps from `portal_candle_closures` evidence for the same
+  instrument/timeframe/window. Unknown continuity is a data quality caveat, and
+  unclassified/runtime/projection/ingestion gaps block golden readiness.
+- Headless research runs must emit canonical `run_final` continuity evidence
+  without requiring BotLens to be opened.
+- Strategy rows in report config snapshots must preserve the run-start
+  `run_strategy_snapshot`/`effective_strategy_config` when provided by runtime
+  series metadata. Worker aggregation must not replace known rules, params, ATM,
+  or variant provenance with empty placeholders.
 
 ## Related Docs
 

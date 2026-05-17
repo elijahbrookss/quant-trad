@@ -6,6 +6,7 @@ from collections import Counter, OrderedDict
 from collections.abc import Mapping, Sequence
 from concurrent.futures import Future
 from datetime import datetime, timezone
+import statistics
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -59,6 +60,19 @@ def _safe_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _safe_int(value: Any) -> Optional[int]:
+    try:
+        if value in (None, ""):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return int(number)
 
 
 def _execution_mode_from_run(run: Mapping[str, Any]) -> str:
@@ -211,6 +225,7 @@ def list_report_summaries(
             run_id,
             financial_summary=summary or None,
         )
+        report_materialization = report_data.get_report_materialization_status(run_id)
         items.append(
             {
                 "schema_version": "run_report_summary_item.v1",
@@ -246,6 +261,7 @@ def list_report_summaries(
                     "reason": readiness.get("reason"),
                     "dataset_status": readiness.get("dataset_status"),
                 },
+                "report_materialization": report_materialization,
             }
         )
     logger.debug(with_log_context("report_catalog_list_done", context | {"items": len(items), "total": total}))
@@ -259,6 +275,7 @@ def get_run_research_dataset(run_id: str) -> Dict[str, Any]:
 def get_report_readiness(run_id: str) -> Dict[str, Any]:
     dataset = _dataset(run_id)
     readiness = _mapping(dataset.get("readiness"))
+
     return {
         "schema_version": "report_readiness.v1",
         "run_id": run_id,
@@ -278,6 +295,768 @@ def get_run_report_summary(run_id: str) -> Dict[str, Any]:
         "portfolio_metrics": dataset.get("portfolio_metrics") or {},
         "sections": dataset.get("sections") or {},
     }
+
+
+def _metric_value(
+    *,
+    value: Any = None,
+    valid: Optional[bool] = None,
+    unit: Optional[str] = None,
+    method: Optional[str] = None,
+    source: Optional[str] = None,
+    metadata: Optional[Mapping[str, Any]] = None,
+    sample_count: Optional[int] = None,
+    minimum_sample_count: Optional[int] = None,
+    invalid_reason: Optional[str] = None,
+    caveats: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    resolved_valid = bool(valid) if valid is not None else value is not None
+    if resolved_valid and value is None:
+        resolved_valid = False
+    reason = invalid_reason
+    if not resolved_valid and not reason:
+        reason = "not_available" if value is None else "invalid"
+    return {
+        "value": value,
+        "valid": resolved_valid,
+        "unit": unit,
+        "method": method,
+        "source": source,
+        "metadata": dict(metadata or {}),
+        "sample_count": sample_count,
+        "minimum_sample_count": minimum_sample_count,
+        "invalid_reason": None if resolved_valid else reason,
+        "caveats": list(dict.fromkeys(str(item) for item in (caveats or []) if str(item or "").strip())),
+    }
+
+
+def _unavailable_metric(reason: str = "not_available", *, unit: Optional[str] = None, method: Optional[str] = None) -> Dict[str, Any]:
+    return _metric_value(value=None, valid=False, unit=unit, method=method, invalid_reason=reason)
+
+
+def _series_count(dataset: Mapping[str, Any], key: str) -> Optional[int]:
+    payload = _mapping(_mapping(_mapping(dataset.get("timeseries")).get("items")).get(key))
+    count = _safe_int(payload.get("row_count"))
+    if count is not None:
+        return count
+    items = payload.get("items")
+    return len(items) if isinstance(items, list) else None
+
+
+def _simulated_window_days(metadata: Mapping[str, Any]) -> Optional[float]:
+    window = _mapping(metadata.get("simulated_window"))
+    start = _parse_time(window.get("start"))
+    end = _parse_time(window.get("end"))
+    if start is None or end is None or end <= start:
+        return None
+    return (end - start).total_seconds() / 86400.0
+
+
+def _summary_number(summary: Mapping[str, Any], portfolio: Mapping[str, Any], key: str) -> Any:
+    value = summary.get(key)
+    return portfolio.get(key) if value is None else value
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _performance_metrics(dataset: Mapping[str, Any]) -> Dict[str, Any]:
+    metadata = _mapping(dataset.get("metadata"))
+    summary = _mapping(dataset.get("summary"))
+    portfolio = _mapping(dataset.get("portfolio_metrics"))
+    execution = _mapping(dataset.get("execution"))
+    slippage_accounting = _mapping(execution.get("slippage"))
+    closed_trades = _safe_int(_first_present(summary.get("closed_trades"), summary.get("trades"))) or 0
+    wins = _safe_int(summary.get("wins")) or 0
+    losses = _safe_int(summary.get("losses")) or 0
+    breakeven = max(closed_trades - wins - losses, 0)
+    duration_days = _simulated_window_days(metadata)
+    returns_count = _series_count(dataset, "returns_series")
+    equity_count = _series_count(dataset, "equity_curve")
+    portfolio_caveats = [str(item) for item in portfolio.get("caveats") or []]
+    unavailable = _mapping(summary.get("unavailable_metrics"))
+    avg_win = _safe_float(summary.get("avg_win"))
+    avg_loss = _safe_float(summary.get("avg_loss"))
+    avg_win_loss_ratio = abs(avg_win / avg_loss) if avg_win is not None and avg_loss not in (None, 0.0) else None
+    cagr = _summary_number(summary, portfolio, "cagr")
+    drawdown = _safe_float(summary.get("max_drawdown"))
+    drawdown_pct = _safe_float(summary.get("max_drawdown_pct"))
+    profit_factor = _summary_number(summary, portfolio, "profit_factor")
+    exposure_pct = _summary_number(summary, portfolio, "exposure_pct")
+    average_holding = _safe_float(summary.get("average_holding_seconds"))
+    annualization_factor = _safe_int(portfolio.get("annualization_periods"))
+    basis = _mapping(portfolio.get("basis"))
+    risk_free_rate = _safe_float(basis.get("risk_free_rate"))
+    ratio_caveats = [item for item in portfolio_caveats if item.endswith("_unavailable") or "risk_metrics" in item]
+
+    sharpe = _summary_number(summary, portfolio, "sharpe")
+    sortino = _summary_number(summary, portfolio, "sortino")
+    calmar = _summary_number(summary, portfolio, "calmar")
+    sharpe_valid = sharpe is not None and (returns_count or 0) >= 2
+    sortino_valid = sortino is not None and (returns_count or 0) >= 2
+    calmar_valid = calmar is not None and cagr is not None and drawdown_pct not in (None, 0.0)
+    cagr_valid = cagr is not None and duration_days is not None and duration_days >= 90.0
+    drawdown_valid = (drawdown is not None or drawdown_pct is not None) and (equity_count is None or equity_count >= 1)
+    profit_factor_valid = profit_factor is not None and wins > 0 and losses > 0
+    exposure_valid = exposure_pct is not None and duration_days is not None and any(
+        str(row.get("entry_time") or "").strip() and str(row.get("exit_time") or row.get("closed_at") or "").strip()
+        for row in dataset.get("trades") or []
+        if isinstance(row, Mapping)
+    )
+    slippage_invalid_reason = (
+        "requires_execution_slippage_facts_or_configured_zero_slippage_model"
+        if slippage_accounting
+        else "not_modeled"
+    )
+
+    return {
+        "net_pnl": _metric_value(
+            value=summary.get("net_pnl"),
+            valid=summary.get("net_pnl") is not None,
+            unit="currency",
+            method="sum_closed_trade_net_pnl",
+            source="RunResearchDataset.summary",
+        ),
+        "gross_pnl": _metric_value(
+            value=summary.get("gross_pnl"),
+            valid=summary.get("gross_pnl") is not None,
+            unit="currency",
+            method="sum_closed_trade_gross_pnl",
+            source="RunResearchDataset.summary",
+        ),
+        "realized_pnl": _metric_value(
+            value=summary.get("net_pnl"),
+            valid=summary.get("net_pnl") is not None,
+            unit="currency",
+            method="closed_trade_realized_net_pnl",
+            source="RunResearchDataset.summary",
+        ),
+        "unrealized_pnl": _unavailable_metric("not_modeled", unit="currency", method="requires_open_position_mark_to_market"),
+        "total_return_pct": _metric_value(
+            value=summary.get("return_pct"),
+            valid=summary.get("return_pct") is not None,
+            unit="ratio",
+            method="net_pnl_over_starting_equity",
+            source="RunResearchDataset.summary",
+        ),
+        "annualized_return_pct": _metric_value(
+            value=cagr,
+            valid=cagr_valid,
+            unit="ratio",
+            method="compound_annual_growth_rate",
+            source="RunResearchDataset.portfolio_metrics",
+            metadata={"minimum_duration_days": 90.0, "simulated_duration_days": duration_days},
+            sample_count=int(duration_days) if duration_days is not None else None,
+            minimum_sample_count=90,
+            invalid_reason="simulated_window_less_than_90_days" if cagr is not None else unavailable.get("cagr") or "not_available",
+            caveats=portfolio_caveats,
+        ),
+        "max_drawdown": _metric_value(
+            value=drawdown,
+            valid=drawdown_valid,
+            unit="currency",
+            method="max_peak_to_trough_equity_decline",
+            source="RunResearchDataset.summary",
+            sample_count=equity_count,
+            minimum_sample_count=1,
+            invalid_reason=unavailable.get("max_drawdown") or "equity_curve_unavailable",
+        ),
+        "max_drawdown_pct": _metric_value(
+            value=drawdown_pct,
+            valid=drawdown_valid,
+            unit="ratio",
+            method="max_peak_to_trough_equity_decline_pct",
+            source="RunResearchDataset.summary",
+            sample_count=equity_count,
+            minimum_sample_count=1,
+            invalid_reason=unavailable.get("max_drawdown_pct") or "equity_curve_unavailable",
+        ),
+        "drawdown_duration": _metric_value(
+            value=summary.get("drawdown_duration_seconds"),
+            valid=summary.get("drawdown_duration_seconds") is not None and drawdown_valid,
+            unit="seconds",
+            method="longest_drawdown_duration",
+            source="RunResearchDataset.summary",
+            sample_count=equity_count,
+            minimum_sample_count=1,
+            invalid_reason=unavailable.get("drawdown_duration_seconds") or "equity_curve_unavailable",
+        ),
+        "sharpe": _metric_value(
+            value=sharpe,
+            valid=sharpe_valid,
+            unit="ratio",
+            method="annualized_mean_excess_daily_return_over_population_stddev",
+            source="RunResearchDataset.portfolio_metrics",
+            metadata={"frequency": "daily", "annualization_factor": annualization_factor, "risk_free_rate": risk_free_rate},
+            sample_count=returns_count,
+            minimum_sample_count=2,
+            invalid_reason="insufficient_return_samples_or_zero_variance",
+            caveats=ratio_caveats + [f"annualization_factor={annualization_factor}", f"risk_free_rate={risk_free_rate}"],
+        ),
+        "sortino": _metric_value(
+            value=sortino,
+            valid=sortino_valid,
+            unit="ratio",
+            method="annualized_mean_excess_daily_return_over_downside_stddev",
+            source="RunResearchDataset.portfolio_metrics",
+            metadata={"frequency": "daily", "annualization_factor": annualization_factor, "risk_free_rate": risk_free_rate},
+            sample_count=returns_count,
+            minimum_sample_count=2,
+            invalid_reason="insufficient_downside_return_samples_or_zero_downside_deviation",
+            caveats=ratio_caveats + [f"annualization_factor={annualization_factor}", f"risk_free_rate={risk_free_rate}"],
+        ),
+        "calmar": _metric_value(
+            value=calmar,
+            valid=calmar_valid,
+            unit="ratio",
+            method="cagr_over_max_drawdown_pct",
+            source="RunResearchDataset.portfolio_metrics",
+            metadata={"minimum_duration_days": 90.0, "simulated_duration_days": duration_days},
+            sample_count=int(duration_days) if duration_days is not None else None,
+            minimum_sample_count=90,
+            invalid_reason="requires_cagr_and_nonzero_drawdown",
+            caveats=portfolio_caveats,
+        ),
+        "profit_factor": _metric_value(
+            value=profit_factor,
+            valid=profit_factor_valid,
+            unit="ratio",
+            method="gross_profit_over_absolute_gross_loss",
+            source="RunResearchDataset.summary",
+            sample_count=closed_trades,
+            minimum_sample_count=1,
+            invalid_reason="requires_winning_and_losing_trades",
+        ),
+        "expectancy": _metric_value(
+            value=summary.get("expectancy"),
+            valid=summary.get("expectancy") is not None and closed_trades > 0,
+            unit="currency",
+            method="average_closed_trade_net_pnl",
+            source="RunResearchDataset.summary",
+            sample_count=closed_trades,
+            minimum_sample_count=1,
+        ),
+        "win_rate": _metric_value(value=summary.get("win_rate"), valid=summary.get("win_rate") is not None, unit="ratio", method="wins_over_closed_trades", source="RunResearchDataset.summary", sample_count=closed_trades),
+        "loss_rate": _metric_value(value=summary.get("loss_rate"), valid=summary.get("loss_rate") is not None, unit="ratio", method="losses_over_closed_trades", source="RunResearchDataset.summary", sample_count=closed_trades),
+        "average_win": _metric_value(value=avg_win, valid=avg_win is not None, unit="currency", method="average_winning_trade_net_pnl", source="RunResearchDataset.summary", sample_count=wins),
+        "average_loss": _metric_value(value=avg_loss, valid=avg_loss is not None, unit="currency", method="average_losing_trade_net_pnl", source="RunResearchDataset.summary", sample_count=losses),
+        "average_win_loss_ratio": _metric_value(value=avg_win_loss_ratio, valid=avg_win_loss_ratio is not None, unit="ratio", method="average_win_over_absolute_average_loss", source="RunResearchDataset.summary"),
+        "largest_win": _metric_value(value=summary.get("largest_win"), valid=summary.get("largest_win") is not None, unit="currency", method="max_winning_trade_net_pnl", source="RunResearchDataset.summary", sample_count=wins),
+        "largest_loss": _metric_value(value=summary.get("largest_loss"), valid=summary.get("largest_loss") is not None, unit="currency", method="min_losing_trade_net_pnl", source="RunResearchDataset.summary", sample_count=losses),
+        "trade_count": _metric_value(value=closed_trades, valid=True, unit="count", method="closed_trade_count", source="RunResearchDataset.summary"),
+        "winning_trades": _metric_value(value=wins, valid=True, unit="count", method="winning_closed_trade_count", source="RunResearchDataset.summary"),
+        "losing_trades": _metric_value(value=losses, valid=True, unit="count", method="losing_closed_trade_count", source="RunResearchDataset.summary"),
+        "breakeven_trades": _metric_value(value=breakeven, valid=True, unit="count", method="closed_trades_minus_wins_losses", source="RunResearchDataset.summary"),
+        "fees": _metric_value(value=summary.get("fees"), valid=summary.get("fees") is not None, unit="currency", method="sum_closed_trade_fees", source="RunResearchDataset.summary"),
+        "slippage": _metric_value(
+            value=slippage_accounting.get("total_slippage_cost"),
+            valid=slippage_accounting.get("total_slippage_cost") is not None,
+            unit="currency",
+            method="sum_execution_slippage_cost_when_fill_facts_or_zero_slippage_model_available",
+            source="RunResearchDataset.execution.slippage",
+            metadata={
+                "configured_slippage_bps": slippage_accounting.get("configured_slippage_bps"),
+                "fill_fact_count": slippage_accounting.get("fill_fact_count"),
+                "status": slippage_accounting.get("status"),
+            },
+            sample_count=_safe_int(slippage_accounting.get("fill_fact_count")),
+            invalid_reason=slippage_invalid_reason,
+            caveats=[str(item) for item in slippage_accounting.get("caveats") or []],
+        ),
+        "exposure_pct": _metric_value(value=exposure_pct, valid=exposure_valid, unit="ratio", method="merged_trade_holding_time_over_simulated_window", source="RunResearchDataset.portfolio_metrics", invalid_reason="requires_entry_exit_timestamps_and_simulated_window", caveats=portfolio_caveats),
+        "time_in_market_pct": _metric_value(value=exposure_pct, valid=exposure_valid, unit="ratio", method="merged_trade_holding_time_over_simulated_window", source="RunResearchDataset.portfolio_metrics", invalid_reason="requires_entry_exit_timestamps_and_simulated_window", caveats=portfolio_caveats),
+        "average_trade_duration": _metric_value(value=average_holding, valid=average_holding is not None, unit="seconds", method="average_closed_trade_holding_seconds", source="RunResearchDataset.summary", sample_count=closed_trades),
+        "margin_usage": _unavailable_metric("not_available_until_wallet_timeseries_exposes_margin_state", unit="ratio", method="requires_wallet_margin_time_series"),
+    }
+
+
+def _event_context(row: Mapping[str, Any]) -> Dict[str, Any]:
+    payload = _mapping(row.get("payload"))
+    return _mapping(payload.get("context"))
+
+
+def _event_run_seq(row: Mapping[str, Any]) -> Optional[int]:
+    return _safe_int(row.get("run_seq")) or _safe_int(_event_context(row).get("run_seq")) or _safe_int(row.get("seq"))
+
+
+def _event_code_count(events: Sequence[Mapping[str, Any]], code: str) -> int:
+    needle = str(code or "").strip().lower()
+    if not needle:
+        return 0
+    count = 0
+    for row in events:
+        context = _event_context(row)
+        payload = _mapping(row.get("payload"))
+        values = [
+            row.get("event_name"),
+            row.get("reason_code"),
+            payload.get("event_name"),
+            context.get("reason"),
+            context.get("reason_code"),
+            context.get("fault_code"),
+            context.get("code"),
+        ]
+        if any(needle == str(value or "").strip().lower() for value in values):
+            count += 1
+    return count
+
+
+def _runtime_ordering_summary(events: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    sequences = [value for row in events if (value := _event_run_seq(row)) is not None]
+    if not events:
+        return {"status": "not_available", "gap_count": None, "duplicate_count": None}
+    if not sequences:
+        return {"status": "not_available", "gap_count": None, "duplicate_count": None}
+    present = set(sequences)
+    expected = set(range(min(present), max(present) + 1))
+    gap_count = len(expected - present)
+    duplicate_count = len(sequences) - len(present)
+    return {
+        "status": "gapless" if gap_count == 0 and duplicate_count == 0 else "inconsistent",
+        "gap_count": gap_count,
+        "duplicate_count": duplicate_count,
+        "min_run_seq": min(present),
+        "max_run_seq": max(present),
+    }
+
+
+def _decision_market_epoch(row: Mapping[str, Any]) -> Optional[float]:
+    for key in ("bar_time", "known_at", "event_ts"):
+        parsed = _parse_time(row.get(key))
+        if parsed is not None:
+            return parsed.timestamp()
+    return None
+
+
+def _wallet_market_time_overtake_count(decisions: Sequence[Mapping[str, Any]]) -> Optional[int]:
+    rows = []
+    accepted_wallet_candidates = 0
+    for decision in decisions:
+        if not isinstance(decision, Mapping):
+            continue
+        if not bool(decision.get("accepted")):
+            continue
+        accepted_wallet_candidates += 1
+        if not str(decision.get("decision_id") or "").strip():
+            continue
+        run_seq = _safe_int(decision.get("run_seq"))
+        market_epoch = _decision_market_epoch(decision)
+        if run_seq is None or market_epoch is None:
+            continue
+        rows.append((run_seq, market_epoch))
+    if accepted_wallet_candidates and not rows:
+        return None
+    latest_epoch: Optional[float] = None
+    overtakes = 0
+    for _run_seq, market_epoch in sorted(rows):
+        if latest_epoch is not None and market_epoch < latest_epoch:
+            overtakes += 1
+        latest_epoch = market_epoch if latest_epoch is None else max(latest_epoch, market_epoch)
+    return overtakes
+
+
+def _candle_continuity_status(candle_gaps: Mapping[str, Any]) -> str:
+    canonical = str(candle_gaps.get("canonical_evidence_status") or "").strip().lower()
+    if canonical == "missing" or "missing_canonical_continuity_evidence" in set(candle_gaps.get("caveats") or []):
+        return "missing_canonical_continuity_evidence"
+    if int(candle_gaps.get("blocking_gap_count") or 0) > 0:
+        return "blocked"
+    if int(candle_gaps.get("provider_gap_count") or 0) > 0:
+        return "source_sparse"
+    if canonical == "present":
+        return "clean"
+    return "unknown"
+
+
+def _research_status(readiness: Mapping[str, Any]) -> str:
+    if str(readiness.get("golden_candidate_status") or "").strip().lower() == "certified":
+        return "research_valid"
+    if readiness.get("results_ready") and readiness.get("safe_to_compare"):
+        return "research_valid_with_caveats"
+    if readiness.get("blocking_reasons") or readiness.get("golden_blocking_reasons"):
+        return "blocked"
+    if readiness.get("results_ready"):
+        return "results_ready"
+    return "not_ready"
+
+
+def _first_failure_reason(readiness: Mapping[str, Any], diagnostics: Mapping[str, Any]) -> Optional[str]:
+    for key in ("blocking_reasons", "golden_blocking_reasons"):
+        values = readiness.get(key)
+        if isinstance(values, list) and values:
+            return str(values[0])
+    summary = _mapping(diagnostics.get("summary"))
+    blocking = summary.get("blocking_codes")
+    if isinstance(blocking, list) and blocking:
+        return str(blocking[0])
+    reason = str(readiness.get("reason") or "").strip()
+    return reason if reason and reason != "ready" else None
+
+
+def _research_trust(dataset: Mapping[str, Any], events: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    metadata = _mapping(dataset.get("metadata"))
+    readiness = _mapping(dataset.get("readiness"))
+    diagnostics = _mapping(dataset.get("diagnostics"))
+    candle_gaps = _mapping(dataset.get("candle_gaps"))
+    wallet = _mapping(dataset.get("wallet_accounting"))
+    ordering = _runtime_ordering_summary(events)
+    wallet_missing = _safe_int(wallet.get("missing_wallet_trace_count"))
+    observer_fact_count = int(candle_gaps.get("noncanonical_fact_count") or 0)
+    canonical_status = str(candle_gaps.get("canonical_evidence_status") or "unknown")
+    if canonical_status == "present" and observer_fact_count > 0:
+        observer_status = "observer_diagnostics_ignored"
+    elif canonical_status == "present":
+        observer_status = "observer_safe"
+    else:
+        observer_status = "unknown"
+    timeout_count = _event_code_count(events, "entry_decision_order_turn_timeout") if events else None
+    return {
+        "lifecycle_status": metadata.get("status"),
+        "terminal_reason": metadata.get("terminal_reason") or readiness.get("reason"),
+        "golden_status": readiness.get("golden_candidate_status") or "not_available",
+        "golden_candidate_status": readiness.get("golden_candidate_status") or "unknown",
+        "research_status": _research_status(readiness),
+        "readiness_status": readiness.get("results_status") or readiness.get("dataset_status") or "unknown",
+        "readiness_blockers": list(readiness.get("blocking_reasons") or []) + list(readiness.get("golden_blocking_reasons") or []),
+        "caveats": list(readiness.get("caveats") or []),
+        "config_hash": metadata.get("config_hash"),
+        "material_config_hash": metadata.get("material_config_hash"),
+        "data_snapshot_hash": metadata.get("data_snapshot_hash"),
+        "strategy_hash": metadata.get("strategy_hash"),
+        "semantic_fingerprint": readiness.get("semantic_fingerprint") or metadata.get("report_semantic_fingerprint"),
+        "operational_fingerprint": readiness.get("operational_fingerprint") or metadata.get("report_operational_fingerprint"),
+        "runtime_ordering_status": ordering.get("status") or "unknown",
+        "run_seq_gap_count": ordering.get("gap_count"),
+        "run_seq_duplicate_count": ordering.get("duplicate_count"),
+        "wallet_trace_complete": None if wallet_missing is None else wallet_missing == 0,
+        "wallet_market_time_overtake_count": _wallet_market_time_overtake_count(dataset.get("decisions") or []),
+        "entry_decision_order_timeout_count": timeout_count,
+        "candle_continuity_status": _candle_continuity_status(candle_gaps),
+        "canonical_continuity_evidence_status": canonical_status,
+        "observer_invariance_status": observer_status,
+        "first_failure_reason": _first_failure_reason(readiness, diagnostics),
+    }
+
+
+def _holding_seconds(trade: Mapping[str, Any]) -> Optional[float]:
+    value = _safe_float(trade.get("holding_seconds") or trade.get("duration_seconds"))
+    if value is not None:
+        return value
+    start = _parse_time(trade.get("entry_time") or trade.get("opened_at"))
+    end = _parse_time(trade.get("exit_time") or trade.get("closed_at"))
+    if start is None or end is None or end < start:
+        return None
+    return (end - start).total_seconds()
+
+
+def _decision_behavior(dataset: Mapping[str, Any]) -> Dict[str, Any]:
+    summary = _mapping(dataset.get("summary"))
+    decisions = [dict(row) for row in dataset.get("decisions") or [] if isinstance(row, Mapping)]
+    trades = [dict(row) for row in dataset.get("trades") or [] if isinstance(row, Mapping)]
+    rejection_reasons = Counter()
+    action_distribution = Counter()
+    for decision in decisions:
+        action = str(decision.get("action") or decision.get("intent") or "unknown").strip().lower() or "unknown"
+        action_distribution[action] += 1
+        if bool(decision.get("rejected")) or str(decision.get("decision_state") or "").strip().lower() == "rejected":
+            rejection_reasons[str(decision.get("reason_code") or decision.get("status") or "unknown")] += 1
+    holds = [value for trade in trades if (value := _holding_seconds(trade)) is not None]
+    margin_rejections = sum(count for reason, count in rejection_reasons.items() if "MARGIN" in reason.upper())
+    position_rejections = sum(count for reason, count in rejection_reasons.items() if "POSITION" in reason.upper())
+    entry_count = sum(count for action, count in action_distribution.items() if "enter" in action or action in {"buy", "sell"})
+    exit_count = sum(1 for trade in trades if str(trade.get("exit_time") or trade.get("closed_at") or "").strip())
+    return {
+        "total_signals": len(dataset.get("signals") or []),
+        "total_decisions": int(summary.get("total_decisions") or len(decisions)),
+        "accepted_decisions": int(summary.get("accepted_decisions") or sum(1 for row in decisions if row.get("accepted"))),
+        "rejected_decisions": int(summary.get("rejected_decisions") or sum(1 for row in decisions if row.get("rejected"))),
+        "rejection_reasons": dict(sorted(rejection_reasons.items())),
+        "action_distribution": dict(sorted(action_distribution.items())),
+        "entry_count": entry_count,
+        "exit_count": exit_count,
+        "average_holding_period": _metric_value(value=summary.get("average_holding_seconds"), valid=summary.get("average_holding_seconds") is not None, unit="seconds", method="average_closed_trade_holding_seconds", source="RunResearchDataset.summary", sample_count=len(holds)),
+        "median_holding_period": _metric_value(value=statistics.median(holds) if holds else None, valid=bool(holds), unit="seconds", method="median_closed_trade_holding_seconds", source="RunResearchDataset.trades", sample_count=len(holds)),
+        "longest_trade_duration": _metric_value(value=max(holds) if holds else None, valid=bool(holds), unit="seconds", method="max_closed_trade_holding_seconds", source="RunResearchDataset.trades", sample_count=len(holds)),
+        "shortest_trade_duration": _metric_value(value=min(holds) if holds else None, valid=bool(holds), unit="seconds", method="min_closed_trade_holding_seconds", source="RunResearchDataset.trades", sample_count=len(holds)),
+        "margin_rejection_count": margin_rejections,
+        "position_policy_rejection_count": position_rejections,
+    }
+
+
+def _wallet_performance(dataset: Mapping[str, Any]) -> Dict[str, Any]:
+    summary = _mapping(dataset.get("summary"))
+    wallet = _mapping(dataset.get("wallet_accounting"))
+    diagnostics = _mapping(wallet.get("wallet_diagnostics"))
+    projection = _mapping(diagnostics.get("replay_projection"))
+    balances = _mapping(projection.get("balances"))
+    collateral = _mapping(projection.get("free_collateral"))
+    missing_count = _safe_int(wallet.get("missing_wallet_trace_count"))
+    final_value = balances.get("USD") if "USD" in balances else _first_present(summary.get("equity_end"), summary.get("final_equity"))
+    final_collateral = collateral.get("USD") if "USD" in collateral else None
+    return {
+        "wallet_trace_complete": None if missing_count is None else missing_count == 0,
+        "missing_wallet_trace_count": missing_count,
+        "wallet_projection_status": wallet.get("wallet_replay_status") or diagnostics.get("wallet_replay_status") or "unknown",
+        "final_wallet_value": _metric_value(value=final_value, valid=final_value is not None, unit="currency", method="wallet_replay_final_balance_or_summary_equity_end", source="RunResearchDataset.wallet_accounting"),
+        "final_cash_collateral": _metric_value(value=final_collateral, valid=final_collateral is not None, unit="currency", method="wallet_replay_free_collateral", source="RunResearchDataset.wallet_accounting"),
+        "margin_warnings": [dict(row) for row in wallet.get("margin_warnings") or [] if isinstance(row, Mapping)],
+        "reservation_leaks": _mapping(wallet.get("reservation_leaks")),
+        "caveats": list(wallet.get("caveats") or []),
+    }
+
+
+def _symbol_breakdown(dataset: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    insights = _mapping(dataset.get("strategy_insights"))
+    summary = _mapping(dataset.get("summary"))
+    total_net = _safe_float(summary.get("net_pnl")) or 0.0
+    rows_by_symbol: Dict[str, Dict[str, Any]] = {}
+    for row in insights.get("per_symbol_performance") or []:
+        if not isinstance(row, Mapping):
+            continue
+        symbol = str(row.get("symbol") or "UNKNOWN")
+        rows_by_symbol[symbol] = dict(row)
+    decisions_by_symbol: Dict[str, List[Mapping[str, Any]]] = {}
+    for decision in dataset.get("decisions") or []:
+        if isinstance(decision, Mapping):
+            decisions_by_symbol.setdefault(str(decision.get("symbol") or "UNKNOWN"), []).append(decision)
+    trades_by_symbol: Dict[str, List[Mapping[str, Any]]] = {}
+    for trade in dataset.get("trades") or []:
+        if isinstance(trade, Mapping):
+            trades_by_symbol.setdefault(str(trade.get("symbol") or "UNKNOWN"), []).append(trade)
+            rows_by_symbol.setdefault(str(trade.get("symbol") or "UNKNOWN"), {})
+    output = []
+    for symbol in sorted(rows_by_symbol):
+        row = rows_by_symbol[symbol]
+        decisions = decisions_by_symbol.get(symbol, [])
+        trades = trades_by_symbol.get(symbol, [])
+        wins = [_safe_float(trade.get("net_pnl")) for trade in trades if (_safe_float(trade.get("net_pnl")) or 0.0) > 0]
+        losses = [_safe_float(trade.get("net_pnl")) for trade in trades if (_safe_float(trade.get("net_pnl")) or 0.0) < 0]
+        net = row.get("net_pnl") if row.get("net_pnl") is not None else sum(_safe_float(trade.get("net_pnl")) or 0.0 for trade in trades)
+        gross = row.get("gross_pnl") if row.get("gross_pnl") is not None else sum(_safe_float(trade.get("gross_pnl")) or 0.0 for trade in trades)
+        fees = row.get("fees") if row.get("fees") is not None else sum(_safe_float(trade.get("fees_paid") or trade.get("fees")) or 0.0 for trade in trades)
+        rejection_reasons = Counter(str(decision.get("reason_code") or "unknown") for decision in decisions if decision.get("rejected"))
+        contribution = (float(net) / total_net) if total_net else None
+        output.append(
+            {
+                "symbol": symbol,
+                "trade_count": int(row.get("trades") or row.get("trade_count") or len(trades)),
+                "decision_count": len(decisions) if decisions else None,
+                "accepted_decisions": sum(1 for decision in decisions if decision.get("accepted")) if decisions else None,
+                "rejected_decisions": sum(1 for decision in decisions if decision.get("rejected")) if decisions else None,
+                "rejection_count": sum(rejection_reasons.values()) if decisions else None,
+                "rejection_reasons": dict(sorted(rejection_reasons.items())),
+                "net_pnl": _metric_value(value=net, valid=net is not None, unit="currency", method="sum_symbol_closed_trade_net_pnl", source="RunResearchDataset.strategy_insights"),
+                "gross_pnl": _metric_value(value=gross, valid=gross is not None, unit="currency", method="sum_symbol_closed_trade_gross_pnl", source="RunResearchDataset.strategy_insights"),
+                "fees": _metric_value(value=fees, valid=fees is not None, unit="currency", method="sum_symbol_closed_trade_fees", source="RunResearchDataset.strategy_insights"),
+                "win_rate": _metric_value(value=row.get("win_rate"), valid=row.get("win_rate") is not None, unit="ratio", method="symbol_wins_over_closed_trades", source="RunResearchDataset.strategy_insights"),
+                "average_win": _metric_value(value=(sum(wins) / len(wins)) if wins else None, valid=bool(wins), unit="currency", method="average_symbol_winning_trade_net_pnl", source="RunResearchDataset.trades"),
+                "average_loss": _metric_value(value=(sum(losses) / len(losses)) if losses else None, valid=bool(losses), unit="currency", method="average_symbol_losing_trade_net_pnl", source="RunResearchDataset.trades"),
+                "contribution_pct": _metric_value(value=contribution, valid=contribution is not None, unit="ratio", method="symbol_net_pnl_over_run_net_pnl", source="RunResearchDataset.strategy_insights"),
+                "caveats": [],
+            }
+        )
+    return output
+
+
+def _details(row: Mapping[str, Any]) -> Dict[str, Any]:
+    return _mapping(row.get("details"))
+
+
+def _latest_event(rows: Sequence[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
+    if not rows:
+        return None
+    return max(rows, key=lambda row: str(row.get("observed_at") or row.get("created_at") or ""))
+
+
+def _blocker_list(value: Any) -> List[Mapping[str, Any]]:
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, Mapping)]
+    return []
+
+
+def _wait_watermarks(wait: Mapping[str, Any], *keys: str) -> List[Dict[str, Any]]:
+    output: List[Dict[str, Any]] = []
+    for key in keys:
+        for blocker in _blocker_list(wait.get(key)):
+            output.append(
+                {
+                    "participant_key": blocker.get("participant_key"),
+                    "symbol": blocker.get("symbol") or blocker.get("participant_symbol"),
+                    "timeframe": blocker.get("timeframe") or blocker.get("participant_timeframe"),
+                    "next_bar_time": blocker.get("next_bar_time") or blocker.get("next_bar_watermark"),
+                    "current_bar_time": blocker.get("current_bar_time") or blocker.get("current_bar_watermark"),
+                    "active": blocker.get("active"),
+                    "done": blocker.get("done"),
+                    "failed": blocker.get("failed"),
+                }
+            )
+    return output
+
+
+def _coordinator_waits(run_id: str) -> Dict[str, Any]:
+    try:
+        events = [
+            row
+            for row in report_data.list_observability_events(run_id, limit=2000)
+            if str(row.get("event_name") or "") == "decision_order_top_waits_merged"
+        ]
+    except Exception as exc:  # noqa: BLE001 - coordinator waits are diagnostic, not material truth.
+        logger.warning(
+            with_log_context(
+                "run_report_v2_coordinator_waits_unavailable",
+                build_log_context(run_id=run_id, error=str(exc)),
+            )
+        )
+        events = []
+    event = _latest_event(events)
+    if event is None:
+        return {
+            "status": "not_available",
+            "top_waits": [],
+            "caveats": ["decision_order_top_waits_merged_unavailable"],
+        }
+    details = _details(event)
+    waits = []
+    for wait in details.get("top_waits") or details.get("waits") or []:
+        if not isinstance(wait, Mapping):
+            continue
+        first_watermarks = _wait_watermarks(wait, "blocking_participants", "first_blockers", "first_blocker_context")
+        release_watermarks = _wait_watermarks(wait, "release_participants", "release_blockers", "release_context")
+        blocker_symbols = sorted(
+            {
+                str(row.get("symbol") or row.get("participant_symbol") or "")
+                for row in _blocker_list(wait.get("blocking_participants")) + _blocker_list(wait.get("first_blockers"))
+                if str(row.get("symbol") or row.get("participant_symbol") or "").strip()
+            }
+        )
+        waits.append(
+            {
+                "candidate_id": wait.get("candidate_id"),
+                "decision_id": wait.get("decision_id"),
+                "candidate_symbol": wait.get("candidate_symbol") or wait.get("symbol"),
+                "candidate_timeframe": wait.get("candidate_timeframe") or wait.get("timeframe"),
+                "candidate_bar_time": wait.get("candidate_bar_time") or wait.get("bar_time"),
+                "wait_elapsed_ms": _safe_float(wait.get("elapsed_wait_ms") or wait.get("wait_elapsed_ms")),
+                "wait_poll_count": _safe_int(wait.get("poll_count") or wait.get("wait_poll_count")),
+                "final_action": wait.get("final_action"),
+                "release_reason": wait.get("release_reason"),
+                "blocker_symbols": blocker_symbols,
+                "first_blocker_watermarks": first_watermarks,
+                "release_watermarks": release_watermarks,
+                "worker_id": wait.get("worker_id") or wait.get("process_id"),
+                "caveats": [],
+            }
+        )
+    caveats = []
+    if details.get("release_count") is None or details.get("fail_count") is None:
+        caveats.append("decision_order_release_fail_counts_unavailable")
+    return {
+        "status": "available",
+        "total_wait_ms": _safe_float(details.get("total_wait_ms") or details.get("decision_order_wait_ms")),
+        "wait_count": _safe_int(details.get("wait_count") or details.get("decision_order_wait_count")),
+        "max_wait_ms": _safe_float(details.get("max_wait_ms") or details.get("decision_order_max_wait_ms")),
+        "release_count": _safe_int(details.get("release_count") or details.get("decision_order_release_count")),
+        "fail_count": _safe_int(details.get("fail_count") or details.get("decision_order_fail_count")),
+        "top_waits": sorted(waits, key=lambda row: _safe_float(row.get("wait_elapsed_ms")) or 0.0, reverse=True),
+        "caveats": caveats,
+    }
+
+
+def _operational_diagnostics(dataset: Mapping[str, Any]) -> Dict[str, Any]:
+    readiness = _mapping(dataset.get("readiness"))
+    diagnostics = _mapping(dataset.get("diagnostics"))
+    summary = _mapping(diagnostics.get("summary"))
+    by_code = _mapping(summary.get("by_code"))
+    caveats = list(readiness.get("caveats") or [])
+    telemetry_warnings = [
+        dict(item)
+        for item in diagnostics.get("items") or []
+        if isinstance(item, Mapping) and "telemetry" in str(item.get("source") or item.get("code") or "").lower()
+    ]
+    step_trace_warnings = [
+        dict(item)
+        for item in diagnostics.get("items") or []
+        if isinstance(item, Mapping) and "step_trace" in str(item.get("source") or item.get("code") or "").lower()
+    ]
+    botlens_caveats = [item for item in caveats if "botlens" in str(item).lower()]
+    degraded = "degraded" if readiness.get("degraded_sections") or summary.get("degraded_codes") else "clean"
+    return {
+        "operational_fingerprint": readiness.get("operational_fingerprint") or _mapping(dataset.get("metadata")).get("report_operational_fingerprint"),
+        "operational_drift_status": "not_computed",
+        "telemetry_warnings": telemetry_warnings,
+        "db_slow_write_warning_count": _safe_int(by_code.get("db_write_slow") or by_code.get("slow_db_write")),
+        "step_trace_warnings": step_trace_warnings,
+        "botlens_diagnostic_caveats": botlens_caveats,
+        "diagnostics_degraded_status": degraded,
+        "caveats": caveats,
+    }
+
+
+def _run_report_identity(dataset: Mapping[str, Any]) -> Dict[str, Any]:
+    metadata = _mapping(dataset.get("metadata"))
+    return {
+        "run_id": metadata.get("run_id"),
+        "bot_id": metadata.get("bot_id"),
+        "strategy_id": metadata.get("strategy_id"),
+        "strategy_name": metadata.get("strategy_name"),
+        "run_type": metadata.get("run_type"),
+        "execution_mode": metadata.get("execution_mode"),
+        "symbols": list(metadata.get("symbols") or []),
+        "instrument_ids": list(metadata.get("instrument_ids") or []),
+        "timeframe": metadata.get("timeframe"),
+        "timeframes": list(metadata.get("timeframes") or []),
+        "provider": metadata.get("provider"),
+        "exchange": metadata.get("exchange"),
+        "simulated_window": _mapping(metadata.get("simulated_window")),
+        "wall_clock_window": _mapping(metadata.get("wall_clock_window")),
+        "starting_capital": metadata.get("starting_capital"),
+    }
+
+
+def build_run_report(run_id: str) -> Dict[str, Any]:
+    """Build the RunReportDTO v2 payload from canonical report inputs."""
+
+    dataset = _dataset(run_id)
+    try:
+        events = report_data.list_run_events(run_id)
+    except Exception as exc:  # noqa: BLE001 - report v2 should degrade optional runtime ordering context.
+        logger.warning(
+            with_log_context(
+                "run_report_v2_runtime_ordering_context_unavailable",
+                build_log_context(run_id=run_id, error=str(exc)),
+            )
+        )
+        events = []
+    return {
+        "contract_version": "run_report_v2",
+        "schema_version": "run_report.v2",
+        "run_id": run_id,
+        "identity": _run_report_identity(dataset),
+        "trust": _research_trust(dataset, events),
+        "performance": _performance_metrics(dataset),
+        "behavior": _decision_behavior(dataset),
+        "wallet": _wallet_performance(dataset),
+        "symbol_breakdown": _symbol_breakdown(dataset),
+        "coordinator_waits": _coordinator_waits(run_id),
+        "operational_diagnostics": _operational_diagnostics(dataset),
+        "sections": _mapping(dataset.get("sections")),
+        "raw_refs": {
+            "source_contract": "RunResearchDataset.v1",
+            "dataset_schema_version": dataset.get("schema_version") or DATASET_SCHEMA_VERSION,
+            "dataset_route": f"/api/reports/{run_id}",
+            "readiness_route": f"/api/reports/{run_id}/readiness",
+            "diagnostics_route": f"/api/reports/{run_id}/diagnostics",
+            "metrics_route": f"/api/reports/{run_id}/metrics",
+        },
+    }
+
+
+def get_run_report(run_id: str) -> Dict[str, Any]:
+    return build_run_report(run_id)
 
 
 def get_report_sections(run_id: str) -> Dict[str, Any]:

@@ -25,6 +25,7 @@ from ..storage.storage import (
     record_bot_trade_event,
     update_bot_run_artifact,
 )
+from ..storage.repos.observability import record_observability_events_batch
 from ..strategies.strategy_service.facade import run_strategy_preview
 from .botlens_canonical_facts import append_botlens_canonical_fact_batch, append_botlens_canonical_fact_batches
 
@@ -100,6 +101,12 @@ def _runtime_input_plan_for_indicator(
     )
 
 
+def _record_bot_runtime_diagnostic_event(payload: Any) -> None:
+    if not isinstance(payload, dict):
+        return
+    record_observability_events_batch([payload])
+
+
 def build_bot_runtime_deps() -> BotRuntimeDeps:
     return BotRuntimeDeps(
         fetch_strategy=StrategyLoader.fetch_strategy,
@@ -121,6 +128,7 @@ def build_bot_runtime_deps() -> BotRuntimeDeps:
         record_bot_run_steps_batch=record_bot_run_steps_batch,
         update_bot_run_artifact=update_bot_run_artifact,
         build_run_artifact_bundle=build_run_artifact_bundle,
+        record_bot_runtime_diagnostic_event=_record_bot_runtime_diagnostic_event,
     )
 
 

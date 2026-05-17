@@ -64,6 +64,11 @@ Projection or convenience state includes:
 - report artifact status.
 
 Projection rows can be rebuilt or unavailable. They must not contradict canonical runtime truth.
+Observability metric/event rows are diagnostic storage. They are not report or
+golden certification evidence unless the same fact is written through an
+explicit canonical runtime/reporting path. Viewer/debug writes must never
+promote themselves into material run identity by sharing a run ID, symbol, or
+continuity payload shape.
 
 ## Table Contract Triage
 
@@ -105,8 +110,11 @@ transport event. Event retention is tiered:
   are persisted long term.
 - Tier 2, research context: compact series/catalog context, continuity
   summaries, selected indicator/world-state context, and decision/trade
-  evidence. Raw per-bar candles and per-bar stats are summarized or referenced
-  from source/catalog storage instead of retained as runtime-event rows.
+  evidence. Terminal `run_final` continuity summaries are material report
+  evidence; BotLens selected-symbol/bootstrap continuity rows are diagnostic
+  observability unless explicitly promoted through a canonical path. Raw
+  per-bar candles and per-bar stats are summarized or referenced from
+  source/catalog storage instead of retained as runtime-event rows.
 - Tier 3, observability metrics: write latency, queue depth, runtime health,
   projector timing, and step metrics. These are aggregated in
   `observability_metrics.botlens_backend_metric_rollups_v1`; raw metric samples

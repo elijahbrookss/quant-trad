@@ -613,6 +613,52 @@ class BotRunRecord(Base):
         }
 
 
+class ReportMaterializationRecord(Base):
+    """Persisted RunReportDTO artifact and build status for one run."""
+
+    __tablename__ = "portal_report_materializations_v1"
+
+    run_id = Column(String(64), ForeignKey("portal_bot_runs.run_id", ondelete="CASCADE"), primary_key=True)
+    contract_version = Column(String(64), nullable=False, default="run_report_v2")
+    status = Column(String(32), nullable=False, default="not_started")
+    artifact_id = Column(String(160), nullable=True)
+    artifact = Column(JSONB, nullable=True)
+    cache_key = Column(String(255), nullable=True)
+    stale_reason = Column(String(512), nullable=True)
+    error = Column(String(2048), nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    built_at = Column(DateTime, nullable=True)
+    duration_ms = Column(Float, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a serialisable report materialization status."""
+
+        effective_status = self.status
+        if self.status == "ready" and not isinstance(self.artifact, dict):
+            effective_status = "stale"
+        can_view = effective_status == "ready" and isinstance(self.artifact, dict)
+        can_build = effective_status in {"not_started", "failed", "stale"}
+        can_retry = effective_status == "failed"
+        return {
+            "run_id": self.run_id,
+            "status": effective_status,
+            "contract_version": self.contract_version,
+            "artifact_id": self.artifact_id,
+            "artifact_path": None,
+            "built_at": (self.built_at.isoformat() + "Z") if self.built_at else None,
+            "started_at": (self.started_at.isoformat() + "Z") if self.started_at else None,
+            "duration_ms": self.duration_ms,
+            "error": self.error,
+            "stale_reason": self.stale_reason or ("missing_artifact" if effective_status == "stale" else None),
+            "cache_key": self.cache_key,
+            "can_view": can_view,
+            "can_build": can_build,
+            "can_retry": can_retry,
+        }
+
+
 class BotRunLifecycleRecord(Base):
     """Current durable lifecycle state for one bot run."""
 

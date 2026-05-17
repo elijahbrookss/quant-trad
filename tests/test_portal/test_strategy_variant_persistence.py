@@ -9,7 +9,16 @@ pytest.importorskip("sqlalchemy")
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from portal.backend.db.models import Base, BotRecord, StrategyRecord
+from portal.backend.db.models import (
+    ATMTemplateRecord,
+    Base,
+    BotRecord,
+    StrategyIndicatorLink,
+    StrategyInstrumentLink,
+    StrategyRecord,
+    StrategyRuleRecord,
+    StrategyVariantRecord,
+)
 from portal.backend.service.storage.repos import bots as bot_repos
 from portal.backend.service.storage.repos import strategies as strategy_repos
 
@@ -19,7 +28,18 @@ class _SqliteDb:
 
     def __init__(self) -> None:
         self._engine = create_engine("sqlite:///:memory:")
-        Base.metadata.create_all(self._engine)
+        Base.metadata.create_all(
+            self._engine,
+            tables=[
+                StrategyRecord.__table__,
+                ATMTemplateRecord.__table__,
+                StrategyVariantRecord.__table__,
+                StrategyIndicatorLink.__table__,
+                StrategyInstrumentLink.__table__,
+                StrategyRuleRecord.__table__,
+                BotRecord.__table__,
+            ],
+        )
         self._session_factory = sessionmaker(
             bind=self._engine,
             expire_on_commit=False,

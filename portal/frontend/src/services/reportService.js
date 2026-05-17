@@ -4,6 +4,7 @@
 
 import {
   compareReports,
+  compareRunReports,
   explainMetric,
   exportReport,
   getCandleCatalog,
@@ -16,6 +17,7 @@ import {
   getReportReadiness,
   getReportSections,
   getReportSummary,
+  getRunReport,
   getOperationalHealth,
   getSignalDataset,
   getTimeseriesDataset,
@@ -30,6 +32,10 @@ export const reportService = {
 
   async getReport(runId, options) {
     return getReport(runId, options)
+  },
+
+  async getRunReport(runId, options) {
+    return getRunReport(runId, options)
   },
 
   async getReportReadiness(runId, options) {
@@ -90,6 +96,10 @@ export const reportService = {
 
   async compareReports(runIds) {
     return compareReports(runIds)
+  },
+
+  async compareRunReports(leftRunId, rightRunId, options) {
+    return compareRunReports(leftRunId, rightRunId, options)
   },
 
   async exportReport(runId, options) {

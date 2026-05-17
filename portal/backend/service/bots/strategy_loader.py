@@ -7,7 +7,7 @@ with all their relationships, replacing the confusing dict-based approach.
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import Any, List
 
 from sqlalchemy import select
 
@@ -21,11 +21,25 @@ from ...db.models import (
     StrategyVariantRecord,
 )
 from ..risk.atm import normalise_template
+from ..strategy_variant_resolution import resolve_strategy_variant
 from engines.bot_runtime.strategy.models import Strategy, StrategyIndicatorLink, StrategyInstrumentLink
 from risk import normalise_risk_config
 from utils.log_context import build_log_context, with_log_context
 
 logger = logging.getLogger(__name__)
+
+
+def _default_variant_record(session: Any, strategy_id: str) -> StrategyVariantRecord | None:
+    rows = session.execute(
+        select(StrategyVariantRecord).where(StrategyVariantRecord.strategy_id == strategy_id)
+    ).scalars().all()
+    for row in rows:
+        if row.is_default:
+            return row
+    for row in rows:
+        if str(row.name or "").strip().lower() == "default":
+            return row
+    return None
 
 
 class StrategyLoader:
@@ -68,17 +82,20 @@ class StrategyLoader:
             variant_rec = None
             if variant_id:
                 variant_rec = session.get(StrategyVariantRecord, variant_id)
-                if variant_rec and str(variant_rec.strategy_id or "").strip() != strategy_id:
+                if not variant_rec:
+                    raise ValueError(f"Strategy variant not found: {variant_id}")
+                if str(variant_rec.strategy_id or "").strip() != strategy_id:
                     raise ValueError(
                         f"Strategy variant {variant_id} does not belong to strategy {strategy_id}"
                     )
-                if variant_rec and not resolved_params:
-                    resolved_params = dict(variant_rec.param_overrides or {})
 
-            selected_atm_template_id = (
-                (variant_rec.atm_template_id if variant_rec else None)
-                or strategy_rec.atm_template_id
+            effective_config = resolve_strategy_variant(
+                strategy_rec,
+                variant_rec,
+                default_variant=_default_variant_record(session, strategy_id),
+                bot_overrides=resolved_params if not variant_id else None,
             )
+            selected_atm_template_id = effective_config.effective_atm_template_id
 
             # Fetch ATM template if linked
             atm_template = None
@@ -150,8 +167,16 @@ class StrategyLoader:
                 indicator_links=indicator_links,
                 instrument_links=instrument_links,
                 rules=rules,
-                variant_name=variant_name,
-                resolved_params=dict(resolved_params or {}),
+                variant_id=variant_id,
+                variant_name=(
+                    str(variant_rec.name or "").strip()
+                    if variant_rec is not None
+                    else variant_name
+                ) or None,
+                resolved_params=effective_config.effective_params,
+                param_source_map=effective_config.param_source_map,
+                effective_strategy_config=effective_config.to_effective_strategy_config(),
+                run_strategy_snapshot=effective_config.to_run_strategy_snapshot(),
             )
 
     @staticmethod

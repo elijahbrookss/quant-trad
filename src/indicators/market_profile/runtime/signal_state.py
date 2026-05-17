@@ -46,6 +46,17 @@ def _level_price(state: MarketProfileBarState, direction: str) -> float:
     return float(state.vah if direction == "long" else state.val)
 
 
+def _distance_from_reference(*, trigger_price: float, reference_price: float, direction: str) -> dict[str, float]:
+    signed = (float(trigger_price) - float(reference_price)) if direction == "long" else (float(reference_price) - float(trigger_price))
+    absolute = abs(float(trigger_price) - float(reference_price))
+    pct = absolute / float(reference_price) if float(reference_price) else 0.0
+    return {
+        "distance_from_reference": signed,
+        "distance_from_reference_abs": absolute,
+        "distance_from_reference_pct": pct,
+    }
+
+
 def _breakout_direction(state: MarketProfileBarState) -> str | None:
     if state.previous_location == "inside_value" and state.location == "above_value":
         return "long"
@@ -453,6 +464,11 @@ class BreakoutRetestStateMachine:
                 "outside_bars_observed": int(sequence.outside_bars),
                 "reclaim_max_bars": int(self._reclaim_max_bars),
                 "retest_max_bars": int(self._retest_max_bars),
+                **_distance_from_reference(
+                    trigger_price=float(state.close),
+                    reference_price=float(sequence.reference_price),
+                    direction=sequence.direction,
+                ),
             },
         }
 
@@ -490,6 +506,11 @@ class BreakoutRetestStateMachine:
                 ),
                 "bars_since_confirmation": int(sequence.bars_since_confirmation),
                 "reclaim_max_bars": int(self._reclaim_max_bars),
+                **_distance_from_reference(
+                    trigger_price=float(state.close),
+                    reference_price=float(sequence.reference_price),
+                    direction=sequence.direction,
+                ),
             },
         }
 
@@ -563,6 +584,11 @@ class BreakoutRetestStateMachine:
                 "retest_touch_tolerance_atr": float(self._retest_touch_tolerance_atr),
                 "retest_max_penetration_atr": float(self._retest_max_penetration_atr),
                 "retest_hold_confirm_bars": int(self._retest_hold_confirm_bars),
+                **_distance_from_reference(
+                    trigger_price=float(state.close),
+                    reference_price=float(sequence.reference_price),
+                    direction=sequence.direction,
+                ),
             },
         }
 

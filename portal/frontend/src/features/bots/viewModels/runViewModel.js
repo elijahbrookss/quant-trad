@@ -11,7 +11,7 @@ export const LIFECYCLE_STATES = new Set([
 ])
 
 export const HEALTH_STATES = new Set(['ok', 'warning', 'critical', 'unknown'])
-export const REPORT_STATUSES = new Set(['unknown', 'not_started', 'preparing', 'ready', 'failed', 'unavailable', 'stale'])
+export const REPORT_STATUSES = new Set(['unknown', 'not_started', 'preparing', 'building', 'ready', 'failed', 'unavailable', 'stale'])
 export const COMPARISON_STATUSES = new Set(['unknown', 'eligible', 'blocked', 'not_applicable'])
 export const ERROR_SEVERITIES = new Set(['info', 'warning', 'critical', 'unknown'])
 export const ERROR_CATEGORIES = new Set(['startup', 'configuration', 'runtime', 'reporting', 'network', 'storage', 'unknown'])
@@ -223,19 +223,26 @@ export function mapRunToViewModel(apiRun = {}, options = {}) {
       readPath(apiRun, ['last_run_artifact', 'stats', 'net_pnl']),
     ]),
     totalTrades: firstFiniteNumber([
-      apiRun.total_trades,
+      readPath(apiRun, ['runtime', 'total_trades']),
       readPath(apiRun, ['runtime', 'stats', 'total_trades']),
+      apiRun.total_trades,
       readPath(apiRun, ['run', 'summary', 'total_trades']),
       readPath(apiRun, ['last_stats', 'total_trades']),
       readPath(apiRun, ['last_run_artifact', 'summary', 'total_trades']),
     ]),
     openTrades: firstFiniteNumber([
-      apiRun.open_trades,
+      readPath(apiRun, ['runtime', 'open_trade_count']),
+      readPath(apiRun, ['runtime', 'trade_count']),
+      readPath(apiRun, ['lifecycle', 'telemetry', 'open_trade_count']),
       readPath(apiRun, ['lifecycle', 'telemetry', 'trade_count']),
+      Array.isArray(apiRun.open_trades) ? apiRun.open_trades.length : apiRun.open_trades,
     ]),
     warningsCount: Math.max(
       0,
-      Number(apiRun.warning_count ?? apiRun.warnings_count ?? apiRun.lifecycle?.telemetry?.warning_count ?? 0) || 0,
+      Number(apiRun.warning_count ?? 0) || 0,
+      Number(apiRun.warnings_count ?? 0) || 0,
+      Number(apiRun.runtime?.warning_count ?? 0) || 0,
+      Number(apiRun.lifecycle?.telemetry?.warning_count ?? 0) || 0,
       Number(Array.isArray(apiRun.runtime?.warnings) ? apiRun.runtime.warnings.length : 0) || 0,
     ),
     primaryError: mapErrorToViewModel(extractBackendError(apiRun)),

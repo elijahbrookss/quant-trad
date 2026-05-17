@@ -41,6 +41,9 @@ class _FakeStorage:
     def get_bot_run(self, run_id):
         return {"run_id": run_id} if run_id else None
 
+    def get_report_materialization_status(self, run_id):
+        return {"run_id": run_id, "status": "not_started"}
+
     def get_latest_bot_runtime_run_id(self, bot_id):
         return None
 
@@ -127,3 +130,4 @@ def test_runtime_composition_caches_per_mode_singletons(monkeypatch):
     second = get_runtime_composition(mode=RuntimeMode.BACKTEST)
 
     assert first is second
+    assert hasattr(first.storage, "get_report_materialization_status")

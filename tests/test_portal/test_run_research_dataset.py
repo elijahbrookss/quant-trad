@@ -19,6 +19,7 @@ class _ResearchDatasetStorage:
         observability_events: list[dict[str, Any]] | None = None,
         candle_summaries: dict[tuple[str, str], dict[str, Any]] | None = None,
         candle_closures: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
+        candles: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
     ) -> None:
         self._run = dict(run)
         self._events = sorted([dict(row) for row in events], key=lambda row: int(row.get("seq") or 0))
@@ -29,6 +30,10 @@ class _ResearchDatasetStorage:
         self._candle_closures = {
             tuple(key): [dict(row) for row in value]
             for key, value in (candle_closures or {}).items()
+        }
+        self._candles = {
+            tuple(key): [dict(row) for row in value]
+            for key, value in (candles or {}).items()
         }
 
     def get_bot_run(self, run_id: str):
@@ -54,6 +59,19 @@ class _ResearchDatasetStorage:
     def list_candle_closure_evidence(self, *, instrument_id: str, timeframe: str, start, end):
         _ = start, end
         return [dict(row) for row in self._candle_closures.get((instrument_id, timeframe), [])]
+
+    def list_candles_for_series(
+        self,
+        *,
+        instrument_id: str,
+        timeframe: str,
+        start,
+        end,
+        limit: int,
+        prefer_latest: bool = False,
+    ):
+        _ = start, end, prefer_latest
+        return [dict(row) for row in self._candles.get((instrument_id, timeframe), [])[: int(limit or 2000)]]
 
     def list_bot_runtime_events(
         self,
@@ -106,6 +124,9 @@ def _run() -> dict[str, Any]:
             "symbols": ["BTC", "ETH"],
             "timeframe": "1h",
             "material_config_hash": "material-1",
+            "risk_settings": {"risk_per_trade": 0.01, "slippage_bps": 0.0},
+            "atm_template": {"id": "atm-1", "targets": [1, 2, 3]},
+            "indicators": [{"id": "ind-1", "type": "market_profile"}],
         },
     }
 
@@ -219,8 +240,10 @@ def _gap(seq: int) -> dict[str, Any]:
         "candle_continuity_summary",
         {
             "symbol": "BTC",
+            "instrument_id": "instrument-btc",
+            "timeframe": "1h",
             "series_key": "instrument-btc|1h",
-            "boundary_name": "ingest_admission",
+            "boundary_name": "run_final",
             "source_reason": "provider_missing_data",
             "detected_gap_count": 2,
             "gap_count_by_type": {"provider_missing_data": 1, "unknown_gap": 1},
@@ -283,6 +306,52 @@ def _unknown_gap(seq: int) -> dict[str, Any]:
         },
         event_type="observability",
     )
+
+
+def _observer_gap(
+    *,
+    boundary_name: str = "selected_symbol_snapshot",
+    pipeline_stage: str = "botlens_selected_symbol_snapshot",
+    message_kind: str = "ephemeral",
+    detected_gap_count: int = 9,
+) -> dict[str, Any]:
+    return {
+        "level": "INFO",
+        "event_name": "candle_continuity_summary",
+        "component": "botlens_symbol_service",
+        "pipeline_stage": pipeline_stage,
+        "message_kind": message_kind,
+        "bot_id": "bot-1",
+        "run_id": "run-1",
+        "series_key": "instrument-btc|1h",
+        "instrument_id": "instrument-btc",
+        "symbol": "BTC",
+        "timeframe": "1h",
+        "observed_at": "2026-04-01T00:09:00Z",
+        "details": {
+            "boundary_name": boundary_name,
+            "source_reason": "observer_snapshot",
+            "series_key": "instrument-btc|1h",
+            "instrument_id": "instrument-btc",
+            "symbol": "BTC",
+            "timeframe": "1h",
+            "message_kind": message_kind,
+            "pipeline_stage": pipeline_stage,
+            "materiality": "diagnostic",
+            "diagnostic_scope": "botlens_observer",
+            "detected_gap_count": detected_gap_count,
+            "gap_count_by_type": {"unknown_gap": detected_gap_count},
+            "candle_count": 320,
+            "missing_candle_estimate": detected_gap_count,
+            "gaps": [
+                {
+                    "previous_ts": "2026-03-10T00:00:00Z",
+                    "current_ts": "2026-03-10T10:00:00Z",
+                    "classification": "unknown_gap",
+                }
+            ],
+        },
+    }
 
 
 def _trades(extra: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -394,6 +463,7 @@ def _build(
     observability_events=None,
     candle_summaries=None,
     candle_closures=None,
+    candles=None,
 ):
     fake_storage = _ResearchDatasetStorage(
         run=_run(),
@@ -403,6 +473,7 @@ def _build(
         observability_events=observability_events,
         candle_summaries=candle_summaries,
         candle_closures=candle_closures,
+        candles=candles,
     )
     _install(monkeypatch, fake_storage)
     return run_research_dataset.build_run_research_dataset("run-1")
@@ -541,7 +612,11 @@ def test_dataset_includes_execution_mode_and_intrabar_fallback_summary(monkeypat
     dataset = _build(monkeypatch)
 
     assert dataset["metadata"]["execution_mode"] == "full"
+    assert dataset["metadata"]["configuration"]["risk"]["slippage_bps"] == 0.0
+    assert dataset["metadata"]["configuration"]["atm"]["id"] == "atm-1"
+    assert dataset["metadata"]["configuration"]["indicators"][0]["type"] == "market_profile"
     assert dataset["execution"]["execution_mode"] == "full"
+    assert dataset["execution"]["slippage"]["total_slippage_cost"] == 0.0
     assert dataset["execution"]["intrabar_fallback_count"] == 2
     assert dataset["execution"]["fallback_reason_distribution"] == {
         "ambiguous_1m_candle": 1,
@@ -549,6 +624,69 @@ def test_dataset_includes_execution_mode_and_intrabar_fallback_summary(monkeypat
     }
     diagnostic_codes = {item["code"] for item in dataset["diagnostics"]["items"]}
     assert "intrabar_fallback_pessimistic" in diagnostic_codes
+
+
+def test_dataset_enriches_trade_entry_risk_excursion_and_fallback_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    trades = _trades()
+    trades[0]["stop_price"] = 90.0
+    trades[0]["tick_size"] = 1.0
+    trades[0]["tick_value"] = 1.0
+    trades[0]["metrics"] = {
+        **trades[0]["metrics"],
+        "r_ticks": 10.0,
+        "r_value": 10.0,
+        "legs": [
+            {
+                "id": "leg-1",
+                "name": "tp-1",
+                "status": "target",
+                "exit_price": 110.0,
+                "exit_time": "2026-03-05T01:00:00Z",
+                "contracts": 1,
+                "ticks": 10,
+                "target_price": 110.0,
+            }
+        ],
+    }
+    events = _events() + [
+        _event(
+            20,
+            "execution_intrabar_fallback_pessimistic",
+            {
+                "symbol": "BTC",
+                "timeframe": "1h",
+                "bar_time": "2026-03-05T01:00:00Z",
+                "reason": "ambiguous_1m_candle",
+                "raw_reason": "ambiguous_1m_candle",
+                "execution_mode": "full",
+            },
+            event_type="runtime.execution",
+        )
+    ]
+
+    dataset = _build(
+        monkeypatch,
+        events=events,
+        trades=trades,
+        candles={
+            ("instrument-btc", "1m"): [
+                {"time": "2026-03-05T00:00:00Z", "open": 100.0, "high": 105.0, "low": 98.0, "close": 103.0},
+                {"time": "2026-03-05T01:00:00Z", "open": 103.0, "high": 112.0, "low": 96.0, "close": 111.0},
+                {"time": "2026-03-05T02:00:00Z", "open": 111.0, "high": 111.0, "low": 99.0, "close": 110.0},
+            ]
+        },
+    )
+
+    trade = next(row for row in dataset["trades"] if row["trade_id"] == "trade-1")
+    assert trade["entry_risk"]["stop_distance_price"] == pytest.approx(10.0)
+    assert trade["entry_risk"]["r_ticks"] == pytest.approx(10.0)
+    assert trade["excursion"]["mae_ticks"] == pytest.approx(-4.0)
+    assert trade["excursion"]["mfe_ticks"] == pytest.approx(12.0)
+    assert trade["excursion"]["mae_r"] == pytest.approx(-0.4)
+    assert trade["intrabar_fallback_within_trade"] is True
+    assert trade["intrabar_fallback_reasons"] == ["ambiguous_1m_candle"]
+    assert trade["legs"][0]["excursion"]["mfe_ticks"] == pytest.approx(12.0)
+    assert trade["legs"][0]["intrabar_fallback_within_leg"] is True
 
 
 def test_dataset_includes_signals_and_trace_identity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -601,6 +739,20 @@ def test_dataset_extracts_runtime_indicator_and_market_context_from_signal_artif
                             "indicator_commit_seq": 12,
                             "indicator_commit_seq_status": "indicator_scoped",
                             "event_keys": ["breakout_long"],
+                            "events": [
+                                {
+                                    "key": "breakout_long",
+                                    "direction": "long",
+                                    "known_at": 1772668800,
+                                    "metadata": {
+                                        "breakout_time": 1772665200,
+                                        "confirmation_bars_required": 2,
+                                        "reference": {"kind": "price_level", "label": "VAH", "price": 99.0},
+                                        "distance_from_reference": 1.0,
+                                    },
+                                }
+                            ],
+                            "event_count": 1,
                         },
                         "ind-1.market_state": {
                             "output_ref": "ind-1.market_state",
@@ -626,6 +778,9 @@ def test_dataset_extracts_runtime_indicator_and_market_context_from_signal_artif
     indicator_context = dataset["context"]["indicator_snapshots"]
     market_state = dataset["context"]["market_state"]
     assert indicator_context["row_count"] == 2
+    signal_snapshot = next(row for row in indicator_context["items"] if row["output_name"] == "signal")
+    assert signal_snapshot["values"]["events"][0]["metadata"]["distance_from_reference"] == 1.0
+    assert dataset["signals"][0]["indicator_context"]["outputs"]["ind-1.signal"]["events"][0]["metadata"]["confirmation_bars_required"] == 2
     assert market_state["row_count"] == 1
     assert indicator_context["items"][1]["indicator_commit_seq"] == 13
     assert market_state["items"][0]["context_values"]["ind-1.market_state"] == {
@@ -1143,6 +1298,46 @@ def test_data_snapshot_hash_changes_when_candle_gap_window_changes(monkeypatch: 
     changed = _build(monkeypatch, events=changed_events)
 
     assert changed["metadata"]["data_snapshot_hash"] != baseline["metadata"]["data_snapshot_hash"]
+
+
+def test_observer_continuity_facts_do_not_change_material_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    baseline = _build(monkeypatch, events=_events(), observability_events=[])
+    observed = _build(
+        monkeypatch,
+        events=_events(),
+        observability_events=[
+            _observer_gap(boundary_name="selected_symbol_snapshot"),
+            _observer_gap(
+                boundary_name="run_bootstrap_selected_symbol",
+                pipeline_stage="botlens_run_bootstrap_snapshot",
+            ),
+        ],
+    )
+
+    assert observed["metadata"]["data_snapshot_hash"] == baseline["metadata"]["data_snapshot_hash"]
+    assert observed["readiness"]["semantic_fingerprint"] == baseline["readiness"]["semantic_fingerprint"]
+    assert observed["readiness"]["material_fingerprint"] == baseline["readiness"]["material_fingerprint"]
+    assert observed["readiness"]["golden_candidate_status"] == baseline["readiness"]["golden_candidate_status"]
+    assert observed["readiness"]["golden_blocking_reasons"] == baseline["readiness"]["golden_blocking_reasons"]
+    assert observed["candle_gaps"]["noncanonical_fact_count"] == 2
+    assert all(row["evidence_scope"] == "diagnostic_observer" for row in observed["candle_gaps"]["diagnostic_facts"])
+    assert all(row["boundary_name"] == "run_final" for row in observed["candle_gaps"]["facts"])
+
+
+def test_missing_run_final_continuity_fails_without_certifying_from_observer_facts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = [row for row in _events() if _event_name(row) != "candle_continuity_summary"]
+
+    dataset = _build(monkeypatch, events=events, observability_events=[_observer_gap()])
+
+    assert dataset["candle_gaps"]["canonical_evidence_status"] == "missing"
+    assert dataset["candle_gaps"]["facts"] == []
+    assert dataset["candle_gaps"]["diagnostic_facts"]
+    assert "missing_canonical_continuity_evidence" in dataset["readiness"]["caveats"]
+    assert "missing_canonical_continuity_evidence" in dataset["readiness"]["golden_blocking_reasons"]
+    assert "missing_canonical_continuity_evidence" in dataset["diagnostics"]["summary"]["blocking_codes"]
+    assert dataset["readiness"]["golden_candidate_status"] == "blocked"
 
 
 def test_lifecycle_failure_and_completion_blocks_golden_candidate(monkeypatch: pytest.MonkeyPatch) -> None:

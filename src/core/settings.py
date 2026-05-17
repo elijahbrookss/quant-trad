@@ -103,6 +103,7 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_BOT_RUNTIME_BOTLENS_MAX_WARNINGS", ("bot_runtime", "botlens", "max_warnings")),
     ("QT_BOT_RUNTIME_BOTLENS_RING_SIZE", ("bot_runtime", "botlens", "ring_size")),
     ("QT_BOT_RUNTIME_BOTLENS_INGEST_QUEUE_MAX", ("bot_runtime", "botlens", "ingest_queue_max")),
+    ("QT_BOT_RUNTIME_BOTLENS_PERSIST_OBSERVER_CONTINUITY", ("bot_runtime", "botlens", "persist_observer_continuity")),
     ("QT_BOT_RUNTIME_STEP_TRACE_QUEUE_MAX", ("bot_runtime", "step_trace", "queue_max")),
     ("QT_BOT_RUNTIME_STEP_TRACE_BATCH_SIZE", ("bot_runtime", "step_trace", "batch_size")),
     ("QT_BOT_RUNTIME_STEP_TRACE_FLUSH_INTERVAL_MS", ("bot_runtime", "step_trace", "flush_interval_ms")),
@@ -456,6 +457,7 @@ class BotlensSettings:
     max_warnings: int
     ring_size: int
     ingest_queue_max: int
+    persist_observer_continuity: bool
 
 
 @dataclass(frozen=True)
@@ -800,6 +802,9 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                 max_warnings=_coerce_int(botlens_payload.get("max_warnings"), 120, minimum=20),
                 ring_size=_coerce_int(botlens_payload.get("ring_size"), 8192, minimum=32),
                 ingest_queue_max=_coerce_int(botlens_payload.get("ingest_queue_max"), 4096, minimum=64),
+                persist_observer_continuity=_coerce_bool(
+                    botlens_payload.get("persist_observer_continuity"), False
+                ),
             ),
             step_trace=StepTraceSettings(
                 queue_max=_coerce_int(step_trace_payload.get("queue_max"), 8192, minimum=1),

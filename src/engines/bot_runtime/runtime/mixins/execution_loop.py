@@ -34,6 +34,35 @@ logger = logging.getLogger(__name__)
 _OVERLAY_SUPPRESSION_LOG_EVERY = 25
 
 
+def _decision_order_pressure_context(summary: Mapping[str, Any] | None) -> Dict[str, Any]:
+    if not isinstance(summary, Mapping):
+        return {
+            "decision_order_wait_ms": 0.0,
+            "decision_order_wait_count": 0.0,
+            "decision_order_wait_poll_count": 0.0,
+            "decision_order_release_count": 0.0,
+            "decision_order_fail_count": 0.0,
+            "decision_order_blocking_participant_count": 0.0,
+            "decision_order_max_blocking_participant_count": 0.0,
+        }
+
+    def _float(key: str) -> float:
+        try:
+            return float(summary.get(key) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return {
+        "decision_order_wait_ms": _float("elapsed_wait_ms"),
+        "decision_order_wait_count": _float("wait_count"),
+        "decision_order_wait_poll_count": _float("wait_poll_count"),
+        "decision_order_release_count": _float("release_count"),
+        "decision_order_fail_count": _float("fail_count"),
+        "decision_order_blocking_participant_count": _float("blocking_participant_count"),
+        "decision_order_max_blocking_participant_count": _float("max_blocking_participant_count"),
+    }
+
+
 class RuntimeExecutionLoopMixin:
     def _require_prepared(self, action: str) -> None:
         if self._prepared:
@@ -290,6 +319,7 @@ class RuntimeExecutionLoopMixin:
                 runtime_loop_duration_seconds=self._runtime_loop_duration_seconds,
             )
             logger.info(with_log_context("bot_run_end_summary", context))
+        self._record_decision_order_wait_diagnostics(status=status)
         # Update state with last candle from first series (backward compatibility)
         if self._series and self._series[0].candles:
             self._update_state(self._series[0].candles[-1], status=status)
@@ -306,6 +336,91 @@ class RuntimeExecutionLoopMixin:
         self._runtime_flush_drain_duration_seconds = max((datetime.now(timezone.utc) - drain_started).total_seconds(), 0.0)
         self._persist_runtime_state(status)
         self._persist_run_artifact(status)
+
+    def _record_decision_order_wait_diagnostics(self, *, status: str) -> None:
+        if self._run_context is None:
+            return
+        try:
+            coordinator = self._decision_order_coordinator()
+            top_waits = list(coordinator.top_wait_diagnostics())
+        except Exception as exc:  # pragma: no cover - diagnostic-only defensive path.
+            logger.warning(
+                with_log_context(
+                    "bot_runtime_decision_order_wait_diagnostic_snapshot_failed",
+                    self._runtime_log_context(status=status, error=str(exc)),
+                )
+            )
+            return
+        if not top_waits:
+            return
+        recorder = getattr(self._deps, "record_bot_runtime_diagnostic_event", None)
+        if not callable(recorder):
+            return
+        payload = {
+            "observed_at": _isoformat(datetime.now(timezone.utc)),
+            "component": "bot_runtime",
+            "event_name": "decision_order_top_waits",
+            "level": "INFO",
+            "bot_id": self.bot_id,
+            "run_id": self._run_context.run_id,
+            "worker_id": getattr(self._start_context, "worker_id", None) if self._start_context is not None else None,
+            "pipeline_stage": "decision_ordering",
+            "message_kind": "diagnostic",
+            "status": status,
+            "message": "Worker terminal snapshot of shared-wallet coordinator waits captured.",
+            "details": {
+                "materiality": "diagnostic",
+                "diagnostic_scope": "coordinator_wait_attribution",
+                "aggregation_level": "worker_terminal_snapshot",
+                "source_reason": "worker_terminal_status",
+                "top_n": len(top_waits),
+                "waits": top_waits,
+            },
+        }
+        try:
+            recorder(payload)
+        except Exception as exc:  # pragma: no cover - diagnostics must not fail the run.
+            logger.warning(
+                with_log_context(
+                    "bot_runtime_decision_order_wait_diagnostic_persist_failed",
+                    self._runtime_log_context(status=status, error=str(exc)),
+                )
+            )
+        try:
+            merged = coordinator.claim_merged_wait_diagnostics()
+        except Exception as exc:  # pragma: no cover - diagnostic-only defensive path.
+            logger.warning(
+                with_log_context(
+                    "bot_runtime_decision_order_wait_merged_snapshot_failed",
+                    self._runtime_log_context(status=status, error=str(exc)),
+                )
+            )
+            return
+        if not merged:
+            return
+        merged_payload = {
+            "observed_at": _isoformat(datetime.now(timezone.utc)),
+            "component": "bot_runtime",
+            "event_name": "decision_order_top_waits_merged",
+            "level": "INFO",
+            "bot_id": self.bot_id,
+            "run_id": self._run_context.run_id,
+            "worker_id": getattr(self._start_context, "worker_id", None) if self._start_context is not None else None,
+            "pipeline_stage": "decision_ordering",
+            "message_kind": "diagnostic",
+            "status": status,
+            "message": "Run-level merged shared-wallet coordinator waits captured.",
+            "details": dict(merged),
+        }
+        try:
+            recorder(merged_payload)
+        except Exception as exc:  # pragma: no cover - diagnostics must not fail the run.
+            logger.warning(
+                with_log_context(
+                    "bot_runtime_decision_order_wait_merged_diagnostic_persist_failed",
+                    self._runtime_log_context(status=status, error=str(exc)),
+                )
+            )
 
     def _terminalize_backtest_open_trades(self) -> int:
         closed_count = 0
@@ -763,6 +878,7 @@ class RuntimeExecutionLoopMixin:
             decision_order_ticket = None
             decision_order_completed = False
             decision_order_outcome = "none"
+            decision_order_pressure = _decision_order_pressure_context(None)
             try:
                 instrument_id = None
                 if isinstance(series.instrument, Mapping):
@@ -784,6 +900,8 @@ class RuntimeExecutionLoopMixin:
                 decision_candidate = None
                 if direction is not None and instrument_id and isinstance(selected_decision, Mapping):
                     decision_candidate = {
+                        "run_id": self._run_context.run_id if self._run_context is not None else None,
+                        "bot_id": self.bot_id,
                         "bar_time": bar_time,
                         "strategy_id": getattr(series, "strategy_id", None),
                         "instrument_id": instrument_id,
@@ -803,6 +921,10 @@ class RuntimeExecutionLoopMixin:
                         bar={"bar_time": bar_time, "timeframe": getattr(series, "timeframe", None)},
                         candidate=decision_candidate,
                     )
+                    if decision_order_ticket is not None:
+                        decision_order_pressure = _decision_order_pressure_context(
+                            getattr(decision_order_ticket, "wait_summary", None)
+                        )
                 # Attempt to create trade from signal
                 if direction is not None:
                     if not instrument_id:
@@ -994,9 +1116,16 @@ class RuntimeExecutionLoopMixin:
                         "entry_created": entry_created,
                         "trade_lock_wait_ms": trade_lock_wait_ms,
                         "trade_lock_hold_ms": trade_lock_hold_ms,
+                        **decision_order_pressure,
                     },
                 )
             except Exception as exc:
+                candidate_order_failed = (
+                    decision_order_ticket is not None
+                    and decision_order_ticket.has_candidate
+                ) or decision_candidate is not None
+                if candidate_order_failed and not decision_order_pressure.get("decision_order_release_count"):
+                    decision_order_pressure["decision_order_fail_count"] = 1.0
                 self._decision_order_coordinator().mark_participant_failed(
                     self._decision_order_participant_payload(series, state),
                     error=exc,
@@ -1026,6 +1155,7 @@ class RuntimeExecutionLoopMixin:
                         "entry_created": entry_created,
                         "trade_lock_wait_ms": trade_lock_wait_ms,
                         "trade_lock_hold_ms": trade_lock_hold_ms,
+                        **decision_order_pressure,
                     },
                 )
                 raise

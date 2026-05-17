@@ -216,17 +216,25 @@ function describeWorkerUsage(display) {
 function runtimeWarningCount(display, bot) {
   return Math.max(
     Number(display?.warningCount || 0) || 0,
+    Number(bot?.runtime?.warning_count || 0) || 0,
     Number(bot?.runtime?.warnings?.length || 0) || 0,
     Number(bot?.lifecycle?.telemetry?.warning_count || 0) || 0,
   )
 }
 
-function openTradeCount(display) {
-  return Math.max(0, Number(display?.lifecycle?.telemetry?.trade_count || 0) || 0)
+function openTradeCount(display, bot) {
+  return Math.max(
+    0,
+    Number(display?.lifecycle?.telemetry?.open_trade_count || 0) || 0,
+    Number(display?.lifecycle?.telemetry?.trade_count || 0) || 0,
+    Number(bot?.runtime?.open_trade_count || 0) || 0,
+    Number(bot?.runtime?.trade_count || 0) || 0,
+  )
 }
 
 function totalTrades(bot) {
   return firstFiniteNumber([
+    readNestedNumber(bot, [['runtime', 'total_trades']]),
     readNestedNumber(bot, [['runtime', 'stats', 'total_trades']]),
     readNestedNumber(bot, [['run', 'summary', 'total_trades']]),
     readNestedNumber(bot, [['last_stats', 'total_trades']]),
@@ -328,7 +336,7 @@ export function buildBotCardViewModel(
   const phaseLabel = formatLifecyclePhaseLabel(display?.lifecycle?.phase)
   const warningCount = runtimeWarningCount(display, bot)
   const warningSummary = warningSummaryFor(warningCount)
-  const openTrades = runView.openTrades ?? openTradeCount(display)
+  const openTrades = runView.openTrades ?? openTradeCount(display, bot)
   const totalTradeCount = runView.totalTrades ?? totalTrades(bot)
   const netPnl = runView.pnl ?? netPnlValue(bot)
   const workerUsage = describeWorkerUsage(display)

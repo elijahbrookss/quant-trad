@@ -43,6 +43,14 @@ from .observability import (
     record_observability_metric_rollups_batch,
 )
 from .presets import delete_symbol_preset, list_symbol_presets, upsert_symbol_preset
+from .report_materializations import (
+    claim_report_materialization_build,
+    get_materialized_run_report,
+    get_report_materialization_status,
+    mark_report_materialization_failed,
+    reset_report_materialization,
+    store_materialized_run_report,
+)
 from .runs import get_bot_run, list_bot_runs, upsert_bot_run
 from .runtime_events import (
     get_latest_bot_runtime_event,
@@ -110,6 +118,8 @@ __all__ = [
     "get_strategy_variant",
     "get_latest_bot_runtime_event",
     "get_latest_bot_runtime_run_id",
+    "get_materialized_run_report",
+    "get_report_materialization_status",
     "list_bot_run_lifecycle_events",
     "list_bot_run_steps_for_run",
     "list_bot_runs",
@@ -134,6 +144,9 @@ __all__ = [
     "record_bot_run_lifecycle_checkpoint",
     "record_observability_events_batch",
     "record_observability_metric_rollups_batch",
+    "claim_report_materialization_build",
+    "mark_report_materialization_failed",
+    "reset_report_materialization",
     "record_bot_runtime_event",
     "record_bot_runtime_events_batch",
     "record_bot_trade",
@@ -153,4 +166,5 @@ __all__ = [
     "upsert_strategy_rule",
     "upsert_strategy_variant",
     "upsert_symbol_preset",
+    "store_materialized_run_report",
 ]

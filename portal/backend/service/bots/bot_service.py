@@ -62,6 +62,12 @@ def _load_projection_inputs(
         else None
     )
     run = _composition().storage.get_bot_run(run_id) if run_id else None
+    if run and run_id:
+        try:
+            report_status = _composition().storage.get_report_materialization_status(run_id)
+            run = {**dict(run), "report_materialization": report_status, "report_status": report_status.get("status")}
+        except Exception as exc:  # noqa: BLE001 - bot cards must still render if report status is unavailable.
+            logger.warning("bot_report_materialization_status_unavailable | bot_id=%s | run_id=%s | error=%s", bot_id, run_id, exc)
     run_snapshot = _telemetry_hub().get_run_snapshot(run_id=run_id) if run_id else None
     return run, lifecycle, run_snapshot
 

@@ -29,5 +29,6 @@ class BotRuntimeDeps:
     build_run_artifact_bundle: Callable[[str, str, Mapping[str, Any], Sequence[Any]], Any]
     append_botlens_canonical_fact_batch: Optional[Callable[..., Mapping[str, Any]]] = None
     append_botlens_canonical_fact_batches: Optional[Callable[..., Mapping[str, Any]]] = None
+    record_bot_runtime_diagnostic_event: Optional[Callable[[Mapping[str, Any]], None]] = None
 
 __all__ = ["BotRuntimeDeps"]

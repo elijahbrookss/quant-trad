@@ -120,14 +120,40 @@ test('treats degraded runtime as a distinct Degraded card state', () => {
   assert.equal(state.detail, '2 runtime warnings active')
   assert.deepEqual(
     state.allowedActions.map((action) => action.key),
-    ['open', 'report', 'stop'],
+    ['open', 'stop'],
   )
+})
+
+test('uses runtime warning count when fleet lifecycle telemetry is stale', () => {
+  const state = getBotCardDisplayState(
+    buildBot({
+      status: 'degraded',
+      active_run_id: 'run-live-degraded',
+      lifecycle: {
+        status: 'degraded',
+        phase: 'degraded',
+        reason: 'runtime_degraded',
+        telemetry: { warning_count: 0 },
+      },
+      runtime: {
+        status: 'degraded',
+        run_id: 'run-live-degraded',
+        warning_count: 2,
+        warnings: [],
+      },
+    }),
+  )
+
+  assert.equal(state.warningCount, 2)
+  assert.equal(state.detail, '2 runtime warnings active')
 })
 
 test('surfaces completed runs as Completed with rerun and lens actions', () => {
   const state = getBotCardDisplayState(
     buildBot({
       status: 'completed',
+      latest_run_id: 'run-completed-1',
+      report_materialization: { status: 'ready', can_view: true },
       controls: {
         can_start: true,
         can_stop: false,
@@ -199,7 +225,7 @@ test('surfaces canceled terminal runs without falling back to Starting', () => {
   assert.equal(state.isTerminal, true)
   assert.deepEqual(
     state.allowedActions.map((action) => action.label),
-    ['Start', 'View Report', 'Delete'],
+    ['Start', 'Report Unavailable', 'Delete'],
   )
 })
 
@@ -234,7 +260,7 @@ test('surfaces startup_failed lifecycle as Startup failed', () => {
   assert.equal(state.detail, 'docker launch failed')
   assert.deepEqual(
     state.allowedActions.map((action) => action.label),
-    ['Restart', 'View Report', 'View Diagnostics', 'Delete'],
+    ['Restart', 'Report Unavailable', 'View Diagnostics', 'Delete'],
   )
   assert.deepEqual(
     state.allowedActions.map((action) => action.variant),
@@ -303,7 +329,7 @@ test('surfaces crashed runs as Crashed and routes detail to diagnostics instead 
   assert.equal(state.detail, 'Container exited unexpectedly')
   assert.deepEqual(
     state.allowedActions.map((action) => action.label),
-    ['Restart', 'View Report', 'View Diagnostics', 'Delete'],
+    ['Restart', 'Report Unavailable', 'View Diagnostics', 'Delete'],
   )
   assert.deepEqual(
     state.allowedActions.map((action) => action.variant),
@@ -343,7 +369,7 @@ test('maps watchdog/container crash after healthy runtime to Crashed', () => {
   assert.equal(state.detail, 'Runtime heartbeat lost')
   assert.deepEqual(
     state.allowedActions.map((action) => action.label),
-    ['Restart', 'View Report', 'View Diagnostics', 'Delete'],
+    ['Restart', 'Report Unavailable', 'View Diagnostics', 'Delete'],
   )
   assert.deepEqual(
     state.allowedActions.map((action) => action.variant),
@@ -387,7 +413,7 @@ test('keeps terminal completion over stale lifecycle crash residue after refresh
   assert.equal(state.detail, 'Run completed in 3m 30s')
   assert.deepEqual(
     state.allowedActions.map((action) => action.label),
-    ['Rerun', 'View Report', 'Delete'],
+    ['Rerun', 'Report Unavailable', 'Delete'],
   )
 })
 
@@ -451,7 +477,7 @@ test('promotes runtime-only live telemetry into Running without waiting for a ha
   assert.equal(state.displayStatus, 'Running')
   assert.equal(state.runId, 'runtime-live-1')
   assert.equal(state.allowedActions.some((action) => action.label === 'Open Lens'), true)
-  assert.equal(state.allowedActions.some((action) => action.label === 'View Report'), true)
+  assert.equal(state.allowedActions.some((action) => action.label === 'View Report'), false)
 })
 
 test('restart clicks immediately surface Starting while the new run is being requested', () => {

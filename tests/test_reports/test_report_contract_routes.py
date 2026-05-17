@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from portal.backend.controller import reports as reports_controller
 from portal.backend.main import app
+from portal.backend.service.reports.schemas import RunComparisonDTO
 
 
 def _dataset() -> dict:
@@ -70,6 +71,39 @@ def test_report_contract_routes_expose_canonical_shapes(monkeypatch: pytest.Monk
             "summary": _dataset()["summary"],
             "portfolio_metrics": _dataset()["portfolio_metrics"],
             "sections": _dataset()["sections"],
+        },
+    )
+    monkeypatch.setattr(
+        reports_controller,
+        "_materialized_run_report",
+        lambda run_id: {
+            "contract_version": "run_report_v2",
+            "schema_version": "run_report.v2",
+            "run_id": run_id,
+            "identity": {"run_id": run_id},
+            "trust": {
+                "readiness_status": "ready",
+                "semantic_fingerprint": "semantic-fingerprint",
+                "data_snapshot_hash": "data-snapshot-hash",
+            },
+            "performance": {"sharpe": {"value": 1.25, "valid": True, "unit": "ratio", "method": "test", "source": "fixture"}},
+            "behavior": {"total_decisions": 0, "accepted_decisions": 0, "rejected_decisions": 0},
+            "wallet": {"wallet_projection_status": "passed"},
+            "symbol_breakdown": [],
+            "coordinator_waits": {"status": "not_available", "top_waits": []},
+            "operational_diagnostics": {"operational_drift_status": "not_computed"},
+            "sections": {},
+            "raw_refs": {"source_contract": "RunResearchDataset.v1"},
+        },
+    )
+    monkeypatch.setattr(
+        reports_controller,
+        "_report_materialization_status",
+        lambda run_id, **_kwargs: {
+            "contract_version": "run_report_v2",
+            "schema_version": "run_report_materialization_status.v1",
+            "run_id": run_id,
+            "report_status": {"status": "ready", "contract_version": "run_report_v2", "can_view": True, "can_build": False, "can_retry": False},
         },
     )
     monkeypatch.setattr(reports_controller, "_get_report_sections", lambda _run_id: _dataset()["sections"])
@@ -145,6 +179,9 @@ def test_report_contract_routes_expose_canonical_shapes(monkeypatch: pytest.Monk
     assert client.get("/api/reports/run-1/readiness").json()["schema_version"] == "report_readiness.v1"
     assert client.get("/api/reports/run-1/summary").json()["schema_version"] == "run_report_summary.v1"
     assert client.get("/api/reports/run-1/summary").json()["portfolio_metrics"]["sharpe"] == 1.25
+    report_v2 = client.get("/api/reports/run-1/run-report").json()
+    assert report_v2["contract_version"] == "run_report_v2"
+    assert report_v2["performance"]["sharpe"]["valid"] is True
     assert client.get("/api/reports/run-1/sections").json()["schema_version"] == "report_sections.v1"
     assert client.get("/api/reports/run-1/diagnostics").json()["schema_version"] == "report_diagnostics.v1"
     assert client.get("/api/reports/run-1/metrics").json()["schema_version"] == "report_metrics.v1"
@@ -182,6 +219,85 @@ def test_report_compare_contract_blocks_without_deltas(monkeypatch: pytest.Monke
     assert payload["status"] == "blocked"
     assert payload["comparisons"] == []
     assert payload["blocked_reasons"]
+
+
+def test_materialized_report_compare_route_exposes_run_comparison_dto(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        reports_controller,
+        "_compare_materialized_run_reports",
+        lambda left_run_id, right_run_id, **_kwargs: RunComparisonDTO.model_validate({
+            "contract_version": "run_report_comparison_v1",
+            "left_run_id": left_run_id,
+            "right_run_id": right_run_id,
+            "comparison_status": "ready",
+            "comparison_verdict": "semantic_match",
+            "can_compare": True,
+            "blocked_reason": None,
+            "trust_comparison": {"semantic_fingerprint_match": True, "operational_fingerprint_match": True},
+            "performance_delta": {"net_pnl": {"left": 1, "right": 1, "delta": 0, "valid": True}},
+            "behavior_delta": {"decision_count_delta": 0},
+            "wallet_comparison": {"wallet_trace_complete_left": True, "wallet_trace_complete_right": True},
+            "symbol_deltas": [],
+            "coordinator_wait_delta": {},
+            "operational_drift": {"operational_fingerprint_match": True, "operational_drift_summary": "operational_match"},
+            "first_divergence": {"present": False, "divergence_type": "none", "source": "report_comparison"},
+            "raw_refs": {"cold_build_triggered": False},
+        }),
+    )
+
+    client = TestClient(app)
+    response = client.get("/api/reports/compare?left_run_id=run-1&right_run_id=run-2")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["contract_version"] == "run_report_comparison_v1"
+    assert payload["comparison_verdict"] == "semantic_match"
+    assert payload["trust_comparison"]["semantic_fingerprint_match"] is True
+
+
+def test_run_report_route_blocks_active_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(reports_controller, "_materialized_run_report", lambda _run_id: None)
+
+    def _not_terminal(run_id: str, **_kwargs: object) -> dict:
+        raise reports_controller.RunReportMaterializationNotTerminal(run_id, "running")
+
+    monkeypatch.setattr(reports_controller, "_report_materialization_status", _not_terminal)
+
+    client = TestClient(app)
+    response = client.get("/api/reports/run-active/run-report")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "run_not_terminal"
+
+
+def test_run_report_route_returns_building_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(reports_controller, "_materialized_run_report", lambda _run_id: None)
+    monkeypatch.setattr(
+        reports_controller,
+        "_report_materialization_status",
+        lambda run_id, **_kwargs: {
+            "contract_version": "run_report_v2",
+            "schema_version": "run_report_materialization_status.v1",
+            "run_id": run_id,
+            "report_status": {"status": "not_started", "contract_version": "run_report_v2", "can_view": False, "can_build": True, "can_retry": False},
+        },
+    )
+    monkeypatch.setattr(
+        reports_controller,
+        "_ensure_report_materialization",
+        lambda run_id, **_kwargs: {
+            "contract_version": "run_report_v2",
+            "schema_version": "run_report_materialization_status.v1",
+            "run_id": run_id,
+            "report_status": {"status": "building", "contract_version": "run_report_v2", "can_view": False, "can_build": False, "can_retry": False},
+        },
+    )
+
+    client = TestClient(app)
+    response = client.get("/api/reports/run-queued/run-report")
+
+    assert response.status_code == 202
+    assert response.json()["report_status"]["status"] == "building"
 
 
 def test_report_export_contract_uses_manifest_and_zip(monkeypatch: pytest.MonkeyPatch) -> None:

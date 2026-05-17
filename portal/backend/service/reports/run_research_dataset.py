@@ -55,6 +55,20 @@ _CANDLE_GAP_BLOCKING_TYPES = frozenset(
 )
 _CANDLE_GAP_PROVIDER_TYPES = frozenset({"provider_missing_data"})
 _CANDLE_GAP_EXPECTED_TYPES = frozenset({"expected_session_gap"})
+_CANONICAL_CANDLE_CONTINUITY_BOUNDARY = "run_final"
+_OBSERVER_CANDLE_CONTINUITY_BOUNDARIES = frozenset(
+    {
+        "selected_symbol_snapshot",
+        "run_bootstrap_selected_symbol",
+    }
+)
+_OBSERVER_CANDLE_CONTINUITY_STAGES = frozenset(
+    {
+        "botlens_selected_symbol_snapshot",
+        "botlens_run_bootstrap_snapshot",
+    }
+)
+_OBSERVER_CANDLE_CONTINUITY_MESSAGE_KINDS = frozenset({"ephemeral"})
 
 
 @dataclass(frozen=True)
@@ -89,6 +103,7 @@ class RunResearchMetadata:
     report_operational_fingerprint: Optional[str]
     dataset_schema_version: str
     generated_at: str
+    configuration: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -328,6 +343,122 @@ def _material_config_hash(config: Mapping[str, Any]) -> Optional[str]:
         return None
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+_SENSITIVE_CONFIG_KEYS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "api_secret",
+        "auth_token",
+        "dsn",
+        "password",
+        "pg_dsn",
+        "private_key",
+        "refresh_token",
+        "secret",
+        "token",
+    }
+)
+
+
+def _redact_config_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        redacted: Dict[str, Any] = {}
+        for key, item in value.items():
+            normalized = str(key).strip().lower()
+            if normalized in _SENSITIVE_CONFIG_KEYS or any(token in normalized for token in ("password", "secret", "token")):
+                redacted[str(key)] = "<redacted>"
+                continue
+            redacted[str(key)] = _redact_config_value(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_config_value(item) for item in value]
+    return _json_safe(value)
+
+
+def _first_config_section(config: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = config.get(key)
+        if value not in (None, "", [], {}):
+            return value
+    return None
+
+
+def _strategy_config_sections(config: Mapping[str, Any]) -> Dict[str, Any]:
+    bot = _mapping(config.get("bot"))
+    risk = _mapping(config.get("risk_settings")) or _mapping(bot.get("risk")) or _mapping(config.get("risk"))
+    execution = _mapping(config.get("execution"))
+    bot_execution = _mapping(bot.get("execution"))
+    slippage_bps = config.get("slippage_bps")
+    if slippage_bps is None:
+        slippage_bps = risk.get("slippage_bps")
+    if slippage_bps is None:
+        slippage_bps = execution.get("slippage_bps")
+    if slippage_bps is None:
+        slippage_bps = bot_execution.get("slippage_bps")
+    strategies = config.get("strategies") if isinstance(config.get("strategies"), list) else None
+    strategy = (
+        config.get("strategy")
+        or config.get("strategy_config")
+        or config.get("compiled_strategy")
+        or (strategies[0] if strategies else None)
+    )
+    strategy_map = _mapping(strategy)
+    indicator_config = (
+        _first_config_section(config, "indicators", "indicator_config", "strategy_indicators", "indicator_bindings")
+        or _first_config_section(strategy_map, "indicators", "indicator_config", "indicator_bindings")
+        or _first_config_section(bot, "indicators", "indicator_config")
+    )
+    atm_config = (
+        _first_config_section(config, "atm", "atm_template", "atm_config", "bracket_template")
+        or _first_config_section(strategy_map, "atm", "atm_template", "atm_config", "bracket_template")
+        or _first_config_section(risk, "atm", "atm_template", "bracket_template")
+        or _first_config_section(bot, "atm", "atm_template", "atm_config")
+    )
+    execution_config = {
+        "execution_mode": config.get("execution_mode") or bot.get("execution_mode") or risk.get("execution_mode"),
+        "playback_mode": config.get("playback_mode") or bot.get("playback_mode"),
+        "execution_profile": config.get("execution_profile") or bot.get("execution_profile") or risk.get("execution_profile"),
+        "slippage_bps": slippage_bps,
+    }
+    data_config = {
+        "symbols": config.get("symbols"),
+        "instrument_ids": config.get("instrument_ids"),
+        "timeframe": config.get("timeframe"),
+        "date_range": config.get("date_range"),
+        "datasource": config.get("datasource"),
+        "exchange": config.get("exchange"),
+    }
+    return {
+        "strategy": _redact_config_value(strategy if strategy is not None else strategies),
+        "effective_strategy_config": _redact_config_value(
+            _first_config_section(config, "effective_strategy_config")
+            or _first_config_section(strategy_map, "effective_strategy_config")
+        ),
+        "run_strategy_snapshot": _redact_config_value(
+            _first_config_section(config, "run_strategy_snapshot")
+            or _first_config_section(strategy_map, "run_strategy_snapshot")
+        ),
+        "risk": _redact_config_value(risk),
+        "atm": _redact_config_value(atm_config),
+        "indicators": _redact_config_value(indicator_config),
+        "execution": _redact_config_value({key: value for key, value in execution_config.items() if value not in (None, "", [], {})}),
+        "data": _redact_config_value({key: value for key, value in data_config.items() if value not in (None, "", [], {})}),
+    }
+
+
+def _configuration_metadata(config: Mapping[str, Any]) -> Dict[str, Any]:
+    sections = _strategy_config_sections(config)
+    return {
+        "schema_version": "run_configuration_snapshot.v1",
+        "source": "portal_bot_runs.config_snapshot",
+        "available": bool(config),
+        "config_hash": _config_hash(config),
+        "material_config_hash": _material_config_hash(config),
+        **sections,
+        "raw_snapshot": _redact_config_value(dict(config)),
+    }
 
 
 def _execution_mode(run: Mapping[str, Any]) -> str:
@@ -605,6 +736,7 @@ def _signal_row(row: Mapping[str, Any]) -> Dict[str, Any]:
         "quantity": context.get("quantity") or context.get("qty"),
         "reason_code": row.get("reason_code") or context.get("reason_code"),
         "context": context,
+        "indicator_context": _indicator_context_from_runtime_context(context),
         "source_refs": [
             {"section": "runtime_events", "event_id": row.get("event_id") or payload.get("event_id")}
         ] if (row.get("event_id") or payload.get("event_id")) else [],
@@ -632,6 +764,7 @@ def _normalize_trades(
     normalized: List[Dict[str, Any]] = []
     for trade in trades:
         trade_id = _trade_id(trade)
+        metrics = _trade_metrics(trade)
         event_context = _mapping(trade_closed_context_by_id.get(trade_id))
         entry_time = trade.get("entry_time") or event_context.get("opened_at")
         exit_time = trade.get("exit_time") or event_context.get("exit_time") or event_context.get("closed_at")
@@ -656,6 +789,7 @@ def _normalize_trades(
                 "direction": trade.get("direction") or trade.get("side") or event_context.get("direction") or event_context.get("side"),
                 "entry_time": entry_time,
                 "entry_price": trade.get("entry_price") or event_context.get("entry_price"),
+                "stop_price": _safe_float(trade.get("stop_price") if trade.get("stop_price") is not None else event_context.get("stop_price") or metrics.get("stop_price")),
                 "exit_time": exit_time,
                 "exit_price": trade.get("exit_price") or event_context.get("exit_price"),
                 "exit_reason": close_reason,
@@ -670,6 +804,25 @@ def _normalize_trades(
                 "decision_id": trade.get("decision_id") or event_context.get("decision_id"),
                 "signal_id": trade.get("signal_id") or event_context.get("signal_id"),
                 "legs": legs,
+                "entry_order": _json_safe(trade.get("entry_order") or event_context.get("entry_order") or metrics.get("entry_order") or {}),
+                "entry_outcome": _json_safe(trade.get("entry_outcome") or event_context.get("entry_outcome") or metrics.get("entry_outcome") or {}),
+                "tick_size": _safe_float(trade.get("tick_size") if trade.get("tick_size") is not None else metrics.get("tick_size")),
+                "tick_value": _safe_float(trade.get("tick_value") if trade.get("tick_value") is not None else metrics.get("tick_value")),
+                "contract_size": _safe_float(trade.get("contract_size") if trade.get("contract_size") is not None else metrics.get("contract_size")),
+                "atr_at_entry": _safe_float(trade.get("atr_at_entry") if trade.get("atr_at_entry") is not None else metrics.get("atr_at_entry")),
+                "r_multiple_at_entry": _safe_float(
+                    trade.get("r_multiple_at_entry")
+                    if trade.get("r_multiple_at_entry") is not None
+                    else metrics.get("r_multiple_at_entry")
+                ),
+                "r_value": _safe_float(trade.get("r_value") if trade.get("r_value") is not None else metrics.get("r_value")),
+                "r_ticks": _safe_float(trade.get("r_ticks") if trade.get("r_ticks") is not None else metrics.get("r_ticks")),
+                "mae_ticks": _safe_float(trade.get("mae_ticks") if trade.get("mae_ticks") is not None else metrics.get("mae_ticks")),
+                "mfe_ticks": _safe_float(trade.get("mfe_ticks") if trade.get("mfe_ticks") is not None else metrics.get("mfe_ticks")),
+                "mae_r": _safe_float(metrics.get("mae_r")),
+                "mfe_r": _safe_float(metrics.get("mfe_r")),
+                "bars_held": _safe_int(trade.get("bars_held") if trade.get("bars_held") is not None else metrics.get("bars_held")),
+                "metrics": _json_safe(metrics),
                 "holding_seconds": holding_seconds,
                 "duration_seconds": holding_seconds,
                 "duration": holding_seconds,
@@ -682,6 +835,375 @@ def _normalize_trades(
             }
         )
     return normalized
+
+
+def _timeframe_seconds(value: Any) -> Optional[int]:
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    match = re.fullmatch(r"(\d+)\s*([smhdw])", text)
+    if not match:
+        return None
+    amount = int(match.group(1))
+    unit = match.group(2)
+    multiplier = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[unit]
+    return amount * multiplier
+
+
+def _trade_direction_factor(trade: Mapping[str, Any]) -> int:
+    direction = str(trade.get("direction") or trade.get("side") or "").strip().lower()
+    if direction in {"short", "sell"}:
+        return -1
+    return 1
+
+
+def _infer_tick_size_from_legs(trade: Mapping[str, Any]) -> Optional[float]:
+    entry = _safe_float(trade.get("entry_price"))
+    if entry is None:
+        return None
+    for leg in trade.get("legs") or []:
+        if not isinstance(leg, Mapping):
+            continue
+        ticks = _safe_float(leg.get("ticks"))
+        target = _safe_float(leg.get("target_price"))
+        if ticks in (None, 0.0) or target is None:
+            continue
+        inferred = abs(target - entry) / abs(ticks)
+        if inferred > 0:
+            return inferred
+    return None
+
+
+def _entry_risk_fields(trade: Mapping[str, Any]) -> Dict[str, Any]:
+    entry = _safe_float(trade.get("entry_price"))
+    stop = _safe_float(trade.get("stop_price"))
+    tick_size = _safe_float(trade.get("tick_size")) or _infer_tick_size_from_legs(trade)
+    tick_value = _safe_float(trade.get("tick_value"))
+    quantity = _safe_float(trade.get("quantity")) or 0.0
+    r_ticks = _safe_float(trade.get("r_ticks"))
+    r_value = _safe_float(trade.get("r_value"))
+    source = "trade_r_ticks" if r_ticks not in (None, 0.0) else None
+    stop_distance_price = abs(entry - stop) if entry is not None and stop is not None else None
+    if r_ticks in (None, 0.0) and stop_distance_price is not None and tick_size not in (None, 0.0):
+        r_ticks = abs(stop_distance_price / tick_size)
+        source = "entry_stop_price"
+    if stop_distance_price is None and r_ticks not in (None, 0.0) and tick_size not in (None, 0.0):
+        stop_distance_price = abs(r_ticks * tick_size)
+    if stop is None and entry is not None and stop_distance_price is not None:
+        stop = entry - stop_distance_price if _trade_direction_factor(trade) > 0 else entry + stop_distance_price
+    if r_value is None and r_ticks not in (None, 0.0) and tick_value is not None and quantity:
+        r_value = abs(r_ticks * tick_value * quantity)
+    stop_distance_pct = (stop_distance_price / entry) if entry not in (None, 0.0) and stop_distance_price is not None else None
+    status = "available" if stop_distance_price is not None or r_ticks not in (None, 0.0) or r_value is not None else "unavailable"
+    entry_risk = {
+        "schema_version": "trade_entry_risk.v1",
+        "status": status,
+        "source": source or ("trade_stop_price" if stop_distance_price is not None else None),
+        "entry_price": entry,
+        "stop_price": stop,
+        "stop_distance_price": stop_distance_price,
+        "stop_distance_pct": stop_distance_pct,
+        "stop_distance_ticks": r_ticks,
+        "r_ticks": r_ticks,
+        "r_value": r_value,
+        "r_multiple_at_entry": _safe_float(trade.get("r_multiple_at_entry")),
+        "tick_size": tick_size,
+        "tick_value": tick_value,
+        "quantity": quantity or None,
+        "caveats": [] if status == "available" else ["entry_stop_or_r_metrics_unavailable"],
+    }
+    return {
+        "stop_price": stop,
+        "stop_distance_price": stop_distance_price,
+        "stop_distance_pct": stop_distance_pct,
+        "stop_distance_ticks": r_ticks,
+        "r_ticks": r_ticks,
+        "r_value": r_value,
+        "tick_size": tick_size,
+        "entry_risk": _json_safe(entry_risk),
+    }
+
+
+def _fallback_bars_for_window(
+    *,
+    fallback_bars: Sequence[Mapping[str, Any]],
+    symbol: Any,
+    timeframe: Any,
+    start: Any,
+    end: Any,
+) -> List[Dict[str, Any]]:
+    start_dt = _parse_iso(start)
+    end_dt = _parse_iso(end)
+    if not start_dt or not end_dt:
+        return []
+    symbol_text = str(symbol or "").strip()
+    timeframe_text = str(timeframe or "").strip()
+    matches: List[Dict[str, Any]] = []
+    for row in fallback_bars:
+        if symbol_text and str(row.get("symbol") or "").strip() != symbol_text:
+            continue
+        if timeframe_text and str(row.get("timeframe") or "").strip() != timeframe_text:
+            continue
+        bar_time = _parse_iso(row.get("bar_time"))
+        if bar_time and start_dt <= bar_time <= end_dt:
+            matches.append(dict(row))
+    return matches
+
+
+def _candle_dt(row: Mapping[str, Any]) -> Optional[datetime]:
+    value = row.get("time") or row.get("candle_time")
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    return _parse_iso(value)
+
+
+def _fetch_excursion_candles(trade: Mapping[str, Any]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    list_candles = getattr(storage, "list_candles_for_series", None)
+    if not callable(list_candles):
+        return [], {"status": "unavailable", "caveats": ["candle_window_storage_unavailable"]}
+    instrument_id = str(trade.get("instrument_id") or "").strip()
+    entry_dt = _parse_iso(trade.get("entry_time"))
+    exit_dt = _parse_iso(trade.get("exit_time"))
+    if not instrument_id or not entry_dt or not exit_dt:
+        return [], {"status": "unavailable", "caveats": ["trade_identity_or_lifecycle_incomplete"]}
+    candidate_timeframes = _unique_text(["1m", trade.get("timeframe")])
+    partial: tuple[List[Dict[str, Any]], Dict[str, Any]] | None = None
+    for timeframe in candidate_timeframes:
+        seconds = _timeframe_seconds(timeframe) or 60
+        duration_seconds = max((exit_dt - entry_dt).total_seconds(), 0.0)
+        expected_limit = int(duration_seconds / seconds) + 3
+        limit = max(1, min(expected_limit, 2000))
+        end = exit_dt + timedelta(seconds=seconds)
+        try:
+            rows = list_candles(
+                instrument_id=instrument_id,
+                timeframe=timeframe,
+                start=_iso(entry_dt),
+                end=_iso(end),
+                limit=limit,
+                prefer_latest=False,
+            )
+        except Exception as exc:  # pragma: no cover - defensive report caveat
+            logger.warning(
+                "report_excursion_candle_fetch_failed run_id=%s trade_id=%s instrument_id=%s timeframe=%s error=%s",
+                trade.get("run_id"),
+                trade.get("trade_id"),
+                instrument_id,
+                timeframe,
+                exc,
+            )
+            continue
+        normalized = [dict(row) for row in rows if isinstance(row, Mapping)]
+        if not normalized:
+            continue
+        metadata = {
+            "status": "available",
+            "source": "market_candles_raw",
+            "source_timeframe": timeframe,
+            "candle_count": len(normalized),
+            "caveats": [],
+        }
+        if expected_limit > 2000 and len(normalized) >= 2000:
+            metadata["status"] = "partial"
+            metadata["caveats"] = ["excursion_candle_window_truncated_at_2000_rows"]
+            partial = (normalized, metadata)
+            continue
+        return normalized, metadata
+    if partial is not None:
+        return partial
+    return [], {"status": "unavailable", "caveats": ["excursion_candles_unavailable"]}
+
+
+def _compute_excursion(
+    *,
+    trade: Mapping[str, Any],
+    candles: Sequence[Mapping[str, Any]],
+    source: Mapping[str, Any],
+    end_time: Any,
+    quantity: Optional[float] = None,
+) -> Dict[str, Any]:
+    entry_dt = _parse_iso(trade.get("entry_time"))
+    end_dt = _parse_iso(end_time)
+    entry = _safe_float(trade.get("entry_price"))
+    if not entry_dt or not end_dt or entry is None or not candles:
+        return {
+            "schema_version": "trade_excursion.v1",
+            "status": "unavailable",
+            "source": source.get("source"),
+            "source_timeframe": source.get("source_timeframe"),
+            "caveats": list(source.get("caveats") or ["excursion_inputs_unavailable"]),
+        }
+    direction = _trade_direction_factor(trade)
+    tick_size = _safe_float(trade.get("tick_size")) or _infer_tick_size_from_legs(trade)
+    tick_value = _safe_float(trade.get("tick_value"))
+    r_ticks = _safe_float(trade.get("r_ticks")) or _safe_float(trade.get("stop_distance_ticks"))
+    qty = quantity if quantity is not None else _safe_float(trade.get("quantity"))
+    selected: List[tuple[datetime, Mapping[str, Any]]] = []
+    for candle in candles:
+        candle_time = _candle_dt(candle)
+        if candle_time and entry_dt <= candle_time <= end_dt:
+            selected.append((candle_time, candle))
+    if not selected:
+        return {
+            "schema_version": "trade_excursion.v1",
+            "status": "unavailable",
+            "source": source.get("source"),
+            "source_timeframe": source.get("source_timeframe"),
+            "caveats": ["no_candles_in_trade_window"],
+        }
+    max_favorable = 0.0
+    max_adverse = 0.0
+    max_favorable_time: Optional[datetime] = None
+    max_adverse_time: Optional[datetime] = None
+    max_favorable_price: Optional[float] = None
+    max_adverse_price: Optional[float] = None
+    for candle_time, candle in selected:
+        high = _safe_float(candle.get("high"))
+        low = _safe_float(candle.get("low"))
+        if high is None or low is None:
+            continue
+        high_move = (high - entry) * direction
+        low_move = (low - entry) * direction
+        favorable_move = max(high_move, low_move)
+        adverse_move = min(high_move, low_move)
+        favorable_price = high if direction > 0 and high_move >= low_move else low if direction < 0 and low_move >= high_move else high
+        adverse_price = low if direction > 0 and low_move <= high_move else high
+        if favorable_move > max_favorable:
+            max_favorable = favorable_move
+            max_favorable_time = candle_time
+            max_favorable_price = favorable_price
+        if adverse_move < max_adverse:
+            max_adverse = adverse_move
+            max_adverse_time = candle_time
+            max_adverse_price = adverse_price
+    mae_ticks = (max_adverse / tick_size) if tick_size not in (None, 0.0) else None
+    mfe_ticks = (max_favorable / tick_size) if tick_size not in (None, 0.0) else None
+    mae_r = (mae_ticks / r_ticks) if mae_ticks is not None and r_ticks not in (None, 0.0) else None
+    mfe_r = (mfe_ticks / r_ticks) if mfe_ticks is not None and r_ticks not in (None, 0.0) else None
+    mae_currency = (mae_ticks * tick_value * qty) if mae_ticks is not None and tick_value is not None and qty is not None else None
+    mfe_currency = (mfe_ticks * tick_value * qty) if mfe_ticks is not None and tick_value is not None and qty is not None else None
+    caveats = list(source.get("caveats") or [])
+    if selected and end_dt >= selected[-1][0]:
+        caveats.append("bar_extremes_include_exit_bar_when_available")
+    return _json_safe(
+        {
+            "schema_version": "trade_excursion.v1",
+            "status": source.get("status") or "available",
+            "source": source.get("source"),
+            "source_timeframe": source.get("source_timeframe"),
+            "candle_count": len(selected),
+            "entry_price": entry,
+            "window_start": _iso(entry_dt),
+            "window_end": _iso(end_dt),
+            "mae_price_move": max_adverse,
+            "mfe_price_move": max_favorable,
+            "mae_ticks": mae_ticks,
+            "mfe_ticks": mfe_ticks,
+            "mae_abs_ticks": abs(mae_ticks) if mae_ticks is not None else None,
+            "mfe_abs_ticks": abs(mfe_ticks) if mfe_ticks is not None else None,
+            "mae_r": mae_r,
+            "mfe_r": mfe_r,
+            "mae_currency": mae_currency,
+            "mfe_currency": mfe_currency,
+            "max_adverse_price": max_adverse_price,
+            "max_adverse_time": _iso(max_adverse_time),
+            "max_favorable_price": max_favorable_price,
+            "max_favorable_time": _iso(max_favorable_time),
+            "caveats": sorted(dict.fromkeys(caveats)),
+        }
+    )
+
+
+def _runtime_excursion_from_trade(trade: Mapping[str, Any]) -> Dict[str, Any]:
+    metrics = _mapping(trade.get("metrics"))
+    mae_ticks = _safe_float(trade.get("mae_ticks")) if trade.get("mae_ticks") is not None else _safe_float(metrics.get("mae_ticks"))
+    mfe_ticks = _safe_float(trade.get("mfe_ticks")) if trade.get("mfe_ticks") is not None else _safe_float(metrics.get("mfe_ticks"))
+    return _json_safe(
+        {
+            "schema_version": "runtime_trade_excursion.v1",
+            "status": "available" if mae_ticks is not None or mfe_ticks is not None else "unavailable",
+            "source": "persisted_trade_metrics",
+            "mae_ticks": mae_ticks,
+            "mfe_ticks": mfe_ticks,
+            "mae_r": _safe_float(trade.get("mae_r")) if trade.get("mae_r") is not None else _safe_float(metrics.get("mae_r")),
+            "mfe_r": _safe_float(trade.get("mfe_r")) if trade.get("mfe_r") is not None else _safe_float(metrics.get("mfe_r")),
+            "bars_held": _safe_int(trade.get("bars_held")) if trade.get("bars_held") is not None else _safe_int(metrics.get("bars_held")),
+            "caveats": [] if mae_ticks is not None or mfe_ticks is not None else ["runtime_mae_mfe_metrics_unavailable"],
+        }
+    )
+
+
+def _enrich_trades_for_research(
+    trades: Sequence[Mapping[str, Any]],
+    *,
+    execution: Mapping[str, Any],
+) -> List[Dict[str, Any]]:
+    fallback_bars = [dict(row) for row in execution.get("fallback_bars") or [] if isinstance(row, Mapping)]
+    enriched: List[Dict[str, Any]] = []
+    for trade in trades:
+        row = dict(trade)
+        risk = _entry_risk_fields(row)
+        for key in ("stop_price", "stop_distance_price", "stop_distance_pct", "stop_distance_ticks", "r_ticks", "r_value", "tick_size"):
+            if row.get(key) in (None, "") and risk.get(key) is not None:
+                row[key] = risk.get(key)
+        row["entry_risk"] = risk["entry_risk"]
+        row["runtime_excursion"] = _runtime_excursion_from_trade(row)
+
+        candles, candle_source = _fetch_excursion_candles(row)
+        trade_excursion = _compute_excursion(trade=row, candles=candles, source=candle_source, end_time=row.get("exit_time"))
+        row["excursion"] = trade_excursion
+        row["unrealized_excursion_before_exit"] = trade_excursion
+        for flat_key, nested_key in (
+            ("excursion_mae_ticks", "mae_ticks"),
+            ("excursion_mfe_ticks", "mfe_ticks"),
+            ("excursion_mae_r", "mae_r"),
+            ("excursion_mfe_r", "mfe_r"),
+            ("excursion_mae_currency", "mae_currency"),
+            ("excursion_mfe_currency", "mfe_currency"),
+        ):
+            row[flat_key] = trade_excursion.get(nested_key)
+
+        trade_fallbacks = _fallback_bars_for_window(
+            fallback_bars=fallback_bars,
+            symbol=row.get("symbol"),
+            timeframe=row.get("timeframe"),
+            start=row.get("entry_time"),
+            end=row.get("exit_time"),
+        )
+        row["intrabar_fallback_within_trade"] = bool(trade_fallbacks)
+        row["intrabar_fallback_count"] = len(trade_fallbacks)
+        row["intrabar_fallback_bars"] = trade_fallbacks
+        row["intrabar_fallback_reasons"] = sorted(dict.fromkeys(str(item.get("reason") or "unknown") for item in trade_fallbacks))
+
+        legs: List[Dict[str, Any]] = []
+        for leg in row.get("legs") or []:
+            leg_row = dict(leg) if isinstance(leg, Mapping) else {}
+            leg_end = leg_row.get("exit_time") or row.get("exit_time")
+            leg_qty = _safe_float(leg_row.get("contracts")) or _safe_float(row.get("quantity"))
+            leg_excursion = _compute_excursion(trade=row, candles=candles, source=candle_source, end_time=leg_end, quantity=leg_qty)
+            leg_row["excursion"] = leg_excursion
+            leg_row["unrealized_excursion_before_exit"] = leg_excursion
+            for flat_key, nested_key in (
+                ("mae_ticks", "mae_ticks"),
+                ("mfe_ticks", "mfe_ticks"),
+                ("mae_r", "mae_r"),
+                ("mfe_r", "mfe_r"),
+            ):
+                leg_row[flat_key] = leg_excursion.get(nested_key)
+            leg_fallbacks = _fallback_bars_for_window(
+                fallback_bars=fallback_bars,
+                symbol=row.get("symbol"),
+                timeframe=row.get("timeframe"),
+                start=row.get("entry_time"),
+                end=leg_end,
+            )
+            leg_row["intrabar_fallback_within_leg"] = bool(leg_fallbacks)
+            leg_row["intrabar_fallback_count"] = len(leg_fallbacks)
+            leg_row["intrabar_fallback_bars"] = leg_fallbacks
+            legs.append(leg_row)
+        row["legs"] = legs
+        enriched.append(_json_safe(row))
+    return enriched
 
 
 def _link_trace_rows(
@@ -794,7 +1316,81 @@ def _summary(
     )
 
 
-def _fee_accounting(trades: Sequence[Mapping[str, Any]], summary: RunResearchSummary) -> Dict[str, Any]:
+def _fee_fact_from_mapping(
+    source: Mapping[str, Any],
+    *,
+    trade_id: Any = None,
+    symbol: Any = None,
+    source_name: str,
+) -> Optional[Dict[str, Any]]:
+    fee_paid = _safe_float(
+        source.get("fee_paid")
+        if source.get("fee_paid") is not None
+        else source.get("fees_paid")
+        if source.get("fees_paid") is not None
+        else source.get("fee")
+    )
+    rate = _safe_float(source.get("fee_rate"))
+    role = source.get("fee_role") or source.get("fee_type") or source.get("liquidity_role")
+    fee_source = source.get("fee_source") or source.get("source")
+    if fee_paid is None and rate is None and not role and not fee_source:
+        return None
+    return {
+        "trade_id": trade_id or source.get("trade_id"),
+        "symbol": symbol or source.get("symbol"),
+        "fee_paid": fee_paid,
+        "fee_rate": rate,
+        "fee_role": str(role).strip() if role not in (None, "") else None,
+        "fee_source": str(fee_source).strip() if fee_source not in (None, "") else None,
+        "source": source_name,
+    }
+
+
+def _fee_facts(
+    *,
+    trades: Sequence[Mapping[str, Any]],
+    events: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    facts: List[Dict[str, Any]] = []
+    for trade in trades:
+        metrics = _mapping(trade.get("metrics"))
+        trade_id = trade.get("trade_id")
+        symbol = trade.get("symbol")
+        for source, source_name in (
+            (metrics, "trade_metrics"),
+            (_mapping(trade.get("entry_outcome")), "trade_entry_outcome"),
+        ):
+            fact = _fee_fact_from_mapping(source, trade_id=trade_id, symbol=symbol, source_name=source_name)
+            if fact:
+                facts.append(fact)
+        for leg in trade.get("legs") or []:
+            if not isinstance(leg, Mapping):
+                continue
+            fact = _fee_fact_from_mapping(leg, trade_id=trade_id, symbol=symbol, source_name="trade_leg")
+            if fact:
+                facts.append(fact)
+    for row in events:
+        name = _event_name_key(row)
+        if name not in {"entry_filled", "exit_filled", "fee_applied"}:
+            continue
+        context = _context(row)
+        fact = _fee_fact_from_mapping(
+            context,
+            trade_id=context.get("trade_id") or row.get("trade_id"),
+            symbol=context.get("symbol") or row.get("symbol"),
+            source_name=f"runtime_event:{name}",
+        )
+        if fact:
+            facts.append(fact)
+    return facts
+
+
+def _fee_accounting(
+    trades: Sequence[Mapping[str, Any]],
+    summary: RunResearchSummary,
+    *,
+    events: Sequence[Mapping[str, Any]] = (),
+) -> Dict[str, Any]:
     per_symbol: Dict[str, Dict[str, Any]] = {}
     roles = Counter()
     sources = Counter()
@@ -811,20 +1407,26 @@ def _fee_accounting(trades: Sequence[Mapping[str, Any]], summary: RunResearchSum
         stats["trades"] += 1
         stats["gross_pnl"] += gross
         stats["net_pnl"] += net
-        metrics = _mapping(trade.get("metrics"))
-        if metrics.get("fee_role"):
-            roles[str(metrics.get("fee_role"))] += 1
-        if metrics.get("fee_source"):
-            sources[str(metrics.get("fee_source"))] += 1
-        rate = _safe_float(metrics.get("fee_rate"))
-        if rate is not None:
-            rates.append(rate)
         if fees < -_EPSILON:
             suspicious.append({"trade_id": trade.get("trade_id"), "reason": "negative_fee", "fees_paid": fees})
         if abs(gross) > _EPSILON and abs(fees / gross) > 1.0:
             suspicious.append({"trade_id": trade.get("trade_id"), "reason": "fee_exceeds_gross_pnl", "fees_paid": fees, "gross_pnl": gross})
         if abs((gross - fees) - net) > 0.01:
             net_mismatch.append(str(trade.get("trade_id") or ""))
+    fee_facts = _fee_facts(trades=trades, events=events)
+    for fact in fee_facts:
+        if fact.get("fee_role"):
+            roles[str(fact.get("fee_role"))] += 1
+        if fact.get("fee_source"):
+            sources[str(fact.get("fee_source"))] += 1
+        rate = _safe_float(fact.get("fee_rate"))
+        if rate is not None:
+            rates.append(rate)
+    caveats = []
+    if not roles:
+        caveats.append("fee_role_facts_unavailable")
+    if not rates:
+        caveats.append("fee_rate_facts_unavailable")
     return {
         "per_symbol_fees": sorted(per_symbol.values(), key=lambda item: item["symbol"]),
         "fee_rate": {
@@ -834,6 +1436,8 @@ def _fee_accounting(trades: Sequence[Mapping[str, Any]], summary: RunResearchSum
         },
         "fee_role_distribution": dict(roles),
         "fee_source_distribution": dict(sources),
+        "fee_fact_count": len(fee_facts),
+        "fee_facts": fee_facts[:500],
         "fee_sanity_checks": {
             "fees_non_negative": not any((_safe_float(trade.get("fees_paid")) or 0.0) < -_EPSILON for trade in trades),
             "net_equals_gross_minus_fees": not net_mismatch,
@@ -841,6 +1445,126 @@ def _fee_accounting(trades: Sequence[Mapping[str, Any]], summary: RunResearchSum
             "total_fees": summary.fees,
         },
         "suspicious_fee_outliers": suspicious,
+        "caveats": caveats,
+    }
+
+
+def _find_config_number(value: Any, key_name: str) -> Optional[float]:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if str(key).strip().lower() == key_name:
+                parsed = _safe_float(item)
+                if parsed is not None:
+                    return parsed
+            found = _find_config_number(item, key_name)
+            if found is not None:
+                return found
+    if isinstance(value, list):
+        for item in value:
+            found = _find_config_number(item, key_name)
+            if found is not None:
+                return found
+    return None
+
+
+def _slippage_fact_from_mapping(source: Mapping[str, Any], *, source_name: str, trade_id: Any = None, symbol: Any = None) -> Optional[Dict[str, Any]]:
+    requested = _safe_float(
+        source.get("requested_price")
+        if source.get("requested_price") is not None
+        else source.get("signal_price")
+        if source.get("signal_price") is not None
+        else source.get("expected_price")
+    )
+    fill = _safe_float(
+        source.get("fill_price")
+        if source.get("fill_price") is not None
+        else source.get("avg_fill_price")
+        if source.get("avg_fill_price") is not None
+        else source.get("price")
+    )
+    explicit_slippage = _safe_float(source.get("slippage") if source.get("slippage") is not None else source.get("slippage_price"))
+    bps = _safe_float(source.get("slippage_bps"))
+    quantity = _safe_float(source.get("qty") if source.get("qty") is not None else source.get("quantity"))
+    contract_size = _safe_float(source.get("contract_size")) or 1.0
+    if explicit_slippage is None and requested is not None and fill is not None:
+        explicit_slippage = fill - requested
+    if bps is None and explicit_slippage is not None and requested not in (None, 0.0):
+        bps = (explicit_slippage / requested) * 10000.0
+    cost = None
+    if explicit_slippage is not None and quantity is not None:
+        cost = abs(explicit_slippage) * quantity * contract_size
+    if explicit_slippage is None and bps is None and cost is None:
+        return None
+    return _json_safe(
+        {
+            "trade_id": trade_id or source.get("trade_id"),
+            "symbol": symbol or source.get("symbol"),
+            "requested_price": requested,
+            "fill_price": fill,
+            "slippage_price": explicit_slippage,
+            "slippage_bps": bps,
+            "slippage_cost": cost,
+            "quantity": quantity,
+            "source": source_name,
+        }
+    )
+
+
+def _slippage_accounting(
+    *,
+    run: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]],
+    trades: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    facts: List[Dict[str, Any]] = []
+    for trade in trades:
+        trade_id = trade.get("trade_id")
+        symbol = trade.get("symbol")
+        for source, source_name in (
+            (_mapping(trade.get("entry_outcome")), "trade_entry_outcome"),
+            (_mapping(_mapping(trade.get("entry_outcome")).get("metadata")), "trade_entry_outcome.metadata"),
+        ):
+            fact = _slippage_fact_from_mapping(source, source_name=source_name, trade_id=trade_id, symbol=symbol)
+            if fact:
+                facts.append(fact)
+    for row in events:
+        name = _event_name_key(row)
+        if name not in {"entry_filled", "exit_filled"}:
+            continue
+        context = _context(row)
+        fact = _slippage_fact_from_mapping(
+            context,
+            source_name=f"runtime_event:{name}",
+            trade_id=context.get("trade_id") or row.get("trade_id"),
+            symbol=context.get("symbol") or row.get("symbol"),
+        )
+        if fact:
+            facts.append(fact)
+    config = _mapping(run.get("config_snapshot"))
+    configured_bps = _find_config_number(config, "slippage_bps")
+    costs = [_safe_float(fact.get("slippage_cost")) for fact in facts]
+    costs = [value for value in costs if value is not None]
+    bps_values = [_safe_float(fact.get("slippage_bps")) for fact in facts]
+    bps_values = [value for value in bps_values if value is not None]
+    total_cost = sum(costs) if costs else (0.0 if configured_bps == 0 else None)
+    caveats = []
+    if not facts:
+        caveats.append("per_fill_slippage_facts_unavailable")
+    if configured_bps is None:
+        caveats.append("configured_slippage_bps_unavailable")
+    return {
+        "schema_version": "slippage_accounting.v1",
+        "status": "available" if total_cost is not None or facts else "unavailable",
+        "configured_slippage_bps": configured_bps,
+        "fill_fact_count": len(facts),
+        "total_slippage_cost": total_cost,
+        "slippage_bps": {
+            "min": min(bps_values) if bps_values else configured_bps,
+            "max": max(bps_values) if bps_values else configured_bps,
+            "avg": statistics.mean(bps_values) if bps_values else configured_bps,
+        },
+        "facts": facts[:500],
+        "caveats": caveats,
     }
 
 
@@ -1139,7 +1863,9 @@ def _candle_gaps(
     classification = Counter()
     facts: List[Dict[str, Any]] = []
     sources: List[tuple[Mapping[str, Any], Dict[str, Any], str]] = []
-    observed_summary = False
+    diagnostic_facts: List[Dict[str, Any]] = []
+    canonical_summary_seen = False
+    noncanonical_summary_count = 0
     for row in events:
         context = _context(row)
         sources.append((row, context if "gap_count_by_type" in context else _mapping(_payload(row).get("details")), _event_name_key(row)))
@@ -1149,7 +1875,9 @@ def _candle_gaps(
     for row, summary_context, name in sources:
         if name not in {"candle_continuity_summary", "candle_gap_observed"} and "gap_count_by_type" not in summary_context:
             continue
-        observed_summary = True
+        evidence_scope = _candle_continuity_evidence_scope(row=row, summary_context=summary_context)
+        if evidence_scope != "canonical_terminal":
+            noncanonical_summary_count += 1
         instrument_id = summary_context.get("instrument_id") or row.get("instrument_id")
         series_key = summary_context.get("series_key") or row.get("series_key")
         if not instrument_id and series_key and "|" in str(series_key):
@@ -1180,7 +1908,30 @@ def _candle_gaps(
         )
         if gaps and int(sum(derived_gap_counts.values())) == int(detected or 0) and int(gap_counts.get("unknown_gap", 0) or 0) > 0:
             gap_counts = dict(derived_gap_counts)
+        fact = {
+            "symbol": symbol,
+            "resolved_symbol": symbol,
+            "instrument_id": instrument_id,
+            "timeframe": summary_context.get("timeframe") or row.get("timeframe"),
+            "series_key": series_key,
+            "boundary_name": summary_context.get("boundary_name") or row.get("boundary_name"),
+            "source_reason": summary_context.get("source_reason") or row.get("source_reason"),
+            "pipeline_stage": summary_context.get("pipeline_stage") or row.get("pipeline_stage"),
+            "message_kind": summary_context.get("message_kind") or row.get("message_kind"),
+            "gap_count_by_type": gap_counts,
+            "detected_gap_count": detected,
+            "candle_count": summary_context.get("candle_count"),
+            "missing_candle_estimate": summary_context.get("missing_candle_estimate"),
+            "gaps": gaps,
+            "observed_at": row.get("observed_at"),
+            "evidence_scope": evidence_scope,
+        }
+        if evidence_scope != "canonical_terminal":
+            diagnostic_facts.append(fact)
+            continue
+        canonical_summary_seen = True
         if detected <= 0:
+            facts.append(fact)
             continue
         stats = by_symbol.setdefault(symbol, {"symbol": symbol, "gap_count": 0, "gap_count_by_type": {}})
         stats["gap_count"] += detected
@@ -1188,23 +1939,7 @@ def _candle_gaps(
             normalized_count = int(_safe_int(count) or 0)
             classification[str(gap_type)] += normalized_count
             stats["gap_count_by_type"][str(gap_type)] = stats["gap_count_by_type"].get(str(gap_type), 0) + normalized_count
-        facts.append(
-            {
-                "symbol": symbol,
-                "resolved_symbol": symbol,
-                "instrument_id": instrument_id,
-                "timeframe": summary_context.get("timeframe") or row.get("timeframe"),
-                "series_key": series_key,
-                "boundary_name": summary_context.get("boundary_name"),
-                "source_reason": summary_context.get("source_reason"),
-                "gap_count_by_type": gap_counts,
-                "detected_gap_count": detected,
-                "candle_count": summary_context.get("candle_count"),
-                "missing_candle_estimate": summary_context.get("missing_candle_estimate"),
-                "gaps": gaps,
-                "observed_at": row.get("observed_at"),
-            }
-        )
+        facts.append(fact)
     return {
         "gap_counts_by_symbol": sorted(by_symbol.values(), key=lambda item: item["symbol"]),
         "classification_distribution": dict(classification),
@@ -1215,8 +1950,35 @@ def _candle_gaps(
         "facts": facts,
         "provider_missing_facts": [fact for fact in facts if int(_mapping(fact.get("gap_count_by_type")).get("provider_missing_data", 0) or 0) > 0],
         "source_sparse_facts": [fact for fact in facts if str(fact.get("source_reason") or "").strip().lower() == "source_sparse"],
-        "caveats": [] if observed_summary else ["candle_gap_observability_unavailable"],
+        "diagnostic_facts": diagnostic_facts,
+        "noncanonical_fact_count": noncanonical_summary_count,
+        "canonical_evidence_status": "present" if canonical_summary_seen else "missing",
+        "caveats": [] if canonical_summary_seen else ["missing_canonical_continuity_evidence"],
     }
+
+
+def _candle_continuity_evidence_scope(
+    *,
+    row: Mapping[str, Any],
+    summary_context: Mapping[str, Any],
+) -> str:
+    boundary_name = str(summary_context.get("boundary_name") or row.get("boundary_name") or "").strip().lower()
+    pipeline_stage = str(summary_context.get("pipeline_stage") or row.get("pipeline_stage") or "").strip().lower()
+    message_kind = str(summary_context.get("message_kind") or row.get("message_kind") or "").strip().lower()
+    materiality = str(summary_context.get("materiality") or row.get("materiality") or "").strip().lower()
+    diagnostic_scope = str(summary_context.get("diagnostic_scope") or row.get("diagnostic_scope") or "").strip().lower()
+
+    if (
+        materiality in {"diagnostic", "operational", "debug"}
+        or diagnostic_scope
+        or boundary_name in _OBSERVER_CANDLE_CONTINUITY_BOUNDARIES
+        or pipeline_stage in _OBSERVER_CANDLE_CONTINUITY_STAGES
+        or message_kind in _OBSERVER_CANDLE_CONTINUITY_MESSAGE_KINDS
+    ):
+        return "diagnostic_observer"
+    if boundary_name == _CANONICAL_CANDLE_CONTINUITY_BOUNDARY:
+        return "canonical_terminal"
+    return "noncanonical"
 
 
 def _candle_gap_missing_window(gap: Mapping[str, Any]) -> tuple[Optional[datetime], Optional[datetime]]:
@@ -1922,6 +2684,21 @@ def _report_diagnostics(
                     suggested_next_step="Review data quality before comparing or exporting results for analysis.",
                 )
             )
+    elif "missing_canonical_continuity_evidence" in set(candle_gaps.get("caveats") or []):
+        items.append(
+            _diagnostic(
+                severity="warning",
+                source="data_quality",
+                code="missing_canonical_continuity_evidence",
+                message="No terminal run_final candle continuity evidence was available for this run.",
+                affected_identity={
+                    "run_id": run_id,
+                    "ignored_diagnostic_fact_count": int(candle_gaps.get("noncanonical_fact_count") or 0),
+                },
+                readiness_impact="blocks_golden",
+                suggested_next_step="Regenerate or repair terminal run_final continuity evidence; do not certify from observer/debug facts.",
+            )
+        )
     elif "candle_gap_observability_unavailable" in set(candle_gaps.get("caveats") or []):
         items.append(
             _diagnostic(
@@ -2796,9 +3573,32 @@ def _indicator_snapshot_value(raw: Any) -> Any:
             result["state_key"] = raw.get("state_key")
         result["fields"] = raw.get("fields")
         return result
-    if "event_keys" in raw:
-        return {"event_keys": raw.get("event_keys")}
+    if "event_keys" in raw or "events" in raw:
+        result: Dict[str, Any] = {}
+        if raw.get("event_keys") is not None:
+            result["event_keys"] = raw.get("event_keys")
+        if raw.get("events") is not None:
+            result["events"] = raw.get("events")
+        if raw.get("event_count") is not None:
+            result["event_count"] = raw.get("event_count")
+        return result
     return raw
+
+
+def _indicator_context_from_runtime_context(context: Mapping[str, Any]) -> Dict[str, Any]:
+    outputs: Dict[str, Any] = {}
+    for output_map in _context_output_maps(context):
+        for output_key, raw in output_map.items():
+            normalized_output_key = str(output_key)
+            if normalized_output_key in outputs:
+                continue
+            outputs[normalized_output_key] = _json_safe(raw)
+    return {
+        "schema_version": "signal_indicator_context.v1",
+        "source": "decision_artifact_runtime_outputs",
+        "outputs": outputs,
+        "output_count": len(outputs),
+    }
 
 
 def _context_output_is_market_state(output_key: Any, raw: Any) -> bool:
@@ -2915,6 +3715,63 @@ def _indicator_rows_from_context(
     return rows
 
 
+def _market_context_point(
+    *,
+    identity: Mapping[str, Any],
+    values: Mapping[str, Any],
+    source: str,
+) -> Optional[Dict[str, Any]]:
+    bar_time = _parse_iso(identity.get("bar_time"))
+    if not bar_time or not values:
+        return None
+    return {
+        "symbol": identity.get("symbol"),
+        "timeframe": identity.get("timeframe"),
+        "bar_time": _iso(bar_time),
+        "known_at": identity.get("known_at"),
+        "context_values": _json_safe(values),
+        "source": source,
+    }
+
+
+def _lookup_market_context(
+    *,
+    points: Sequence[Mapping[str, Any]],
+    symbol: Any,
+    timeframe: Any,
+    target_time: Any,
+) -> Dict[str, Any]:
+    target = _parse_iso(target_time)
+    if not target:
+        return {"status": "unavailable", "caveats": ["target_time_unavailable"]}
+    symbol_text = str(symbol or "").strip()
+    timeframe_text = str(timeframe or "").strip()
+    candidates: List[tuple[datetime, Mapping[str, Any]]] = []
+    for point in points:
+        if symbol_text and str(point.get("symbol") or "").strip() != symbol_text:
+            continue
+        if timeframe_text and str(point.get("timeframe") or "").strip() != timeframe_text:
+            continue
+        bar_time = _parse_iso(point.get("bar_time"))
+        if bar_time and bar_time <= target:
+            candidates.append((bar_time, point))
+    if not candidates:
+        return {"status": "unavailable", "caveats": ["captured_market_state_unavailable_at_or_before_target"]}
+    bar_time, point = max(candidates, key=lambda item: item[0])
+    staleness_seconds = max((target - bar_time).total_seconds(), 0.0)
+    status = "exact" if staleness_seconds <= _EPSILON else "latest_before_target"
+    caveats = [] if status == "exact" else ["exit_context_uses_latest_captured_market_state_before_target"]
+    return {
+        "status": status,
+        "bar_time": _iso(bar_time),
+        "known_at": point.get("known_at"),
+        "staleness_seconds": staleness_seconds,
+        "source": point.get("source"),
+        "context_values": point.get("context_values") or {},
+        "caveats": caveats,
+    }
+
+
 def _context_dataset(
     *,
     metadata: RunResearchMetadata,
@@ -2926,6 +3783,7 @@ def _context_dataset(
     decision_context_rows: List[Dict[str, Any]] = []
     trade_context_rows: List[Dict[str, Any]] = []
     market_state_rows: List[Dict[str, Any]] = []
+    market_context_points: List[Dict[str, Any]] = []
     decisions_by_trade_id = {str(row.get("trade_id") or ""): dict(row) for row in decisions if row.get("trade_id")}
     decisions_by_decision_id = {str(row.get("decision_id") or ""): dict(row) for row in decisions if row.get("decision_id")}
 
@@ -2960,6 +3818,9 @@ def _context_dataset(
         market_values = _market_context_values(context)
         if market_values:
             market_state_rows.append(identity | {"context_values": market_values, "source": "decision_context"})
+            point = _market_context_point(identity=identity, values=market_values, source="decision_context")
+            if point:
+                market_context_points.append(point)
 
     for signal in signals:
         context = _mapping(signal.get("context"))
@@ -2981,10 +3842,25 @@ def _context_dataset(
         market_values = _market_context_values(context)
         if market_values:
             market_state_rows.append(identity | {"context_values": market_values, "source": "signal_context"})
+            point = _market_context_point(identity=identity, values=market_values, source="signal_context")
+            if point:
+                market_context_points.append(point)
 
     for trade in trades:
         decision = decisions_by_trade_id.get(str(trade.get("trade_id") or "")) or decisions_by_decision_id.get(str(trade.get("decision_id") or ""))
         decision_context = _mapping(decision.get("decision_context")) if decision else {}
+        entry_market_state = _lookup_market_context(
+            points=market_context_points,
+            symbol=trade.get("symbol"),
+            timeframe=trade.get("timeframe"),
+            target_time=trade.get("entry_time"),
+        )
+        exit_market_state = _lookup_market_context(
+            points=market_context_points,
+            symbol=trade.get("symbol"),
+            timeframe=trade.get("timeframe"),
+            target_time=trade.get("exit_time"),
+        )
         trade_context_rows.append(
             {
                 "run_id": metadata.run_id,
@@ -3002,6 +3878,8 @@ def _context_dataset(
                 "exit_reason": trade.get("exit_reason") or trade.get("close_reason"),
                 "net_pnl": trade.get("net_pnl"),
                 "context_values": _compact_context_values(decision_context),
+                "entry_market_state": entry_market_state,
+                "exit_market_state": exit_market_state,
                 "source_refs": trade.get("source_refs") or [],
             }
         )
@@ -3011,6 +3889,11 @@ def _context_dataset(
         caveats.append("indicator_snapshot_runtime_capture_unavailable")
     if not market_state_rows:
         caveats.append("market_state_runtime_capture_unavailable")
+    if trades and any(
+        str(_mapping(row.get("exit_market_state")).get("status") or "") == "unavailable"
+        for row in trade_context_rows
+    ):
+        caveats.append("exit_market_state_runtime_capture_incomplete")
     return {
         "schema_version": "report_context.v1",
         "indicator_snapshots": _series_payload(
@@ -3326,6 +4209,16 @@ def _context_material_rows(context: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _semantic_context_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        if "event_keys" in value:
+            return {"event_keys": _json_safe(value.get("event_keys"))}
+        return {str(key): _semantic_context_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_semantic_context_value(item) for item in value]
+    return _json_safe(value)
+
+
 def _context_semantic_rows(context: Mapping[str, Any]) -> Dict[str, Any]:
     indicator_rows: List[Dict[str, Any]] = []
     for row in _mapping(context.get("indicator_snapshots")).get("items") or []:
@@ -3344,7 +4237,7 @@ def _context_semantic_rows(context: Mapping[str, Any]) -> Dict[str, Any]:
                 "output_type": row.get("output_type"),
                 "indicator_commit_seq": row.get("indicator_commit_seq"),
                 "indicator_commit_seq_status": row.get("indicator_commit_seq_status"),
-                "values": row.get("values"),
+                "values": _semantic_context_value(row.get("values")),
             }
         )
     market_rows: List[Dict[str, Any]] = []
@@ -3679,6 +4572,7 @@ def _golden_blocking_reasons(
             "candle_catalog_identity_conflict",
             "candle_continuity_degraded",
             "candle_continuity_catalog_unavailable",
+            "missing_canonical_continuity_evidence",
             "lifecycle_contradiction",
             "projection_failure",
             "run_notification_queue_overflow",
@@ -3928,6 +4822,7 @@ def _metadata(run: Mapping[str, Any]) -> RunResearchMetadata:
         report_operational_fingerprint=None,
         dataset_schema_version=DATASET_SCHEMA_VERSION,
         generated_at=generated_at,
+        configuration=_configuration_metadata(config),
     )
 
 
@@ -3995,7 +4890,7 @@ def _finalize_readiness(
         data_quality_status = "degraded"
     elif candle_gaps.get("gap_counts_by_symbol"):
         data_quality_status = "clean"
-    elif "candle_gap_observability_unavailable" in candle_caveats:
+    elif "missing_canonical_continuity_evidence" in candle_caveats or "candle_gap_observability_unavailable" in candle_caveats:
         data_quality_status = "unknown"
 
     execution_quality_status = "degraded" if int(execution.get("intrabar_fallback_count") or 0) > 0 else "clean"
@@ -4009,6 +4904,12 @@ def _finalize_readiness(
         degraded_sections.append("data_quality")
     if execution_quality_status == "degraded":
         degraded_sections.append("execution_quality")
+    for caveat in candle_caveats:
+        normalized = str(caveat or "").strip()
+        if not normalized:
+            continue
+        caveats.append(normalized)
+        degraded_sections.append("data_quality")
     runtime_event_names = Counter(_event_name_key(row) for row in _unclassified_runtime_failures(events))
     if runtime_event_names.get("run_failed") or runtime_event_names.get("fault_recorded"):
         degraded_sections.append("lifecycle")
@@ -4113,6 +5014,9 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         timeframes=_unique_text([*metadata.timeframes, *(row.get("timeframe") for row in trace_rows)]),
         strategy_hash=metadata.strategy_hash or _first_trace_value(trace_rows, "strategy_hash"),
     )
+    execution = _execution_section(run=run, events=events)
+    trades = _enrich_trades_for_research(trades, execution=execution)
+    trace_rows = [*decisions, *signals, *trades]
     summary = _summary(decisions=decisions, trades=trades, starting_capital=metadata.starting_capital)
     decision_summary = {
         "total": summary.total_decisions,
@@ -4133,8 +5037,9 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         decision_summary=decision_summary,
         financial_summary=financial_summary,
     )
-    execution = _execution_section(run=run, events=events)
-    fee_accounting = _fee_accounting(trades, summary)
+    execution = dict(execution)
+    execution["slippage"] = _slippage_accounting(run=run, events=events, trades=trades)
+    fee_accounting = _fee_accounting(trades, summary, events=events)
     wallet_accounting = _wallet_accounting(run=run, decisions=decisions, events=events, summary=summary)
     wallet_diagnostics = _mapping(wallet_accounting.get("wallet_diagnostics"))
     observability_events = _observability_events_for_run(run_id)

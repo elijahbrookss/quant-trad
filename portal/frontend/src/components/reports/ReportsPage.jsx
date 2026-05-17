@@ -1,69 +1,28 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useParams, useSearchParams } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
-  ArrowDownAZ,
-  ArrowUpDown,
   BarChart3,
-  Calendar,
   ChevronLeft,
   ChevronRight,
+  Download,
+  ExternalLink,
   Filter,
   GitCompare,
   Grid3X3,
   List,
   RefreshCw,
   Search,
-  TrendingDown,
-  TrendingUp,
   X,
 } from 'lucide-react'
 import { reportService } from '../../services/reportService.js'
-import { formatCurrency, formatNumber, formatPercent, formatTimeframe, formatSymbols } from '../../utils/formatters.js'
-import { Button } from '../ui/Button.jsx'
-import { ReportModal } from './ReportModal.jsx'
-import { CompareModal } from './CompareModal.jsx'
-import { SemanticStatusBadge } from '../ui/StatusBadge.jsx'
+import { formatCurrency, formatNumber, formatPercent, formatSymbols, formatTimeframe } from '../../utils/formatters.js'
 import { formatExecutionModeLabel } from '../../features/bots/executionMode.js'
 import { reportListItemView } from './reportContractViewModel.js'
+import { reportComparableForSelection } from './reportComparisonViewModel.js'
+import { RunComparisonPage } from './RunComparisonPage.jsx'
+import { RunReportPage, formatDuration } from './RunReportPage.jsx'
 
 const PAGE_SIZE = 25
-
-const formatDateTime = (value) => {
-  if (!value) return '--'
-  try {
-    const date = new Date(value)
-    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
-  } catch {
-    return value
-  }
-}
-
-const formatDateTimeShort = (value) => {
-  if (!value) return '--'
-  try {
-    const date = new Date(value)
-    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-  } catch {
-    return value
-  }
-}
-
-const formatRunTime = (seconds) => {
-  if (seconds === null || seconds === undefined) return '--'
-  const numeric = Number(seconds)
-  if (!Number.isFinite(numeric) || numeric < 0) return '--'
-  const totalSeconds = Math.floor(numeric)
-  const hours = Math.floor(totalSeconds / 3600)
-  const minutes = Math.floor((totalSeconds % 3600) / 60)
-  const secs = totalSeconds % 60
-  if (hours) {
-    return `${hours}h ${String(minutes).padStart(2, '0')}m`
-  }
-  if (minutes) {
-    return `${minutes}m ${String(secs).padStart(2, '0')}s`
-  }
-  return `${secs}s`
-}
 
 const SORT_OPTIONS = [
   { value: 'completedAt', label: 'Date' },
@@ -74,165 +33,171 @@ const SORT_OPTIONS = [
   { value: 'trades', label: 'Trades' },
 ]
 
-const StatCard = ({ label, value, subValue, icon: Icon, tone = 'neutral' }) => {
-  const toneClasses = {
-    positive: 'text-emerald-400',
-    negative: 'text-rose-400',
-    neutral: 'text-slate-100',
-    accent: 'text-[color:var(--accent-text-soft)]',
-  }
+const formatDateTimeShort = (value) => {
+  if (!value) return 'Not available'
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return String(value)
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
 
+const normalizeLabel = (value) => {
+  if (value === true) return 'Complete'
+  if (value === false) return 'Incomplete'
+  if (value === null || value === undefined || value === '') return 'Unknown'
+  return String(value)
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+}
+
+const statusTone = (value) => {
+  const normalized = String(value ?? '').toLowerCase()
+  if (!normalized || ['unknown', 'not_available', 'not_computed', 'unavailable', 'not_implemented'].includes(normalized)) return 'neutral'
+  if (['ready', 'completed', 'pass', 'passed', 'certified', 'research_ready', 'research_valid', 'match', 'matched', 'present'].includes(normalized)) {
+    return 'good'
+  }
+  if (['partial', 'degraded', 'ready_with_caveats', 'caution', 'warning', 'operational_drift', 'operational_only_drift'].includes(normalized)) {
+    return 'warn'
+  }
+  if (['blocked', 'failed', 'fail', 'mismatch', 'missing', 'invalid', 'drift'].includes(normalized)) return 'bad'
+  return 'neutral'
+}
+
+const badgeClasses = {
+  good: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200',
+  warn: 'border-amber-500/30 bg-amber-500/10 text-amber-200',
+  bad: 'border-rose-500/30 bg-rose-500/10 text-rose-200',
+  neutral: 'border-white/10 bg-white/[0.04] text-slate-300',
+}
+
+function StatusPill({ value, title }) {
+  const tone = statusTone(value)
   return (
-    <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
-      <div className="flex items-start justify-between">
-        <div className="space-y-1">
-          <div className="text-[11px] uppercase tracking-[0.3em] text-slate-500">{label}</div>
-          <div className={`text-xl font-semibold ${toneClasses[tone]}`}>{value}</div>
-          {subValue && <div className="text-xs text-slate-500">{subValue}</div>}
+    <span className={`inline-flex rounded-[6px] border px-2 py-1 text-[10px] font-medium ${badgeClasses[tone]}`} title={title}>
+      {normalizeLabel(value)}
+    </span>
+  )
+}
+
+const formatMetricNumber = (value, decimals = 2) => (value === null || value === undefined ? 'Not available' : formatNumber(value, decimals))
+const formatMetricCurrency = (value) => (value === null || value === undefined ? 'Not available' : formatCurrency(value))
+const formatMetricPercent = (value) => (value === null || value === undefined ? 'Not available' : formatPercent(value, 2))
+const reportActionLabel = (report) => {
+  if (report?.canViewReport) return 'View Report'
+  const status = String(report?.reportStatus || '').toLowerCase()
+  if (['building', 'preparing'].includes(status)) return 'Report Generating...'
+  if (status === 'failed') return 'Report Failed'
+  if (status === 'not_started') return 'Generate Report'
+  return 'Report Unavailable'
+}
+const reportActionDisabled = (report) => {
+  if (report?.canViewReport) return false
+  const status = String(report?.reportStatus || '').toLowerCase()
+  return !['not_started', 'failed', 'stale'].includes(status)
+}
+
+function ReportCard({ report, onOpen, onExport, exportingRunId, selectedForCompare = false, onToggleCompare }) {
+  const compareSelectable = reportComparableForSelection(report)
+  return (
+    <article
+      className="cursor-pointer rounded-[8px] border border-white/10 bg-[#141923]/80 p-4 transition hover:border-white/20 hover:bg-[#171e2b]"
+      onClick={() => onOpen(report)}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-semibold text-slate-100">{report.botName || 'Bot unknown'}</div>
+          <div className="mt-1 truncate text-xs text-slate-500">{report.strategyName || 'Strategy unknown'}</div>
+          <div className="mt-2 break-all font-mono text-[11px] text-slate-500">{report.runId || 'No run ID'}</div>
         </div>
-        {Icon && (
-          <div className="rounded-lg bg-white/5 p-2">
-            <Icon className="size-4 text-slate-400" />
-          </div>
-        )}
+        <StatusPill value={report.researchStatus || report.readinessStatus || report.reportStatus} />
       </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-2">
+        <MetricTile label="Net PnL" value={formatMetricCurrency(report.netPnl)} />
+        <MetricTile label="Return" value={formatMetricPercent(report.totalReturn)} />
+        <MetricTile label="Max DD" value={formatMetricPercent(report.maxDrawdownPct)} />
+        <MetricTile
+          label="Sharpe"
+          value={report.sharpeMetric && report.sharpeMetric.valid === false ? 'Not available' : formatMetricNumber(report.sharpe, 2)}
+          title={report.sharpeMetric?.invalid_reason || report.sharpeMetric?.method || undefined}
+        />
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+        <span>{formatSymbols(report.symbols, 3)}</span>
+        <span>{formatTimeframe(report.timeframe)}</span>
+        <span>{report.executionMode ? formatExecutionModeLabel(report.executionMode) : 'Execution unknown'}</span>
+        <span>{formatDuration(report.durationSeconds)}</span>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-2 border-t border-white/8 pt-3">
+        <RowAction label={reportActionLabel(report)} disabled={reportActionDisabled(report)} onClick={() => onOpen(report)} />
+        <a
+          href={`/bots?runId=${encodeURIComponent(report.runId || '')}`}
+          onClick={(event) => event.stopPropagation()}
+          className="inline-flex items-center gap-1.5 rounded-[6px] border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-xs text-slate-300 hover:border-white/20"
+        >
+          <ExternalLink className="size-3" />
+          Open BotLens
+        </a>
+        <RowAction
+          label={exportingRunId === report.runId ? 'Exporting' : 'Export'}
+          icon={Download}
+          disabled={exportingRunId === report.runId}
+          onClick={() => onExport(report)}
+        />
+        <button
+          type="button"
+          disabled={!compareSelectable}
+          title={compareSelectable ? 'Select for comparison' : 'Report comparison requires a ready terminal report'}
+          onClick={(event) => {
+            event.stopPropagation()
+            if (compareSelectable) onToggleCompare?.(report)
+          }}
+          className={`inline-flex items-center gap-1.5 rounded-[6px] border px-2.5 py-1.5 text-xs transition disabled:cursor-not-allowed disabled:opacity-45 ${
+            selectedForCompare
+              ? 'border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] text-[color:var(--accent-text-soft)]'
+              : 'border-white/10 bg-white/[0.04] text-slate-300 hover:border-white/20'
+          }`}
+        >
+          <GitCompare className="size-3" />
+          {selectedForCompare ? 'Selected' : 'Compare'}
+        </button>
+      </div>
+    </article>
+  )
+}
+
+function MetricTile({ label, value, title }) {
+  return (
+    <div className="rounded-[7px] border border-white/8 bg-black/20 p-2.5" title={title}>
+      <div className="text-[9px] uppercase tracking-[0.16em] text-slate-500">{label}</div>
+      <div className="mt-1 font-mono text-sm text-slate-100">{value}</div>
     </div>
   )
 }
 
-const ReportStateShell = ({ runView, selected = false }) => (
-  <section className="rounded-2xl border border-white/8 bg-[#111722]/70 p-4">
-    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-      <div className="min-w-0">
-        <div className="text-[11px] font-medium text-slate-500">{selected ? 'Selected run' : 'Report state'}</div>
-        <div className="mt-1 flex flex-wrap items-center gap-2">
-          <span className="font-mono text-sm text-slate-200">{runView.runId || 'No run selected'}</span>
-          {runView.name ? <span className="text-sm text-slate-500">{runView.name}</span> : null}
-        </div>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        <SemanticStatusBadge kind="report" value={runView.reportStatus} />
-        <SemanticStatusBadge kind="comparison" value={runView.comparisonStatus} />
-      </div>
-    </div>
-    {runView.reportStatus === 'unknown' ? (
-      <div className="mt-4 rounded-lg border border-white/8 bg-white/[0.03] p-3">
-        <p className="text-sm font-medium text-slate-200">Report status unknown</p>
-        <p className="mt-1 text-xs leading-5 text-slate-500">
-          The current backend response does not yet expose report readiness. Showing available run data only.
-        </p>
-      </div>
-    ) : null}
-    {runView.comparisonStatus === 'unknown' ? (
-      <div className="mt-3 rounded-lg border border-white/8 bg-white/[0.03] p-3">
-        <p className="text-sm font-medium text-slate-200">Comparison eligibility unknown</p>
-        <p className="mt-1 text-xs leading-5 text-slate-500">
-          The current backend response does not yet expose whether this run is eligible for comparison.
-        </p>
-      </div>
-    ) : null}
-  </section>
-)
-
-const ReportCard = ({ report, onSelect, isSelected, onToggleCompare }) => {
-  const pnl = report.netPnl || 0
-  const isProfit = pnl > 0
-  const isLoss = pnl < 0
-  const canCompare = report.comparisonStatus === 'eligible'
-
+function RowAction({ label, icon: Icon, disabled = false, onClick }) {
   return (
-    <div
-      className={`group relative cursor-pointer rounded-2xl border bg-black/30 p-4 transition hover:border-white/20 hover:bg-black/40 ${
-        isSelected ? 'border-[color:var(--accent-alpha-60)] ring-1 ring-[color:var(--accent-ring)]' : 'border-white/10'
-      }`}
-      onClick={() => onSelect(report)}
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={(event) => {
+        event.stopPropagation()
+        if (!disabled) onClick?.()
+      }}
+      className="inline-flex items-center gap-1.5 rounded-[6px] border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-xs text-slate-300 transition hover:border-white/20 hover:text-slate-100 disabled:opacity-50"
     >
-      <div className="absolute right-3 top-3 opacity-0 transition group-hover:opacity-100">
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation()
-            if (canCompare) onToggleCompare(report.runId)
-          }}
-          disabled={!canCompare}
-          className={`rounded-full border p-1.5 transition ${
-            isSelected
-              ? 'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-soft)]'
-              : canCompare
-                ? 'border-white/10 bg-white/5 text-slate-400 hover:border-white/20 hover:text-slate-300'
-                : 'cursor-not-allowed border-white/8 bg-white/[0.03] text-slate-600'
-          }`}
-          title={canCompare ? (isSelected ? 'Remove from comparison' : 'Add to comparison') : 'Comparison eligibility unknown'}
-        >
-          <GitCompare className="size-3" />
-        </button>
-      </div>
-
-      <div className="mb-3 flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium text-slate-100">{report.botName || 'Bot'}</div>
-          <div className="mt-0.5 truncate text-xs text-slate-500">{report.strategyName || 'Strategy'}</div>
-        </div>
-        <SemanticStatusBadge kind="report" value={report.reportStatus} />
-      </div>
-
-      <div className="mb-4 flex items-center gap-2 text-xs text-slate-400">
-        <Calendar className="size-3" />
-        <span>{formatDateTimeShort(report.simulatedWindow?.start)}</span>
-        <span className="text-slate-600">→</span>
-        <span>{formatDateTimeShort(report.simulatedWindow?.end)}</span>
-      </div>
-
-      <div className="grid grid-cols-2 gap-3">
-        <div className="rounded-lg bg-white/5 p-2.5">
-          <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Net PnL</div>
-          <div
-            className={`mt-1 text-sm font-semibold ${isProfit ? 'text-emerald-400' : isLoss ? 'text-rose-400' : 'text-slate-300'}`}
-          >
-            {formatCurrency(pnl)}
-          </div>
-        </div>
-        <div className="rounded-lg bg-white/5 p-2.5">
-          <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Return</div>
-          <div
-            className={`mt-1 text-sm font-semibold ${
-              (report.totalReturn || 0) > 0
-                ? 'text-emerald-400'
-                : (report.totalReturn || 0) < 0
-                  ? 'text-rose-400'
-                  : 'text-slate-300'
-            }`}
-          >
-            {formatPercent(report.totalReturn, 2)}
-          </div>
-        </div>
-        <div className="rounded-lg bg-white/5 p-2.5">
-          <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Sharpe</div>
-          <div className="mt-1 text-sm font-semibold text-slate-200">{formatNumber(report.sharpe, 2)}</div>
-        </div>
-        <div className="rounded-lg bg-white/5 p-2.5">
-          <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Max DD</div>
-          <div className="mt-1 text-sm font-semibold text-rose-400">{formatPercent(report.maxDrawdownPct, 2)}</div>
-        </div>
-      </div>
-
-      <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-3">
-        <div className="flex items-center gap-1.5 text-xs text-slate-500">
-          <span>{report.trades || 0} trades</span>
-          <span className="text-slate-700">•</span>
-          <span>{formatTimeframe(report.timeframe)}</span>
-          <span className="text-slate-700">•</span>
-          <span>{formatExecutionModeLabel(report.executionMode)}</span>
-        </div>
-        <div className="text-[10px] text-slate-600">{report.runId?.slice(0, 8)}</div>
-      </div>
-    </div>
+      {Icon ? <Icon className="size-3" /> : null}
+      {label}
+    </button>
   )
 }
 
 export function ReportsPage() {
   const { routeRunId } = useParams()
-  const [searchParams, setSearchParams] = useSearchParams()
+  const [searchParams] = useSearchParams()
+  const navigate = useNavigate()
+  const requestSeqRef = useRef(0)
   const [reports, setReports] = useState([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
@@ -248,12 +213,17 @@ export function ReportsPage() {
   const [sortBy, setSortBy] = useState('completedAt')
   const [sortDir, setSortDir] = useState('desc')
   const [filtersExpanded, setFiltersExpanded] = useState(false)
-  const [compareIds, setCompareIds] = useState([])
-  const [compareOpen, setCompareOpen] = useState(false)
+  const [exportingRunId, setExportingRunId] = useState(null)
+  const [selectedCompareRunIds, setSelectedCompareRunIds] = useState([])
 
-  const runId = routeRunId || searchParams.get('runId')
+  const isCompareRoute = routeRunId === 'compare'
+  const compareLeftRunId = searchParams.get('left')
+  const compareRightRunId = searchParams.get('right')
+  const runId = isCompareRoute ? null : routeRunId || searchParams.get('runId')
 
   const fetchReports = useCallback(async () => {
+    const seq = requestSeqRef.current + 1
+    requestSeqRef.current = seq
     setLoading(true)
     setError(null)
     try {
@@ -268,12 +238,18 @@ export function ReportsPage() {
         start: startDate || undefined,
         end: endDate || undefined,
       })
-      setReports((payload?.items || []).map(reportListItemView))
+      if (requestSeqRef.current !== seq) return
+      const baseRows = (payload?.items || []).map(reportListItemView)
+      setReports(baseRows)
       setTotal(payload?.total || 0)
     } catch (err) {
-      setError(err?.message || 'Failed to load reports')
+      if (requestSeqRef.current === seq) {
+        setError(err?.message || 'Failed to load reports')
+      }
     } finally {
-      setLoading(false)
+      if (requestSeqRef.current === seq) {
+        setLoading(false)
+      }
     }
   }, [botFilter, endDate, instrumentFilter, page, search, startDate, timeframeFilter])
 
@@ -281,27 +257,64 @@ export function ReportsPage() {
     fetchReports()
   }, [fetchReports])
 
-  useEffect(() => {
-    if (compareIds.length < 2) {
-      setCompareOpen(false)
+  const handleBackToIndex = useCallback(() => {
+    navigate('/reports')
+  }, [navigate])
+
+  const handleOpenReport = useCallback((report) => {
+    if (!report?.runId) return
+    navigate(`/reports/${encodeURIComponent(report.runId)}`)
+  }, [navigate])
+
+  const handleToggleCompareSelection = useCallback((report) => {
+    if (!report?.runId || !reportComparableForSelection(report)) return
+    setSelectedCompareRunIds((prev) => {
+      if (prev.includes(report.runId)) return prev.filter((runId) => runId !== report.runId)
+      return [...prev.slice(-1), report.runId]
+    })
+  }, [])
+
+  const handleExport = useCallback(async (report) => {
+    if (!report?.runId || exportingRunId) return
+    setExportingRunId(report.runId)
+    try {
+      const { blob, filename } = await reportService.exportReport(report.runId, {})
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename || `run_${report.runId}_report_export.zip`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+    } finally {
+      setExportingRunId(null)
     }
-  }, [compareIds])
+  }, [exportingRunId])
+
+  const handleResetPage = () => setPage(0)
+
+  const handleClearFilters = () => {
+    setSearch('')
+    setBotFilter('')
+    setInstrumentFilter('')
+    setTimeframeFilter('')
+    setStartDate('')
+    setEndDate('')
+    handleResetPage()
+  }
 
   const botOptions = useMemo(() => {
     const unique = new Map()
     reports.forEach((report) => {
-      if (report?.botId && report?.botName) {
-        unique.set(report.botId, report.botName)
-      }
+      if (report?.botId && report?.botName) unique.set(report.botId, report.botName)
     })
     return [{ value: '', label: 'All Bots' }, ...Array.from(unique.entries()).map(([value, label]) => ({ value, label }))]
   }, [reports])
 
   const instrumentOptions = useMemo(() => {
     const unique = new Set()
-    reports.forEach((report) => {
-      ;(report?.symbols || []).forEach((symbol) => unique.add(symbol))
-    })
+    reports.forEach((report) => (report?.symbols || []).forEach((symbol) => unique.add(symbol)))
     return [{ value: '', label: 'All Instruments' }, ...Array.from(unique).map((value) => ({ value, label: value }))]
   }, [reports])
 
@@ -314,343 +327,193 @@ export function ReportsPage() {
   }, [reports])
 
   const sortedReports = useMemo(() => {
-    const sorted = [...reports].sort((a, b) => {
+    return [...reports].sort((a, b) => {
       let aVal = a[sortBy]
       let bVal = b[sortBy]
       if (sortBy === 'completedAt') {
         aVal = aVal ? new Date(aVal).getTime() : 0
         bVal = bVal ? new Date(bVal).getTime() : 0
       }
+      if (typeof aVal === 'string' || typeof bVal === 'string') {
+        return sortDir === 'desc'
+          ? String(bVal || '').localeCompare(String(aVal || ''))
+          : String(aVal || '').localeCompare(String(bVal || ''))
+      }
       if (aVal == null) aVal = sortDir === 'desc' ? -Infinity : Infinity
       if (bVal == null) bVal = sortDir === 'desc' ? -Infinity : Infinity
       return sortDir === 'desc' ? bVal - aVal : aVal - bVal
     })
-    return sorted
   }, [reports, sortBy, sortDir])
 
-  const stats = useMemo(() => {
-    if (!reports.length) return null
-    const profitable = reports.filter((r) => (r.netPnl || 0) > 0).length
-    const totalPnl = reports.reduce((sum, r) => sum + (r.netPnl || 0), 0)
-    const avgReturn =
-      reports.reduce((sum, r) => sum + (r.totalReturn || 0), 0) / reports.length
-    const avgSharpe =
-      reports.filter((r) => r.sharpe != null).reduce((sum, r) => sum + r.sharpe, 0) /
-        reports.filter((r) => r.sharpe != null).length || 0
-    const totalTrades = reports.reduce((sum, r) => sum + (r.trades || 0), 0)
-    return { profitable, totalPnl, avgReturn, avgSharpe, totalTrades, total: reports.length }
-  }, [reports])
-
   const pageCount = Math.ceil(total / PAGE_SIZE)
-  const selectedReport = useMemo(() => {
-    if (!runId) return null
-    return reports.find((report) => report?.runId === runId) || null
-  }, [reports, runId])
-  const selectedRunView = useMemo(
-    () => selectedReport || { runId, name: selectedReport?.botName || 'Selected run', reportStatus: 'unknown', comparisonStatus: 'unknown' },
-    [runId, selectedReport],
-  )
-
-  const handleRowClick = (report) => {
-    if (!report?.runId) return
-    const next = new URLSearchParams(searchParams)
-    next.set('runId', report.runId)
-    setSearchParams(next)
-  }
-
-  const handleCloseModal = () => {
-    const next = new URLSearchParams(searchParams)
-    next.delete('runId')
-    setSearchParams(next)
-  }
-
-  const handleResetPage = () => setPage(0)
-
-  const handleToggleCompare = (runId) => {
-    const report = reports.find((item) => item?.runId === runId)
-    if (report?.comparisonStatus !== 'eligible') return
-    setCompareIds((prev) => (prev.includes(runId) ? prev.filter((id) => id !== runId) : [...prev, runId].slice(-4)))
-  }
-
-  const handleClearFilters = () => {
-    setSearch('')
-    setBotFilter('')
-    setInstrumentFilter('')
-    setTimeframeFilter('')
-    setStartDate('')
-    setEndDate('')
-    handleResetPage()
-  }
-
   const hasActiveFilters = search || botFilter || instrumentFilter || timeframeFilter || startDate || endDate
+  const selectedCompareReports = useMemo(() => {
+    const byId = new Map(reports.map((report) => [report.runId, report]))
+    return selectedCompareRunIds.map((runId) => byId.get(runId)).filter(Boolean)
+  }, [reports, selectedCompareRunIds])
+  const canCompareSelected = selectedCompareReports.length === 2 && selectedCompareReports.every(reportComparableForSelection)
+  const compareSelectionLabel = selectedCompareRunIds.length ? `${Math.min(selectedCompareRunIds.length, 2)}/2 selected` : 'Select 2 reports'
+
+  const handleOpenComparison = useCallback(() => {
+    if (!canCompareSelected) return
+    const [left, right] = selectedCompareRunIds
+    navigate(`/reports/compare?left=${encodeURIComponent(left)}&right=${encodeURIComponent(right)}`)
+  }, [canCompareSelected, navigate, selectedCompareRunIds])
+
+  if (isCompareRoute) {
+    return <RunComparisonPage leftRunId={compareLeftRunId} rightRunId={compareRightRunId} onBack={handleBackToIndex} />
+  }
+
+  if (runId) {
+    return <RunReportPage runId={runId} onBack={handleBackToIndex} />
+  }
 
   return (
-    <div className="space-y-6">
-      {runId ? <ReportStateShell runView={selectedRunView} selected /> : null}
+    <div className="space-y-5">
+      <header className="rounded-[8px] border border-white/8 bg-[#151924]/85 p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Research Reports</div>
+            <h1 className="mt-1 text-2xl font-semibold text-slate-100">Reports Index</h1>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
+              Trust and performance are loaded from backend report contracts. Missing fields stay explicit instead of being inferred in the UI.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={fetchReports}
+            disabled={loading}
+            className="inline-flex items-center gap-2 rounded-[7px] border border-white/10 bg-white/[0.04] px-3 py-2 text-xs text-slate-300 transition hover:border-white/20 hover:text-slate-100 disabled:opacity-50"
+          >
+            <RefreshCw className={`size-3.5 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+        </div>
+      </header>
 
-      {stats && (
-        <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-          <StatCard
-            label="Total Reports"
-            value={stats.total}
-            subValue={`${stats.profitable} profitable`}
-            icon={BarChart3}
-            tone="accent"
-          />
-          <StatCard
-            label="Combined PnL"
-            value={formatCurrency(stats.totalPnl)}
-            icon={stats.totalPnl >= 0 ? TrendingUp : TrendingDown}
-            tone={stats.totalPnl > 0 ? 'positive' : stats.totalPnl < 0 ? 'negative' : 'neutral'}
-          />
-          <StatCard
-            label="Avg Return"
-            value={formatPercent(stats.avgReturn, 2)}
-            tone={stats.avgReturn > 0 ? 'positive' : stats.avgReturn < 0 ? 'negative' : 'neutral'}
-          />
-          <StatCard label="Avg Sharpe" value={formatNumber(stats.avgSharpe, 2)} />
-          <StatCard label="Total Trades" value={formatNumber(stats.totalTrades, 0)} />
-        </section>
-      )}
-
-      <section className="rounded-3xl border border-white/8 bg-[#1a1d27]/80 p-5 shadow-[0_40px_120px_-70px_rgba(0,0,0,0.85)]">
-        <div className="flex flex-col gap-4">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex flex-1 items-center gap-3">
-              <div className="relative flex-1 lg:max-w-md">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">
-                  <Search className="size-4" />
+      <section className="rounded-[8px] border border-white/8 bg-[#151924]/80 p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-1 items-center gap-3">
+            <div className="relative flex-1 lg:max-w-md">
+              <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-500" />
+              <input
+                type="text"
+                value={search}
+                onChange={(event) => {
+                  setSearch(event.target.value)
+                  handleResetPage()
+                }}
+                placeholder="Search reports..."
+                className="w-full rounded-[7px] border border-white/10 bg-black/40 py-2.5 pl-10 pr-4 text-sm text-slate-100 placeholder:text-slate-500 focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => setFiltersExpanded((prev) => !prev)}
+              className={`inline-flex items-center gap-2 rounded-[7px] border px-3 py-2.5 text-sm transition ${
+                filtersExpanded || hasActiveFilters
+                  ? 'border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] text-[color:var(--accent-text-soft)]'
+                  : 'border-white/10 bg-white/[0.04] text-slate-300 hover:border-white/20'
+              }`}
+            >
+              <Filter className="size-4" />
+              Filters
+              {hasActiveFilters ? (
+                <span className="rounded-full bg-[color:var(--accent-alpha-30)] px-1.5 text-[10px]">
+                  {[search, botFilter, instrumentFilter, timeframeFilter, startDate, endDate].filter(Boolean).length}
                 </span>
-                <input
-                  type="text"
-                  value={search}
-                  onChange={(event) => {
-                    setSearch(event.target.value)
-                    handleResetPage()
-                  }}
-                  placeholder="Search reports..."
-                  className="w-full rounded-xl border border-white/10 bg-black/40 py-2.5 pl-10 pr-4 text-sm text-slate-100 placeholder:text-slate-500 focus:border-[color:var(--accent-alpha-40)] focus:outline-none focus:ring-1 focus:ring-[color:var(--accent-ring)]"
-                />
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setFiltersExpanded((prev) => !prev)}
-                className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2.5 text-sm transition ${
-                  filtersExpanded || hasActiveFilters
-                    ? 'border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] text-[color:var(--accent-text-soft)]'
-                    : 'border-white/10 bg-white/5 text-slate-300 hover:border-white/20'
-                }`}
-              >
-                <Filter className="size-4" />
-                <span className="hidden sm:inline">Filters</span>
-                {hasActiveFilters && (
-                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[color:var(--accent-alpha-30)] text-[10px] font-medium">
-                    {[search, botFilter, instrumentFilter, timeframeFilter, startDate, endDate].filter(Boolean).length}
-                  </span>
-                )}
-              </button>
-
-              <button
-                type="button"
-                onClick={fetchReports}
-                disabled={loading}
-                className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm text-slate-300 transition hover:border-white/20 disabled:opacity-50"
-              >
-                <RefreshCw className={`size-4 ${loading ? 'animate-spin' : ''}`} />
-              </button>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <div className="flex items-center rounded-xl border border-white/10 bg-white/5 p-1">
-                <button
-                  type="button"
-                  onClick={() => setViewMode('cards')}
-                  className={`rounded-lg p-2 transition ${
-                    viewMode === 'cards' ? 'bg-white/10 text-slate-100' : 'text-slate-500 hover:text-slate-300'
-                  }`}
-                  title="Card view"
-                >
-                  <Grid3X3 className="size-4" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewMode('table')}
-                  className={`rounded-lg p-2 transition ${
-                    viewMode === 'table' ? 'bg-white/10 text-slate-100' : 'text-slate-500 hover:text-slate-300'
-                  }`}
-                  title="Table view"
-                >
-                  <List className="size-4" />
-                </button>
-              </div>
-
-              <div className="relative">
-                <select
-                  value={`${sortBy}-${sortDir}`}
-                  onChange={(e) => {
-                    const [field, dir] = e.target.value.split('-')
-                    setSortBy(field)
-                    setSortDir(dir)
-                  }}
-                  className="appearance-none rounded-xl border border-white/10 bg-white/5 py-2.5 pl-3 pr-8 text-sm text-slate-300 focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                >
-                  {SORT_OPTIONS.map((opt) => (
-                    <option key={`${opt.value}-desc`} value={`${opt.value}-desc`}>
-                      {opt.label} ↓
-                    </option>
-                  ))}
-                  {SORT_OPTIONS.map((opt) => (
-                    <option key={`${opt.value}-asc`} value={`${opt.value}-asc`}>
-                      {opt.label} ↑
-                    </option>
-                  ))}
-                </select>
-                <ArrowUpDown className="pointer-events-none absolute right-2.5 top-1/2 size-4 -translate-y-1/2 text-slate-500" />
-              </div>
-            </div>
+              ) : null}
+            </button>
           </div>
 
-          {filtersExpanded && (
-            <div className="flex flex-wrap items-end gap-3 rounded-2xl border border-white/5 bg-black/20 p-4">
-              <div className="min-w-[140px] flex-1">
-                <label className="mb-1.5 block text-[11px] uppercase tracking-[0.2em] text-slate-500">Bot</label>
-                <select
-                  value={botFilter}
-                  onChange={(e) => {
-                    setBotFilter(e.target.value)
-                    handleResetPage()
-                  }}
-                  className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-slate-200 focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                >
-                  {botOptions.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="min-w-[140px] flex-1">
-                <label className="mb-1.5 block text-[11px] uppercase tracking-[0.2em] text-slate-500">Instrument</label>
-                <select
-                  value={instrumentFilter}
-                  onChange={(e) => {
-                    setInstrumentFilter(e.target.value)
-                    handleResetPage()
-                  }}
-                  className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-slate-200 focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                >
-                  {instrumentOptions.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="min-w-[140px] flex-1">
-                <label className="mb-1.5 block text-[11px] uppercase tracking-[0.2em] text-slate-500">Timeframe</label>
-                <select
-                  value={timeframeFilter}
-                  onChange={(e) => {
-                    setTimeframeFilter(e.target.value)
-                    handleResetPage()
-                  }}
-                  className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-slate-200 focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                >
-                  {timeframeOptions.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="min-w-[140px] flex-1">
-                <label className="mb-1.5 block text-[11px] uppercase tracking-[0.2em] text-slate-500">Date Range</label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="date"
-                    value={startDate}
-                    onChange={(e) => {
-                      setStartDate(e.target.value)
-                      handleResetPage()
-                    }}
-                    className="flex-1 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-slate-200 focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                  />
-                  <span className="text-slate-600">→</span>
-                  <input
-                    type="date"
-                    value={endDate}
-                    onChange={(e) => {
-                      setEndDate(e.target.value)
-                      handleResetPage()
-                    }}
-                    className="flex-1 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-slate-200 focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                  />
-                </div>
-              </div>
-              {hasActiveFilters && (
-                <button
-                  type="button"
-                  onClick={handleClearFilters}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-400 transition hover:border-white/20 hover:text-slate-300"
-                >
-                  <X className="size-3" />
-                  Clear
-                </button>
-              )}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center rounded-[7px] border border-white/10 bg-white/[0.04] p-1">
+              <button
+                type="button"
+                onClick={() => setViewMode('cards')}
+                className={`rounded-[6px] p-2 ${viewMode === 'cards' ? 'bg-white/10 text-slate-100' : 'text-slate-500 hover:text-slate-300'}`}
+                title="Card view"
+              >
+                <Grid3X3 className="size-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('table')}
+                className={`rounded-[6px] p-2 ${viewMode === 'table' ? 'bg-white/10 text-slate-100' : 'text-slate-500 hover:text-slate-300'}`}
+                title="Table view"
+              >
+                <List className="size-4" />
+              </button>
             </div>
-          )}
+            <select
+              value={`${sortBy}-${sortDir}`}
+              onChange={(event) => {
+                const [field, direction] = event.target.value.split('-')
+                setSortBy(field)
+                setSortDir(direction)
+              }}
+              className="rounded-[7px] border border-white/10 bg-[#101520] px-3 py-2.5 text-sm text-slate-300 focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+            >
+              {SORT_OPTIONS.map((option) => (
+                <option key={`${option.value}-desc`} value={`${option.value}-desc`}>
+                  {option.label} desc
+                </option>
+              ))}
+              {SORT_OPTIONS.map((option) => (
+                <option key={`${option.value}-asc`} value={`${option.value}-asc`}>
+                  {option.label} asc
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
+
+        {filtersExpanded ? (
+          <div className="mt-4 grid gap-3 rounded-[8px] border border-white/8 bg-black/20 p-4 lg:grid-cols-5">
+            <FilterSelect label="Bot" value={botFilter} onChange={setBotFilter} options={botOptions} onResetPage={handleResetPage} />
+            <FilterSelect label="Instrument" value={instrumentFilter} onChange={setInstrumentFilter} options={instrumentOptions} onResetPage={handleResetPage} />
+            <FilterSelect label="Timeframe" value={timeframeFilter} onChange={setTimeframeFilter} options={timeframeOptions} onResetPage={handleResetPage} />
+            <DateInput label="Start" value={startDate} onChange={setStartDate} onResetPage={handleResetPage} />
+            <DateInput label="End" value={endDate} onChange={setEndDate} onResetPage={handleResetPage} />
+            {hasActiveFilters ? (
+              <button
+                type="button"
+                onClick={handleClearFilters}
+                className="inline-flex items-center justify-center gap-2 rounded-[7px] border border-white/10 bg-white/[0.04] px-3 py-2 text-xs text-slate-300 hover:border-white/20 lg:col-span-5 lg:w-fit"
+              >
+                <X className="size-3.5" />
+                Clear filters
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </section>
 
-      {compareIds.length > 0 && (
-        <section className="rounded-2xl border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-05)] p-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <GitCompare className="size-5 text-[color:var(--accent-text-soft)]" />
-              <span className="text-sm font-medium text-[color:var(--accent-text-soft)]">
-                {compareIds.length} report{compareIds.length !== 1 ? 's' : ''} selected for comparison
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setCompareIds([])}
-              >
-                Clear
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={() => setCompareOpen(true)}
-                disabled={compareIds.length < 2}
-                title={compareIds.length < 2 ? 'Select at least two comparison-eligible reports' : undefined}
-              >
-                Compare
-              </Button>
-            </div>
-          </div>
-        </section>
-      )}
-
-      <section className="rounded-3xl border border-white/8 bg-[#1a1d27]/80 p-5 shadow-[0_40px_120px_-70px_rgba(0,0,0,0.85)]">
-        <div className="mb-4 flex items-center justify-between">
+      <section className="rounded-[8px] border border-white/8 bg-[#151924]/80 p-4">
+        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <div className="text-xs uppercase tracking-[0.3em] text-slate-500">Report Archive</div>
+            <div className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Run Archive</div>
             <div className="mt-1 text-sm text-slate-300">
-              {total} report{total !== 1 ? 's' : ''}
-              {hasActiveFilters && (
-                <span className="ml-2 text-slate-500">(filtered)</span>
-              )}
+              {total} report{total === 1 ? '' : 's'}
             </div>
           </div>
           <div className="flex items-center gap-1">
             <button
               type="button"
+              disabled={!canCompareSelected}
+              onClick={handleOpenComparison}
+              className="mr-2 inline-flex items-center gap-2 rounded-[7px] border border-white/10 bg-white/[0.04] px-3 py-2 text-xs text-slate-300 transition hover:border-white/20 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
+              title={canCompareSelected ? 'Compare selected reports' : 'Select two ready terminal reports'}
+            >
+              <GitCompare className="size-3.5" />
+              Compare
+              <span className="text-slate-500">{compareSelectionLabel}</span>
+            </button>
+            <button
+              type="button"
               disabled={page === 0}
               onClick={() => setPage((prev) => Math.max(prev - 1, 0))}
-              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-300 transition hover:border-white/20 disabled:opacity-40"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-[7px] border border-white/10 bg-white/[0.04] text-slate-300 disabled:opacity-40"
             >
               <ChevronLeft className="size-4" />
             </button>
@@ -661,7 +524,7 @@ export function ReportsPage() {
               type="button"
               disabled={page + 1 >= pageCount}
               onClick={() => setPage((prev) => prev + 1)}
-              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-300 transition hover:border-white/20 disabled:opacity-40"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-[7px] border border-white/10 bg-white/[0.04] text-slate-300 disabled:opacity-40"
             >
               <ChevronRight className="size-4" />
             </button>
@@ -669,121 +532,212 @@ export function ReportsPage() {
         </div>
 
         {loading ? (
-          <div className="flex items-center justify-center py-16">
-            <div className="flex items-center gap-3">
-              <RefreshCw className="size-5 animate-spin text-[color:var(--accent-text-soft)]" />
-              <span className="text-sm text-slate-400">Loading reports...</span>
-            </div>
-          </div>
+          <LoadingPanel message="Loading reports..." />
         ) : error ? (
-          <div className="rounded-2xl border border-rose-500/20 bg-rose-500/10 p-6 text-center">
-            <div className="text-sm text-rose-300">{error}</div>
-            <button
-              type="button"
-              onClick={fetchReports}
-              className="mt-3 rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-xs text-slate-200 transition hover:border-white/20"
-            >
-              Retry
-            </button>
-          </div>
+          <ErrorPanel message={error} onRetry={fetchReports} />
         ) : sortedReports.length === 0 ? (
-          <div className="rounded-2xl border border-white/5 bg-black/20 p-12 text-center">
-            <BarChart3 className="mx-auto size-10 text-slate-600" />
-            <div className="mt-4 text-sm text-slate-400">
-              {hasActiveFilters ? 'No reports match your filters.' : 'No reports are available yet.'}
-            </div>
-            {hasActiveFilters && (
-              <button
-                type="button"
-                onClick={handleClearFilters}
-                className="mt-3 text-xs text-[color:var(--accent-text-soft)] hover:underline"
-              >
-                Clear filters
-              </button>
-            )}
-          </div>
+          <EmptyPanel message={hasActiveFilters ? 'No reports match your filters.' : 'No reports are available yet.'} onClear={hasActiveFilters ? handleClearFilters : null} />
         ) : viewMode === 'cards' ? (
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             {sortedReports.map((report) => (
               <ReportCard
                 key={report.runId}
                 report={report}
-                onSelect={handleRowClick}
-                isSelected={compareIds.includes(report.runId)}
-                onToggleCompare={handleToggleCompare}
+                onOpen={handleOpenReport}
+                onExport={handleExport}
+                exportingRunId={exportingRunId}
+                selectedForCompare={selectedCompareRunIds.includes(report.runId)}
+                onToggleCompare={handleToggleCompareSelection}
               />
             ))}
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-left text-sm text-slate-200">
-              <thead>
-                <tr className="border-b border-white/10 text-[11px] uppercase tracking-[0.2em] text-slate-500">
-                  <th className="pb-3 pr-4">Completed</th>
-                  <th className="pb-3 pr-4">Bot / Strategy</th>
-                  <th className="pb-3 pr-4">Instruments</th>
-                  <th className="pb-3 pr-4">Date Range</th>
-                  <th className="pb-3 pr-4">Run Time</th>
-                  <th className="pb-3 pr-4">Execution</th>
-                  <th className="pb-3 pr-4">TF</th>
-                  <th className="pb-3 pr-4 text-right">Net PnL</th>
-                  <th className="pb-3 pr-4 text-right">Return</th>
-                  <th className="pb-3 pr-4 text-right">Max DD</th>
-                  <th className="pb-3 pr-4 text-right">Sharpe</th>
-                  <th className="pb-3 text-right">Trades</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortedReports.map((report) => {
-                  const pnl = report.netPnl || 0
-                  const ret = report.totalReturn || 0
-                  const runTimeLabel = formatRunTime(null)
-                  return (
-                    <tr
-                      key={report.runId}
-                      onClick={() => handleRowClick(report)}
-                      className="cursor-pointer border-b border-white/5 transition hover:bg-white/5"
-                    >
-                      <td className="py-3 pr-4 text-xs text-slate-400">{formatDateTime(report.completedAt)}</td>
-                      <td className="py-3 pr-4">
-                        <div className="font-medium text-slate-200">{report.botName || '--'}</div>
-                        <div className="text-xs text-slate-500">{report.strategyName || '--'}</div>
-                      </td>
-                      <td className="py-3 pr-4 text-xs" title={(report.symbols || []).join(', ')}>
-                        {formatSymbols(report.symbols, 2)}
-                      </td>
-                      <td className="py-3 pr-4 text-xs text-slate-400">
-                        {formatDateTimeShort(report.simulatedWindow?.start)} → {formatDateTimeShort(report.simulatedWindow?.end)}
-                      </td>
-                      <td className="py-3 pr-4 text-xs text-slate-400">{runTimeLabel}</td>
-                      <td className="py-3 pr-4 text-xs text-slate-300">{formatExecutionModeLabel(report.executionMode)}</td>
-                      <td className="py-3 pr-4 text-xs">{formatTimeframe(report.timeframe)}</td>
-                      <td
-                        className={`py-3 pr-4 text-right font-mono ${pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : ''}`}
-                      >
-                        {formatCurrency(pnl)}
-                      </td>
-                      <td
-                        className={`py-3 pr-4 text-right font-mono ${ret > 0 ? 'text-emerald-400' : ret < 0 ? 'text-rose-400' : ''}`}
-                      >
-                        {formatPercent(ret, 2)}
-                      </td>
-                      <td className="py-3 pr-4 text-right font-mono text-rose-400">
-                        {formatPercent(report.maxDrawdownPct, 2)}
-                      </td>
-                      <td className="py-3 pr-4 text-right font-mono">{formatNumber(report.sharpe, 2)}</td>
-                      <td className="py-3 text-right font-mono">{formatNumber(report.trades, 0)}</td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
+          <ReportTable
+            reports={sortedReports}
+            onOpen={handleOpenReport}
+            onExport={handleExport}
+            exportingRunId={exportingRunId}
+            selectedCompareRunIds={selectedCompareRunIds}
+            onToggleCompare={handleToggleCompareSelection}
+          />
         )}
       </section>
+    </div>
+  )
+}
 
-      <ReportModal runId={runId} open={Boolean(runId)} onClose={handleCloseModal} />
-      <CompareModal runIds={compareIds} open={compareOpen} onClose={() => setCompareOpen(false)} />
+function FilterSelect({ label, value, onChange, options, onResetPage }) {
+  return (
+    <label className="block">
+      <span className="mb-1.5 block text-[10px] uppercase tracking-[0.18em] text-slate-500">{label}</span>
+      <select
+        value={value}
+        onChange={(event) => {
+          onChange(event.target.value)
+          onResetPage()
+        }}
+        className="w-full rounded-[7px] border border-white/10 bg-[#101520] px-3 py-2 text-sm text-slate-200 focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+      >
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+function DateInput({ label, value, onChange, onResetPage }) {
+  return (
+    <label className="block">
+      <span className="mb-1.5 block text-[10px] uppercase tracking-[0.18em] text-slate-500">{label}</span>
+      <input
+        type="date"
+        value={value}
+        onChange={(event) => {
+          onChange(event.target.value)
+          onResetPage()
+        }}
+        className="w-full rounded-[7px] border border-white/10 bg-black/40 px-3 py-2 text-sm text-slate-200 focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+      />
+    </label>
+  )
+}
+
+function ReportTable({ reports, onOpen, onExport, exportingRunId, selectedCompareRunIds = [], onToggleCompare }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full border-collapse text-left text-sm text-slate-200">
+        <thead>
+          <tr className="border-b border-white/10 text-[10px] uppercase tracking-[0.16em] text-slate-500">
+            <th className="pb-3 pr-4">Run</th>
+            <th className="pb-3 pr-4">Bot / Strategy</th>
+            <th className="pb-3 pr-4">Trust</th>
+            <th className="pb-3 pr-4">Readiness</th>
+            <th className="pb-3 pr-4">Golden</th>
+            <th className="pb-3 pr-4">Semantic</th>
+            <th className="pb-3 pr-4">Operational</th>
+            <th className="pb-3 pr-4">Symbols</th>
+            <th className="pb-3 pr-4">Started / Ended</th>
+            <th className="pb-3 pr-4">Duration</th>
+            <th className="pb-3 pr-4 text-right">Net PnL</th>
+            <th className="pb-3 pr-4 text-right">Return</th>
+            <th className="pb-3 pr-4 text-right">Max DD</th>
+            <th className="pb-3 pr-4 text-right">Sharpe</th>
+            <th className="pb-3 pr-4 text-right">Trades</th>
+            <th className="pb-3 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {reports.map((report) => {
+            const compareSelectable = reportComparableForSelection(report)
+            const selectedForCompare = selectedCompareRunIds.includes(report.runId)
+            return (
+              <tr key={report.runId} onClick={() => onOpen(report)} className="cursor-pointer border-b border-white/5 transition hover:bg-white/[0.04]">
+                <td className="py-3 pr-4">
+                  <div className="font-mono text-xs text-slate-200">{report.runId?.slice(0, 8) || 'Unknown'}</div>
+                  <div className="mt-1 text-[10px] uppercase tracking-[0.14em] text-slate-600">{report.runType || 'run'}</div>
+                </td>
+                <td className="py-3 pr-4">
+                  <div className="max-w-[14rem] truncate font-medium text-slate-200">{report.botName || 'Bot unknown'}</div>
+                  <div className="max-w-[14rem] truncate text-xs text-slate-500">{report.strategyName || 'Strategy unknown'}</div>
+                </td>
+                <td className="py-3 pr-4"><StatusPill value={report.researchStatus || report.reportStatus} /></td>
+                <td className="py-3 pr-4"><StatusPill value={report.readinessStatus || report.reportStatus} /></td>
+                <td className="py-3 pr-4"><StatusPill value={report.goldenStatus} /></td>
+                <td className="py-3 pr-4"><StatusPill value={report.semanticFingerprint ? 'present' : 'not_available'} title={report.semanticFingerprint || undefined} /></td>
+                <td className="py-3 pr-4"><StatusPill value={report.operationalDriftStatus || (report.operationalFingerprint ? 'present' : 'not_available')} title={report.operationalFingerprint || undefined} /></td>
+                <td className="py-3 pr-4 text-xs" title={(report.symbols || []).join(', ')}>
+                  <div>{formatSymbols(report.symbols, 2)}</div>
+                  <div className="mt-1 text-slate-500">{formatTimeframe(report.timeframe)}</div>
+                </td>
+                <td className="py-3 pr-4 text-xs text-slate-400">
+                  <div>{formatDateTimeShort(report.startedAt || report.wallClockWindow?.start || report.completedAt)}</div>
+                  <div className="mt-1">{formatDateTimeShort(report.endedAt || report.wallClockWindow?.end || report.completedAt)}</div>
+                </td>
+                <td className="py-3 pr-4 text-xs text-slate-400">{formatDuration(report.durationSeconds)}</td>
+                <td className="py-3 pr-4 text-right font-mono">{formatMetricCurrency(report.netPnl)}</td>
+                <td className="py-3 pr-4 text-right font-mono">{formatMetricPercent(report.totalReturn)}</td>
+                <td className="py-3 pr-4 text-right font-mono">{formatMetricPercent(report.maxDrawdownPct)}</td>
+                <td className="py-3 pr-4 text-right font-mono" title={report.sharpeMetric?.invalid_reason || report.sharpeMetric?.method || undefined}>
+                  {report.sharpeMetric && report.sharpeMetric.valid === false ? 'Not available' : formatMetricNumber(report.sharpe, 2)}
+                </td>
+                <td className="py-3 pr-4 text-right font-mono">{formatMetricNumber(report.trades, 0)}</td>
+                <td className="py-3 text-right">
+                  <div className="flex justify-end gap-1.5">
+                    <RowAction label={report.canViewReport ? 'View' : '...'} disabled={reportActionDisabled(report)} onClick={() => onOpen(report)} />
+                    <a
+                      href={`/bots?runId=${encodeURIComponent(report.runId || '')}`}
+                      onClick={(event) => event.stopPropagation()}
+                      className="inline-flex items-center justify-center rounded-[6px] border border-white/10 bg-white/[0.04] p-1.5 text-slate-300 hover:border-white/20"
+                      title="Open BotLens"
+                    >
+                      <ExternalLink className="size-3.5" />
+                    </a>
+                    <RowAction
+                      label={exportingRunId === report.runId ? '...' : ''}
+                      icon={Download}
+                      disabled={exportingRunId === report.runId}
+                      onClick={() => onExport(report)}
+                    />
+                    <button
+                      type="button"
+                      disabled={!compareSelectable}
+                      title={compareSelectable ? 'Select for comparison' : 'Report comparison requires a ready terminal report'}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        if (compareSelectable) onToggleCompare?.(report)
+                      }}
+                      className={`inline-flex items-center justify-center rounded-[6px] border p-1.5 transition disabled:cursor-not-allowed disabled:opacity-45 ${
+                        selectedForCompare
+                          ? 'border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] text-[color:var(--accent-text-soft)]'
+                          : 'border-white/10 bg-white/[0.04] text-slate-300 hover:border-white/20'
+                      }`}
+                    >
+                      <GitCompare className="size-3.5" />
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function LoadingPanel({ message }) {
+  return (
+    <div className="flex items-center justify-center rounded-[8px] border border-white/8 bg-black/20 p-10 text-sm text-slate-400">
+      <RefreshCw className="mr-3 size-4 animate-spin text-[color:var(--accent-text-soft)]" />
+      {message}
+    </div>
+  )
+}
+
+function ErrorPanel({ message, onRetry }) {
+  return (
+    <div className="rounded-[8px] border border-rose-500/20 bg-rose-500/10 p-6 text-sm text-rose-100">
+      <div>{message}</div>
+      <button type="button" onClick={onRetry} className="mt-3 rounded-[7px] border border-white/10 bg-white/[0.04] px-3 py-2 text-xs text-slate-200">
+        Retry
+      </button>
+    </div>
+  )
+}
+
+function EmptyPanel({ message, onClear }) {
+  return (
+    <div className="rounded-[8px] border border-white/8 bg-black/20 p-10 text-center">
+      <BarChart3 className="mx-auto size-9 text-slate-600" />
+      <div className="mt-4 text-sm text-slate-400">{message}</div>
+      {onClear ? (
+        <button type="button" onClick={onClear} className="mt-3 text-xs text-[color:var(--accent-text-soft)] hover:underline">
+          Clear filters
+        </button>
+      ) : null}
     </div>
   )
 }

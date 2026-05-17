@@ -166,11 +166,11 @@ test('failed rows remain diagnostics-first and starting rows remain cancel-orien
 
   assert.deepEqual(
     failedState.allowedActions.map((action) => action.label),
-    ['Restart', 'View Report', 'View Diagnostics', 'Delete'],
+    ['Restart', 'Report Unavailable', 'View Diagnostics', 'Delete'],
   )
   assert.deepEqual(
     startingState.allowedActions.map((action) => action.label),
-    ['View Report', 'Cancel'],
+    ['Cancel'],
   )
   assert.deepEqual(
     failedState.allowedActions.map((action) => action.variant),
@@ -251,6 +251,8 @@ test('bot row view model carries compact performance trace for the card chart', 
   const view = buildBotCardViewModel(
     buildBot({
       status: 'running',
+      total_trades: 0,
+      open_trades: 0,
       active_run_id: 'run-live',
       lifecycle: {
         status: 'running',
@@ -283,6 +285,44 @@ test('bot row view model carries compact performance trace for the card chart', 
   assert.equal(view.performanceTrace.latestValue, 1015)
   assert.equal(view.metricStats.find((item) => item.key === 'total-trades')?.value, '5')
   assert.equal(view.metricStats.find((item) => item.key === 'net-pnl')?.value, '+15.00')
+})
+
+test('bot row view model consumes live runtime summary deltas for trades and warnings', () => {
+  const view = buildBotCardViewModel(
+    buildBot({
+      status: 'running',
+      active_run_id: 'run-live',
+      lifecycle: {
+        status: 'running',
+        phase: 'live',
+        reason: 'live_runtime',
+        updated_at: '2026-04-06T12:05:00Z',
+        telemetry: {
+          warning_count: 0,
+          trade_count: 0,
+        },
+      },
+      runtime: {
+        status: 'running',
+        run_id: 'run-live',
+        warning_count: 2,
+        open_trade_count: 1,
+        stats: {
+          total_trades: 4,
+          net_pnl: 12,
+        },
+      },
+    }),
+    {
+      strategyLookup: buildStrategyLookup(),
+      nowEpochMs: Date.parse('2026-04-06T12:05:10Z'),
+    },
+  )
+
+  assert.equal(view.metricStats.find((item) => item.key === 'open-trades')?.value, '1')
+  assert.equal(view.metricStats.find((item) => item.key === 'total-trades')?.value, '4')
+  assert.equal(view.metricStats.find((item) => item.key === 'warnings')?.value, '2')
+  assert.equal(view.warningSummary.label, '2 warnings active')
 })
 
 test('bot sort order lives with the fleet view model instead of the card component', () => {

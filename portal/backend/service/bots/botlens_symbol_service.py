@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import replace
 from typing import Any, Dict
 
-from ..observability import BackendObserver
-from .botlens_candle_continuity import continuity_summary_from_candles, emit_candle_continuity_summary
+from ..observability import BackendObserver, payload_size_bytes
+from .botlens_candle_continuity import (
+    continuity_summary_from_candles,
+    emit_candle_continuity_summary,
+    should_persist_observer_continuity,
+)
 from .botlens_contract import normalize_series_key
 from .botlens_event_replay import rebuild_run_projection_snapshot, rebuild_symbol_projection_snapshot
 from .botlens_state import (
@@ -44,6 +49,68 @@ def _run_bot_id(*, run_id: str) -> str:
     if not bot_id:
         raise ValueError(f"bot_id missing for run_id={run_id}")
     return bot_id
+
+
+def _read_source_reason(*, run_live: Any) -> str:
+    return "active_runtime" if bool(run_live) else "terminal_or_historical"
+
+
+def _observe_projection_read(
+    *,
+    started: float,
+    bot_id: Any,
+    run_id: Any,
+    series_key: Any = None,
+    source_reason: str,
+    outcome: str = "success",
+) -> None:
+    labels = {
+        "bot_id": bot_id,
+        "run_id": run_id,
+        "series_key": series_key,
+        "pipeline_stage": "botlens_selected_symbol_snapshot",
+        "message_kind": "ephemeral",
+        "source_reason": source_reason,
+        "outcome": outcome,
+    }
+    _OBSERVER.increment("botlens_projection_read_total", **labels)
+    _OBSERVER.observe(
+        "botlens_projection_read_ms",
+        max((time.perf_counter() - started) * 1000.0, 0.0),
+        **labels,
+    )
+
+
+def _observe_selected_symbol_response(
+    *,
+    started: float,
+    response: Dict[str, Any],
+    bot_id: Any,
+    run_id: Any,
+    series_key: Any,
+    run_live: Any,
+    outcome: str = "success",
+) -> Dict[str, Any]:
+    labels = {
+        "bot_id": bot_id,
+        "run_id": run_id,
+        "series_key": series_key,
+        "pipeline_stage": "botlens_selected_symbol_snapshot",
+        "message_kind": "ephemeral",
+        "source_reason": _read_source_reason(run_live=run_live),
+        "outcome": outcome,
+    }
+    _OBSERVER.observe(
+        "botlens_selected_symbol_request_ms",
+        max((time.perf_counter() - started) * 1000.0, 0.0),
+        **labels,
+    )
+    _OBSERVER.observe(
+        "botlens_selected_symbol_response_payload_bytes",
+        float(payload_size_bytes(response)),
+        **labels,
+    )
+    return response
 
 
 def _historical_run_snapshot(*, run_id: str, max_seq: int | None = None) -> tuple[str, Any]:
@@ -133,6 +200,7 @@ async def get_symbol_detail(*, run_id: str, symbol_key: str, limit: int = 320) -
 
 
 async def get_selected_symbol_snapshot(*, run_id: str, symbol_key: str, limit: int = 320) -> Dict[str, Any]:
+    request_started = time.perf_counter()
     bot_id = _run_bot_id(run_id=run_id)
     normalized_symbol_key = normalize_series_key(symbol_key)
     if not normalized_symbol_key:
@@ -142,7 +210,15 @@ async def get_selected_symbol_snapshot(*, run_id: str, symbol_key: str, limit: i
     # If a projector is missing, we lazily ensure it once through projector ownership.
     run_state = _telemetry_hub().get_run_snapshot(run_id=str(run_id))
     if run_state is None:
+        ensure_run_started = time.perf_counter()
         run_state = await _telemetry_hub().ensure_run_snapshot(run_id=str(run_id), bot_id=bot_id)
+        _observe_projection_read(
+            started=ensure_run_started,
+            bot_id=bot_id,
+            run_id=str(run_id),
+            series_key=normalized_symbol_key,
+            source_reason="ensure_run_snapshot",
+        )
     resolved_run_state = _resolved_run_state(bot_id=bot_id, run_id=str(run_id), run_state=run_state)
     symbol_catalog_entry = dict(resolved_run_state.symbol_catalog.entries.get(normalized_symbol_key) or {})
     if not symbol_catalog_entry:
@@ -150,30 +226,46 @@ async def get_selected_symbol_snapshot(*, run_id: str, symbol_key: str, limit: i
 
     symbol_state = _telemetry_hub().get_symbol_snapshot(run_id=str(run_id), symbol_key=normalized_symbol_key)
     if symbol_state is None:
+        ensure_symbol_started = time.perf_counter()
         symbol_state = await _telemetry_hub().ensure_symbol_snapshot(
             run_id=str(run_id),
             bot_id=bot_id,
             symbol_key=normalized_symbol_key,
         )
+        _observe_projection_read(
+            started=ensure_symbol_started,
+            bot_id=bot_id,
+            run_id=str(run_id),
+            series_key=normalized_symbol_key,
+            source_reason="ensure_symbol_snapshot",
+        )
 
     cursor = await _telemetry_hub().current_cursor(run_id=str(run_id), bot_id=bot_id)
     projection_error = _symbol_projection_error(symbol_state)
     if symbol_state is None or int(symbol_state.seq or 0) <= 0 or projection_error:
-        return selected_symbol_snapshot_contract(
+        run_live = bool(resolved_run_state.readiness.run_live)
+        return _observe_selected_symbol_response(
+            started=request_started,
             bot_id=bot_id,
             run_id=str(run_id),
-            symbol_key=normalized_symbol_key,
-            symbol_state=None,
-            symbol_catalog_entry=symbol_catalog_entry,
-            run_health=resolved_run_state.health.to_dict(),
-            run_bootstrap_seq=int(resolved_run_state.seq or 0),
-            base_seq=int(cursor.get("base_seq") or 0),
-            stream_session_id=str(cursor.get("stream_session_id") or "").strip() or None,
-            run_live=bool(resolved_run_state.readiness.run_live),
-            transport_eligible=bool(resolved_run_state.readiness.run_live),
-            state="unavailable",
-            unavailable_reason="projection_error" if projection_error else "symbol_snapshot_unavailable",
-            message=projection_error or "BotLens selected-symbol snapshot is unavailable because projector state has not been built yet.",
+            series_key=normalized_symbol_key,
+            run_live=run_live,
+            response=selected_symbol_snapshot_contract(
+                bot_id=bot_id,
+                run_id=str(run_id),
+                symbol_key=normalized_symbol_key,
+                symbol_state=None,
+                symbol_catalog_entry=symbol_catalog_entry,
+                run_health=resolved_run_state.health.to_dict(),
+                run_bootstrap_seq=int(resolved_run_state.seq or 0),
+                base_seq=int(cursor.get("base_seq") or 0),
+                stream_session_id=str(cursor.get("stream_session_id") or "").strip() or None,
+                run_live=run_live,
+                transport_eligible=run_live,
+                state="unavailable",
+                unavailable_reason="projection_error" if projection_error else "symbol_snapshot_unavailable",
+                message=projection_error or "BotLens selected-symbol snapshot is unavailable because projector state has not been built yet.",
+            ),
         )
 
     projected_symbol_state = _trim_symbol_snapshot(symbol_state=symbol_state, limit=limit)
@@ -182,37 +274,52 @@ async def get_selected_symbol_snapshot(*, run_id: str, symbol_key: str, limit: i
         timeframe=projected_symbol_state.identity.timeframe,
         series_key=projected_symbol_state.symbol_key,
     )
-    emit_candle_continuity_summary(
-        _OBSERVER,
+    if should_persist_observer_continuity(
         stage="botlens_selected_symbol_snapshot",
-        summary=continuity_summary,
-        bot_id=bot_id,
-        run_id=str(run_id),
-        instrument_id=projected_symbol_state.identity.instrument_id,
-        series_key=projected_symbol_state.symbol_key,
-        symbol=projected_symbol_state.identity.symbol,
-        timeframe=projected_symbol_state.identity.timeframe,
         message_kind="ephemeral",
         boundary_name="selected_symbol_snapshot",
-        extra={
-            "contract": "botlens_selected_symbol_snapshot",
-            "scope": "selected_symbol",
-            "snapshot_seq": int(projected_symbol_state.seq or 0),
-        },
-    )
-    return selected_symbol_snapshot_contract(
+    ):
+        emit_candle_continuity_summary(
+            _OBSERVER,
+            stage="botlens_selected_symbol_snapshot",
+            summary=continuity_summary,
+            bot_id=bot_id,
+            run_id=str(run_id),
+            instrument_id=projected_symbol_state.identity.instrument_id,
+            series_key=projected_symbol_state.symbol_key,
+            symbol=projected_symbol_state.identity.symbol,
+            timeframe=projected_symbol_state.identity.timeframe,
+            message_kind="ephemeral",
+            boundary_name="selected_symbol_snapshot",
+            extra={
+                "contract": "botlens_selected_symbol_snapshot",
+                "scope": "selected_symbol",
+                "snapshot_seq": int(projected_symbol_state.seq or 0),
+                "materiality": "diagnostic",
+                "diagnostic_scope": "botlens_observer",
+            },
+        )
+    run_live = bool(resolved_run_state.readiness.run_live)
+    return _observe_selected_symbol_response(
+        started=request_started,
         bot_id=bot_id,
         run_id=str(run_id),
-        symbol_key=normalized_symbol_key,
-        symbol_state=projected_symbol_state,
-        symbol_catalog_entry=symbol_catalog_entry,
-        run_health=resolved_run_state.health.to_dict(),
-        run_bootstrap_seq=int(resolved_run_state.seq or 0),
-        base_seq=int(cursor.get("base_seq") or 0),
-        stream_session_id=str(cursor.get("stream_session_id") or "").strip() or None,
-        run_live=bool(resolved_run_state.readiness.run_live),
-        transport_eligible=bool(resolved_run_state.readiness.run_live),
-        message="BotLens selected-symbol snapshot ready.",
+        series_key=normalized_symbol_key,
+        run_live=run_live,
+        response=selected_symbol_snapshot_contract(
+            bot_id=bot_id,
+            run_id=str(run_id),
+            symbol_key=normalized_symbol_key,
+            symbol_state=projected_symbol_state,
+            symbol_catalog_entry=symbol_catalog_entry,
+            run_health=resolved_run_state.health.to_dict(),
+            run_bootstrap_seq=int(resolved_run_state.seq or 0),
+            base_seq=int(cursor.get("base_seq") or 0),
+            stream_session_id=str(cursor.get("stream_session_id") or "").strip() or None,
+            run_live=run_live,
+            transport_eligible=run_live,
+            message="BotLens selected-symbol snapshot ready.",
+        ),
     )
 
 

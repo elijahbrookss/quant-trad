@@ -12,7 +12,9 @@ tags:
   - runtime
 code_paths:
   - src/strategies
+  - portal/backend/service/strategy_variant_resolution.py
   - portal/backend/service/strategies
+  - portal/backend/service/bots/config_service.py
   - portal/backend/controller/strategies.py
   - src/engines/bot_runtime/strategy
   - portal/backend/service/bots/strategy_loader.py
@@ -98,6 +100,13 @@ Decision artifacts are runtime truth candidates. They are not fills. Runtime dec
 
 The decision layer can remember bounded output history because some guards ask whether a condition held or a signal was seen/absent within a window. That history must be built from known-at outputs only.
 
+Strategy variants are named diffs against a strategy/default variant. Preview,
+bot config, runtime loading, and report metadata must resolve the same
+`effective_params` through the shared variant resolver. Runtime strategy models
+carry the resulting `effective_strategy_config` and `run_strategy_snapshot` as
+provenance only; these fields must not change evaluator, wallet, order, fee, or
+trade semantics.
+
 ## Failure And Recovery
 
 - Missing typed outputs make dependent rules false or rejected with context.
@@ -111,6 +120,9 @@ The decision layer can remember bounded output history because some guards ask w
 - Strategies read typed outputs, not indicator internals.
 - Runtime decision provenance captures only rule-referenced typed outputs at the decision boundary; reporting must not reconstruct indicator context from hidden state.
 - `strategy_hash` travels with decisions for reproducibility.
+- Variant resolution is shared across preview, bot config, runtime loading, and
+  report metadata. A selected variant must not have one effective param map in
+  preview and another at runtime.
 - Bounded history never includes future bars.
 - Execution state can reject a valid strategy decision, and that rejection is part of truth.
 

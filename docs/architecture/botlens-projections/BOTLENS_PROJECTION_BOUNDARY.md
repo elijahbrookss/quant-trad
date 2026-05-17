@@ -12,6 +12,8 @@ tags:
   - read-model
 code_paths:
   - portal/backend/service/bots/botlens_contract.py
+  - portal/backend/service/bots/botlens_bootstrap_service.py
+  - portal/backend/service/bots/botlens_candle_continuity.py
   - portal/backend/service/bots/botlens_canonical_facts.py
   - portal/backend/service/bots/botlens_domain_events.py
   - portal/backend/service/bots/botlens_event_retention.py
@@ -21,6 +23,7 @@ code_paths:
   - portal/backend/service/bots/botlens_state.py
   - portal/backend/service/bots/botlens_transport.py
   - portal/backend/service/bots/botlens_run_stream.py
+  - portal/backend/service/bots/botlens_symbol_service.py
   - portal/backend/service/bots/container_runtime_telemetry.py
   - src/engines/bot_runtime/runtime/components/chart_state.py
   - src/engines/bot_runtime/runtime/components/overlay_delta.py
@@ -124,6 +127,14 @@ other UI demand signal. It emits the same canonical facts and bounded
 projection/debug facts for the same run inputs regardless of whether anyone is
 watching. Viewer demand can never change strategy timing, execution timing,
 wallet timing, canonical fact emission, or run finalization.
+
+BotLens read endpoints may compute selected-symbol continuity diagnostics for
+the response they return, but ordinary reads do not durably persist observer
+continuity facts. Durable observer continuity writes require the explicit debug
+configuration `QT_BOT_RUNTIME_BOTLENS_PERSIST_OBSERVER_CONTINUITY=true` and
+must be labeled diagnostic/non-material. These rows remain operational evidence
+only; report/golden material identity accepts terminal `run_final` continuity
+evidence from the canonical run path, not BotLens viewer/bootstrap facts.
 
 The fact stream is also source-compacted before it reaches backend projectors.
 `runtime_state_observed` carries only compact health/runtime fields, not the

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Mapping
 from typing import Any, Dict
 
+from ..observability import payload_size_bytes
 from ..observability import BackendObserver
 from . import bot_service
-from .botlens_candle_continuity import continuity_summary_from_candles, emit_candle_continuity_summary
+from .botlens_candle_continuity import (
+    continuity_summary_from_candles,
+    emit_candle_continuity_summary,
+    should_persist_observer_continuity,
+)
 from .botlens_state import empty_run_projection_snapshot, select_default_symbol_key
 from .botlens_transport import run_bootstrap_contract
 from ..storage.storage import get_bot_run
@@ -136,32 +142,109 @@ def _startup_bootstrap_state(
     )
 
 
+def _request_source_reason(response: Mapping[str, Any]) -> str:
+    scope = _mapping(response.get("scope"))
+    readiness = _mapping(response.get("readiness"))
+    run_id = str(scope.get("run_id") or "").strip()
+    if not run_id:
+        return "inactive"
+    if bool(readiness.get("run_live")):
+        return "active_runtime"
+    return "terminal_or_startup"
+
+
+def _observe_projection_read(
+    *,
+    started: float,
+    bot_id: Any,
+    run_id: Any,
+    source_reason: str,
+    outcome: str = "success",
+) -> None:
+    labels = {
+        "bot_id": bot_id,
+        "run_id": run_id,
+        "pipeline_stage": "botlens_run_bootstrap",
+        "message_kind": "ephemeral",
+        "source_reason": source_reason,
+        "outcome": outcome,
+    }
+    _OBSERVER.increment("botlens_projection_read_total", **labels)
+    _OBSERVER.observe(
+        "botlens_projection_read_ms",
+        max((time.perf_counter() - started) * 1000.0, 0.0),
+        **labels,
+    )
+
+
+def _observe_run_bootstrap_response(
+    *,
+    started: float,
+    response: Dict[str, Any],
+    bot_id: Any,
+    outcome: str = "success",
+) -> Dict[str, Any]:
+    scope = _mapping(response.get("scope"))
+    run_id = str(scope.get("run_id") or "").strip() or None
+    labels = {
+        "bot_id": bot_id,
+        "run_id": run_id,
+        "pipeline_stage": "botlens_run_bootstrap",
+        "message_kind": "ephemeral",
+        "source_reason": _request_source_reason(response),
+        "outcome": outcome,
+    }
+    _OBSERVER.observe(
+        "botlens_run_bootstrap_request_ms",
+        max((time.perf_counter() - started) * 1000.0, 0.0),
+        **labels,
+    )
+    _OBSERVER.observe(
+        "botlens_run_bootstrap_response_payload_bytes",
+        float(payload_size_bytes(response)),
+        **labels,
+    )
+    return response
+
+
 async def get_active_botlens_run_bootstrap(*, bot_id: str) -> Dict[str, Any]:
+    request_started = time.perf_counter()
     projected_bot = _mapping(bot_service.get_bot(str(bot_id)))
     active_run_id = str(projected_bot.get("active_run_id") or "").strip() or None
     lifecycle = _mapping(projected_bot.get("lifecycle"))
     bot_status = str(projected_bot.get("status") or "").strip().lower()
 
     if not active_run_id:
-        return run_bootstrap_contract(
-            bot_id=str(bot_id),
-            run_id=None,
-            run_meta=None,
-            lifecycle=lifecycle,
-            health={},
-            symbol_catalog={},
-            open_trades={},
-            selected_symbol_key=None,
-            state="inactive",
-            run_live=False,
-            transport_eligible=False,
-            message="No active runtime is attached to this bot.",
-            bootstrap_seq=0,
-            base_seq=0,
-            stream_session_id=None,
+        return _observe_run_bootstrap_response(
+            started=request_started,
+            bot_id=bot_id,
+            response=run_bootstrap_contract(
+                bot_id=str(bot_id),
+                run_id=None,
+                run_meta=None,
+                lifecycle=lifecycle,
+                health={},
+                symbol_catalog={},
+                open_trades={},
+                selected_symbol_key=None,
+                state="inactive",
+                run_live=False,
+                transport_eligible=False,
+                message="No active runtime is attached to this bot.",
+                bootstrap_seq=0,
+                base_seq=0,
+                stream_session_id=None,
+            ),
         )
 
+    ensure_started = time.perf_counter()
     run_state = await _telemetry_hub().ensure_run_snapshot(run_id=active_run_id, bot_id=str(bot_id))
+    _observe_projection_read(
+        started=ensure_started,
+        bot_id=bot_id,
+        run_id=active_run_id,
+        source_reason="ensure_run_snapshot",
+    )
     cursor = await _telemetry_hub().current_cursor(run_id=active_run_id, bot_id=str(bot_id))
     symbol_index = run_state.symbol_catalog.entries
     open_trades_index = run_state.open_trades.entries
@@ -170,22 +253,26 @@ async def get_active_botlens_run_bootstrap(*, bot_id: str) -> Dict[str, Any]:
         bootstrap_state, bootstrap_message = _startup_bootstrap_state(
             lifecycle=run_state.lifecycle.to_dict() or lifecycle,
         )
-        return run_bootstrap_contract(
-            bot_id=str(bot_id),
-            run_id=active_run_id,
-            run_meta=_run_meta(run_id=active_run_id, projected_bot=projected_bot, health_state=run_state.health.to_dict()),
-            lifecycle=run_state.lifecycle.to_dict() or lifecycle,
-            health=run_state.health.to_dict(),
-            symbol_catalog={},
-            open_trades=open_trades_index,
-            selected_symbol_key=None,
-            state=bootstrap_state,
-            run_live=bool(run_state.readiness.run_live),
-            transport_eligible=bot_status in _ACTIVE_STATUSES,
-            message=bootstrap_message,
-            bootstrap_seq=int(run_state.seq or 0),
-            base_seq=int(cursor.get("base_seq") or 0),
-            stream_session_id=str(cursor.get("stream_session_id") or "").strip() or None,
+        return _observe_run_bootstrap_response(
+            started=request_started,
+            bot_id=bot_id,
+            response=run_bootstrap_contract(
+                bot_id=str(bot_id),
+                run_id=active_run_id,
+                run_meta=_run_meta(run_id=active_run_id, projected_bot=projected_bot, health_state=run_state.health.to_dict()),
+                lifecycle=run_state.lifecycle.to_dict() or lifecycle,
+                health=run_state.health.to_dict(),
+                symbol_catalog={},
+                open_trades=open_trades_index,
+                selected_symbol_key=None,
+                state=bootstrap_state,
+                run_live=bool(run_state.readiness.run_live),
+                transport_eligible=bot_status in _ACTIVE_STATUSES,
+                message=bootstrap_message,
+                bootstrap_seq=int(run_state.seq or 0),
+                base_seq=int(cursor.get("base_seq") or 0),
+                stream_session_id=str(cursor.get("stream_session_id") or "").strip() or None,
+            ),
         )
 
     selected_symbol_key = select_default_symbol_key(
@@ -194,10 +281,17 @@ async def get_active_botlens_run_bootstrap(*, bot_id: str) -> Dict[str, Any]:
     )
     if not selected_symbol_key:
         raise ValueError(f"BotLens could not resolve a default symbol for run_id={active_run_id}")
+    ensure_symbol_started = time.perf_counter()
     selected_symbol_state = await _telemetry_hub().ensure_symbol_snapshot(
         run_id=active_run_id,
         bot_id=str(bot_id),
         symbol_key=selected_symbol_key,
+    )
+    _observe_projection_read(
+        started=ensure_symbol_started,
+        bot_id=bot_id,
+        run_id=active_run_id,
+        source_reason="ensure_symbol_snapshot",
     )
     if selected_symbol_state.readiness.snapshot_ready:
         continuity_summary = continuity_summary_from_candles(
@@ -205,42 +299,53 @@ async def get_active_botlens_run_bootstrap(*, bot_id: str) -> Dict[str, Any]:
             timeframe=selected_symbol_state.identity.timeframe,
             series_key=selected_symbol_state.symbol_key,
         )
-        emit_candle_continuity_summary(
-            _OBSERVER,
+        if should_persist_observer_continuity(
             stage="botlens_run_bootstrap_snapshot",
-            summary=continuity_summary,
-            bot_id=bot_id,
-            run_id=active_run_id,
-            instrument_id=selected_symbol_state.identity.instrument_id,
-            series_key=selected_symbol_state.symbol_key,
-            symbol=selected_symbol_state.identity.symbol,
-            timeframe=selected_symbol_state.identity.timeframe,
             message_kind="ephemeral",
             boundary_name="run_bootstrap_selected_symbol",
-            extra={
-                "contract": "botlens_run_bootstrap",
-                "scope": "selected_symbol",
-                "snapshot_seq": int(selected_symbol_state.seq or 0),
-            },
-        )
+        ):
+            emit_candle_continuity_summary(
+                _OBSERVER,
+                stage="botlens_run_bootstrap_snapshot",
+                summary=continuity_summary,
+                bot_id=bot_id,
+                run_id=active_run_id,
+                instrument_id=selected_symbol_state.identity.instrument_id,
+                series_key=selected_symbol_state.symbol_key,
+                symbol=selected_symbol_state.identity.symbol,
+                timeframe=selected_symbol_state.identity.timeframe,
+                message_kind="ephemeral",
+                boundary_name="run_bootstrap_selected_symbol",
+                extra={
+                    "contract": "botlens_run_bootstrap",
+                    "scope": "selected_symbol",
+                    "snapshot_seq": int(selected_symbol_state.seq or 0),
+                    "materiality": "diagnostic",
+                    "diagnostic_scope": "botlens_observer",
+                },
+            )
 
-    return run_bootstrap_contract(
-        bot_id=str(bot_id),
-        run_id=active_run_id,
-        run_meta=_run_meta(run_id=active_run_id, projected_bot=projected_bot, health_state=run_state.health.to_dict()),
-        lifecycle=run_state.lifecycle.to_dict() or lifecycle,
-        health=run_state.health.to_dict(),
-        symbol_catalog=symbol_index,
-        open_trades=open_trades_index,
-        selected_symbol_key=selected_symbol_key,
-        state="ready",
-        run_live=bool(run_state.readiness.run_live),
-        transport_eligible=bot_status in _ACTIVE_STATUSES,
-        message="BotLens run bootstrap ready.",
-        bootstrap_seq=int(run_state.seq or 0),
-        base_seq=int(cursor.get("base_seq") or 0),
-        stream_session_id=str(cursor.get("stream_session_id") or "").strip() or None,
-        selected_symbol_state=selected_symbol_state,
+    return _observe_run_bootstrap_response(
+        started=request_started,
+        bot_id=bot_id,
+        response=run_bootstrap_contract(
+            bot_id=str(bot_id),
+            run_id=active_run_id,
+            run_meta=_run_meta(run_id=active_run_id, projected_bot=projected_bot, health_state=run_state.health.to_dict()),
+            lifecycle=run_state.lifecycle.to_dict() or lifecycle,
+            health=run_state.health.to_dict(),
+            symbol_catalog=symbol_index,
+            open_trades=open_trades_index,
+            selected_symbol_key=selected_symbol_key,
+            state="ready",
+            run_live=bool(run_state.readiness.run_live),
+            transport_eligible=bot_status in _ACTIVE_STATUSES,
+            message="BotLens run bootstrap ready.",
+            bootstrap_seq=int(run_state.seq or 0),
+            base_seq=int(cursor.get("base_seq") or 0),
+            stream_session_id=str(cursor.get("stream_session_id") or "").strip() or None,
+            selected_symbol_state=selected_symbol_state,
+        ),
     )
 
 

@@ -7,7 +7,7 @@ import logging
 from typing import Any, Callable, Dict, Optional, TypeVar
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from ..service.reports.contract import (
@@ -32,7 +32,14 @@ from ..service.reports.contract import (
     get_trade_dataset as _get_trade_dataset,
     list_report_summaries as _list_report_summaries,
 )
+from ..service.reports.comparison import compare_materialized_run_reports as _compare_materialized_run_reports
 from ..service.reports.export_bundle import build_export_archive, build_export_manifest
+from ..service.reports.materialization import (
+    RunReportMaterializationNotTerminal,
+    ensure_report_materialization as _ensure_report_materialization,
+    materialized_run_report as _materialized_run_report,
+    report_materialization_status as _report_materialization_status,
+)
 from ..service.reports.schemas import (
     CandleCatalogResponse,
     CandleDatasetResponse,
@@ -43,9 +50,12 @@ from ..service.reports.schemas import (
     ReportDiagnosticsResponse,
     ReportExportRequest,
     ReportListResponse,
+    RunComparisonDTO,
+    RunReportMaterializationResponse,
     ReportReadinessResponse,
     ReportSectionsResponse,
     RunComparisonResultResponse,
+    RunReportDTO,
     RunReportSummaryResponse,
     RunResearchDatasetResponse,
 )
@@ -133,6 +143,45 @@ async def compare_reports(payload: ReportCompareRequest) -> RunComparisonResultR
         raise HTTPException(500, "Report comparison failed") from exc
 
 
+@router.get("/compare", response_model=RunComparisonDTO)
+async def compare_materialized_reports(
+    left_run_id: str = Query(..., alias="left_run_id"),
+    right_run_id: str = Query(..., alias="right_run_id"),
+    include_golden: bool = Query(True, description="Read existing golden comparison evidence when available."),
+    require_golden: bool = Query(False, description="Block comparison when existing golden evidence is unavailable."),
+) -> RunComparisonDTO:
+    """Compare two ready materialized RunReportDTO v2 artifacts without building reports."""
+
+    context = build_log_context(left_run_id=left_run_id, right_run_id=right_run_id, include_golden=include_golden, require_golden=require_golden)
+    logger.info(with_log_context("run_report_compare_request", context))
+    try:
+        result = await _run_report_task(
+            _compare_materialized_run_reports,
+            left_run_id,
+            right_run_id,
+            include_golden=include_golden,
+            require_golden=require_golden,
+        )
+        logger.info(
+            with_log_context(
+                "run_report_compare_success",
+                context
+                | {
+                    "comparison_status": result.comparison_status,
+                    "comparison_verdict": result.comparison_verdict,
+                    "blocked_reason": result.blocked_reason,
+                },
+            )
+        )
+        return result
+    except KeyError as exc:
+        logger.warning(with_log_context("run_report_compare_missing", context))
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - convert to API error
+        logger.error(with_log_context("run_report_compare_failed", context), exc_info=exc)
+        raise HTTPException(500, "Run report comparison failed") from exc
+
+
 @router.get("/{run_id}/readiness", response_model=ReportReadinessResponse)
 async def get_report_readiness(run_id: str) -> ReportReadinessResponse:
     """Return report readiness and readiness-impacting diagnostics."""
@@ -167,6 +216,97 @@ async def get_run_report_summary(run_id: str) -> RunReportSummaryResponse:
     except Exception as exc:  # noqa: BLE001 - convert to API error
         logger.error(with_log_context("report_summary_failed", context), exc_info=exc)
         raise HTTPException(500, "Report summary build failed") from exc
+
+
+@router.get("/{run_id}/run-report/status", response_model=RunReportMaterializationResponse)
+async def get_run_report_materialization_status(run_id: str) -> RunReportMaterializationResponse:
+    """Return materialized Run Report DTO v2 artifact status."""
+
+    context = build_log_context(run_id=run_id)
+    logger.info(with_log_context("run_report_materialization_status_request", context))
+    try:
+        payload = await _run_report_task(_report_materialization_status, run_id)
+        return RunReportMaterializationResponse.model_validate(payload)
+    except KeyError as exc:
+        logger.warning(with_log_context("run_report_materialization_status_missing", context))
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - convert to API error
+        logger.error(with_log_context("run_report_materialization_status_failed", context), exc_info=exc)
+        raise HTTPException(500, "Run report status query failed") from exc
+
+
+@router.get(
+    "/{run_id}/run-report",
+    responses={
+        200: {"model": RunReportDTO},
+        202: {"model": RunReportMaterializationResponse},
+    },
+)
+async def get_run_report(
+    run_id: str,
+    build: bool = Query(True, description="Enqueue materialization for terminal runs when no ready artifact exists."),
+    force_rebuild: bool = Query(False, description="Force a new materialized report build."),
+) -> Any:
+    """Return a materialized Run Report DTO v2 contract for a terminal run."""
+
+    context = build_log_context(run_id=run_id, build=build, force_rebuild=force_rebuild)
+    logger.info(with_log_context("run_report_v2_request", context))
+    try:
+        if not force_rebuild:
+            materialized = await _run_report_task(_materialized_run_report, run_id)
+            if materialized is not None:
+                logger.info(with_log_context("run_report_v2_materialized_success", context))
+                return RunReportDTO.model_validate(materialized)
+
+        status_payload = await _run_report_task(
+            _report_materialization_status,
+            run_id,
+            require_terminal=True,
+        )
+        if not build and not force_rebuild:
+            return JSONResponse(status_code=202, content=status_payload)
+
+        status_payload = await _run_report_task(
+            _ensure_report_materialization,
+            run_id,
+            force=force_rebuild,
+            async_build=True,
+        )
+        status = dict(status_payload.get("report_status") or {})
+        if status.get("can_view") and not force_rebuild:
+            materialized = await _run_report_task(_materialized_run_report, run_id)
+            if materialized is not None:
+                logger.info(with_log_context("run_report_v2_materialized_success", context))
+                return RunReportDTO.model_validate(materialized)
+        if status.get("status") == "failed":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "report_materialization_failed",
+                    "message": "Run report materialization failed.",
+                    "report_status": status,
+                },
+            )
+        return JSONResponse(status_code=202, content=status_payload)
+    except KeyError as exc:
+        logger.warning(with_log_context("run_report_v2_missing", context))
+        raise HTTPException(404, str(exc)) from exc
+    except RunReportMaterializationNotTerminal as exc:
+        logger.info(with_log_context("run_report_v2_not_terminal", context | {"run_status": exc.status}))
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "run_not_terminal",
+                "message": "Run report is only available after the run reaches a terminal status.",
+                "run_id": run_id,
+                "run_status": exc.status,
+            },
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - convert to API error
+        logger.error(with_log_context("run_report_v2_failed", context), exc_info=exc)
+        raise HTTPException(500, "Run report materialization failed") from exc
 
 
 @router.get("/{run_id}/sections", response_model=ReportSectionsResponse)

@@ -29,9 +29,10 @@ async function handleResponse(res) {
     log.warn('report_response_parse_failed', { status: res.status, url: res.url }, err)
   }
 
-  const detail =
+  const rawDetail =
     (payload && typeof payload === 'object' && (payload.detail || payload.message)) ||
     (typeof payload === 'string' ? payload : null)
+  const detail = rawDetail && typeof rawDetail === 'object' ? rawDetail.message || rawDetail.code || JSON.stringify(rawDetail) : rawDetail
   const error = new Error(detail || res.statusText || `Request failed with status ${res.status}`)
   error.status = res.status
   if (payload && typeof payload === 'object') {
@@ -76,6 +77,10 @@ export async function listReports(params = {}) {
 
 export async function getReport(runId, options = {}) {
   return getReportJson(`/api/reports/${runId}`, options)
+}
+
+export async function getRunReport(runId, options = {}) {
+  return getReportJson(`/api/reports/${runId}/run-report`, options)
 }
 
 export async function getReportReadiness(runId, options = {}) {
@@ -149,6 +154,16 @@ export async function compareReports(runIds = []) {
     mode: 'cors',
   })
   return handleResponse(res)
+}
+
+export async function compareRunReports(leftRunId, rightRunId, options = {}) {
+  const query = buildQuery({
+    left_run_id: leftRunId,
+    right_run_id: rightRunId,
+    include_golden: options.includeGolden,
+    require_golden: options.requireGolden,
+  })
+  return getReportJson(`/api/reports/compare${query}`, options)
 }
 
 export async function exportReport(runId, options = {}) {

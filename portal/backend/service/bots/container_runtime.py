@@ -195,6 +195,10 @@ def _build_shared_wallet_proxy(
         "decision_order_state": manager.dict(),
         "decision_order_participants": manager.dict(),
         "decision_order_expected_count": max(int(expected_decision_participants or 0), 0),
+        "decision_order_wait_top": manager.list(),
+        "decision_order_wait_control": manager.dict(),
+        "decision_order_wait_total_ms": manager.Value("d", 0.0),
+        "decision_order_wait_record_count": manager.Value("i", 0),
         "lock": manager.RLock(),
     }
 

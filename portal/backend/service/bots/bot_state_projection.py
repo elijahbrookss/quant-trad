@@ -532,6 +532,11 @@ def project_bot_state(
     payload["active_run_id"] = active_run_id
     payload["latest_run_id"] = selected_run_id
     payload["run"] = dict(selected_run) if selected_run else None
+    if selected_run:
+        report_materialization = _mapping(selected_run.get("report_materialization"))
+        if report_materialization:
+            payload["report_materialization"] = report_materialization
+            payload["report_status"] = report_materialization.get("status")
     return payload
 
 

@@ -761,6 +761,21 @@ class IntakeRouter:
                 bot_id=bot_id,
                 reason=str(payload.get("status") or payload.get("phase") or "terminal").strip().lower(),
             )
+            try:
+                from ..reports.materialization import enqueue_report_materialization_for_terminal_run
+
+                enqueue_report_materialization_for_terminal_run(
+                    run_id,
+                    terminal_status=str(payload.get("status") or payload.get("phase") or "terminal").strip().lower(),
+                    source_reason="botlens_terminal_lifecycle",
+                )
+            except Exception as exc:  # noqa: BLE001 - report materialization must not alter lifecycle truth.
+                logger.warning(
+                    "report_materialization_terminal_enqueue_failed | run_id=%s | bot_id=%s | error=%s",
+                    run_id,
+                    bot_id,
+                    exc,
+                )
 
 
 __all__ = ["IntakeRouter"]

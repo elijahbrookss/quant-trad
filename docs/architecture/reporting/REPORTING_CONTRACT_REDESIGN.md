@@ -14,11 +14,16 @@ tags:
 code_paths:
   - portal/backend/controller/reports.py
   - portal/backend/service/reports/contract.py
+  - portal/backend/service/reports/comparison.py
+  - portal/backend/service/reports/golden_evidence.py
   - portal/backend/service/reports/run_research_dataset.py
   - portal/backend/service/reports/export_bundle.py
   - portal/backend/service/reports/schemas.py
+  - portal/backend/service/reports/materialization.py
+  - portal/backend/service/storage/repos/report_materializations.py
   - portal/backend/service/storage/repos/candles.py
   - portal/frontend/src/components/reports
+  - scripts/reporting/golden_repeatability.py
 ---
 
 # Reporting Contract Redesign
@@ -32,12 +37,19 @@ analysis tools.
 `RunResearchDataset v1` is the canonical report payload. Frontend-shaped report
 payloads are not part of the contract.
 
+`RunReportDTO v2` is the typed frontend/MCP-safe view over the canonical
+dataset. It groups deterministic facts into research trust, performance,
+behavior, wallet, symbol breakdown, coordinator-wait, and operational
+diagnostic sections without making raw internals the primary UX contract.
+
 ## Contract Shape
 
 The public API exposes typed, versioned report surfaces:
 
 - `ReportReadiness`
 - `RunResearchDataset`
+- `RunReportDTO`
+- `RunComparisonDTO`
 - `RunReportSummary`
 - `ReportSections`
 - `TradeDataset`
@@ -64,6 +76,9 @@ supporting/internal sources. They are not the reporting contract.
 |---|---|---|
 | `GET /api/reports` | `ReportList` | Lightweight catalog rows with summary and readiness state. |
 | `GET /api/reports/{run_id}` | `RunResearchDataset` | Canonical complete dataset. |
+| `GET /api/reports/{run_id}/run-report` | `RunReportDTO` or materialization status | Typed research cockpit contract over the canonical dataset. Terminal runs return a ready materialized artifact when available, enqueue materialization and return `202` when building, and reject active runs. |
+| `GET /api/reports/{run_id}/run-report/status` | `ReportMaterializationStatusDTO` | Materialized report artifact lifecycle (`not_started`, `building`, `ready`, `failed`, `stale`) for UI actions and automation. |
+| `GET /api/reports/compare?left_run_id=...&right_run_id=...` | `RunComparisonDTO` | Frontend comparison contract over ready materialized `RunReportDTO v2` artifacts. It returns structured blocked states when either artifact is unavailable, reads existing golden evidence when available, and does not enqueue cold report or golden builds by default. |
 | `GET /api/reports/{run_id}/readiness` | `ReportReadiness` | Cheap readiness/status read. |
 | `GET /api/reports/{run_id}/summary` | `RunReportSummary` | Compact run summary. |
 | `GET /api/reports/{run_id}/sections` | `ReportSections` | Section availability, row counts, and unsupported states. |
@@ -83,7 +98,7 @@ supporting/internal sources. They are not the reporting contract.
 | `GET /api/reports/{run_id}/metrics/{metric_name}/explanation` | `MetricExplanation` | Formula and source references for supported metrics. |
 | `GET /api/reports/{run_id}/export/manifest` | `ExportManifest` | Files and unavailable sections for export. |
 | `POST /api/reports/{run_id}/export` | `ExportBundle` | Zip generated from the reporting data product. |
-| `POST /api/reports/compare` | `RunComparisonResult` | Gated result; blocked comparisons do not return deltas. |
+| `POST /api/reports/compare` | `RunComparisonResult` | Legacy dataset comparison result; blocked comparisons do not return deltas. |
 
 ## Readiness
 
@@ -166,6 +181,59 @@ Consumers should not have to recompute these metrics to render standard report
 views. Raw trade rows remain available so external analysis tools can audit or
 recompute metrics independently.
 
+`RunReportDTO v2` wraps display-facing metrics in `MetricValueDTO` so ratios and
+caveated values are never exposed as naked numbers. Each metric carries value,
+validity, unit, method, source, method metadata, sample counts, minimum sample
+count, invalid reason, and caveats. Missing or unsupported fields such as
+slippage, unrealized PnL, and margin time-series usage are returned as invalid
+or `not_available` with an explicit reason rather than inferred by the
+frontend.
+
+Slippage remains unavailable unless execution facts or an explicit zero-slippage
+configuration make the value explainable. Fee accounting should aggregate role,
+rate, source, and sanity-check evidence from durable trade metrics and runtime
+fill/fee events when those facts exist.
+
+## Materialized Run Comparison
+
+`RunComparisonDTO` compares exactly two ready terminal report artifacts from
+`portal_report_materializations_v1`. The comparison endpoint checks
+materialization status first and returns a blocked contract for
+`run_not_terminal`, `left_report_not_ready`, `right_report_not_ready`,
+`left_report_building`, `right_report_building`, `left_report_failed`, or
+`right_report_failed`. It must not call report materialization builders unless a
+future explicit rebuild parameter is added.
+
+Golden evidence is integrated through a read-only artifact adapter. The adapter
+scans existing golden repeatability `comparison_summary*.json` artifacts,
+selects the latest artifact whose `run_ids` match the requested pair, and
+normalizes stable script output into `GoldenEvidenceDTO`. Normal comparison
+does not invoke `scripts/reporting/golden_repeatability.py`. `include_golden`
+controls artifact reads, and `require_golden` can block when no existing
+artifact is available.
+
+Golden repeatability artifacts preserve legacy decision summary fields and the
+full decision-difference evidence needed by downstream comparison consumers:
+`missing_decision_ids`, `extra_decision_ids`, and compact `verdict_changes`
+rows. Readers must prefer the full arrays when present and fall back to legacy
+first-example fields for older artifacts without changing PASS/FAIL semantics.
+
+The DTO separates semantic comparison from operational drift:
+
+- trust comparison carries lifecycle, readiness, golden, semantic fingerprint,
+  operational fingerprint, data snapshot hash, config/strategy hash, runtime
+  ordering, wallet trace, candle continuity, and observer safety fields;
+- performance deltas compare `MetricValueDTO` fields and preserve invalid or
+  not-comparable states instead of subtracting naked ratios;
+- behavior, wallet, symbol, and coordinator wait deltas are report-level views
+  over the two materialized artifacts;
+- operational drift is diagnostic-only when semantic fingerprints match;
+- first divergence is sourced from report comparison when fingerprints differ,
+  and from golden evidence when an existing artifact provides decision/trade or
+  material divergence details. If golden evidence confirms no semantic
+  divergence, first divergence is explicitly reported as absent even when
+  operational diagnostics differ.
+
 ## Timeseries
 
 The dataset exposes canonical timeseries sections under `timeseries.items`.
@@ -206,6 +274,18 @@ artifact, including `referenced_outputs`, so reporting can expose the known-at
 signal/context/metric evidence without replaying hidden indicator internals or
 dumping arbitrary raw blobs. Missing runtime capture is reported as a section
 caveat and diagnostic.
+
+Signal datasets may include a direct `indicator_context` view over those typed
+outputs. Indicator-coupled metadata, including value-area references, breakout
+time, confirmation bars, and distance from the referenced level, belongs inside
+the indicator output payload rather than as generic strategy signal columns.
+
+Trade datasets may include report-only research enrichment for stop distance and
+R at entry, persisted runtime MAE/MFE, bounded candle-derived MAE/MFE before
+trade or leg exit, intrabar fallback flags on trades and legs, and entry/exit
+market-state lookup status. Exit market state is exact only when a captured
+world-state row exists at the exit time; otherwise reporting may expose the
+latest captured state before exit with explicit staleness and caveats.
 
 ## Candles
 
@@ -303,8 +383,9 @@ events. API routes run that work in the FastAPI threadpool so one report build
 does not block unrelated event-loop requests.
 
 The report contract service also keeps a short-lived per-process
-`RunResearchDataset` cache with in-flight request coalescing. This is not a
-durable materialization layer; it only absorbs bursts where clients request
+`RunResearchDataset` cache with in-flight request coalescing. This complements
+the terminal `RunReportDTO v2` materialization table; the cache only absorbs
+bursts where clients request
 readiness, summary, sections, diagnostics, table pages, manifest, or full
 dataset for the same run in quick succession. The canonical contract and route
 shape remain unchanged.

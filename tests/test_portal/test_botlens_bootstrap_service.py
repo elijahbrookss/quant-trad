@@ -14,6 +14,7 @@ from portal.backend.service.bots.botlens_state import (
     SymbolReadinessState,
     empty_symbol_projection_snapshot,
 )
+from portal.backend.service.observability import get_observability_sink, reset_observability_sink
 
 
 def _summary_payload() -> dict:
@@ -166,6 +167,7 @@ def test_get_active_botlens_run_bootstrap_returns_inactive_without_active_run(mo
 
 
 def test_get_active_botlens_run_bootstrap_is_run_scoped_and_embeds_selected_symbol_state(monkeypatch) -> None:
+    reset_observability_sink()
     monkeypatch.setattr(svc, "_telemetry_hub", lambda: _FakeTelemetryHub())
     monkeypatch.setattr(
         svc.bot_service,
@@ -208,6 +210,74 @@ def test_get_active_botlens_run_bootstrap_is_run_scoped_and_embeds_selected_symb
     assert result["selected_symbol"]["current"]["continuity"]["candle_count"] == 1
     assert result["bootstrap"]["base_seq"] == 14
     assert "detail" not in result
+    metrics = get_observability_sink().snapshot()["metrics"]
+    metric_names = {metric["metric_name"] for metric in metrics}
+    assert "botlens_run_bootstrap_request_ms" in metric_names
+    assert "botlens_run_bootstrap_response_payload_bytes" in metric_names
+    assert "botlens_projection_read_ms" in metric_names
+    projection_reads = [metric for metric in metrics if metric["metric_name"] == "botlens_projection_read_ms"]
+    assert {metric["tags"]["source_reason"] for metric in projection_reads} == {
+        "ensure_run_snapshot",
+        "ensure_symbol_snapshot",
+    }
+    assert all(metric["tags"]["pipeline_stage"] == "botlens_run_bootstrap" for metric in projection_reads)
+
+
+def test_get_active_botlens_run_bootstrap_does_not_persist_observer_continuity_by_default(monkeypatch) -> None:
+    monkeypatch.setattr(svc, "_telemetry_hub", lambda: _FakeTelemetryHub())
+    monkeypatch.setattr(svc, "should_persist_observer_continuity", lambda **kwargs: False)
+    monkeypatch.setattr(
+        svc.bot_service,
+        "get_bot",
+        lambda bot_id: {
+            "id": bot_id,
+            "status": "running",
+            "active_run_id": "run-1",
+            "lifecycle": {"phase": "live", "status": "running"},
+        },
+    )
+    monkeypatch.setattr(svc, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
+    monkeypatch.setattr(
+        svc,
+        "emit_candle_continuity_summary",
+        lambda *args, **kwargs: pytest.fail("ordinary BotLens bootstrap reads must not durably emit observer continuity"),
+    )
+
+    result = asyncio.run(svc.get_active_botlens_run_bootstrap(bot_id="bot-1"))
+
+    assert result["selected_symbol"]["current"]["continuity"]["candle_count"] == 1
+
+
+def test_get_active_botlens_run_bootstrap_can_persist_diagnostic_continuity_in_debug_mode(monkeypatch) -> None:
+    captured: list[dict] = []
+    monkeypatch.setattr(svc, "_telemetry_hub", lambda: _FakeTelemetryHub())
+    monkeypatch.setattr(svc, "should_persist_observer_continuity", lambda **kwargs: True)
+    monkeypatch.setattr(
+        svc.bot_service,
+        "get_bot",
+        lambda bot_id: {
+            "id": bot_id,
+            "status": "running",
+            "active_run_id": "run-1",
+            "lifecycle": {"phase": "live", "status": "running"},
+        },
+    )
+    monkeypatch.setattr(svc, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
+
+    def _emit(*args, **kwargs):
+        _ = args
+        captured.append(dict(kwargs))
+        return {}
+
+    monkeypatch.setattr(svc, "emit_candle_continuity_summary", _emit)
+
+    asyncio.run(svc.get_active_botlens_run_bootstrap(bot_id="bot-1"))
+
+    assert captured
+    assert captured[0]["boundary_name"] == "run_bootstrap_selected_symbol"
+    assert captured[0]["message_kind"] == "ephemeral"
+    assert captured[0]["extra"]["materiality"] == "diagnostic"
+    assert captured[0]["extra"]["diagnostic_scope"] == "botlens_observer"
 
 
 def test_get_active_botlens_run_bootstrap_passes_internal_state_only_to_run_bootstrap_contract(monkeypatch) -> None:

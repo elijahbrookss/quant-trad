@@ -321,6 +321,7 @@ def test_minimal_decision_details_preserve_selected_decision_without_debug_blobs
     }
     assert minimal.selected_artifact["referenced_outputs"]["ind-1.metric"]["fields"] == {"score": 12.5}
     assert minimal.selected_artifact["referenced_outputs"]["ind-1.sig"]["event_keys"] == ["breakout_long"]
+    assert minimal.selected_artifact["referenced_outputs"]["ind-1.sig"]["events"] == [{"key": "breakout_long"}]
     assert sorted(minimal.selected_artifact["observed_outputs"]) == [
         "ind-1.ctx",
         "ind-1.metric",

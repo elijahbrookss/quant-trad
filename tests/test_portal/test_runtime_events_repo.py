@@ -53,6 +53,10 @@ def test_step_rollups_keep_only_budgeted_context_metrics():
             "overlay_projection_ms": 3.25,
             "payload_bytes": 4096,
             "botlens_fact_stream_overlays_payload_bytes": 2048,
+            "decision_order_wait_ms": 17.5,
+            "decision_order_release_count": 1,
+            "canonical_fact_count": 3,
+            "live_fact_count": 7,
             "botlens_live_overlays_payload_bytes": 2048,
             "consumed_signals_count": 2,
             "one_off_internal_wait_ms": 999.0,
@@ -68,6 +72,10 @@ def test_step_rollups_keep_only_budgeted_context_metrics():
         "overlay_projection_ms",
         "payload_bytes",
         "botlens_fact_stream_overlays_payload_bytes",
+        "decision_order_wait_ms",
+        "decision_order_release_count",
+        "canonical_fact_count",
+        "live_fact_count",
     } <= metric_names
     assert "botlens_live_overlays_payload_bytes" not in metric_names
     assert "consumed_signals_count" not in metric_names

@@ -69,6 +69,14 @@ _TERMINAL_LIFECYCLE_STATUSES = frozenset(
 )
 
 
+def _finite_number(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if numeric == numeric and numeric not in {float("inf"), float("-inf")} else None
+
+
 def _batch_terminal_status(batch: ProjectionBatch) -> str | None:
     for event in batch.events:
         event_name = str(getattr(event.event_name, "value", event.event_name) or "").strip().upper()
@@ -83,6 +91,53 @@ def _batch_terminal_status(batch: ProjectionBatch) -> str | None:
             return phase
         return event_name.lower().replace("run_", "")
     return None
+
+
+def _runtime_stats_from_symbol_catalog(state: RunProjectionSnapshot) -> dict[str, Any]:
+    entries = state.symbol_catalog.entries or {}
+    if not entries:
+        return {}
+
+    numeric_sums = {
+        "wins": 0.0,
+        "losses": 0.0,
+        "gross_pnl": 0.0,
+        "net_pnl": 0.0,
+        "fees_paid": 0.0,
+        "total_fees": 0.0,
+        "total_trades": 0.0,
+        "completed_trades": 0.0,
+    }
+    seen = False
+    quote_currency: str | None = None
+    for entry in entries.values():
+        if not isinstance(entry, dict):
+            continue
+        stats = entry.get("stats") if isinstance(entry.get("stats"), dict) else {}
+        if not stats:
+            continue
+        seen = True
+        for key in numeric_sums:
+            value = _finite_number(stats.get(key))
+            if value is not None:
+                numeric_sums[key] += value
+        if quote_currency is None:
+            candidate = str(stats.get("quote_currency") or "").strip().upper()
+            quote_currency = candidate or None
+
+    if not seen:
+        return {}
+
+    payload: dict[str, Any] = {"stats_source": "botlens_symbol_catalog"}
+    integer_keys = {"wins", "losses", "total_trades", "completed_trades"}
+    for key, value in numeric_sums.items():
+        payload[key] = int(value) if key in integer_keys else value
+    if payload.get("wins") or payload.get("losses"):
+        denominator = float(payload.get("wins", 0) + payload.get("losses", 0))
+        payload["win_rate"] = float(payload.get("wins", 0)) / denominator if denominator else 0.0
+    if quote_currency:
+        payload["quote_currency"] = quote_currency
+    return payload
 
 
 class RunProjector:
@@ -271,6 +326,7 @@ class RunProjector:
     async def _process_symbol_notification(self, notification: SymbolSummaryNotification) -> None:
         started = time.perf_counter()
         deltas: list[RunConcernDelta] = []
+        publish_runtime_summary = False
 
         symbol_summary = dict(notification.symbol_summary)
         symbol_key = str(symbol_summary.get("symbol_key") or notification.symbol_key).strip()
@@ -278,6 +334,10 @@ class RunProjector:
             next_catalog = dict(self._state.symbol_catalog.entries)
             current_entry = next_catalog.get(symbol_key)
             if current_entry != symbol_summary:
+                current_stats = current_entry.get("stats") if isinstance(current_entry, dict) else {}
+                next_stats = symbol_summary.get("stats") if isinstance(symbol_summary.get("stats"), dict) else {}
+                if current_stats != next_stats:
+                    publish_runtime_summary = True
                 next_catalog[symbol_key] = symbol_summary
                 self._state = replace(
                     self._state,
@@ -331,6 +391,7 @@ class RunProjector:
                     emitted_removals.append(trade_id)
                     changed = True
             if changed:
+                publish_runtime_summary = True
                 self._state = replace(
                     self._state,
                     seq=max(int(self._state.seq), int(notification.seq)),
@@ -366,6 +427,7 @@ class RunProjector:
                 terminal=notification.runtime.get("terminal"),
             )
             if next_health != self._state.health:
+                publish_runtime_summary = True
                 self._state = replace(
                     self._state,
                     seq=max(int(self._state.seq), int(notification.seq)),
@@ -395,6 +457,7 @@ class RunProjector:
                 symbol_key=notification.symbol_key,
                 events=(),
             ),
+            publish_runtime_summary=publish_runtime_summary,
         )
         self._refresh_terminal_state()
         _OBSERVER.observe(
@@ -471,19 +534,40 @@ class RunProjector:
                 source_reason="fanout_queue_full",
             )
 
-    async def _publish_side_effects(self, *, deltas: tuple[RunConcernDelta, ...], batch: ProjectionBatch) -> None:
-        if any(isinstance(delta, RunHealthDelta) for delta in deltas):
+    def _runtime_summary_payload(self, *, known_at: Any) -> dict[str, Any]:
+        health = self._state.health.to_dict()
+        open_trade_count = len(self._state.open_trades.entries)
+        payload = {
+            **health,
+            "run_id": self._run_id,
+            "seq": int(self._state.seq),
+            "known_at": known_at,
+            "last_snapshot_at": known_at,
+            "open_trade_count": open_trade_count,
+            "trade_count": open_trade_count,
+        }
+        stats = _runtime_stats_from_symbol_catalog(self._state)
+        if stats:
+            payload["stats"] = stats
+        return payload
+
+    async def _publish_side_effects(
+        self,
+        *,
+        deltas: tuple[RunConcernDelta, ...],
+        batch: ProjectionBatch,
+        publish_runtime_summary: bool | None = None,
+    ) -> None:
+        should_publish_runtime_summary = (
+            any(isinstance(delta, RunHealthDelta) for delta in deltas)
+            if publish_runtime_summary is None
+            else bool(publish_runtime_summary)
+        )
+        if should_publish_runtime_summary:
             try:
                 from .bot_service import publish_runtime_update
 
-                health = self._state.health.to_dict()
-                payload = {
-                    **health,
-                    "run_id": self._run_id,
-                    "seq": int(self._state.seq),
-                    "known_at": batch.known_at,
-                    "last_snapshot_at": batch.known_at,
-                }
+                payload = self._runtime_summary_payload(known_at=batch.known_at)
                 await asyncio.to_thread(publish_runtime_update, self._bot_id, payload)
             except Exception as exc:
                 logger.warning("run_projector_runtime_publish_failed | run_id=%s | error=%s", self._run_id, exc)

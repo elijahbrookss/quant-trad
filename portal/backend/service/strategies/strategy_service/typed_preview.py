@@ -337,6 +337,7 @@ def evaluate_strategy_preview(
     compiled_strategy: CompiledStrategySpec,
     selected_variant: Mapping[str, Any],
     resolved_params: Mapping[str, Any],
+    effective_strategy_config: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     if not instrument_ids:
         raise ValueError("instrument_ids is required for strategy preview")
@@ -364,6 +365,7 @@ def evaluate_strategy_preview(
             "atm_template_id": str(selected_variant.get("atm_template_id") or "").strip() or None,
             "is_default": bool(selected_variant.get("is_default", False)),
         },
+        "effective_strategy_config": dict(effective_strategy_config or {}),
         "instruments": {},
     }
 

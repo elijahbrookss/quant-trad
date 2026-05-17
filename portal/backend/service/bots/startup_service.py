@@ -92,6 +92,14 @@ class BotStartupOrchestrator:
             ctx.bot_record["wallet_config"] = dict(ctx.wallet_config)
 
             strategy = ctx.strategy_snapshot
+            strategy_payload = strategy.to_dict() if hasattr(strategy, "to_dict") else {}
+            if isinstance(strategy_payload, dict):
+                ctx.bot_record["resolved_params"] = dict(strategy_payload.get("resolved_params") or {})
+                ctx.bot_record["atm_template_id"] = strategy_payload.get("atm_template_id")
+                ctx.bot_record["strategy_variant_name"] = strategy_payload.get(
+                    "variant_name",
+                    ctx.bot_record.get("strategy_variant_name"),
+                )
             self._record_phase(
                 ctx,
                 BotLifecyclePhase.RESOLVING_STRATEGY.value,
@@ -185,6 +193,17 @@ class BotStartupOrchestrator:
 
     def _prepare_run_record(self, ctx: BotStartupContext) -> None:
         strategy = ctx.strategy_snapshot
+        strategy_payload = strategy.to_dict() if hasattr(strategy, "to_dict") else {}
+        run_strategy_snapshot = (
+            dict(strategy_payload.get("run_strategy_snapshot") or {})
+            if isinstance(strategy_payload, dict)
+            else {}
+        )
+        effective_strategy_config = (
+            dict(strategy_payload.get("effective_strategy_config") or {})
+            if isinstance(strategy_payload, dict)
+            else {}
+        )
         execution_mode = _execution_mode_from_bot(ctx.bot_record)
         self.storage.upsert_bot_run(
             {
@@ -211,6 +230,8 @@ class BotStartupOrchestrator:
                     },
                     "bot": dict(ctx.bot_record),
                     "runtime_readiness": dict(ctx.runtime_readiness),
+                    "run_strategy_snapshot": run_strategy_snapshot,
+                    "effective_strategy_config": effective_strategy_config,
                 },
             }
         )

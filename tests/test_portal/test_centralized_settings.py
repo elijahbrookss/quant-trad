@@ -7,9 +7,11 @@ import core.settings as settings_module
 from core.settings import get_settings
 
 
-def test_settings_applies_single_underscore_env_overrides(monkeypatch):
+def test_settings_applies_single_underscore_env_overrides(monkeypatch, request):
+    request.addfinalizer(settings_module.clear_settings_cache)
     monkeypatch.setenv("QT_CONFIG_PROFILE", "dev")
     monkeypatch.setenv("QT_BOT_RUNTIME_IMAGE", "quanttrad-backend:test")
+    monkeypatch.setenv("QT_BOT_RUNTIME_BOTLENS_PERSIST_OBSERVER_CONTINUITY", "true")
     monkeypatch.setenv("QT_WORKERS_INDICATORS_INDEX", "2")
     monkeypatch.setenv("QT_WORKERS_INDICATORS_TOTAL", "7")
     monkeypatch.setenv("QT_REPORTS_ARTIFACTS_OUTPUT_FORMAT", "csv")
@@ -18,6 +20,7 @@ def test_settings_applies_single_underscore_env_overrides(monkeypatch):
     settings = get_settings(force_reload=True)
 
     assert settings.bot_runtime.image == "quanttrad-backend:test"
+    assert settings.bot_runtime.botlens.persist_observer_continuity is True
     assert settings.workers.indicators.index == 2
     assert settings.workers.indicators.total == 7
     assert settings.reports.artifacts.output_format == "csv"

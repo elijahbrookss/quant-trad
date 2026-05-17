@@ -203,6 +203,14 @@ def _build_series_snapshot(series: Sequence[Any]) -> tuple[list[dict[str, Any]],
     for entry in series:
         meta = dict(getattr(entry, "meta", {}) or {})
         indicator_links = list(meta.get("indicator_links") or [])
+        compiled_strategy = meta.get("compiled_strategy")
+        strategy_hash = (
+            getattr(compiled_strategy, "strategy_hash", None)
+            if compiled_strategy is not None
+            else None
+        )
+        if strategy_hash is None and isinstance(compiled_strategy, Mapping):
+            strategy_hash = compiled_strategy.get("strategy_hash")
         indicator_ids = []
         for link in indicator_links:
             indicator_id = str(link.get("indicator_id") or link.get("id") or "").strip()
@@ -230,6 +238,18 @@ def _build_series_snapshot(series: Sequence[Any]) -> tuple[list[dict[str, Any]],
                 "window_start": getattr(entry, "window_start", None),
                 "window_end": getattr(entry, "window_end", None),
                 "indicator_ids": indicator_ids,
+                "strategy_hash": strategy_hash,
+                "variant_id": meta.get("variant_id"),
+                "variant_name": meta.get("variant_name"),
+                "resolved_params": dict(meta.get("resolved_params") or {}),
+                "effective_params": dict(meta.get("effective_params") or meta.get("resolved_params") or {}),
+                "param_source_map": dict(meta.get("param_source_map") or {}),
+                "effective_strategy_config": dict(meta.get("effective_strategy_config") or {}),
+                "run_strategy_snapshot": dict(meta.get("run_strategy_snapshot") or {}),
+                "atm_template_id": meta.get("atm_template_id"),
+                "atm_template": dict(meta.get("atm_template") or {}),
+                "rules": dict(meta.get("rules") or {}),
+                "instruments": list(meta.get("instrument_links") or []),
             }
         )
     return snapshots, indicator_meta_by_id
@@ -258,6 +278,14 @@ def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> 
             record = storage.get_indicator(indicator_id)
             if record:
                 indicator_params.append(record)
+        compiled_strategy = meta.get("compiled_strategy")
+        strategy_hash = (
+            getattr(compiled_strategy, "strategy_hash", None)
+            if compiled_strategy is not None
+            else None
+        )
+        if strategy_hash is None and isinstance(compiled_strategy, Mapping):
+            strategy_hash = compiled_strategy.get("strategy_hash")
         strategies.append(
             {
                 "id": strategy_id,
@@ -265,6 +293,14 @@ def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> 
                 "timeframe": meta.get("timeframe") or getattr(entry, "timeframe", None),
                 "datasource": meta.get("datasource") or getattr(entry, "datasource", None),
                 "exchange": meta.get("exchange") or getattr(entry, "exchange", None),
+                "strategy_hash": strategy_hash,
+                "variant_id": meta.get("variant_id"),
+                "variant_name": meta.get("variant_name"),
+                "resolved_params": dict(meta.get("resolved_params") or {}),
+                "effective_params": dict(meta.get("effective_params") or meta.get("resolved_params") or {}),
+                "param_source_map": dict(meta.get("param_source_map") or {}),
+                "effective_strategy_config": dict(meta.get("effective_strategy_config") or {}),
+                "run_strategy_snapshot": dict(meta.get("run_strategy_snapshot") or {}),
                 "atm_template_id": meta.get("atm_template_id"),
                 "atm_template": meta.get("atm_template") or {},
                 "rules": meta.get("rules") or {},
@@ -818,12 +854,20 @@ def _build_config_snapshot_from_series_snapshot(
                 "timeframe": entry.get("timeframe"),
                 "datasource": entry.get("datasource"),
                 "exchange": entry.get("exchange"),
-                "atm_template_id": None,
-                "atm_template": {},
-                "rules": {},
+                "strategy_hash": entry.get("strategy_hash"),
+                "variant_id": entry.get("variant_id"),
+                "variant_name": entry.get("variant_name"),
+                "resolved_params": dict(entry.get("resolved_params") or {}),
+                "effective_params": dict(entry.get("effective_params") or entry.get("resolved_params") or {}),
+                "param_source_map": dict(entry.get("param_source_map") or {}),
+                "effective_strategy_config": dict(entry.get("effective_strategy_config") or {}),
+                "run_strategy_snapshot": dict(entry.get("run_strategy_snapshot") or {}),
+                "atm_template_id": entry.get("atm_template_id"),
+                "atm_template": dict(entry.get("atm_template") or {}),
+                "rules": dict(entry.get("rules") or {}),
                 "indicator_ids": indicator_ids,
                 "indicator_params": indicator_params,
-                "instruments": [],
+                "instruments": list(entry.get("instruments") or []),
             }
         )
     return {

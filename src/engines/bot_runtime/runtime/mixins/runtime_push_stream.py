@@ -15,6 +15,7 @@ from engines.bot_runtime.core.domain import Candle
 from engines.bot_runtime.core.series_identity import canonical_series_key
 from utils.log_context import with_log_context
 
+from ..components.canonical_facts import canonical_fact_payload
 from ..core import _isoformat
 from ..components.overlay_delta import (
     build_overlay_delta,
@@ -2743,6 +2744,12 @@ class RuntimePushStreamMixin:
                         payload_context["serialize_ms"] = serialize_ms
                         payload_context["delta_serialize_ms"] = serialize_ms
             append_outcome = None
+            live_fact_count = len(payload.get("facts") or [])
+            canonical_facts = canonical_fact_payload(payload).get("facts")
+            payload_context["live_fact_count"] = live_fact_count
+            payload_context["canonical_fact_count"] = (
+                len(canonical_facts) if isinstance(canonical_facts, list) else 0
+            )
             if payload.get("facts"):
                 append_started = time.perf_counter()
                 append_outcome = self.commit_botlens_fact_payload(
@@ -2753,6 +2760,8 @@ class RuntimePushStreamMixin:
                 canonical_append_ms = max((time.perf_counter() - append_started) * 1000.0, 0.0)
                 payload_context["canonical_append_ms"] = canonical_append_ms
             if append_outcome is not None:
+                append_result = dict(getattr(append_outcome.batch, "append_result", {}) or {})
+                payload_context["canonical_event_count"] = int(append_result.get("event_count") or 0)
                 dispatch_started = time.perf_counter()
                 consumer_results = self._canonical_fact_appender.dispatch(append_outcome.batch)
                 dispatch_ms = max((time.perf_counter() - dispatch_started) * 1000.0, 0.0)

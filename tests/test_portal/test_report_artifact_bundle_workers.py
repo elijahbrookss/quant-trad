@@ -83,7 +83,22 @@ def _series(symbol: str, strategy_id: str, indicator_id: str):
         window_start="2026-01-01T00:00:00Z",
         window_end="2026-01-02T00:00:00Z",
         candles=[candle],
-        meta={"indicator_links": [{"indicator_id": indicator_id}]},
+        meta={
+            "indicator_links": [{"indicator_id": indicator_id}],
+            "variant_id": "variant-1",
+            "variant_name": "aggressive",
+            "resolved_params": {"conviction_min": 0.55},
+            "param_source_map": {"conviction_min": "variant_overrides"},
+            "run_strategy_snapshot": {
+                "strategy_id": strategy_id,
+                "variant_id": "variant-1",
+                "effective_params": {"conviction_min": 0.55},
+            },
+            "atm_template_id": "atm-1",
+            "atm_template": {"name": "ATM 1"},
+            "rules": {"rule-1": {"id": "rule-1", "intent": "enter_long"}},
+            "instrument_links": [{"instrument_id": f"{symbol}-instrument", "symbol": symbol}],
+        },
     )
 
 
@@ -192,3 +207,10 @@ def test_finalize_run_artifact_bundle_from_workers_aggregates_worker_outputs(mon
     series_snapshot = artifacts._read_json(run_dir / "run" / "series.json")
     assert len(series_snapshot["series"]) == 2
     assert len(storage.upserts) == 1
+    config_snapshot = storage.upserts[0]["config_snapshot"]
+    strategy_snapshot = config_snapshot["strategies"][0]
+    assert strategy_snapshot["variant_id"] == "variant-1"
+    assert strategy_snapshot["resolved_params"] == {"conviction_min": 0.55}
+    assert strategy_snapshot["run_strategy_snapshot"]["effective_params"] == {"conviction_min": 0.55}
+    assert strategy_snapshot["rules"] == {"rule-1": {"id": "rule-1", "intent": "enter_long"}}
+    assert strategy_snapshot["atm_template"] == {"name": "ATM 1"}

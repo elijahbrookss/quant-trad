@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional,
 from ...market import instrument_service
 from ...risk.atm import normalise_template
 from ...indicators.indicator_service import get_instance_meta
+from ...strategy_variant_resolution import EffectiveStrategyConfig, resolve_strategy_variant
 from engines.bot_runtime.core.execution_profile import compile_runtime_profile_or_error
 from risk import normalise_risk_config
 from strategies.contracts import CompiledStrategySpec, DecisionRuleSpec
@@ -214,18 +215,24 @@ def _resolve_effective_variant_params(
     selected_variant: Mapping[str, Any],
 ) -> Dict[str, Any]:
     default_variant = _select_default_strategy_variant(strategy_id)
-    default_variant_id = str(default_variant.get("id") or "").strip()
-    selected_variant_id = str(selected_variant.get("id") or "").strip()
-    default_params = dict(default_variant.get("param_overrides") or {})
-    selected_params = dict(selected_variant.get("param_overrides") or {})
-    if bool(selected_variant.get("is_default", False)):
-        return selected_params
-    if default_variant_id and selected_variant_id == default_variant_id:
-        return default_params
-    return {
-        **default_params,
-        **selected_params,
-    }
+    return resolve_strategy_variant(
+        {"id": strategy_id},
+        selected_variant,
+        default_variant=default_variant,
+    ).effective_params
+
+
+def _resolve_effective_strategy_config(
+    strategy: "StrategyDefinition",
+    *,
+    selected_variant: Mapping[str, Any],
+) -> EffectiveStrategyConfig:
+    default_variant = _select_default_strategy_variant(strategy.id)
+    return resolve_strategy_variant(
+        strategy,
+        selected_variant,
+        default_variant=default_variant,
+    )
 
 
 def _compile_strategy_definition(
@@ -235,14 +242,14 @@ def _compile_strategy_definition(
     variant_id: Optional[str] = None,
     selected_variant: Optional[Mapping[str, Any]] = None,
     timeframe: Optional[str] = None,
-) -> tuple[CompiledStrategySpec, Dict[str, Any], Dict[str, Any]]:
+) -> tuple[CompiledStrategySpec, Dict[str, Any], EffectiveStrategyConfig]:
     resolved_variant = (
         dict(selected_variant)
         if selected_variant is not None
         else _resolve_strategy_variant_payload(strategy.id, variant_id)
     )
-    resolved_params = _resolve_effective_variant_params(
-        strategy.id,
+    effective_config = _resolve_effective_strategy_config(
+        strategy,
         selected_variant=resolved_variant,
     )
     compiled = compile_strategy(
@@ -251,9 +258,9 @@ def _compile_strategy_definition(
         rules=list(rules) if rules is not None else [rule.to_dict() for rule in strategy.rules.values()],
         attached_indicator_ids=strategy.indicator_ids,
         indicator_meta_getter=get_instance_meta,
-        params=resolved_params,
+        params=effective_config.effective_params,
     )
-    return compiled, resolved_variant, resolved_params
+    return compiled, resolved_variant, effective_config
 
 
 def _validate_rule_set(
@@ -299,14 +306,17 @@ def _serialize_compiled_strategy_payload(
     *,
     compiled_strategy: CompiledStrategySpec,
     selected_variant: Mapping[str, Any],
-    resolved_params: Mapping[str, Any],
+    effective_config: EffectiveStrategyConfig,
 ) -> Dict[str, Any]:
+    resolved_params = effective_config.effective_params
     return {
         "strategy_id": strategy.id,
         "strategy_name": strategy.name,
         "timeframe": compiled_strategy.timeframe,
         "strategy_hash": compiled_strategy.strategy_hash,
         "variant": _serialize_variant_payload(selected_variant, resolved_params=resolved_params),
+        "effective_strategy_config": effective_config.to_effective_strategy_config(),
+        "run_strategy_snapshot": effective_config.to_run_strategy_snapshot(),
         "compiled": {
             "strategy_hash": compiled_strategy.strategy_hash,
             "timeframe": compiled_strategy.timeframe,
@@ -1024,7 +1034,7 @@ class StrategyRegistry:
         """Create a rule for the strategy."""
 
         record = self.get(strategy_id)
-        _, _, default_params = _compile_strategy_definition(
+        _, _, default_config = _compile_strategy_definition(
             record,
             rules=[],
         )
@@ -1041,7 +1051,7 @@ class StrategyRegistry:
                 "description": description,
                 "enabled": enabled,
             },
-            params=default_params,
+            params=default_config.effective_params,
         )
         _validate_rule_set(
             record,
@@ -1072,7 +1082,7 @@ class StrategyRegistry:
         """Update a rule for a strategy."""
 
         record = self.get(strategy_id)
-        _, _, default_params = _compile_strategy_definition(
+        _, _, default_config = _compile_strategy_definition(
             record,
             rules=[],
         )
@@ -1092,7 +1102,7 @@ class StrategyRegistry:
                 "description": fields.get("description", rule.description),
                 "enabled": fields.get("enabled", rule.enabled),
             },
-            params=default_params,
+            params=default_config.effective_params,
         )
         _validate_rule_set(
             record,
@@ -1154,7 +1164,7 @@ class StrategyRegistry:
         record = self.get(strategy_id)
         requested_ids = [str(item).strip() for item in (instrument_ids or []) if str(item).strip()]
         preview_id = str(uuid.uuid4())
-        compiled_strategy, selected_variant, resolved_params = _compile_strategy_definition(
+        compiled_strategy, selected_variant, effective_config = _compile_strategy_definition(
             record,
             variant_id=variant_id,
             timeframe=interval,
@@ -1169,7 +1179,8 @@ class StrategyRegistry:
             instrument_ids=requested_ids,
             compiled_strategy=compiled_strategy,
             selected_variant=selected_variant,
-            resolved_params=resolved_params,
+            resolved_params=effective_config.effective_params,
+            effective_strategy_config=effective_config.to_effective_strategy_config(),
         )
         _PREVIEW_RESULTS.put(payload)
         return payload
@@ -1551,7 +1562,7 @@ def compile_strategy_contract(
     """Validate and compile a strategy using the selected or default variant."""
 
     record = _REGISTRY.get(strategy_id)
-    compiled_strategy, selected_variant, resolved_params = _compile_strategy_definition(
+    compiled_strategy, selected_variant, effective_config = _compile_strategy_definition(
         record,
         variant_id=variant_id,
     )
@@ -1559,7 +1570,7 @@ def compile_strategy_contract(
         record,
         compiled_strategy=compiled_strategy,
         selected_variant=selected_variant,
-        resolved_params=resolved_params,
+        effective_config=effective_config,
     )
 
 

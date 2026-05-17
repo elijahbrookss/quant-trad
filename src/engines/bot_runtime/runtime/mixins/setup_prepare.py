@@ -791,6 +791,11 @@ class RuntimeSetupPrepareMixin:
             timeout_value = float(timeout_seconds) if timeout_seconds is not None else 120.0
         except (TypeError, ValueError):
             timeout_value = 120.0
+        top_n_raw = self.config.get("decision_order_wait_diagnostic_top_n")
+        try:
+            wait_diagnostic_top_n = int(top_n_raw) if top_n_raw is not None else 10
+        except (TypeError, ValueError):
+            wait_diagnostic_top_n = 10
         shared_wallet_proxy = self.config.get("shared_wallet_proxy")
         return SharedWalletEntryDecisionOrderCoordinator(
             shared_wallet_proxy if isinstance(shared_wallet_proxy, Mapping) else None,
@@ -799,6 +804,7 @@ class RuntimeSetupPrepareMixin:
                 self.run_type,
                 timeout_seconds=timeout_value,
             ),
+            wait_diagnostic_top_n=wait_diagnostic_top_n,
         )
 
     def _decision_order_participant_payload(
@@ -833,6 +839,8 @@ class RuntimeSetupPrepareMixin:
             gap_classification = str(raw_gap_classification)
         return {
             "participant_key": participant_key,
+            "run_id": self._run_context.run_id if self._run_context is not None else None,
+            "bot_id": self.bot_id,
             "strategy_id": strategy_id,
             "instrument_id": instrument_id,
             "symbol": symbol,

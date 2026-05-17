@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, Deque, Dict, Iterable, Literal, Mapping, Optional
+from typing import Any, Deque, Dict, Iterable, Literal, Mapping, Optional, Sequence
 
 from engines.indicator_engine.contracts import OutputType, RuntimeOutput
 
@@ -820,7 +820,14 @@ def _compact_output_snapshot(*, output_type: OutputType, output: RuntimeOutput) 
         return {}
     if output_type == "signal":
         event_keys = compact.get("event_keys")
-        return {"event_keys": list(event_keys) if isinstance(event_keys, list) else []}
+        snapshot: dict[str, Any] = {"event_keys": list(event_keys) if isinstance(event_keys, list) else []}
+        value = output.value if isinstance(output.value, Mapping) else {}
+        raw_events = value.get("events")
+        events = _plain_compact_value(_compact_signal_events(raw_events)) if isinstance(raw_events, list) else None
+        if isinstance(events, list):
+            snapshot["events"] = events
+            snapshot["event_count"] = len(events)
+        return snapshot
     if output_type == "context":
         fields = compact.get("fields") if isinstance(compact.get("fields"), Mapping) else {}
         return {
@@ -899,6 +906,24 @@ def _compact_output_value(*, output_type: OutputType, output: RuntimeOutput) -> 
             }
         )
     return _compact_scalar_mapping(value)
+
+
+def _compact_signal_events(events: Sequence[Any]) -> tuple[Mapping[str, Any], ...]:
+    compact_events: list[Mapping[str, Any]] = []
+    allowed_keys = {"key", "direction", "pattern_id", "known_at", "confidence", "metadata"}
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        compact: dict[str, Any] = {}
+        for key in allowed_keys:
+            if key not in event:
+                continue
+            value = _plain_compact_value(event.get(key))
+            if value is not None:
+                compact[key] = value
+        if compact.get("key"):
+            compact_events.append(MappingProxyType(compact))
+    return tuple(compact_events)
 
 
 def _compact_scalar_mapping(value: Any) -> Mapping[str, Any]:
