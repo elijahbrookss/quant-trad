@@ -47,6 +47,9 @@ class _FakeStorage:
     def get_latest_bot_runtime_run_id(self, bot_id):
         return None
 
+    def get_bot_run_lifecycle(self, run_id):
+        return None
+
     def get_latest_bot_run_lifecycle(self, bot_id):
         return None
 

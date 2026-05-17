@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quant-trad"
+version = "0.1.0"
+description = "Quant-Trad research and runtime tooling."
+requires-python = ">=3.11"
+
+[project.scripts]
+qt = "cli.main:main"
+
+[tool.setuptools]
+packages = ["cli", "cli.experiments"]

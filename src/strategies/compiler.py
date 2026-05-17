@@ -400,6 +400,7 @@ def _compile_context_guard(
         output_key=f"{indicator_id}.{output_name}",
         field=normalized_field,
         value=value,
+        source=_guard_source(node),
     )
 
 
@@ -438,7 +439,18 @@ def _compile_metric_guard(
         field=field,
         operator=operator,
         value=value,
+        source=_guard_source(node),
     )
+
+
+def _guard_source(node: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    source = node.get("source")
+    if not isinstance(source, Mapping):
+        return None
+    source_type = str(source.get("type") or "").strip()
+    if not source_type:
+        return None
+    return {str(key): value for key, value in source.items()}
 
 
 def _resolve_output_meta(

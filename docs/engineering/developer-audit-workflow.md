@@ -33,6 +33,24 @@ folders unless the file becomes difficult to navigate. If it does, split by
 current sections into included files such as `make/docker.mk`, `make/db.mk`,
 `make/reporting.mk`, `make/test.mk`, and `make/docs.mk`.
 
+The `qt` CLI is the API-backed research adapter for human and future agent
+workflows. It does not replace Make. Use Make for Docker, database, validation,
+and local forensic helpers; use `qt` when the workflow should go through the
+formal backend API boundary.
+
+Common API-backed research commands:
+
+- `qt bots list`
+- `qt bots get <bot_id>`
+- `qt bots start <bot_id> --request-id <request_id>`
+- `qt runs wait <bot_id> <run_id>`
+- `qt reports summary <run_id>`
+- `qt reports export <run_id>`
+- `qt reports compare <baseline_run_id> <variant_run_id>`
+- `qt experiments start-bot <bot_id> --request-id <request_id> --baseline-run-id <run_id>`
+- `qt experiments status <experiment_id>`
+- `qt experiments collect <experiment_id> --wait --export`
+
 ## Reporting Audit
 
 Reporting helpers use existing backend report contracts and the single
@@ -59,6 +77,10 @@ when it is not already exported.
 
 Report export output defaults to `logs/reports/`, which is ignored and suitable
 for local audit artifacts.
+
+CLI experiment records default to `logs/experiments/`, which is also ignored.
+Use these records to resume long-running research operations after a terminal
+disconnect or context reset.
 
 `golden-compare` builds and saves both `RunResearchDataset` payloads, compares
 material hashes, report fingerprints, decision ids/verdicts, wallet trace

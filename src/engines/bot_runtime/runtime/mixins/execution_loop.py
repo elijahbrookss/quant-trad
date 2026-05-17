@@ -1703,7 +1703,7 @@ class RuntimeExecutionLoopMixin:
         for key, value in artifact.items():
             if key not in MINIMAL_DECISION_ARTIFACT_FIELDS:
                 continue
-            if key in {"referenced_outputs", "observed_outputs"} and isinstance(value, Mapping):
+            if key in {"referenced_outputs", "observed_outputs", "output_filter_trace"} and isinstance(value, Mapping):
                 compact_value = RuntimeExecutionLoopMixin._copy_compact_artifact_tree(value)
                 if isinstance(compact_value, Mapping):
                     copied[key] = dict(compact_value)

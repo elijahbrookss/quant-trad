@@ -91,6 +91,9 @@ Rejected decisions matter. A missed trade should be inspectable through an artif
 
 - Decision artifacts with `decision_id`, `strategy_id`, `strategy_hash`, `instrument_id`, rule ID, intent, direction, and evidence.
 - Compact `referenced_outputs` snapshots for the typed outputs that caused or gated the decision. These snapshots carry output identity, type, readiness, bar time, and indicator commit sequence, but not overlays, details, debug blobs, or full indicator state.
+- Compact `output_filter_trace` records when variant output filters were
+  materialized into guards. These traces report output ref, field, operator,
+  expected value, actual value, readiness, and match result for audit only.
 - Rejection artifacts with stage and reason.
 - Runtime-facing provenance fields for event emission.
 
@@ -123,6 +126,8 @@ trade semantics.
 - Variant resolution is shared across preview, bot config, runtime loading, and
   report metadata. A selected variant must not have one effective param map in
   preview and another at runtime.
+- Output-filter traces are derived from the same guard evaluation result used
+  by the decision. They must not trigger a second rule evaluation path.
 - Bounded history never includes future bars.
 - Execution state can reject a valid strategy decision, and that rejection is part of truth.
 

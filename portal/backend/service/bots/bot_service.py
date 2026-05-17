@@ -9,9 +9,11 @@ from typing import Any, Dict, List, Mapping
 
 from core.settings import get_settings
 
+from ..market import candle_service
 from .bot_state_projection import project_bot_state
 from .runner import DockerBotRunner
 from .runtime_composition import get_runtime_composition
+from .startup_lifecycle import is_active_run_state, is_terminal_run_state
 
 logger = logging.getLogger(__name__)
 _BOT_RUNTIME_SETTINGS = get_settings().bot_runtime
@@ -122,6 +124,219 @@ def list_bots() -> List[Dict[str, object]]:
     return [_project_bot(bot) for bot in _composition().config_service.list_bots()]
 
 
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _clean_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _metric_subset(summary: Mapping[str, Any]) -> Dict[str, Any]:
+    keys = (
+        "net_pnl",
+        "gross_pnl",
+        "total_return_pct",
+        "return_pct",
+        "max_drawdown",
+        "max_drawdown_pct",
+        "profit_factor",
+        "expectancy",
+        "win_rate",
+        "trades",
+        "closed_trades",
+        "total_trades",
+        "fees",
+        "exposure_pct",
+        "time_in_market_pct",
+    )
+    return {key: summary.get(key) for key in keys if summary.get(key) is not None}
+
+
+def _run_strategy_snapshot(run: Mapping[str, Any]) -> Mapping[str, Any]:
+    config = _as_mapping(run.get("config_snapshot"))
+    snapshot = _as_mapping(config.get("run_strategy_snapshot"))
+    if snapshot:
+        return snapshot
+    strategy = _as_mapping(config.get("strategy"))
+    if strategy:
+        return strategy
+    return {}
+
+
+def _latest_run_for_bot(bot_id: str, lifecycle: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
+    run_id = (
+        _clean_text(_as_mapping(lifecycle).get("run_id"))
+        or _clean_text(_composition().storage.get_latest_bot_runtime_run_id(bot_id))
+    )
+    return _composition().storage.get_bot_run(run_id) if run_id else {}
+
+
+def _report_status(run_id: str | None) -> Mapping[str, Any]:
+    if not run_id:
+        return {}
+    try:
+        return _composition().storage.get_report_materialization_status(run_id)
+    except Exception as exc:  # noqa: BLE001 - run context should remain inspectable when report status is unavailable.
+        logger.warning("bot_run_context_report_status_unavailable | run_id=%s | error=%s", run_id, exc)
+        return {"status": "unavailable", "error": str(exc)}
+
+
+def _controls_for(status: Any, phase: Any) -> Dict[str, Any]:
+    active = is_active_run_state(status=status, phase=phase)
+    terminal = is_terminal_run_state(status=status, phase=phase)
+    normalized_status = str(status or "").strip().lower()
+    if terminal and normalized_status in {"failed", "startup_failed", "crashed", "degraded_terminal"}:
+        start_label = "Restart"
+    elif terminal:
+        start_label = "Rerun"
+    else:
+        start_label = "Start"
+    return {
+        "can_start": not active,
+        "can_stop": active,
+        "start_label": start_label,
+    }
+
+
+def _bot_run_context(bot: Mapping[str, Any]) -> Dict[str, Any]:
+    bot_id = str(bot.get("id") or "").strip()
+    lifecycle = _composition().storage.get_latest_bot_run_lifecycle(bot_id) if bot_id else {}
+    lifecycle_map = _as_mapping(lifecycle)
+    latest_run = _latest_run_for_bot(bot_id, lifecycle_map) if bot_id else {}
+    latest_run_map = _as_mapping(latest_run)
+    latest_run_id = _clean_text(latest_run_map.get("run_id")) or _clean_text(lifecycle_map.get("run_id"))
+    status = _clean_text(lifecycle_map.get("status")) or _clean_text(latest_run_map.get("status")) or _clean_text(bot.get("status")) or "unknown"
+    phase = _clean_text(lifecycle_map.get("phase"))
+    active_run_id = latest_run_id if is_active_run_state(status=status, phase=phase) else None
+    strategy_snapshot = _run_strategy_snapshot(latest_run_map)
+    report_status = _report_status(latest_run_id)
+    summary = _as_mapping(latest_run_map.get("summary"))
+    controls = _controls_for(status, phase)
+
+    return {
+        "schema_version": "bot_run_context.v1",
+        "bot_id": bot_id,
+        "name": bot.get("name"),
+        "status": status,
+        "phase": phase,
+        "controls": controls,
+        "can_start": controls["can_start"],
+        "can_stop": controls["can_stop"],
+        "strategy": {
+            "strategy_id": bot.get("strategy_id"),
+            "strategy_variant_id": bot.get("strategy_variant_id"),
+            "strategy_variant_name": bot.get("strategy_variant_name"),
+            "effective_strategy_config_hash": strategy_snapshot.get("effective_strategy_config_hash")
+            or strategy_snapshot.get("strategy_hash"),
+            "effective_params": strategy_snapshot.get("effective_params"),
+            "variant_overrides": strategy_snapshot.get("variant_overrides"),
+            "param_source_map": strategy_snapshot.get("param_source_map"),
+        },
+        "execution": {
+            "run_type": bot.get("run_type"),
+            "mode": bot.get("mode"),
+            "execution_mode": bot.get("execution_mode"),
+            "datasource": bot.get("datasource"),
+            "exchange": bot.get("exchange"),
+            "timeframe": latest_run_map.get("timeframe"),
+            "symbols": list(latest_run_map.get("symbols") or []),
+            "backtest_start": bot.get("backtest_start"),
+            "backtest_end": bot.get("backtest_end"),
+            "snapshot_interval_ms": bot.get("snapshot_interval_ms"),
+            "atm_template_id": bot.get("atm_template_id"),
+            "risk_config": bot.get("risk_config") or {},
+            "wallet_config": bot.get("wallet_config") or {},
+            "instrument_type": bot.get("instrument_type"),
+        },
+        "active_run": {
+            "run_id": active_run_id,
+            "status": status if active_run_id else None,
+            "phase": phase if active_run_id else None,
+            "checkpoint_at": lifecycle_map.get("checkpoint_at") if active_run_id else None,
+        },
+        "latest_run": {
+            "run_id": latest_run_id,
+            "status": latest_run_map.get("status") or status,
+            "started_at": latest_run_map.get("started_at"),
+            "ended_at": latest_run_map.get("ended_at"),
+            "summary": _metric_subset(summary),
+            "report_status": report_status.get("status"),
+        },
+    }
+
+
+def list_bot_run_contexts() -> Dict[str, Any]:
+    items = [_bot_run_context(bot) for bot in _composition().config_service.list_bots()]
+    return {
+        "schema_version": "bot_run_context_list.v1",
+        "items": items,
+        "total": len(items),
+    }
+
+
+def get_bot_run_context(bot_id: str) -> Dict[str, Any]:
+    return _bot_run_context(_composition().config_service.get_bot(bot_id))
+
+
+def get_bot_run_status(bot_id: str, run_id: str) -> Dict[str, Any]:
+    bot = _composition().config_service.get_bot(bot_id)
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        raise ValueError("run_id is required")
+    run = _as_mapping(_composition().storage.get_bot_run(normalized_run_id))
+    if run and str(run.get("bot_id") or "") != str(bot.get("id") or ""):
+        raise KeyError(f"run {normalized_run_id!r} does not belong to bot {bot_id!r}")
+    lifecycle = _as_mapping(_composition().storage.get_bot_run_lifecycle(normalized_run_id))
+    if lifecycle and str(lifecycle.get("bot_id") or bot_id) != str(bot.get("id") or ""):
+        raise KeyError(f"run {normalized_run_id!r} does not belong to bot {bot_id!r}")
+    if not run and not lifecycle:
+        raise KeyError(normalized_run_id)
+    status = _clean_text(lifecycle.get("status")) or _clean_text(run.get("status")) or "unknown"
+    phase = _clean_text(lifecycle.get("phase"))
+    report_status = _report_status(normalized_run_id)
+    terminal = is_terminal_run_state(status=status, phase=phase)
+    return {
+        "schema_version": "bot_run_status.v1",
+        "bot_id": bot_id,
+        "run_id": normalized_run_id,
+        "status": status,
+        "phase": phase,
+        "terminal": terminal,
+        "completed": status == "completed" or phase == "completed",
+        "active": is_active_run_state(status=status, phase=phase),
+        "checkpoint_at": lifecycle.get("checkpoint_at"),
+        "updated_at": lifecycle.get("updated_at") or run.get("updated_at"),
+        "started_at": run.get("started_at"),
+        "ended_at": run.get("ended_at"),
+        "summary": _metric_subset(_as_mapping(run.get("summary"))),
+        "report": {
+            "status": report_status.get("status"),
+            "can_view": report_status.get("can_view"),
+            "can_build": report_status.get("can_build"),
+            "can_retry": report_status.get("can_retry"),
+            "artifact_path": report_status.get("artifact_path"),
+        },
+    }
+
+
+def start_bot_run_context(bot_id: str, *, request_id: str | None = None) -> Dict[str, Any]:
+    start_payload = start_bot(bot_id, request_id=request_id)
+    run_id = _clean_text(_as_mapping(start_payload).get("run_id")) or _clean_text(_as_mapping(start_payload).get("active_run_id"))
+    context = get_bot_run_context(bot_id)
+    payload = {
+        "schema_version": "bot_run_start.v1",
+        "request_id": _as_mapping(start_payload).get("request_id") or request_id,
+        "bot_id": bot_id,
+        "run_id": run_id or _as_mapping(context.get("active_run")).get("run_id"),
+        "status": _as_mapping(start_payload).get("status") or context.get("status"),
+        "phase": _as_mapping(start_payload).get("phase") or context.get("phase"),
+        "context": context,
+    }
+    return payload
+
+
 def publish_projected_bot(bot_id: str, *, inspect_container: bool = True) -> None:
     try:
         bot = _composition().config_service.get_bot(bot_id)
@@ -166,6 +381,54 @@ def update_bot(bot_id: str, **payload: object) -> Dict[str, object]:
     projected = _project_bot(bot)
     _broadcast_bot_stream("bot", {"bot": projected})
     return projected
+
+
+def preflight_bot_data(bot_id: str, *, start: str, end: str) -> Dict[str, Any]:
+    """Return compact pre-run candle coverage for the bot's strategy instruments."""
+
+    bot = _composition().config_service.get_bot(bot_id)
+    windowed_bot = {**dict(bot), "backtest_start": start, "backtest_end": end}
+    artifacts = _composition().config_service.prepare_startup_artifacts(windowed_bot)
+    readiness = artifacts.get("runtime_readiness") if isinstance(artifacts.get("runtime_readiness"), Mapping) else {}
+    timeframe = str(readiness.get("timeframe") or "").strip()
+    checks: list[Dict[str, Any]] = []
+    for profile in readiness.get("profiles") or []:
+        if not isinstance(profile, Mapping):
+            continue
+        instrument_id = str(profile.get("instrument_id") or "").strip()
+        if not instrument_id:
+            checks.append(
+                {
+                    "schema_version": "candle_coverage_preflight.v1",
+                    "symbol": profile.get("symbol"),
+                    "timeframe": timeframe,
+                    "status": "error",
+                    "severity": "error",
+                    "message": "Strategy instrument link is missing instrument_id.",
+                }
+            )
+            continue
+        checks.append(candle_service.preflight_candle_coverage_by_instrument(instrument_id, start, end, timeframe))
+    has_error = any(str(item.get("severity") or item.get("status") or "").lower() == "error" for item in checks)
+    has_warning = any(str(item.get("severity") or item.get("status") or "").lower() == "warning" for item in checks)
+    return {
+        "schema_version": "bot_data_preflight.v1",
+        "bot_id": bot_id,
+        "strategy": {
+            "strategy_id": bot.get("strategy_id"),
+            "strategy_variant_id": bot.get("strategy_variant_id"),
+            "strategy_variant_name": bot.get("strategy_variant_name"),
+        },
+        "execution": {
+            "provider": readiness.get("datasource"),
+            "exchange": readiness.get("exchange"),
+            "timeframe": timeframe,
+            "requested_start": start,
+            "requested_end": end,
+        },
+        "status": "error" if has_error else "warning" if has_warning else "ok",
+        "checks": checks,
+    }
 
 
 def delete_bot_record(bot_id: str) -> None:
@@ -326,6 +589,7 @@ __all__ = [
     "ensure_watchdog_stream_bridge",
     "get_bot",
     "list_bots",
+    "preflight_bot_data",
     "start_bot",
     "stop_bot",
     "update_bot",

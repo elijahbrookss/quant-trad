@@ -161,7 +161,7 @@ class StrategyRuleRecord(Base):
 
 
 class StrategyVariantRecord(Base):
-    """Database representation of a saved strategy parameter variant."""
+    """Database representation of saved strategy output filters."""
 
     __tablename__ = "portal_strategy_variants"
 
@@ -169,8 +169,7 @@ class StrategyVariantRecord(Base):
     strategy_id = Column(String(64), ForeignKey("portal_strategies.id", ondelete="CASCADE"), nullable=False)
     name = Column(String(255), nullable=False)
     description = Column(String(1024), nullable=True)
-    param_overrides = Column(JSON, nullable=False, default=dict)
-    atm_template_id = Column(String(64), nullable=True)
+    output_filters = Column(JSON, nullable=False, default=list)
     is_default = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -187,8 +186,7 @@ class StrategyVariantRecord(Base):
             "strategy_id": self.strategy_id,
             "name": self.name,
             "description": self.description,
-            "param_overrides": dict(self.param_overrides or {}),
-            "atm_template_id": self.atm_template_id,
+            "output_filters": list(self.output_filters or []),
             "is_default": bool(self.is_default),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",

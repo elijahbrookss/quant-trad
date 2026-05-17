@@ -342,6 +342,82 @@ def test_minimal_decision_details_preserve_selected_decision_without_debug_blobs
     assert "window_results" in full.selected_artifact["guard_results"][1]
 
 
+def test_output_filter_trace_is_compact_audit_lineage() -> None:
+    compiled = compile_strategy(
+        strategy_id="strategy-1",
+        timeframe="1m",
+        rules=[
+            {
+                "id": "rule-a",
+                "name": "Breakout",
+                "intent": "enter_long",
+                "priority": 50,
+                "trigger": _trigger(),
+                "guards": [
+                    {
+                        "type": "metric_match",
+                        "indicator_id": "ind-1",
+                        "output_name": "metric",
+                        "field": "score",
+                        "operator": ">=",
+                        "value": 10,
+                        "source": {
+                            "type": "variant_output_filter",
+                            "filter_index": 0,
+                            "filter_hash": "filter-hash-1",
+                            "operator": ">=",
+                            "scope": {"intent": ["enter_long"]},
+                        },
+                    }
+                ],
+            }
+        ],
+        attached_indicator_ids=["ind-1"],
+        indicator_meta_getter=_make_meta_getter([_SIGNAL_OUTPUT, _METRIC_OUTPUT]),
+    )
+    bar_time = datetime(2026, 4, 4, 12, 0, tzinfo=timezone.utc)
+
+    result = evaluate_strategy_bar(
+        compiled_strategy=compiled,
+        state=DecisionEvaluationState(),
+        outputs={
+            "ind-1.sig": _outputs(bar_time)["ind-1.sig"],
+            "ind-1.metric": _outputs(bar_time)["ind-1.metric"],
+        },
+        output_types={"ind-1.sig": "signal", "ind-1.metric": "metric"},
+        instrument_id="instrument-1",
+        symbol="BTCUSD",
+        timeframe="1m",
+        bar_time=bar_time,
+        minimal_decision_details=True,
+    )
+
+    assert result.selected_artifact is not None
+    assert "guard_results" not in result.selected_artifact
+    assert result.selected_artifact["output_filter_trace"] == {
+        "schema_version": "strategy_output_filter_trace.v1",
+        "filter_count": 1,
+        "ready_count": 1,
+        "matched_count": 1,
+        "all_matched": True,
+        "items": [
+            {
+                "filter_index": 0,
+                "filter_hash": "filter-hash-1",
+                "scope": {"intent": ["enter_long"]},
+                "guard_type": "metric_match",
+                "output_ref": "ind-1.metric",
+                "field": "score",
+                "operator": ">=",
+                "expected": 10.0,
+                "actual": 12.5,
+                "ready": True,
+                "matched": True,
+            }
+        ],
+    }
+
+
 def test_compact_history_stores_only_guard_needed_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     def fail_copy(_self: RuntimeOutput) -> RuntimeOutput:
         raise AssertionError("RuntimeOutput.copy must not be used for strategy history")

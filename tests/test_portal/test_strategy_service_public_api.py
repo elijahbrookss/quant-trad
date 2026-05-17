@@ -41,6 +41,7 @@ def test_facade_evaluate_wrapper_preserves_legacy_module_api(monkeypatch: pytest
                 "interval": "1m",
                 "instrument_ids": ["instrument-1"],
                 "variant_id": "variant-1",
+                "variant_name": None,
                 "config": {"mode": "backtest"},
             },
         )
@@ -69,6 +70,7 @@ def test_strategy_service_package_exports_evaluate(monkeypatch: pytest.MonkeyPat
                 "interval": "5m",
                 "instrument_ids": ["instrument-2"],
                 "variant_id": None,
+                "variant_name": None,
                 "config": {"mode": "paper"},
             },
         )

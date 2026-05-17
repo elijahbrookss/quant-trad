@@ -244,6 +244,9 @@ def _build_series_snapshot(series: Sequence[Any]) -> tuple[list[dict[str, Any]],
                 "resolved_params": dict(meta.get("resolved_params") or {}),
                 "effective_params": dict(meta.get("effective_params") or meta.get("resolved_params") or {}),
                 "param_source_map": dict(meta.get("param_source_map") or {}),
+                "output_filters": list(
+                    (meta.get("effective_strategy_config") or {}).get("output_filters") or []
+                ),
                 "effective_strategy_config": dict(meta.get("effective_strategy_config") or {}),
                 "run_strategy_snapshot": dict(meta.get("run_strategy_snapshot") or {}),
                 "atm_template_id": meta.get("atm_template_id"),
@@ -299,6 +302,9 @@ def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> 
                 "resolved_params": dict(meta.get("resolved_params") or {}),
                 "effective_params": dict(meta.get("effective_params") or meta.get("resolved_params") or {}),
                 "param_source_map": dict(meta.get("param_source_map") or {}),
+                "output_filters": list(
+                    (meta.get("effective_strategy_config") or {}).get("output_filters") or []
+                ),
                 "effective_strategy_config": dict(meta.get("effective_strategy_config") or {}),
                 "run_strategy_snapshot": dict(meta.get("run_strategy_snapshot") or {}),
                 "atm_template_id": meta.get("atm_template_id"),
@@ -860,6 +866,9 @@ def _build_config_snapshot_from_series_snapshot(
                 "resolved_params": dict(entry.get("resolved_params") or {}),
                 "effective_params": dict(entry.get("effective_params") or entry.get("resolved_params") or {}),
                 "param_source_map": dict(entry.get("param_source_map") or {}),
+                "output_filters": list(
+                    (entry.get("effective_strategy_config") or {}).get("output_filters") or []
+                ),
                 "effective_strategy_config": dict(entry.get("effective_strategy_config") or {}),
                 "run_strategy_snapshot": dict(entry.get("run_strategy_snapshot") or {}),
                 "atm_template_id": entry.get("atm_template_id"),

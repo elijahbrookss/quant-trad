@@ -24,6 +24,7 @@ from ..service.reports.contract import (
     get_report_readiness as _get_report_readiness,
     get_report_sections as _get_report_sections,
     get_run_report_summary as _get_run_report_summary,
+    get_run_research_summary as _get_run_research_summary,
     get_run_research_dataset as _get_run_research_dataset,
     get_signal_dataset as _get_signal_dataset,
     get_signal_candle_window as _get_signal_candle_window,
@@ -32,7 +33,10 @@ from ..service.reports.contract import (
     get_trade_dataset as _get_trade_dataset,
     list_report_summaries as _list_report_summaries,
 )
-from ..service.reports.comparison import compare_materialized_run_reports as _compare_materialized_run_reports
+from ..service.reports.comparison import (
+    compare_materialized_run_reports as _compare_materialized_run_reports,
+    summarize_run_report_comparison as _summarize_run_report_comparison,
+)
 from ..service.reports.export_bundle import build_export_archive, build_export_manifest
 from ..service.reports.materialization import (
     RunReportMaterializationNotTerminal,
@@ -182,6 +186,46 @@ async def compare_materialized_reports(
         raise HTTPException(500, "Run report comparison failed") from exc
 
 
+@router.get("/compare/summary")
+async def compare_materialized_reports_summary(
+    left_run_id: str = Query(..., alias="left_run_id"),
+    right_run_id: str = Query(..., alias="right_run_id"),
+    include_golden: bool = Query(True, description="Read existing golden comparison evidence when available."),
+    require_golden: bool = Query(False, description="Block comparison when existing golden evidence is unavailable."),
+) -> Dict[str, Any]:
+    """Return a compact materialized report comparison for CLI/research workflows."""
+
+    context = build_log_context(left_run_id=left_run_id, right_run_id=right_run_id, include_golden=include_golden, require_golden=require_golden)
+    logger.info(with_log_context("run_report_compare_summary_request", context))
+    try:
+        result = await _run_report_task(
+            _compare_materialized_run_reports,
+            left_run_id,
+            right_run_id,
+            include_golden=include_golden,
+            require_golden=require_golden,
+        )
+        payload = _summarize_run_report_comparison(result)
+        logger.info(
+            with_log_context(
+                "run_report_compare_summary_success",
+                context
+                | {
+                    "comparison_status": payload.get("comparison_status"),
+                    "comparison_verdict": payload.get("comparison_verdict"),
+                    "blocked_reason": payload.get("blocked_reason"),
+                },
+            )
+        )
+        return payload
+    except KeyError as exc:
+        logger.warning(with_log_context("run_report_compare_summary_missing", context))
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - convert to API error
+        logger.error(with_log_context("run_report_compare_summary_failed", context), exc_info=exc)
+        raise HTTPException(500, "Run report comparison summary failed") from exc
+
+
 @router.get("/{run_id}/readiness", response_model=ReportReadinessResponse)
 async def get_report_readiness(run_id: str) -> ReportReadinessResponse:
     """Return report readiness and readiness-impacting diagnostics."""
@@ -218,6 +262,24 @@ async def get_run_report_summary(run_id: str) -> RunReportSummaryResponse:
         raise HTTPException(500, "Report summary build failed") from exc
 
 
+@router.get("/{run_id}/research-summary")
+async def get_run_research_summary(run_id: str) -> Dict[str, Any]:
+    """Return a compact report summary for CLI/research workflows."""
+
+    context = build_log_context(run_id=run_id)
+    logger.info(with_log_context("report_research_summary_request", context))
+    try:
+        payload = await _run_report_task(_get_run_research_summary, run_id)
+        logger.info(with_log_context("report_research_summary_success", context))
+        return payload
+    except KeyError as exc:
+        logger.warning(with_log_context("report_research_summary_missing", context))
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - convert to API error
+        logger.error(with_log_context("report_research_summary_failed", context), exc_info=exc)
+        raise HTTPException(500, "Report research summary build failed") from exc
+
+
 @router.get("/{run_id}/run-report/status", response_model=RunReportMaterializationResponse)
 async def get_run_report_materialization_status(run_id: str) -> RunReportMaterializationResponse:
     """Return materialized Run Report DTO v2 artifact status."""
@@ -233,6 +295,41 @@ async def get_run_report_materialization_status(run_id: str) -> RunReportMateria
     except Exception as exc:  # noqa: BLE001 - convert to API error
         logger.error(with_log_context("run_report_materialization_status_failed", context), exc_info=exc)
         raise HTTPException(500, "Run report status query failed") from exc
+
+
+@router.post("/{run_id}/run-report/build", response_model=RunReportMaterializationResponse)
+async def build_run_report_materialization(
+    run_id: str,
+    async_build: bool = Query(False, description="Build in the background instead of returning the final status."),
+    force_rebuild: bool = Query(False, description="Force a new materialized report build."),
+) -> RunReportMaterializationResponse:
+    """Build or enqueue a materialized RunReportDTO v2 artifact without returning the artifact."""
+
+    context = build_log_context(run_id=run_id, async_build=async_build, force_rebuild=force_rebuild)
+    logger.info(with_log_context("run_report_materialization_build_request", context))
+    try:
+        payload = await _run_report_task(
+            _ensure_report_materialization,
+            run_id,
+            force=force_rebuild,
+            async_build=async_build,
+        )
+        logger.info(
+            with_log_context(
+                "run_report_materialization_build_success",
+                context | {"status": dict(payload.get("report_status") or {}).get("status")},
+            )
+        )
+        return RunReportMaterializationResponse.model_validate(payload)
+    except RunReportMaterializationNotTerminal as exc:
+        logger.warning(with_log_context("run_report_materialization_build_not_terminal", context | {"run_status": exc.status}))
+        raise HTTPException(409, f"Run {run_id} is not terminal: {exc.status}") from exc
+    except KeyError as exc:
+        logger.warning(with_log_context("run_report_materialization_build_missing", context))
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - convert to API error
+        logger.error(with_log_context("run_report_materialization_build_failed", context), exc_info=exc)
+        raise HTTPException(500, "Run report build failed") from exc
 
 
 @router.get(

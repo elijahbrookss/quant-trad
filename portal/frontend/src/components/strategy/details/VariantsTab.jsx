@@ -1,30 +1,14 @@
-const formatVariantValue = (value) => {
-  if (typeof value === 'string') return value
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-  if (value === null) return 'null'
-  try {
-    return JSON.stringify(value)
-  } catch {
-    return String(value)
-  }
-}
-
 const formatVariantSummary = (variant) => {
-  const overrides = variant?.param_overrides
-  if (!overrides || typeof overrides !== 'object') return []
-  return Object.entries(overrides)
-}
-
-const resolveATMLabel = (variant, strategy) => {
-  const variantAtmTemplateId = String(variant?.atm_template_id || '').trim()
-  const strategyAtmTemplateId = String(strategy?.atm_template_id || '').trim()
-  if (!variantAtmTemplateId) {
-    return strategy?.atm_template?.name?.trim() || 'Uses strategy ATM'
-  }
-  if (variantAtmTemplateId === strategyAtmTemplateId) {
-    return strategy?.atm_template?.name?.trim() || variantAtmTemplateId
-  }
-  return variantAtmTemplateId
+  const filters = Array.isArray(variant?.output_filters) ? variant.output_filters : []
+  return filters.map((filter, index) => {
+    const scope = filter?.scope?.intent
+      ? ` ${Array.isArray(filter.scope.intent) ? filter.scope.intent.join(',') : filter.scope.intent}`
+      : ''
+    return {
+      id: `${variant?.id || variant?.name || 'variant'}-${index}`,
+      label: `${filter?.indicator_id || '?'}:${filter?.output_name || '?'}.${filter?.field || '?'} ${filter?.operator || 'equals'} ${JSON.stringify(filter?.value)}${scope}`,
+    }
+  })
 }
 
 export const VariantsTab = ({
@@ -42,7 +26,7 @@ export const VariantsTab = ({
         <div>
           <h3 className="text-sm font-semibold text-white">Saved variants</h3>
           <p className="mt-1 text-xs text-slate-400">
-            Preset parameter overrides for this strategy. Bots are created later from one concrete variant or override set.
+            Decision filters over attached indicator outputs. ATM and risk are selected outside variants.
           </p>
         </div>
         <ActionButton onClick={onAddVariant}>
@@ -53,7 +37,7 @@ export const VariantsTab = ({
       {!variants.length ? (
         <div className="rounded-lg border border-dashed border-white/10 bg-black/20 px-4 py-6 text-center">
           <p className="text-sm font-medium text-slate-300">No variants saved</p>
-          <p className="mt-1 text-xs text-slate-500">Create a variant to store parameter presets for this strategy.</p>
+          <p className="mt-1 text-xs text-slate-500">Create a variant to store output filters for this strategy.</p>
         </div>
       ) : (
         <div className="space-y-3">
@@ -99,27 +83,18 @@ export const VariantsTab = ({
 
                 <div className="mt-3 rounded-lg border border-white/8 bg-white/[0.03] p-3">
                   <p className="text-[10px] font-semibold uppercase tracking-[0.28em] text-slate-500">
-                    ATM Selection
-                  </p>
-                  <p className="mt-2 text-xs text-slate-300">{resolveATMLabel(variant, strategy)}</p>
-                </div>
-
-                <div className="mt-3 rounded-lg border border-white/8 bg-white/[0.03] p-3">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.28em] text-slate-500">
-                    Parameter Overrides
+                    Output Filters
                   </p>
                   {!summary.length ? (
-                    <p className="mt-2 text-xs text-slate-500">Uses strategy defaults only.</p>
+                    <p className="mt-2 text-xs text-slate-500">No additional decision filters.</p>
                   ) : (
                     <div className="mt-2 flex flex-wrap gap-2">
-                      {summary.map(([key, value]) => (
+                      {summary.map((item) => (
                         <span
-                          key={`${variant.id || variant.name}-${key}`}
+                          key={item.id}
                           className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-xs text-slate-300"
                         >
-                          <span className="font-medium text-slate-200">{key}</span>
-                          <span className="mx-1 text-slate-500">=</span>
-                          <span className="text-slate-400">{formatVariantValue(value)}</span>
+                          {item.label}
                         </span>
                       ))}
                     </div>

@@ -79,10 +79,6 @@ def _template() -> StrategyTemplate:
         timeframe="1m",
         rules=_rules(_metric_guard(value="$params.conviction_min")),
         param_specs=(ParamSpec(key="conviction_min", type="float", default=0.6),),
-        variants={
-            "aggressive": {"conviction_min": 0.5},
-            "conservative": {"conviction_min": 0.7},
-        },
     )
 
 
@@ -124,7 +120,7 @@ def test_bot_strategy_can_be_materialized_from_template_defaults_only() -> None:
     assert strategy.resolved_params == {"conviction_min": 0.6}
 
 
-def test_bot_strategy_can_be_materialized_from_named_variant() -> None:
+def test_template_param_values_override_default_values_without_variant_semantics() -> None:
     indicator_links, instrument_links = _strategy_links()
 
     strategy = Strategy.from_template(
@@ -135,28 +131,10 @@ def test_bot_strategy_can_be_materialized_from_named_variant() -> None:
         template=_template(),
         indicator_links=indicator_links,
         instrument_links=instrument_links,
-        variant_name="aggressive",
+        param_values={"conviction_min": 0.55},
     )
 
-    assert strategy.variant_name == "aggressive"
-    assert strategy.resolved_params == {"conviction_min": 0.5}
-
-
-def test_explicit_overrides_beat_variant_and_default_values() -> None:
-    indicator_links, instrument_links = _strategy_links()
-
-    strategy = Strategy.from_template(
-        id="strategy-1",
-        name="Template Strategy",
-        datasource="demo",
-        exchange="demo",
-        template=_template(),
-        indicator_links=indicator_links,
-        instrument_links=instrument_links,
-        variant_name="aggressive",
-        param_overrides={"conviction_min": 0.55},
-    )
-
+    assert strategy.variant_name is None
     assert strategy.resolved_params == {"conviction_min": 0.55}
 
 
@@ -170,7 +148,7 @@ def test_bot_side_strategy_config_compiles_through_existing_path_unchanged() -> 
         template=_template(),
         indicator_links=indicator_links,
         instrument_links=instrument_links,
-        variant_name="conservative",
+        param_values={"conviction_min": 0.7},
     )
     rules, params = strategy.compilation_inputs()
 
@@ -235,12 +213,12 @@ def test_template_strategy_to_dict_preserves_runtime_shape_and_provenance() -> N
         template=_template(),
         indicator_links=indicator_links,
         instrument_links=instrument_links,
-        variant_name="aggressive",
+        param_values={"conviction_min": 0.55},
     )
 
     payload = strategy.to_dict()
 
     assert payload["rules"]["r1"]["guards"][0]["value"] == "$params.conviction_min"
     assert payload["template_id"] == "regime-template"
-    assert payload["variant_name"] == "aggressive"
-    assert payload["resolved_params"] == {"conviction_min": 0.5}
+    assert "variant_name" not in payload
+    assert payload["resolved_params"] == {"conviction_min": 0.55}

@@ -103,21 +103,14 @@ class Strategy:
         template: StrategyTemplate,
         indicator_links: Optional[List[StrategyIndicatorLink]] = None,
         instrument_links: Optional[List[StrategyInstrumentLink]] = None,
-        variant_name: Optional[str] = None,
-        param_overrides: Optional[Mapping[str, Any]] = None,
+        param_values: Optional[Mapping[str, Any]] = None,
         atm_template_id: Optional[str] = None,
         atm_template: Optional[Dict[str, Any]] = None,
         risk_config: Optional[Mapping[str, Any]] = None,
     ) -> Strategy:
-        if variant_name:
-            rules, resolved_params = template.instantiate_variant(
-                variant_name,
-                overrides=dict(param_overrides) if param_overrides else None,
-            )
-        else:
-            rules, resolved_params = template.instantiate(
-                overrides=dict(param_overrides) if param_overrides else None,
-            )
+        rules, resolved_params = template.instantiate(
+            overrides=dict(param_values) if param_values else None,
+        )
         return cls(
             id=id,
             name=name,
@@ -131,10 +124,9 @@ class Strategy:
             instrument_links=list(instrument_links or []),
             rules=dict(rules),
             template_id=template.template_id,
-            variant_name=variant_name,
             resolved_params=dict(resolved_params),
             param_source_map={
-                key: "base_params" if not variant_name else "variant_overrides"
+                key: "base_params"
                 for key in resolved_params
             },
         )

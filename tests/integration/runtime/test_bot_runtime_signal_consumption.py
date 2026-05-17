@@ -133,6 +133,29 @@ def test_runtime_decision_artifact_copy_is_compact_and_mutation_isolated():
             "guards_matched": 0,
             "matched": True,
         },
+        "output_filter_trace": {
+            "schema_version": "strategy_output_filter_trace.v1",
+            "filter_count": 1,
+            "ready_count": 1,
+            "matched_count": 1,
+            "all_matched": True,
+            "items": [
+                {
+                    "filter_index": 0,
+                    "filter_hash": "filter-hash-1",
+                    "scope": {"intent": ["enter_long"]},
+                    "guard_type": "context_match",
+                    "output_ref": "ind-1.market_state",
+                    "field": "bias",
+                    "operator": "equals",
+                    "expected": ["long"],
+                    "actual": "long",
+                    "ready": True,
+                    "matched": True,
+                    "debug": {"large": True},
+                }
+            ],
+        },
         "trigger": {"event_key": "signal_a", "debug": {"large": True}},
         "guard_results": [{"debug": {"large": True}}],
     }
@@ -168,9 +191,33 @@ def test_runtime_decision_artifact_copy_is_compact_and_mutation_isolated():
         }
     }
     assert copied["artifact_summary"] == artifact["artifact_summary"]
+    assert copied["output_filter_trace"] == {
+        "schema_version": "strategy_output_filter_trace.v1",
+        "filter_count": 1,
+        "ready_count": 1,
+        "matched_count": 1,
+        "all_matched": True,
+        "items": [
+            {
+                "filter_index": 0,
+                "filter_hash": "filter-hash-1",
+                "scope": {"intent": ["enter_long"]},
+                "guard_type": "context_match",
+                "output_ref": "ind-1.market_state",
+                "field": "bias",
+                "operator": "equals",
+                "expected": ["long"],
+                "actual": "long",
+                "ready": True,
+                "matched": True,
+            }
+        ],
+    }
     assert copied["decision_context"] is not artifact["decision_context"]
     artifact["decision_context"]["event_key"] = "mutated"
+    artifact["output_filter_trace"]["items"][0]["actual"] = "mutated"
     assert copied["decision_context"]["event_key"] == "signal_a"
+    assert copied["output_filter_trace"]["items"][0]["actual"] == "long"
 
 
 def test_signal_consumption_preserves_history():

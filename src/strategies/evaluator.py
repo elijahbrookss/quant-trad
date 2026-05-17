@@ -103,6 +103,7 @@ DECISION_DETAIL_FIELD_CLASSIFICATION: dict[str, str] = {
     "suppression_reason": DETAIL_DECISION_CRITICAL,
     "decision_context": DETAIL_DECISION_CRITICAL,
     "artifact_summary": DETAIL_AUDIT_LINEAGE,
+    "output_filter_trace": DETAIL_AUDIT_LINEAGE,
     "observed_outputs": DETAIL_AUDIT_LINEAGE,
     "referenced_outputs": DETAIL_AUDIT_LINEAGE,
     "trigger": DETAIL_DEBUG_PROJECTION_ONLY,
@@ -357,6 +358,7 @@ def _evaluate_rule(
         for guard in rule.guards
     ]
     matched = bool(trigger_result["matched"]) and all(bool(result["matched"]) for result in guard_results)
+    output_filter_trace = _build_output_filter_trace(guard_results)
     artifact = {
         "decision_id": f"{strategy_id}:{instrument_id}:{epoch}:{rule.id}",
         "strategy_id": strategy_id,
@@ -377,6 +379,8 @@ def _evaluate_rule(
         "intent": rule.intent,
         "matched": bool(rule.enabled) and matched,
     }
+    if output_filter_trace:
+        artifact["output_filter_trace"] = output_filter_trace
     if detail_mode == "minimal":
         artifact["decision_context"] = _build_decision_context(rule=rule, trigger_result=trigger_result)
         artifact["referenced_outputs"] = _capture_referenced_outputs(
@@ -500,8 +504,9 @@ def _evaluate_context_match(
             "ready": False,
             "matched": False,
         }
-        if detail_mode == "full":
+        if detail_mode == "full" or _is_variant_output_filter_source(guard.source):
             result.update({"field": guard.field, "expected": list(guard.value), "actual": None})
+        _attach_guard_source(result, guard.source)
         return result
     actual = _read_context_value(current_output, field=guard.field, output_key=guard.output_key)
     result = {
@@ -510,8 +515,9 @@ def _evaluate_context_match(
         "ready": True,
         "matched": str(actual) in guard.value,
     }
-    if detail_mode == "full":
+    if detail_mode == "full" or _is_variant_output_filter_source(guard.source):
         result.update({"field": guard.field, "expected": list(guard.value), "actual": actual})
+    _attach_guard_source(result, guard.source)
     return result
 
 
@@ -536,7 +542,7 @@ def _evaluate_metric_match(
             "ready": False,
             "matched": False,
         }
-        if detail_mode == "full":
+        if detail_mode == "full" or _is_variant_output_filter_source(guard.source):
             result.update(
                 {
                     "field": guard.field,
@@ -545,6 +551,7 @@ def _evaluate_metric_match(
                     "actual": None,
                 }
             )
+        _attach_guard_source(result, guard.source)
         return result
     actual = _read_metric_value(current_output, field=guard.field, output_key=guard.output_key)
     if isinstance(actual, bool) or not isinstance(actual, (int, float)):
@@ -559,7 +566,7 @@ def _evaluate_metric_match(
         "ready": True,
         "matched": matched,
     }
-    if detail_mode == "full":
+    if detail_mode == "full" or _is_variant_output_filter_source(guard.source):
         result.update(
             {
                 "field": guard.field,
@@ -568,6 +575,7 @@ def _evaluate_metric_match(
                 "actual": actual_value,
             }
         )
+    _attach_guard_source(result, guard.source)
     return result
 
 
@@ -728,6 +736,54 @@ def _evaluate_leaf_guard_on_runtime_output(
         runtime_output=runtime_output,
         detail_mode=detail_mode,
     )
+
+
+def _is_variant_output_filter_source(source: Mapping[str, Any] | None) -> bool:
+    return isinstance(source, Mapping) and str(source.get("type") or "").strip() == "variant_output_filter"
+
+
+def _attach_guard_source(result: dict[str, Any], source: Mapping[str, Any] | None) -> None:
+    if not _is_variant_output_filter_source(source):
+        return
+    result["source"] = {
+        "type": "variant_output_filter",
+        "filter_index": source.get("filter_index"),
+        "filter_hash": source.get("filter_hash"),
+        "operator": source.get("operator"),
+        "scope": dict(source.get("scope") or {}) if isinstance(source.get("scope"), Mapping) else {},
+    }
+
+
+def _build_output_filter_trace(guard_results: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for result in guard_results:
+        source = result.get("source")
+        if not _is_variant_output_filter_source(source if isinstance(source, Mapping) else None):
+            continue
+        item = {
+            "filter_index": source.get("filter_index"),
+            "filter_hash": source.get("filter_hash"),
+            "scope": dict(source.get("scope") or {}) if isinstance(source.get("scope"), Mapping) else {},
+            "guard_type": result.get("type"),
+            "output_ref": result.get("output_ref"),
+            "field": result.get("field"),
+            "operator": result.get("operator") or source.get("operator"),
+            "expected": result.get("expected"),
+            "actual": result.get("actual"),
+            "ready": bool(result.get("ready")),
+            "matched": bool(result.get("matched")),
+        }
+        items.append(item)
+    if not items:
+        return {}
+    return {
+        "schema_version": "strategy_output_filter_trace.v1",
+        "filter_count": len(items),
+        "ready_count": sum(1 for item in items if bool(item.get("ready"))),
+        "matched_count": sum(1 for item in items if bool(item.get("matched"))),
+        "all_matched": all(bool(item.get("matched")) for item in items),
+        "items": items,
+    }
 
 
 def _build_decision_context(
