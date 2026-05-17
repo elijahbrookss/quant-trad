@@ -3649,6 +3649,11 @@ def _compact_context_values(context: Mapping[str, Any]) -> Dict[str, Any]:
         if value in (None, "", [], {}):
             continue
         result[key] = _json_safe(value)
+    decision_artifact = context.get("decision_artifact")
+    if isinstance(decision_artifact, Mapping):
+        output_filter_trace = decision_artifact.get("output_filter_trace")
+        if output_filter_trace not in (None, "", [], {}):
+            result["output_filter_trace"] = _json_safe(output_filter_trace)
     return result
 
 

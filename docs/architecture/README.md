@@ -54,6 +54,7 @@ SVG outputs are not checked in yet because Mermaid CLI is not available in the c
 | BotLens projections | [botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md](botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md) | Debug/read models over runtime truth |
 | Persistence | [persistence/PERSISTENCE_BOUNDARY.md](persistence/PERSISTENCE_BOUNDARY.md) | Durable ledgers, repositories, replay support |
 | Reporting | [reporting/REPORTING_BOUNDARY.md](reporting/REPORTING_BOUNDARY.md) | RunResearchDataset, reports, compare, exports, diagnostics |
+| Research orchestration | [research-orchestration/RESEARCH_ORCHESTRATION_BOUNDARY.md](research-orchestration/RESEARCH_ORCHESTRATION_BOUNDARY.md) | API-backed CLI and future agent research workflows |
 | Observability | [observability/OBSERVABILITY_BOUNDARY.md](observability/OBSERVABILITY_BOUNDARY.md) | Logs, metrics, diagnostics, Grafana/Loki surfaces |
 
 ## Decision Records

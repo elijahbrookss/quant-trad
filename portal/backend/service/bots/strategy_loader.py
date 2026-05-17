@@ -21,7 +21,7 @@ from ...db.models import (
     StrategyVariantRecord,
 )
 from ..risk.atm import normalise_template
-from ..strategy_variant_resolution import resolve_strategy_variant
+from ..strategy_variant_resolution import materialize_output_filters, resolve_strategy_variant
 from engines.bot_runtime.strategy.models import Strategy, StrategyIndicatorLink, StrategyInstrumentLink
 from risk import normalise_risk_config
 from utils.log_context import build_log_context, with_log_context
@@ -75,9 +75,6 @@ class StrategyLoader:
             runtime_payload = dict(runtime_config or {})
             variant_id = str(runtime_payload.get("strategy_variant_id") or "").strip() or None
             variant_name = str(runtime_payload.get("strategy_variant_name") or "").strip() or None
-            resolved_params = runtime_payload.get("resolved_params")
-            if not isinstance(resolved_params, dict):
-                resolved_params = {}
 
             variant_rec = None
             if variant_id:
@@ -88,14 +85,31 @@ class StrategyLoader:
                     raise ValueError(
                         f"Strategy variant {variant_id} does not belong to strategy {strategy_id}"
                     )
+                if variant_name and str(variant_rec.name or "").strip() != variant_name:
+                    raise ValueError(
+                        f"Strategy variant name {variant_name} does not match variant {variant_id}"
+                    )
+            elif variant_name:
+                variant_rec = session.execute(
+                    select(StrategyVariantRecord).where(
+                        StrategyVariantRecord.strategy_id == strategy_id,
+                        StrategyVariantRecord.name == variant_name,
+                    )
+                ).scalar_one_or_none()
+                if not variant_rec:
+                    raise ValueError(f"Strategy variant not found: {variant_name}")
+                variant_id = str(variant_rec.id or "").strip() or None
 
             effective_config = resolve_strategy_variant(
                 strategy_rec,
                 variant_rec,
                 default_variant=_default_variant_record(session, strategy_id),
-                bot_overrides=resolved_params if not variant_id else None,
             )
-            selected_atm_template_id = effective_config.effective_atm_template_id
+            selected_atm_template_id = (
+                str(runtime_payload.get("atm_template_id") or "").strip()
+                or str(strategy_rec.atm_template_id or "").strip()
+                or None
+            )
 
             # Fetch ATM template if linked
             atm_template = None
@@ -139,8 +153,12 @@ class StrategyLoader:
                 select(StrategyRuleRecord).where(StrategyRuleRecord.strategy_id == strategy_id)
             ).scalars().all()
 
-            # Convert rules to dict keyed by rule_id
-            rules = {rule.id: rule.to_dict() for rule in rules_db}
+            # Convert rules to dict keyed by rule_id after applying selected variant filters.
+            base_rules = {rule.id: rule.to_dict() for rule in rules_db}
+            rules = {
+                str(rule.get("id") or ""): rule
+                for rule in materialize_output_filters(base_rules, effective_config.output_filters)
+            }
 
             context = build_log_context(
                 strategy_id=strategy_id,

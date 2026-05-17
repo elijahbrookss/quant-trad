@@ -1,7 +1,9 @@
 quant-env/
 classes/__pycache__/
 __pycache__/
+**/__pycache__/
 *.pyc
+*.egg-info/
 artifacts/
 .venv/
 secrets.env

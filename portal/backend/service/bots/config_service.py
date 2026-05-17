@@ -15,6 +15,7 @@ from .startup_validation import validate_wallet_config as normalize_wallet_confi
 from ..market import instrument_service
 from ..storage.storage import (
     delete_bot,
+    get_atm_template,
     get_strategy_variant,
     list_strategy_variants,
     load_bots,
@@ -31,27 +32,41 @@ _SETTINGS = get_settings()
 
 class BotConfigService:
     @staticmethod
-    def _resolve_variant(strategy_id: str, variant_id: Optional[str]) -> Optional[Mapping[str, object]]:
+    def _resolve_variant(
+        strategy_id: str,
+        variant_id: Optional[str],
+        variant_name: Optional[str] = None,
+    ) -> Optional[Mapping[str, object]]:
         normalized_variant_id = str(variant_id or "").strip() or None
+        normalized_variant_name = str(variant_name or "").strip() or None
         variant = get_strategy_variant(normalized_variant_id) if normalized_variant_id else None
         if variant and str(variant.get("strategy_id") or "").strip() != strategy_id:
             raise ValueError("strategy_variant_id does not belong to the selected strategy.")
+        if normalized_variant_name:
+            if variant:
+                if str(variant.get("name") or "").strip() != normalized_variant_name:
+                    raise ValueError("strategy_variant_name does not match strategy_variant_id.")
+                return variant
+            for candidate in list_strategy_variants(strategy_id):
+                if str(candidate.get("name") or "").strip() == normalized_variant_name:
+                    return candidate
+            raise ValueError("Strategy variant not found.")
         return variant
 
     @staticmethod
     def _resolve_effective_atm_template_id(
         strategy_atm_template_id: Optional[str],
-        variant: Optional[Mapping[str, object]],
+        requested_atm_template_id: Optional[object],
     ) -> Optional[str]:
-        variant_atm_template_id = str(variant.get("atm_template_id") or "").strip() if isinstance(variant, Mapping) else ""
-        return variant_atm_template_id or str(strategy_atm_template_id or "").strip() or None
+        candidate = str(requested_atm_template_id or "").strip() or str(strategy_atm_template_id or "").strip() or None
+        if candidate and not get_atm_template(candidate):
+            raise ValueError("ATM template not found.")
+        return candidate
 
     @staticmethod
     def _resolve_effective_strategy_config(
         strategy: Any,
         variant: Optional[Mapping[str, object]],
-        *,
-        bot_overrides: Optional[Mapping[str, Any]] = None,
     ) -> EffectiveStrategyConfig:
         strategy_id = str(getattr(strategy, "id", "") or "").strip()
         variants = list_strategy_variants(strategy_id) if strategy_id else []
@@ -60,7 +75,6 @@ class BotConfigService:
             strategy,
             variant,
             default_variant=default_variant,
-            bot_overrides=bot_overrides,
         )
 
     def list_bots(self) -> List[Dict[str, object]]:
@@ -83,12 +97,18 @@ class BotConfigService:
         wallet_config = self.validate_wallet_config(payload.get("wallet_config"))
         strategy = StrategyLoader.fetch_strategy(strategy_id)
         variant_id = str(payload.get("strategy_variant_id") or "").strip() or None
-        variant = self._resolve_variant(strategy_id, variant_id)
-        legacy_bot_overrides = self.validate_resolved_params(payload.get("resolved_params")) if variant is None else {}
+        variant = self._resolve_variant(
+            strategy_id,
+            variant_id,
+            str(payload.get("strategy_variant_name") or "").strip() or None,
+        )
         effective_strategy_config = self._resolve_effective_strategy_config(
             strategy,
             variant,
-            bot_overrides=legacy_bot_overrides,
+        )
+        effective_atm_template_id = self._resolve_effective_atm_template_id(
+            getattr(strategy, "atm_template_id", None),
+            payload.get("atm_template_id"),
         )
         variant_name = (
             str(variant.get("name") or "").strip()
@@ -110,9 +130,13 @@ class BotConfigService:
             "id": bot_id,
             "name": name,
             "strategy_id": strategy_id,
-            "strategy_variant_id": str(payload.get("strategy_variant_id") or "").strip() or None,
+            "strategy_variant_id": (
+                str(variant.get("id") or "").strip()
+                if isinstance(variant, Mapping)
+                else None
+            ) or None,
             "strategy_variant_name": variant_name,
-            "atm_template_id": effective_strategy_config.effective_atm_template_id,
+            "atm_template_id": effective_atm_template_id,
             "resolved_params": effective_strategy_config.effective_params,
             "risk_config": normalise_risk_config(risk_config_payload),
             "timeframe": None,
@@ -146,10 +170,14 @@ class BotConfigService:
             record["strategy_id"] = self.validate_strategy_id(payload.get("strategy_id"))
         if "strategy_variant_id" in payload:
             record["strategy_variant_id"] = str(payload.get("strategy_variant_id") or "").strip() or None
+            if "strategy_variant_name" not in payload:
+                record["strategy_variant_name"] = None
         if "strategy_variant_name" in payload:
             record["strategy_variant_name"] = str(payload.get("strategy_variant_name") or "").strip() or None
-        if "resolved_params" in payload:
-            record["resolved_params"] = self.validate_resolved_params(payload.get("resolved_params"))
+            if "strategy_variant_id" not in payload:
+                record["strategy_variant_id"] = None
+        if "atm_template_id" in payload:
+            record["atm_template_id"] = str(payload.get("atm_template_id") or "").strip() or None
         if "risk_config" in payload:
             config = payload.get("risk_config") if isinstance(payload.get("risk_config"), Mapping) else {}
             record["risk_config"] = normalise_risk_config(config)
@@ -196,19 +224,29 @@ class BotConfigService:
         strategy_id = self.validate_strategy_id(record.get("strategy_id"))
         record["strategy_id"] = strategy_id
         strategy = StrategyLoader.fetch_strategy(strategy_id)
-        variant = self._resolve_variant(strategy_id, record.get("strategy_variant_id"))
-        legacy_bot_overrides = self.validate_resolved_params(record.get("resolved_params")) if variant is None else {}
+        variant = self._resolve_variant(
+            strategy_id,
+            record.get("strategy_variant_id"),
+            record.get("strategy_variant_name"),
+        )
         effective_strategy_config = self._resolve_effective_strategy_config(
             strategy,
             variant,
-            bot_overrides=legacy_bot_overrides,
+        )
+        record["atm_template_id"] = self._resolve_effective_atm_template_id(
+            getattr(strategy, "atm_template_id", None),
+            record.get("atm_template_id"),
         )
         record["strategy_variant_name"] = (
             str(variant.get("name") or "").strip()
             if isinstance(variant, Mapping)
             else str(record.get("strategy_variant_name") or "").strip()
         ) or None
-        record["atm_template_id"] = effective_strategy_config.effective_atm_template_id
+        record["strategy_variant_id"] = (
+            str(variant.get("id") or "").strip()
+            if isinstance(variant, Mapping)
+            else str(record.get("strategy_variant_id") or "").strip()
+        ) or None
         record["resolved_params"] = effective_strategy_config.effective_params
         self.validate_backtest_window(record)
         upsert_bot(record)
@@ -284,14 +322,6 @@ class BotConfigService:
     @staticmethod
     def validate_wallet_config(wallet_config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         return normalize_wallet_config(wallet_config)
-
-    @staticmethod
-    def validate_resolved_params(value: Optional[object]) -> Dict[str, Any]:
-        if value in (None, ""):
-            return {}
-        if not isinstance(value, Mapping):
-            raise ValueError("resolved_params must be an object map")
-        return {str(key): item for key, item in value.items()}
 
     @staticmethod
     def validate_bot_env(value: Optional[Mapping[str, Any]]) -> Dict[str, str]:
@@ -476,7 +506,7 @@ class BotConfigService:
         return {
             "strategy_variant_id": str(bot.get("strategy_variant_id") or "").strip() or None,
             "strategy_variant_name": str(bot.get("strategy_variant_name") or "").strip() or None,
-            "resolved_params": dict(bot.get("resolved_params") or {}) if isinstance(bot.get("resolved_params"), Mapping) else {},
+            "atm_template_id": str(bot.get("atm_template_id") or "").strip() or None,
             "risk_config": dict(bot.get("risk_config") or {}) if isinstance(bot.get("risk_config"), Mapping) else {},
         }
 

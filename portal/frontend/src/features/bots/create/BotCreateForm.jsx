@@ -20,17 +20,6 @@ const WALLET_PRESETS = [
   { label: '$100K', currency: 'USD', amount: 100000 },
 ]
 
-const formatVariantValue = (value) => {
-  if (typeof value === 'string') return value
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-  if (value === null) return 'null'
-  try {
-    return JSON.stringify(value)
-  } catch {
-    return String(value)
-  }
-}
-
 function StepCard({ title, hint, children }) {
   return (
     <section className="rounded-lg border border-white/[0.06] bg-black/24 p-5">
@@ -224,22 +213,17 @@ export function BotCreateForm({
   }, [form.strategy_variant_id, strategyVariants])
 
   const variantSummary = useMemo(() => {
-    const overrides = selectedVariant?.param_overrides
-    if (!overrides || typeof overrides !== 'object') return []
-    return Object.entries(overrides)
+    const filters = Array.isArray(selectedVariant?.output_filters) ? selectedVariant.output_filters : []
+    return filters.map((filter, index) => ({
+      id: `${selectedVariant?.id || 'variant'}-${index}`,
+      label: `${filter?.indicator_id || '?'}:${filter?.output_name || '?'}.${filter?.field || '?'} ${filter?.operator || 'equals'} ${JSON.stringify(filter?.value)}`,
+    }))
   }, [selectedVariant])
 
   const selectedATMLabel = useMemo(() => {
     if (!selectedStrategy) return 'Select a strategy'
-    const variantAtmTemplateId = String(selectedVariant?.atm_template_id || '').trim()
-    if (!variantAtmTemplateId) {
-      return selectedStrategy?.atm_template?.name || 'Strategy ATM'
-    }
-    if (variantAtmTemplateId === selectedStrategy?.atm_template_id) {
-      return selectedStrategy?.atm_template?.name || variantAtmTemplateId
-    }
-    return variantAtmTemplateId
-  }, [selectedStrategy, selectedVariant])
+    return selectedStrategy?.atm_template?.name || 'Strategy ATM'
+  }, [selectedStrategy])
 
   const suggestedName = useMemo(() => {
     if (!selectedStrategy) return ''
@@ -379,19 +363,17 @@ export function BotCreateForm({
                     </div>
                     {variantSummary.length ? (
                       <div className="mt-3 flex flex-wrap gap-2">
-                        {variantSummary.map(([key, value]) => (
+                        {variantSummary.map((item) => (
                           <span
-                            key={`${selectedVariant.id}-${key}`}
+                            key={item.id}
                             className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-xs text-slate-300"
                           >
-                            <span className="font-medium text-slate-200">{key}</span>
-                            <span className="mx-1 text-slate-500">=</span>
-                            <span className="text-slate-400">{formatVariantValue(value)}</span>
+                            {item.label}
                           </span>
                         ))}
                       </div>
                     ) : (
-                      <p className="mt-2 text-xs text-slate-500">Uses strategy defaults.</p>
+                      <p className="mt-2 text-xs text-slate-500">No additional decision filters.</p>
                     )}
                     <p className="mt-3 text-xs text-slate-400">ATM: {selectedATMLabel}</p>
                   </div>

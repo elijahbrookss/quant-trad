@@ -166,7 +166,7 @@ def test_strategy_preview_response_separates_machine_and_ui(monkeypatch) -> None
         selected_variant={
             "id": "variant-default",
             "name": "default",
-            "param_overrides": {"conviction_min": 0.5},
+            "output_filters": [],
             "is_default": True,
         },
         resolved_params={"conviction_min": 0.5},
@@ -176,7 +176,7 @@ def test_strategy_preview_response_separates_machine_and_ui(monkeypatch) -> None
     assert payload["source_type"] == "strategy_preview"
     assert payload["strategy_hash"] == "hash-1"
     assert payload["variant"]["id"] == "variant-default"
-    assert payload["variant"]["resolved_params"] == {"conviction_min": 0.5}
+    assert payload["variant"]["output_filters"] == []
     instrument_payload = payload["instruments"]["instrument-1"]
     signal = instrument_payload["machine"]["signals"][0]
     assert signal == {

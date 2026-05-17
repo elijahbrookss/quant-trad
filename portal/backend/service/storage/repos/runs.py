@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from ._shared import BotRunRecord, SQLAlchemyError, _parse_optional_timestamp, _utcnow, db, logger, select
+from ._shared import BotRunRecord, SQLAlchemyError, _json_safe, _parse_optional_timestamp, _utcnow, db, logger, select
 
 
 def _merge_symbols(existing: Any, incoming: Any) -> list[str]:
@@ -51,11 +51,11 @@ def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
         record.started_at = _parse_optional_timestamp(payload.get("started_at")) or record.started_at
         record.ended_at = _parse_optional_timestamp(payload.get("ended_at")) or record.ended_at
         if payload.get("summary") is not None:
-            record.summary = dict(payload.get("summary") or {})
+            record.summary = dict(_json_safe(payload.get("summary") or {}))
         if payload.get("config_snapshot") is not None:
-            record.config_snapshot = dict(payload.get("config_snapshot") or {})
+            record.config_snapshot = dict(_json_safe(payload.get("config_snapshot") or {}))
         if payload.get("decision_ledger") is not None:
-            record.decision_ledger = list(payload.get("decision_ledger") or [])
+            record.decision_ledger = list(_json_safe(payload.get("decision_ledger") or []))
         record.updated_at = now
         if record.created_at is None:
             record.created_at = now
@@ -118,5 +118,4 @@ def list_bot_runs(
             exc,
         )
         raise
-
 

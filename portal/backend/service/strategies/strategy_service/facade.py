@@ -13,7 +13,7 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional,
 from ...market import instrument_service
 from ...risk.atm import normalise_template
 from ...indicators.indicator_service import get_instance_meta
-from ...strategy_variant_resolution import EffectiveStrategyConfig, resolve_strategy_variant
+from ...strategy_variant_resolution import EffectiveStrategyConfig, materialize_output_filters, resolve_strategy_variant
 from engines.bot_runtime.core.execution_profile import compile_runtime_profile_or_error
 from risk import normalise_risk_config
 from strategies.contracts import CompiledStrategySpec, DecisionRuleSpec
@@ -115,6 +115,13 @@ def _serialize_trigger(trigger: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _serialize_context_value(value: Any) -> Any:
+    if isinstance(value, (list, tuple, set)):
+        values = [str(item).strip() for item in value if str(item).strip()]
+        return values[0] if len(values) == 1 else values
+    return str(value or "").strip()
+
+
 def _serialize_guard(guard: Mapping[str, Any]) -> Dict[str, Any]:
     guard_type = str(guard.get("type") or "").strip().lower()
     if guard_type == "context_match":
@@ -123,7 +130,7 @@ def _serialize_guard(guard: Mapping[str, Any]) -> Dict[str, Any]:
             "indicator_id": str(guard.get("indicator_id") or "").strip(),
             "output_name": str(guard.get("output_name") or "").strip(),
             "field": str(guard.get("field") or "").strip(),
-            "value": str(guard.get("value") or "").strip(),
+            "value": _serialize_context_value(guard.get("value")),
         }
     if guard_type == "metric_match":
         return {
@@ -200,12 +207,25 @@ def _select_default_strategy_variant(strategy_id: str) -> Dict[str, Any]:
     return storage_ensure_default_strategy_variant(strategy_id)
 
 
-def _resolve_strategy_variant_payload(strategy_id: str, variant_id: Optional[str]) -> Dict[str, Any]:
+def _resolve_strategy_variant_payload(
+    strategy_id: str,
+    variant_id: Optional[str],
+    variant_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    normalized_variant_name = str(variant_name or "").strip() or None
     if variant_id:
         variant = storage_get_strategy_variant(variant_id)
         if not variant or str(variant.get("strategy_id") or "").strip() != strategy_id:
             raise KeyError("Strategy variant not found")
+        if normalized_variant_name and str(variant.get("name") or "").strip() != normalized_variant_name:
+            raise KeyError("Strategy variant not found")
         return dict(variant)
+    if normalized_variant_name:
+        storage_ensure_default_strategy_variant(strategy_id)
+        for variant in storage_list_strategy_variants(strategy_id):
+            if str(variant.get("name") or "").strip() == normalized_variant_name:
+                return dict(variant)
+        raise KeyError("Strategy variant not found")
     return dict(_select_default_strategy_variant(strategy_id))
 
 
@@ -240,13 +260,14 @@ def _compile_strategy_definition(
     *,
     rules: Optional[Sequence[Mapping[str, Any]]] = None,
     variant_id: Optional[str] = None,
+    variant_name: Optional[str] = None,
     selected_variant: Optional[Mapping[str, Any]] = None,
     timeframe: Optional[str] = None,
 ) -> tuple[CompiledStrategySpec, Dict[str, Any], EffectiveStrategyConfig]:
     resolved_variant = (
         dict(selected_variant)
         if selected_variant is not None
-        else _resolve_strategy_variant_payload(strategy.id, variant_id)
+        else _resolve_strategy_variant_payload(strategy.id, variant_id, variant_name)
     )
     effective_config = _resolve_effective_strategy_config(
         strategy,
@@ -255,7 +276,10 @@ def _compile_strategy_definition(
     compiled = compile_strategy(
         strategy_id=strategy.id,
         timeframe=str(timeframe or strategy.timeframe).strip(),
-        rules=list(rules) if rules is not None else [rule.to_dict() for rule in strategy.rules.values()],
+        rules=materialize_output_filters(
+            list(rules) if rules is not None else [rule.to_dict() for rule in strategy.rules.values()],
+            effective_config.output_filters,
+        ),
         attached_indicator_ids=strategy.indicator_ids,
         indicator_meta_getter=get_instance_meta,
         params=effective_config.effective_params,
@@ -268,11 +292,13 @@ def _validate_rule_set(
     rules: Sequence[Mapping[str, Any]],
     *,
     variant_id: Optional[str] = None,
+    variant_name: Optional[str] = None,
 ) -> None:
     _compile_strategy_definition(
         strategy,
         rules=rules,
         variant_id=variant_id,
+        variant_name=variant_name,
     )
 
 
@@ -289,14 +315,12 @@ def _serialize_compiled_rule(rule: DecisionRuleSpec) -> Dict[str, Any]:
     }
 
 
-def _serialize_variant_payload(variant: Mapping[str, Any], *, resolved_params: Mapping[str, Any]) -> Dict[str, Any]:
+def _serialize_variant_payload(variant: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "id": str(variant.get("id") or "").strip(),
         "name": str(variant.get("name") or "").strip(),
         "description": variant.get("description"),
-        "param_overrides": dict(variant.get("param_overrides") or {}),
-        "resolved_params": dict(resolved_params or {}),
-        "atm_template_id": str(variant.get("atm_template_id") or "").strip() or None,
+        "output_filters": list(variant.get("output_filters") or []),
         "is_default": bool(variant.get("is_default", False)),
     }
 
@@ -308,13 +332,12 @@ def _serialize_compiled_strategy_payload(
     selected_variant: Mapping[str, Any],
     effective_config: EffectiveStrategyConfig,
 ) -> Dict[str, Any]:
-    resolved_params = effective_config.effective_params
     return {
         "strategy_id": strategy.id,
         "strategy_name": strategy.name,
         "timeframe": compiled_strategy.timeframe,
         "strategy_hash": compiled_strategy.strategy_hash,
-        "variant": _serialize_variant_payload(selected_variant, resolved_params=resolved_params),
+        "variant": _serialize_variant_payload(selected_variant),
         "effective_strategy_config": effective_config.to_effective_strategy_config(),
         "run_strategy_snapshot": effective_config.to_run_strategy_snapshot(),
         "compiled": {
@@ -1157,6 +1180,7 @@ class StrategyRegistry:
         interval: str,
         instrument_ids: Optional[List[str]] = None,
         variant_id: Optional[str] = None,
+        variant_name: Optional[str] = None,
         config: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Run a rule-logic strategy preview against typed indicator outputs."""
@@ -1167,6 +1191,7 @@ class StrategyRegistry:
         compiled_strategy, selected_variant, effective_config = _compile_strategy_definition(
             record,
             variant_id=variant_id,
+            variant_name=variant_name,
             timeframe=interval,
         )
         payload = evaluate_strategy_preview(
@@ -1334,22 +1359,18 @@ def create_strategy_variant(
     *,
     name: str,
     description: Optional[str] = None,
-    param_overrides: Optional[Mapping[str, Any]] = None,
-    atm_template_id: Optional[str] = None,
+    output_filters: Optional[Sequence[Mapping[str, Any]]] = None,
     is_default: bool = False,
 ) -> Dict[str, Any]:
     """Create a saved variant for a strategy."""
 
     record = _REGISTRY.get(strategy_id)
-    if atm_template_id and not get_atm_template(atm_template_id):
-        raise ValueError("ATM template not found.")
     storage_ensure_default_strategy_variant(strategy_id)
     payload = {
         "strategy_id": strategy_id,
         "name": name,
         "description": description,
-        "param_overrides": dict(param_overrides or {}),
-        "atm_template_id": atm_template_id,
+        "output_filters": list(output_filters or []),
         "is_default": is_default,
     }
     selected_variant = {
@@ -1372,16 +1393,12 @@ def update_strategy_variant(
 
     record = _REGISTRY.get(strategy_id)
     current = get_strategy_variant(strategy_id, variant_id)
-    next_atm_template_id = fields.get("atm_template_id", current.get("atm_template_id"))
-    if next_atm_template_id and not get_atm_template(next_atm_template_id):
-        raise ValueError("ATM template not found.")
     payload = {
         "id": variant_id,
         "strategy_id": strategy_id,
         "name": fields.get("name", current.get("name")),
         "description": fields.get("description", current.get("description")),
-        "param_overrides": fields.get("param_overrides", current.get("param_overrides") or {}),
-        "atm_template_id": next_atm_template_id,
+        "output_filters": fields.get("output_filters", current.get("output_filters") or []),
         "is_default": fields.get("is_default", current.get("is_default", False)),
     }
     _compile_strategy_definition(
@@ -1516,6 +1533,7 @@ def run_strategy_preview(
     interval: str,
     instrument_ids: Optional[List[str]] = None,
     variant_id: Optional[str] = None,
+    variant_name: Optional[str] = None,
     config: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run a strategy preview for the requested window."""
@@ -1527,6 +1545,7 @@ def run_strategy_preview(
         interval=interval,
         instrument_ids=instrument_ids,
         variant_id=variant_id,
+        variant_name=variant_name,
         config=config,
     )
 
@@ -1539,6 +1558,7 @@ def evaluate(
     interval: str,
     instrument_ids: Optional[List[str]] = None,
     variant_id: Optional[str] = None,
+    variant_name: Optional[str] = None,
     config: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compatibility wrapper for callers that import the facade-level evaluate function."""
@@ -1550,6 +1570,7 @@ def evaluate(
         interval=interval,
         instrument_ids=instrument_ids,
         variant_id=variant_id,
+        variant_name=variant_name,
         config=config,
     )
 
@@ -1558,6 +1579,7 @@ def compile_strategy_contract(
     strategy_id: str,
     *,
     variant_id: Optional[str] = None,
+    variant_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Validate and compile a strategy using the selected or default variant."""
 
@@ -1565,6 +1587,7 @@ def compile_strategy_contract(
     compiled_strategy, selected_variant, effective_config = _compile_strategy_definition(
         record,
         variant_id=variant_id,
+        variant_name=variant_name,
     )
     return _serialize_compiled_strategy_payload(
         record,

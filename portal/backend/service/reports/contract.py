@@ -297,6 +297,126 @@ def get_run_report_summary(run_id: str) -> Dict[str, Any]:
     }
 
 
+def _metric_subset(summary: Mapping[str, Any], portfolio: Mapping[str, Any]) -> Dict[str, Any]:
+    keys = (
+        "net_pnl",
+        "gross_pnl",
+        "fees",
+        "return_pct",
+        "total_return_pct",
+        "max_drawdown",
+        "max_drawdown_pct",
+        "profit_factor",
+        "expectancy",
+        "win_rate",
+        "trades",
+        "closed_trades",
+        "total_trades",
+        "accepted_decisions",
+        "rejected_decisions",
+        "exposure_pct",
+        "time_in_market_pct",
+        "average_holding_seconds",
+        "sharpe",
+        "sortino",
+        "calmar",
+    )
+    payload: Dict[str, Any] = {}
+    for key in keys:
+        value = summary.get(key)
+        if value is None:
+            value = portfolio.get(key)
+        if value is not None:
+            payload[key] = value
+    return payload
+
+
+def _section_counts(sections: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    items = sections.get("items")
+    if not isinstance(items, list):
+        return []
+    result: List[Dict[str, Any]] = []
+    for item in items:
+        row = _mapping(item)
+        if not row:
+            continue
+        result.append(
+            {
+                "name": row.get("name") or row.get("section"),
+                "status": row.get("status"),
+                "available": row.get("available"),
+                "row_count": row.get("row_count"),
+            }
+        )
+    return result
+
+
+def _strategy_snapshot_summary(dataset: Mapping[str, Any]) -> Dict[str, Any]:
+    metadata = _mapping(dataset.get("metadata"))
+    config = _mapping(metadata.get("configuration")) or _mapping(metadata.get("config_snapshot"))
+    run_strategy_snapshot = _mapping(config.get("run_strategy_snapshot"))
+    if not run_strategy_snapshot:
+        run_strategy_snapshot = _mapping(metadata.get("run_strategy_snapshot"))
+    return {
+        "strategy_id": metadata.get("strategy_id") or run_strategy_snapshot.get("strategy_id"),
+        "strategy_name": metadata.get("strategy_name") or run_strategy_snapshot.get("strategy_name"),
+        "strategy_hash": metadata.get("strategy_hash") or run_strategy_snapshot.get("strategy_hash"),
+        "strategy_variant_id": metadata.get("strategy_variant_id") or run_strategy_snapshot.get("strategy_variant_id"),
+        "strategy_variant_name": metadata.get("strategy_variant_name") or run_strategy_snapshot.get("strategy_variant_name"),
+        "effective_strategy_config_hash": run_strategy_snapshot.get("effective_strategy_config_hash"),
+        "effective_params": run_strategy_snapshot.get("effective_params"),
+        "variant_overrides": run_strategy_snapshot.get("variant_overrides"),
+        "param_source_map": run_strategy_snapshot.get("param_source_map"),
+    }
+
+
+def get_run_research_summary(run_id: str) -> Dict[str, Any]:
+    """Return a compact research summary for CLI/agent workflows.
+
+    This is intentionally narrower than ``run_report_summary.v1`` so command
+    flows do not need to transfer full metadata/configuration payloads.
+    """
+
+    dataset = _dataset(run_id)
+    metadata = _mapping(dataset.get("metadata"))
+    readiness = _mapping(dataset.get("readiness"))
+    summary = _mapping(dataset.get("summary"))
+    portfolio = _mapping(dataset.get("portfolio_metrics"))
+    sections = _mapping(dataset.get("sections"))
+    simulated_window = _mapping(metadata.get("simulated_window"))
+    return {
+        "schema_version": "run_research_summary.v1",
+        "run_id": run_id,
+        "status": metadata.get("status") or summary.get("run_status"),
+        "bot_id": metadata.get("bot_id"),
+        "run_type": metadata.get("run_type"),
+        "execution_mode": metadata.get("execution_mode"),
+        "symbols": list(metadata.get("symbols") or []),
+        "timeframe": metadata.get("timeframe"),
+        "window": {
+            "start": simulated_window.get("start") or metadata.get("backtest_start"),
+            "end": simulated_window.get("end") or metadata.get("backtest_end"),
+        },
+        "strategy": _strategy_snapshot_summary(dataset),
+        "readiness": {
+            "dataset_ready": readiness.get("dataset_ready"),
+            "results_ready": readiness.get("results_ready"),
+            "safe_to_compare": readiness.get("safe_to_compare"),
+            "reason": readiness.get("reason"),
+            "dataset_status": readiness.get("dataset_status"),
+            "results_status": readiness.get("results_status"),
+            "comparison_status": readiness.get("comparison_status"),
+            "export_status": readiness.get("export_status"),
+            "golden_candidate_status": readiness.get("golden_candidate_status"),
+            "degraded_sections": list(readiness.get("degraded_sections") or []),
+            "unavailable_sections": list(readiness.get("unavailable_sections") or []),
+            "caveats": list(readiness.get("caveats") or []),
+        },
+        "metrics": _metric_subset(summary, portfolio),
+        "sections": _section_counts(sections),
+    }
+
+
 def _metric_value(
     *,
     value: Any = None,

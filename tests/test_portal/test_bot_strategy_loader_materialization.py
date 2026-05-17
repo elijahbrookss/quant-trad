@@ -58,7 +58,7 @@ class _SqliteDb:
             session.close()
 
 
-def test_strategy_loader_materializes_variant_atm_and_risk_config_without_bot_atm_override(monkeypatch) -> None:
+def test_strategy_loader_materializes_variant_output_filters_and_bot_atm(monkeypatch) -> None:
     db = _SqliteDb()
     monkeypatch.setattr("portal.backend.service.bots.strategy_loader.db", db)
 
@@ -98,17 +98,24 @@ def test_strategy_loader_materializes_variant_atm_and_risk_config_without_bot_at
                     strategy_id="strategy-1",
                     name="default",
                     description=None,
-                    param_overrides={"risk_multiple": 1.0},
-                    atm_template_id=None,
+                    output_filters=[],
                     is_default=True,
                 ),
                 StrategyVariantRecord(
                     id="variant-1",
                     strategy_id="strategy-1",
-                    name="aggressive",
+                    name="expanding-only",
                     description=None,
-                    param_overrides={"conviction_min": 0.55},
-                    atm_template_id="atm-variant",
+                    output_filters=[
+                        {
+                            "scope": {"intent": ["enter_long"]},
+                            "indicator_id": "regime-1",
+                            "output_name": "market_regime",
+                            "field": "expansion_state",
+                            "operator": "equals",
+                            "value": "expanding",
+                        }
+                    ],
                     is_default=False,
                 ),
                 StrategyInstrumentLink(
@@ -146,8 +153,8 @@ def test_strategy_loader_materializes_variant_atm_and_risk_config_without_bot_at
         "strategy-1",
         {
             "strategy_variant_id": "variant-1",
-            "strategy_variant_name": "aggressive",
-            "atm_template_id": "atm-bot-override-should-be-ignored",
+            "strategy_variant_name": "expanding-only",
+            "atm_template_id": "atm-variant",
             "risk_config": {"base_risk_per_trade": 250.0, "global_risk_multiplier": 1.2},
         },
     )
@@ -155,13 +162,98 @@ def test_strategy_loader_materializes_variant_atm_and_risk_config_without_bot_at
     assert strategy.atm_template_id == "atm-variant"
     assert strategy.atm_template["name"] == "Variant ATM"
     assert strategy.variant_id == "variant-1"
-    assert strategy.variant_name == "aggressive"
-    assert strategy.resolved_params == {"risk_multiple": 1.0, "conviction_min": 0.55}
-    assert strategy.param_source_map == {
-        "risk_multiple": "default_variant",
-        "conviction_min": "variant_overrides",
+    assert strategy.variant_name == "expanding-only"
+    assert strategy.resolved_params == {}
+    assert strategy.param_source_map == {}
+    guard = strategy.rules["rule-1"]["guards"][0]
+    assert guard | {"source": {}} == {
+        "type": "context_match",
+        "indicator_id": "regime-1",
+        "output_name": "market_regime",
+        "field": "expansion_state",
+        "value": "expanding",
+        "source": {},
     }
+    assert guard["source"]["type"] == "variant_output_filter"
     assert strategy.run_strategy_snapshot["variant_id"] == "variant-1"
+    assert strategy.run_strategy_snapshot["output_filters"][0]["field"] == "expansion_state"
     assert strategy.risk_config == normalise_risk_config(
         {"base_risk_per_trade": 250.0, "global_risk_multiplier": 1.2}
     )
+
+
+def test_strategy_loader_resolves_variant_by_name(monkeypatch) -> None:
+    db = _SqliteDb()
+    monkeypatch.setattr("portal.backend.service.bots.strategy_loader.db", db)
+
+    with db.session() as session:
+        session.add_all(
+            [
+                StrategyRecord(
+                    id="strategy-1",
+                    name="Strategy 1",
+                    description=None,
+                    timeframe="1m",
+                    datasource="demo",
+                    exchange="demo",
+                    atm_template_id=None,
+                    risk_config={},
+                ),
+                StrategyVariantRecord(
+                    id="variant-default",
+                    strategy_id="strategy-1",
+                    name="default",
+                    description=None,
+                    output_filters=[],
+                    is_default=True,
+                ),
+                StrategyVariantRecord(
+                    id="variant-1",
+                    strategy_id="strategy-1",
+                    name="expanding-only",
+                    description=None,
+                    output_filters=[
+                        {
+                            "scope": {"intent": ["enter_long"]},
+                            "indicator_id": "regime-1",
+                            "output_name": "market_regime",
+                            "field": "expansion_state",
+                            "operator": "equals",
+                            "value": "expanding",
+                        }
+                    ],
+                    is_default=False,
+                ),
+                StrategyRuleRecord(
+                    id="rule-1",
+                    strategy_id="strategy-1",
+                    name="Rule 1",
+                    action="buy",
+                    match="all",
+                    description=None,
+                    enabled=True,
+                    conditions={
+                        "id": "rule-1",
+                        "name": "Rule 1",
+                        "intent": "enter_long",
+                        "priority": 0,
+                        "trigger": {
+                            "type": "signal_match",
+                            "indicator_id": "ind-1",
+                            "output_name": "signal",
+                            "event_key": "breakout_long",
+                        },
+                        "guards": [],
+                    },
+                ),
+            ]
+        )
+
+    strategy = StrategyLoader.fetch_strategy(
+        "strategy-1",
+        {"strategy_variant_name": "expanding-only"},
+    )
+
+    assert strategy.variant_id == "variant-1"
+    assert strategy.variant_name == "expanding-only"
+    assert strategy.rules["rule-1"]["guards"][0]["field"] == "expansion_state"

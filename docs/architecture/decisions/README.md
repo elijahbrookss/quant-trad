@@ -35,3 +35,6 @@ respect.
 | [0014](0014-use-shared-wallet-arbitration-policy-by-runtime-mode.md) | Use shared-wallet arbitration policy by runtime mode | Accepted |
 | [0015](0015-split-semantic-and-operational-golden-fingerprints.md) | Split semantic and operational golden fingerprints | Accepted |
 | [0016](0016-treat-runtime-event-ledger-order-as-operational-evidence.md) | Treat runtime event ledger order as operational evidence | Accepted |
+| [0017](0017-use-api-backed-cli-for-research-orchestration.md) | Use an API-backed CLI for research orchestration | Accepted |
+| [0018](0018-use-output-filters-as-strategy-variant-contract.md) | Use output filters as the strategy variant contract | Accepted |
+| [0019](0019-use-file-backed-sequential-experiment-plans.md) | Use file-backed sequential experiment plans | Accepted |

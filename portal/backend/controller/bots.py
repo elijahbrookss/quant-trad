@@ -79,7 +79,7 @@ class BotBase(BaseModel):
     strategy_id: str
     strategy_variant_id: Optional[str] = None
     strategy_variant_name: Optional[str] = None
-    resolved_params: Dict[str, Any] = Field(default_factory=dict)
+    atm_template_id: Optional[str] = None
     risk_config: Dict[str, Any] = Field(default_factory=dict)
     datasource: Optional[str] = None
     exchange: Optional[str] = None
@@ -106,7 +106,7 @@ class BotUpdateRequest(BaseModel):
     strategy_id: Optional[str] = None
     strategy_variant_id: Optional[str] = None
     strategy_variant_name: Optional[str] = None
-    resolved_params: Optional[Dict[str, Any]] = None
+    atm_template_id: Optional[str] = None
     risk_config: Optional[Dict[str, Any]] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
@@ -114,6 +114,8 @@ class BotUpdateRequest(BaseModel):
     mode: Optional[str] = Field(default=None, pattern="^(instant|walk-forward)$")
     execution_mode: Optional[str] = Field(default=None, pattern="^(fast|full|FAST|FULL)$")
     playback_speed: Optional[float] = Field(default=None, ge=0)
+    backtest_start: Optional[str] = None
+    backtest_end: Optional[str] = None
     focus_symbol: Optional[str] = None
     wallet_config: Optional[Dict[str, Any]] = None
     snapshot_interval_ms: Optional[int] = Field(default=None, gt=0)
@@ -131,11 +133,15 @@ class BotStopRequest(BaseModel):
     preserve_container: bool = False
 
 
+class BotDataPreflightRequest(BaseModel):
+    start: str
+    end: str
+
+
 class BotResponse(BotBase):
     """Response payload describing a bot."""
 
     id: str
-    atm_template_id: Optional[str] = None
     status: str
     last_run_at: Optional[str] = None
     last_stats: Dict[str, Any] = Field(default_factory=dict)
@@ -182,6 +188,13 @@ async def bot_runtime_capacity() -> Dict[str, Any]:
     return bot_service.runtime_capacity()
 
 
+@router.get("/run-contexts")
+async def list_bot_run_contexts() -> Dict[str, Any]:
+    """Return compact bot run contexts for CLI/research orchestration."""
+
+    return bot_service.list_bot_run_contexts()
+
+
 @router.get("/stream")
 async def stream_bots() -> StreamingResponse:
     release, channel, initial = bot_service.bots_stream()
@@ -206,6 +219,16 @@ async def stream_bots() -> StreamingResponse:
         "X-Accel-Buffering": "no",
     }
     return StreamingResponse(event_iterator(), media_type="text/event-stream", headers=headers)
+
+
+@router.get("/{bot_id}/run-context")
+async def get_bot_run_context(bot_id: str) -> Dict[str, Any]:
+    """Return the effective bot run context without full UI projections."""
+
+    try:
+        return bot_service.get_bot_run_context(bot_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.get("/{bot_id}", response_model=BotResponse)
@@ -248,6 +271,49 @@ async def start_bot(
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/{bot_id}/runs/start")
+async def start_bot_run_context(
+    bot_id: str,
+    body: Optional[BotStartRequest] = None,
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-ID"),
+) -> Dict[str, Any]:
+    """Start a run and return a compact run-context payload for CLI workflows."""
+
+    request_id = str((body.request_id if body else None) or x_request_id or "").strip() or None
+    try:
+        return bot_service.start_bot_run_context(bot_id, request_id=request_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.get("/{bot_id}/runs/{run_id}/status")
+async def get_bot_run_status(bot_id: str, run_id: str) -> Dict[str, Any]:
+    """Return compact run status for polling/watching long-running CLI work."""
+
+    try:
+        return bot_service.get_bot_run_status(bot_id, run_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/{bot_id}/data-preflight")
+async def preflight_bot_data(bot_id: str, body: BotDataPreflightRequest) -> Dict[str, Any]:
+    """Return compact pre-run candle coverage for a bot/window."""
+
+    try:
+        return bot_service.preflight_bot_data(bot_id, start=body.start, end=body.end)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.post("/{bot_id}/stop")

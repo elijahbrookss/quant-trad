@@ -75,6 +75,19 @@ def test_report_contract_routes_expose_canonical_shapes(monkeypatch: pytest.Monk
     )
     monkeypatch.setattr(
         reports_controller,
+        "_get_run_research_summary",
+        lambda run_id: {
+            "schema_version": "run_research_summary.v1",
+            "run_id": run_id,
+            "symbols": ["BTC"],
+            "timeframe": "1h",
+            "metrics": {"net_pnl": 10.0, "closed_trades": 1},
+            "readiness": {"safe_to_compare": False},
+            "sections": [],
+        },
+    )
+    monkeypatch.setattr(
+        reports_controller,
         "_materialized_run_report",
         lambda run_id: {
             "contract_version": "run_report_v2",
@@ -179,6 +192,8 @@ def test_report_contract_routes_expose_canonical_shapes(monkeypatch: pytest.Monk
     assert client.get("/api/reports/run-1/readiness").json()["schema_version"] == "report_readiness.v1"
     assert client.get("/api/reports/run-1/summary").json()["schema_version"] == "run_report_summary.v1"
     assert client.get("/api/reports/run-1/summary").json()["portfolio_metrics"]["sharpe"] == 1.25
+    assert client.get("/api/reports/run-1/research-summary").json()["schema_version"] == "run_research_summary.v1"
+    assert client.get("/api/reports/run-1/research-summary").json()["metrics"]["net_pnl"] == 10.0
     report_v2 = client.get("/api/reports/run-1/run-report").json()
     assert report_v2["contract_version"] == "run_report_v2"
     assert report_v2["performance"]["sharpe"]["valid"] is True
@@ -253,6 +268,13 @@ def test_materialized_report_compare_route_exposes_run_comparison_dto(monkeypatc
     assert payload["contract_version"] == "run_report_comparison_v1"
     assert payload["comparison_verdict"] == "semantic_match"
     assert payload["trust_comparison"]["semantic_fingerprint_match"] is True
+
+    summary_response = client.get("/api/reports/compare/summary?left_run_id=run-1&right_run_id=run-2")
+    assert summary_response.status_code == 200
+    summary = summary_response.json()
+    assert summary["schema_version"] == "run_report_comparison_summary.v1"
+    assert summary["comparison_verdict"] == "semantic_match"
+    assert summary["performance_delta"]["net_pnl"]["delta"] == 0
 
 
 def test_run_report_route_blocks_active_runs(monkeypatch: pytest.MonkeyPatch) -> None:

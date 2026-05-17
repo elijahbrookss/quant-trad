@@ -56,6 +56,13 @@ lifecycle equality, wallet/order checks, runtime ordering, and first semantic
 divergence. The comparison API must not generate golden artifacts unless a
 future explicit build path is requested.
 
+CLI/agent consumers use compact projections for orchestration:
+`run_research_summary.v1` for single-run summary, an explicit
+`run-report/build` route for materialization status without returning the full
+artifact, and `run_report_comparison_summary.v1` for pairwise comparison. These
+projections are derived from the same dataset and materialized report truth;
+they are not alternate report semantics.
+
 Reporting does not mutate strategy, execution, fee, wallet, trade, or BotLens semantics.
 
 ## Diagram Walkthrough
@@ -80,7 +87,7 @@ The dataset is rebuildable from durable DB/read-model truth:
 
 Run configuration metadata preserves strategy variant provenance when available.
 `run_strategy_snapshot` records the exact effective strategy configuration at run
-start, including `effective_params`, `variant_overrides`, `base_params`, and
+start, including `effective_params`, `output_filters`, `base_params`, and
 `param_source_map`. Reports expose this as provenance only. Reporting must not
 re-resolve variants from mutable strategy storage or let provenance enrichment
 change evaluator or execution behavior.
@@ -91,6 +98,10 @@ captures the current signal, context, and metric outputs from the same indicator
 frame; `referenced_outputs` captures the narrower rule lineage. Reporting
 extracts indicator snapshots and market-state rows from those durable snapshots
 and must not replay hidden indicator state or read mutable engine internals.
+When a strategy variant materializes output filters into rule guards, selected
+decision artifacts may also expose compact `output_filter_trace` records. These
+records are research provenance for the already-evaluated guard results; they
+must not be used to re-evaluate or override strategy decisions inside reporting.
 
 Computed portfolio metrics are part of reporting truth. Standard values such as
 Sharpe, Sortino, Calmar, annualized volatility, drawdown duration, and exposure
@@ -188,6 +199,8 @@ observer facts.
 
 - report API payloads,
 - compare payloads,
+- compact research summary and comparison-summary payloads for CLI/agent
+  workflows,
 - downloadable/export bundles,
 - normalized diagnostics,
 - readiness and caveat explanations.

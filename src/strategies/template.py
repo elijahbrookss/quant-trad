@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal, Mapping
 
 
@@ -55,7 +55,6 @@ class StrategyTemplate:
     timeframe: str
     rules: Mapping[str, Any]
     param_specs: tuple[ParamSpec, ...]
-    variants: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not str(self.template_id or "").strip():
@@ -81,23 +80,6 @@ class StrategyTemplate:
 
         applied_overrides = dict(overrides) if overrides else {}
         return dict(self.rules), self._resolve_params(applied_overrides)
-
-    def instantiate_variant(
-        self,
-        name: str,
-        overrides: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        if name not in self.variants:
-            raise ValueError(f"Unknown strategy variant: {name!r}")
-        variant_overrides = self.variants[name]
-        if not isinstance(variant_overrides, Mapping):
-            raise ValueError(f"Strategy variant {name!r} must define a parameter mapping")
-        merged_overrides = dict(variant_overrides)
-        if overrides:
-            merged_overrides.update(dict(overrides))
-        if not self.param_specs and not merged_overrides:
-            return dict(self.rules), {}
-        return dict(self.rules), self._resolve_params(merged_overrides)
 
     def _resolve_params(self, overrides: Mapping[str, Any]) -> dict[str, float | int | str]:
         specs_by_key = {spec.key: spec for spec in self.param_specs}

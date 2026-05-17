@@ -201,8 +201,7 @@ class StrategyVariantRequest(BaseModel):
 
     name: str
     description: Optional[str] = None
-    param_overrides: Dict[str, Any] = Field(default_factory=dict)
-    atm_template_id: Optional[str] = None
+    output_filters: List[Dict[str, Any]] = Field(default_factory=list)
     is_default: bool = False
 
 
@@ -211,8 +210,7 @@ class StrategyVariantUpdateRequest(BaseModel):
 
     name: Optional[str] = None
     description: Optional[str] = None
-    param_overrides: Optional[Dict[str, Any]] = None
-    atm_template_id: Optional[str] = None
+    output_filters: Optional[List[Dict[str, Any]]] = None
     is_default: Optional[bool] = None
 
 
@@ -223,8 +221,7 @@ class StrategyVariantOut(BaseModel):
     strategy_id: str
     name: str
     description: Optional[str] = None
-    param_overrides: Dict[str, Any] = Field(default_factory=dict)
-    atm_template_id: Optional[str] = None
+    output_filters: List[Dict[str, Any]] = Field(default_factory=list)
     is_default: bool
     created_at: str
     updated_at: str
@@ -250,6 +247,7 @@ class StrategyVariantSelectionRequest(BaseModel):
     """Payload for selecting the effective strategy variant."""
 
     variant_id: Optional[str] = None
+    variant_name: Optional[str] = None
 
 
 class StrategyPreviewRequest(StrategyVariantSelectionRequest):
@@ -418,7 +416,7 @@ async def delete_symbol_preset(preset_id: str) -> Response:
 
 @router.get("/{strategy_id}/variants", response_model=List[StrategyVariantOut])
 async def list_strategy_variants(strategy_id: str) -> List[Dict[str, Any]]:
-    """Return saved parameter variants for a strategy."""
+    """Return saved output-filter variants for a strategy."""
 
     try:
         return strategy_service.list_strategy_variants(strategy_id)
@@ -428,15 +426,14 @@ async def list_strategy_variants(strategy_id: str) -> List[Dict[str, Any]]:
 
 @router.post("/{strategy_id}/variants", response_model=StrategyVariantOut, status_code=201)
 async def create_strategy_variant(strategy_id: str, body: StrategyVariantRequest) -> Dict[str, Any]:
-    """Create a saved parameter variant for a strategy."""
+    """Create a saved output-filter variant for a strategy."""
 
     try:
         return strategy_service.create_strategy_variant(
             strategy_id,
             name=body.name,
             description=body.description,
-            param_overrides=body.param_overrides,
-            atm_template_id=body.atm_template_id,
+            output_filters=body.output_filters,
             is_default=body.is_default,
         )
     except KeyError as exc:
@@ -645,6 +642,7 @@ async def compile_strategy_contract(
         return strategy_service.compile_strategy_contract(
             strategy_id,
             variant_id=body.variant_id if body is not None else None,
+            variant_name=body.variant_name if body is not None else None,
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -665,6 +663,7 @@ async def run_preview(strategy_id: str, body: StrategyPreviewRequest) -> Dict[st
             interval=body.interval,
             instrument_ids=body.instrument_ids,
             variant_id=body.variant_id,
+            variant_name=body.variant_name,
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc

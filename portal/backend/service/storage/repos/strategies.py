@@ -30,18 +30,20 @@ def _normalize_variant_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     strategy_id = str(payload.get("strategy_id") or "").strip()
     name = str(payload.get("name") or "").strip()
+    output_filters = payload.get("output_filters") or []
     if not strategy_id:
         raise ValueError("strategy_id is required for strategy variants")
     if not name:
         raise ValueError("name is required for strategy variants")
+    if not isinstance(output_filters, list):
+        raise ValueError("output_filters must be a list")
     description = payload.get("description")
     return {
         "id": str(payload.get("id") or uuid.uuid4()),
         "strategy_id": strategy_id,
         "name": name,
         "description": str(description).strip() if description else None,
-        "param_overrides": dict(_json_safe(payload.get("param_overrides") or {})),
-        "atm_template_id": str(payload.get("atm_template_id") or "").strip() or None,
+        "output_filters": list(_json_safe(output_filters)),
         "is_default": bool(payload.get("is_default", False)),
     }
 
@@ -132,8 +134,7 @@ def ensure_default_strategy_variant(strategy_id: str) -> Dict[str, Any]:
             "strategy_id": strategy_id,
             "name": "default",
             "description": None,
-            "param_overrides": {},
-            "atm_template_id": None,
+            "output_filters": [],
             "is_default": True,
             "created_at": now,
             "updated_at": now,
@@ -159,8 +160,7 @@ def ensure_default_strategy_variant(strategy_id: str) -> Dict[str, Any]:
                 strategy_id=strategy_id,
                 name="default",
                 description=None,
-                param_overrides={},
-                atm_template_id=None,
+                output_filters=[],
                 is_default=True,
                 created_at=now,
                 updated_at=now,
@@ -201,8 +201,7 @@ def upsert_strategy_variant(payload: Dict[str, Any]) -> Dict[str, Any]:
         record.strategy_id = normalized["strategy_id"]
         record.name = normalized["name"]
         record.description = normalized["description"]
-        record.param_overrides = normalized["param_overrides"]
-        record.atm_template_id = normalized["atm_template_id"]
+        record.output_filters = normalized["output_filters"]
         record.is_default = normalized["is_default"]
         record.updated_at = now
         if record.created_at is None:

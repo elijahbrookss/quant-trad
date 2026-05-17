@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
@@ -17,6 +18,32 @@ from tests.helpers.builders.report_storage_builder import (
 
 def _iso(ts: str) -> str:
     return ts
+
+
+def test_bot_run_config_snapshot_is_json_safe():
+    run_id = f"run-{uuid.uuid4().hex[:8]}"
+    bot_id = f"bot-{uuid.uuid4().hex[:6]}"
+    ensure_report_bot(bot_id, name="Config Snapshot Bot", strategy_id="strategy-1")
+
+    storage.upsert_bot_run(
+        build_run_payload(
+            run_id=run_id,
+            bot_id=bot_id,
+            bot_name="Config Snapshot Bot",
+            strategy_id="strategy-1",
+            strategy_name="Momentum",
+            symbol="BTCUSD",
+            config_snapshot={
+                "started_at": datetime(2026, 5, 17, 7, 45, tzinfo=timezone.utc),
+                "bot": {"updated_at": datetime(2026, 5, 17, 7, 46)},
+            },
+        )
+    )
+
+    persisted = storage.get_bot_run(run_id)
+    assert persisted is not None
+    assert persisted["config_snapshot"]["started_at"] == "2026-05-17T07:45:00Z"
+    assert persisted["config_snapshot"]["bot"]["updated_at"] == "2026-05-17T07:46:00Z"
 
 
 def test_reports_list_and_fetch():

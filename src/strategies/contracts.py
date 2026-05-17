@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Tuple
+from typing import Any, Literal, Mapping, Tuple
 
 
 Intent = Literal["enter_long", "enter_short"]
@@ -34,6 +34,7 @@ class ContextMatchSpec:
     output_key: str
     field: str
     value: tuple[str, ...]
+    source: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class MetricMatchSpec:
     field: str
     operator: str
     value: float
+    source: Mapping[str, Any] | None = None
 
 
 LeafGuardSpec = ContextMatchSpec | MetricMatchSpec

@@ -63,8 +63,14 @@ class _FakeStorage:
     def get_latest_bot_runtime_run_id(self, bot_id: str):
         return "run-1" if str(bot_id) == "bot-1" else None
 
+    def get_bot_run_lifecycle(self, run_id: str):
+        return dict(self.lifecycle) if str(run_id) == "run-1" else None
+
     def get_bot_run(self, run_id: str):
         return dict(self.run) if str(run_id) == "run-1" else None
+
+    def get_report_materialization_status(self, run_id: str):
+        return {"run_id": run_id, "status": "not_started", "can_view": False}
 
     def list_bot_runs(self, bot_id: str):
         return [dict(self.run)] if str(bot_id) == "bot-1" else []

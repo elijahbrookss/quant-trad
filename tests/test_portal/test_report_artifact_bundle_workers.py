@@ -86,13 +86,24 @@ def _series(symbol: str, strategy_id: str, indicator_id: str):
         meta={
             "indicator_links": [{"indicator_id": indicator_id}],
             "variant_id": "variant-1",
-            "variant_name": "aggressive",
-            "resolved_params": {"conviction_min": 0.55},
-            "param_source_map": {"conviction_min": "variant_overrides"},
+            "variant_name": "expanding-only",
+            "resolved_params": {},
+            "param_source_map": {},
+            "effective_strategy_config": {
+                "output_filters": [
+                    {
+                        "indicator_id": indicator_id,
+                        "output_name": "market_regime",
+                        "field": "expansion_state",
+                        "operator": "equals",
+                        "value": "expanding",
+                    }
+                ]
+            },
             "run_strategy_snapshot": {
                 "strategy_id": strategy_id,
                 "variant_id": "variant-1",
-                "effective_params": {"conviction_min": 0.55},
+                "effective_params": {},
             },
             "atm_template_id": "atm-1",
             "atm_template": {"name": "ATM 1"},
@@ -210,7 +221,8 @@ def test_finalize_run_artifact_bundle_from_workers_aggregates_worker_outputs(mon
     config_snapshot = storage.upserts[0]["config_snapshot"]
     strategy_snapshot = config_snapshot["strategies"][0]
     assert strategy_snapshot["variant_id"] == "variant-1"
-    assert strategy_snapshot["resolved_params"] == {"conviction_min": 0.55}
-    assert strategy_snapshot["run_strategy_snapshot"]["effective_params"] == {"conviction_min": 0.55}
+    assert strategy_snapshot["resolved_params"] == {}
+    assert strategy_snapshot["output_filters"][0]["field"] == "expansion_state"
+    assert strategy_snapshot["run_strategy_snapshot"]["effective_params"] == {}
     assert strategy_snapshot["rules"] == {"rule-1": {"id": "rule-1", "intent": "enter_long"}}
     assert strategy_snapshot["atm_template"] == {"name": "ATM 1"}

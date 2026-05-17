@@ -67,6 +67,123 @@ def compare_materialized_run_reports(
     return _ready_comparison(left, right, left_status, right_status, golden_evidence=golden_evidence)
 
 
+def summarize_run_report_comparison(comparison: RunComparisonDTO) -> Dict[str, Any]:
+    """Return the compact comparison shape used by CLI/agent workflows."""
+
+    return {
+        "schema_version": "run_report_comparison_summary.v1",
+        "left_run_id": comparison.left_run_id,
+        "right_run_id": comparison.right_run_id,
+        "comparison_status": comparison.comparison_status,
+        "comparison_verdict": comparison.comparison_verdict,
+        "can_compare": comparison.can_compare,
+        "blocked_reason": comparison.blocked_reason,
+        "trust": _model_subset(
+            comparison.trust_comparison,
+            (
+                "semantic_fingerprint_match",
+                "operational_fingerprint_match",
+                "data_snapshot_hash_match",
+                "config_hash_match",
+                "strategy_hash_match",
+                "first_blocker_reason",
+            ),
+        ),
+        "performance_delta": _model_subset(
+            comparison.performance_delta,
+            (
+                "net_pnl",
+                "total_return_pct",
+                "max_drawdown",
+                "max_drawdown_pct",
+                "profit_factor",
+                "expectancy",
+                "win_rate",
+                "trade_count",
+                "fees",
+                "exposure_pct",
+                "time_in_market_pct",
+            ),
+        ),
+        "behavior_delta": _model_subset(
+            comparison.behavior_delta,
+            (
+                "decision_count_delta",
+                "accepted_delta",
+                "rejected_delta",
+                "rejection_reason_deltas",
+                "action_distribution_deltas",
+                "entry_count_delta",
+                "exit_count_delta",
+                "average_holding_duration_delta",
+                "trade_lifecycle_equal",
+                "verdict_changes",
+                "golden_artifact_status",
+            ),
+        ),
+        "wallet": _model_subset(
+            comparison.wallet_comparison,
+            (
+                "wallet_trace_complete_left",
+                "wallet_trace_complete_right",
+                "missing_wallet_trace_count_left",
+                "missing_wallet_trace_count_right",
+                "wallet_projection_status_left",
+                "wallet_projection_status_right",
+                "wallet_projection_equal",
+                "final_wallet_value_delta",
+                "margin_warnings_delta",
+            ),
+        ),
+        "symbols": [
+            _model_subset(
+                row,
+                (
+                    "symbol",
+                    "left_trade_count",
+                    "right_trade_count",
+                    "trade_count_delta",
+                    "net_pnl_delta",
+                    "fees_delta",
+                    "win_rate_delta",
+                    "contribution_delta",
+                    "decision_delta",
+                    "accepted_delta",
+                    "rejected_delta",
+                    "missing_on_left",
+                    "missing_on_right",
+                ),
+            )
+            for row in comparison.symbol_deltas
+        ],
+        "first_divergence": _model_subset(
+            comparison.first_divergence,
+            (
+                "present",
+                "divergence_type",
+                "symbol",
+                "timeframe",
+                "bar_time",
+                "decision_id",
+                "trade_id",
+                "field_path",
+                "explanation",
+                "source",
+            ),
+        ),
+    }
+
+
+def _model_subset(value: Any, keys: Iterable[str]) -> Dict[str, Any]:
+    if hasattr(value, "model_dump"):
+        payload = value.model_dump(mode="json")
+    elif isinstance(value, Mapping):
+        payload = dict(value)
+    else:
+        payload = {}
+    return {key: payload.get(key) for key in keys if payload.get(key) is not None}
+
+
 def _status_payload(run_id: str) -> Dict[str, Any]:
     try:
         return report_materialization_status(run_id, require_terminal=True)

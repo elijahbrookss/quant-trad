@@ -21,10 +21,6 @@ const parseEnvText = (text) => {
 const normalizeVariantPayload = (variant, strategy) => ({
   strategy_variant_id: String(variant?.id || '').trim(),
   strategy_variant_name: String(variant?.name || '').trim(),
-  resolved_params:
-    variant?.param_overrides && typeof variant.param_overrides === 'object'
-      ? { ...variant.param_overrides }
-      : {},
   risk_config:
     strategy?.risk_config && typeof strategy.risk_config === 'object'
       ? { ...strategy.risk_config }
@@ -105,7 +101,6 @@ export function useBotCreateController({
         ...(variant ? normalizeVariantPayload(variant, strategy) : {
           strategy_variant_id: '',
           strategy_variant_name: '',
-          resolved_params: {},
           risk_config: strategy?.risk_config && typeof strategy.risk_config === 'object' ? { ...strategy.risk_config } : {},
         }),
       })
@@ -150,10 +145,9 @@ export function useBotCreateController({
         ...prev,
         ...(variant
           ? normalizeVariantPayload(variant, strategy)
-          : {
+            : {
               strategy_variant_id: '',
               strategy_variant_name: '',
-              resolved_params: {},
               risk_config: strategy?.risk_config && typeof strategy.risk_config === 'object' ? { ...strategy.risk_config } : {},
             }),
       }))

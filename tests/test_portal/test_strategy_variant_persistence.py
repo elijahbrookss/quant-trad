@@ -84,7 +84,7 @@ def test_default_variant_creation_for_strategy(monkeypatch) -> None:
 
     assert created["strategy_id"] == "strategy-1"
     assert created["name"] == "default"
-    assert created["param_overrides"] == {}
+    assert created["output_filters"] == []
     assert created["is_default"] is True
     assert [item["name"] for item in listed] == ["default"]
 
@@ -98,26 +98,42 @@ def test_create_list_update_delete_variant_behavior(monkeypatch) -> None:
     created = strategy_repos.upsert_strategy_variant(
         {
             "strategy_id": "strategy-1",
-            "name": "aggressive",
-            "description": "Looser threshold",
-            "param_overrides": {"conviction_min": 0.5},
-            "atm_template_id": "atm-fast",
+            "name": "expanding-only",
+            "description": "Regime filter",
+            "output_filters": [
+                {
+                    "scope": {"intent": ["enter_long"]},
+                    "indicator_id": "regime-1",
+                    "output_name": "market_regime",
+                    "field": "expansion_state",
+                    "operator": "equals",
+                    "value": "expanding",
+                }
+            ],
             "is_default": False,
         }
     )
 
     listed = strategy_repos.list_strategy_variants("strategy-1")
-    assert [item["name"] for item in listed] == ["default", "aggressive"]
-    assert listed[1]["atm_template_id"] == "atm-fast"
+    assert [item["name"] for item in listed] == ["default", "expanding-only"]
+    assert listed[1]["output_filters"][0]["field"] == "expansion_state"
 
     updated = strategy_repos.upsert_strategy_variant(
         {
             "id": created["id"],
             "strategy_id": "strategy-1",
-            "name": "aggressive",
+            "name": "expanding-only",
             "description": "Updated description",
-            "param_overrides": {"conviction_min": 0.55},
-            "atm_template_id": "atm-slower",
+            "output_filters": [
+                {
+                    "scope": {"intent": ["enter_long", "enter_short"]},
+                    "indicator_id": "regime-1",
+                    "output_name": "market_regime",
+                    "field": "expansion_state",
+                    "operator": "equals",
+                    "value": "expanding",
+                }
+            ],
             "is_default": False,
         }
     )
@@ -125,8 +141,7 @@ def test_create_list_update_delete_variant_behavior(monkeypatch) -> None:
 
     assert updated["description"] == "Updated description"
     assert fetched is not None
-    assert fetched["param_overrides"] == {"conviction_min": 0.55}
-    assert fetched["atm_template_id"] == "atm-slower"
+    assert fetched["output_filters"][0]["scope"] == {"intent": ["enter_long", "enter_short"]}
 
     strategy_repos.delete_strategy_variant(created["id"])
 
