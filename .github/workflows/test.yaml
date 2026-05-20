@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [core, provider, web]
+        suite: [contracts, runtime-reporting]
 
     steps:
       - name: Checkout repository
@@ -28,5 +28,5 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run ${{ matrix.suite }} suite
+      - name: Run ${{ matrix.suite }} suites
         run: ./scripts/ci/run_test_suite.sh "${{ matrix.suite }}"

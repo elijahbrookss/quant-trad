@@ -3,7 +3,7 @@ set -euo pipefail
 
 SUITE="${1:-}"
 if [[ -z "$SUITE" ]]; then
-  echo "usage: $0 <core|provider|web|integration>" >&2
+  echo "usage: $0 <contracts|runtime-reporting|backend|core|provider|runtime|botlens|web|cli|reports|docs|integration>" >&2
   exit 2
 fi
 
@@ -13,7 +13,7 @@ COMPOSE_FILE="docker/docker-compose.test.yml"
 run_pytest_host() {
   local cmd="$1"
   python -m pip install --upgrade pip
-  eval "$cmd"
+  bash -lc "$cmd"
 }
 
 run_pytest_docker() {
@@ -23,14 +23,14 @@ run_pytest_docker() {
     exit 127
   fi
   docker compose -f "$COMPOSE_FILE" build test
-  docker compose -f "$COMPOSE_FILE" run --rm test bash -lc "
+  docker compose -f "$COMPOSE_FILE" run --rm test bash -lc '
     python -m pip install --upgrade pip &&
-    if [ ! -r '/app/scripts/wait-for-db.sh' ]; then
-      echo 'ci_runner_wait_script_missing_or_unreadable: path=/app/scripts/wait-for-db.sh' >&2
+    if [ ! -r "/app/scripts/wait-for-db.sh" ]; then
+      echo "ci_runner_wait_script_missing_or_unreadable: path=/app/scripts/wait-for-db.sh" >&2
       exit 1
     fi
-    bash /app/scripts/wait-for-db.sh ${cmd}
-  "
+    bash /app/scripts/wait-for-db.sh bash -lc "$1"
+  ' _ "$cmd"
 }
 
 run_suite() {
@@ -42,15 +42,49 @@ run_suite() {
   fi
 }
 
+profile_command() {
+  local profile_args
+  printf -v profile_args '%q ' "$@"
+  echo "for profile in ${profile_args}; do echo \"ci_profile_start profile=\${profile}\"; if [[ \"\${profile}\" == \"docs\" ]]; then python scripts/docs/build_architecture_index.py; fi; QT_CI_PROFILE=\"\${profile}\" pytest -q; done"
+}
+
+run_profiles() {
+  run_suite "$(profile_command "$@")"
+}
+
 case "$SUITE" in
+  contracts)
+    run_profiles core provider cli docs
+    ;;
+  runtime-reporting)
+    run_profiles runtime botlens web reports
+    ;;
+  backend)
+    run_profiles core provider runtime botlens web cli reports docs
+    ;;
   core)
-    run_suite "pytest -q tests/test_signals/test_signal_contract.py tests/test_signals/test_signal_generator_runtime_contract.py tests/test_portal/test_snapshot_signal_evaluator.py tests/smoke/test_import_boundaries.py"
+    run_profiles core
     ;;
   provider)
-    run_suite "pytest -q tests/test_data_providers/test_base_provider.py tests/test_data_providers/test_ccxt_provider.py tests/test_data_providers/test_interactive_brokers.py tests/contract/providers/test_provider_factory_routing.py tests/contract/providers/test_registry_provider_inference.py"
+    run_profiles provider
+    ;;
+  runtime)
+    run_profiles runtime
+    ;;
+  botlens)
+    run_profiles botlens
     ;;
   web)
-    run_suite "pytest -q tests/smoke/test_import_boundaries.py tests/test_portal/test_strategy_service.py"
+    run_profiles web
+    ;;
+  cli)
+    run_profiles cli
+    ;;
+  reports)
+    run_profiles reports
+    ;;
+  docs)
+    run_profiles docs
     ;;
   integration)
     run_suite "pytest -m 'not db' --ignore=tests/test_reports/test_report_exports.py --ignore=tests/test_reports/test_reports_endpoints.py --cov=src --cov-report=term --cov-report=xml"
