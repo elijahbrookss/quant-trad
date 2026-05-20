@@ -76,6 +76,51 @@ def test_runner_runtime_env_includes_backend_owned_run_id(monkeypatch):
     assert env["QT_SECURITY_PROVIDER_CREDENTIAL_KEY"] == "secret-key"
 
 
+def test_docker_runner_labels_spawned_bot_container(monkeypatch):
+    monkeypatch.setattr(
+        "portal.backend.service.bots.runner._SECURITY_SETTINGS",
+        type("Sec", (), {"provider_credential_key": "secret-key"})(),
+    )
+    monkeypatch.setattr(
+        DockerBotRunner,
+        "inspect_bot_container",
+        staticmethod(
+            lambda bot_id, project="quant-trad-bots": {
+                "status": "missing",
+                "running": False,
+            }
+        ),
+    )
+    monkeypatch.setattr(DockerBotRunner, "_resolve_runtime_network", lambda self: "quant-trad_quanttrad")
+    commands = []
+
+    def fake_run_docker(cmd):
+        commands.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="container-1\n", stderr="")
+
+    monkeypatch.setattr(DockerBotRunner, "_run_docker", staticmethod(fake_run_docker))
+
+    runner = DockerBotRunner(image="quanttrad-backend:dev", network="quant-trad_quanttrad")
+    container_id = runner.start_bot(
+        bot={"id": "bot-1", "snapshot_interval_ms": 250, "_runtime_request_id": "req-1"},
+        run_id="run-1",
+    )
+
+    assert container_id == "container-1"
+    command = commands[0]
+    labels = {
+        command[index + 1]
+        for index, token in enumerate(command)
+        if token == "--label"
+    }
+    assert "loki.job=quanttrad" in labels
+    assert "loki.service=bot-runtime" in labels
+    assert "quanttrad.runtime=bot" in labels
+    assert "quanttrad.bot_id=bot-1" in labels
+    assert "quanttrad.run_id=run-1" in labels
+    assert "quanttrad.request_id=req-1" in labels
+
+
 def test_project_bot_state_prefers_active_runtime_over_stale_startup_failed_lifecycle():
     run_snapshot = SimpleNamespace(
         seq=7,

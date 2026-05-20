@@ -12,6 +12,8 @@ from engines.bot_runtime.runtime.components.runtime_policy import ExecutionMode
 
 from .strategy_loader import StrategyLoader
 from .startup_validation import validate_wallet_config as normalize_wallet_config
+from .execution_behavior import execution_behavior_from_bot, normalize_execution_behavior
+from .market_data_stream_policy import normalize_market_data_stream_policy
 from ..market import instrument_service
 from ..storage.storage import (
     delete_bot,
@@ -81,12 +83,22 @@ class BotConfigService:
         bots = load_bots()
         for bot in bots:
             bot["instrument_type"] = self.instrument_policy_from_bot(bot)
+            bot["market_data_stream_policy"] = normalize_market_data_stream_policy(
+                bot.get("market_data_stream_policy")
+                if isinstance(bot.get("market_data_stream_policy"), Mapping)
+                else None
+            )
         return bots
 
     def get_bot(self, bot_id: str) -> Dict[str, object]:
         for bot in load_bots():
             if bot["id"] == bot_id:
                 bot["instrument_type"] = self.instrument_policy_from_bot(bot)
+                bot["market_data_stream_policy"] = normalize_market_data_stream_policy(
+                    bot.get("market_data_stream_policy")
+                    if isinstance(bot.get("market_data_stream_policy"), Mapping)
+                    else None
+                )
                 return bot
         raise KeyError(f"Bot {bot_id} was not found")
 
@@ -125,6 +137,13 @@ class BotConfigService:
         )
         risk_payload = dict(payload.get("risk") or {})
         risk_payload["execution_mode"] = execution_mode
+        execution_behavior = normalize_execution_behavior(payload.get("execution_behavior") or risk_payload.get("execution_behavior"))
+        risk_payload["execution_behavior"] = execution_behavior
+        market_data_stream_policy = normalize_market_data_stream_policy(
+            payload.get("market_data_stream_policy")
+            if isinstance(payload.get("market_data_stream_policy"), Mapping)
+            else None
+        )
 
         record: Dict[str, object] = {
             "id": bot_id,
@@ -142,12 +161,14 @@ class BotConfigService:
             "timeframe": None,
             "mode": (payload.get("mode") or "instant").lower(),
             "execution_mode": execution_mode,
+            "execution_behavior": execution_behavior,
             "run_type": run_type,
             "playback_speed": self.coerce_playback_speed(payload.get("playback_speed") or payload.get("fetch_seconds")),
             "backtest_start": self.coerce_isoformat(payload.get("backtest_start")),
             "backtest_end": self.coerce_isoformat(payload.get("backtest_end")),
             "risk": risk_payload,
             "wallet_config": wallet_config,
+            "market_data_stream_policy": market_data_stream_policy,
             "snapshot_interval_ms": int(payload.get("snapshot_interval_ms") or 0),
             "bot_env": self.validate_bot_env(payload.get("bot_env") if isinstance(payload.get("bot_env"), Mapping) else {}),
             "status": "idle",
@@ -198,6 +219,12 @@ class BotConfigService:
             risk = dict(record.get("risk") or {})
             risk["execution_mode"] = execution_mode
             record["risk"] = risk
+        if "execution_behavior" in payload:
+            execution_behavior = normalize_execution_behavior(payload.get("execution_behavior"))
+            record["execution_behavior"] = execution_behavior
+            risk = dict(record.get("risk") or {})
+            risk["execution_behavior"] = execution_behavior
+            record["risk"] = risk
         if "playback_speed" in payload and payload["playback_speed"] is not None:
             record["playback_speed"] = self.coerce_playback_speed(payload["playback_speed"])
         elif "fetch_seconds" in payload and payload["fetch_seconds"] is not None:
@@ -210,6 +237,12 @@ class BotConfigService:
             record["backtest_end"] = self.coerce_isoformat(payload.get("backtest_end"))
         if "wallet_config" in payload and payload["wallet_config"] is not None:
             record["wallet_config"] = self.validate_wallet_config(payload.get("wallet_config"))
+        if "market_data_stream_policy" in payload and payload["market_data_stream_policy"] is not None:
+            record["market_data_stream_policy"] = normalize_market_data_stream_policy(
+                payload.get("market_data_stream_policy")
+                if isinstance(payload.get("market_data_stream_policy"), Mapping)
+                else {}
+            )
         if "snapshot_interval_ms" in payload and payload["snapshot_interval_ms"] is not None:
             interval = int(payload["snapshot_interval_ms"])
             if interval <= 0:
@@ -248,6 +281,12 @@ class BotConfigService:
             else str(record.get("strategy_variant_id") or "").strip()
         ) or None
         record["resolved_params"] = effective_strategy_config.effective_params
+        record["execution_behavior"] = execution_behavior_from_bot(record)
+        record["market_data_stream_policy"] = normalize_market_data_stream_policy(
+            record.get("market_data_stream_policy")
+            if isinstance(record.get("market_data_stream_policy"), Mapping)
+            else None
+        )
         self.validate_backtest_window(record)
         upsert_bot(record)
         return record
@@ -353,6 +392,11 @@ class BotConfigService:
             "QT_BOT_RUNTIME_NETWORK",
             "QT_BOT_RUNTIME_TELEMETRY_WS_URL",
             "QT_BOT_RUNTIME_TELEMETRY_EVENT_POLL_MS",
+            "QT_BOT_RUNTIME_MARKET_DATA_RECONNECT_ENABLED",
+            "QT_BOT_RUNTIME_MARKET_DATA_INITIAL_BACKOFF_SECONDS",
+            "QT_BOT_RUNTIME_MARKET_DATA_MAX_BACKOFF_SECONDS",
+            "QT_BOT_RUNTIME_MARKET_DATA_CONTINUOUS_DISCONNECT_BUDGET_SECONDS",
+            "QT_BOT_RUNTIME_MARKET_DATA_HEARTBEAT_STALE_SECONDS",
             "QT_BOT_RUNTIME_MAX_SYMBOLS_PER_STRATEGY",
             "QT_BOT_RUNTIME_SYMBOL_PROCESS_MAX",
             "QT_BOT_RUNTIME_STATUS_HEARTBEAT_STALE_MS",
@@ -372,6 +416,11 @@ class BotConfigService:
             "QT_BOT_RUNTIME_WATCHDOG_HEARTBEAT_INTERVAL_SECONDS",
             "QT_BOT_RUNTIME_WATCHDOG_STALE_THRESHOLD_SECONDS",
             "QT_BOT_RUNTIME_WATCHDOG_MONITOR_INTERVAL_SECONDS",
+            "QT_BOT_RUNTIME_WATCHDOG_CLOCK_GAP_ENABLED",
+            "QT_BOT_RUNTIME_WATCHDOG_CLOCK_GAP_INTERVAL_SECONDS",
+            "QT_BOT_RUNTIME_WATCHDOG_CLOCK_GAP_THRESHOLD_SECONDS",
+            "QT_BOT_RUNTIME_WATCHDOG_DOCKER_LIFECYCLE_ENABLED",
+            "QT_BOT_RUNTIME_WATCHDOG_DOCKER_LIFECYCLE_RETRY_INTERVAL_SECONDS",
             "PG_DSN",
             "QT_SECURITY_PROVIDER_CREDENTIAL_KEY",
         ]
@@ -390,6 +439,7 @@ class BotConfigService:
         return {
             "bot_defaults": {
                 "snapshot_interval_ms": _SETTINGS.bot_runtime.snapshot.default_interval_ms,
+                "market_data_stream_policy": normalize_market_data_stream_policy(None),
                 "env_templates": [
                     {"key": "SNAPSHOT_INTERVAL_MS", "default": _SETTINGS.bot_runtime.snapshot.default_interval_ms},
                     {

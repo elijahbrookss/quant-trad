@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from types import SimpleNamespace
@@ -160,6 +161,117 @@ def test_handle_worker_terminal_event_records_explicit_terminal_statuses() -> No
     assert ctx.series_states["BTC"]["status"] == "completed"
 
 
+def test_handle_worker_terminal_event_records_paper_market_stream_summary() -> None:
+    ctx = runtime_mod.ContainerStartupContext(
+        bot_id="bot-1",
+        run_id="run-1",
+        bot={},
+        runtime_bot_config={},
+        strategy_id="strategy-1",
+        symbols=["BTC"],
+        symbol_shards=[["BTC"]],
+        wallet_config={},
+        manager=MagicMock(),
+        shared_wallet_proxy={},
+        worker_symbols={"worker-1": ["BTC"]},
+    )
+
+    runtime_mod._handle_worker_terminal_event(
+        ctx,
+        {
+            "worker_id": "worker-1",
+            "symbols": ["BTC"],
+            "status": "completed",
+            "event_time": "2026-01-01T00:00:00Z",
+            "paper_market_stream": {
+                "event_counts": {"market_candle_update": 101},
+                "store": {"closed_candle_count": 0},
+                "aggregators": {
+                    "BTC": {
+                        "target_timeframe": "1h",
+                        "ignored_snapshot_count": 100,
+                        "dropped_incomplete_target_count": 0,
+                    }
+                },
+            },
+        },
+    )
+
+    assert ctx.paper_market_streams["worker-1"]["symbols"] == ["BTC"]
+    assert ctx.paper_market_streams["worker-1"]["event_time"] == "2026-01-01T00:00:00Z"
+    summary = runtime_mod._paper_market_stream_run_summary(ctx)
+    assert summary["schema_version"] == "paper_market_stream_summary.v1"
+    assert summary["worker_count"] == 1
+    assert summary["totals"]["event_counts"]["market_candle_update"] == 101
+    assert summary["totals"]["store"]["closed_candle_count"] == 0
+    assert summary["totals"]["aggregators"]["ignored_snapshot_count"] == 100
+
+
+def test_persist_paper_market_stream_run_summary_merges_existing_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        runtime_mod,
+        "get_bot_run",
+        lambda _run_id: {"summary": {"existing_metric": 7}, "status": "completed"},
+    )
+    monkeypatch.setattr(runtime_mod, "upsert_bot_run", lambda payload: persisted.append(dict(payload)) or dict(payload))
+
+    ctx = runtime_mod.ContainerStartupContext(
+        bot_id="bot-1",
+        run_id="run-1",
+        bot={},
+        runtime_bot_config={},
+        strategy_id="strategy-1",
+        symbols=["BTC"],
+        symbol_shards=[["BTC"]],
+        wallet_config={},
+        manager=MagicMock(),
+        shared_wallet_proxy={},
+        worker_symbols={"worker-1": ["BTC"]},
+        terminal_status_value="completed",
+        paper_market_streams={
+            "worker-1": {
+                "worker_id": "worker-1",
+                "symbols": ["BTC"],
+                "event_time": "2026-01-01T00:00:00Z",
+                "snapshot": {
+                    "event_counts": {"provider_connected": 1, "market_ticker": 2},
+                    "store": {
+                        "closed_candle_count": 1,
+                        "duplicate_count": 0,
+                        "conflicting_duplicate_count": 0,
+                        "failure_message": None,
+                    },
+                    "aggregators": {
+                        "BTC": {
+                            "ignored_snapshot_count": 100,
+                            "dropped_incomplete_target_count": 0,
+                            "open_source_count": 1,
+                            "open_target_count": 0,
+                        }
+                    },
+                },
+            }
+        },
+    )
+
+    runtime_mod._persist_paper_market_stream_run_summary(ctx)
+
+    assert len(persisted) == 1
+    assert persisted[0]["run_id"] == "run-1"
+    assert persisted[0]["status"] == "completed"
+    summary = persisted[0]["summary"]
+    assert summary["existing_metric"] == 7
+    assert summary["paper_market_stream"]["totals"]["event_counts"] == {
+        "market_ticker": 2,
+        "provider_connected": 1,
+    }
+    assert summary["paper_market_stream"]["totals"]["store"]["closed_candle_count"] == 1
+
+
 def test_series_worker_reports_structured_startup_error_before_process_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -279,6 +391,12 @@ class _FakeSyncWebSocket:
 
     def close(self) -> None:
         self.close_calls += 1
+
+    def __enter__(self) -> "_FakeSyncWebSocket":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
 
 class _ProxySeqCounter:
@@ -436,6 +554,30 @@ def test_telemetry_emitter_reuses_single_websocket_for_multiple_messages(monkeyp
     finally:
         emitter.close()
 
+    assert connections[0].close_calls == 1
+
+
+def test_ephemeral_telemetry_uses_sync_transport_inside_running_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    connections: list[_FakeSyncWebSocket] = []
+
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeSyncWebSocket:
+        assert open_timeout == 2
+        assert close_timeout == 1
+        ws = _FakeSyncWebSocket()
+        connections.append(ws)
+        return ws
+
+    monkeypatch.setattr(telemetry_mod, "sync_connect", _connect)
+
+    async def _send_inside_loop() -> bool:
+        return telemetry_mod.emit_telemetry_ephemeral_message(
+            "ws://example.test/telemetry",
+            json.dumps({"kind": "botlens_lifecycle_event", "run_id": "run-1"}),
+        )
+
+    assert asyncio.run(_send_inside_loop()) is True
+    assert len(connections) == 1
+    assert json.loads(connections[0].sent[0])["run_id"] == "run-1"
     assert connections[0].close_calls == 1
 
 

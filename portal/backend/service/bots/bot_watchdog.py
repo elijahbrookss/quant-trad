@@ -37,18 +37,21 @@ from __future__ import annotations
 import logging
 import socket
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Set
 
 from core.settings import get_settings
 from ..storage.storage import (
     clear_bot_runner,
     find_orphaned_bots,
+    get_bot_run_lease,
     load_bots,
     mark_bot_crashed,
+    run_lease_is_active,
     update_bot_heartbeat,
 )
 from .runner import DockerBotRunner
+from .runner_observability import latest_docker_lifecycle_event_for_bot, latest_runner_clock_gap
 
 logger = logging.getLogger(__name__)
 
@@ -75,11 +78,15 @@ def _parse_bot_timestamp(value: object) -> Optional[datetime]:
     return parsed
 
 
+def _utcnow_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 def _startup_launch_grace_active(bot: Dict[str, object]) -> bool:
     started_at = _active_startup_started_at(bot)
     if started_at is None:
         return False
-    return datetime.utcnow() - started_at < timedelta(seconds=STARTUP_CONTAINER_GRACE_SECONDS)
+    return _utcnow_naive() - started_at < timedelta(seconds=STARTUP_CONTAINER_GRACE_SECONDS)
 
 
 def _active_startup_started_at(bot: Mapping[str, Any]) -> Optional[datetime]:
@@ -106,6 +113,78 @@ def _active_startup_run_id(bot: Mapping[str, Any]) -> Optional[str]:
             return run_id
     run_id = str(bot.get("run_id") or bot.get("last_run_id") or "").strip()
     return run_id or None
+
+
+def _utc_iso(value: datetime) -> str:
+    return value.isoformat() + "Z"
+
+
+def _stale_heartbeat_diagnostics(bot: Mapping[str, Any], *, detected_runner_id: str) -> Dict[str, Any]:
+    bot_id = str(bot.get("id") or "").strip()
+    previous_runner = str(bot.get("runner_id") or "").strip() or None
+    heartbeat_at = _parse_bot_timestamp(bot.get("heartbeat_at"))
+    detected_at = _utcnow_naive()
+    max_recent_age = max(float(STALE_THRESHOLD_SECONDS) * 10.0, 900.0)
+    diagnostics: Dict[str, Any] = {
+        "detected_at": _utc_iso(detected_at),
+        "detected_runner_id": str(detected_runner_id or "").strip() or None,
+        "previous_runner": previous_runner,
+        "heartbeat_at": _utc_iso(heartbeat_at) if heartbeat_at is not None else None,
+        "heartbeat_missing": heartbeat_at is None,
+        "stale_threshold_seconds": float(STALE_THRESHOLD_SECONDS),
+    }
+    if bot_id:
+        diagnostics["bot_id"] = bot_id
+    run_id = _active_startup_run_id(bot)
+    if run_id:
+        diagnostics["run_id"] = run_id
+    if heartbeat_at is not None:
+        diagnostics["stale_age_seconds"] = round(max((detected_at - heartbeat_at).total_seconds(), 0.0), 3)
+    clock_gap = latest_runner_clock_gap(previous_runner, max_age_seconds=max_recent_age)
+    if clock_gap is None:
+        clock_gap = latest_runner_clock_gap(detected_runner_id, max_age_seconds=max_recent_age)
+    if clock_gap is not None:
+        diagnostics["runner_clock_gap"] = clock_gap
+    docker_event = latest_docker_lifecycle_event_for_bot(bot_id, max_age_seconds=max_recent_age)
+    if docker_event is not None:
+        diagnostics["docker_lifecycle"] = docker_event
+    if run_id := diagnostics.get("run_id"):
+        lease = get_bot_run_lease(str(run_id))
+        if lease is not None:
+            diagnostics["run_lease"] = lease
+    return diagnostics
+
+
+def _container_not_running_diagnostics(
+    bot: Mapping[str, Any],
+    *,
+    container: Mapping[str, Any],
+    detected_runner_id: str,
+) -> Dict[str, Any]:
+    bot_id = str(bot.get("id") or "").strip()
+    max_recent_age = max(float(STALE_THRESHOLD_SECONDS) * 10.0, 900.0)
+    diagnostics: Dict[str, Any] = {
+        "detected_at": _utc_iso(_utcnow_naive()),
+        "detected_runner_id": str(detected_runner_id or "").strip() or None,
+        "bot_id": bot_id or None,
+        "run_id": _active_startup_run_id(bot),
+        "container_name": str(container.get("name") or "").strip() or None,
+        "container_status": str(container.get("status") or "").strip() or None,
+        "container_running": bool(container.get("running")),
+        "container_exit_code": container.get("exit_code"),
+        "container_oom_killed": bool(container.get("oom_killed")),
+        "container_error": str(container.get("error") or "").strip() or None,
+        "container_run_id": str(container.get("runtime_run_id") or "").strip() or None,
+    }
+    docker_event = latest_docker_lifecycle_event_for_bot(bot_id, max_age_seconds=max_recent_age)
+    if docker_event is not None:
+        diagnostics["docker_lifecycle"] = docker_event
+    run_id = str(diagnostics.get("run_id") or "").strip()
+    if run_id:
+        lease = get_bot_run_lease(run_id)
+        if lease is not None:
+            diagnostics["run_lease"] = lease
+    return diagnostics
 
 
 def _has_active_startup_artifact(bot: Mapping[str, Any]) -> bool:
@@ -304,13 +383,35 @@ class BotWatchdog:
             bot_id = bot.get("id")
             previous_runner = bot.get("runner_id", "unknown")
             if bot_id:
-                if mark_bot_crashed(bot_id, reason=f"stale_heartbeat:prev={previous_runner}"):
+                diagnostics = _stale_heartbeat_diagnostics(bot, detected_runner_id=self._runner_id)
+                run_id = str(diagnostics.get("run_id") or "").strip()
+                lease = get_bot_run_lease(run_id) if run_id else None
+                if run_lease_is_active(lease):
+                    logger.info(
+                        "bot_watchdog_stale_heartbeat_skipped_fresh_run_lease | bot_id=%s | run_id=%s | previous_runner=%s | lease_runner_id=%s | lease_expires_at=%s",
+                        bot_id,
+                        run_id,
+                        previous_runner,
+                        (lease or {}).get("runner_id"),
+                        (lease or {}).get("expires_at"),
+                    )
+                    continue
+                if mark_bot_crashed(
+                    bot_id,
+                    reason=f"stale_heartbeat:prev={previous_runner}",
+                    diagnostics=diagnostics,
+                ):
                     crashed_ids.append(bot_id)
+                    clock_gap = diagnostics.get("runner_clock_gap")
+                    docker_lifecycle = diagnostics.get("docker_lifecycle")
                     logger.warning(
-                        "bot_watchdog_stale_heartbeat_detected | bot_id=%s | previous_runner=%s | heartbeat_at=%s",
+                        "bot_watchdog_stale_heartbeat_detected | bot_id=%s | previous_runner=%s | heartbeat_at=%s | stale_age_seconds=%s | runner_clock_gap_seconds=%s | docker_action=%s",
                         bot_id,
                         previous_runner,
                         bot.get("heartbeat_at"),
+                        diagnostics.get("stale_age_seconds"),
+                        clock_gap.get("gap_seconds") if isinstance(clock_gap, Mapping) else None,
+                        docker_lifecycle.get("action") if isinstance(docker_lifecycle, Mapping) else None,
                     )
                     if self._on_orphan_detected:
                         try:
@@ -402,14 +503,26 @@ class BotWatchdog:
                 )
                 continue
             container_name = str(container.get("name") or "").strip()
-            if mark_bot_crashed(bot_id, reason=f"container_not_running:{container_name}"):
+            diagnostics = _container_not_running_diagnostics(
+                bot,
+                container=container,
+                detected_runner_id=self._runner_id,
+            )
+            if mark_bot_crashed(
+                bot_id,
+                reason=f"container_not_running:{container_name}",
+                diagnostics=diagnostics,
+            ):
                 failed.append(bot_id)
+                docker_lifecycle = diagnostics.get("docker_lifecycle")
                 logger.error(
-                    "bot_watchdog_container_missing | bot_id=%s | container_name=%s | container_status=%s | error=%s",
+                    "bot_watchdog_container_missing | bot_id=%s | container_name=%s | container_status=%s | error=%s | docker_action=%s | docker_exit_code=%s",
                     bot_id,
                     container_name,
                     container.get("status"),
                     container.get("error"),
+                    docker_lifecycle.get("action") if isinstance(docker_lifecycle, Mapping) else None,
+                    docker_lifecycle.get("exit_code") if isinstance(docker_lifecycle, Mapping) else None,
                 )
                 if self._on_orphan_detected:
                     try:

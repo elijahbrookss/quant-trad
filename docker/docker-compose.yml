@@ -164,6 +164,21 @@ services:
     networks:
       - quanttrad
 
+  docker-events:
+    profiles: [observability]
+    image: docker:27-cli
+    labels:
+      loki.job: quanttrad
+      loki.service: docker-events
+    command:
+      - /bin/sh
+      - -lc
+      - "docker events --format '{{json .}}' --filter type=container --filter label=loki.job=quanttrad"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - quanttrad
+
   grafana:
     profiles: [observability]
     image: grafana/grafana:latest

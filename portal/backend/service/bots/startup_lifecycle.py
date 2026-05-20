@@ -304,6 +304,7 @@ def deep_merge_dict(base: Mapping[str, Any] | None, incoming: Mapping[str, Any] 
 class BotStartupContext:
     bot_id: str
     bot_record: Dict[str, Any]
+    persisted_bot_record: Dict[str, Any]
     run_id: str
     strategy_id: str
     strategy_snapshot: Any
@@ -316,6 +317,7 @@ class BotStartupContext:
     lifecycle_metadata: Dict[str, Any] = field(default_factory=dict)
     current_phase: str = BotLifecyclePhase.START_REQUESTED.value
     container_id: Optional[str] = None
+    run_lease_token: str = ""
 
     def update_metadata(self, payload: Mapping[str, Any] | None = None) -> Dict[str, Any]:
         self.lifecycle_metadata = deep_merge_dict(self.lifecycle_metadata, payload)

@@ -8,7 +8,10 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Protocol
 
+from core.settings import get_settings
+
 from .botlens_lifecycle_bridge import emit_lifecycle_event
+from .execution_behavior import execution_behavior_from_bot
 from .startup_lifecycle import (
     BotLifecyclePhase,
     BotLifecycleStatus,
@@ -19,6 +22,7 @@ from .startup_lifecycle import (
 )
 
 logger = logging.getLogger(__name__)
+_BOT_RUNTIME_SETTINGS = get_settings().bot_runtime
 
 
 def _execution_mode_from_bot(bot: Mapping[str, Any]) -> str:
@@ -28,7 +32,78 @@ def _execution_mode_from_bot(bot: Mapping[str, Any]) -> str:
     return normalized if normalized in {"fast", "full"} else "fast"
 
 
+def _duration_seconds_from_bot(bot: Mapping[str, Any]) -> float | None:
+    value = bot.get("duration_seconds")
+    if value in (None, ""):
+        return None
+    try:
+        duration = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("duration_seconds must be numeric") from None
+    return duration if duration > 0 else None
+
+
+def _bot_run_config_snapshot(bot: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return only run-effective bot config, not mutable operational state."""
+
+    fields = (
+        "id",
+        "name",
+        "strategy_id",
+        "strategy_variant_id",
+        "strategy_variant_name",
+        "atm_template_id",
+        "resolved_params",
+        "risk_config",
+        "risk",
+        "wallet_config",
+        "market_data_stream_policy",
+        "mode",
+        "execution_mode",
+        "execution_behavior",
+        "run_type",
+        "playback_speed",
+        "backtest_start",
+        "backtest_end",
+        "snapshot_interval_ms",
+        "bot_env",
+        "instrument_type",
+        "duration_seconds",
+    )
+    snapshot: Dict[str, Any] = {}
+    for field in fields:
+        if field in bot:
+            value = bot.get(field)
+            if isinstance(value, Mapping):
+                snapshot[field] = dict(value)
+            elif isinstance(value, list):
+                snapshot[field] = list(value)
+            else:
+                snapshot[field] = value
+    return snapshot
+
+
 class StartupStorage(Protocol):
+    def acquire_bot_run_lease(
+        self,
+        *,
+        bot_id: str,
+        run_id: str,
+        runner_id: str,
+        lease_token: str,
+        ttl_seconds: float | int | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> Dict[str, Any]: ...
+    def release_bot_run_lease(
+        self,
+        *,
+        bot_id: str,
+        run_id: str,
+        runner_id: str | None = None,
+        lease_token: str | None = None,
+        status: str = "released",
+        metadata: Mapping[str, Any] | None = None,
+    ) -> Dict[str, Any] | None: ...
     def upsert_bot(self, payload: Mapping[str, Any]) -> None: ...
     def upsert_bot_run(self, payload: Mapping[str, Any]) -> Dict[str, Any]: ...
     def record_bot_run_lifecycle_checkpoint(self, payload: Mapping[str, Any]) -> Dict[str, Any]: ...
@@ -42,13 +117,22 @@ class BotStartupOrchestrator:
     runner: Any
     watchdog: Any
 
-    def start_bot(self, bot_id: str, *, request_id: str | None = None, config_hash: str | None = None) -> BotStartupContext:
-        bot = self._load_bot(bot_id)
+    def start_bot(
+        self,
+        bot_id: str,
+        *,
+        request_id: str | None = None,
+        config_hash: str | None = None,
+        effective_bot: Mapping[str, Any] | None = None,
+    ) -> BotStartupContext:
+        persisted_bot = self._load_bot(bot_id)
+        bot = dict(effective_bot or persisted_bot)
         normalized_request_id = str(request_id or "").strip()
         normalized_config_hash = str(config_hash or "").strip()
         ctx = BotStartupContext(
             bot_id=str(bot_id),
             bot_record=dict(bot),
+            persisted_bot_record=dict(persisted_bot),
             run_id=str(uuid.uuid4()),
             strategy_id=str(bot.get("strategy_id") or "").strip(),
             strategy_snapshot=None,
@@ -65,6 +149,7 @@ class BotStartupOrchestrator:
         # The backend owns run identity before the first lifecycle checkpoint so
         # lifecycle persistence can safely reference the active run via FK.
         self._ensure_run_record(ctx)
+        self._acquire_run_lease(ctx)
         self._record_phase(
             ctx,
             BotLifecyclePhase.START_REQUESTED.value,
@@ -137,6 +222,8 @@ class BotStartupOrchestrator:
                 message="Launching runtime container with backend-owned run_id.",
             )
             ctx.bot_record["_runtime_request_id"] = ctx.request_id
+            ctx.bot_record["_runtime_runner_id"] = self.watchdog.runner_id
+            ctx.bot_record["_runtime_run_lease_token"] = ctx.run_lease_token
             ctx.container_id = str(self.runner.start_bot(bot=ctx.bot_record, run_id=ctx.run_id))
             self._record_phase(
                 ctx,
@@ -163,6 +250,11 @@ class BotStartupOrchestrator:
                 except Exception:  # noqa: BLE001
                     logger.exception("bot_startup_cleanup_watchdog_failed | bot_id=%s | run_id=%s", ctx.bot_id, ctx.run_id)
             self._persist_startup_failure(ctx, exc, traceback_text=traceback.format_exc())
+            self._release_run_lease(
+                ctx,
+                status="released",
+                metadata={"reason": "startup_failed", "phase": ctx.current_phase},
+            )
             raise
 
     def _load_bot(self, bot_id: str) -> Dict[str, Any]:
@@ -191,6 +283,52 @@ class BotStartupOrchestrator:
             }
         )
 
+    def _acquire_run_lease(self, ctx: BotStartupContext) -> None:
+        from ..storage.storage import bot_run_lease_token_hash, new_bot_run_lease_token
+
+        ctx.run_lease_token = new_bot_run_lease_token()
+        lease = self.storage.acquire_bot_run_lease(
+            bot_id=ctx.bot_id,
+            run_id=ctx.run_id,
+            runner_id=self.watchdog.runner_id,
+            lease_token=ctx.run_lease_token,
+            ttl_seconds=_BOT_RUNTIME_SETTINGS.run_lease_ttl_seconds,
+            metadata={
+                "owner": "backend_startup",
+                "request_id": ctx.request_id or None,
+                "start_config_hash": ctx.config_hash or None,
+            },
+        )
+        ctx.lifecycle_metadata["run_lease"] = {
+            "runner_id": self.watchdog.runner_id,
+            "lease_token_hash": bot_run_lease_token_hash(ctx.run_lease_token),
+            "status": lease.get("status"),
+            "generation": lease.get("generation"),
+            "expires_at": lease.get("expires_at"),
+            "ttl_seconds": float(_BOT_RUNTIME_SETTINGS.run_lease_ttl_seconds),
+        }
+
+    def _release_run_lease(
+        self,
+        ctx: BotStartupContext,
+        *,
+        status: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        if not ctx.run_lease_token:
+            return
+        try:
+            self.storage.release_bot_run_lease(
+                bot_id=ctx.bot_id,
+                run_id=ctx.run_id,
+                runner_id=self.watchdog.runner_id,
+                lease_token=ctx.run_lease_token,
+                status=status,
+                metadata=metadata,
+            )
+        except Exception:  # noqa: BLE001 - startup failure is already being persisted.
+            logger.exception("bot_startup_run_lease_release_failed | bot_id=%s | run_id=%s", ctx.bot_id, ctx.run_id)
+
     def _prepare_run_record(self, ctx: BotStartupContext) -> None:
         strategy = ctx.strategy_snapshot
         strategy_payload = strategy.to_dict() if hasattr(strategy, "to_dict") else {}
@@ -205,6 +343,18 @@ class BotStartupOrchestrator:
             else {}
         )
         execution_mode = _execution_mode_from_bot(ctx.bot_record)
+        execution_behavior = execution_behavior_from_bot(ctx.bot_record)
+        duration_seconds = _duration_seconds_from_bot(ctx.bot_record)
+        bot_config_snapshot = _bot_run_config_snapshot(ctx.bot_record)
+        start_request_overrides: Dict[str, Any] = {}
+        if ctx.bot_record.get("run_type") is not None:
+            start_request_overrides["run_type"] = ctx.bot_record.get("run_type")
+        if execution_behavior:
+            start_request_overrides["execution_behavior"] = execution_behavior
+        if duration_seconds is not None:
+            start_request_overrides["duration_seconds"] = duration_seconds
+        if isinstance(ctx.bot_record.get("market_data_stream_policy"), Mapping):
+            start_request_overrides["market_data_stream_policy"] = dict(ctx.bot_record["market_data_stream_policy"])
         self.storage.upsert_bot_run(
             {
                 "run_id": ctx.run_id,
@@ -223,12 +373,14 @@ class BotStartupOrchestrator:
                 "started_at": ctx.started_at,
                 "config_snapshot": {
                     "execution_mode": execution_mode,
+                    "execution_behavior": execution_behavior,
                     "request_id": ctx.request_id or None,
                     "start_request": {
                         "request_id": ctx.request_id or None,
                         "config_hash": ctx.config_hash or None,
+                        "overrides": start_request_overrides,
                     },
-                    "bot": dict(ctx.bot_record),
+                    "bot": bot_config_snapshot,
                     "runtime_readiness": dict(ctx.runtime_readiness),
                     "run_strategy_snapshot": run_strategy_snapshot,
                     "effective_strategy_config": effective_strategy_config,
@@ -237,7 +389,7 @@ class BotStartupOrchestrator:
         )
 
     def _stamp_starting_state(self, ctx: BotStartupContext) -> None:
-        payload = dict(ctx.bot_record)
+        payload = dict(ctx.persisted_bot_record or ctx.bot_record)
         payload["wallet_config"] = dict(ctx.wallet_config)
         payload["status"] = BotLifecycleStatus.STARTING.value
         payload["runner_id"] = self.watchdog.runner_id
@@ -257,7 +409,6 @@ class BotStartupOrchestrator:
             run_id=ctx.run_id,
             status=BotLifecycleStatus.STARTING.value,
         )
-        ctx.bot_record = payload
 
     def _record_phase(
         self,
@@ -329,7 +480,7 @@ class BotStartupOrchestrator:
             )
         except Exception:  # noqa: BLE001
             logger.exception("bot_startup_failure_status_persist_failed | bot_id=%s | run_id=%s", ctx.bot_id, ctx.run_id)
-        payload = dict(ctx.bot_record)
+        payload = dict(ctx.persisted_bot_record or ctx.bot_record)
         payload["status"] = BotLifecycleStatus.STARTUP_FAILED.value
         payload["runner_id"] = None
         payload["last_run_at"] = ctx.started_at

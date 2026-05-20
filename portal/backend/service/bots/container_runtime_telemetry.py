@@ -54,6 +54,62 @@ def emit_telemetry_ephemeral_message(url: str, message: str, *, instrument: bool
             )
         return False
 
+    running_loop = False
+    try:
+        asyncio.get_running_loop()
+        running_loop = True
+    except RuntimeError:
+        running_loop = False
+
+    if running_loop:
+        if sync_connect is None:
+            return False
+        started = time.perf_counter()
+        try:
+            with sync_connect(url, open_timeout=2, close_timeout=1) as ws:
+                ws.send(message)
+        except Exception as exc:  # noqa: BLE001
+            if instrument:
+                failure_mode = normalize_failure_mode(exc)
+                _OBSERVER.increment("telemetry_transport_send_total", message_kind="ephemeral")
+                _OBSERVER.increment(
+                    "telemetry_transport_send_fail_total",
+                    message_kind="ephemeral",
+                    failure_mode=failure_mode,
+                )
+                _OBSERVER.observe(
+                    "telemetry_transport_send_ms",
+                    max((time.perf_counter() - started) * 1000.0, 0.0),
+                    message_kind="ephemeral",
+                    failure_mode=failure_mode,
+                )
+                _OBSERVER.observe(
+                    "telemetry_transport_payload_bytes",
+                    float(payload_size_bytes(message)),
+                    message_kind="ephemeral",
+                )
+                _OBSERVER.event(
+                    "telemetry_transport_send_failed",
+                    level=logging.WARN,
+                    message_kind="ephemeral",
+                    failure_mode=failure_mode,
+                    error=str(exc),
+                )
+            return False
+        if instrument:
+            _OBSERVER.increment("telemetry_transport_send_total", message_kind="ephemeral")
+            _OBSERVER.observe(
+                "telemetry_transport_send_ms",
+                max((time.perf_counter() - started) * 1000.0, 0.0),
+                message_kind="ephemeral",
+            )
+            _OBSERVER.observe(
+                "telemetry_transport_payload_bytes",
+                float(payload_size_bytes(message)),
+                message_kind="ephemeral",
+            )
+        return True
+
     async def _send() -> None:
         async with websockets.connect(url, open_timeout=2, close_timeout=1) as ws:
             await ws.send(message)

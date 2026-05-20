@@ -83,6 +83,8 @@ class _FakeStorage:
         self.bots = []
         self.runs = {}
         self.lifecycle = {}
+        self.leases = {}
+        self.released_leases = []
 
     def upsert_bot(self, payload):
         self.bots.append(dict(payload))
@@ -114,6 +116,30 @@ class _FakeStorage:
                     return dict(row)
         return None
 
+    def get_bot_run_lease(self, run_id):
+        row = self.leases.get(str(run_id))
+        return dict(row) if row else None
+
+    def acquire_bot_run_lease(self, **kwargs):
+        row = {
+            "run_id": kwargs["run_id"],
+            "bot_id": kwargs["bot_id"],
+            "runner_id": kwargs["runner_id"],
+            "lease_token_hash": "lease-token-hash",
+            "status": "active",
+            "generation": 1,
+            "expires_at": "2026-05-19T00:02:00Z",
+        }
+        self.leases[str(kwargs["run_id"])] = {**dict(kwargs), **row}
+        return row
+
+    def release_bot_run_lease(self, **kwargs):
+        self.released_leases.append(dict(kwargs))
+        run_id = str(kwargs["run_id"])
+        if run_id in self.leases:
+            self.leases[run_id]["status"] = kwargs.get("status") or "released"
+        return dict(kwargs)
+
     def get_latest_bot_run_lifecycle(self, bot_id):
         for row in reversed(self.lifecycle.get(str(bot_id), [])):
             return dict(row)
@@ -121,6 +147,7 @@ class _FakeStorage:
 
     def record_bot_run_lifecycle_checkpoint(self, payload):
         row = dict(payload)
+        assert str(row["run_id"]) in self.runs, "lifecycle checkpoints require an existing run row"
         self.lifecycle.setdefault(str(row["bot_id"]), []).append(row)
         return row
 
@@ -246,6 +273,116 @@ def test_start_bot_same_request_id_returns_existing_run(monkeypatch):
     assert len(runner.starts) == 1
     assert storage.runs[run_id]["config_snapshot"]["start_request"]["request_id"] == "req-start-1"
     assert storage.lifecycle["bot-1"][0]["metadata"]["request_id"] == "req-start-1"
+
+
+def test_start_observe_only_paper_run_uses_docker_runner_with_effective_snapshot():
+    config = _FakeConfigService()
+    config._bots[0]["status"] = "failed"
+    config._bots[0]["runner_id"] = "stale-runner"
+    config._bots[0]["last_run_artifact"] = {"runtime_event_stream": ["stale-heavy-artifact"]}
+    stream = _FakeStreamManager()
+    storage = _FakeStorage()
+    runner = _RecordingRunner()
+
+    service = BotRuntimeControlService(
+        config,
+        stream,
+        storage=storage,
+        watchdog=_FakeWatchdog(),
+        runner_factory=lambda: runner,
+    )
+
+    response = service.start_bot(
+        "bot-1",
+        request_id="req-observe-1",
+        start_overrides={
+            "run_type": "paper",
+            "execution_behavior": "observe-only",
+            "duration_seconds": 5,
+            "market_data_stream_policy": {
+                "reconnect_enabled": True,
+                "initial_backoff_seconds": 0.5,
+                "max_backoff_seconds": 30,
+                "continuous_disconnect_budget_seconds": 120,
+                "heartbeat_stale_seconds": 10,
+            },
+        },
+    )
+
+    run_id = response["run_id"]
+    run = storage.runs[run_id]
+    assert response["status"] == "started"
+    assert len(runner.starts) == 1
+    assert runner.starts[0]["run_id"] == run_id
+    assert runner.starts[0]["bot"]["run_type"] == "paper"
+    assert runner.starts[0]["bot"]["execution_behavior"] == "observe-only"
+    assert runner.starts[0]["bot"]["duration_seconds"] == 5.0
+    assert runner.starts[0]["bot"]["market_data_stream_policy"]["continuous_disconnect_budget_seconds"] == 120.0
+
+    assert run["run_type"] == "paper"
+    assert run["config_snapshot"]["execution_behavior"] == "observe-only"
+    assert run["config_snapshot"]["bot"]["execution_behavior"] == "observe-only"
+    assert run["config_snapshot"]["bot"]["market_data_stream_policy"]["heartbeat_stale_seconds"] == 10.0
+    assert "status" not in run["config_snapshot"]["bot"]
+    assert "runner_id" not in run["config_snapshot"]["bot"]
+    assert "last_run_artifact" not in run["config_snapshot"]["bot"]
+    assert run["config_snapshot"]["start_request"]["overrides"]["duration_seconds"] == 5.0
+    assert (
+        run["config_snapshot"]["start_request"]["overrides"]["market_data_stream_policy"][
+            "continuous_disconnect_budget_seconds"
+        ]
+        == 120.0
+    )
+    assert storage.bots[-1]["runner_id"] == "runner-test"
+
+
+def test_start_bot_passes_run_lease_to_runner():
+    config = _FakeConfigService()
+    stream = _FakeStreamManager()
+    storage = _FakeStorage()
+    runner = _RecordingRunner()
+    service = BotRuntimeControlService(
+        config,
+        stream,
+        storage=storage,
+        watchdog=_FakeWatchdog(),
+        runner_factory=lambda: runner,
+    )
+
+    result = service.start_bot("bot-1", request_id="req-lease")
+    run_id = str(result["run_id"])
+
+    assert runner.starts[0]["run_id"] == run_id
+    assert runner.starts[0]["bot"]["_runtime_runner_id"] == "runner-test"
+    assert runner.starts[0]["bot"]["_runtime_run_lease_token"]
+    assert storage.leases[run_id]["runner_id"] == "runner-test"
+
+
+def test_stop_observe_only_paper_run_uses_docker_runner():
+    config = _FakeConfigService()
+    stream = _FakeStreamManager()
+    storage = _FakeStorage()
+    runner = _RecordingRunner()
+    service = BotRuntimeControlService(
+        config,
+        stream,
+        storage=storage,
+        watchdog=_FakeWatchdog(),
+        runner_factory=lambda: runner,
+    )
+    start = service.start_bot(
+        "bot-1",
+        request_id="req-observe-1",
+        start_overrides={"run_type": "paper", "execution_behavior": "observe-only"},
+    )
+
+    response = service.stop_bot("bot-1", run_id=start["run_id"], request_id="cancel-observe-1")
+
+    assert response["status"] == "canceled"
+    assert runner.stops == [{"bot_id": "bot-1", "preserve_container": False, "run_id": start["run_id"]}]
+    phases = [entry["phase"] for entry in storage.lifecycle["bot-1"]]
+    assert "cancel_requested" in phases
+    assert "canceling" in phases
 
 
 def test_start_bot_different_request_while_active_returns_conflict(monkeypatch):

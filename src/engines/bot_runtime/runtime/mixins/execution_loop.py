@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from engines.bot_runtime.core.domain import Candle, StrategySignal, isoformat
 from engines.bot_runtime.core.series_identity import canonical_series_key
+from engines.bot_runtime.live_market import LiveCandleStore, append_closed_live_candles_to_series
 from strategies.evaluator import (
     MINIMAL_DECISION_ARTIFACT_FIELDS,
     build_rejection_artifact,
@@ -116,6 +117,8 @@ class RuntimeExecutionLoopMixin:
             self._push_runtime_health_warning_revision = 0
             self._push_runtime_health_status = None
             self._report_artifact_bundle = None
+            self._live_duration_deadline_monotonic = None
+            self._live_duration_completed = False
             self.state = {
                 "status": "idle",
                 "progress": 0.0,
@@ -179,6 +182,12 @@ class RuntimeExecutionLoopMixin:
         self._pause_event.set()
         self._paused = False
         self._run_started_at = datetime.now(timezone.utc)
+        self._live_duration_completed = False
+        self._live_duration_deadline_monotonic = (
+            time.monotonic() + float(self._live_duration_seconds)
+            if self._live_mode and float(self._live_duration_seconds or 0.0) > 0.0
+            else None
+        )
         self._run_context = self._build_run_context()
         self._report_artifact_bundle = self._deps.build_run_artifact_bundle(
             self.bot_id,
@@ -282,6 +291,8 @@ class RuntimeExecutionLoopMixin:
             status = "error"
         elif runtime_status == "degraded":
             status = "degraded"
+        elif bool(getattr(self, "_live_duration_completed", False)):
+            status = "completed"
         elif self._stop.is_set():
             status = "stopped"
         elif not self._live_mode:
@@ -1780,12 +1791,21 @@ class RuntimeExecutionLoopMixin:
             time.sleep(min(0.25, remaining))
 
     def _append_live_candles_if_needed(self) -> bool:
+        if self._live_duration_should_stop():
+            return False
         updated = False
+        live_store = self._live_candle_store if isinstance(self._live_candle_store, LiveCandleStore) else None
+        if live_store is not None:
+            live_store.raise_if_failed()
         end_iso = _isoformat(datetime.now(timezone.utc))
         with self._series_update_lock:
             for series in self._series:
                 last_time = series.candles[-1].time if series.candles else None
                 if last_time is None:
+                    continue
+                if live_store is not None:
+                    if self._append_series_live_candles(series, after=last_time):
+                        updated = True
                     continue
                 start_iso = _isoformat(last_time + timedelta(seconds=1))
                 if self._append_series_updates(series, start_iso, end_iso):
@@ -1804,11 +1824,28 @@ class RuntimeExecutionLoopMixin:
         return updated
 
     def _append_live_candles_for_state(self, state: SeriesExecutionState) -> bool:
+        if self._live_duration_should_stop():
+            return False
         end_iso = _isoformat(datetime.now(timezone.utc))
         series = state.series
         last_time = series.candles[-1].time if series.candles else None
         if last_time is None:
             return False
+        live_store = self._live_candle_store if isinstance(self._live_candle_store, LiveCandleStore) else None
+        if live_store is not None:
+            live_store.raise_if_failed()
+            with self._series_update_lock:
+                updated = self._append_series_live_candles(series, after=last_time)
+                if not updated:
+                    return False
+                state.total_bars = len(series.candles)
+                if state.done and state.bar_index < state.total_bars:
+                    state.done = False
+                self._total_bars = max(len(s.candles) for s in self._series) if self._series else 0
+            self._rebuild_overlay_cache()
+            self._log_event("live_refresh", message="Appended provider stream candles")
+            self._push_update("live_refresh")
+            return True
         start_iso = _isoformat(last_time + timedelta(seconds=1))
         with self._series_update_lock:
             updated = self._append_series_updates(series, start_iso, end_iso)
@@ -1821,6 +1858,42 @@ class RuntimeExecutionLoopMixin:
         self._rebuild_overlay_cache()
         self._log_event("live_refresh", message="Appended live candles")
         self._push_update("live_refresh")
+        return True
+
+    def _append_series_live_candles(self, series: StrategySeries, *, after: datetime | None) -> bool:
+        live_store = self._live_candle_store
+        if not isinstance(live_store, LiveCandleStore):
+            return False
+        new_candles = append_closed_live_candles_to_series(
+            store=live_store,
+            series=series,
+            after=after,
+        )
+        if not new_candles:
+            return False
+        series.candles.extend(new_candles)
+        series.window_end = _isoformat(new_candles[-1].time)
+        logger.info(
+            with_log_context(
+                "paper_live_candles_appended",
+                self._series_log_context(
+                    series,
+                    candles=len(new_candles),
+                    first_bar_time=_isoformat(new_candles[0].time),
+                    last_bar_time=_isoformat(new_candles[-1].time),
+                ),
+            )
+        )
+        return True
+
+    def _live_duration_should_stop(self) -> bool:
+        deadline = getattr(self, "_live_duration_deadline_monotonic", None)
+        if deadline is None:
+            return False
+        if time.monotonic() < float(deadline):
+            return False
+        self._live_duration_completed = True
+        self._stop.set()
         return True
 
     def _append_series_updates(self, series: StrategySeries, start_iso: str, end_iso: str) -> bool:

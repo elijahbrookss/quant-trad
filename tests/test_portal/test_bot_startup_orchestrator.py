@@ -44,9 +44,30 @@ class _FakeStorage:
     def __init__(self, order: list[str]) -> None:
         self.order = order
         self.runs = []
+        self.leases = []
+        self.released_leases = []
         self.lifecycle = []
         self.bots = []
         self._next_lifecycle_seq = 1
+
+    def acquire_bot_run_lease(self, **kwargs):
+        self.order.append("acquire_bot_run_lease")
+        lease = {
+            "run_id": kwargs["run_id"],
+            "bot_id": kwargs["bot_id"],
+            "runner_id": kwargs["runner_id"],
+            "lease_token_hash": "lease-token-hash",
+            "status": "active",
+            "generation": 1,
+            "expires_at": "2026-05-19T00:02:00Z",
+        }
+        self.leases.append({**dict(kwargs), **lease})
+        return lease
+
+    def release_bot_run_lease(self, **kwargs):
+        self.order.append("release_bot_run_lease")
+        self.released_leases.append(dict(kwargs))
+        return dict(kwargs)
 
     def upsert_bot(self, payload):
         self.order.append("upsert_bot")
@@ -105,8 +126,12 @@ def test_startup_orchestrator_creates_run_before_container_launch():
     ctx = orchestrator.start_bot("bot-1")
 
     assert ctx.run_id
+    assert ctx.run_lease_token
     assert runner.calls[0]["run_id"] == ctx.run_id
+    assert runner.calls[0]["bot"]["_runtime_run_lease_token"] == ctx.run_lease_token
+    assert runner.calls[0]["bot"]["_runtime_runner_id"] == "runner-test"
     assert order.index("upsert_bot_run") < order.index("runner.start_bot")
+    assert order.index("acquire_bot_run_lease") < order.index("runner.start_bot")
     assert order.index("upsert_bot_run") < order.index(f"phase:{BotLifecyclePhase.START_REQUESTED.value}")
     assert [row["phase"] for row in storage.lifecycle[:5]] == [
         BotLifecyclePhase.START_REQUESTED.value,
@@ -116,6 +141,7 @@ def test_startup_orchestrator_creates_run_before_container_launch():
         BotLifecyclePhase.PREPARING_RUN.value,
     ]
     assert storage.lifecycle[-1]["phase"] == BotLifecyclePhase.AWAITING_CONTAINER_BOOT.value
+    assert storage.lifecycle[0]["metadata"]["run_lease"]["runner_id"] == "runner-test"
     assert storage.bots[-1]["status"] == "starting"
     assert storage.bots[-1]["last_run_artifact"]["startup"]["run_id"] == ctx.run_id
     assert [entry for entry in order if entry.startswith("status:")] == ["status:starting"]
@@ -146,6 +172,7 @@ def test_startup_orchestrator_persists_startup_failed_phase():
         raise AssertionError("expected startup failure")
 
     assert storage.runs, "run row should be persisted before failure"
+    assert storage.released_leases[-1]["status"] == "released"
     assert storage.lifecycle[-1]["phase"] == BotLifecyclePhase.STARTUP_FAILED.value
     assert "docker launch failed" in storage.lifecycle[-1]["message"]
     assert storage.bots[-1]["status"] == "startup_failed"

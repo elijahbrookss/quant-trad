@@ -141,6 +141,20 @@ class RuntimeSetupPrepareMixin:
         self._next_bar_at: Optional[datetime] = None
         self._policy = RuntimeModePolicy.for_run_type(self.run_type)
         self._live_mode = self._policy.allow_live_refresh
+        self._live_candle_store = self.config.pop("live_candle_store", None)
+        self._live_data_idle_poll_seconds = self._coerce_positive_float(
+            self.config.get("live_data_idle_poll_seconds")
+            or self.config.get("BOT_RUNTIME_LIVE_DATA_IDLE_POLL_SECONDS"),
+            default=0.5,
+        )
+        self._live_duration_seconds = self._coerce_positive_float(
+            self.config.get("duration_seconds")
+            or self.config.get("runtime_duration_seconds")
+            or self.config.get("BOT_RUNTIME_DURATION_SECONDS"),
+            default=0.0,
+        )
+        self._live_duration_deadline_monotonic: Optional[float] = None
+        self._live_duration_completed = False
         self._series_runner_type = self._resolve_series_runner_type(self.config.get("series_runner"))
         self._degrade_series_on_error = bool(self.config.get("degrade_series_on_error", False))
         self._logs: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOG_ENTRIES)
@@ -316,6 +330,14 @@ class RuntimeSetupPrepareMixin:
         return max(parsed, 1)
 
     @staticmethod
+    def _coerce_positive_float(value: Optional[object], *, default: float) -> float:
+        try:
+            parsed = float(value) if value is not None else default
+        except (TypeError, ValueError):
+            return max(float(default), 0.0)
+        return max(parsed, 0.0)
+
+    @staticmethod
     def _coerce_bool(value: Optional[object], *, default: bool) -> bool:
         if value is None:
             return bool(default)
@@ -363,6 +385,7 @@ class RuntimeSetupPrepareMixin:
             append_live_candles_if_needed=self._append_live_candles_if_needed,
             append_live_candles_for_state=self._append_live_candles_for_state,
             pace=self._pace,
+            live_idle_interval_seconds=self._live_idle_interval_seconds,
             series_states=self._active_series_states,
             thread_name=self._series_thread_name,
             log_debug=self._log_runner_debug,
@@ -371,6 +394,16 @@ class RuntimeSetupPrepareMixin:
             degrade_series_on_error=self._degrade_series_on_error,
         )
         return InlineSeriesRunner(ctx)
+
+    def runtime_series(self) -> List[StrategySeries]:
+        """Return prepared runtime series for container-owned live data wiring."""
+
+        self._require_prepared("runtime_series")
+        with self._series_update_lock:
+            return list(self._series)
+
+    def _live_idle_interval_seconds(self) -> float:
+        return max(float(self._live_data_idle_poll_seconds or 0.5), 0.05)
 
     def _pool_worker_count(self) -> int:
         configured = self.config.get("series_runner_pool_workers")

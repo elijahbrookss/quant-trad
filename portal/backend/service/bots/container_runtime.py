@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import multiprocessing as mp
@@ -33,7 +34,11 @@ from portal.backend.service.bots.container_runtime_projection import (
 from portal.backend.service.bots.container_runtime_telemetry import TelemetryEmitter
 from portal.backend.service.bots.container_runtime_telemetry import emit_telemetry_ephemeral_message
 from portal.backend.service.bots.botlens_canonical_facts import append_botlens_canonical_fact_batch
-from portal.backend.service.bots.botlens_contract import BRIDGE_FACTS_KIND, FACT_TYPE_WALLET_LEDGER_EVENT
+from portal.backend.service.bots.botlens_contract import (
+    BRIDGE_FACTS_KIND,
+    FACT_TYPE_PROVISIONAL_CANDLE_UPDATED,
+    FACT_TYPE_WALLET_LEDGER_EVENT,
+)
 from portal.backend.service.bots.botlens_contract import normalize_series_key
 from portal.backend.service.bots.botlens_runtime_state import (
     BotLensRuntimeState,
@@ -43,6 +48,11 @@ from portal.backend.service.bots.botlens_runtime_state import (
     startup_bootstrap_admission,
 )
 from portal.backend.service.bots.runtime_dependencies import build_bot_runtime_deps
+from portal.backend.service.bots.execution_behavior import OBSERVE_ONLY_BEHAVIOR, is_observe_only_bot
+from portal.backend.service.bots.observe_only_runtime import run_observe_only_market_intake
+from portal.backend.service.bots.paper_market_stream import PaperMarketStreamRunner
+from portal.backend.service.bots.run_lease import RunLeaseRenewer, default_run_lease_runner_id
+from engines.bot_runtime.live_market import LiveCandleStore
 from portal.backend.service.reports.artifacts import finalize_run_artifact_bundle_from_workers
 from portal.backend.service.bots.startup_lifecycle import (
     BotLifecyclePhase,
@@ -63,8 +73,10 @@ from portal.backend.service.observability import BackendObserver
 from portal.backend.service.bots.startup_validation import validate_wallet_config
 from portal.backend.service.bots.strategy_loader import StrategyLoader
 from portal.backend.service.storage.storage import (
+    get_bot_run,
     load_bots,
     record_bot_run_lifecycle_checkpoint,
+    upsert_bot_run,
     update_bot_runtime_status,
 )
 
@@ -435,6 +447,7 @@ class ContainerStartupContext:
     first_snapshot_series: set[str] = field(default_factory=set)
     reported_worker_failures: set[str] = field(default_factory=set)
     reported_worker_terminal_statuses: Dict[str, str] = field(default_factory=dict)
+    paper_market_streams: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     runtime_state: str = BotLensRuntimeState.INITIALIZING.value
     recent_runtime_transitions: List[Dict[str, Any]] = field(default_factory=list)
     last_useful_progress_at: str | None = None
@@ -457,6 +470,7 @@ class ContainerStartupContext:
     telemetry_degraded_emitted: bool = False
     request_id: str | None = None
     final_readiness: Dict[str, Any] = field(default_factory=dict)
+    run_lease: RunLeaseRenewer | None = None
 
 
 def _resolve_backend_run_id(bot_id: str) -> str:
@@ -475,6 +489,57 @@ def _resolve_backend_run_id(bot_id: str) -> str:
 def _resolve_backend_request_id() -> str | None:
     value = str(os.environ.get("QT_BOT_RUNTIME_REQUEST_ID") or os.environ.get("QT_REQUEST_ID") or "").strip()
     return value or None
+
+
+def _resolve_run_lease_token() -> str | None:
+    value = str(os.environ.get("QT_BOT_RUN_LEASE_TOKEN") or "").strip()
+    return value or None
+
+
+def _resolve_run_lease_runner_id() -> str:
+    value = str(os.environ.get("QT_BOT_RUN_LEASE_RUNNER_ID") or "").strip()
+    return value or default_run_lease_runner_id()
+
+
+def _load_runtime_bot_snapshot(bot_id: str, run_id: str) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    run = get_bot_run(run_id) or {}
+    config_snapshot = run.get("config_snapshot") if isinstance(run.get("config_snapshot"), Mapping) else {}
+    bot_snapshot = config_snapshot.get("bot") if isinstance(config_snapshot.get("bot"), Mapping) else {}
+    if bot_snapshot:
+        bot = dict(bot_snapshot)
+        bot["id"] = str(bot.get("id") or bot_id)
+        return bot, dict(run)
+    bot = next((b for b in load_bots() if b.get("id") == bot_id), None)
+    if bot is None:
+        raise RuntimeError(f"Bot not found: {bot_id}")
+    return dict(bot), dict(run)
+
+
+def _runtime_readiness_from_run_or_strategy(run: Mapping[str, Any], strategy: Any) -> Dict[str, Any]:
+    config_snapshot = run.get("config_snapshot") if isinstance(run.get("config_snapshot"), Mapping) else {}
+    readiness = config_snapshot.get("runtime_readiness") if isinstance(config_snapshot.get("runtime_readiness"), Mapping) else {}
+    if readiness:
+        return dict(readiness)
+    return {
+        "datasource": getattr(strategy, "datasource", None),
+        "exchange": getattr(strategy, "exchange", None),
+        "timeframe": getattr(strategy, "timeframe", None),
+        "symbols": [str(getattr(link, "symbol", "") or "").strip().upper() for link in getattr(strategy, "instrument_links", []) or []],
+    }
+
+
+def _duration_seconds_from_runtime_snapshot(bot: Mapping[str, Any], run: Mapping[str, Any]) -> float | None:
+    config_snapshot = run.get("config_snapshot") if isinstance(run.get("config_snapshot"), Mapping) else {}
+    start_request = config_snapshot.get("start_request") if isinstance(config_snapshot.get("start_request"), Mapping) else {}
+    overrides = start_request.get("overrides") if isinstance(start_request.get("overrides"), Mapping) else {}
+    value = overrides.get("duration_seconds", bot.get("duration_seconds"))
+    if value in (None, ""):
+        return None
+    try:
+        duration = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("duration_seconds must be numeric") from None
+    return duration if duration > 0 else None
 
 
 def _persist_lifecycle_phase(
@@ -649,6 +714,8 @@ def _runtime_observability_metadata(ctx: ContainerStartupContext) -> Dict[str, A
         runtime_meta["terminal"] = terminal_payload
     if ctx.final_readiness:
         runtime_meta["readiness"] = dict(ctx.final_readiness)
+    if ctx.run_lease is not None:
+        runtime_meta["run_lease"] = ctx.run_lease.snapshot()
     if runtime_meta:
         metadata["runtime_observability"] = runtime_meta
     return metadata
@@ -943,6 +1010,142 @@ def _terminal_payload(ctx: ContainerStartupContext) -> Dict[str, Any]:
     payload["expected_workers"] = len(ctx.worker_symbols)
     payload["reported_workers"] = len(ctx.reported_worker_terminal_statuses)
     return payload
+
+
+def _handle_worker_paper_market_stream_summary(ctx: ContainerStartupContext, event: Mapping[str, Any]) -> None:
+    worker_id = str(event.get("worker_id") or "").strip()
+    snapshot = event.get("paper_market_stream")
+    if not worker_id or not isinstance(snapshot, Mapping):
+        return
+    ctx.paper_market_streams[worker_id] = {
+        "worker_id": worker_id,
+        "symbols": [
+            str(symbol).strip().upper()
+            for symbol in event.get("symbols") or []
+            if str(symbol).strip()
+        ],
+        "event_time": str(event.get("event_time") or "").strip() or None,
+        "snapshot": json_safe(dict(snapshot)),
+    }
+
+
+def _paper_market_stream_run_summary(ctx: ContainerStartupContext) -> Dict[str, Any]:
+    if not ctx.paper_market_streams:
+        return {}
+    workers: Dict[str, Any] = {}
+    event_totals: Dict[str, int] = {}
+    store_totals = {
+        "closed_candle_count": 0,
+        "duplicate_count": 0,
+        "conflicting_duplicate_count": 0,
+    }
+    aggregator_totals = {
+        "ignored_out_of_order_count": 0,
+        "ignored_snapshot_count": 0,
+        "dropped_incomplete_target_count": 0,
+        "open_source_count": 0,
+        "open_target_count": 0,
+    }
+    stream_diagnostic_totals: Dict[str, Any] = {
+        "disconnect_count": 0,
+        "reconnect_attempt_count": 0,
+        "reconnect_success_count": 0,
+        "total_disconnected_seconds": 0.0,
+        "max_continuous_disconnected_seconds": 0.0,
+    }
+    failure_messages: list[str] = []
+    for worker_id, entry in sorted(ctx.paper_market_streams.items()):
+        snapshot = dict(entry.get("snapshot") or {})
+        workers[worker_id] = {
+            "symbols": list(entry.get("symbols") or []),
+            "event_time": entry.get("event_time"),
+            "snapshot": snapshot,
+        }
+        for key, value in (snapshot.get("event_counts") or {}).items():
+            try:
+                event_totals[str(key)] = int(event_totals.get(str(key), 0)) + int(value or 0)
+            except (TypeError, ValueError):
+                continue
+        store = snapshot.get("store") if isinstance(snapshot.get("store"), Mapping) else {}
+        for key in store_totals:
+            try:
+                store_totals[key] += int(store.get(key) or 0)
+            except (TypeError, ValueError):
+                continue
+        failure_message = str(store.get("failure_message") or "").strip()
+        if failure_message:
+            failure_messages.append(failure_message)
+        diagnostics = snapshot.get("stream_diagnostics") if isinstance(snapshot.get("stream_diagnostics"), Mapping) else {}
+        for key in ("disconnect_count", "reconnect_attempt_count", "reconnect_success_count"):
+            try:
+                stream_diagnostic_totals[key] += int(diagnostics.get(key) or 0)
+            except (TypeError, ValueError):
+                continue
+        for key in ("total_disconnected_seconds", "max_continuous_disconnected_seconds"):
+            try:
+                value = float(diagnostics.get(key) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if key == "max_continuous_disconnected_seconds":
+                stream_diagnostic_totals[key] = max(float(stream_diagnostic_totals[key]), value)
+            else:
+                stream_diagnostic_totals[key] += value
+        aggregators = snapshot.get("aggregators") if isinstance(snapshot.get("aggregators"), Mapping) else {}
+        for aggregator in aggregators.values():
+            if not isinstance(aggregator, Mapping):
+                continue
+            for key in aggregator_totals:
+                try:
+                    aggregator_totals[key] += int(aggregator.get(key) or 0)
+                except (TypeError, ValueError):
+                    continue
+    totals: Dict[str, Any] = {
+        "event_counts": dict(sorted(event_totals.items())),
+        "store": store_totals,
+        "aggregators": aggregator_totals,
+        "stream_diagnostics": {
+            "disconnect_count": int(stream_diagnostic_totals["disconnect_count"]),
+            "reconnect_attempt_count": int(stream_diagnostic_totals["reconnect_attempt_count"]),
+            "reconnect_success_count": int(stream_diagnostic_totals["reconnect_success_count"]),
+            "total_disconnected_seconds": round(float(stream_diagnostic_totals["total_disconnected_seconds"]), 6),
+            "max_continuous_disconnected_seconds": round(
+                float(stream_diagnostic_totals["max_continuous_disconnected_seconds"]),
+                6,
+            ),
+        },
+    }
+    if failure_messages:
+        totals["failure_messages"] = failure_messages
+    return {
+        "schema_version": "paper_market_stream_summary.v1",
+        "worker_count": len(workers),
+        "workers": workers,
+        "totals": totals,
+    }
+
+
+def _persist_paper_market_stream_run_summary(ctx: ContainerStartupContext) -> None:
+    paper_summary = _paper_market_stream_run_summary(ctx)
+    if not paper_summary:
+        return
+    run = get_bot_run(ctx.run_id) or {}
+    summary = dict(run.get("summary") or {})
+    summary["paper_market_stream"] = paper_summary
+    upsert_bot_run(
+        {
+            "run_id": ctx.run_id,
+            "bot_id": ctx.bot_id,
+            "status": ctx.terminal_status_value or run.get("status") or BotLifecycleStatus.STOPPED.value,
+            "summary": summary,
+        }
+    )
+    logger.info(
+        "paper_market_stream_summary_persisted | bot_id=%s | run_id=%s | workers=%s | totals=%s",
+        ctx.bot_id,
+        ctx.run_id,
+        len(ctx.paper_market_streams),
+        paper_summary.get("totals"),
+    )
 
 
 def _mark_useful_progress(ctx: ContainerStartupContext, observed_at: Any) -> None:
@@ -1260,9 +1463,12 @@ def _parent_event_queue_maxsize(*, worker_count: int) -> int:
 def load_container_startup_context(
     bot_id: str,
     *,
+    run_id: str | None = None,
+    bot_snapshot: Mapping[str, Any] | None = None,
+    run_snapshot: Mapping[str, Any] | None = None,
     telemetry_sender: TelemetryEmitter | None = None,
 ) -> ContainerStartupContext:
-    run_id = _resolve_backend_run_id(bot_id)
+    run_id = str(run_id or _resolve_backend_run_id(bot_id)).strip()
     request_id = _resolve_backend_request_id()
     _persist_lifecycle_phase(
         bot_id=bot_id,
@@ -1274,9 +1480,11 @@ def load_container_startup_context(
         telemetry_sender=telemetry_sender,
     )
 
-    bot = next((b for b in load_bots() if b.get("id") == bot_id), None)
-    if bot is None:
-        raise RuntimeError(f"Bot not found: {bot_id}")
+    if bot_snapshot is not None:
+        bot = dict(bot_snapshot)
+    else:
+        bot, _loaded_run = _load_runtime_bot_snapshot(bot_id, run_id)
+    _ = run_snapshot
     _persist_lifecycle_phase(
         bot_id=bot_id,
         run_id=run_id,
@@ -1478,6 +1686,11 @@ def _series_worker(
     child_config["worker_id"] = worker_id
     child_config["report_artifact_role"] = "worker"
     child_config["wallet_initialization_owner"] = _WALLET_INITIALIZATION_OWNER_CONTAINER
+    paper_live_store: LiveCandleStore | None = None
+    if str(child_config.get("run_type") or "").strip().lower() == "paper":
+        paper_live_store = LiveCandleStore()
+        child_config["paper_live_market_data"] = True
+        child_config["live_candle_store"] = paper_live_store
     if (
         "BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY" not in child_config
         and "push_payload_bytes_sample_every" not in child_config
@@ -1538,6 +1751,8 @@ def _series_worker(
     bridge_resync_reason: str | None = None
     first_live_facts_emitted = False
     first_live_progress_signaled = False
+    paper_market_stream: PaperMarketStreamRunner | None = None
+    paper_market_stream_snapshot: Dict[str, Any] | None = None
 
     def _schedule_bridge_resync(reason: str) -> None:
         nonlocal bridge_session_id, bridge_seq, bridge_resync_reason
@@ -1578,6 +1793,41 @@ def _series_worker(
         )
         if emitted:
             bridge_resync_reason = None
+        return emitted
+
+    def _emit_provisional_market_fact(payload: Mapping[str, Any]) -> bool:
+        nonlocal bridge_seq
+        series_key_local = normalize_series_key(payload.get("series_key"))
+        provisional_candle = payload.get("provisional_candle") if isinstance(payload.get("provisional_candle"), Mapping) else {}
+        if not series_key_local or not provisional_candle:
+            return False
+        bridge_seq_local = bridge_seq + 1
+        emitted = _queue_worker_event(
+            {
+                "kind": "provisional_market_facts",
+                "worker_id": worker_id,
+                "symbols": list(symbols),
+                "series_key": series_key_local,
+                "bridge_session_id": bridge_session_id,
+                "bridge_seq": bridge_seq_local,
+                "facts": [
+                    {
+                        "fact_type": FACT_TYPE_PROVISIONAL_CANDLE_UPDATED,
+                        "series_key": series_key_local,
+                        "instrument_id": payload.get("instrument_id"),
+                        "symbol": payload.get("symbol"),
+                        "timeframe": payload.get("timeframe"),
+                        "strategy_id": payload.get("strategy_id"),
+                        "provisional_candle": dict(provisional_candle),
+                    }
+                ],
+                "known_at": payload.get("known_at") or utc_now_iso(),
+                "event_time": payload.get("event_time") or payload.get("known_at") or utc_now_iso(),
+            },
+            timeout_s=0.02,
+        )
+        if emitted:
+            bridge_seq = bridge_seq_local
         return emitted
 
     stream_stop = threading.Event()
@@ -1757,6 +2007,26 @@ def _series_worker(
             raise RuntimeError(f"worker lifecycle bridge unavailable during warm-up | worker_id={worker_id}")
         runtime.reset_if_finished()
         runtime.warm_up()
+        if paper_live_store is not None:
+            paper_market_stream = PaperMarketStreamRunner(
+                bot_id=bot_id,
+                run_id=run_id,
+                store=paper_live_store,
+                series=runtime.runtime_series(),
+                provisional_candle_sink=_emit_provisional_market_fact,
+                market_data_stream_policy=child_config.get("market_data_stream_policy")
+                if isinstance(child_config.get("market_data_stream_policy"), Mapping)
+                else None,
+            )
+            paper_market_stream.start()
+            logger.info(
+                "paper_market_stream_started | bot_id=%s | run_id=%s | worker_id=%s | symbols=%s | snapshot=%s",
+                bot_id,
+                run_id,
+                worker_id,
+                list(symbols),
+                paper_market_stream.snapshot(),
+            )
         bootstrap_append_outcome = runtime.commit_botlens_fact_payload(
             _build_bootstrap_payload(),
             batch_kind="botlens_runtime_bootstrap_facts",
@@ -1790,6 +2060,35 @@ def _series_worker(
         runtime_error["exception_type"] = type(exc).__name__
         runtime_error["traceback"] = traceback.format_exc().strip()
     finally:
+        if paper_market_stream is not None:
+            try:
+                paper_market_stream.stop()
+                paper_market_stream_snapshot = json_safe(paper_market_stream.snapshot())
+                logger.info(
+                    "paper_market_stream_stopped | bot_id=%s | run_id=%s | worker_id=%s | symbols=%s | snapshot=%s",
+                    bot_id,
+                    run_id,
+                    worker_id,
+                    list(symbols),
+                    paper_market_stream_snapshot,
+                )
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    paper_market_stream_snapshot = json_safe(
+                        {
+                            **paper_market_stream.snapshot(),
+                            "stop_error": str(exc),
+                        }
+                    )
+                except Exception:  # noqa: BLE001
+                    paper_market_stream_snapshot = {"stop_error": str(exc)}
+                logger.warning(
+                    "paper_market_stream_stop_failed | bot_id=%s | run_id=%s | worker_id=%s | error=%s",
+                    bot_id,
+                    run_id,
+                    worker_id,
+                    exc,
+                )
         stream_stop.set()
         if emitter_thread is not None:
             emitter_thread.join(timeout=1.0)
@@ -1814,31 +2113,35 @@ def _series_worker(
                 "at": utc_now_iso(),
             }
         )
+        terminal_event = {
+            "kind": "worker_terminal",
+            "worker_id": worker_id,
+            "symbols": list(symbols),
+            "status": "error",
+            "message": f"Worker runtime exited with terminal status error.",
+            "event_time": utc_now_iso(),
+        }
+        if paper_market_stream_snapshot is not None:
+            terminal_event["paper_market_stream"] = paper_market_stream_snapshot
         _queue_control_event(
-            {
-                "kind": "worker_terminal",
-                "worker_id": worker_id,
-                "symbols": list(symbols),
-                "status": "error",
-                "message": f"Worker runtime exited with terminal status error.",
-                "event_time": utc_now_iso(),
-            }
+            terminal_event
         )
         if not queued:
             raise RuntimeError(
                 f"symbol worker failed | worker_id={worker_id} | symbols={list(symbols)} | error={runtime_error.get('message')}"
             )
         return
-    _queue_control_event(
-        {
-            "kind": "worker_terminal",
-            "worker_id": worker_id,
-            "symbols": list(symbols),
-            "status": status,
-            "message": f"Worker runtime exited with terminal status {status}.",
-            "event_time": utc_now_iso(),
-        }
-    )
+    terminal_event = {
+        "kind": "worker_terminal",
+        "worker_id": worker_id,
+        "symbols": list(symbols),
+        "status": status,
+        "message": f"Worker runtime exited with terminal status {status}.",
+        "event_time": utc_now_iso(),
+    }
+    if paper_market_stream_snapshot is not None:
+        terminal_event["paper_market_stream"] = paper_market_stream_snapshot
+    _queue_control_event(terminal_event)
     if status in {"error", "failed", "crashed", "degraded"}:
         _queue_control_event(
             {
@@ -1905,6 +2208,7 @@ def _handle_worker_terminal_event(ctx: ContainerStartupContext, event: Mapping[s
     if not worker_id or not status:
         return
     ctx.reported_worker_terminal_statuses[worker_id] = status
+    _handle_worker_paper_market_stream_summary(ctx, event)
     for symbol in event.get("symbols") or []:
         normalized_symbol = str(symbol).strip().upper()
         if not normalized_symbol:
@@ -2155,6 +2459,49 @@ def _handle_runtime_facts_event(
         message="All planned series emitted first runtime snapshot; bot is live.",
     )
     return run_seq, telemetry_emit_ms, payload_bytes, sent
+
+
+def _handle_provisional_market_facts_event(
+    ctx: ContainerStartupContext,
+    event: Mapping[str, Any],
+    *,
+    telemetry_sender: TelemetryEmitter,
+) -> tuple[int, float, int, bool]:
+    series_key = normalize_series_key(event.get("series_key"))
+    facts = event.get("facts") if isinstance(event.get("facts"), list) else []
+    if not series_key or not facts:
+        return 0, 0.0, 0, True
+    worker_id = str(event.get("worker_id") or "").strip()
+    telemetry_payload = {
+        "kind": BRIDGE_FACTS_KIND,
+        "bot_id": ctx.bot_id,
+        "run_id": ctx.run_id,
+        "worker_id": worker_id,
+        "source_emitter": "container_runtime",
+        "source_reason": "provider_stream_provisional",
+        "series_key": series_key,
+        "bridge_session_id": str(event.get("bridge_session_id") or "").strip() or None,
+        "bridge_seq": int(event.get("bridge_seq") or 0),
+        "known_at": event.get("known_at") or utc_now_iso(),
+        "event_time": event.get("event_time") or utc_now_iso(),
+        "facts": list(facts),
+        "summary": {"display_only": True},
+    }
+    telemetry_message = json.dumps(json_safe(telemetry_payload))
+    payload_bytes = len(telemetry_message.encode("utf-8"))
+    telemetry_payload["summary"]["payload_bytes"] = payload_bytes
+    telemetry_started = time.monotonic()
+    sent = telemetry_sender.send(telemetry_payload)
+    telemetry_emit_ms = max((time.monotonic() - telemetry_started) * 1000.0, 0.0)
+    if not sent:
+        logger.warning(
+            "paper_market_provisional_facts_send_failed | bot_id=%s | run_id=%s | worker_id=%s | series_key=%s",
+            ctx.bot_id,
+            ctx.run_id,
+            worker_id,
+            series_key,
+        )
+    return 0, telemetry_emit_ms, payload_bytes, sent
 
 
 def _persist_startup_live_if_ready(
@@ -2645,6 +2992,8 @@ def supervise_startup_and_runtime(ctx: ContainerStartupContext) -> None:
         try:
             while ctx.children:
                 loop_started = time.monotonic()
+                if ctx.run_lease is not None:
+                    ctx.run_lease.assert_healthy()
                 run_seq = 0
                 queue_drain_ms = 0.0
                 worker_reconcile_ms = 0.0
@@ -2764,6 +3113,16 @@ def supervise_startup_and_runtime(ctx: ContainerStartupContext) -> None:
                             ):
                                 telemetry_degraded = False
                                 ctx.telemetry_degraded_emitted = False
+                        emitted_events_in_cycle += 1
+                        return
+                    if kind == "provisional_market_facts":
+                        _, emitted_ms, event_payload_bytes, _sent = _handle_provisional_market_facts_event(
+                            ctx,
+                            event,
+                            telemetry_sender=telemetry_sender,
+                        )
+                        telemetry_emit_ms += emitted_ms
+                        payload_bytes = max(payload_bytes, event_payload_bytes)
                         emitted_events_in_cycle += 1
                         return
                     if kind == "worker_error":
@@ -3002,6 +3361,7 @@ def supervise_startup_and_runtime(ctx: ContainerStartupContext) -> None:
             telemetry_sender=telemetry_sender,
             shared_wallet_proxy=ctx.shared_wallet_proxy,
         )
+        _persist_paper_market_stream_run_summary(ctx)
     finally:
         try:
             if owns_telemetry_sender:
@@ -3009,6 +3369,148 @@ def supervise_startup_and_runtime(ctx: ContainerStartupContext) -> None:
         finally:
             # Final lifecycle persistence still sequences against shared_wallet_proxy.
             ctx.manager.shutdown()
+
+
+def run_observe_only_container_runtime(
+    *,
+    bot_id: str,
+    run_id: str,
+    bot: Mapping[str, Any],
+    run: Mapping[str, Any],
+    telemetry_sender: TelemetryEmitter,
+) -> int:
+    request_id = _resolve_backend_request_id()
+
+    def _record_lifecycle(
+        rec_bot_id: str,
+        rec_run_id: str,
+        phase: str,
+        owner: str,
+        message: str,
+        metadata: Mapping[str, Any] | None,
+        failure: Mapping[str, Any] | None,
+        status: str | None,
+    ) -> Mapping[str, Any]:
+        return _persist_lifecycle_phase(
+            bot_id=rec_bot_id,
+            run_id=rec_run_id,
+            phase=phase,
+            owner=owner,
+            message=message,
+            metadata=metadata,
+            failure=failure,
+            status=status,
+            telemetry_sender=telemetry_sender,
+        )
+
+    def _record_run_summary(payload: Mapping[str, Any]) -> None:
+        upsert_bot_run(dict(payload))
+
+    try:
+        _persist_lifecycle_phase(
+            bot_id=bot_id,
+            run_id=run_id,
+            phase=BotLifecyclePhase.CONTAINER_BOOTING.value,
+            owner=LifecycleOwner.CONTAINER.value,
+            message="Container process booting with observe-only startup contract.",
+            metadata={"request_id": request_id, "execution_behavior": OBSERVE_ONLY_BEHAVIOR},
+            telemetry_sender=telemetry_sender,
+        )
+        _persist_lifecycle_phase(
+            bot_id=bot_id,
+            run_id=run_id,
+            phase=BotLifecyclePhase.LOADING_BOT_CONFIG.value,
+            owner=LifecycleOwner.CONTAINER.value,
+            message="Loading observe-only bot config snapshot in runtime container.",
+            metadata={"request_id": request_id, "execution_behavior": OBSERVE_ONLY_BEHAVIOR},
+            telemetry_sender=telemetry_sender,
+        )
+        _persist_lifecycle_phase(
+            bot_id=bot_id,
+            run_id=run_id,
+            phase=BotLifecyclePhase.CLAIMING_RUN.value,
+            owner=LifecycleOwner.CONTAINER.value,
+            message="Observe-only container claimed backend-owned run_id.",
+            metadata={"run_id": run_id, "request_id": request_id, "execution_behavior": OBSERVE_ONLY_BEHAVIOR},
+            telemetry_sender=telemetry_sender,
+        )
+        strategy_id = str(bot.get("strategy_id") or "").strip()
+        if not strategy_id:
+            raise RuntimeError(f"Bot {bot_id} has no strategy_id configured")
+        _persist_lifecycle_phase(
+            bot_id=bot_id,
+            run_id=run_id,
+            phase=BotLifecyclePhase.LOADING_STRATEGY_SNAPSHOT.value,
+            owner=LifecycleOwner.CONTAINER.value,
+            message="Loading strategy snapshot for observe-only market intake.",
+            metadata={"strategy_id": strategy_id, "execution_behavior": OBSERVE_ONLY_BEHAVIOR},
+            telemetry_sender=telemetry_sender,
+        )
+        strategy = StrategyLoader.fetch_strategy(strategy_id)
+        readiness = _runtime_readiness_from_run_or_strategy(run, strategy)
+        duration_seconds = _duration_seconds_from_runtime_snapshot(bot, run)
+        return asyncio.run(
+            run_observe_only_market_intake(
+                bot_id=bot_id,
+                run_id=run_id,
+                request_id=request_id,
+                strategy=strategy,
+                readiness=readiness,
+                record_lifecycle=_record_lifecycle,
+                record_run_summary=_record_run_summary,
+                duration_seconds=duration_seconds,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc)
+        failure = build_failure_payload(
+            phase=BotLifecyclePhase.FAILED.value,
+            message=message,
+            error_type=type(exc).__name__,
+            type="observe_only_container_exception",
+            reason_code="observe_only_container_failed",
+            owner=LifecycleOwner.CONTAINER.value,
+            exception_type=type(exc).__name__,
+            traceback=traceback.format_exc().strip(),
+        )
+        upsert_bot_run(
+            {
+                "run_id": run_id,
+                "bot_id": bot_id,
+                "status": BotLifecycleStatus.FAILED.value,
+                "ended_at": utc_now_iso(),
+                "summary": {
+                    "execution_behavior": OBSERVE_ONLY_BEHAVIOR,
+                    "error": message,
+                    "orders_submitted": 0,
+                    "fills_recorded": 0,
+                    "wallet_mutations": 0,
+                },
+            }
+        )
+        _persist_lifecycle_phase(
+            bot_id=bot_id,
+            run_id=run_id,
+            phase=BotLifecyclePhase.FAILED.value,
+            owner=LifecycleOwner.CONTAINER.value,
+            message=message,
+            metadata={
+                "request_id": request_id,
+                "execution_behavior": OBSERVE_ONLY_BEHAVIOR,
+                "terminal_actor": "observe_only_container",
+                "terminal_reason_text": message,
+            },
+            failure=failure,
+            status=BotLifecycleStatus.FAILED.value,
+            telemetry_sender=telemetry_sender,
+        )
+        logger.exception(
+            "observe_only_container_runtime_failed | bot_id=%s | run_id=%s | error=%s",
+            bot_id,
+            run_id,
+            exc,
+        )
+        return 1
 
 
 def main() -> int:
@@ -3024,8 +3526,43 @@ def main() -> int:
         queue_timeout_ms=_TELEMETRY_EMIT_QUEUE_TIMEOUT_MS,
         retry_ms=_TELEMETRY_EMIT_RETRY_MS,
     )
+    lease_renewer: RunLeaseRenewer | None = None
     try:
-        ctx = load_container_startup_context(bot_id, telemetry_sender=telemetry_sender)
+        run_id = _resolve_backend_run_id(bot_id)
+        lease_token = _resolve_run_lease_token()
+        if not lease_token:
+            raise RuntimeError(
+                "QT_BOT_RUN_LEASE_TOKEN is required for bot runtime containers. "
+                f"bot_id={bot_id} run_id={run_id}"
+            )
+        lease_renewer = RunLeaseRenewer(
+            bot_id=bot_id,
+            run_id=run_id,
+            runner_id=_resolve_run_lease_runner_id(),
+            lease_token=lease_token,
+            ttl_seconds=_BOT_RUNTIME_SETTINGS.run_lease_ttl_seconds,
+            interval_seconds=_BOT_RUNTIME_SETTINGS.run_lease_renew_interval_seconds,
+            metadata={"owner": "container_runtime", "request_id": _resolve_backend_request_id()},
+        )
+        lease_renewer.start()
+        bot_snapshot, run_snapshot = _load_runtime_bot_snapshot(bot_id, run_id)
+        if is_observe_only_bot(bot_snapshot):
+            logger.info("bot_runtime_observe_only_started | bot_id=%s | run_id=%s", bot_id, run_id)
+            return run_observe_only_container_runtime(
+                bot_id=bot_id,
+                run_id=run_id,
+                bot=bot_snapshot,
+                run=run_snapshot,
+                telemetry_sender=telemetry_sender,
+            )
+        ctx = load_container_startup_context(
+            bot_id,
+            run_id=run_id,
+            bot_snapshot=bot_snapshot,
+            run_snapshot=run_snapshot,
+            telemetry_sender=telemetry_sender,
+        )
+        ctx.run_lease = lease_renewer
         logger.info("bot_runtime_run_started | bot_id=%s | run_id=%s", ctx.bot_id, ctx.run_id)
         spawn_workers(ctx)
         start_observability_exporter()
@@ -3033,6 +3570,20 @@ def main() -> int:
         return 0
     finally:
         stop_observability_exporter()
+        if lease_renewer is not None:
+            try:
+                lease_renewer.stop(
+                    release=True,
+                    status="released",
+                    metadata={"owner": "container_runtime", "reason": "runtime_process_exit"},
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve the primary runtime exit path.
+                logger.warning(
+                    "bot_runtime_run_lease_release_failed | bot_id=%s | run_id=%s | error=%s",
+                    bot_id,
+                    getattr(lease_renewer, "run_id", None),
+                    exc,
+                )
         telemetry_sender.close()
 
 

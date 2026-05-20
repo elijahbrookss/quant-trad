@@ -85,11 +85,13 @@ class BotBase(BaseModel):
     exchange: Optional[str] = None
     mode: str = Field(default="instant", pattern="^(instant|walk-forward)$")
     execution_mode: Optional[str] = Field(default=None, pattern="^(fast|full|FAST|FULL)$")
+    execution_behavior: str = Field(default="simulated", pattern="^(simulated|observe-only)$")
     run_type: str = Field(default="backtest", pattern="^(backtest|sim_trade|paper|live)$")
     playback_speed: float = Field(default=0.0, ge=0)
     backtest_start: Optional[str] = None
     backtest_end: Optional[str] = None
     wallet_config: Dict[str, Any] = Field(default_factory=dict)
+    market_data_stream_policy: Dict[str, Any] = Field(default_factory=dict)
     snapshot_interval_ms: int = Field(..., gt=0)
     bot_env: Dict[str, str] = Field(default_factory=dict)
     instrument_type: Optional[str] = None
@@ -113,11 +115,13 @@ class BotUpdateRequest(BaseModel):
     run_type: Optional[str] = Field(default=None, pattern="^(backtest|sim_trade|paper|live)$")
     mode: Optional[str] = Field(default=None, pattern="^(instant|walk-forward)$")
     execution_mode: Optional[str] = Field(default=None, pattern="^(fast|full|FAST|FULL)$")
+    execution_behavior: Optional[str] = Field(default=None, pattern="^(simulated|observe-only)$")
     playback_speed: Optional[float] = Field(default=None, ge=0)
     backtest_start: Optional[str] = None
     backtest_end: Optional[str] = None
     focus_symbol: Optional[str] = None
     wallet_config: Optional[Dict[str, Any]] = None
+    market_data_stream_policy: Optional[Dict[str, Any]] = None
     snapshot_interval_ms: Optional[int] = Field(default=None, gt=0)
     bot_env: Optional[Dict[str, str]] = None
     instrument_type: Optional[str] = None
@@ -125,6 +129,10 @@ class BotUpdateRequest(BaseModel):
 
 class BotStartRequest(BaseModel):
     request_id: Optional[str] = None
+    run_type: Optional[str] = Field(default=None, pattern="^(backtest|sim_trade|paper|live)$")
+    execution_behavior: Optional[str] = Field(default=None, pattern="^(simulated|observe-only)$")
+    duration_seconds: Optional[float] = Field(default=None, gt=0)
+    market_data_stream_policy: Optional[Dict[str, Any]] = None
 
 
 class BotStopRequest(BaseModel):
@@ -263,8 +271,9 @@ async def start_bot(
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-ID"),
 ) -> Dict[str, Any]:
     request_id = str((body.request_id if body else None) or x_request_id or "").strip() or None
+    overrides = body.dict(exclude_none=True, exclude={"request_id"}) if body else {}
     try:
-        return bot_service.start_bot(bot_id, request_id=request_id)
+        return bot_service.start_bot(bot_id, request_id=request_id, start_overrides=overrides)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -282,8 +291,9 @@ async def start_bot_run_context(
     """Start a run and return a compact run-context payload for CLI workflows."""
 
     request_id = str((body.request_id if body else None) or x_request_id or "").strip() or None
+    overrides = body.dict(exclude_none=True, exclude={"request_id"}) if body else {}
     try:
-        return bot_service.start_bot_run_context(bot_id, request_id=request_id)
+        return bot_service.start_bot_run_context(bot_id, request_id=request_id, start_overrides=overrides)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:

@@ -88,8 +88,8 @@ def _container_state_for_bot(bot: Mapping[str, Any], lifecycle: Mapping[str, Any
     }
     if not inspect_container:
         return default_state
-    lifecycle_status = str((lifecycle or {}).get("status") or "").strip().lower()
     lifecycle_metadata = lifecycle.get("metadata") if isinstance(lifecycle, Mapping) else {}
+    lifecycle_status = str((lifecycle or {}).get("status") or "").strip().lower()
     persisted_status = str(bot.get("status") or "").strip().lower()
     should_inspect = bool(
         bot.get("runner_id")
@@ -150,6 +150,12 @@ def _metric_subset(summary: Mapping[str, Any]) -> Dict[str, Any]:
         "fees",
         "exposure_pct",
         "time_in_market_pct",
+        "execution_behavior",
+        "market_event_counts",
+        "duration_seconds",
+        "orders_submitted",
+        "fills_recorded",
+        "wallet_mutations",
     )
     return {key: summary.get(key) for key in keys if summary.get(key) is not None}
 
@@ -211,6 +217,9 @@ def _bot_run_context(bot: Mapping[str, Any]) -> Dict[str, Any]:
     phase = _clean_text(lifecycle_map.get("phase"))
     active_run_id = latest_run_id if is_active_run_state(status=status, phase=phase) else None
     strategy_snapshot = _run_strategy_snapshot(latest_run_map)
+    latest_config = _as_mapping(latest_run_map.get("config_snapshot"))
+    latest_bot_snapshot = _as_mapping(latest_config.get("bot"))
+    latest_bot_risk = _as_mapping(latest_bot_snapshot.get("risk"))
     report_status = _report_status(latest_run_id)
     summary = _as_mapping(latest_run_map.get("summary"))
     controls = _controls_for(status, phase)
@@ -235,11 +244,15 @@ def _bot_run_context(bot: Mapping[str, Any]) -> Dict[str, Any]:
             "param_source_map": strategy_snapshot.get("param_source_map"),
         },
         "execution": {
-            "run_type": bot.get("run_type"),
-            "mode": bot.get("mode"),
-            "execution_mode": bot.get("execution_mode"),
-            "datasource": bot.get("datasource"),
-            "exchange": bot.get("exchange"),
+            "run_type": latest_bot_snapshot.get("run_type") or bot.get("run_type"),
+            "mode": latest_bot_snapshot.get("mode") or bot.get("mode"),
+            "execution_mode": latest_config.get("execution_mode") or latest_bot_snapshot.get("execution_mode") or bot.get("execution_mode"),
+            "execution_behavior": latest_config.get("execution_behavior")
+            or latest_bot_snapshot.get("execution_behavior")
+            or latest_bot_risk.get("execution_behavior")
+            or bot.get("execution_behavior"),
+            "datasource": latest_run_map.get("datasource") or bot.get("datasource"),
+            "exchange": latest_run_map.get("exchange") or bot.get("exchange"),
             "timeframe": latest_run_map.get("timeframe"),
             "symbols": list(latest_run_map.get("symbols") or []),
             "backtest_start": bot.get("backtest_start"),
@@ -321,8 +334,13 @@ def get_bot_run_status(bot_id: str, run_id: str) -> Dict[str, Any]:
     }
 
 
-def start_bot_run_context(bot_id: str, *, request_id: str | None = None) -> Dict[str, Any]:
-    start_payload = start_bot(bot_id, request_id=request_id)
+def start_bot_run_context(
+    bot_id: str,
+    *,
+    request_id: str | None = None,
+    start_overrides: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    start_payload = start_bot(bot_id, request_id=request_id, start_overrides=start_overrides)
     run_id = _clean_text(_as_mapping(start_payload).get("run_id")) or _clean_text(_as_mapping(start_payload).get("active_run_id"))
     context = get_bot_run_context(bot_id)
     payload = {
@@ -437,9 +455,18 @@ def delete_bot_record(bot_id: str) -> None:
     _broadcast_bot_stream("bot_deleted", {"bot_id": bot_id})
 
 
-def start_bot(bot_id: str, *, request_id: str | None = None) -> Dict[str, object]:
+def start_bot(
+    bot_id: str,
+    *,
+    request_id: str | None = None,
+    start_overrides: Mapping[str, Any] | None = None,
+) -> Dict[str, object]:
     _ensure_watchdog_callback()
-    return _composition().runtime_control_service.start_bot(bot_id, request_id=request_id)
+    return _composition().runtime_control_service.start_bot(
+        bot_id,
+        request_id=request_id,
+        start_overrides=start_overrides,
+    )
 
 
 def stop_bot(

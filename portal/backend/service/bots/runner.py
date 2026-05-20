@@ -73,7 +73,14 @@ class DockerBotRunner:
         )
 
     @staticmethod
-    def _runtime_process_env(bot_id: str, run_id: str, *, request_id: str | None = None) -> Dict[str, str]:
+    def _runtime_process_env(
+        bot_id: str,
+        run_id: str,
+        *,
+        request_id: str | None = None,
+        run_lease_token: str | None = None,
+        run_lease_runner_id: str | None = None,
+    ) -> Dict[str, str]:
         env_map = {key: str(value) for key, value in os.environ.items() if key.startswith("QT_")}
         if _DATABASE_SETTINGS.dsn:
             env_map["PG_DSN"] = str(_DATABASE_SETTINGS.dsn)
@@ -82,6 +89,10 @@ class DockerBotRunner:
             env_map["QT_SECURITY_PROVIDER_CREDENTIAL_KEY"] = provider_key
         env_map["QT_BOT_RUNTIME_BOT_ID"] = str(bot_id)
         env_map["QT_BOT_RUNTIME_RUN_ID"] = str(run_id)
+        if run_lease_token:
+            env_map["QT_BOT_RUN_LEASE_TOKEN"] = str(run_lease_token)
+        if run_lease_runner_id:
+            env_map["QT_BOT_RUN_LEASE_RUNNER_ID"] = str(run_lease_runner_id)
         if request_id:
             env_map["QT_BOT_RUNTIME_REQUEST_ID"] = str(request_id)
             env_map["QT_REQUEST_ID"] = str(request_id)
@@ -127,6 +138,7 @@ class DockerBotRunner:
         state = container.get("State") if isinstance(container.get("State"), dict) else {}
         status = str(state.get("Status") or "").strip().lower() or "unknown"
         config = container.get("Config") if isinstance(container.get("Config"), dict) else {}
+        labels = config.get("Labels") if isinstance(config.get("Labels"), dict) else {}
         env_entries = config.get("Env") if isinstance(config.get("Env"), list) else []
         env_map: Dict[str, str] = {}
         for entry in env_entries:
@@ -144,7 +156,15 @@ class DockerBotRunner:
             "oom_killed": bool(state.get("OOMKilled")),
             "error": str(state.get("Error") or "").strip() or None,
             "runtime_run_id": str(env_map.get("QT_BOT_RUNTIME_RUN_ID") or "").strip() or None,
-            "request_id": str(env_map.get("QT_BOT_RUNTIME_REQUEST_ID") or env_map.get("QT_REQUEST_ID") or "").strip() or None,
+            "runtime_bot_id": str(labels.get("quanttrad.bot_id") or "").strip() or None,
+            "runtime_label_run_id": str(labels.get("quanttrad.run_id") or "").strip() or None,
+            "request_id": str(
+                env_map.get("QT_BOT_RUNTIME_REQUEST_ID")
+                or env_map.get("QT_REQUEST_ID")
+                or labels.get("quanttrad.request_id")
+                or ""
+            ).strip()
+            or None,
         }
 
     def start_bot(self, *, bot: Mapping[str, object], run_id: str) -> str:
@@ -176,7 +196,22 @@ class DockerBotRunner:
             self.stop_bot(bot_id=bot_id, run_id=str(existing.get("runtime_run_id") or "") or None)
         network = self._resolve_runtime_network()
         request_id = str(bot.get("_runtime_request_id") or bot.get("request_id") or "").strip() or None
-        runtime_env = self._runtime_process_env(bot_id, normalized_run_id, request_id=request_id)
+        runtime_env = self._runtime_process_env(
+            bot_id,
+            normalized_run_id,
+            request_id=request_id,
+            run_lease_token=str(bot.get("_runtime_run_lease_token") or "").strip() or None,
+            run_lease_runner_id=str(bot.get("_runtime_runner_id") or "").strip() or None,
+        )
+        runtime_labels = {
+            "loki.job": "quanttrad",
+            "loki.service": "bot-runtime",
+            "quanttrad.runtime": "bot",
+            "quanttrad.bot_id": bot_id,
+            "quanttrad.run_id": normalized_run_id,
+        }
+        if request_id:
+            runtime_labels["quanttrad.request_id"] = request_id
         cmd = [
             "docker",
             "run",
@@ -186,6 +221,8 @@ class DockerBotRunner:
             "--network",
             network,
         ]
+        for key, value in sorted(runtime_labels.items()):
+            cmd.extend(["--label", f"{key}={value}"])
         for key, value in sorted(runtime_env.items()):
             cmd.extend(["-e", f"{key}={value}"])
         cmd.extend(

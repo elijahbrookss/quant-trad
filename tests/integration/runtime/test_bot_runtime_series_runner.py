@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import threading
 
-from engines.bot_runtime.runtime.components.series_runner import PoolSeriesRunner, SeriesRunnerContext
+from engines.bot_runtime.runtime.components.series_runner import InlineSeriesRunner, PoolSeriesRunner, SeriesRunnerContext
 
 
 @dataclass
@@ -47,3 +47,36 @@ def test_pool_series_runner_steps_due_states():
     runner.run()
 
     assert {id(state) for state in calls} == {id(state) for state in states}
+
+
+def test_inline_live_runner_waits_for_live_candles_until_stopped():
+    stop_event = threading.Event()
+    pause_event = threading.Event()
+    pause_event.set()
+    idle_paces = {"count": 0}
+
+    def pace(_interval, _update):
+        idle_paces["count"] += 1
+        stop_event.set()
+
+    ctx = SeriesRunnerContext(
+        stop_event=stop_event,
+        pause_event=pause_event,
+        live_mode=True,
+        mode="instant",
+        due_series_states=lambda _now: [],
+        next_step_time=lambda: None,
+        step_series_state=lambda _state: None,
+        append_live_candles_if_needed=lambda: False,
+        append_live_candles_for_state=lambda _state: False,
+        pace=pace,
+        series_states=lambda: [],
+        thread_name=lambda _state, idx: f"thread-{idx}",
+        log_debug=lambda *_args, **_kwargs: None,
+        log_info=lambda *_args, **_kwargs: None,
+        live_idle_interval_seconds=lambda: 0.01,
+    )
+
+    InlineSeriesRunner(ctx).run()
+
+    assert idle_paces["count"] == 1

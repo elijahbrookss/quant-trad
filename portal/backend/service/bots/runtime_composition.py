@@ -38,6 +38,27 @@ class BotStorageGateway(Protocol):
     def get_report_materialization_status(self, run_id: str) -> Dict[str, Any]: ...
     def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]: ...
     def get_bot_run_lifecycle(self, run_id: str) -> Optional[Mapping[str, Any]]: ...
+    def get_bot_run_lease(self, run_id: str) -> Optional[Mapping[str, Any]]: ...
+    def acquire_bot_run_lease(
+        self,
+        *,
+        bot_id: str,
+        run_id: str,
+        runner_id: str,
+        lease_token: str,
+        ttl_seconds: float | int | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> Dict[str, Any]: ...
+    def release_bot_run_lease(
+        self,
+        *,
+        bot_id: str,
+        run_id: str,
+        runner_id: str | None = None,
+        lease_token: str | None = None,
+        status: str = "released",
+        metadata: Mapping[str, Any] | None = None,
+    ) -> Optional[Dict[str, Any]]: ...
     def get_latest_bot_run_lifecycle(self, bot_id: str) -> Optional[Mapping[str, Any]]: ...
     def record_bot_run_lifecycle_checkpoint(self, payload: Mapping[str, Any]) -> Dict[str, Any]: ...
     def update_bot_runtime_status(self, *, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None: ...
@@ -95,6 +116,47 @@ def _build_storage_gateway() -> BotStorageGateway:
 
         def get_bot_run_lifecycle(self, run_id: str) -> Optional[Mapping[str, Any]]:
             return storage_module.get_bot_run_lifecycle(str(run_id))
+
+        def get_bot_run_lease(self, run_id: str) -> Optional[Mapping[str, Any]]:
+            return storage_module.get_bot_run_lease(str(run_id))
+
+        def acquire_bot_run_lease(
+            self,
+            *,
+            bot_id: str,
+            run_id: str,
+            runner_id: str,
+            lease_token: str,
+            ttl_seconds: float | int | None = None,
+            metadata: Mapping[str, Any] | None = None,
+        ) -> Dict[str, Any]:
+            return storage_module.acquire_bot_run_lease(
+                bot_id=str(bot_id),
+                run_id=str(run_id),
+                runner_id=str(runner_id),
+                lease_token=str(lease_token),
+                ttl_seconds=ttl_seconds,
+                metadata=metadata,
+            )
+
+        def release_bot_run_lease(
+            self,
+            *,
+            bot_id: str,
+            run_id: str,
+            runner_id: str | None = None,
+            lease_token: str | None = None,
+            status: str = "released",
+            metadata: Mapping[str, Any] | None = None,
+        ) -> Optional[Dict[str, Any]]:
+            return storage_module.release_bot_run_lease(
+                bot_id=str(bot_id),
+                run_id=str(run_id),
+                runner_id=runner_id,
+                lease_token=lease_token,
+                status=status,
+                metadata=metadata,
+            )
 
         def get_latest_bot_run_lifecycle(self, bot_id: str) -> Optional[Mapping[str, Any]]:
             return storage_module.get_latest_bot_run_lifecycle(str(bot_id))

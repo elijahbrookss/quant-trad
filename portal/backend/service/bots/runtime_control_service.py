@@ -8,6 +8,7 @@ import json
 import threading
 import uuid
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any, Callable, Dict, Optional, Protocol
 
 from core.settings import get_settings
@@ -17,6 +18,8 @@ from .bot_state_projection import project_bot_state
 from .bot_stream import BotStreamManager
 from .bot_watchdog import get_watchdog
 from .config_service import BotConfigService
+from .execution_behavior import execution_behavior_from_bot, normalize_execution_behavior
+from .market_data_stream_policy import normalize_market_data_stream_policy
 from .runner import BotRunner, DockerBotRunner
 from .startup_lifecycle import (
     BotLifecyclePhase,
@@ -44,6 +47,27 @@ class BotControlStorage(Protocol):
     def list_bot_runs(self, *, bot_id: Optional[str] = None) -> list[Dict[str, Any]]: ...
     def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]: ...
     def get_bot_run_lifecycle(self, run_id: str) -> Optional[Dict[str, Any]]: ...
+    def get_bot_run_lease(self, run_id: str) -> Optional[Dict[str, Any]]: ...
+    def acquire_bot_run_lease(
+        self,
+        *,
+        bot_id: str,
+        run_id: str,
+        runner_id: str,
+        lease_token: str,
+        ttl_seconds: float | int | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> Dict[str, Any]: ...
+    def release_bot_run_lease(
+        self,
+        *,
+        bot_id: str,
+        run_id: str,
+        runner_id: str | None = None,
+        lease_token: str | None = None,
+        status: str = "released",
+        metadata: Mapping[str, Any] | None = None,
+    ) -> Optional[Dict[str, Any]]: ...
     def get_latest_bot_run_lifecycle(self, bot_id: str) -> Optional[Dict[str, Any]]: ...
     def record_bot_run_lifecycle_checkpoint(self, payload: Dict[str, Any]) -> Dict[str, Any]: ...
     def update_bot_runtime_status(self, *, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None: ...
@@ -67,6 +91,10 @@ def _json_stable(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _utc_iso() -> str:
+    return datetime.now(UTC).replace(tzinfo=None).isoformat() + "Z"
+
+
 def _start_config_projection(bot: Mapping[str, Any]) -> Dict[str, Any]:
     excluded = {
         "status",
@@ -79,6 +107,32 @@ def _start_config_projection(bot: Mapping[str, Any]) -> Dict[str, Any]:
         "updated_at",
     }
     return {str(key): value for key, value in dict(bot or {}).items() if str(key) not in excluded}
+
+
+def _apply_start_overrides(bot: Mapping[str, Any], overrides: Mapping[str, Any] | None = None) -> Dict[str, Any]:
+    payload = dict(bot or {})
+    for key, value in dict(overrides or {}).items():
+        if value in (None, ""):
+            continue
+        if key == "execution_behavior":
+            behavior = normalize_execution_behavior(value)
+            payload["execution_behavior"] = behavior
+            risk = dict(payload.get("risk") or {})
+            risk["execution_behavior"] = behavior
+            payload["risk"] = risk
+        elif key == "run_type":
+            payload["run_type"] = str(value).strip().lower()
+        elif key == "duration_seconds":
+            payload["duration_seconds"] = float(value)
+        elif key == "market_data_stream_policy":
+            payload["market_data_stream_policy"] = normalize_market_data_stream_policy(
+                value if isinstance(value, Mapping) else {}
+            )
+        else:
+            payload[key] = value
+    if "execution_behavior" not in payload:
+        payload["execution_behavior"] = execution_behavior_from_bot(payload)
+    return payload
 
 
 def _start_config_hash(bot: Mapping[str, Any]) -> str:
@@ -183,6 +237,47 @@ class BotRuntimeControlService:
 
             def get_bot_run_lifecycle(self, run_id: str) -> Optional[Dict[str, Any]]:
                 return storage_module.get_bot_run_lifecycle(str(run_id))
+
+            def get_bot_run_lease(self, run_id: str) -> Optional[Dict[str, Any]]:
+                return storage_module.get_bot_run_lease(str(run_id))
+
+            def acquire_bot_run_lease(
+                self,
+                *,
+                bot_id: str,
+                run_id: str,
+                runner_id: str,
+                lease_token: str,
+                ttl_seconds: float | int | None = None,
+                metadata: Mapping[str, Any] | None = None,
+            ) -> Dict[str, Any]:
+                return storage_module.acquire_bot_run_lease(
+                    bot_id=bot_id,
+                    run_id=run_id,
+                    runner_id=runner_id,
+                    lease_token=lease_token,
+                    ttl_seconds=ttl_seconds,
+                    metadata=metadata,
+                )
+
+            def release_bot_run_lease(
+                self,
+                *,
+                bot_id: str,
+                run_id: str,
+                runner_id: str | None = None,
+                lease_token: str | None = None,
+                status: str = "released",
+                metadata: Mapping[str, Any] | None = None,
+            ) -> Optional[Dict[str, Any]]:
+                return storage_module.release_bot_run_lease(
+                    bot_id=bot_id,
+                    run_id=run_id,
+                    runner_id=runner_id,
+                    lease_token=lease_token,
+                    status=status,
+                    metadata=metadata,
+                )
 
             def get_latest_bot_run_lifecycle(self, bot_id: str) -> Optional[Dict[str, Any]]:
                 return storage_module.get_latest_bot_run_lifecycle(str(bot_id))
@@ -423,10 +518,12 @@ class BotRuntimeControlService:
         )
         return active
 
-    def _reconcile_active_runs_before_start(self, *, bot_id: str, runner: BotRunner, request_id: str) -> list[Dict[str, Any]]:
+    def _reconcile_active_runs_before_start(self, *, bot_id: str, runner: BotRunner | None, request_id: str) -> list[Dict[str, Any]]:
         active_runs = self._active_runs_for_bot(bot_id)
         if not active_runs:
             return []
+        if runner is None:
+            return active_runs
         try:
             container_state = DockerBotRunner.inspect_bot_container(bot_id)
         except Exception as exc:  # noqa: BLE001
@@ -493,25 +590,42 @@ class BotRuntimeControlService:
             return
         self._stop_runner(runner, bot_id=bot_id, run_id=run_id, preserve_container=False)
 
-    def start_bot(self, bot_id: str, *, request_id: str | None = None) -> Dict[str, object]:
+    def start_bot(
+        self,
+        bot_id: str,
+        *,
+        request_id: str | None = None,
+        start_overrides: Mapping[str, Any] | None = None,
+    ) -> Dict[str, object]:
         normalized_request_id = str(request_id or "").strip() or str(uuid.uuid4())
         lock = _lock_for_bot(bot_id)
         with lock:
-            return self._start_bot_locked(bot_id, request_id=normalized_request_id)
+            return self._start_bot_locked(
+                bot_id,
+                request_id=normalized_request_id,
+                start_overrides=dict(start_overrides or {}),
+            )
 
-    def _start_bot_locked(self, bot_id: str, *, request_id: str) -> Dict[str, object]:
-        runner = self._resolve_runner()
+    def _start_bot_locked(
+        self,
+        bot_id: str,
+        *,
+        request_id: str,
+        start_overrides: Mapping[str, Any] | None = None,
+    ) -> Dict[str, object]:
         watchdog = self._watchdog_instance()
         storage = self._storage_gateway()
-        bot = self._config.get_bot(bot_id)
+        stored_bot = self._config.get_bot(bot_id)
+        bot = _apply_start_overrides(stored_bot, start_overrides)
         config_hash = _start_config_hash(bot)
+        runner = self._resolve_runner()
         active_runs = self._reconcile_active_runs_before_start(bot_id=bot_id, runner=runner, request_id=request_id)
         if active_runs:
             active_run = active_runs[0]
             active_run_id = str(active_run.get("run_id") or "").strip()
             active_lifecycle = active_run.get("_lifecycle") if isinstance(active_run.get("_lifecycle"), Mapping) else {}
             start_request = _run_start_request(active_run, active_lifecycle)
-            projected = self._project_bot_from_storage(bot)
+            projected = self._project_bot_from_storage(stored_bot)
             if start_request.get("request_id") == request_id and start_request.get("config_hash") == config_hash:
                 return _control_response(
                     status="already_started",
@@ -534,7 +648,7 @@ class BotRuntimeControlService:
             )
 
         latest_run_id = storage.get_latest_bot_runtime_run_id(bot_id)
-        if latest_run_id:
+        if latest_run_id and runner is not None:
             latest_lifecycle = (
                 storage.get_bot_run_lifecycle(latest_run_id)
                 if hasattr(storage, "get_bot_run_lifecycle")
@@ -543,6 +657,8 @@ class BotRuntimeControlService:
             latest_run = storage.get_bot_run(latest_run_id) or {}
             if is_terminal_run_state(status=latest_run.get("status"), phase=(latest_lifecycle or {}).get("phase")):
                 self._cleanup_terminal_container_before_start(bot_id=bot_id, run_id=latest_run_id, runner=runner)
+        if runner is None:
+            raise RuntimeError("docker runner resolution failed for bot start")
         orchestrator = BotStartupOrchestrator(
             config_service=self._config,
             storage=storage,
@@ -550,7 +666,12 @@ class BotRuntimeControlService:
             watchdog=watchdog,
         )
         try:
-            ctx = orchestrator.start_bot(bot_id, request_id=request_id, config_hash=config_hash)
+            ctx = orchestrator.start_bot(
+                bot_id,
+                request_id=request_id,
+                config_hash=config_hash,
+                effective_bot=bot,
+            )
         except Exception:
             bot = self._config.get_bot(bot_id)
             projected = self._project_bot_from_storage(bot, inspect_container=False)
@@ -678,6 +799,22 @@ class BotRuntimeControlService:
         self._stop_runner(runner, bot_id=bot_id, preserve_container=preserve_container, run_id=target_run_id)
         watchdog = self._watchdog_instance()
         watchdog.unregister_bot(bot_id)
+        try:
+            storage.release_bot_run_lease(
+                bot_id=bot_id,
+                run_id=target_run_id,
+                runner_id=watchdog.runner_id,
+                status="released",
+                metadata={"reason": "platform_cancel", "request_id": request_id},
+            )
+        except Exception as exc:  # noqa: BLE001 - cancellation lifecycle is the primary control result.
+            logger.warning(
+                "bot_cancel_run_lease_release_failed | bot_id=%s | run_id=%s | runner_id=%s | error=%s",
+                bot_id,
+                target_run_id,
+                watchdog.runner_id,
+                exc,
+            )
 
         bot = self._config.get_bot(bot_id)
         payload = dict(bot)

@@ -12,6 +12,7 @@ from core.settings import get_settings
 from .controller import bots, candles, indicators as ind_controller, instruments, providers, reports, strategies
 from .service.bots import bot_service
 from .service.bots.bot_watchdog import get_watchdog
+from .service.bots.runner_observability import start_runner_observability, stop_runner_observability
 from .service.db.postgres_extensions import ensure_postgres_extensions
 from .service.observability_exporter import start_observability_exporter, stop_observability_exporter
 
@@ -57,6 +58,7 @@ def _startup_watchdog() -> None:
     start_observability_exporter()
     bot_service.ensure_watchdog_stream_bridge()
     watchdog = get_watchdog()
+    start_runner_observability(runner_id=watchdog.runner_id)
     watchdog.recover_local_orphans()
     watchdog.start_background_monitor()
     logger.info("bot_watchdog_ready | runner_id=%s", watchdog.runner_id)
@@ -65,6 +67,7 @@ def _startup_watchdog() -> None:
 def _shutdown_watchdog() -> None:
     watchdog = get_watchdog()
     watchdog.stop_background_monitor()
+    stop_runner_observability()
     stop_observability_exporter()
     logger.info("bot_watchdog_stopped | runner_id=%s", watchdog.runner_id)
 

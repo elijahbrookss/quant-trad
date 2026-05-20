@@ -358,6 +358,10 @@ class SeriesBuilderConstructionMixin:
             )
             candles = self._build_candles(df, timeframe)
             candle_gap_classification = df.attrs.get("gap_classification") if hasattr(df, "attrs") else None
+            if self.run_type == "paper" and bool(self.config.get("paper_live_market_data")):
+                # Streaming paper uses historical candles only to warm indicator state.
+                # Entries/exits start with candles closed after the run begins.
+                replay_start_index = len(candles)
         if not candles:
             raise RuntimeError(f"No valid candles could be built for strategy {strategy.id}")
         if self._log_candle_sequence:
