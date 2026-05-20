@@ -1,6 +1,6 @@
 import { PlusCircle, RefreshCw, Search } from 'lucide-react'
 
-import { BotFleetCard } from '../../fleet/components/BotFleetCard.jsx'
+import { BacktestRunCard, LiveMonitorRow } from '../../fleet/components/BotFleetCard.jsx'
 
 function SummaryMetric({ label, value, tone = 'default' }) {
   const valueClass = tone === 'attention'
@@ -32,13 +32,10 @@ function FleetHeader({
   return (
     <section className="qt-ops-shell overflow-hidden">
       <div className="border-b border-white/8 px-4 py-4 sm:px-5">
-        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+        <div className="flex items-center justify-between gap-4">
           <div className="min-w-0">
-            <p className="qt-ops-kicker">Bots</p>
-            <h2 className="mt-2 text-[1.6rem] font-semibold tracking-[0.01em] text-slate-50">Fleet management</h2>
-            <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-400">
-              Run state, operator actions, and fleet health stay here. BotLens remains the separate deep inspection surface.
-            </p>
+            <p className="qt-ops-kicker">Fleet</p>
+            <h2 className="mt-1 text-[1.4rem] font-semibold tracking-[0.01em] text-slate-50">Bot management</h2>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <button
@@ -63,8 +60,8 @@ function FleetHeader({
       </div>
 
       <div className="space-y-4 px-4 py-4 sm:px-5">
-        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
-          <div className="grid gap-3 border-b border-white/6 pb-4 sm:grid-cols-3 xl:grid-cols-7">
+        <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3 border-b border-white/6 pb-4">
+          <div className="flex flex-wrap gap-x-4 gap-y-2">
             {fleetSummary.items.map((item) => (
               <SummaryMetric
                 key={item.key}
@@ -88,34 +85,54 @@ function FleetHeader({
               />
             ) : null}
           </div>
-
-          <div className="qt-mono flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.14em] text-slate-500 lg:justify-end">
-            <span>{filteredBots.length} shown</span>
-            <span className="text-slate-700">/</span>
-            <span>{sortedBots.length} total</span>
-            <span className="text-slate-700">/</span>
+          <div className="qt-mono flex items-center gap-2 text-[11px] uppercase tracking-[0.14em] text-slate-500">
+            <span>{filteredBots.length}/{sortedBots.length}</span>
+            <span className="text-slate-700">·</span>
             <span>stream {botStreamState}</span>
           </div>
         </div>
 
-        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
-          <label className="qt-ops-panel-muted flex min-w-0 items-center gap-2 px-3 py-2.5 text-slate-200 focus-within:border-white/14">
-            <Search className="size-3.5 shrink-0 text-slate-600" />
-            <input
-              type="search"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Filter by bot, strategy, status, or run id"
-              className="min-w-0 flex-1 bg-transparent text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none"
-            />
-          </label>
-          <p className="text-sm text-slate-500 lg:text-right">
-            Filter the fleet without leaving the operational surface.
-          </p>
-        </div>
+        <label className="qt-ops-panel-muted flex min-w-0 items-center gap-2 px-3 py-2.5 text-slate-200 focus-within:border-white/14">
+          <Search className="size-3.5 shrink-0 text-slate-600" />
+          <input
+            type="search"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Filter by name, strategy, status, or run ID"
+            className="min-w-0 flex-1 bg-transparent text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none"
+          />
+        </label>
       </div>
     </section>
   )
+}
+
+function SectionLabel({ title, count }) {
+  return (
+    <div className="flex items-center gap-2">
+      <p className="qt-ops-kicker">{title}</p>
+      {count != null && count > 0 ? (
+        <span className="qt-mono text-[10px] font-semibold text-slate-600">{count}</span>
+      ) : null}
+    </div>
+  )
+}
+
+function partitionBots(bots) {
+  const monitor = []
+  const backtest = []
+  for (const bot of bots) {
+    const t = String(bot.run_type || '').toLowerCase().trim()
+    if (t === 'backtest') backtest.push(bot)
+    else monitor.push(bot)
+  }
+  return { monitor, backtest }
+}
+
+function groupBacktests(bots) {
+  // Each bot is its own run group until parallel backtest support lands.
+  // Future: group by bot.run_group_id when the backend provides it.
+  return bots.map((bot) => ({ key: bot.id, bots: [bot] }))
 }
 
 export function BotsFleetPanel({
@@ -142,6 +159,23 @@ export function BotsFleetPanel({
   sortedBots,
   strategyLookup,
 }) {
+  const { monitor, backtest } = partitionBots(filteredBots)
+  const backtestGroups = groupBacktests(backtest)
+
+  const sharedProps = {
+    strategyLookup,
+    nowEpochMs,
+    pendingStart,
+    pendingStop,
+    pendingDelete,
+    onStart: handleStart,
+    onStop: handleStop,
+    onDelete: handleDelete,
+    onOpenLens: (bot) => setLensBotId(bot?.id || null),
+    onOpenDiagnostics: (bot) => setDiagnosticsBotId(bot?.id || null),
+    onViewReport: handleViewReport,
+  }
+
   return (
     <section className="space-y-4">
       <FleetHeader
@@ -157,41 +191,46 @@ export function BotsFleetPanel({
         sortedBots={sortedBots}
       />
 
-      <section className="space-y-2.5">
-        <div className="flex items-end justify-between gap-3">
-          <div>
-            <p className="qt-ops-kicker">Fleet List</p>
-            <h3 className="mt-1 text-base font-semibold text-slate-100">Operator-ready bot inventory</h3>
-          </div>
-        </div>
+      {fleetState.mode === 'ready' ? (
+        <div className="space-y-5">
+          {/* Active monitor — paper and live bots */}
+          {monitor.length > 0 ? (
+            <section className="space-y-1.5">
+              <SectionLabel title="Active" count={monitor.length} />
+              <div className="qt-ops-shell divide-y divide-white/6 overflow-hidden">
+                {monitor.map((bot) => (
+                  <LiveMonitorRow key={bot.id} bot={bot} {...sharedProps} />
+                ))}
+              </div>
+            </section>
+          ) : null}
 
-        {fleetState.mode === 'ready' ? (
-          <div className="space-y-2.5">
-            {filteredBots.map((bot) => (
-              <BotFleetCard
-                key={bot.id}
-                bot={bot}
-                strategyLookup={strategyLookup}
-                nowEpochMs={nowEpochMs}
-                onStart={handleStart}
-                onStop={handleStop}
-                onDelete={handleDelete}
-                onOpenLens={(selectedBot) => setLensBotId(selectedBot?.id || null)}
-                onOpenDiagnostics={(selectedBot) => setDiagnosticsBotId(selectedBot?.id || null)}
-                onViewReport={handleViewReport}
-                pendingStart={pendingStart}
-                pendingStop={pendingStop}
-                pendingDelete={pendingDelete}
-              />
-            ))}
-          </div>
-        ) : (
-          <div className="qt-ops-shell px-5 py-10 text-center">
-            <p className="text-base font-semibold text-slate-100">{fleetState.title}</p>
-            <p className="mt-2 text-sm text-slate-400">{fleetState.detail}</p>
-          </div>
-        )}
-      </section>
+          {/* Backtest runs */}
+          {backtestGroups.length > 0 ? (
+            <section className="space-y-1.5">
+              <SectionLabel title="Backtest Runs" count={backtestGroups.length} />
+              <div className="space-y-2">
+                {backtestGroups.map((group) => (
+                  <BacktestRunCard key={group.key} bots={group.bots} {...sharedProps} />
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {monitor.length === 0 && backtest.length === 0 ? (
+            <div className="qt-ops-shell px-5 py-10 text-center">
+              <p className="text-sm text-slate-400">
+                {sortedBots.length === 0 ? 'No bots yet.' : 'No bots match the current filter.'}
+              </p>
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <div className="qt-ops-shell px-5 py-10 text-center">
+          <p className="text-base font-semibold text-slate-100">{fleetState.title}</p>
+          <p className="mt-2 text-sm text-slate-400">{fleetState.detail}</p>
+        </div>
+      )}
     </section>
   )
 }

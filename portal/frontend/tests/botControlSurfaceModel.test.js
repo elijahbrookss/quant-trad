@@ -183,6 +183,7 @@ test('bot row view model shapes metadata, symbols, and warnings for faster scana
     buildBot({
       id: 'bot-1234567890abcdef',
       status: 'failed_start',
+      strategy_variant_name: 'Expansion Only',
       active_run_id: 'run-1234567890abcdef',
       lifecycle: {
         status: 'startup_failed',
@@ -202,7 +203,8 @@ test('bot row view model shapes metadata, symbols, and warnings for faster scana
   )
 
   assert.equal(view.strategyLabel, 'Breakout Ladder')
-  assert.equal(view.headerMetaText, 'Breakout Ladder · Backtest · FAST · 1H')
+  assert.equal(view.strategyVariantLabel, 'Expansion Only')
+  assert.equal(view.headerMetaText, 'Breakout Ladder · Expansion Only · Backtest · FAST · 1 hr')
   assert.equal(view.symbols.summaryLabel, '6 symbols')
   assert.equal(view.symbols.trackedLabel, '6 symbols tracked')
   assert.equal(view.symbols.preview, 'BTC, ETH, XRP, SOL +2 more')
@@ -216,8 +218,37 @@ test('bot row view model shapes metadata, symbols, and warnings for faster scana
   assert.equal(view.bodyStats.some((item) => item.key === 'snapshot'), false)
   assert.equal(view.warningSummary.count, 2)
   assert.equal(view.warningSummary.label, '2 warnings active')
-  assert.equal(view.operationalRows[0].label, 'Phase')
+  assert.equal(view.operationalRows[0].label, 'Mode')
+  assert.equal(view.operationalRows.find((row) => row.key === 'phase')?.label, 'Phase')
   assert.equal(view.actionHint.includes('diagnostics'), true)
+})
+
+test('paper bot rows expose paper mode prominently without backtest execution wording', () => {
+  const view = buildBotCardViewModel(
+    buildBot({
+      status: 'running',
+      run_type: 'paper',
+      mode: 'walk-forward',
+      execution_mode: 'full',
+      active_run_id: 'run-paper',
+      lifecycle: {
+        status: 'running',
+        phase: 'live',
+        reason: 'live_runtime',
+        updated_at: '2026-04-06T12:04:55Z',
+      },
+    }),
+    {
+      strategyLookup: buildStrategyLookup(),
+      nowEpochMs: Date.parse('2026-04-06T12:05:10Z'),
+    },
+  )
+
+  assert.equal(view.runMode.label, 'Paper')
+  assert.equal(view.headerMetaText, 'Breakout Ladder · Paper · 1 hr')
+  assert.equal(view.metadataItems.find((item) => item.key === 'execution-mode'), undefined)
+  assert.equal(view.operationalRows.find((item) => item.key === 'mode')?.value, 'Paper')
+  assert.doesNotMatch(view.headerMetaText, /FULL/)
 })
 
 test('completed bot rows keep completion timing in metadata instead of repeating it in the stats block', () => {

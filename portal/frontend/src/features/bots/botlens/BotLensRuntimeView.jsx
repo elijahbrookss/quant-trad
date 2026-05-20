@@ -4,7 +4,6 @@ import { Check, Copy, RefreshCcw, X } from 'lucide-react'
 
 import { ActiveTradeChip } from '../../../components/bots/ActiveTradeChip.jsx'
 import DecisionTrace from '../../../components/bots/DecisionTrace/index.jsx'
-import { TradeLogList } from '../../../components/bots/TradeLogList.jsx'
 import { useOverlayControls } from '../../../components/bots/hooks/useOverlayControls.js'
 import { ChartPanel } from './components/ChartPanel.jsx'
 
@@ -16,10 +15,29 @@ function noticeClassName(tone) {
 
 function statusToneClass(tone) {
   return {
-    emerald: 'border-emerald-500/45 bg-emerald-500/10 text-emerald-200',
+    emerald: 'border-emerald-400/60 bg-emerald-400/15 text-emerald-100 shadow-[0_0_24px_rgba(52,211,153,0.12)]',
     amber: 'border-amber-500/45 bg-amber-500/10 text-amber-200',
-    rose: 'border-rose-500/50 bg-rose-500/12 text-rose-200',
+    rose: 'border-rose-500/50 bg-rose-500/10 text-rose-200',
     sky: 'border-sky-500/45 bg-sky-500/10 text-sky-200',
+    slate: 'border-white/10 bg-white/5 text-slate-200',
+  }[tone] || 'border-white/10 bg-white/5 text-slate-200'
+}
+
+function statusDotClass(tone) {
+  return {
+    emerald: 'bg-emerald-300 shadow-[0_0_14px_rgba(52,211,153,0.55)]',
+    amber: 'bg-amber-300',
+    rose: 'bg-rose-300',
+    sky: 'bg-sky-300',
+    slate: 'bg-slate-400',
+  }[tone] || 'bg-slate-400'
+}
+
+function runModeClass(tone) {
+  return {
+    amber: 'border-amber-300/50 bg-amber-300/12 text-amber-100',
+    rose: 'border-rose-300/55 bg-rose-300/12 text-rose-100',
+    sky: 'border-sky-300/45 bg-sky-300/10 text-sky-100',
     slate: 'border-white/10 bg-white/5 text-slate-200',
   }[tone] || 'border-white/10 bg-white/5 text-slate-200'
 }
@@ -33,7 +51,7 @@ function RuntimeEmptyState({ mode, detail }) {
   return (
     <div className="qt-ops-console flex min-h-[22rem] items-center justify-center px-6 py-10 text-center">
       <div className="max-w-xl">
-        <p className="qt-ops-kicker">BotLens</p>
+        <p className="text-xs font-semibold text-slate-400">BotLens</p>
         <p className="mt-3 text-xl font-semibold text-slate-100">{title}</p>
         <p className="mt-2 text-sm text-slate-400">{detail}</p>
       </div>
@@ -79,19 +97,29 @@ function TopBar({ topBar, onClose, refreshSession }) {
         delete resetTimersRef.current[identifier.key]
         setCopiedKeys((current) => ({ ...current, [identifier.key]: false }))
       }, COPY_RESET_MS)
-    } catch {}
+    } catch {
+      // Clipboard access is best-effort in restricted browser contexts.
+    }
   }, [])
 
   return (
-    <header className="border-b border-white/8 px-4 py-4 sm:px-5">
-      <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+    <header className="border-b border-white/8 px-4 py-3 sm:px-5">
+      <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <div className="min-w-0">
-          <p className="qt-ops-kicker">{topBar.kicker}</p>
+          <p className="text-xs font-semibold text-slate-400">{topBar.kicker}</p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <DialogTitle className="text-[1.4rem] font-semibold tracking-[0.01em] text-slate-50">
               {topBar.title}
             </DialogTitle>
-            <span className={`qt-ops-chip ${statusToneClass(topBar.status.tone)}`}>{topBar.status.label}</span>
+            <span className={`inline-flex items-center gap-1.5 rounded-[3px] border px-2.5 py-1 text-sm font-semibold ${statusToneClass(topBar.status.tone)}`}>
+              <span className={`size-1.5 rounded-full ${statusDotClass(topBar.status.tone)}`} />
+              {topBar.status.label}
+            </span>
+            {topBar.runMode ? (
+              <span className={`inline-flex items-center rounded-[3px] border px-2.5 py-1 text-sm font-semibold ${runModeClass(topBar.runMode.tone)}`}>
+                {topBar.runMode.label}
+              </span>
+            ) : null}
           </div>
           <p className="mt-2 text-sm text-slate-300">{topBar.subtitle}</p>
           <div className="mt-3 flex flex-wrap gap-2">
@@ -110,7 +138,7 @@ function TopBar({ topBar, onClose, refreshSession }) {
           <button
             type="button"
             onClick={refreshSession}
-            className="qt-mono inline-flex items-center gap-1.5 rounded-[3px] border border-white/10 bg-black/25 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-300 transition hover:border-white/16 hover:bg-black/40 hover:text-slate-100"
+            className="inline-flex items-center gap-1.5 rounded-[3px] border border-white/10 bg-black/25 px-3 py-2 text-sm font-semibold text-slate-300 transition hover:border-white/16 hover:bg-black/40 hover:text-slate-100"
           >
             <RefreshCcw className="size-3.5" />
             Refresh
@@ -118,7 +146,7 @@ function TopBar({ topBar, onClose, refreshSession }) {
           <button
             type="button"
             onClick={onClose}
-            className="qt-mono inline-flex items-center gap-1.5 rounded-[3px] border border-white/10 bg-black/25 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-300 transition hover:border-white/16 hover:bg-black/40 hover:text-slate-100"
+            className="inline-flex items-center gap-1.5 rounded-[3px] border border-white/10 bg-black/25 px-3 py-2 text-sm font-semibold text-slate-300 transition hover:border-white/16 hover:bg-black/40 hover:text-slate-100"
           >
             <X className="size-3.5" />
             Exit Lens
@@ -126,12 +154,12 @@ function TopBar({ topBar, onClose, refreshSession }) {
         </div>
       </div>
 
-      <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
+      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 border-t border-white/8 pt-3">
         {topBar.stats.map((stat) => (
-          <div key={stat.key} className="qt-ops-panel-muted px-3 py-2.5">
-            <p className="qt-ops-kicker">{stat.label}</p>
-            <p className="mt-1 text-sm font-semibold text-slate-100">{stat.value}</p>
-          </div>
+          <span key={stat.key} className="inline-flex items-baseline gap-1.5 text-xs">
+            <span className="text-slate-600">{stat.label}</span>
+            <span className="font-semibold text-slate-200">{stat.value}</span>
+          </span>
         ))}
       </div>
     </header>
@@ -157,7 +185,7 @@ function TabButton({ active, badge, label, onClick }) {
       type="button"
       onClick={onClick}
       data-active={active ? 'true' : 'false'}
-      className="qt-ops-tab qt-mono inline-flex items-center gap-2 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.14em]"
+      className="qt-ops-tab inline-flex items-center gap-2 px-3 py-2 text-sm font-semibold"
     >
       <span>{label}</span>
       {badge !== undefined ? <span className="text-slate-500">{badge}</span> : null}
@@ -169,13 +197,13 @@ function ReadoutTable({ title, rows }) {
   return (
     <section className="qt-ops-console overflow-hidden">
       <header className="border-b border-white/8 px-4 py-3">
-        <p className="qt-ops-kicker">{title}</p>
+        <p className="text-sm font-semibold text-slate-100">{title}</p>
       </header>
       {rows.length ? (
         <div className="divide-y divide-white/6">
           {rows.map((row) => (
             <div key={row.key} className="flex items-center justify-between gap-4 px-4 py-3">
-              <span className="qt-ops-kicker">{row.label}</span>
+              <span className="text-xs font-medium text-slate-500">{row.label}</span>
               <span className="max-w-[60%] text-right text-sm text-slate-200">{row.value}</span>
             </div>
           ))}
@@ -195,15 +223,6 @@ function EmptyConsole({ message }) {
   )
 }
 
-function StateTab({ model }) {
-  return (
-    <div className="grid h-full gap-4 xl:grid-cols-2">
-      <ReadoutTable title="Run State" rows={model.runRows} />
-      <ReadoutTable title="Selected Symbol State" rows={model.selectedRows} />
-    </div>
-  )
-}
-
 function RecentTradesTable({ rows }) {
   if (!rows.length) {
     return <EmptyConsole message="No recent selected-symbol trades are available yet." />
@@ -212,11 +231,11 @@ function RecentTradesTable({ rows }) {
   return (
     <div className="qt-ops-console overflow-hidden">
       <header className="border-b border-white/8 px-4 py-3">
-        <p className="qt-ops-kicker">Selected Symbol Trades</p>
+        <p className="text-sm font-semibold text-slate-100">Selected symbol trades</p>
       </header>
       <div className="overflow-auto">
         <table className="min-w-full text-left text-sm text-slate-200">
-          <thead className="border-b border-white/8 bg-black/25 text-[11px] uppercase tracking-[0.18em] text-slate-500">
+          <thead className="border-b border-white/8 bg-black/25 text-xs text-slate-500">
             <tr>
               <th className="px-4 py-3">Symbol</th>
               <th className="px-4 py-3">Status</th>
@@ -254,8 +273,8 @@ function TradesTab({ model, hoveredTradeId, onHoverTrade, onSelectSymbol }) {
       <section className="qt-ops-console overflow-hidden">
         <header className="border-b border-white/8 px-4 py-3">
           <div className="flex items-center justify-between gap-3">
-            <p className="qt-ops-kicker">Open Trades</p>
-            <span className="qt-mono text-[11px] uppercase tracking-[0.14em] text-slate-500">
+            <p className="text-sm font-semibold text-slate-100">Open trades</p>
+            <span className="text-xs text-slate-500">
               {model.openTrades.length} active
             </span>
           </div>
@@ -294,9 +313,9 @@ function DecisionsTab({ model }) {
       <section className="qt-ops-console overflow-hidden">
         <header className="border-b border-white/8 px-4 py-3">
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-            <p className="qt-ops-kicker">Decision Ledger</p>
-            <span className="qt-mono text-[11px] uppercase tracking-[0.14em] text-slate-500">status {model.status}</span>
-            <span className="qt-mono text-[11px] uppercase tracking-[0.14em] text-slate-500">
+            <p className="text-sm font-semibold text-slate-100">Decision ledger</p>
+            <span className="text-xs text-slate-500">status {model.status}</span>
+            <span className="qt-mono text-[11px] text-slate-500">
               seq {model.nextCursor.afterSeq}
             </span>
           </div>
@@ -315,32 +334,24 @@ function DecisionsTab({ model }) {
   )
 }
 
-function LogsTab({ model, logTab, onLogTabChange }) {
-  return (
-    <div className="h-full">
-      <TradeLogList logs={model.entries} logTab={logTab} onTabChange={onLogTabChange} onFocusLog={() => {}} />
-    </div>
-  )
-}
-
 function DiagnosticsTab({ model }) {
   return (
     <div className="grid h-full gap-4 xl:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
       <section className="qt-ops-console overflow-hidden">
         <header className="border-b border-white/8 px-4 py-3">
-          <p className="qt-ops-kicker">Diagnostics Checks</p>
+          <p className="text-sm font-semibold text-slate-100">Runtime health</p>
         </header>
         <div className="divide-y divide-white/6">
           {model.checks.map((row) => (
             <div key={row.key} className="flex items-center justify-between gap-3 px-4 py-3">
-              <span className="qt-ops-kicker">{row.label}</span>
+              <span className="text-xs font-medium text-slate-500">{row.label}</span>
               <span className="text-sm text-slate-200">{row.value}</span>
             </div>
           ))}
         </div>
         {model.notices.length ? (
           <div className="border-t border-white/8 px-4 py-4">
-            <p className="qt-ops-kicker">Notices</p>
+            <p className="text-sm font-semibold text-slate-100">Notices</p>
             <div className="mt-3 space-y-2">
               {model.notices.map((notice) => (
                 <div key={notice.key} className={`rounded-[3px] border px-3 py-2 text-sm ${noticeClassName(notice.tone)}`}>
@@ -355,8 +366,8 @@ function DiagnosticsTab({ model }) {
       <section className="qt-ops-console overflow-hidden">
         <header className="border-b border-white/8 px-4 py-3">
           <div className="flex items-center justify-between gap-3">
-            <p className="qt-ops-kicker">Warnings</p>
-            <span className="qt-mono text-[11px] uppercase tracking-[0.14em] text-slate-500">
+            <p className="text-sm font-semibold text-slate-100">Warnings</p>
+            <span className="text-xs text-slate-500">
               {model.warnings.count} active
             </span>
           </div>
@@ -370,7 +381,7 @@ function DiagnosticsTab({ model }) {
                     <p className="text-sm font-medium text-slate-100">{warning.title}</p>
                     <p className="mt-1 text-xs leading-relaxed text-slate-400">{warning.message}</p>
                   </div>
-                  <div className="qt-mono text-right text-[11px] uppercase tracking-[0.12em] text-slate-500">
+                  <div className="text-right text-xs text-slate-500">
                     <p>x{Math.max(1, Number(warning.count || 1) || 1)}</p>
                     <p className="mt-1">{warning.seenLabel}</p>
                   </div>
@@ -394,9 +405,8 @@ export function BotLensRuntimeView({
   open,
   refreshSession,
 }) {
-  const [activeTab, setActiveTab] = useState('state')
-  const [overlayPanelCollapsed, setOverlayPanelCollapsed] = useState(false)
-  const [logTab, setLogTab] = useState('trade')
+  const [activeTab, setActiveTab] = useState('decisions')
+  const [overlayPanelCollapsed, setOverlayPanelCollapsed] = useState(true)
   const [hoveredTradeId, setHoveredTradeId] = useState(null)
 
   const { overlayOptions, visibility, visibleOverlays, toggleOverlay } = useOverlayControls({
@@ -405,11 +415,14 @@ export function BotLensRuntimeView({
 
   useEffect(() => {
     if (!open) return
-    setActiveTab('state')
-    setOverlayPanelCollapsed(false)
-    setLogTab('trade')
+    setActiveTab('decisions')
+    setOverlayPanelCollapsed(true)
     setHoveredTradeId(null)
   }, [open, model.botId])
+
+  useEffect(() => {
+    if (!model.tabs.some((tab) => tab.key === activeTab)) setActiveTab(model.tabs[0]?.key || 'decisions')
+  }, [activeTab, model.tabs])
 
   useEffect(() => {
     if (!hoveredTradeId) return
@@ -425,7 +438,7 @@ export function BotLensRuntimeView({
     [model.retrievalPanels.chart, visibleOverlays],
   )
 
-  let tabContent = <StateTab model={model.inspection.state} />
+  let tabContent = <DecisionsTab model={model.inspection.decisions} />
   if (activeTab === 'trades') {
     tabContent = (
       <TradesTab
@@ -435,10 +448,6 @@ export function BotLensRuntimeView({
         onSelectSymbol={changeSelectedSymbol}
       />
     )
-  } else if (activeTab === 'decisions') {
-    tabContent = <DecisionsTab model={model.inspection.decisions} />
-  } else if (activeTab === 'logs') {
-    tabContent = <LogsTab model={model.inspection.logs} logTab={logTab} onLogTabChange={setLogTab} />
   } else if (activeTab === 'diagnostics') {
     tabContent = <DiagnosticsTab model={model.inspection.diagnostics} />
   }
@@ -447,7 +456,7 @@ export function BotLensRuntimeView({
     <Dialog open={open} onClose={onClose} className="relative z-[75]">
       <div className="fixed inset-0 bg-black/80 backdrop-blur-sm" aria-hidden="true" />
       <div className="fixed inset-0 overflow-y-auto px-3 py-3 sm:px-4 sm:py-4">
-        <DialogPanel className="qt-ops-shell mx-auto flex min-h-[calc(100vh-1.5rem)] w-full max-w-[min(96vw,118rem)] flex-col overflow-hidden">
+        <DialogPanel className="qt-ops-shell qt-botlens-shell mx-auto flex min-h-[calc(100vh-1.5rem)] w-full max-w-[min(96vw,118rem)] flex-col overflow-hidden">
           <TopBar topBar={model.topBar} onClose={onClose} refreshSession={refreshSession} />
           <NoticesStrip notices={model.notices} />
 
@@ -460,7 +469,7 @@ export function BotLensRuntimeView({
             </div>
           ) : (
             <>
-              <div className="min-h-0 border-b border-white/8 px-4 py-4 sm:px-5">
+              <div className="qt-botlens-chart-zone min-h-0 border-b border-white/8 px-4 py-4 sm:px-5">
                 <ChartPanel
                   model={chartModel}
                   symbolSelector={model.symbolSelector}

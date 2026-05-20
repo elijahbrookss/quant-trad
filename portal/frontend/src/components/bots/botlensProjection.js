@@ -11,6 +11,7 @@ const symbolDeltaDropWarnings = new Map()
 
 export const SYMBOL_SIGNAL_DELTA_TYPE = 'botlens_symbol_signal_delta'
 export const SYMBOL_CANDLE_DELTA_TYPE = 'botlens_symbol_candle_delta'
+export const SYMBOL_PROVISIONAL_CANDLE_DELTA_TYPE = 'botlens_symbol_provisional_candle_delta'
 export const SYMBOL_OVERLAY_DELTA_TYPE = 'botlens_symbol_overlay_delta'
 export const SYMBOL_TRADE_DELTA_TYPE = 'botlens_symbol_trade_delta'
 export const SYMBOL_LOG_DELTA_TYPE = 'botlens_symbol_diagnostic_delta'
@@ -24,6 +25,7 @@ export const RUN_OPEN_TRADES_DELTA_TYPE = 'botlens_run_open_trades_delta'
 
 const SYMBOL_DELTA_TYPES = new Set([
   SYMBOL_CANDLE_DELTA_TYPE,
+  SYMBOL_PROVISIONAL_CANDLE_DELTA_TYPE,
   SYMBOL_OVERLAY_DELTA_TYPE,
   SYMBOL_SIGNAL_DELTA_TYPE,
   SYMBOL_TRADE_DELTA_TYPE,
@@ -34,6 +36,7 @@ const SYMBOL_DELTA_TYPES = new Set([
 
 const SYMBOL_CONCERN_BY_TYPE = {
   [SYMBOL_CANDLE_DELTA_TYPE]: 'candles',
+  [SYMBOL_PROVISIONAL_CANDLE_DELTA_TYPE]: 'provisional_candle',
   [SYMBOL_OVERLAY_DELTA_TYPE]: 'overlays',
   [SYMBOL_SIGNAL_DELTA_TYPE]: 'signals',
   [SYMBOL_TRADE_DELTA_TYPE]: 'trades',
@@ -370,6 +373,8 @@ function normalizeRunBootstrapSymbol(entry) {
     last_event_at: activity.last_event_at || null,
     last_bar_time: activity.last_bar_time || null,
     last_price: activity.last_price ?? null,
+    last_market_at: activity.last_market_at || null,
+    last_market_price: activity.last_market_price ?? null,
     candle_count: Number(activity.candle_count || 0) || 0,
     has_open_trade: Boolean(openTrade.present),
     open_trade_count: Number(openTrade.count || 0) || 0,
@@ -559,6 +564,7 @@ export function normalizeSelectedSymbolState(selectedSymbol, { symbolKey = null,
       run_live: false,
     }),
     candles: mergeCanonicalCandles(source.candles || []),
+    provisional_candle: normalizeCandle(source.provisional_candle),
     overlays: projectOverlayState(source.overlays || []),
     signals: Array.isArray(source.signals) ? source.signals.filter((entry) => entry && typeof entry === 'object').map((entry) => ({ ...entry })) : [],
     recent_trades: recentTrades,
@@ -914,6 +920,9 @@ export function applySelectedSymbolBootstrap(store, bootstrapPayload) {
     stats: hasSnapshotField('stats') ? symbolState.stats : existingState?.stats || symbolState.stats,
     overlays: hasSnapshotField('overlays') ? symbolState.overlays : existingState?.overlays || symbolState.overlays,
     candles: hasSnapshotField('candles') ? symbolState.candles : existingState?.candles || symbolState.candles,
+    provisional_candle: hasSnapshotField('provisional_candle')
+      ? symbolState.provisional_candle
+      : existingState?.provisional_candle || symbolState.provisional_candle,
     continuity: hasSnapshotField('continuity') ? symbolState.continuity : existingState?.continuity || symbolState.continuity,
     live_cursors: mergeScopedCursors(existingState?.live_cursors, symbolState.live_cursors),
   }
@@ -1197,10 +1206,19 @@ export function applyStatsDelta(store, message) {
   })
 }
 
+export function applyProvisionalCandleDelta(store, message) {
+  return withSymbolState(store, message, (next, payload) => {
+    next.provisional_candle = normalizeCandle(payload.provisional_candle)
+    return next
+  })
+}
+
 export function applyTypedSymbolDelta(store, message) {
   switch (String(message?.type || '')) {
     case SYMBOL_CANDLE_DELTA_TYPE:
       return applyCandleDelta(store, message)
+    case SYMBOL_PROVISIONAL_CANDLE_DELTA_TYPE:
+      return applyProvisionalCandleDelta(store, message)
     case SYMBOL_OVERLAY_DELTA_TYPE:
       return applyOverlayDeltaMessage(store, message)
     case SYMBOL_SIGNAL_DELTA_TYPE:
@@ -1258,6 +1276,7 @@ export function getSelectedSymbolSlices(store) {
       readiness: symbolState.readiness || null,
     },
     candles: Array.isArray(symbolState.candles) ? symbolState.candles : [],
+    provisionalCandle: symbolState.provisional_candle || null,
     overlays: Array.isArray(symbolState.overlays) ? symbolState.overlays : [],
     signals: Array.isArray(symbolState.signals) ? symbolState.signals : [],
     recentTrades: Array.isArray(symbolState.recent_trades) ? symbolState.recent_trades : [],

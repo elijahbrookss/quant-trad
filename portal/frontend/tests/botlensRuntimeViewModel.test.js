@@ -248,7 +248,10 @@ test('runtime view model keeps current-state rows separate from retrieval-backed
   const model = buildBotLensRuntimeViewModel(buildControllerLike(state))
 
   assert.equal(model.mode, 'ready')
-  assert.equal(model.topBar.stats.find((row) => row.key === 'execution-mode')?.value, 'FULL (intrabar)')
+  assert.equal(model.topBar.stats.find((row) => row.key === 'execution-mode'), undefined)
+  assert.equal(model.topBar.stats.find((row) => row.key === 'phase'), undefined)
+  assert.equal(model.topBar.stats.find((row) => row.key === 'timeframe')?.value, '1M')
+  assert.doesNotMatch(model.topBar.subtitle, /FULL/)
   assert.equal(model.currentStatePanels.overview.runRows.find((row) => row.key === 'execution-mode')?.value, 'FULL (intrabar)')
   assert.equal(model.currentStatePanels.overview.runRows.find((row) => row.key === 'intrabar-path')?.value, 'Enabled')
   assert.equal(model.inspection.diagnostics.checks.find((row) => row.key === 'execution-mode')?.value, 'FULL (intrabar)')
@@ -257,6 +260,14 @@ test('runtime view model keeps current-state rows separate from retrieval-backed
   assert.equal(model.inspection.diagnostics.checks.find((row) => row.key === 'transport')?.value, 'Yes')
   assert.equal(model.currentStatePanels.tradeActivity.logs.length, 0)
   assert.equal(model.retrievalPanels.chart.historyCount, 1)
+  assert.equal(model.retrievalPanels.chart.chartContext.symbol, 'BTC')
+  assert.equal(model.retrievalPanels.chart.chartKey, 'instrument-btc|1m')
+  assert.equal(model.retrievalPanels.chart.chartContext.openTradeCount, 1)
+  assert.equal(model.retrievalPanels.chart.liveTrades.length, 1)
+  assert.deepEqual(
+    model.tabs.map((tab) => tab.key),
+    ['decisions', 'trades', 'diagnostics'],
+  )
   assert.deepEqual(
     model.retrievalPanels.chart.candles.map((row) => row.time),
     [1767225540, 1767225600],
@@ -415,4 +426,22 @@ test('runtime view model suppresses generic ready notices in the top-level modal
   const model = buildBotLensRuntimeViewModel(buildControllerLike(bootstrapState()))
 
   assert.deepEqual(model.notices, [])
+})
+
+test('runtime chart timer mode prefers paper/live run type over playback mode', () => {
+  const model = buildBotLensRuntimeViewModel(buildControllerLike(bootstrapState(), {
+    bot: {
+      id: 'bot-1',
+      name: 'Momentum Runner',
+      mode: 'walk-forward',
+      run_type: 'paper',
+      playback_speed: 1,
+    },
+  }))
+
+  assert.equal(model.retrievalPanels.chart.mode, 'walk-forward')
+  assert.equal(model.retrievalPanels.chart.timerMode, 'paper')
+  assert.equal(model.retrievalPanels.chart.chartContext.runMode.label, 'Paper')
+  assert.equal(model.topBar.runMode.label, 'Paper')
+  assert.doesNotMatch(model.topBar.subtitle, /Paper/)
 })

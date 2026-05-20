@@ -323,7 +323,7 @@ export function BotLensChart({
 
   const markerTooltip = useMarkerTooltip({ chartRef, markerDetailsRef })
 
-  const { start: startAnimator, cancel: cancelAnimator, onLifecycleEvent, stateRef: animatorStateRef } =
+  const { start: startAnimator, cancel: cancelAnimator, onLifecycleEvent } =
     useIntrabarCandleAnimator()
 
   useEffect(
@@ -481,7 +481,7 @@ export function BotLensChart({
   }, [applyArtifacts, candleData, computeArtifacts, requestIntent, resolvedOverlays, tradeMarkerTooltips, tradeMarkers, tradePriceLines, tradeRegions, tradeSegments])
 
   const containerClasses = [
-    'relative w-full overflow-hidden rounded-2xl border border-white/10 bg-[#0f1118]',
+    'relative w-full overflow-hidden rounded-[3px] border border-white/10 bg-[#0f1118]',
     heightClass,
     className,
   ]

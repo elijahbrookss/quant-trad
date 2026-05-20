@@ -46,7 +46,8 @@ export function selectSelectedSymbolChartHistoryStatus(state) {
 export function selectSelectedSymbolChartCandles(state) {
   const baseSlices = selectSelectedSymbolBaseSlices(state)
   const history = selectSelectedSymbolChartHistory(state)
-  return mergeCanonicalCandles(history?.candles || [], baseSlices?.candles || [])
+  const provisional = baseSlices?.provisionalCandle ? [baseSlices.provisionalCandle] : []
+  return mergeCanonicalCandles(history?.candles || [], baseSlices?.candles || [], provisional)
 }
 
 export function selectSymbolOptions(state) {

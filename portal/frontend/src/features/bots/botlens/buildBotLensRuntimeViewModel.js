@@ -1,6 +1,5 @@
 import {
   describeBotLifecycle,
-  formatLifecyclePhaseLabel,
   getBotRunId,
   getBotStatus,
   normalizeBotStatus,
@@ -22,6 +21,16 @@ function formatSignedNumber(value, digits = 2) {
   if (typeof value !== 'number' || Number.isNaN(value)) return '—'
   if (value === 0) return value.toFixed(digits)
   return `${value > 0 ? '+' : ''}${value.toFixed(digits)}`
+}
+
+function formatPrice(value) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return '—'
+  const abs = Math.abs(numeric)
+  if (abs >= 1000) return numeric.toFixed(2)
+  if (abs >= 100) return numeric.toFixed(3)
+  if (abs >= 1) return numeric.toFixed(4)
+  return numeric.toFixed(6)
 }
 
 function formatMoment(value) {
@@ -62,6 +71,24 @@ function humanizeToken(value) {
     .filter(Boolean)
     .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
     .join(' ')
+}
+
+function normalizeRunMode(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return null
+  if (['paper', 'paper_trade', 'paper_trading', 'sim_trade', 'sim'].includes(normalized)) return 'paper'
+  if (normalized === 'live') return 'live'
+  if (normalized === 'backtest') return 'backtest'
+  return normalized
+}
+
+function buildRunModeBadge(value) {
+  const key = normalizeRunMode(value)
+  if (!key) return null
+  if (key === 'paper') return { key, label: 'Paper', tone: 'amber' }
+  if (key === 'live') return { key, label: 'Live', tone: 'rose' }
+  if (key === 'backtest') return { key, label: 'Backtest', tone: 'sky' }
+  return { key, label: humanizeToken(key), tone: 'slate' }
 }
 
 function formatBooleanState(value, { trueLabel = 'Yes', falseLabel = 'No' } = {}) {
@@ -170,6 +197,34 @@ function buildRecentTradeRows(trades = []) {
     netPnl: formatSignedNumber(Number(trade?.net_pnl), 2),
     tradeId: String(trade?.trade_id || '').trim() || '—',
   }))
+}
+
+function buildPriceContext(candles = []) {
+  const rows = Array.isArray(candles) ? candles : []
+  const last = rows[rows.length - 1] || null
+  const previous = rows[rows.length - 2] || null
+  const lastClose = Number(last?.close)
+  const previousClose = Number(previous?.close)
+  const change = Number.isFinite(lastClose) && Number.isFinite(previousClose)
+    ? lastClose - previousClose
+    : null
+  const changePct = Number.isFinite(change) && Number.isFinite(previousClose) && previousClose !== 0
+    ? change / previousClose
+    : null
+  const direction = Number.isFinite(change)
+    ? change > 0
+      ? 'up'
+      : change < 0
+        ? 'down'
+        : 'flat'
+    : 'unknown'
+
+  return {
+    lastPrice: Number.isFinite(lastClose) ? formatPrice(lastClose) : '—',
+    change: Number.isFinite(change) ? formatSignedNumber(change, Math.abs(change) >= 1 ? 2 : 4) : '—',
+    changePct: Number.isFinite(changePct) ? `${changePct > 0 ? '+' : ''}${(changePct * 100).toFixed(2)}%` : '—',
+    direction,
+  }
 }
 
 function normalizeTimestamp(value) {
@@ -461,8 +516,9 @@ export function buildBotLensRuntimeViewModel({
   const selectedSymbol = String(selectedSymbolMetadata?.symbol || selectedSummary?.symbol || '').trim().toUpperCase() || '—'
   const selectedTimeframe = String(selectedSymbolMetadata?.timeframe || selectedSummary?.timeframe || '').trim().toUpperCase() || '—'
   const selectedNetPnlValue = Number(selectedSymbolState?.stats?.net_pnl ?? selectedSummary?.stats?.net_pnl)
+  const selectedNetPnlLabel = formatSignedNumber(selectedNetPnlValue)
+  const priceContext = buildPriceContext(chartCandles)
   const openTradeCount = Object.keys(runState?.openTradesIndex || {}).length
-  const logCount = Array.isArray(logs) ? logs.length : 0
   const recentTradeRows = buildRecentTradeRows(chartTrades)
   const topTone = topBarTone(runState?.health?.status || botStatus)
   const strategyName = String(runState?.runMeta?.strategy_name || bot?.strategy_variant_name || bot?.strategy_id || 'Strategy').trim()
@@ -513,6 +569,9 @@ export function buildBotLensRuntimeViewModel({
   })
   const executionModeLabel = formatExecutionModeLabel(executionMode)
   const intrabarExecution = executionModeUsesIntrabar(executionMode)
+  const chartPlaybackMode = bot?.mode || null
+  const timerRunMode = bot?.run_type || runState?.runMeta?.run_type || runState?.lifecycle?.phase || bot?.mode || null
+  const runModeBadge = buildRunModeBadge(bot?.run_type || runState?.runMeta?.run_type)
   const selectedReadiness = selectedSymbolState?.readiness && typeof selectedSymbolState.readiness === 'object'
     ? selectedSymbolState.readiness
     : selectedSymbolMetadata?.readiness && typeof selectedSymbolMetadata.readiness === 'object'
@@ -641,6 +700,7 @@ export function buildBotLensRuntimeViewModel({
 
   const retrievalPanels = {
     chart: {
+      chartKey: selectedSymbolKey || selectedLabel || selectedSymbol,
       status: selectedSnapshotReady
         ? 'ready'
         : selectedSymbolBootstrapStatus === 'loading'
@@ -661,8 +721,23 @@ export function buildBotLensRuntimeViewModel({
         signals: String(selectedSymbolSignals?.length || 0),
         decisions: String(selectedSymbolDecisions?.length || 0),
         trades: String((Array.isArray(chartTrades) ? chartTrades : []).length),
-        netPnl: formatSignedNumber(selectedNetPnlValue),
+        netPnl: selectedNetPnlLabel,
+        openTrades: String(selectedOpenTradeCount),
       },
+      chartContext: {
+        symbol: selectedSymbol,
+        label: selectedLabel || selectedSymbol,
+        timeframe: selectedTimeframe,
+        status: humanizeToken(selectedSymbolState?.status || selectedSummary?.status || runState?.health?.status || botStatus || 'idle'),
+        openTradeCount: selectedOpenTradeCount,
+        netPnl: selectedNetPnlLabel,
+        lastPrice: priceContext.lastPrice,
+        priceChange: priceContext.change,
+        priceChangePct: priceContext.changePct,
+        priceDirection: priceContext.direction,
+        runMode: runModeBadge,
+      },
+      liveTrades: currentStatePanels.tradeActivity.openTrades,
       historyStatus: chartHistoryStatus || 'idle',
       historyCount: Number(chartHistory?.candles?.length || 0),
       cacheCount: Number(chartHistoryCacheCount || 0),
@@ -670,7 +745,8 @@ export function buildBotLensRuntimeViewModel({
       trades: Array.isArray(chartTrades) ? chartTrades : [],
       overlays: Array.isArray(chartOverlays) ? chartOverlays : [],
       timeframe: selectedSymbolMetadata?.timeframe || selectedSymbolState?.timeframe || null,
-      mode: bot?.mode || null,
+      mode: chartPlaybackMode,
+      timerMode: timerRunMode,
       playbackSpeed: Number(bot?.playback_speed || 0),
       emptyMessage: selectedSymbolBootstrapStatus === 'loading'
         ? `Loading symbol snapshot for ${selectedLabel}...`
@@ -693,9 +769,10 @@ export function buildBotLensRuntimeViewModel({
     topBar: {
       kicker: 'BotLens',
       title: bot?.name || 'Runtime workspace',
-      subtitle: [strategyName, executionModeLabel, bot?.run_type ? humanizeToken(bot.run_type) : null, `run ${shortId(resolvedRunId)}`]
+      subtitle: [strategyName, `run ${shortId(resolvedRunId)}`]
         .filter(Boolean)
         .join(' · '),
+      runMode: runModeBadge,
       status: {
         label: humanizeToken(runState?.health?.status || botStatus || 'idle'),
         tone: topTone,
@@ -706,18 +783,15 @@ export function buildBotLensRuntimeViewModel({
       ],
       stats: [
         { key: 'selected-symbol', label: 'Selected Symbol', value: selectedLabel || '—' },
-        { key: 'execution-mode', label: 'Execution Mode', value: executionModeLabel },
-        { key: 'phase', label: 'Phase', value: formatLifecyclePhaseLabel(runState?.lifecycle?.phase || botLifecycle.phase || 'idle') },
+        { key: 'timeframe', label: 'Timeframe', value: selectedTimeframe },
         { key: 'open-trades', label: 'Open Trades', value: String(openTradeCount) },
         { key: 'warnings', label: 'Warnings', value: String(warningCount) },
         { key: 'last-event', label: 'Last Event', value: formatRelativeTime(runState?.health?.last_event_at) },
       ],
     },
     tabs: [
-      { key: 'state', label: 'State' },
-      { key: 'trades', label: 'Trades', badge: String(openTradeCount) },
       { key: 'decisions', label: 'Decisions', badge: String(decisionCount) },
-      { key: 'logs', label: 'Logs', badge: String(logCount) },
+      { key: 'trades', label: 'Trades', badge: String(openTradeCount) },
       { key: 'diagnostics', label: 'Diagnostics', badge: String(warningCount) },
     ],
     inspection: {

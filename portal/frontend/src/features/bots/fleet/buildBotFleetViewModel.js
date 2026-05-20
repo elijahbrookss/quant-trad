@@ -8,6 +8,32 @@ import { mapRunToViewModel } from '../viewModels/runViewModel.js'
 import { formatExecutionModeLabel, resolveExecutionMode } from '../executionMode.js'
 import { getBotPerformanceTrace } from '../../../components/bots/botPerformanceTrace.js'
 
+function normalizeRunType(value) {
+  const normalized = String(value || 'backtest').trim().toLowerCase()
+  if (['paper', 'paper_trade', 'paper_trading', 'sim_trade', 'sim'].includes(normalized)) return 'paper'
+  if (normalized === 'live') return 'live'
+  if (normalized === 'backtest') return 'backtest'
+  return normalized || 'backtest'
+}
+
+function humanizeToken(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return '—'
+  return normalized
+    .split('_')
+    .filter(Boolean)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(' ')
+}
+
+function buildRunModeBadge(value) {
+  const key = normalizeRunType(value)
+  if (key === 'paper') return { key, label: 'Paper', tone: 'amber' }
+  if (key === 'live') return { key, label: 'Live', tone: 'rose' }
+  if (key === 'backtest') return { key, label: 'Backtest', tone: 'sky' }
+  return { key, label: humanizeToken(key), tone: 'slate' }
+}
+
 function truncateIdentifier(value, { head = 7, tail = 5 } = {}) {
   const normalized = String(value || '').trim()
   if (!normalized) return ''
@@ -34,10 +60,41 @@ function symbolsFor(bot, strategyLookup) {
   return strategy ? symbolsFromInstrumentSlots(strategy.instrument_slots) : []
 }
 
+function formatTimeframeLabel(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return '—'
+  const normalized = raw.toLowerCase().replace(/\s+/g, '')
+  const match = normalized.match(/^(\d+)(m|min|minute|minutes|h|hr|hour|hours|d|day|days|w|wk|week|weeks)$/)
+  if (!match) return raw
+
+  const amount = Number(match[1])
+  const unit = match[2]
+  if (unit === 'm' || unit === 'min' || unit === 'minute' || unit === 'minutes') return `${amount} min`
+  if (unit === 'h' || unit === 'hr' || unit === 'hour' || unit === 'hours') return `${amount} hr`
+  if (unit === 'd' || unit === 'day' || unit === 'days') return `${amount} ${amount === 1 ? 'day' : 'days'}`
+  if (unit === 'w' || unit === 'wk' || unit === 'week' || unit === 'weeks') return `${amount} wk`
+  return raw
+}
+
 function describeTimeframe(bot, strategyLookup) {
   const strategy = strategyFor(bot, strategyLookup)
   const timeframe = String(strategy?.timeframe || bot?.timeframe || '').trim()
-  return timeframe ? timeframe.toUpperCase() : '—'
+  return formatTimeframeLabel(timeframe)
+}
+
+function describeStrategyVariant(bot, strategy) {
+  const persistedName = String(bot?.strategy_variant_name || bot?.strategyVariantName || '').trim()
+  if (persistedName) return persistedName
+
+  const variantId = String(bot?.strategy_variant_id || bot?.strategyVariantId || '').trim()
+  if (!variantId) return '—'
+
+  const variants = Array.isArray(strategy?.variants) ? strategy.variants : []
+  const currentVariant = variants.find((variant) => String(variant?.id || '').trim() === variantId)
+  const currentName = String(currentVariant?.name || '').trim()
+  if (currentName) return currentName
+
+  return truncateIdentifier(variantId)
 }
 
 function describeSymbols(bot, strategyLookup) {
@@ -64,24 +121,26 @@ function describeSymbols(bot, strategyLookup) {
 }
 
 function describeExecution(bot) {
-  const runType = String(bot?.run_type || 'backtest').trim().toLowerCase()
+  const runType = normalizeRunType(bot?.run_type)
   const executionLabel = formatExecutionModeLabel(resolveExecutionMode(bot))
   if (runType === 'backtest') {
     return `Backtest · ${executionLabel}`
   }
-  if (runType === 'paper' || runType === 'paper_trade' || runType === 'sim_trade') {
-    return `Paper · ${executionLabel}`
-  }
-  return `Live · ${executionLabel}`
+  return buildRunModeBadge(runType).label
 }
 
-function buildHeaderMetaText(strategyLabel, executionLabel, timeframe) {
+function buildHeaderMetaText(strategyLabel, variantLabel, runMode, executionLabel, timeframe) {
+  const showExecution = runMode?.key === 'backtest'
   const parts = [
     String(strategyLabel || '').trim(),
-    ...String(executionLabel || '')
-      .split('·')
-      .map((part) => part.trim())
-      .filter(Boolean),
+    String(variantLabel || '').trim(),
+    runMode?.label,
+    ...(showExecution
+      ? String(executionLabel || '')
+          .split('·')
+          .map((part) => part.trim())
+          .filter((part) => part && part !== runMode?.label)
+      : []),
     String(timeframe || '').trim(),
   ].filter((part) => part && part !== '—')
 
@@ -331,6 +390,7 @@ export function buildBotCardViewModel(
   const strategy = strategyFor(bot, strategyLookup)
   const runView = mapRunToViewModel(bot, { strategy, display })
   const strategyLabel = String(strategy?.name || bot?.strategy_id || '—').trim() || '—'
+  const strategyVariantLabel = describeStrategyVariant(bot, strategy)
   const symbolInfo = describeSymbols(bot, strategyLookup)
   const activity = describeActivity(display, bot, nowEpochMs)
   const phaseLabel = formatLifecyclePhaseLabel(display?.lifecycle?.phase)
@@ -343,10 +403,11 @@ export function buildBotCardViewModel(
   const botId = String(bot?.id || '').trim()
   const runId = String(display?.runId || '').trim()
   const timeframe = describeTimeframe(bot, strategyLookup)
+  const runMode = buildRunModeBadge(bot?.run_type)
   const executionLabel = describeExecution(bot)
-  const headerMetaText = buildHeaderMetaText(strategyLabel, executionLabel, timeframe)
+  const headerMetaText = buildHeaderMetaText(strategyLabel, strategyVariantLabel, runMode, executionLabel, timeframe)
   const durationLabel = durationFor(display, bot, nowEpochMs)
-  const metadataItems = [
+  const baseMetadataItems = [
     buildMetadataItem({
       key: 'bot-id',
       label: 'Bot ID',
@@ -367,13 +428,17 @@ export function buildBotCardViewModel(
       copyable: Boolean(runId),
     }),
     buildActivityMetadataItem(activity),
-    buildMetadataItem({
-      key: 'execution-mode',
-      label: 'Execution',
-      rawValue: runView.executionMode,
-      value: runView.executionModeLabel,
-      title: runView.executionModeLabel,
-    }),
+    ...(runMode.key === 'backtest'
+      ? [
+          buildMetadataItem({
+            key: 'execution-mode',
+            label: 'Execution',
+            rawValue: runView.executionMode,
+            value: runView.executionModeLabel,
+            title: runView.executionModeLabel,
+          }),
+        ]
+      : []),
     buildMetadataItem({
       key: 'duration',
       label: 'Duration',
@@ -383,6 +448,7 @@ export function buildBotCardViewModel(
       mono: true,
     }),
   ]
+  const metadataItems = baseMetadataItems
   const metricStats = [
     {
       key: 'open-trades',
@@ -425,6 +491,8 @@ export function buildBotCardViewModel(
   return {
     display,
     strategyLabel,
+    strategyVariantLabel,
+    runMode,
     symbolsLabel: symbolInfo.preview,
     symbolsTitle: symbolInfo.title,
     executionLabel,
@@ -447,6 +515,7 @@ export function buildBotCardViewModel(
     },
     warningSummary,
     operationalRows: [
+      { key: 'mode', label: 'Mode', value: runMode.label },
       { key: 'phase', label: 'Phase', value: phaseLabel },
       { key: 'heartbeat', label: 'Heartbeat', value: describeHeartbeat(display?.lifecycle?.heartbeatState) },
       { key: 'container', label: 'Container', value: describeContainer(display?.containerStatus) },
