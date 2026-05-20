@@ -11,7 +11,7 @@ This document describes the current GitHub Actions test topology as it actually 
 
 ## Current CI Flow
 
-1. **targeted-suites** (matrix): `core`, `provider`, `web`
+1. **pr-suite**: `./scripts/ci/run_test_suite.sh pr`
 
 That is the whole GitHub PR gate right now.
 
@@ -27,7 +27,9 @@ The current CI job is intentionally a fast regression screen, not a full runtime
 
 ## Why this structure
 
-- The matrix catches breakages earlier and with clearer ownership.
+- GitHub runners do not have the project database available.
+- PR CI omits tests marked `db` before collection so DB-backed modules are not imported for a job that cannot run them.
+- The PR gate is one job to avoid repeated dependency-install and job-rounding overhead.
 - A single suite-runner script reduces drift between workflow YAML and actual test commands.
 - GitHub-host execution avoids spending time fighting container orchestration for every PR.
 
@@ -38,7 +40,7 @@ Current GitHub PR CI is good at catching:
 - import/bootstrap breakage
 - pure logic regressions
 - provider wiring regressions
-- web/service regressions that do not depend on full runtime environment fidelity
+- runtime, wallet, fee, margin, reporting, BotLens, CLI, MCP, and service-contract regressions that do not require a live database
 
 Current GitHub PR CI is not the source of truth for:
 
@@ -46,18 +48,19 @@ Current GitHub PR CI is not the source of truth for:
 - runtime composition across real services
 - database wiring inside the Docker network
 - full backtest/runtime orchestration
+- DB-backed endpoint behavior
 
 If a bug only appears once services are inside the Docker network, host-run PR CI may miss it.
 
 ## Safe Landing Path
 
 ### Phase 1 (now)
-- Matrix routing with explicit test-file groups.
-- Host-run PR checks only.
+- Host-run `pr` profile only.
+- DB-marked tests omitted from GitHub PR CI.
 
 ### Phase 2
-- Expand `@pytest.mark.core|provider|web|smoke` coverage.
-- Move suite selection from file lists to marker expressions.
+- Continue moving high-value tests into semantic profiles instead of file-list routing.
+- Delete or downgrade low-value tests that only freeze implementation shape.
 
 ### Phase 3
 - Add a separate container-backed runtime/integration job if runtime orchestration bugs become a recurring problem worth paying for.
@@ -65,8 +68,9 @@ If a bug only appears once services are inside the Docker network, host-run PR C
 
 ## Operational Rule
 
-If you change suite contents, update only `scripts/ci/run_test_suite.sh`.
-Workflow jobs should continue to call that script and avoid duplicating pytest arguments.
+If you change suite commands, update only `scripts/ci/run_test_suite.sh`.
+If you change profile membership, update `tests/conftest.py`.
+Workflow jobs should continue to call the suite script and avoid duplicating pytest arguments.
 
 
 ## Local Reproduction
@@ -77,9 +81,15 @@ To mimic the current GitHub job locally:
    - `python -m pip install --upgrade pip`
    - `pip install -r requirements.txt`
 2. Run targeted suites exactly as CI does:
-   - `./scripts/ci/run_test_suite.sh core`
-   - `./scripts/ci/run_test_suite.sh provider`
-   - `./scripts/ci/run_test_suite.sh web`
+   - `./scripts/ci/run_test_suite.sh pr`
+
+Useful local-only layers:
+
+- `./scripts/ci/run_test_suite.sh backend` runs all non-DB tests.
+- `./scripts/ci/run_test_suite.sh full` runs the full pytest suite, with DB tests skipped unless `RUN_DB_TESTS=1`.
+- `./scripts/ci/run_test_suite.sh db` runs DB-marked tests and requires a reachable `PG_DSN`.
+- `./scripts/ci/run_test_suite.sh runtime` runs the runtime profile without DB-marked tests.
+- `./scripts/ci/run_test_suite.sh reports` runs the reporting profile without DB-marked tests.
 ## Optional Container Reproduction
 
 If you want to debug container-specific issues locally, use the optional Docker path:

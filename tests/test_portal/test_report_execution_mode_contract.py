@@ -320,6 +320,11 @@ def test_list_report_summaries_exposes_execution_mode(monkeypatch) -> None:
             "export_status": "available",
         },
     )
+    monkeypatch.setattr(
+        contract.report_data,
+        "get_report_materialization_status",
+        lambda _run_id: {"status": "not_built", "contract_version": "run_report_v2"},
+    )
 
     payload = contract.list_report_summaries()
 

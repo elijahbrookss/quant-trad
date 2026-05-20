@@ -3,7 +3,7 @@ set -euo pipefail
 
 SUITE="${1:-}"
 if [[ -z "$SUITE" ]]; then
-  echo "usage: $0 <contracts|runtime-reporting|backend|core|provider|runtime|botlens|web|cli|reports|docs|integration>" >&2
+  echo "usage: $0 <pr|contracts|runtime-reporting|backend|full|db|core|provider|runtime|botlens|web|cli|reports|docs|integration>" >&2
   exit 2
 fi
 
@@ -45,7 +45,7 @@ run_suite() {
 profile_command() {
   local profile_args
   printf -v profile_args '%q ' "$@"
-  echo "for profile in ${profile_args}; do echo \"ci_profile_start profile=\${profile}\"; if [[ \"\${profile}\" == \"docs\" ]]; then python scripts/docs/build_architecture_index.py; fi; QT_CI_PROFILE=\"\${profile}\" pytest -q; done"
+  echo "for profile in ${profile_args}; do echo \"ci_profile_start profile=\${profile}\"; if [[ \"\${profile}\" == \"docs\" ]]; then python scripts/docs/build_architecture_index.py; fi; QT_OMIT_DB_TESTS=1 QT_CI_PROFILE=\"\${profile}\" pytest -q; done"
 }
 
 run_profiles() {
@@ -53,6 +53,9 @@ run_profiles() {
 }
 
 case "$SUITE" in
+  pr)
+    run_suite "QT_OMIT_DB_TESTS=1 QT_CI_PROFILE=pr pytest -q"
+    ;;
   contracts)
     run_profiles core provider cli docs
     ;;
@@ -60,7 +63,13 @@ case "$SUITE" in
     run_profiles runtime botlens web reports
     ;;
   backend)
-    run_profiles core provider runtime botlens web cli reports docs
+    run_suite "QT_OMIT_DB_TESTS=1 pytest -q"
+    ;;
+  full)
+    run_suite "pytest -q"
+    ;;
+  db)
+    run_suite "RUN_DB_TESTS=1 pytest -q -m db"
     ;;
   core)
     run_profiles core

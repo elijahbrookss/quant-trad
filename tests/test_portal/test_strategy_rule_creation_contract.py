@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 pytest.importorskip("sqlalchemy")
@@ -46,7 +48,11 @@ def test_add_rule_persists_canonical_conditions_payload(monkeypatch) -> None:
 
     persisted: dict[str, object] = {}
 
-    monkeypatch.setattr(facade, "_compile_strategy_definition", lambda *args, **kwargs: (None, {}, {}))
+    monkeypatch.setattr(
+        facade,
+        "_compile_strategy_definition",
+        lambda *args, **kwargs: (None, {}, SimpleNamespace(effective_params={})),
+    )
     monkeypatch.setattr(facade, "_validate_rule_set", lambda *args, **kwargs: None)
     monkeypatch.setattr(facade, "_normalize_rule_contract", lambda *args, **kwargs: dict(canonical_rule))
     monkeypatch.setattr(facade, "storage_upsert_strategy", lambda payload: payload)

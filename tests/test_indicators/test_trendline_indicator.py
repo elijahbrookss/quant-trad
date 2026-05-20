@@ -15,8 +15,8 @@ def dummy_df():
     return pd.DataFrame(
         {
             "open": close,
-            "high": close + 0.2,
-            "low": close - 0.2,
+            "high": [value + 0.2 for value in close],
+            "low": [value - 0.2 for value in close],
             "close": close,
             "volume": [1000] * 30,
         },

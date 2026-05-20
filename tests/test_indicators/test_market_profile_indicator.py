@@ -401,35 +401,27 @@ def test_to_lightweight_respects_indicator_extend_flag() -> None:
 
 
 def test_overlay_transformer_builds_boxes_from_runtime_payload() -> None:
-    indicator = MarketProfileIndicator(
-        _sample_df(),
-        bin_size=1.0,
-        use_merged_value_areas=False,
-        extend_value_area_to_chart_end=True,
-    )
     start = pd.Timestamp("2025-01-01T10:00:00+00:00")
     end = start + timedelta(hours=1)
     chart_end = end + timedelta(hours=3)
-    indicator._profiles = [
-        _profile(
-            start=start.isoformat(),
-            end=end.isoformat(),
-            val=99.0,
-            vah=101.0,
-            poc=100.0,
-        )
-    ]
-    payload = indicator.build_runtime_signal_payload(
-        indicator_id="ind-1",
-        params={
+    payload = {
+        "profiles": [
+            _runtime_profile_payload(
+                start=start.isoformat(),
+                end=end.isoformat(),
+                known_at=end.isoformat(),
+                val=99.0,
+                vah=101.0,
+                poc=100.0,
+            )
+        ],
+        "profile_params": {
             "use_merged_value_areas": False,
             "extend_value_area_to_chart_end": True,
-            "start": int(start.timestamp()),
-            "end": int(chart_end.timestamp()),
+            "start": start.isoformat(),
+            "end": chart_end.isoformat(),
         },
-        symbol="ES",
-        chart_timeframe="30m",
-    )
+    }
     overlay = {"type": "market-profile", "payload": payload, "symbol": "ES"}
 
     transformed = market_profile_overlay_transformer(
