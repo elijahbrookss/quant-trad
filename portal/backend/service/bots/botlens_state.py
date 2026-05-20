@@ -65,6 +65,11 @@ class SymbolCandlesState:
 
 
 @dataclass(frozen=True)
+class SymbolProvisionalCandleState:
+    provisional_candle: Optional[Dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
 class SymbolOverlaysState:
     overlays: Tuple[Dict[str, Any], ...]
     overlay_commit_seq: int = 0
@@ -116,6 +121,7 @@ class SymbolProjectionSnapshot:
     last_event_at: Optional[str]
     identity: SymbolIdentityState
     candles: SymbolCandlesState
+    provisional_candle: SymbolProvisionalCandleState
     overlays: SymbolOverlaysState
     signals: SymbolSignalsState
     decisions: SymbolDecisionsState
@@ -268,6 +274,14 @@ class CandleDelta:
 
 
 @dataclass(frozen=True)
+class ProvisionalCandleDelta:
+    symbol_key: str
+    seq: int
+    event_time: Any
+    provisional_candle: Optional[Dict[str, Any]]
+
+
+@dataclass(frozen=True)
 class OverlayDelta:
     symbol_key: str
     seq: int
@@ -356,6 +370,7 @@ class RunOpenTradesDelta:
 SymbolConcernDelta = (
     SymbolIdentityDelta
     | CandleDelta
+    | ProvisionalCandleDelta
     | OverlayDelta
     | SignalDelta
     | DecisionDelta
@@ -983,6 +998,7 @@ def empty_symbol_projection_snapshot(symbol_key: str) -> SymbolProjectionSnapsho
         last_event_at=None,
         identity=empty_symbol_identity_state(normalized_symbol_key),
         candles=SymbolCandlesState(candles=()),
+        provisional_candle=SymbolProvisionalCandleState(provisional_candle=None),
         overlays=SymbolOverlaysState(overlays=()),
         signals=SymbolSignalsState(signals=()),
         decisions=SymbolDecisionsState(decisions=()),
@@ -1096,6 +1112,13 @@ def read_symbol_projection_snapshot(payload: Any, *, symbol_key: str) -> SymbolP
             timeframe=str(identity_payload.get("timeframe") or base.identity.timeframe or "").strip().lower() or None,
         ),
         candles=SymbolCandlesState(candles=merge_candles(_mapping(concerns.get("candles")).get("items"), limit=_MAX_CANDLES)),
+        provisional_candle=SymbolProvisionalCandleState(
+            provisional_candle=(
+                canonicalize_candle(_mapping(concerns.get("provisional_candle")).get("payload"))
+                if isinstance(_mapping(concerns.get("provisional_candle")).get("payload"), Mapping)
+                else None
+            )
+        ),
         overlays=SymbolOverlaysState(
             overlays=project_overlay_state(_mapping(concerns.get("overlays")).get("items")),
             overlay_commit_seq=max(0, _overlay_clock_int(_mapping(concerns.get("overlays")).get("overlay_commit_seq"), 0)),
@@ -1220,6 +1243,13 @@ def serialize_symbol_projection_snapshot(state: SymbolProjectionSnapshot) -> Dic
             "concerns": {
                 "identity": state.identity.to_dict(),
                 "candles": {"items": [dict(entry) for entry in state.candles.candles]},
+                "provisional_candle": {
+                    "payload": (
+                        dict(state.provisional_candle.provisional_candle)
+                        if state.provisional_candle.provisional_candle is not None
+                        else None
+                    )
+                },
                 "overlays": {
                     "items": [dict(entry) for entry in state.overlays.overlays],
                     "overlay_commit_seq": int(state.overlays.overlay_commit_seq or 0),
@@ -1396,6 +1426,8 @@ def _catalog_entry(existing: Mapping[str, Any] | None, *, identity: SymbolIdenti
         "last_activity_at": _iso_or_none(event.event_ts),
         "last_bar_time": current.get("last_bar_time"),
         "last_price": current.get("last_price"),
+        "last_market_at": current.get("last_market_at"),
+        "last_market_price": current.get("last_market_price"),
         "candle_count": int(current.get("candle_count") or 0),
         "last_trade_at": current.get("last_trade_at"),
         "stats": dict(current.get("stats") or {}) if isinstance(current.get("stats"), Mapping) else {},
@@ -1405,6 +1437,10 @@ def _catalog_entry(existing: Mapping[str, Any] | None, *, identity: SymbolIdenti
         next_entry["last_bar_time"] = candle.get("time")
         next_entry["last_price"] = candle.get("close")
         next_entry["candle_count"] = max(int(next_entry["candle_count"] or 0) + 1, 1)
+    elif event.event_name == BotLensDomainEventName.PROVISIONAL_CANDLE_UPDATED:
+        candle = canonicalize_candle(event.context.to_dict().get("provisional_candle"))
+        next_entry["last_market_at"] = candle.get("last_known_at") or _iso_or_none(event.event_ts)
+        next_entry["last_market_price"] = candle.get("close")
     elif event.event_name in {
         BotLensDomainEventName.TRADE_OPENED,
         BotLensDomainEventName.TRADE_UPDATED,
@@ -1460,6 +1496,48 @@ def apply_symbol_candle_projector(
         candle = canonicalize_candle(event.context.to_dict().get("candle"))
         next_state = SymbolCandlesState(candles=merge_candles(next_state.candles, [candle], limit=_MAX_CANDLES))
         deltas.append(CandleDelta(symbol_key=symbol_key, seq=batch.seq, event_time=_iso_or_none(event.event_ts) or batch.event_time, candle=dict(candle)))
+    return next_state, tuple(deltas)
+
+
+def apply_symbol_provisional_candle_projector(
+    state: SymbolProvisionalCandleState,
+    *,
+    batch: ProjectionBatch,
+    symbol_key: str,
+) -> tuple[SymbolProvisionalCandleState, Tuple[ProvisionalCandleDelta, ...]]:
+    next_state = state
+    deltas: List[ProvisionalCandleDelta] = []
+    for event in batch.events:
+        if event.event_name == BotLensDomainEventName.CANDLE_OBSERVED:
+            current = next_state.provisional_candle
+            if current is None:
+                continue
+            closed_candle = canonicalize_candle(event.context.to_dict().get("candle"))
+            current_time = normalize_candle_time(current.get("time"))
+            closed_time = normalize_candle_time(closed_candle.get("time"))
+            if current_time is not None and closed_time is not None and current_time <= closed_time:
+                next_state = SymbolProvisionalCandleState(provisional_candle=None)
+                deltas.append(
+                    ProvisionalCandleDelta(
+                        symbol_key=symbol_key,
+                        seq=batch.seq,
+                        event_time=_iso_or_none(event.event_ts) or batch.event_time,
+                        provisional_candle=None,
+                    )
+                )
+            continue
+        if event.event_name != BotLensDomainEventName.PROVISIONAL_CANDLE_UPDATED:
+            continue
+        candle = canonicalize_candle(event.context.to_dict().get("provisional_candle"))
+        next_state = SymbolProvisionalCandleState(provisional_candle=dict(candle))
+        deltas.append(
+            ProvisionalCandleDelta(
+                symbol_key=symbol_key,
+                seq=batch.seq,
+                event_time=_iso_or_none(event.event_ts) or batch.event_time,
+                provisional_candle=dict(candle),
+            )
+        )
     return next_state, tuple(deltas)
 
 
@@ -1656,6 +1734,11 @@ def apply_symbol_batch(
     if identity_state.symbol_key:
         symbol_key = identity_state.symbol_key
     candle_state, candle_deltas = apply_symbol_candle_projector(snapshot.candles, batch=batch, symbol_key=symbol_key)
+    provisional_state, provisional_deltas = apply_symbol_provisional_candle_projector(
+        snapshot.provisional_candle,
+        batch=batch,
+        symbol_key=symbol_key,
+    )
     overlay_state, overlay_deltas = apply_symbol_overlay_projector(snapshot.overlays, batch=batch, symbol_key=symbol_key)
     signal_state, signal_deltas = apply_symbol_signal_projector(snapshot.signals, batch=batch, symbol_key=symbol_key)
     decision_state, decision_deltas = apply_symbol_decision_projector(snapshot.decisions, batch=batch, symbol_key=symbol_key)
@@ -1673,6 +1756,7 @@ def apply_symbol_batch(
         last_event_at=_iso_or_none(batch.known_at or batch.event_time) or snapshot.last_event_at,
         identity=identity_state,
         candles=candle_state,
+        provisional_candle=provisional_state,
         overlays=overlay_state,
         signals=signal_state,
         decisions=decision_state,
@@ -1684,6 +1768,7 @@ def apply_symbol_batch(
     deltas: Tuple[SymbolConcernDelta, ...] = (
         *identity_deltas,
         *candle_deltas,
+        *provisional_deltas,
         *overlay_deltas,
         *signal_deltas,
         *decision_deltas,
@@ -2020,6 +2105,7 @@ __all__ = [
     "DiagnosticDelta",
     "OverlayDelta",
     "ProjectionBatch",
+    "ProvisionalCandleDelta",
     "RunConcernDelta",
     "RunFaultDelta",
     "RunFaultsState",
@@ -2044,6 +2130,7 @@ __all__ = [
     "SymbolIdentityDelta",
     "SymbolIdentityState",
     "SymbolOverlaysState",
+    "SymbolProvisionalCandleState",
     "SymbolProjectionSnapshot",
     "SymbolReadinessState",
     "SymbolSignalsState",
@@ -2063,6 +2150,7 @@ __all__ = [
     "apply_symbol_diagnostic_projector",
     "apply_symbol_identity_projector",
     "apply_symbol_overlay_projector",
+    "apply_symbol_provisional_candle_projector",
     "apply_symbol_signal_projector",
     "apply_symbol_stats_projector",
     "apply_symbol_trade_projector",

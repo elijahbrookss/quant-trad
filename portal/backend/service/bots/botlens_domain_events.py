@@ -15,6 +15,7 @@ from .botlens_contract import (
     FACT_TYPE_CANDLE_UPSERTED,
     FACT_TYPE_DECISION_EMITTED,
     FACT_TYPE_LOG_EMITTED,
+    FACT_TYPE_PROVISIONAL_CANDLE_UPDATED,
     FACT_TYPE_RUNTIME_STATE,
     FACT_TYPE_SERIES_STATE,
     FACT_TYPE_TRADE_CLOSED,
@@ -33,6 +34,7 @@ _SERIES_SCOPED_EVENT_NAMES = frozenset(
     {
         "SERIES_METADATA_REPORTED",
         "CANDLE_OBSERVED",
+        "PROVISIONAL_CANDLE_UPDATED",
         "OVERLAY_STATE_CHANGED",
         "SERIES_STATS_REPORTED",
         "SIGNAL_EMITTED",
@@ -109,6 +111,7 @@ class BotLensDomainEventName(str, Enum):
     RUN_CANCELLED = "RUN_CANCELLED"
     SERIES_METADATA_REPORTED = "SERIES_METADATA_REPORTED"
     CANDLE_OBSERVED = "CANDLE_OBSERVED"
+    PROVISIONAL_CANDLE_UPDATED = "PROVISIONAL_CANDLE_UPDATED"
     OVERLAY_STATE_CHANGED = "OVERLAY_STATE_CHANGED"
     SERIES_STATS_REPORTED = "SERIES_STATS_REPORTED"
     SIGNAL_EMITTED = "SIGNAL_EMITTED"
@@ -767,6 +770,20 @@ class BotLensCandle:
         )
 
 
+def _normalize_provisional_candle_payload(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("context.provisional_candle is required")
+    base = BotLensCandle.from_payload(value).to_dict()
+    normalized = {**dict(value), **base}
+    normalized["is_closed"] = False
+    normalized["provisional"] = True
+    normalized["execution_eligible"] = False
+    for key in ("source_event_count",):
+        if normalized.get(key) is not None:
+            normalized[key] = _coerce_int(normalized.get(key), 0)
+    return normalized
+
+
 @dataclass(frozen=True, kw_only=True)
 class RunLifecycleContext(BotLensDomainContextBase):
     phase: str
@@ -808,6 +825,19 @@ class CandleObservedContext(BotLensSeriesContextBase):
             raise ValueError("context.candle is required")
         if self.bar_time is None:
             object.__setattr__(self, "bar_time", self.candle.time)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ProvisionalCandleUpdatedContext(BotLensSeriesContextBase):
+    provisional_candle: Dict[str, Any]
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self._require_series_key(event_name="PROVISIONAL_CANDLE_UPDATED")
+        normalized = _normalize_provisional_candle_payload(self.provisional_candle)
+        object.__setattr__(self, "provisional_candle", normalized)
+        if self.bar_time is None:
+            object.__setattr__(self, "bar_time", parse_optional_datetime(normalized.get("time")))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1340,6 +1370,7 @@ BotLensDomainContext = (
     RunLifecycleContext
     | SeriesMetadataReportedContext
     | CandleObservedContext
+    | ProvisionalCandleUpdatedContext
     | OverlayStateChangedContext
     | SeriesStatsReportedContext
     | SignalEmittedContext
@@ -1412,6 +1443,15 @@ def _durable_context_payload(
         }
         durable.update(ordering_context)
         durable["candle"] = _durable_candle(context.get("candle"))
+        return durable
+    if event_name == BotLensDomainEventName.PROVISIONAL_CANDLE_UPDATED:
+        durable = {
+            key: context.get(key)
+            for key in ("run_id", "bot_id", "series_key", "instrument_id", "symbol", "timeframe", "strategy_id", "trade_id", "bar_time")
+            if context.get(key) not in (None, "", [], {}, ())
+        }
+        durable.update(ordering_context)
+        durable["provisional_candle"] = _normalize_provisional_candle_payload(context.get("provisional_candle"))
         return durable
     if event_name == BotLensDomainEventName.OVERLAY_STATE_CHANGED:
         durable = {
@@ -1827,6 +1867,7 @@ _EVENT_ENVELOPE_KEYS = frozenset(
 _ALLOWED_CONTEXT_KEYS_BY_EVENT = {
     BotLensDomainEventName.SERIES_METADATA_REPORTED: _SERIES_CONTEXT_BASE_KEYS,
     BotLensDomainEventName.CANDLE_OBSERVED: _SERIES_CONTEXT_BASE_KEYS | frozenset({"candle"}),
+    BotLensDomainEventName.PROVISIONAL_CANDLE_UPDATED: _SERIES_CONTEXT_BASE_KEYS | frozenset({"provisional_candle"}),
     BotLensDomainEventName.OVERLAY_STATE_CHANGED: _SERIES_CONTEXT_BASE_KEYS | frozenset({"overlay_delta"}),
     BotLensDomainEventName.SERIES_STATS_REPORTED: _SERIES_CONTEXT_BASE_KEYS | frozenset({"stats"}),
     BotLensDomainEventName.SIGNAL_EMITTED: _SERIES_CONTEXT_BASE_KEYS
@@ -1929,6 +1970,11 @@ def deserialize_botlens_domain_context(
         return CandleObservedContext(
             **_serialized_series_context_base_fields(context_payload),
             candle=BotLensCandle.from_payload(context_payload.get("candle")),
+        )
+    if event_name == BotLensDomainEventName.PROVISIONAL_CANDLE_UPDATED:
+        return ProvisionalCandleUpdatedContext(
+            **_serialized_series_context_base_fields(context_payload),
+            provisional_candle=_mapping(context_payload.get("provisional_candle")),
         )
     if event_name == BotLensDomainEventName.SERIES_METADATA_REPORTED:
         return SeriesMetadataReportedContext(**_serialized_series_context_base_fields(context_payload))
@@ -2286,6 +2332,55 @@ def build_botlens_domain_events_from_fact_batch(
                         series_key=context.series_key,
                         scope="candle",
                         event_ts=context.candle.time,
+                    ),
+                    context=context,
+                )
+            )
+            continue
+
+        if fact_type == FACT_TYPE_PROVISIONAL_CANDLE_UPDATED:
+            provisional_candle = _normalize_provisional_candle_payload(fact.get("provisional_candle"))
+            candle_time = parse_optional_datetime(provisional_candle.get("time"))
+            event_ts = (
+                parse_optional_datetime(provisional_candle.get("last_known_at"))
+                or parse_optional_datetime(provisional_candle.get("first_known_at"))
+                or known_at
+            )
+            context = ProvisionalCandleUpdatedContext(
+                **_base_context(
+                    bot_id=bot_id,
+                    run_id=run_id,
+                    identity=identity
+                    | {
+                        "series_key": normalize_series_key(fact.get("series_key")) or identity.get("series_key"),
+                        "instrument_id": fact.get("instrument_id") or identity.get("instrument_id"),
+                        "symbol": fact.get("symbol") or identity.get("symbol"),
+                        "timeframe": fact.get("timeframe") or identity.get("timeframe"),
+                    },
+                    strategy_id=fact.get("strategy_id"),
+                    bar_time=candle_time,
+                    observed_at=observed_at,
+                ),
+                provisional_candle=provisional_candle,
+            )
+            bridge_revision = _event_hash(
+                payload.get("bridge_session_id"),
+                payload.get("bridge_seq"),
+                fact.get("source_event_seq"),
+                provisional_candle.get("last_known_at"),
+                provisional_candle.get("close"),
+            )
+            event_id = f"botlens:{_event_hash('provisional_candle', run_id, context.series_key, context.bar_time, bridge_revision)}"
+            events.append(
+                _new_event(
+                    event_name=BotLensDomainEventName.PROVISIONAL_CANDLE_UPDATED,
+                    event_id=event_id,
+                    event_ts=event_ts,
+                    correlation_id=_correlation_id(
+                        run_id=run_id,
+                        series_key=context.series_key,
+                        scope="provisional_candle",
+                        event_ts=event_ts,
                     ),
                     context=context,
                 )

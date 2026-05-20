@@ -68,7 +68,7 @@ _TERMINAL_LIFECYCLE_STATES = frozenset({"completed", "stopped", "cancelled", "ca
 
 def _ingest_source_reason(*, kind: str, payload: Mapping[str, Any]) -> str:
     explicit = str(payload.get("source_reason") or "").strip().lower()
-    if explicit in {"ingest", "replay", "retry", "bootstrap", "projector", "transport", "unknown", "provider_closure", "source_sparse"}:
+    if explicit in {"ingest", "replay", "retry", "bootstrap", "projector", "transport", "unknown", "provider_closure", "provider_stream_provisional", "source_sparse"}:
         return explicit
     if kind == BRIDGE_BOOTSTRAP_KIND:
         return "bootstrap"

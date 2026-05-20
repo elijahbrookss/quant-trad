@@ -20,6 +20,7 @@ from .botlens_contract import (
     STREAM_SYMBOL_OVERLAY_DELTA_TYPE,
     STREAM_SYMBOL_DECISION_DELTA_TYPE,
     STREAM_SYMBOL_DIAGNOSTIC_DELTA_TYPE,
+    STREAM_SYMBOL_PROVISIONAL_CANDLE_DELTA_TYPE,
     STREAM_SYMBOL_SIGNAL_DELTA_TYPE,
     STREAM_SYMBOL_STATS_DELTA_TYPE,
     STREAM_SYMBOL_TRADE_DELTA_TYPE,
@@ -30,6 +31,7 @@ from .botlens_state import (
     DecisionDelta,
     DiagnosticDelta,
     OverlayDelta,
+    ProvisionalCandleDelta,
     RunConcernDelta,
     RunFaultDelta,
     RunHealthDelta,
@@ -125,6 +127,11 @@ def _symbol_detail_payload(state: SymbolProjectionSnapshot, *, run_health: Mappi
         "last_event_at": state.last_event_at,
         **_symbol_overlay_cursor_payload(state),
         "candles": [dict(entry) for entry in state.candles.candles],
+        "provisional_candle": (
+            dict(state.provisional_candle.provisional_candle)
+            if state.provisional_candle.provisional_candle is not None
+            else None
+        ),
         "overlays": [dict(entry) for entry in state.overlays.overlays],
         "recent_trades": [dict(entry) for entry in state.trades.trades],
         "logs": [dict(entry) for entry in state.diagnostics.diagnostics],
@@ -147,6 +154,11 @@ def _symbol_current_payload(
     return {
         **_symbol_overlay_cursor_payload(state),
         "candles": [dict(entry) for entry in state.candles.candles],
+        "provisional_candle": (
+            dict(state.provisional_candle.provisional_candle)
+            if state.provisional_candle.provisional_candle is not None
+            else None
+        ),
         "overlays": [dict(entry) for entry in state.overlays.overlays],
         "signals": [dict(entry) for entry in state.signals.signals],
         "decisions": [dict(entry) for entry in state.decisions.decisions],
@@ -183,6 +195,8 @@ def _run_catalog_entry_payload(
             "last_event_at": identity.get("last_event_at"),
             "last_bar_time": identity.get("last_bar_time"),
             "last_price": identity.get("last_price"),
+            "last_market_at": identity.get("last_market_at"),
+            "last_market_price": identity.get("last_market_price"),
             "candle_count": int(identity.get("candle_count") or 0),
             "last_trade_at": identity.get("last_trade_at"),
             "last_activity_at": identity.get("last_activity_at"),
@@ -222,6 +236,8 @@ def _live_symbol_summary_payload(
         "last_event_at": identity.get("last_event_at"),
         "last_bar_time": identity.get("last_bar_time"),
         "last_price": identity.get("last_price"),
+        "last_market_at": identity.get("last_market_at"),
+        "last_market_price": identity.get("last_market_price"),
         "candle_count": int(identity.get("candle_count") or 0),
         "has_open_trade": bool(open_trade_list),
         "open_trade_count": len(open_trade_list),
@@ -674,6 +690,25 @@ class BotLensTransport:
                         scope_seq=delta.seq,
                         event_time=delta.event_time,
                         payload={"candle": dict(delta.candle)},
+                    )
+                )
+            elif isinstance(delta, ProvisionalCandleDelta):
+                prepared.append(
+                    self._build_prepared(
+                        message_type=STREAM_SYMBOL_PROVISIONAL_CANDLE_DELTA_TYPE,
+                        scope="symbol",
+                        concern="provisional_candle",
+                        run_id=run_id,
+                        symbol_key=delta.symbol_key,
+                        scope_seq=delta.seq,
+                        event_time=delta.event_time,
+                        payload={
+                            "provisional_candle": (
+                                dict(delta.provisional_candle)
+                                if delta.provisional_candle is not None
+                                else None
+                            )
+                        },
                     )
                 )
             elif isinstance(delta, OverlayDelta):

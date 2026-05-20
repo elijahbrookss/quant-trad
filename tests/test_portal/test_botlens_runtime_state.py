@@ -28,7 +28,8 @@ from portal.backend.service.bots.botlens_domain_events import (
     build_botlens_domain_events_from_fact_batch,
     deserialize_botlens_domain_event,
 )
-from portal.backend.service.bots.botlens_transport import selected_symbol_snapshot_contract
+from portal.backend.service.bots.botlens_event_retention import RuntimeEventRetentionAction, retention_policy_for_event_name
+from portal.backend.service.bots.botlens_transport import BotLensTransport, selected_symbol_snapshot_contract
 
 
 def test_runtime_state_machine_blocks_live_back_to_awaiting_first_snapshot() -> None:
@@ -77,6 +78,118 @@ def test_startup_bootstrap_admission_rejects_live_phase_without_runtime_state() 
 def test_stopping_is_not_part_of_public_runtime_state_contract() -> None:
     with pytest.raises(ValueError, match="unsupported runtime state"):
         normalize_runtime_state("stopping")
+
+
+def test_provisional_candle_projects_separately_and_stays_transport_only() -> None:
+    events = build_botlens_domain_events_from_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        payload={
+            "known_at": "2026-01-01T00:00:06Z",
+            "bridge_session_id": "session-1",
+            "bridge_seq": 7,
+            "facts": [
+                {
+                    "fact_type": "series_state_observed",
+                    "series_key": "instr-1|1h",
+                    "instrument_id": "instr-1",
+                    "symbol": "BTC-PERP",
+                    "timeframe": "1h",
+                },
+                {
+                    "fact_type": "provisional_candle_updated",
+                    "series_key": "instr-1|1h",
+                    "instrument_id": "instr-1",
+                    "symbol": "BTC-PERP",
+                    "timeframe": "1h",
+                    "provisional_candle": {
+                        "time": "2026-01-01T00:00:00Z",
+                        "end": "2026-01-01T01:00:00Z",
+                        "open": 100.0,
+                        "high": 101.25,
+                        "low": 99.5,
+                        "close": 101.0,
+                        "is_closed": False,
+                        "provisional": True,
+                        "execution_eligible": False,
+                    },
+                },
+            ],
+        },
+    )
+    provisional_event = [event for event in events if event.event_name.value == "PROVISIONAL_CANDLE_UPDATED"][0]
+    assert retention_policy_for_event_name(provisional_event.event_name).action == RuntimeEventRetentionAction.TRANSPORT_ONLY
+
+    snapshot, deltas = apply_symbol_batch(
+        empty_symbol_projection_snapshot("instr-1|1h"),
+        batch=ProjectionBatch(
+            batch_kind="botlens_runtime_facts",
+            run_id="run-1",
+            bot_id="bot-1",
+            seq=7,
+            event_time="2026-01-01T00:00:06Z",
+            known_at="2026-01-01T00:00:06Z",
+            symbol_key="instr-1|1h",
+            bridge_session_id="session-1",
+            events=tuple(events),
+        ),
+    )
+
+    assert snapshot.candles.candles == ()
+    assert snapshot.provisional_candle.provisional_candle["close"] == 101.0
+    prepared = BotLensTransport().build_symbol_prepared_deltas(run_id="run-1", deltas=deltas)
+    assert [entry.event.message_type for entry in prepared] == [
+        "botlens_symbol_provisional_candle_delta",
+    ]
+
+    closed_events = build_botlens_domain_events_from_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        payload={
+            "known_at": "2026-01-01T01:00:00Z",
+            "facts": [
+                {
+                    "fact_type": "series_state_observed",
+                    "series_key": "instr-1|1h",
+                    "instrument_id": "instr-1",
+                    "symbol": "BTC-PERP",
+                    "timeframe": "1h",
+                },
+                {
+                    "fact_type": "candle_upserted",
+                    "candle": {
+                        "time": "2026-01-01T00:00:00Z",
+                        "end": "2026-01-01T01:00:00Z",
+                        "open": 100.0,
+                        "high": 101.25,
+                        "low": 99.5,
+                        "close": 100.75,
+                    },
+                },
+            ],
+        },
+    )
+    snapshot, deltas = apply_symbol_batch(
+        snapshot,
+        batch=ProjectionBatch(
+            batch_kind="botlens_runtime_facts",
+            run_id="run-1",
+            bot_id="bot-1",
+            seq=8,
+            event_time="2026-01-01T01:00:00Z",
+            known_at="2026-01-01T01:00:00Z",
+            symbol_key="instr-1|1h",
+            events=tuple(closed_events),
+        ),
+    )
+    assert len(snapshot.candles.candles) == 1
+    assert snapshot.provisional_candle.provisional_candle is None
+    prepared = BotLensTransport().build_symbol_prepared_deltas(run_id="run-1", deltas=deltas)
+    assert [entry.event.message_type for entry in prepared] == [
+        "botlens_symbol_candle_delta",
+        "botlens_symbol_provisional_candle_delta",
+    ]
+    assert prepared[1].event.payload["provisional_candle"] is None
 
 
 def test_read_run_projection_snapshot_treats_null_recent_transitions_as_empty_history() -> None:

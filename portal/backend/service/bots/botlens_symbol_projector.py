@@ -507,6 +507,7 @@ class SymbolProjector:
     def _symbol_summary_payload(self) -> dict[str, Any]:
         identity = self._state.identity.to_dict()
         candles = self._state.candles.candles
+        provisional = self._state.provisional_candle.provisional_candle or {}
         trades = self._state.trades.trades
         last_candle = candles[-1] if candles else {}
         last_trade = trades[-1] if trades else {}
@@ -522,6 +523,8 @@ class SymbolProjector:
             "last_event_at": self._state.last_event_at,
             "last_bar_time": last_candle.get("time"),
             "last_price": last_candle.get("close"),
+            "last_market_at": provisional.get("last_known_at"),
+            "last_market_price": provisional.get("close"),
             "candle_count": len(candles),
             "last_trade_at": last_trade_at,
             "last_activity_at": self._state.last_event_at,

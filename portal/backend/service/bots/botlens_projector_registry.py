@@ -75,6 +75,7 @@ _TAIL_TERMINAL_STATUSES = frozenset(
 
 _DELTA_SURFACE_BY_TYPE = {
     "CandleDelta": "candles",
+    "ProvisionalCandleDelta": "provisional_candle",
     "OverlayDelta": "overlays",
     "SignalDelta": "decisions",
     "DecisionDelta": "decisions",
