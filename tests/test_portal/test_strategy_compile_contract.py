@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -244,7 +244,7 @@ def test_create_strategy_variant_validates_output_filters_against_compile(monkey
 
     def _upsert_variant(payload):
         saved["payload"] = payload
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         return {
             "id": "variant-1",
             "created_at": now,

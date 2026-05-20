@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import threading
 import time
-import multiprocessing as mp
 from typing import Callable, Dict, List, Mapping, Optional
 
 import pytest
@@ -16,6 +15,11 @@ from engines.bot_runtime.runtime.components.runtime_policy import BacktestShared
 
 BAR_TIME = "2026-01-14T04:00:00Z"
 STRATEGY_ID = "strategy-1"
+
+
+class _SharedNumber:
+    def __init__(self, value: float) -> None:
+        self.value = value
 
 
 def _proxy(expected_count: int) -> Dict[str, object]:
@@ -335,51 +339,50 @@ def test_merged_top_waits_include_true_longest_wait_across_workers() -> None:
 
 
 def test_top_waits_are_shared_when_worker_config_copies_proxy_mapping() -> None:
-    with mp.Manager() as manager:
-        shared_proxy = {
-            "lock": manager.RLock(),
-            "decision_order_state": manager.dict(),
-            "decision_order_participants": manager.dict(),
-            "decision_order_expected_count": 2,
-            "decision_order_wait_top": manager.list(),
-            "decision_order_wait_control": manager.dict(),
-            "decision_order_wait_total_ms": manager.Value("d", 0.0),
-            "decision_order_wait_record_count": manager.Value("i", 0),
-        }
-        coordinator_a = _backtest_coordinator(dict(shared_proxy), timeout_seconds=2.0)
-        coordinator_b = _backtest_coordinator(dict(shared_proxy), timeout_seconds=2.0)
-        coordinator_a.register_participant({**_participant("BIP"), "worker_id": "worker-a"})
-        coordinator_b.register_participant({**_participant("XPP"), "worker_id": "worker-b"})
+    shared_proxy = {
+        "lock": threading.RLock(),
+        "decision_order_state": {},
+        "decision_order_participants": {},
+        "decision_order_expected_count": 2,
+        "decision_order_wait_top": [],
+        "decision_order_wait_control": {},
+        "decision_order_wait_total_ms": _SharedNumber(0.0),
+        "decision_order_wait_record_count": _SharedNumber(0),
+    }
+    coordinator_a = _backtest_coordinator(dict(shared_proxy), timeout_seconds=2.0)
+    coordinator_b = _backtest_coordinator(dict(shared_proxy), timeout_seconds=2.0)
+    coordinator_a.register_participant({**_participant("BIP"), "worker_id": "worker-a"})
+    coordinator_b.register_participant({**_participant("XPP"), "worker_id": "worker-b"})
 
-        with shared_proxy["lock"]:
-            coordinator_a._record_wait_diagnostic_locked(  # noqa: SLF001 - simulates worker-local terminal snapshot.
-                {
-                    "materiality": "diagnostic",
-                    "diagnostic_scope": "coordinator_wait_attribution",
-                    "candidate_symbol": "BIP",
-                    "wait_elapsed_ms": 100,
-                    "wait_count": 1,
-                    "wait_poll_count": 10,
-                    "final_action": "released",
-                    "worker_id": "worker-a",
-                }
-            )
-            coordinator_b._record_wait_diagnostic_locked(  # noqa: SLF001
-                {
-                    "materiality": "diagnostic",
-                    "diagnostic_scope": "coordinator_wait_attribution",
-                    "candidate_symbol": "XPP",
-                    "wait_elapsed_ms": 500,
-                    "wait_count": 1,
-                    "wait_poll_count": 50,
-                    "final_action": "released",
-                    "worker_id": "worker-b",
-                }
-            )
+    with shared_proxy["lock"]:
+        coordinator_a._record_wait_diagnostic_locked(  # noqa: SLF001 - simulates worker-local terminal snapshot.
+            {
+                "materiality": "diagnostic",
+                "diagnostic_scope": "coordinator_wait_attribution",
+                "candidate_symbol": "BIP",
+                "wait_elapsed_ms": 100,
+                "wait_count": 1,
+                "wait_poll_count": 10,
+                "final_action": "released",
+                "worker_id": "worker-a",
+            }
+        )
+        coordinator_b._record_wait_diagnostic_locked(  # noqa: SLF001
+            {
+                "materiality": "diagnostic",
+                "diagnostic_scope": "coordinator_wait_attribution",
+                "candidate_symbol": "XPP",
+                "wait_elapsed_ms": 500,
+                "wait_count": 1,
+                "wait_poll_count": 50,
+                "final_action": "released",
+                "worker_id": "worker-b",
+            }
+        )
 
-        top_waits = list(coordinator_a.top_wait_diagnostics())
-        assert [item["candidate_symbol"] for item in top_waits[:2]] == ["XPP", "BIP"]
-        assert shared_proxy["decision_order_wait_record_count"].value == 2
+    top_waits = list(coordinator_a.top_wait_diagnostics())
+    assert [item["candidate_symbol"] for item in top_waits[:2]] == ["XPP", "BIP"]
+    assert shared_proxy["decision_order_wait_record_count"].value == 2
 
 
 def test_delayed_same_bar_candidate_releases_in_deterministic_order() -> None:

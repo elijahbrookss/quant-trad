@@ -54,7 +54,7 @@ _T = TypeVar("_T")
 def _utcnow() -> datetime:
     """Return a naive UTC timestamp."""
 
-    return datetime.utcnow()
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _parse_optional_timestamp(value: Any) -> Optional[datetime]:

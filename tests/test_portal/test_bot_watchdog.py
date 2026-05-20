@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 pytest.importorskip("sqlalchemy")
 
 from portal.backend.service.bots import bot_watchdog as watchdog_module
+
+
+def _utc_iso(delta: timedelta = timedelta()) -> str:
+    return (datetime.now(timezone.utc) + delta).isoformat().replace("+00:00", "Z")
 
 
 def test_verify_container_ownership_does_not_fail_starting_bot_without_confirmed_container_ownership(
@@ -57,7 +61,7 @@ def test_verify_container_ownership_respects_startup_grace_for_missing_container
 ) -> None:
     watchdog = watchdog_module.BotWatchdog()
     marked: list[tuple[str, str]] = []
-    recent_start = (datetime.utcnow() - timedelta(seconds=5)).isoformat() + "Z"
+    recent_start = _utc_iso(timedelta(seconds=-5))
 
     monkeypatch.setattr(
         watchdog_module,
@@ -98,7 +102,7 @@ def test_verify_container_ownership_uses_startup_artifact_time_for_launch_grace(
 ) -> None:
     watchdog = watchdog_module.BotWatchdog()
     marked: list[tuple[str, str]] = []
-    recent_start = (datetime.utcnow() - timedelta(seconds=5)).isoformat() + "Z"
+    recent_start = _utc_iso(timedelta(seconds=-5))
 
     monkeypatch.setattr(
         watchdog_module,
@@ -140,7 +144,7 @@ def test_verify_container_ownership_respects_startup_grace_with_stale_prior_hear
 ) -> None:
     watchdog = watchdog_module.BotWatchdog()
     marked: list[tuple[str, str]] = []
-    recent_start = (datetime.utcnow() - timedelta(seconds=5)).isoformat() + "Z"
+    recent_start = _utc_iso(timedelta(seconds=-5))
 
     monkeypatch.setattr(
         watchdog_module,
@@ -183,7 +187,7 @@ def test_verify_container_ownership_does_not_fail_new_run_for_old_exited_contain
 ) -> None:
     watchdog = watchdog_module.BotWatchdog()
     marked: list[tuple[str, str]] = []
-    recent_start = (datetime.utcnow() - timedelta(seconds=5)).isoformat() + "Z"
+    recent_start = _utc_iso(timedelta(seconds=-5))
 
     monkeypatch.setattr(
         watchdog_module,
@@ -226,7 +230,7 @@ def test_verify_container_ownership_does_not_fail_degraded_startup_without_confi
 ) -> None:
     watchdog = watchdog_module.BotWatchdog()
     marked: list[tuple[str, str]] = []
-    old_start = (datetime.utcnow() - timedelta(seconds=120)).isoformat() + "Z"
+    old_start = _utc_iso(timedelta(seconds=-120))
 
     monkeypatch.setattr(
         watchdog_module,
@@ -268,7 +272,7 @@ def test_verify_container_ownership_marks_confirmed_owned_container_after_grace(
 ) -> None:
     watchdog = watchdog_module.BotWatchdog()
     marked: list[tuple[str, str]] = []
-    old_start = (datetime.utcnow() - timedelta(seconds=120)).isoformat() + "Z"
+    old_start = _utc_iso(timedelta(seconds=-120))
 
     monkeypatch.setattr(
         watchdog_module,
@@ -310,7 +314,7 @@ def test_scan_stale_heartbeats_persists_runner_diagnostics(monkeypatch: pytest.M
     watchdog = watchdog_module.BotWatchdog()
     watchdog._runner_id = "current-runner"
     marked: list[tuple[str, str, dict]] = []
-    stale_heartbeat = (datetime.utcnow() - timedelta(seconds=125)).isoformat() + "Z"
+    stale_heartbeat = _utc_iso(timedelta(seconds=-125))
 
     monkeypatch.setattr(
         watchdog_module,
@@ -390,7 +394,7 @@ def test_scan_stale_heartbeats_skips_when_run_lease_is_fresh(monkeypatch: pytest
             "bot_id": "bot-1",
             "runner_id": "backend.quanttrad",
             "status": "active",
-            "expires_at": (datetime.utcnow() + timedelta(seconds=60)).isoformat() + "Z",
+            "expires_at": _utc_iso(timedelta(seconds=60)),
             "released_at": None,
         },
     )
