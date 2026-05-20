@@ -38,3 +38,9 @@ respect.
 | [0017](0017-use-api-backed-cli-for-research-orchestration.md) | Use an API-backed CLI for research orchestration | Accepted |
 | [0018](0018-use-output-filters-as-strategy-variant-contract.md) | Use output filters as the strategy variant contract | Accepted |
 | [0019](0019-use-file-backed-sequential-experiment-plans.md) | Use file-backed sequential experiment plans | Accepted |
+| [0020](0020-use-budgeted-market-data-stream-reconnect-policy.md) | Use budgeted market data stream reconnect policy | Accepted |
+| [0021](0021-use-runner-clock-gap-sentinel.md) | Use runner clock gap sentinel | Accepted |
+| [0022](0022-capture-docker-container-lifecycle-as-runner-agnostic-observability.md) | Capture Docker container lifecycle as runner-agnostic observability | Accepted |
+| [0023](0023-persist-watchdog-degradation-diagnostics.md) | Persist watchdog degradation diagnostics | Accepted |
+| [0024](0024-use-provider-credential-references.md) | Use provider credential references | Accepted |
+| [0025](0025-use-per-run-leases.md) | Use per-run leases | Accepted |

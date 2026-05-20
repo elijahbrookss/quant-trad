@@ -1,6 +1,8 @@
 # Quant-Trad
 
-Quant-Trad is a deterministic trading engine for research, strategy evaluation, execution realism, and runtime inspection.
+Quant-Trad is a deterministic trading platform for research, strategy
+evaluation, execution realism, provider-backed paper runs, and runtime
+inspection.
 
 It is built around one question:
 
@@ -24,10 +26,12 @@ Data -> Indicators -> Signals -> Decisions -> Execution -> BotLens / Reports
 
 At a high level:
 
-- **Data providers** supply market candles and source metadata.
+- **Data providers** supply market candles, source metadata, and provider-backed
+  stream facts.
 - **Indicators** advance through the runtime timeline and publish typed outputs.
 - **Strategies** consume typed outputs and produce decision artifacts.
-- **The bot runtime** executes decisions with deterministic ordering, fees, margin, wallet state, settlement, and trade lifecycle tracking.
+- **The bot runtime** executes decisions with deterministic ordering, fees,
+  margin, wallet state, settlement, and trade lifecycle tracking.
 - **BotLens** replays and inspects what the runtime actually did.
 - **RunResearchDataset** turns runtime truth into comparison-ready research data.
 
@@ -53,9 +57,30 @@ The runtime is the source of truth.
 
 ---
 
-## Execution Modes
+## Execution And Run Modes
 
-Quant-Trad separates execution semantics from UI playback.
+Quant-Trad separates execution semantics from UI playback. Backtests and paper
+runs use the same runtime contract: source facts advance the runtime timeline,
+then BotLens and reports project from the resulting facts.
+
+Current run types:
+
+- **Backtest** runs over historical provider/cache candles.
+- **Paper** runs against provider-backed market data without placing live
+  orders. Coinbase Direct is the first concrete streaming provider.
+- **Live** is a mode-aware architecture seam, not a production-ready live order
+  path.
+
+Paper runs support two execution behaviors:
+
+- **observe-only** validates live intake, product mapping, stream parsing, and
+  lifecycle recording without running strategy decisions or mutating wallet
+  state.
+- **simulated** warms indicators from historical candles, advances on closed
+  live candles, and routes decisions through the existing paper execution
+  adapter.
+
+Execution fidelity is selected separately:
 
 ### FAST
 
@@ -76,6 +101,9 @@ FULL mode uses lower-timeframe intrabar data when available.
 - Keeps frontend animation separate from execution truth.
 
 FULL is the higher-fidelity execution mode.
+
+If lower-timeframe data is incomplete, FULL keeps that visible through
+execution-quality diagnostics instead of silently manufacturing certainty.
 
 ---
 
@@ -124,6 +152,16 @@ BotLens is the inspection layer. It shows what the runtime knew and did: selecte
 ### RunResearchDataset
 
 RunResearchDataset is the canonical research output. It summarizes decisions, trades, fees, PnL, execution mode, fallbacks, close reasons, per-symbol performance, and LLM-ready insights.
+
+### Research Orchestration
+
+The `qt` CLI is the normal agent/operator command surface for bots, providers,
+experiments, reports, exports, and comparisons. `qt mcp serve` exposes the same
+backend and CLI contracts to MCP-capable agent hosts. It is an adapter, not a
+second source of runtime or reporting truth.
+
+Make remains the local support surface for Docker, DB, tests, docs, logs, and
+direct forensic helpers.
 
 ---
 
@@ -188,6 +226,7 @@ Engineering:
 - [Engineering architecture](docs/engineering/architecture.md)
 - [Data layer](docs/engineering/data-layer.md)
 - [Observability](docs/engineering/observability.md)
+- [Developer audit workflow](docs/engineering/developer-audit-workflow.md)
 - [Architecture component index](docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md)
 
 Guides:
@@ -195,6 +234,7 @@ Guides:
 - [Creating an indicator](docs/guides/creating-an-indicator.md)
 - [Creating a strategy](docs/guides/creating-a-strategy.md)
 - [Adding a provider](docs/guides/adding-a-provider.md)
+- [Coinbase derivatives paper setup](docs/guides/coinbase-derivatives-paper-setup.md)
 
 Contracts:
 
@@ -203,7 +243,17 @@ Contracts:
 - [Execution and playback contract](docs/contracts/platform/02_execution_playback_contract.md)
 - [Engineering contract](docs/contracts/platform/03_engineering_contract.md)
 
-Contracts are the source of truth when code and explanatory docs disagree.
+Architecture and decisions:
+
+- [Architecture docs](docs/architecture/README.md)
+- [Architecture decision records](docs/architecture/decisions/README.md)
+- [MCP research server](docs/architecture/research-orchestration/MCP_RESEARCH_SERVER.md)
+- [Paper engine v1 design](docs/architecture/execution-runtime/PAPER_ENGINE_V1_DESIGN.md)
+- [Security layer](docs/architecture/security/SECURITY_LAYER.md)
+
+Contracts are the source of truth when code and explanatory docs disagree. ADRs
+capture durable decisions and tradeoffs without forcing the README to carry all
+design detail.
 
 ---
 
@@ -216,9 +266,25 @@ make up BUILD=1 STACK_PROFILES=all   # build and start core + observability
 make ps                              # inspect running services
 make logs SERVICE=backend            # tail backend logs
 make restart BUILD=1                 # rebuild/restart current stack
+make mcp-ready                       # print the MCP stdio command/registration state
 make test                            # run tests
 make check                           # run standard developer/audit checks
 make down                            # stop and remove containers
+```
+
+Common `qt` workflows:
+
+```bash
+qt bots list
+qt bots start <bot_id> --run-type backtest
+qt bots start <bot_id> --run-type paper --execution observe-only --duration-seconds 30
+qt providers list
+qt providers stream-smoke --provider COINBASE --venue COINBASE_DIRECT --symbol <product>
+qt reports summary <run_id>
+qt reports compare <baseline_run_id> <candidate_run_id>
+qt experiments validate-plan <plan.json>
+qt experiments run-plan <plan.json> --experiment-id <experiment_id>
+qt mcp serve
 ```
 
 ---
@@ -227,7 +293,15 @@ make down                            # stop and remove containers
 
 Quant-Trad is in active development.
 
-The runtime, execution semantics, reporting datasets, BotLens inspection, provider behavior, and operator workflows are still evolving. The system is intended for research, backtesting, paper trading, and controlled environments unless you have independently reviewed the execution path, provider configuration, and risk controls for your use case.
+The runtime, execution semantics, reporting datasets, BotLens inspection,
+provider behavior, and operator workflows are still evolving. MCP v0 covers
+bounded agent access to run, experiment, provider, report, and comparison
+workflows. The next useful MCP-aligned surfaces are data coverage/hydration,
+indicator authoring and preview, and safer parallel experiment orchestration.
+
+The system is intended for research, backtesting, paper trading, and controlled
+environments unless you have independently reviewed the execution path, provider
+configuration, and risk controls for your use case.
 
 Do not treat this as production trading infrastructure without your own validation.
 

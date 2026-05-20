@@ -24,7 +24,10 @@ code_paths:
   - portal/backend/service/bots/botlens_transport.py
   - portal/backend/service/bots/botlens_run_stream.py
   - portal/backend/service/bots/botlens_symbol_service.py
+  - portal/backend/service/bots/container_runtime.py
   - portal/backend/service/bots/container_runtime_telemetry.py
+  - portal/backend/service/bots/paper_market_stream.py
+  - src/engines/bot_runtime/live_market.py
   - src/engines/bot_runtime/runtime/components/chart_state.py
   - src/engines/bot_runtime/runtime/components/overlay_delta.py
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
@@ -60,6 +63,10 @@ BotLens does not own:
 - wallet settlement,
 - report readiness.
 
+BotLens may display a provider-derived provisional candle for a live paper run,
+but that candle is projection/debug state only. It is not a runtime candle, not
+strategy input, not report input, and not execution-eligible market truth.
+
 ## Diagram Walkthrough
 
 [botlens-projection-flow.mmd](diagrams/botlens-projection-flow.mmd) shows two paths:
@@ -89,6 +96,7 @@ ledger dominates stale live projection state.
 Symbol projection owns symbol-level state:
 
 - candles,
+- display-only provisional candle,
 - overlays,
 - decisions,
 - trades and markers,
@@ -120,6 +128,16 @@ does not become canonical truth by seeing the live message first.
 Transport-only derived facts may be persisted by ingest, but repeated stable
 event ids should be filtered before DB access and still remain protected by
 storage uniqueness.
+
+Paper market streams may emit `provisional_candle_updated` facts from provider
+ticker/candle updates. These facts travel through the existing
+`botlens_runtime_facts` telemetry path and are retained as Tier 4 live
+transport only. They update the selected-symbol chart display by replacing the
+latest visual candle for the in-progress bar, but they stay separate from
+canonical `CANDLE_OBSERVED` candles. When a closed candle is observed for the
+same bar, the provisional candle projection is cleared. This keeps the live UI
+responsive without changing indicator, strategy, wallet, order, trade, report,
+or replay semantics.
 
 The runtime-to-portal fact stream is viewer-blind. Runtime must not inspect
 BotLens panes, websocket subscribers, selected symbols, chart state, or any

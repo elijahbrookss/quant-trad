@@ -22,6 +22,7 @@ Quant-Trad documentation is layered so readers do not have to start in deep arch
 - [Runtime engine](engineering/runtime-engine.md): concise runtime internals summary with links to deep design docs.
 - [Data layer](engineering/data-layer.md): provider adapters, candle cache, sparse candles, and gap classification.
 - [Observability](engineering/observability.md): logs, metrics, runtime events, BotLens diagnostics, Grafana, and Loki.
+- [Security layer](architecture/security/SECURITY_LAYER.md): credential handling, trust boundaries, known gaps, and post-quantum risk points.
 - [Engineering standards](engineering/README.md): testing, CI, observability doctrine, and documentation standards.
 
 ## Guides
@@ -30,6 +31,7 @@ Quant-Trad documentation is layered so readers do not have to start in deep arch
 - [Creating a strategy](guides/creating-a-strategy.md): typed-output decision flow and test expectations.
 - [Adding a provider](guides/adding-a-provider.md): adapter, candle, cache, gap, and test expectations.
 - [Binance futures public data setup](guides/binance-futures-public-data.md): target setup and ingestion contract for archive-backed USD-M perpetual research data.
+- [Coinbase derivatives paper setup](guides/coinbase-derivatives-paper-setup.md): target setup for Coinbase product metadata, WebSockets, and provider-backed paper runs.
 
 ## Contracts
 
@@ -50,6 +52,7 @@ Deep architecture docs describe implementation boundaries and component-specific
 - [Engine state model](architecture/engine/ENGINE_STATE_MODEL.md)
 - [Architecture decision records](architecture/decisions/README.md)
 - [Execution runtime boundary](architecture/execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md)
+- [Paper engine v1 design](architecture/execution-runtime/PAPER_ENGINE_V1_DESIGN.md)
 - [BotLens projection boundary](architecture/botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
 - [Reporting boundary](architecture/reporting/REPORTING_BOUNDARY.md)
 - [Architecture component index](architecture/ARCHITECTURE_COMPONENT_INDEX.md)

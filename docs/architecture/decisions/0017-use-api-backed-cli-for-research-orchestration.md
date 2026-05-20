@@ -28,9 +28,13 @@ Accepted on 2026-05-17.
 
 ## Context
 
-Quant-Trad needs an interface that a human or future agent can use to start
-runs, inspect lifecycle state, export reports, and compare completed research
+Quant-Trad needs an interface that agents and tools can use to start runs,
+inspect lifecycle state, export reports, and compare completed research
 artifacts without reimplementing backend semantics.
+
+The product UI is the human visualization and inspection surface. It should
+help operators inspect charts, BotLens, playback, fleets, strategies, and
+reports, but it should not be the workflow contract for automation.
 
 The existing Makefile is useful for local development, Docker, database, and
 forensic audit helpers. Those commands are not the right long-term contract for
@@ -61,14 +65,18 @@ The normal CLI path uses compact API contracts such as `bot_run_context.v1`,
 `run_report_comparison_summary.v1`. Full UI/debug payloads may continue to
 exist, but they are not the agent research contract.
 
-Make remains the repo-native development and forensic audit surface. The CLI
-does not replace Make; it provides a cleaner research/operator interface over
-the same backend contracts.
+Make remains the repo-native development and forensic audit support surface.
+The CLI does not replace Make; it is the normal workflow and operation
+entrypoint over the backend contracts. Make should not wrap normal bot, run, or
+report workflows; run-aware Make helpers are reserved for explicitly forensic
+direct-local diagnostics.
 
 ## Consequences
 
-- Agent-facing workflows can call a stable command surface without importing
+- Agent/tool workflows can call a stable command surface without importing
   backend internals.
+- Human visualization stays in the UI without making frontend state an
+  automation contract.
 - Backend DTOs and API routes stay the source of truth for research artifacts.
 - CLI workflows are attributable because they print structured JSON results.
 - Resumable experiment records live under ignored `logs/experiments/` partitions

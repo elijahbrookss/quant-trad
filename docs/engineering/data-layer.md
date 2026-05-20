@@ -16,6 +16,9 @@ Current provider code lives under:
 
 Adapters should hide provider-specific client details without hiding data quality problems. Provider/venue validation, credentials, and factory routing belong at provider boundaries, not in strategy or runtime logic.
 
+Provider API keys flow through credential refs. Do not add provider-specific API
+key fields to settings, bot env, or run config.
+
 ## Candle Cache
 
 The candle cache exists to avoid repeated provider fetches while preserving runtime semantics. Cache keys must include semantic inputs such as provider, venue/exchange, symbol, timeframe, and requested window.
@@ -47,6 +50,8 @@ Provider data feeds indicators and runtime. Runtime and BotLens can surface gap 
 
 - Minimal extension guide: [adding a provider](../guides/adding-a-provider.md).
 - Archive-backed research data setup: [Binance futures public data](../guides/binance-futures-public-data.md).
+- Live-stream/paper setup: [Coinbase derivatives paper setup](../guides/coinbase-derivatives-paper-setup.md).
 - Provider and candle architecture: [data boundary](../architecture/data/DATA_BOUNDARY.md).
+- Credential and trust-boundary reference: [security layer](../architecture/security/SECURITY_LAYER.md).
 - Runtime contract: [runtime contract](../contracts/platform/01_runtime_contract.md).
 - Runtime diagnostics: [execution runtime boundary](../architecture/execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md).

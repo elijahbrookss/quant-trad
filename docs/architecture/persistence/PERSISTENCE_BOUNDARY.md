@@ -9,11 +9,13 @@ tags:
   - persistence
   - runtime-events
   - ledger
+  - leasing
   - postgres
 code_paths:
   - portal/backend/db/models.py
   - portal/backend/db/session.py
   - portal/backend/service/storage
+  - portal/backend/service/storage/repos/run_leases.py
   - portal/backend/service/storage/repos/runtime_events.py
   - portal/backend/service/bots/botlens_domain_events.py
   - portal/backend/service/bots/botlens_canonical_facts.py
@@ -53,6 +55,7 @@ Canonical runtime persistence includes:
 - `portal_bot_runs`,
 - `portal_bot_trades`,
 - `portal_bot_trade_events`,
+- `portal_bot_run_leases`,
 - `portal_bot_run_events`,
 - lifecycle checkpoint rows.
 
@@ -76,7 +79,7 @@ Active schema surfaces are justified by role:
 
 - Keep as durable truth: `portal_bot_runs`, `portal_bot_run_events`,
   `portal_bot_run_event_seq_allocators`, `portal_bot_trades`,
-  `portal_bot_trade_events`, `portal_bot_run_lifecycle`,
+  `portal_bot_trade_events`, `portal_bot_run_leases`, `portal_bot_run_lifecycle`,
   `portal_bot_run_lifecycle_events`, strategy/bot/instrument config tables, and
   market data source tables.
 - Keep as bounded observability: `observability_events.botlens_backend_events_v1`

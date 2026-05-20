@@ -49,10 +49,11 @@ The data boundary provides evidence. It does not make trading decisions, execute
 
 1. Operator/runtime config selects provider, venue, symbol, timeframe, and window.
 2. Provider registry and factory select an adapter.
-3. The adapter isolates external API details, symbol formats, credentials, pagination, and provider metadata.
-4. Provider-backed rows are persisted or read through cache paths.
-5. Continuity checks classify sparse data and gaps.
-6. Market services pass source facts to the indicator runtime and execution runtime.
+3. Required/optional credential keys come from registry metadata; secret values are resolved through credential refs, not runtime config.
+4. The adapter isolates external API details, symbol formats, credentials, pagination, and provider metadata.
+5. Provider-backed rows are persisted or read through cache paths.
+6. Continuity checks classify sparse data and gaps.
+7. Market services pass source facts to the indicator runtime and execution runtime.
 
 Provider adapters are anti-corruption boundaries. External provider quirks should not leak into strategy, execution, BotLens, or reporting.
 
@@ -73,7 +74,7 @@ Unknown gaps are safer than false certainty. If the system cannot prove a market
 ## Inputs
 
 - Provider, venue, exchange, symbol, timeframe, start/end.
-- Provider credentials and runtime settings.
+- Provider credential references and runtime settings.
 - Provider registry metadata.
 - Cached candle rows and closure/session rows when available.
 - Instrument metadata requests.
@@ -96,6 +97,7 @@ The data boundary should not manufacture alternate execution truth. If source da
 ## Failure And Recovery
 
 - Missing credentials fail before runtime starts.
+- Provider API keys must not be read from centralized settings/env bindings.
 - Unsupported provider/venue/symbol combinations fail with provider context.
 - Provider fetch defects become explicit warnings or errors.
 - Provider sparse responses and fetch exceptions attach provider-agnostic missing-range evidence to continuity classifications. Empty or out-of-window successful responses may be closure-backed; failed calls remain ingestion/fetch defects and should not be treated as known market closures.
@@ -108,6 +110,7 @@ The data boundary should not manufacture alternate execution truth. If source da
 - Provider-specific behavior stops at the adapter boundary.
 - Candle continuity is diagnostic truth, not a strategy decision.
 - Instrument metadata must be validated before execution depends on tick size, contract size, fees, shorting, or margin.
+- Provider credentials flow through credential refs; bot config and runtime config must not transport provider API keys.
 
 ## Related Docs
 
@@ -115,6 +118,7 @@ The data boundary should not manufacture alternate execution truth. If source da
 - [Engine state model](../engine/ENGINE_STATE_MODEL.md)
 - [Execution runtime boundary](../execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md)
 - [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)
+- [Security layer](../security/SECURITY_LAYER.md)
 
 ## Known Gaps
 

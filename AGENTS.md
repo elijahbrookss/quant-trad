@@ -15,6 +15,10 @@ the code is wrong.
 - QuantLab = research only
 - Strategy = decision logic only
 - Bot = execution + realism only
+- UI = human visualization and inspection only
+- `qt` CLI = agent/tool workflow and operation entrypoint
+- `qt mcp serve` = MCP adapter over `qt`/backend contracts, not new truth
+- Make = local stack, DB, tests, and forensic helpers
 - All bot runs are walk-forward
 - Derived artifacts must respect known-at timing
 - Playback is a debugger, not a demo
@@ -186,13 +190,28 @@ Performance, polish, and optimization come second.
 
 ## Developer/Audit Workflow
 
-- Use `make help` as the repo-native command index for Docker, DB, reporting,
-  BotLens, validation, git, and commit workflows.
+- Use `qt` as the primary command surface for agent/tool workflows and
+  operations: bot runs, experiments, provider checks, report summaries, report
+  exports, and comparisons.
+- Use the UI for human visualization and inspection. Do not use frontend state
+  as workflow truth.
+- Use `make help` as the repo-native support index for Docker, DB, validation,
+  git, local stack control, and direct forensic helpers.
 - Use `docs/engineering/developer-audit-workflow.md` for the standard Codex
   and local audit workflow before inventing new one-off commands.
-- Keep workflow helpers in existing locations such as the root `Makefile`,
-  `scripts/reporting/`, and `docs/engineering/`; do not add new root-level
-  workflow files or folders.
+- Keep local support and forensic helpers in existing locations such as the root
+  `Makefile`, `scripts/reporting/`, and `docs/engineering/`; do not add new
+  root-level workflow files or folders. Normal bot/run/report workflows belong
+  in `qt`, not Make.
+
+## Commit Hygiene
+
+- Commit coherent slices as they become reviewable instead of saving every
+  change for branch closeout.
+- Prefer small one-line messages in the existing `<area>: <core change>` style.
+- Use `make commit msg="area: core change"` when the whole staged scope belongs
+  together; otherwise stage explicit paths and run `git commit -m` directly.
+- Never stage unrelated local changes just to make the tree clean.
 
 ## Architecture Docs Tagging + Index Workflow
 

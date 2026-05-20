@@ -61,9 +61,9 @@ Reports, charts, fleet cards, exports, and narrative summaries are views. They d
 | Persistence | Durable ledgers and read-model support rows | Alternate execution reconstruction |
 | BotLens projections | Debug/read models over runtime facts | Execution truth |
 | Reporting | Research datasets, compare, exports, diagnostics, narrative summaries | Runtime mutation |
-| Research orchestration | API-backed CLI and future agent workflow composition | Runtime, strategy, wallet, report, or persistence semantics |
+| Research orchestration | API-backed CLI workflow and operation surface for agents/tools | Runtime, strategy, wallet, report, or persistence semantics |
 | Observability | Logs, metrics, diagnostics, fallback/degrade visibility | Domain truth |
-| Frontend | Operator commands and inspection state | Canonical runtime state |
+| Frontend | Human visualization and inspection state | Canonical runtime state or agent workflow orchestration |
 
 ## Hot Path And Cold Path
 

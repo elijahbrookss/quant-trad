@@ -14,6 +14,7 @@ code_paths:
   - portal/backend/controller/bots.py
   - portal/backend/service/observability.py
   - portal/backend/service/observability_exporter.py
+  - portal/backend/service/bots/runner_observability.py
   - portal/backend/service/bots/container_runtime_telemetry.py
   - portal/backend/service/bots/botlens_candle_continuity.py
   - portal/backend/service/bots/botlens_run_stream.py
@@ -21,6 +22,7 @@ code_paths:
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
   - portal/backend/service/storage/repos/observability.py
   - scripts/db/manual_migration_observability_metric_rollups_v1.sql
+  - docker/docker-compose.yml
   - docker/grafana
   - docs/architecture/observability/diagrams/observability-flow.mmd
 ---
@@ -43,6 +45,7 @@ Observability can answer:
 - are payloads too large?
 - is a stream dropping or lagging?
 - did execution fall back?
+- did a runner pause or container lifecycle event explain degraded ownership?
 - which run/symbol/phase is affected?
 
 It cannot answer by itself:
@@ -121,6 +124,8 @@ complete database pressure signal.
   overlays, series stats, and symbol summary facts,
 - backend live transport build/serialize/dispatch attribution by surface,
 - fallback and degrade events,
+- runner clock-gap diagnostics,
+- Docker container lifecycle diagnostics for Quant-Trad containers,
 - storage write timing,
 - projection failures,
 - continuity summaries,
@@ -144,6 +149,8 @@ complete database pressure signal.
 - Missing observability must not be repaired by certifying from viewer/debug
   facts. Reports should fail loudly when canonical evidence is missing.
 - Runtime fallbacks should emit WARN-level or metric diagnostics with enough context to investigate.
+- Runner clock gaps and Docker lifecycle events explain operational liveness;
+  they must not become strategy, wallet, order, trade, or report truth.
 - Dashboard gaps should point back to missing instrumentation or storage, not hidden execution semantics.
 
 ## Invariants

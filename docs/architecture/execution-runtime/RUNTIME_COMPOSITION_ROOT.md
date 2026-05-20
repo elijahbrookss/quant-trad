@@ -10,10 +10,13 @@ tags:
   - runtime
   - portal
   - runtime-mode
+  - leasing
 code_paths:
   - portal/backend/service/bots/runtime_composition.py
   - portal/backend/service/bots/bot_service.py
   - portal/backend/service/bots/runtime_control_service.py
+  - portal/backend/service/bots/startup_service.py
+  - portal/backend/service/bots/run_lease.py
 ---
 # Runtime Composition Root
 
@@ -41,6 +44,7 @@ Mode-specific behavior belongs in composition builders before it appears as scat
 - bot config service,
 - runtime control service,
 - storage gateway,
+- run lease repository,
 - watchdog,
 - runner-facing dependencies.
 

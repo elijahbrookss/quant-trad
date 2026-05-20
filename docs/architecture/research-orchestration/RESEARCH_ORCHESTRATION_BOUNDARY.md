@@ -6,12 +6,14 @@ doc_type: architecture
 status: active
 tags:
   - cli
+  - mcp
   - experiments
   - agent
   - reporting
   - api
 code_paths:
   - cli
+  - cli/mcp_server.py
   - cli/experiments
   - pyproject.toml
   - Makefile
@@ -26,10 +28,18 @@ code_paths:
 
 ## Purpose
 
-The research orchestration boundary gives humans and future agents a small,
+The research orchestration boundary gives agent/tool workflows a small,
 deterministic way to operate the existing system: start bot runs, wait for
 terminal lifecycle state, materialize/export reports, and compare completed
 runs.
+
+Humans can still use the CLI for reproducible operations, but the product UI is
+the human visualization and inspection surface. UI state is never workflow
+truth.
+
+MCP is the protocol adapter for agent hosts. It exposes read-only resources and
+guarded tools over the same `qt` CLI and backend API contracts; it is not a new
+runtime or reporting authority.
 
 It is an interface boundary, not a new strategy engine.
 
@@ -48,6 +58,7 @@ The boundary may:
 - write downloaded report exports to local ignored paths,
 - write CLI invocation audit logs for command/API/artifact provenance.
 - run file-backed sequential experiment plans that compose those API routes.
+- expose MCP resources and tools that call these same API and CLI contracts.
 
 The boundary must not:
 
@@ -58,6 +69,7 @@ The boundary must not:
 - infer run truth from UI state,
 - mutate runtime or reporting semantics.
 - treat local experiment state as canonical runtime truth.
+- treat MCP resources as cached truth or introduce MCP-only workflow semantics.
 
 ## Local Log Partitioning
 
@@ -68,6 +80,8 @@ Default partitions:
 
 - CLI invocation audit logs:
   `logs/cli/YYYY/MM/DD/<command>/<subcommand>/<operation_id>.json`
+- MCP-drafted experiment plans:
+  `logs/experiments/plans/YYYY/MM/DD/<timestamp>__<plan_name>.json`
 - experiment records:
   `logs/experiments/YYYY/MM/DD/<experiment_id>/experiment.json`
 - report export zips:
@@ -115,13 +129,15 @@ backend snapshot remains the execution truth for what actually ran.
 | Layer | Role |
 | --- | --- |
 | Backend API | Formal semantic boundary for bot control, reports, comparison, and future experiment operations. |
-| CLI | API-backed research adapter for humans and agents. |
-| Makefile | Local development, Docker, DB, validation, and forensic audit command index. |
-| QuantLab/UI | Visual debugging and inspection surface, especially for candles, indicators, overlays, and reports. |
+| CLI | Primary API-backed workflow and operation surface for agents and tools. |
+| MCP | Protocol adapter for agent hosts; exposes read-only resources and guarded tools over `qt` and backend API contracts. |
+| Makefile | Local development, Docker, DB, validation, and forensic audit support index. |
+| QuantLab/UI | Human visualization and inspection surface, especially for candles, indicators, overlays, BotLens, playback, and reports. |
 
 ## Current CLI Surface
 
-`qt` exposes API-backed commands for:
+`qt` is the primary agent/tool command surface. It exposes API-backed commands
+for:
 
 - backend health checks,
 - bot listing, inspection, start, stop, active-run, and recent runs through
@@ -143,6 +159,22 @@ backend snapshot remains the execution truth for what actually ran.
 The experiment layer is intentionally file-backed and small. It proves the
 automation seam without introducing a separate experiment database, scheduler,
 or variant generation system.
+
+## Current MCP Surface
+
+`qt mcp serve` starts the stdio MCP server for agent hosts. The server exposes:
+
+- read-only `quanttrad://` resources for health, bots, strategies, providers,
+  reports, report sections, and local experiment state/events,
+- read tools for the same API-backed inspection routes,
+- experiment tools that delegate to `qt experiments ...`,
+- controlled mutation tools for starting/stopping runs, updating bot backtest
+  windows, setting bot strategy variants, and creating/updating strategy
+  variants.
+
+Run-starting and write tools require explicit confirmation. Tools with useful
+previews default to planned mutations and require both `apply=true` and
+`confirm=true` before calling backend write routes.
 
 ## Plan-Based Experiment Contracts
 
@@ -179,6 +211,10 @@ returns unsupported/failed rather than inventing a metric.
 - CLI audit logs should remain local under `logs/` and should not be committed.
 - Normal CLI research commands should prefer compact API contracts over full UI
   projection payloads.
+- Humans inspect runtime and research state through UI views; agents and tools
+  operate workflows through `qt`.
+- MCP clients operate through `qt mcp serve`; MCP must stay a protocol adapter
+  over `qt` and backend contracts.
 - Plan-based experiments must stay sequential until real pressure justifies
   concurrency.
 - Data preflight warnings must be surfaced with provider/symbol/window context
@@ -187,6 +223,8 @@ returns unsupported/failed rather than inventing a metric.
   were used or missing.
 - Make commands can still exist for direct local diagnostics, but direct storage
   access is an explicit forensic path, not the default orchestration path.
+- Run-aware Make diagnostics should use a `forensic-` prefix so they are not
+  confused with normal `qt` workflows.
 
 ## Known Gaps
 

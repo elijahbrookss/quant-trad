@@ -8,11 +8,14 @@ tags:
   - runtime
   - execution
   - lifecycle
+  - leasing
   - wallet
   - deterministic
 code_paths:
   - src/engines/bot_runtime
   - portal/backend/service/bots/bot_watchdog.py
+  - portal/backend/service/bots/runner_observability.py
+  - portal/backend/service/bots/run_lease.py
   - portal/backend/service/bots/container_runtime.py
   - portal/backend/service/bots/runtime_dependencies.py
   - portal/backend/service/bots/startup_lifecycle.py
@@ -87,7 +90,17 @@ terminal only when the watchdog can verify the container belongs to the run it
 is evaluating and startup launch grace has expired. A fixed-name container from
 an older run is startup ambiguity, not proof that the new run crashed.
 Recoverable watchdog conditions should produce degraded operational health with
-context, not `RUN_FAILED` or an unclassified terminal fault.
+context, not `RUN_FAILED` or an unclassified terminal fault. Watchdog lifecycle
+rows should include bounded diagnostics such as stale age, previous runner,
+detecting runner, runner clock gap evidence, and nearby container lifecycle
+evidence when those facts are available.
+
+Run ownership is leased per `run_id`. The backend acquires a run lease before
+launching the runner, the runtime renews that lease while it is alive, and clean
+terminal exit releases it. A fresh run lease is stronger liveness evidence than
+the legacy bot-row heartbeat; stale bot heartbeats with a fresh run lease are
+not terminal proof. Runtime processes must fail loud if they lose the lease or
+cannot renew it before continuing to emit run facts.
 
 ## Execution Semantics
 

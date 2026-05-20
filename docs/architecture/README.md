@@ -11,7 +11,8 @@ The architecture docs are organized by conceptual boundary, not by the current P
 3. [Identity and correlation boundary](identity/IDENTITY_AND_CORRELATION_BOUNDARY.md) - how `run_id`, `bot_id`, `strategy_hash`, `instrument_id`, `signal_id`, `decision_id`, and `trade_id` connect the system.
 4. [Architecture documentation model](ARCHITECTURE_DOCS_MODEL.md) - audit, consolidation decisions, and remaining gaps.
 5. [Architecture decision records](decisions/README.md) - compact backfilled decisions and tradeoffs.
-6. [Architecture component index](ARCHITECTURE_COMPONENT_INDEX.md) - generated frontmatter/code-path index.
+6. [Security layer](security/SECURITY_LAYER.md) - credential handling, trust boundaries, known gaps, and PQ risk points.
+7. [Architecture component index](ARCHITECTURE_COMPONENT_INDEX.md) - generated frontmatter/code-path index.
 
 ## Fastest Diagrams
 
@@ -55,6 +56,7 @@ SVG outputs are not checked in yet because Mermaid CLI is not available in the c
 | Persistence | [persistence/PERSISTENCE_BOUNDARY.md](persistence/PERSISTENCE_BOUNDARY.md) | Durable ledgers, repositories, replay support |
 | Reporting | [reporting/REPORTING_BOUNDARY.md](reporting/REPORTING_BOUNDARY.md) | RunResearchDataset, reports, compare, exports, diagnostics |
 | Research orchestration | [research-orchestration/RESEARCH_ORCHESTRATION_BOUNDARY.md](research-orchestration/RESEARCH_ORCHESTRATION_BOUNDARY.md) | API-backed CLI and future agent research workflows |
+| Security | [security/SECURITY_LAYER.md](security/SECURITY_LAYER.md) | Credential references, trust boundaries, hardening backlog |
 | Observability | [observability/OBSERVABILITY_BOUNDARY.md](observability/OBSERVABILITY_BOUNDARY.md) | Logs, metrics, diagnostics, Grafana/Loki surfaces |
 
 ## Decision Records

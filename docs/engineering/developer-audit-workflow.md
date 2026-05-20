@@ -1,12 +1,56 @@
 # Developer Audit Workflow
 
-This workflow is for Codex and local developer operations only. It standardizes
-repeat audit, Docker, database, reporting, log, validation, and commit commands
-without changing product/runtime behavior.
+This workflow is for Codex, other agents, and local developer operations. It
+standardizes the command surfaces for workflows, visualization, Docker,
+database, reporting, logs, validation, and commits without changing
+product/runtime behavior.
 
-## Command Structure
+## Operational Surfaces
 
-Use the root `Makefile` as the single entrypoint:
+Use the surfaces by role:
+
+| Surface | Role |
+| --- | --- |
+| `qt` CLI | Primary agent/tool workflow and operation entrypoint. Use it for bot runs, experiments, provider checks, report summaries, report exports, and comparisons. |
+| `qt mcp serve` | MCP protocol adapter for agent hosts. Use it when the host expects MCP resources/tools instead of direct shell commands. |
+| UI | Human visualization and inspection surface. Use it to inspect charts, BotLens, fleets, strategies, reports, and playback. Do not treat UI state as workflow truth. |
+| Makefile | Local development and forensic support index. Use it for Docker, DB, validation, tests, logs, git helpers, and direct local diagnostics. |
+
+Start with `qt` when a task asks an agent to operate the system through normal
+backend contracts. Use Make when the task is about the local stack, direct DB
+inspection, tests, or forensic diagnostics.
+
+Use `qt mcp serve` only as the MCP transport for agent hosts. It should expose
+the same workflow boundary as `qt`, not a separate source of runtime, report, or
+experiment truth.
+
+Common agent/tool workflow commands:
+
+- `qt bots list`
+- `qt bots get <bot_id>`
+- `qt bots start <bot_id> --request-id <request_id>`
+- `qt runs wait <bot_id> <run_id>`
+- `qt reports summary <run_id>`
+- `qt reports export <run_id>`
+- `qt reports compare <baseline_run_id> <variant_run_id>`
+- `qt experiments validate-plan <plan>`
+- `qt experiments run-plan <plan> --experiment-id <experiment_id>`
+- `qt experiments resume <experiment_id>`
+- `qt experiments status <experiment_id>`
+- `qt experiments collect <experiment_id> --wait --export`
+
+MCP host command:
+
+- `qt mcp serve`
+- `make mcp-ready`
+- `make mcp-smoke`
+- `make mcp-register-codex`
+
+`make up` prints the MCP adapter command and whether the Codex MCP alias is
+already configured. It does not daemonize `qt mcp serve`; the MCP host must
+launch the stdio server so stdin/stdout are connected to that host.
+
+Use the root `Makefile` as the support command index:
 
 - `make help` lists repo-native commands.
 - `make status` shows compose service status.
@@ -20,60 +64,41 @@ Use the root `Makefile` as the single entrypoint:
 - `make dbshell` opens `psql` in the TimescaleDB container.
 - `make db-query sql="select 1"` runs a one-line SQL statement.
 - `make db-file file=scripts/db/example.sql` runs a SQL file.
-- `make bot-active bot=<bot_id>` prints backend active-run state.
-- `make bot-start bot=<bot_id> request=<request_id>` starts a bot and prints
-  the accepted run id.
-- `make bot-stop bot=<bot_id> run=<run_id> preserve=1` stops a bot run while
-  preserving the runtime container/artifacts when the backend supports it.
-- `make run-status run=<run_id>` prints persisted DB run status.
-- `make run-wait run=<run_id>` waits for a terminal DB run status.
 
-The root `Makefile` remains the entrypoint. Do not add new root-level workflow
-folders unless the file becomes difficult to navigate. If it does, split by
-current sections into included files such as `make/docker.mk`, `make/db.mk`,
-`make/reporting.mk`, `make/test.mk`, and `make/docs.mk`.
+Normal bot/run/report operations do not belong in Make. Use `qt bots`,
+`qt runs`, `qt reports`, and `qt experiments` for those workflows.
 
-The `qt` CLI is the API-backed research adapter for human and future agent
-workflows. It does not replace Make. Use Make for Docker, database, validation,
-and local forensic helpers; use `qt` when the workflow should go through the
-formal backend API boundary.
-
-Common API-backed research commands:
-
-- `qt bots list`
-- `qt bots get <bot_id>`
-- `qt bots start <bot_id> --request-id <request_id>`
-- `qt runs wait <bot_id> <run_id>`
-- `qt reports summary <run_id>`
-- `qt reports export <run_id>`
-- `qt reports compare <baseline_run_id> <variant_run_id>`
-- `qt experiments start-bot <bot_id> --request-id <request_id> --baseline-run-id <run_id>`
-- `qt experiments status <experiment_id>`
-- `qt experiments collect <experiment_id> --wait --export`
+The root `Makefile` remains the development and forensic support index. Do not
+add new root-level workflow folders unless the file becomes difficult to
+navigate. If it does, split by current sections into included files such as
+`make/docker.mk`, `make/db.mk`, `make/reporting.mk`, `make/test.mk`, and
+`make/docs.mk`.
 
 ## Reporting Audit
 
-Reporting helpers use existing backend report contracts and the single
-`PG_DSN`. Local make targets source `secrets.env` only to construct `PG_DSN`
-when it is not already exported.
+For normal report workflows, prefer `qt reports ...` because it goes through
+the backend API contract and returns machine-readable workflow output.
 
-- `make report-readiness run=<run_id>`
-- `make report-dataset run=<run_id>`
-- `make report-summary run=<run_id>`
-- `make report-diagnostics run=<run_id>`
-- `make report-manifest run=<run_id>`
-- `make report-export run=<run_id>`
-- `make run-ordering run=<run_id>`
-- `make run-throughput run=<run_id>`
-- `make run-event-summary run=<run_id>`
-- `make run-seq-gaps run=<run_id>`
-- `make run-write-latency run=<run_id>`
-- `make botlens-check run=<run_id>`
-- `make botlens-check run=<run_id> symbol="<instrument_id|timeframe>"`
-- `make wallet-diagnostics run=<run_id>`
-- `make wallet-diagnostics run=<run_id> compare=<prior_run_id>`
-- `make golden-compare left=<run_id> right=<run_id>`
-- `make golden-compare left=<run_id> right=<run_id> check_prior=1`
+Make forensic helpers are for direct local audit and diagnostics. They use
+existing backend report/runtime contracts and the single `PG_DSN`. Local make
+targets source `secrets.env` only to construct `PG_DSN` when it is not already
+exported.
+
+Direct forensic targets are explicitly prefixed:
+
+- `make forensic-run-ordering run=<run_id>`
+- `make forensic-run-throughput run=<run_id>`
+- `make forensic-run-event-summary run=<run_id>`
+- `make forensic-run-storage-budget run=<optional_run_id>`
+- `make forensic-run-seq-gaps run=<run_id>`
+- `make forensic-run-write-latency run=<run_id>`
+- `make forensic-observability-storage-budget run=<optional_run_id>`
+- `make forensic-botlens-check run=<run_id>`
+- `make forensic-botlens-check run=<run_id> symbol="<instrument_id|timeframe>"`
+- `make forensic-wallet-diagnostics run=<run_id>`
+- `make forensic-wallet-diagnostics run=<run_id> compare=<prior_run_id>`
+- `make forensic-golden-compare left=<run_id> right=<run_id>`
+- `make forensic-golden-compare left=<run_id> right=<run_id> check_prior=1`
 
 Report export output defaults to `logs/reports/`, which is ignored and suitable
 for local audit artifacts.
@@ -82,10 +107,10 @@ CLI experiment records default to `logs/experiments/`, which is also ignored.
 Use these records to resume long-running research operations after a terminal
 disconnect or context reset.
 
-`golden-compare` builds and saves both `RunResearchDataset` payloads, compares
-material hashes, report fingerprints, decision ids/verdicts, wallet trace
-coverage, trade lifecycle, summary metrics, diagnostics, runtime ordering, and
-golden candidate status, then writes `comparison_summary.json`.
+`forensic-golden-compare` builds and saves both `RunResearchDataset` payloads,
+compares material hashes, report fingerprints, decision ids/verdicts, wallet
+trace coverage, trade lifecycle, summary metrics, diagnostics, runtime
+ordering, and golden candidate status, then writes `comparison_summary.json`.
 
 ## Validation
 
@@ -112,15 +137,18 @@ docs, refresh the index, and run `make sync-docs`.
 
 Do not hide full audits behind one opaque target. Keep the pieces composable:
 
-- Start runs explicitly with `make bot-start`.
-- Wait explicitly with `make run-wait`.
-- Compare explicitly with `make golden-compare`.
+- Start runs explicitly with `qt bots start` or a checked-in/ignored
+  experiment plan through `qt experiments run-plan`.
+- Wait explicitly with `qt runs wait` or `qt experiments collect --wait`.
+- Compare explicitly with `qt reports compare` for normal report comparisons.
+- Use `make forensic-golden-compare` when you need the direct local forensic
+  comparison helper.
 - Use `make db-query`, `make logs-backend`, `make logs-bots`, and shell targets
   when the failure mode needs direct inspection.
 
-This is the useful automation boundary: commands remove repeated typing, but
-Codex still chooses the next diagnostic path instead of being funneled through a
-single rigid script.
+This is the useful automation boundary: `qt` operates the system through the
+backend API, Make supports local diagnostics, and Codex still chooses the next
+diagnostic path instead of being funneled through a single rigid script.
 
 ## Commit Helper
 
