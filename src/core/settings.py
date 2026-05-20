@@ -74,11 +74,30 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_BOT_RUNTIME_MAX_SYMBOLS_PER_STRATEGY", ("bot_runtime", "max_symbols_per_strategy")),
     ("QT_BOT_RUNTIME_SYMBOL_PROCESS_MAX", ("bot_runtime", "symbol_process_max")),
     ("QT_BOT_RUNTIME_STATUS_HEARTBEAT_STALE_MS", ("bot_runtime", "status_heartbeat_stale_ms")),
+    ("QT_BOT_RUNTIME_RUN_LEASE_TTL_SECONDS", ("bot_runtime", "run_lease_ttl_seconds")),
+    ("QT_BOT_RUNTIME_RUN_LEASE_RENEW_INTERVAL_SECONDS", ("bot_runtime", "run_lease_renew_interval_seconds")),
     ("QT_BOT_RUNTIME_TELEMETRY_WS_URL", ("bot_runtime", "telemetry", "ws_url")),
     ("QT_BOT_RUNTIME_TELEMETRY_EVENT_POLL_MS", ("bot_runtime", "telemetry", "event_poll_ms")),
     ("QT_BOT_RUNTIME_TELEMETRY_EMIT_QUEUE_MAX", ("bot_runtime", "telemetry", "emit_queue_max")),
     ("QT_BOT_RUNTIME_TELEMETRY_EMIT_QUEUE_TIMEOUT_MS", ("bot_runtime", "telemetry", "emit_queue_timeout_ms")),
     ("QT_BOT_RUNTIME_TELEMETRY_EMIT_RETRY_MS", ("bot_runtime", "telemetry", "emit_retry_ms")),
+    ("QT_BOT_RUNTIME_MARKET_DATA_RECONNECT_ENABLED", ("bot_runtime", "market_data_stream_policy", "reconnect_enabled")),
+    (
+        "QT_BOT_RUNTIME_MARKET_DATA_INITIAL_BACKOFF_SECONDS",
+        ("bot_runtime", "market_data_stream_policy", "initial_backoff_seconds"),
+    ),
+    (
+        "QT_BOT_RUNTIME_MARKET_DATA_MAX_BACKOFF_SECONDS",
+        ("bot_runtime", "market_data_stream_policy", "max_backoff_seconds"),
+    ),
+    (
+        "QT_BOT_RUNTIME_MARKET_DATA_CONTINUOUS_DISCONNECT_BUDGET_SECONDS",
+        ("bot_runtime", "market_data_stream_policy", "continuous_disconnect_budget_seconds"),
+    ),
+    (
+        "QT_BOT_RUNTIME_MARKET_DATA_HEARTBEAT_STALE_SECONDS",
+        ("bot_runtime", "market_data_stream_policy", "heartbeat_stale_seconds"),
+    ),
     ("QT_BOT_RUNTIME_SNAPSHOT_DEFAULT_INTERVAL_MS", ("bot_runtime", "snapshot", "default_interval_ms")),
     ("QT_BOT_RUNTIME_SNAPSHOT_FAST_INTERVAL_MS", ("bot_runtime", "snapshot", "fast_interval_ms")),
     ("QT_BOT_RUNTIME_SNAPSHOT_IDLE_INTERVAL_MS", ("bot_runtime", "snapshot", "idle_interval_ms")),
@@ -112,6 +131,14 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_BOT_RUNTIME_WATCHDOG_STALE_THRESHOLD_SECONDS", ("bot_runtime", "watchdog", "stale_threshold_seconds")),
     ("QT_BOT_RUNTIME_WATCHDOG_MONITOR_INTERVAL_SECONDS", ("bot_runtime", "watchdog", "monitor_interval_seconds")),
     ("QT_BOT_RUNTIME_WATCHDOG_RUNNER_ID", ("bot_runtime", "watchdog", "runner_id")),
+    ("QT_BOT_RUNTIME_WATCHDOG_CLOCK_GAP_ENABLED", ("bot_runtime", "watchdog", "clock_gap_enabled")),
+    ("QT_BOT_RUNTIME_WATCHDOG_CLOCK_GAP_INTERVAL_SECONDS", ("bot_runtime", "watchdog", "clock_gap_interval_seconds")),
+    ("QT_BOT_RUNTIME_WATCHDOG_CLOCK_GAP_THRESHOLD_SECONDS", ("bot_runtime", "watchdog", "clock_gap_threshold_seconds")),
+    ("QT_BOT_RUNTIME_WATCHDOG_DOCKER_LIFECYCLE_ENABLED", ("bot_runtime", "watchdog", "docker_lifecycle_enabled")),
+    (
+        "QT_BOT_RUNTIME_WATCHDOG_DOCKER_LIFECYCLE_RETRY_INTERVAL_SECONDS",
+        ("bot_runtime", "watchdog", "docker_lifecycle_retry_interval_seconds"),
+    ),
     ("QT_PROVIDERS_RUNTIME_HISTORY_SEGMENT_POINTS", ("providers", "runtime", "history_segment_points")),
     ("QT_PROVIDERS_RUNTIME_CANDLES_RAW_TABLE", ("providers", "runtime", "persistence", "candles_raw_table")),
     ("QT_PROVIDERS_RUNTIME_DERIVATIVES_STATE_TABLE", ("providers", "runtime", "persistence", "derivatives_state_table")),
@@ -126,12 +153,6 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_PROVIDERS_IBKR_SYMBOL_OVERRIDES", ("providers", "ibkr", "symbol_overrides")),
     ("QT_PROVIDERS_CCXT_SANDBOX_MODE", ("providers", "ccxt", "sandbox_mode")),
     ("QT_PROVIDERS_CCXT_OHLCV_LIMIT", ("providers", "ccxt", "ohlcv_limit")),
-    ("QT_PROVIDERS_CCXT_API_KEY", ("providers", "ccxt", "api_key")),
-    ("QT_PROVIDERS_CCXT_API_SECRET", ("providers", "ccxt", "api_secret")),
-    ("QT_PROVIDERS_CCXT_SECRET", ("providers", "ccxt", "secret")),
-    ("QT_PROVIDERS_CCXT_PASSWORD", ("providers", "ccxt", "password")),
-    ("QT_PROVIDERS_ALPACA_API_KEY", ("providers", "alpaca", "api_key")),
-    ("QT_PROVIDERS_ALPACA_SECRET_KEY", ("providers", "alpaca", "secret_key")),
     ("QT_PROVIDERS_ALPACA_PAPER", ("providers", "alpaca", "paper")),
     ("QT_SECURITY_PROVIDER_CREDENTIAL_KEY", ("security", "provider_credential_key")),
     ("QT_REPORTS_ARTIFACTS_ENABLED", ("reports", "artifacts", "enabled")),
@@ -483,6 +504,20 @@ class WatchdogSettings:
     stale_threshold_seconds: float
     monitor_interval_seconds: float
     runner_id: Optional[str]
+    clock_gap_enabled: bool
+    clock_gap_interval_seconds: float
+    clock_gap_threshold_seconds: float
+    docker_lifecycle_enabled: bool
+    docker_lifecycle_retry_interval_seconds: float
+
+
+@dataclass(frozen=True)
+class MarketDataStreamPolicySettings:
+    reconnect_enabled: bool
+    initial_backoff_seconds: float
+    max_backoff_seconds: float
+    continuous_disconnect_budget_seconds: float
+    heartbeat_stale_seconds: float
 
 
 @dataclass(frozen=True)
@@ -495,12 +530,15 @@ class BotRuntimeSettings:
     max_symbols_per_strategy: int
     symbol_process_max: Optional[int]
     status_heartbeat_stale_ms: int
+    run_lease_ttl_seconds: float
+    run_lease_renew_interval_seconds: float
     snapshot: SnapshotSettings
     push: PushSettings
     indicator_guard: IndicatorGuardSettings
     botlens: BotlensSettings
     step_trace: StepTraceSettings
     telemetry: TelemetrySettings
+    market_data_stream_policy: MarketDataStreamPolicySettings
     watchdog: WatchdogSettings
 
 
@@ -520,16 +558,10 @@ class IbkrSettings:
 class CcxtSettings:
     sandbox_mode: bool
     ohlcv_limit: Optional[int]
-    api_key: Optional[str]
-    api_secret: Optional[str]
-    secret: Optional[str]
-    password: Optional[str]
 
 
 @dataclass(frozen=True)
 class AlpacaSettings:
-    api_key: Optional[str]
-    secret_key: Optional[str]
     paper: bool
 
 
@@ -625,6 +657,7 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
     botlens_payload = _coerce_mapping(bot_runtime_payload.get("botlens"))
     step_trace_payload = _coerce_mapping(bot_runtime_payload.get("step_trace"))
     telemetry_payload = _coerce_mapping(bot_runtime_payload.get("telemetry"))
+    market_data_stream_policy_payload = _coerce_mapping(bot_runtime_payload.get("market_data_stream_policy"))
     watchdog_payload = _coerce_mapping(bot_runtime_payload.get("watchdog"))
     providers_payload = _coerce_mapping(payload.get("providers"))
     provider_runtime_payload = _coerce_mapping(providers_payload.get("runtime"))
@@ -753,6 +786,12 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             status_heartbeat_stale_ms=_coerce_int(
                 bot_runtime_payload.get("status_heartbeat_stale_ms"), 45000, minimum=5000
             ),
+            run_lease_ttl_seconds=_coerce_float(
+                bot_runtime_payload.get("run_lease_ttl_seconds"), 120.0, minimum=1.0
+            ),
+            run_lease_renew_interval_seconds=_coerce_float(
+                bot_runtime_payload.get("run_lease_renew_interval_seconds"), 15.0, minimum=0.1
+            ),
             snapshot=SnapshotSettings(
                 default_interval_ms=_coerce_int(snapshot_payload.get("default_interval_ms"), 250, minimum=1),
                 fast_interval_ms=_coerce_int(snapshot_payload.get("fast_interval_ms"), 250, minimum=1),
@@ -822,6 +861,21 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                 emit_queue_timeout_ms=_coerce_int(telemetry_payload.get("emit_queue_timeout_ms"), 1000, minimum=10),
                 emit_retry_ms=_coerce_int(telemetry_payload.get("emit_retry_ms"), 250, minimum=50),
             ),
+            market_data_stream_policy=MarketDataStreamPolicySettings(
+                reconnect_enabled=_coerce_bool(market_data_stream_policy_payload.get("reconnect_enabled"), True),
+                initial_backoff_seconds=_coerce_float(
+                    market_data_stream_policy_payload.get("initial_backoff_seconds"), 1.0, minimum=0.0
+                ),
+                max_backoff_seconds=_coerce_float(
+                    market_data_stream_policy_payload.get("max_backoff_seconds"), 60.0, minimum=0.001
+                ),
+                continuous_disconnect_budget_seconds=_coerce_float(
+                    market_data_stream_policy_payload.get("continuous_disconnect_budget_seconds"), 900.0, minimum=0.001
+                ),
+                heartbeat_stale_seconds=_coerce_float(
+                    market_data_stream_policy_payload.get("heartbeat_stale_seconds"), 30.0, minimum=0.001
+                ),
+            ),
             watchdog=WatchdogSettings(
                 heartbeat_interval_seconds=_coerce_float(
                     watchdog_payload.get("heartbeat_interval_seconds"), 15.0, minimum=0.1
@@ -833,6 +887,17 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                     watchdog_payload.get("monitor_interval_seconds"), 30.0, minimum=0.1
                 ),
                 runner_id=_coerce_optional_str(watchdog_payload.get("runner_id")),
+                clock_gap_enabled=_coerce_bool(watchdog_payload.get("clock_gap_enabled"), True),
+                clock_gap_interval_seconds=_coerce_float(
+                    watchdog_payload.get("clock_gap_interval_seconds"), 5.0, minimum=0.1
+                ),
+                clock_gap_threshold_seconds=_coerce_float(
+                    watchdog_payload.get("clock_gap_threshold_seconds"), 30.0, minimum=0.1
+                ),
+                docker_lifecycle_enabled=_coerce_bool(watchdog_payload.get("docker_lifecycle_enabled"), True),
+                docker_lifecycle_retry_interval_seconds=_coerce_float(
+                    watchdog_payload.get("docker_lifecycle_retry_interval_seconds"), 10.0, minimum=0.1
+                ),
             ),
         ),
         providers=ProviderSettings(
@@ -867,14 +932,8 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                     if ccxt_payload.get("ohlcv_limit") in (None, "")
                     else _coerce_int(ccxt_payload.get("ohlcv_limit"), 500, minimum=1)
                 ),
-                api_key=_coerce_optional_str(ccxt_payload.get("api_key")),
-                api_secret=_coerce_optional_str(ccxt_payload.get("api_secret")),
-                secret=_coerce_optional_str(ccxt_payload.get("secret")),
-                password=_coerce_optional_str(ccxt_payload.get("password")),
             ),
             alpaca=AlpacaSettings(
-                api_key=_coerce_optional_str(alpaca_payload.get("api_key")),
-                secret_key=_coerce_optional_str(alpaca_payload.get("secret_key")),
                 paper=_coerce_bool(alpaca_payload.get("paper"), True),
             ),
         ),
@@ -975,11 +1034,6 @@ def env_is_set(name: str) -> bool:
     return value not in (None, "")
 
 
-def resolve_ccxt_credentials(exchange_id: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    settings = get_settings()
-    return settings.providers.ccxt.api_key, settings.providers.ccxt.api_secret or settings.providers.ccxt.secret, settings.providers.ccxt.password
-
-
 __all__ = [
     "AppSettings",
     "AsyncJobSettings",
@@ -990,6 +1044,7 @@ __all__ = [
     "FrontendSettings",
     "IbkrSettings",
     "LoggingSettings",
+    "MarketDataStreamPolicySettings",
     "ObservabilitySettings",
     "ProviderRuntimeSettings",
     "ReportArtifactSettings",
@@ -1002,5 +1057,4 @@ __all__ = [
     "env_is_set",
     "env_value",
     "get_settings",
-    "resolve_ccxt_credentials",
 ]

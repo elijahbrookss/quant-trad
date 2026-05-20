@@ -20,6 +20,7 @@ from ....db import (
     BotRunEventRecord,
     BotRunLifecycleEventRecord,
     BotRunLifecycleRecord,
+    BotRunLeaseRecord,
     BotRunRecord,
     BotRunEventSeqAllocatorRecord,
     BotRunStepRollupRecord,

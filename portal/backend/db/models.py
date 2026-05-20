@@ -274,16 +274,26 @@ class ATMTemplateRecord(Base):
         }
 
 
-class ProviderCredentialRecord(Base):
-    """Encrypted provider credential storage."""
+class ProviderCredentialRefRecord(Base):
+    """Encrypted provider credential reference metadata."""
 
-    __tablename__ = "portal_provider_credentials"
+    __tablename__ = "portal_provider_credential_refs"
 
-    provider_id = Column(String(64), primary_key=True)
-    venue_id = Column(String(64), primary_key=True, default="")
+    credential_ref = Column(String(128), primary_key=True)
+    provider_id = Column(String(64), nullable=False)
+    venue_id = Column(String(64), nullable=False, default="")
+    environment = Column(String(32), nullable=False, default="paper")
+    display_name = Column(String(255), nullable=True)
+    status = Column(String(32), nullable=False, default="active")
     secrets_encrypted = Column(String, nullable=False)
+    secret_version = Column(Integer, nullable=False, default=1)
+    required_secret_keys = Column(JSON, nullable=False, default=list)
+    validation = Column(JSON, nullable=False, default=dict)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_validated_at = Column(DateTime, nullable=True)
+    last_used_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
 
 
 class SymbolPresetRecord(Base):
@@ -406,6 +416,7 @@ class BotRecord(Base):
     backtest_end = Column(DateTime, nullable=True)
     risk = Column(JSON, nullable=False, default=dict)
     wallet_config = Column(JSON, nullable=False, default=dict)
+    market_data_stream_policy = Column(JSON, nullable=False, default=dict)
     snapshot_interval_ms = Column(Integer, nullable=False, default=250)
     bot_env = Column(JSON, nullable=False, default=dict)
     status = Column(String(32), nullable=False, default="idle")
@@ -425,6 +436,9 @@ class BotRecord(Base):
         execution_mode = str(risk_payload.get("execution_mode") or "fast").strip().lower()
         if execution_mode not in {"fast", "full"}:
             execution_mode = "fast"
+        execution_behavior = str(risk_payload.get("execution_behavior") or "simulated").strip().lower().replace("_", "-")
+        if execution_behavior not in {"simulated", "observe-only"}:
+            execution_behavior = "simulated"
         return {
             "id": self.id,
             "name": self.name,
@@ -436,12 +450,14 @@ class BotRecord(Base):
             "risk_config": dict(self.risk_config or {}),
             "mode": self.mode,
             "execution_mode": execution_mode,
+            "execution_behavior": execution_behavior,
             "run_type": self.run_type,
             "playback_speed": float(self.playback_speed if self.playback_speed is not None else 0.0),
             "backtest_start": (self.backtest_start.isoformat() + "Z") if self.backtest_start else None,
             "backtest_end": (self.backtest_end.isoformat() + "Z") if self.backtest_end else None,
             "risk": risk_payload,
             "wallet_config": dict(self.wallet_config or {}),
+            "market_data_stream_policy": dict(self.market_data_stream_policy or {}),
             "snapshot_interval_ms": int(self.snapshot_interval_ms or 0),
             "bot_env": dict(self.bot_env or {}),
             "status": self.status,
@@ -586,6 +602,14 @@ class BotRunRecord(Base):
         ).strip().lower()
         if execution_mode not in {"fast", "full"}:
             execution_mode = "fast"
+        execution_behavior = str(
+            config_snapshot.get("execution_behavior")
+            or bot_snapshot.get("execution_behavior")
+            or bot_risk.get("execution_behavior")
+            or "simulated"
+        ).strip().lower().replace("_", "-")
+        if execution_behavior not in {"simulated", "observe-only"}:
+            execution_behavior = "simulated"
         return {
             "run_id": self.run_id,
             "bot_id": self.bot_id,
@@ -604,6 +628,7 @@ class BotRunRecord(Base):
             "ended_at": (self.ended_at.isoformat() + "Z") if self.ended_at else None,
             "summary": dict(self.summary or {}),
             "execution_mode": execution_mode,
+            "execution_behavior": execution_behavior,
             "config_snapshot": config_snapshot,
             "decision_ledger": list(self.decision_ledger or []),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
@@ -728,6 +753,47 @@ class BotRunLifecycleEventRecord(Base):
             "failure": dict(self.failure or {}),
             "checkpoint_at": (self.checkpoint_at or datetime.utcnow()).isoformat() + "Z",
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class BotRunLeaseRecord(Base):
+    """Runner-agnostic ownership lease for one bot run."""
+
+    __tablename__ = "portal_bot_run_leases"
+    __table_args__ = (
+        Index("ix_portal_bot_run_leases_bot_status_expires", "bot_id", "status", "expires_at"),
+        Index("ix_portal_bot_run_leases_runner_status", "runner_id", "status"),
+    )
+
+    run_id = Column(String(64), ForeignKey("portal_bot_runs.run_id", ondelete="CASCADE"), primary_key=True)
+    bot_id = Column(String(64), ForeignKey("portal_bots.id", ondelete="CASCADE"), nullable=False)
+    runner_id = Column(String(128), nullable=False)
+    lease_token_hash = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False, default="active")
+    generation = Column(Integer, nullable=False, default=1)
+    acquired_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    renewed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    released_at = Column(DateTime, nullable=True)
+    lease_metadata = Column("metadata", JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "bot_id": self.bot_id,
+            "runner_id": self.runner_id,
+            "lease_token_hash": self.lease_token_hash,
+            "status": self.status,
+            "generation": int(self.generation or 0),
+            "acquired_at": (self.acquired_at or datetime.utcnow()).isoformat() + "Z",
+            "renewed_at": (self.renewed_at or datetime.utcnow()).isoformat() + "Z",
+            "expires_at": (self.expires_at or datetime.utcnow()).isoformat() + "Z",
+            "released_at": (self.released_at.isoformat() + "Z") if self.released_at else None,
+            "metadata": dict(self.lease_metadata or {}),
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
 
 

@@ -69,6 +69,8 @@ bot_runtime:
   max_symbols_per_strategy: 10
   symbol_process_max: null
   status_heartbeat_stale_ms: 45000
+  run_lease_ttl_seconds: 120
+  run_lease_renew_interval_seconds: 15
   snapshot:
     default_interval_ms: 250
     fast_interval_ms: 250
@@ -92,6 +94,12 @@ bot_runtime:
     emit_queue_max: 256
     emit_queue_timeout_ms: 1000
     emit_retry_ms: 250
+  market_data_stream_policy:
+    reconnect_enabled: true
+    initial_backoff_seconds: 1.0
+    max_backoff_seconds: 60.0
+    continuous_disconnect_budget_seconds: 900.0
+    heartbeat_stale_seconds: 30.0
   botlens:
     max_series: 12
     max_candles: 320
@@ -114,6 +122,11 @@ bot_runtime:
     stale_threshold_seconds: 60
     monitor_interval_seconds: 30
     runner_id: null
+    clock_gap_enabled: true
+    clock_gap_interval_seconds: 5
+    clock_gap_threshold_seconds: 30
+    docker_lifecycle_enabled: true
+    docker_lifecycle_retry_interval_seconds: 10
 
 providers:
   runtime:
@@ -134,13 +147,7 @@ providers:
   ccxt:
     sandbox_mode: false
     ohlcv_limit: null
-    api_key: null
-    api_secret: null
-    secret: null
-    password: null
   alpaca:
-    api_key: null
-    secret_key: null
     paper: true
 
 security:

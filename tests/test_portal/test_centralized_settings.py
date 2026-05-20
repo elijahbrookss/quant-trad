@@ -14,6 +14,7 @@ def test_settings_applies_single_underscore_env_overrides(monkeypatch, request):
     monkeypatch.setenv("QT_BOT_RUNTIME_BOTLENS_PERSIST_OBSERVER_CONTINUITY", "true")
     monkeypatch.setenv("QT_WORKERS_INDICATORS_INDEX", "2")
     monkeypatch.setenv("QT_WORKERS_INDICATORS_TOTAL", "7")
+    monkeypatch.setenv("QT_BOT_RUNTIME_WATCHDOG_CLOCK_GAP_THRESHOLD_SECONDS", "42")
     monkeypatch.setenv("QT_REPORTS_ARTIFACTS_OUTPUT_FORMAT", "csv")
     monkeypatch.setenv("PG_DSN", "postgresql://example/test")
 
@@ -23,6 +24,7 @@ def test_settings_applies_single_underscore_env_overrides(monkeypatch, request):
     assert settings.bot_runtime.botlens.persist_observer_continuity is True
     assert settings.workers.indicators.index == 2
     assert settings.workers.indicators.total == 7
+    assert settings.bot_runtime.watchdog.clock_gap_threshold_seconds == 42.0
     assert settings.reports.artifacts.output_format == "csv"
     assert settings.database.dsn == "postgresql://example/test"
 

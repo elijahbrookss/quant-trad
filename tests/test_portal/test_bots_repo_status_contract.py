@@ -137,7 +137,14 @@ def test_mark_bot_crashed_classifies_stale_heartbeat_as_recoverable_lifecycle_de
     )
     monkeypatch.setattr(lifecycle_repo, "record_bot_run_lifecycle_checkpoint", lambda payload: recorded.append(payload))
 
-    result = bots.mark_bot_crashed("bot-1", "stale_heartbeat:prev=backend.quanttrad")
+    result = bots.mark_bot_crashed(
+        "bot-1",
+        "stale_heartbeat:prev=backend.quanttrad",
+        diagnostics={
+            "stale_age_seconds": 125.0,
+            "runner_clock_gap": {"gap_seconds": 3672.0, "detected_at": "2026-05-19T07:57:54Z"},
+        },
+    )
 
     assert result is True
     assert bot_row.runner_id is None
@@ -146,5 +153,7 @@ def test_mark_bot_crashed_classifies_stale_heartbeat_as_recoverable_lifecycle_de
     assert recorded[0]["phase"] == "degraded"
     assert recorded[0]["status"] == "degraded"
     assert recorded[0]["metadata"]["watchdog_classification"] == "recoverable"
+    assert recorded[0]["metadata"]["watchdog_diagnostics"]["stale_age_seconds"] == 125.0
+    assert recorded[0]["metadata"]["watchdog_diagnostics"]["runner_clock_gap"]["gap_seconds"] == 3672.0
     assert recorded[0]["failure"]["reason_code"] == "stale_heartbeat"
     assert recorded[0]["failure"]["recoverable"] is True

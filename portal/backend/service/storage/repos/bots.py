@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from ._shared import (
     BotRecord,
@@ -41,7 +41,20 @@ def _row_value(row: Any, key: str) -> Any:
     return getattr(row, key, None)
 
 
-def _watchdog_terminal_metadata(bot_id: str, reason: str) -> Dict[str, Any]:
+def _watchdog_diagnostics_metadata(diagnostics: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    if not diagnostics:
+        return {}
+    payload = _json_safe(dict(diagnostics))
+    if not isinstance(payload, dict) or not payload:
+        return {}
+    return {"watchdog_diagnostics": payload}
+
+
+def _watchdog_terminal_metadata(
+    bot_id: str,
+    reason: str,
+    diagnostics: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
     normalized = str(reason or "").strip().lower()
     metadata: Dict[str, Any] = {
         "terminal_actor": "watchdog_stop",
@@ -65,7 +78,9 @@ def _watchdog_terminal_metadata(bot_id: str, reason: str) -> Dict[str, Any]:
             metadata["terminal_actor"] = "process_exit"
         elif container_status == "missing":
             metadata["terminal_actor"] = "unknown"
+    metadata.update(_watchdog_diagnostics_metadata(diagnostics))
     return metadata
+
 
 def load_bots() -> List[Dict[str, Any]]:
     """Return all persisted bot configurations."""
@@ -139,8 +154,14 @@ def upsert_bot(payload: Dict[str, Any]) -> None:
                 risk_payload = dict(record.risk or {})
                 risk_payload["execution_mode"] = payload.get("execution_mode")
                 record.risk = risk_payload
+            if "execution_behavior" in payload:
+                risk_payload = dict(record.risk or {})
+                risk_payload["execution_behavior"] = payload.get("execution_behavior")
+                record.risk = risk_payload
             if "wallet_config" in payload:
                 record.wallet_config = dict(payload.get("wallet_config") or {})
+            if "market_data_stream_policy" in payload:
+                record.market_data_stream_policy = dict(_json_safe(payload.get("market_data_stream_policy") or {}))
             if "snapshot_interval_ms" in payload:
                 record.snapshot_interval_ms = int(payload.get("snapshot_interval_ms") or 0)
             if "bot_env" in payload:
@@ -193,7 +214,11 @@ def update_bot_heartbeat(bot_id: str, runner_id: str) -> None:
         logger.warning("bot_heartbeat_failed | id=%s | error=%s", bot_id, exc)
 
 
-def mark_bot_crashed(bot_id: str, reason: str = "orphaned") -> bool:
+def mark_bot_crashed(
+    bot_id: str,
+    reason: str = "orphaned",
+    diagnostics: Optional[Mapping[str, Any]] = None,
+) -> bool:
     """Mark a bot as crashed and clear its runner ownership (BotWatchdog).
 
     Returns True if the bot was updated, False otherwise.
@@ -270,8 +295,10 @@ def mark_bot_crashed(bot_id: str, reason: str = "orphaned") -> bool:
                     "watchdog_reason_text": str(reason or "").strip() or "stale_heartbeat",
                 }
                 if recoverable_watchdog_condition
-                else _watchdog_terminal_metadata(bot_id, reason)
+                else _watchdog_terminal_metadata(bot_id, reason, diagnostics)
             )
+            if recoverable_watchdog_condition:
+                terminal_metadata.update(_watchdog_diagnostics_metadata(diagnostics))
             phase = (
                 BotLifecyclePhase.DEGRADED.value
                 if recoverable_watchdog_condition
