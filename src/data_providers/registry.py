@@ -18,6 +18,7 @@ class ProviderConfig:
     supported_venues: List[str] = field(default_factory=list)
     capabilities: Dict[str, object] = field(default_factory=dict)
     required_secrets: List[str] = field(default_factory=list)
+    optional_secrets: List[str] = field(default_factory=list)
     implementation_module: Optional[str] = None
     implementation_class: Optional[str] = None
 
@@ -32,6 +33,7 @@ class VenueConfig:
     symbols_format: Optional[str] = None
     metadata: Dict[str, object] = field(default_factory=dict)
     required_secrets: List[str] = field(default_factory=list)
+    optional_secrets: List[str] = field(default_factory=list)
 
 
 class _Registry:
@@ -166,6 +168,17 @@ def exchange_slug_for_venue(venue_id: Optional[str]) -> Optional[str]:
     return slug.lower() if isinstance(slug, str) else None
 
 
+def venue_for_exchange_slug(exchange: Optional[str]) -> Optional[str]:
+    if not exchange:
+        return None
+    slug = str(exchange).strip().lower()
+    for venue in list_venues():
+        venue_slug = exchange_slug_for_venue(venue.id)
+        if venue_slug and venue_slug.lower() == slug:
+            return venue.id
+    return None
+
+
 # --- Pre-register built-in providers/venues to keep existing behaviour ---
 _REGISTRY.register_provider(
     ProviderConfig(
@@ -203,6 +216,7 @@ _REGISTRY.register_provider(
         label="CCXT (multi-exchange)",
         supported_venues=["KRAKEN_PRO", "BINANCE_US", "COINBASE"],
         capabilities={"supportsHistorical": True, "supportsLive": True, "supportsOrders": True, "assetClasses": ["crypto"]},
+        optional_secrets=["CCXT_API_KEY", "CCXT_SECRET", "CCXT_PASSWORD"],
         implementation_module="data_providers.providers.ccxt",
         implementation_class="CCXTProvider",
     )
@@ -218,7 +232,16 @@ _REGISTRY.register_provider(
     )
 )
 
-_REGISTRY.register_venue(VenueConfig(id="ALPACA", label="Alpaca", provider_id="ALPACA", adapter_id=None, asset_class="equities"))
+_REGISTRY.register_venue(
+    VenueConfig(
+        id="ALPACA",
+        label="Alpaca",
+        provider_id="ALPACA",
+        adapter_id=None,
+        asset_class="equities",
+        required_secrets=["ALPACA_API_KEY", "ALPACA_SECRET_KEY"],
+    )
+)
 _REGISTRY.register_venue(VenueConfig(id="YAHOO", label="Yahoo Finance", provider_id="YAHOO", adapter_id=None, asset_class="equities"))
 _REGISTRY.register_venue(VenueConfig(id="INTERACTIVE_BROKERS", label="Interactive Brokers", provider_id="INTERACTIVE_BROKERS", adapter_id=None))
 _REGISTRY.register_venue(VenueConfig(id="KRAKEN_PRO", label="Kraken Pro", provider_id="CCXT", adapter_id="kraken", asset_class="crypto"))
@@ -236,6 +259,7 @@ __all__ = [
     "get_venue_config",
     "provider_for_venue",
     "exchange_slug_for_venue",
+    "venue_for_exchange_slug",
     "normalize_provider_id",
     "normalize_venue_id",
     "venues_by_provider",

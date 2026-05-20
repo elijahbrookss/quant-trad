@@ -8,8 +8,9 @@ import pandas as pd
 import ccxt
 
 from core.logger import logger
-from core.settings import get_settings, resolve_ccxt_credentials
-from data_providers.registry import _REGISTRY
+from core.settings import get_settings
+from data_providers.registry import _REGISTRY, venue_for_exchange_slug
+from data_providers.services.credential_store import load_credentials
 from .base import BaseDataProvider, InstrumentMetadata, InstrumentType
 
 _CCXT_SETTINGS = get_settings().providers.ccxt
@@ -276,7 +277,30 @@ class CCXTProvider(BaseDataProvider):
         return _CCXT_SETTINGS.sandbox_mode
 
     def _resolve_credentials(self) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        return resolve_ccxt_credentials(self._exchange_id)
+        venue_id = venue_for_exchange_slug(self._exchange_id) or self._exchange_id.upper()
+        try:
+            stored = load_credentials(
+                "CCXT",
+                venue_id,
+                environment="paper",
+                mark_used=True,
+                warn_missing=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "ccxt_optional_credentials_unavailable | exchange=%s venue=%s error=%s",
+                self._exchange_id,
+                venue_id,
+                exc,
+            )
+            return None, None, None
+        if not stored:
+            return None, None, None
+        return (
+            str(stored.get("CCXT_API_KEY") or "").strip() or None,
+            str(stored.get("CCXT_SECRET") or stored.get("CCXT_API_SECRET") or "").strip() or None,
+            str(stored.get("CCXT_PASSWORD") or "").strip() or None,
+        )
 
     def _build_exchange(self):
         if not hasattr(ccxt, self._exchange_id):
