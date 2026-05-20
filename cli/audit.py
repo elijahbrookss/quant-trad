@@ -10,6 +10,16 @@ from typing import Any, Mapping, Sequence
 
 
 _SAFE_PATH_PART = re.compile(r"[^A-Za-z0-9_.=-]+")
+_SENSITIVE_FLAGS = {
+    "--secret",
+    "--secrets-json",
+}
+_SENSITIVE_ARG_NAMES = {
+    "credentials",
+    "secret",
+    "secrets",
+    "secrets_json",
+}
 
 
 def utc_now() -> datetime:
@@ -42,7 +52,10 @@ def command_path(args: Any) -> str:
         getattr(args, "strategies_command", None),
         getattr(args, "variants_command", None),
         getattr(args, "reports_command", None),
+        getattr(args, "providers_command", None),
+        getattr(args, "credentials_command", None),
         getattr(args, "experiments_command", None),
+        getattr(args, "mcp_command", None),
     ]
     return ".".join(safe_path_part(part) for part in parts if part)
 
@@ -72,13 +85,43 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _redact_sensitive(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): "***REDACTED***" if str(key) in _SENSITIVE_ARG_NAMES else _redact_sensitive(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_redact_sensitive(item) for item in value]
+    return _json_safe(value)
+
+
 def _namespace_payload(args: Any) -> dict[str, Any]:
     payload = {
         key: value
         for key, value in vars(args).items()
         if key not in {"func"} and not callable(value)
     }
-    return _json_safe(payload)
+    return _redact_sensitive(payload)
+
+
+def _redact_argv(argv: Sequence[str]) -> list[str]:
+    redacted: list[str] = []
+    redact_next = False
+    for item in argv:
+        if redact_next:
+            redacted.append("***REDACTED***")
+            redact_next = False
+            continue
+        if any(item == flag for flag in _SENSITIVE_FLAGS):
+            redacted.append(item)
+            redact_next = True
+            continue
+        if any(item.startswith(f"{flag}=") for flag in _SENSITIVE_FLAGS):
+            redacted.append(item.split("=", 1)[0] + "=***REDACTED***")
+            continue
+        redacted.append(item)
+    return redacted
 
 
 class CliAuditLog:
@@ -98,7 +141,7 @@ class CliAuditLog:
         self.operation_id = f"{timestamp_slug(self.started_at)}-{uuid.uuid4().hex[:8]}"
         self.command = command_path(args) or "unknown"
         self.root = Path(root).expanduser()
-        self.argv = list(argv)
+        self.argv = _redact_argv(argv)
         self.args = _namespace_payload(args)
         self.events: list[dict[str, Any]] = []
         self.artifacts: list[dict[str, Any]] = []

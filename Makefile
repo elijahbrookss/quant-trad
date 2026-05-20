@@ -56,15 +56,18 @@ PID_DIR     ?= .pids
 LOG_DIR     ?= logs
 LOG_TAIL    ?= 240
 
+MCP_NAME              ?= quant-trad
+MCP_API_URL           ?= http://127.0.0.1:8000
+MCP_COMMAND_TIMEOUT   ?= 7200
+MCP_QT_BIN            ?= $(abspath $(VENV)/bin/qt)
+MCP_LOG_ROOT          ?= $(abspath $(LOG_DIR))
+CODEX                 ?= codex
+
 DB_SERVICE      ?= tsdb
 BACKEND_SERVICE ?= backend
 BOT_SERVICE     ?= bot-runtime
 REPORT_EXPORT_DIR ?= $(LOG_DIR)/reports
 GOLDEN_OUT_DIR    ?= $(REPORT_EXPORT_DIR)/golden-repeatability
-BACKEND_API_URL   ?= http://127.0.0.1:8000
-RUN_WAIT_INTERVAL ?= 30
-RUN_WAIT_TIMEOUT  ?= 3600
-
 LOCAL_PG_ENV = if [ -f secrets.env ]; then \
 	while IFS='=' read -r key value; do \
 		key="$${key%%[[:space:]]*}"; \
@@ -113,7 +116,7 @@ help: ## Show this help
 ## ========================== QUICK COMMANDS ============================== ##
 .PHONY: up down restart logs build rebuild ps sync-docs architecture-svgs mermaid-svgs
 
-up: stack-up sync-docs ## Start stack (alias for stack-up, use STACK_PROFILES= to customize)
+up: stack-up mcp-ready sync-docs ## Start stack and show MCP readiness (use STACK_PROFILES= to customize)
 down: stack-down ## Stop and remove stack (alias for stack-down)
 restart: stack-restart ## Restart stack (alias for stack-restart, use BUILD=1 to rebuild)
 logs: stack-logs ## Tail logs (alias for stack-logs, use SERVICE= to filter)
@@ -254,12 +257,47 @@ bots-ps: ## List isolated bot containers
 bots-logs: ## Tail isolated bot containers logs
 	@$(BOTS_COMPOSE_CMD) logs -f
 
-## ============================ DEV / AUDIT =============================== ##
+## ============================== MCP ===================================== ##
+.PHONY: mcp-ready mcp-smoke mcp-register-codex
+
+mcp-ready: ## Show MCP adapter status for Codex; stdio server is launched by the MCP host
+	@set -euo pipefail; \
+	echo ""; \
+	echo "► MCP adapter"; \
+	if [ ! -x "$(MCP_QT_BIN)" ]; then \
+		echo "  ! $(MCP_QT_BIN) not found; run make deps before MCP registration"; \
+		exit 0; \
+	fi; \
+	echo "  ✓ Command: $(MCP_QT_BIN) --api-url $(MCP_API_URL) --log-root $(MCP_LOG_ROOT) --no-audit-log mcp serve --command-timeout $(MCP_COMMAND_TIMEOUT)"; \
+	if command -v "$(CODEX)" >/dev/null 2>&1; then \
+		if "$(CODEX)" mcp get "$(MCP_NAME)" >/dev/null 2>&1; then \
+			echo "  ✓ Codex MCP alias configured: $(MCP_NAME)"; \
+		else \
+			echo "  ► Register once: make mcp-register-codex"; \
+		fi; \
+	else \
+		echo "  ! Codex CLI not found on PATH; register the command above in your MCP host"; \
+	fi
+
+mcp-smoke: venv ## Smoke test the stdio MCP server initialize handshake
+	@printf '{"jsonrpc":"2.0","id":1,"method":"initialize"}\n' | "$(MCP_QT_BIN)" --api-url "$(MCP_API_URL)" --log-root "$(MCP_LOG_ROOT)" --no-audit-log mcp serve --command-timeout 5
+
+mcp-register-codex: venv ## Register the Quant-Trad MCP stdio server with Codex CLI
+	@set -euo pipefail; \
+	command -v "$(CODEX)" >/dev/null 2>&1 || { echo "✗ $(CODEX) not found on PATH"; exit 1; }; \
+	if "$(CODEX)" mcp get "$(MCP_NAME)" >/dev/null 2>&1; then \
+		echo "✓ Codex MCP alias already configured: $(MCP_NAME)"; \
+		"$(CODEX)" mcp get "$(MCP_NAME)"; \
+	else \
+		"$(CODEX)" mcp add "$(MCP_NAME)" -- "$(MCP_QT_BIN)" --api-url "$(MCP_API_URL)" --log-root "$(MCP_LOG_ROOT)" --no-audit-log mcp serve --command-timeout "$(MCP_COMMAND_TIMEOUT)"; \
+		echo "✓ Codex MCP alias registered: $(MCP_NAME)"; \
+	fi
+
+## ============================ DEV / INFRA =============================== ##
 .PHONY: status logs-backend logs-bots backend-shell bot-shell dbshell db-query db-file \
-	bot-active bot-start bot-stop run-status run-wait golden-compare \
-	report-export report-readiness report-dataset report-summary report-diagnostics report-manifest \
-	run-ordering run-throughput run-event-summary run-seq-gaps run-write-latency observability-storage-budget \
-	botlens-check wallet-diagnostics report-wallet-diagnostics \
+	forensic-run-ordering forensic-run-throughput forensic-run-event-summary forensic-run-storage-budget \
+	forensic-run-seq-gaps forensic-run-write-latency forensic-observability-storage-budget \
+	forensic-botlens-check forensic-wallet-diagnostics forensic-golden-compare \
 	test-reporting test-reporting-api test-botlens test-runtime validate-docs frontend-test frontend-build frontend-check \
 	git-status git-diff git-check check commit
 
@@ -306,124 +344,59 @@ db-file: ## Run a SQL file against TimescaleDB (file=scripts/db/example.sql)
 	test -f "$(file)" || { echo "✗ SQL file not found: $(file)"; exit 1; }; \
 	$(COMPOSE_CMD) --profile database exec -T $(DB_SERVICE) bash -lc 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < "$(file)"
 
-bot-active: venv ## Print active run state for a bot (bot=<bot_id>)
-	@set -euo pipefail; \
-	if [ -z "$(strip $(bot))" ]; then echo "✗ bot=<bot_id> is required"; exit 1; fi; \
-	$(PYTEST_ENV) $(PYTHON) scripts/reporting/bot_runtime_control.py --api-url "$(BACKEND_API_URL)" active --bot-id "$(bot)"
-
-bot-start: venv ## Start a bot and print the accepted run id (bot=<bot_id> request=<optional>)
-	@set -euo pipefail; \
-	if [ -z "$(strip $(bot))" ]; then echo "✗ bot=<bot_id> is required"; exit 1; fi; \
-	$(PYTEST_ENV) $(PYTHON) scripts/reporting/bot_runtime_control.py --api-url "$(BACKEND_API_URL)" start --bot-id "$(bot)" $(if $(strip $(request)),--request-id "$(request)",)
-
-bot-stop: venv ## Stop a bot run through the backend API (bot=<bot_id> run=<optional> preserve=1)
-	@set -euo pipefail; \
-	if [ -z "$(strip $(bot))" ]; then echo "✗ bot=<bot_id> is required"; exit 1; fi; \
-	$(PYTEST_ENV) $(PYTHON) scripts/reporting/bot_runtime_control.py --api-url "$(BACKEND_API_URL)" stop --bot-id "$(bot)" $(if $(strip $(run)),--run-id "$(run)",) $(if $(strip $(request)),--request-id "$(request)",) $(if $(filter 1 true yes on,$(preserve)),--preserve-container,)
-
-run-status: venv ## Print persisted run status (run=<run_id>)
-	@set -euo pipefail; \
-	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
-	$(LOCAL_PG_ENV); \
-	$(PYTHON) scripts/reporting/bot_runtime_control.py status --run-id "$(run)"
-
-run-wait: venv ## Wait for a run to reach terminal DB status (run=<run_id> timeout=3600 interval=30)
-	@set -euo pipefail; \
-	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
-	$(LOCAL_PG_ENV); \
-	$(PYTHON) scripts/reporting/bot_runtime_control.py --timeout "$(if $(strip $(timeout)),$(timeout),$(RUN_WAIT_TIMEOUT))" wait --run-id "$(run)" --interval "$(if $(strip $(interval)),$(interval),$(RUN_WAIT_INTERVAL))" $(if $(filter 1 true yes on,$(print_each)),--print-each,) $(if $(filter 1 true yes on,$(allow_non_completed)),--allow-non-completed,)
-
-report-export: venv _ensure_dirs ## Export a run report bundle (run=<run_id> out=logs/reports include_candles=0)
-	@set -euo pipefail; \
-	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
-	$(LOCAL_PG_ENV); \
-	$(PYTHON) scripts/reporting/inspect_report.py export --run-id "$(run)" --out-dir "$(if $(strip $(out)),$(out),$(REPORT_EXPORT_DIR))" $(if $(filter 1 true yes on,$(include_candles)),--include-candles,)
-
-report-readiness: venv ## Inspect report readiness for a run (run=<run_id>)
-	@set -euo pipefail; \
-	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
-	$(LOCAL_PG_ENV); \
-	$(PYTHON) scripts/reporting/inspect_report.py readiness --run-id "$(run)"
-
-report-dataset: venv ## Print the canonical report dataset for a run (run=<run_id>)
-	@set -euo pipefail; \
-	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
-	$(LOCAL_PG_ENV); \
-	$(PYTHON) scripts/reporting/inspect_report.py dataset --run-id "$(run)"
-
-report-summary: venv ## Print the compact report summary for a run (run=<run_id>)
-	@set -euo pipefail; \
-	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
-	$(LOCAL_PG_ENV); \
-	$(PYTHON) scripts/reporting/inspect_report.py summary --run-id "$(run)"
-
-report-diagnostics: venv ## Print report diagnostics for a run (run=<run_id>)
-	@set -euo pipefail; \
-	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
-	$(LOCAL_PG_ENV); \
-	$(PYTHON) scripts/reporting/inspect_report.py diagnostics --run-id "$(run)"
-
-report-manifest: venv ## Print the report export manifest for a run (run=<run_id> include_candles=0)
-	@set -euo pipefail; \
-	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
-	$(LOCAL_PG_ENV); \
-	$(PYTHON) scripts/reporting/inspect_report.py manifest --run-id "$(run)" $(if $(filter 1 true yes on,$(include_candles)),--include-candles,)
-
-run-ordering: venv ## Check runtime event ordering health for a run (run=<run_id>)
+forensic-run-ordering: venv ## Forensic: check runtime event ordering health (run=<run_id>)
 	@set -euo pipefail; \
 	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
 	$(LOCAL_PG_ENV); \
 	$(PYTHON) scripts/reporting/check_run_ordering.py --run-id "$(run)"
 
-run-throughput: venv ## Summarize runtime event throughput by minute (run=<run_id>)
+forensic-run-throughput: venv ## Forensic: summarize runtime event throughput by minute (run=<run_id>)
 	@set -euo pipefail; \
 	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
 	$(LOCAL_PG_ENV); \
 	$(PYTHON) scripts/reporting/runtime_event_diagnostics.py throughput --run-id "$(run)"
 
-run-event-summary: venv ## Summarize runtime event counts by event type/name (run=<run_id>)
+forensic-run-event-summary: venv ## Forensic: summarize runtime event counts by type/name (run=<run_id>)
 	@set -euo pipefail; \
 	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
 	$(LOCAL_PG_ENV); \
 	$(PYTHON) scripts/reporting/runtime_event_diagnostics.py event-summary --run-id "$(run)"
 
-run-storage-budget: venv ## Estimate runtime event storage budget by tier (run=<optional_run_id>)
+forensic-run-storage-budget: venv ## Forensic: estimate runtime event storage budget by tier (run=<optional_run_id>)
 	@set -euo pipefail; \
 	$(LOCAL_PG_ENV); \
 	$(PYTHON) scripts/reporting/runtime_event_diagnostics.py storage-budget $(if $(strip $(run)),--run-id "$(run)",)
 
-run-seq-gaps: venv ## Check runtime run_seq gaps and duplicates (run=<run_id>)
+forensic-run-seq-gaps: venv ## Forensic: check runtime run_seq gaps and duplicates (run=<run_id>)
 	@set -euo pipefail; \
 	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
 	$(LOCAL_PG_ENV); \
 	$(PYTHON) scripts/reporting/runtime_event_diagnostics.py seq-gaps --run-id "$(run)" $(if $(strip $(limit)),--limit "$(limit)",)
 
-run-write-latency: venv ## Summarize runtime event DB write latency metrics (run=<run_id>)
+forensic-run-write-latency: venv ## Forensic: summarize runtime event DB write latency metrics (run=<run_id>)
 	@set -euo pipefail; \
 	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
 	$(LOCAL_PG_ENV); \
 	$(PYTHON) scripts/reporting/runtime_event_diagnostics.py write-latency --run-id "$(run)"
 
-observability-storage-budget: venv ## Summarize durable observability rollup storage budget (run=<optional_run_id>)
+forensic-observability-storage-budget: venv ## Forensic: summarize durable observability rollup storage budget (run=<optional_run_id>)
 	@set -euo pipefail; \
 	$(LOCAL_PG_ENV); \
 	$(PYTHON) scripts/reporting/runtime_event_diagnostics.py observability-storage-budget $(if $(strip $(run)),--run-id "$(run)",) $(if $(strip $(limit)),--limit "$(limit)",)
 
-botlens-check: venv ## Replay BotLens projection state from the ledger (run=<run_id> symbol=<optional>)
+forensic-botlens-check: venv ## Forensic: replay BotLens projection state from ledger (run=<run_id> symbol=<optional>)
 	@set -euo pipefail; \
 	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
 	$(LOCAL_PG_ENV); \
 	$(PYTHON) scripts/reporting/check_botlens_projection.py --run-id "$(run)" $(if $(strip $(symbol)),--symbol-key "$(symbol)",) $(if $(strip $(max_seq)),--max-seq "$(max_seq)",)
 
-wallet-diagnostics: venv ## Check wallet trace/replay diagnostics for a run (run=<run_id> compare=<optional>)
+forensic-wallet-diagnostics: venv ## Forensic: check wallet trace/replay diagnostics (run=<run_id> compare=<optional>)
 	@set -euo pipefail; \
 	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
 	$(LOCAL_PG_ENV); \
 	$(PYTHON) scripts/reporting/check_wallet_determinism.py --run-id "$(run)" $(if $(strip $(compare)),--compare-run-id "$(compare)",)
 
-report-wallet-diagnostics: wallet-diagnostics ## Alias for wallet-diagnostics
-
-golden-compare: venv _ensure_dirs ## Compare two completed runs as a golden candidate (left=<run_id> right=<run_id>)
+forensic-golden-compare: venv _ensure_dirs ## Forensic: compare two completed runs as a golden candidate (left=<run_id> right=<run_id>)
 	@set -euo pipefail; \
 	if [ -z "$(strip $(left))" ] || [ -z "$(strip $(right))" ]; then echo "✗ left=<run_id> and right=<run_id> are required"; exit 1; fi; \
 	$(LOCAL_PG_ENV); \

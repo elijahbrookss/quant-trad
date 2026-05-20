@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 
 [project.scripts]
 qt = "cli.main:main"
+qt-mcp = "cli.mcp_server:main"
 
 [tool.setuptools]
 packages = ["cli", "cli.experiments"]

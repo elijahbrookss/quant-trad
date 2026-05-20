@@ -239,6 +239,183 @@ def test_bots_create_and_update_use_backend_bot_routes(tmp_path, monkeypatch):
     )
 
 
+def test_providers_stream_smoke_uses_backend_route(tmp_path, monkeypatch):
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        observed["method"] = request.get_method()
+        observed["path"] = urllib.parse.urlparse(request.full_url).path
+        observed["timeout"] = timeout
+        observed["body"] = json.loads(request.data.decode("utf-8"))
+        return _Response(
+            json.dumps(
+                {
+                    "schema_version": "provider_stream_smoke.v1",
+                    "status": "completed",
+                    "counts": {"market_ticker": 1},
+                }
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    exit_code = main(
+        [
+            "--log-root",
+            str(tmp_path),
+            "providers",
+            "stream-smoke",
+            "--symbol",
+            "BIP-20DEC30-CDE",
+            "--duration",
+            "1",
+            "--channel",
+            "ticker",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed == {
+        "method": "POST",
+        "path": "/api/providers/stream-smoke",
+        "timeout": 30.0,
+        "body": {
+            "provider_id": "COINBASE",
+            "venue_id": "COINBASE_DIRECT",
+            "symbol": "BIP-20DEC30-CDE",
+            "product_id": None,
+            "channels": ["ticker"],
+            "timeframe": None,
+            "auth_mode": "public",
+            "duration_seconds": 1.0,
+            "sample_limit": 10,
+        },
+    }
+
+
+def test_provider_credentials_add_reads_stdin_json_and_redacts_audit(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        path = urllib.parse.urlparse(request.full_url).path
+        method = request.get_method()
+        body = json.loads(request.data.decode("utf-8")) if request.data else None
+        calls.append((method, path, body))
+        if method == "GET" and path == "/api/providers/credentials/schema":
+            return _Response(
+                json.dumps(
+                    {
+                        "provider_id": "COINBASE",
+                        "venue_id": "COINBASE_DIRECT",
+                        "environment": "paper",
+                        "default_credential_ref": "coinbase-coinbase-direct-paper",
+                        "required": ["COINBASE_API_KEY", "COINBASE_API_SECRET"],
+                        "optional": [],
+                        "accepted": ["COINBASE_API_KEY", "COINBASE_API_SECRET"],
+                        "secrets_are_returned": False,
+                    }
+                ).encode("utf-8")
+            )
+        return _Response(
+            json.dumps(
+                {
+                    "credential": {
+                        "credential_ref": "coinbase-coinbase-direct-paper",
+                        "provider_id": "COINBASE",
+                        "venue_id": "COINBASE_DIRECT",
+                        "status": "active",
+                    },
+                    "secrets_are_returned": False,
+                }
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    secret_json = '{"COINBASE_API_KEY":"key-123","COINBASE_API_SECRET":"secret-456"}'
+    exit_code = main(
+        [
+            "--log-root",
+            str(tmp_path),
+            "providers",
+            "credentials",
+            "add",
+            "--provider",
+            "COINBASE",
+            "--venue",
+            "COINBASE_DIRECT",
+            "--secrets-json",
+            secret_json,
+            "--no-input",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls[1] == (
+        "POST",
+        "/api/providers/credentials",
+        {
+            "provider_id": "COINBASE",
+            "venue_id": "COINBASE_DIRECT",
+            "credential_ref": "coinbase-coinbase-direct-paper",
+            "environment": "paper",
+            "display_name": None,
+            "credentials": {
+                "COINBASE_API_KEY": "key-123",
+                "COINBASE_API_SECRET": "secret-456",
+            },
+        },
+    )
+    audit_payload = next((tmp_path / "cli").glob("**/*.json")).read_text(encoding="utf-8")
+    assert "key-123" not in audit_payload
+    assert "secret-456" not in audit_payload
+    assert "***REDACTED***" in audit_payload
+
+
+def test_bots_start_supports_observe_only_paper_overrides(tmp_path, monkeypatch):
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        observed["method"] = request.get_method()
+        observed["path"] = urllib.parse.urlparse(request.full_url).path
+        observed["body"] = json.loads(request.data.decode("utf-8"))
+        return _Response(b'{"status":"started","run_id":"run-1"}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    exit_code = main(
+        [
+            "--log-root",
+            str(tmp_path),
+            "bots",
+            "start",
+            "bot-1",
+            "--request-id",
+            "req-1",
+            "--run-type",
+            "paper",
+            "--execution",
+            "observe-only",
+            "--duration-seconds",
+            "30",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed == {
+        "method": "POST",
+        "path": "/api/bots/bot-1/runs/start",
+        "body": {
+            "request_id": "req-1",
+            "run_type": "paper",
+            "execution_behavior": "observe-only",
+            "duration_seconds": 30.0,
+        },
+    }
+
+
 def test_experiments_start_bot_writes_resumable_record(tmp_path, monkeypatch):
     def fake_urlopen(request, timeout):
         _ = timeout

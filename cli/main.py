@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import sys
@@ -373,6 +374,19 @@ def _cmd_health(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_mcp_serve(args: argparse.Namespace) -> int:
+    from cli.mcp_server import QuantTradMcpServer, serve_stdio
+
+    return serve_stdio(
+        QuantTradMcpServer(
+            api_url=args.api_url,
+            timeout=float(args.timeout),
+            log_root=str(args.log_root),
+            command_timeout_seconds=float(args.command_timeout),
+        )
+    )
+
+
 def _cmd_bots_list(args: argparse.Namespace) -> int:
     _print_json(_client(args).request_json("GET", "/api/bots/run-contexts"))
     return 0
@@ -405,6 +419,7 @@ def _bot_write_payload(args: argparse.Namespace, *, require_name: bool = False) 
         "exchange": "exchange",
         "mode": "mode",
         "execution_mode": "execution_mode",
+        "execution_behavior": "execution_behavior",
         "run_type": "run_type",
         "backtest_start": "backtest_start",
         "backtest_end": "backtest_end",
@@ -417,6 +432,11 @@ def _bot_write_payload(args: argparse.Namespace, *, require_name: bool = False) 
             payload[payload_name] = value
     if getattr(args, "wallet_json", None):
         payload["wallet_config"] = _read_json_object_arg(args.wallet_json, label="--wallet-json")
+    if getattr(args, "market_data_stream_policy_json", None):
+        payload["market_data_stream_policy"] = _read_json_object_arg(
+            args.market_data_stream_policy_json,
+            label="--market-data-stream-policy-json",
+        )
     if getattr(args, "risk_config_json", None):
         payload["risk_config"] = _read_json_object_arg(args.risk_config_json, label="--risk-config-json")
     if getattr(args, "bot_env_json", None):
@@ -442,6 +462,17 @@ def _cmd_bots_update(args: argparse.Namespace) -> int:
 
 def _cmd_bots_start(args: argparse.Namespace) -> int:
     body = {"request_id": args.request_id} if args.request_id else {}
+    if getattr(args, "run_type", None):
+        body["run_type"] = args.run_type
+    if getattr(args, "execution_behavior", None):
+        body["execution_behavior"] = args.execution_behavior
+    if getattr(args, "duration_seconds", None):
+        body["duration_seconds"] = args.duration_seconds
+    if getattr(args, "market_data_stream_policy_json", None):
+        body["market_data_stream_policy"] = _read_json_object_arg(
+            args.market_data_stream_policy_json,
+            label="--market-data-stream-policy-json",
+        )
     _print_json(_client(args).request_json("POST", f"/api/bots/{args.bot_id}/runs/start", payload=body))
     return 0
 
@@ -640,6 +671,166 @@ def _cmd_reports_compare(args: argparse.Namespace) -> int:
                 "include_golden": not args.no_golden,
                 "require_golden": args.require_golden,
             },
+        )
+    )
+    return 0
+
+
+def _cmd_providers_stream_smoke(args: argparse.Namespace) -> int:
+    audit = getattr(args, "_audit_log", None)
+
+    def _observe(event: str, fields: dict[str, Any]) -> None:
+        if audit is not None:
+            audit.record_event(event, **fields)
+
+    payload = {
+        "provider_id": args.provider,
+        "venue_id": args.venue,
+        "symbol": args.symbol,
+        "product_id": args.product_id,
+        "channels": args.channel or None,
+        "timeframe": args.timeframe,
+        "auth_mode": args.auth_mode,
+        "duration_seconds": args.duration,
+        "sample_limit": args.sample_limit,
+    }
+    client = ApiClient(
+        args.api_url,
+        timeout=max(float(args.timeout), float(args.duration) + 10.0),
+        observer=_observe,
+    )
+    result = client.request_json("POST", "/api/providers/stream-smoke", payload=payload)
+    _print_json(result)
+    return 0 if str(result.get("status") or "").lower() == "completed" else 1
+
+
+def _cmd_providers_list(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", "/api/providers/"))
+    return 0
+
+
+def _cmd_provider_credentials_schema(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/providers/credentials/schema",
+            params={
+                "provider_id": args.provider,
+                "venue_id": args.venue,
+                "environment": args.environment,
+            },
+        )
+    )
+    return 0
+
+
+def _secret_env_map(items: list[str] | None) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for item in items or []:
+        if "=" not in item:
+            raise ValueError(f"expected KEY=ENV_VAR for --secret-env, got {item!r}")
+        key, env_name = item.split("=", 1)
+        key = key.strip()
+        env_name = env_name.strip()
+        if not key or not env_name:
+            raise ValueError(f"expected non-empty KEY=ENV_VAR for --secret-env, got {item!r}")
+        value = os.environ.get(env_name)
+        if value is not None and value != "":
+            mapping[key] = value
+    return mapping
+
+
+def _collect_credential_values(args: argparse.Namespace, schema: dict[str, Any]) -> dict[str, str]:
+    required = [str(key) for key in schema.get("required") or []]
+    accepted = [str(key) for key in schema.get("accepted") or []]
+    accepted_set = set(accepted)
+    credentials: dict[str, str] = {}
+    credentials.update({str(k): str(v) for k, v in _read_json_object_arg(args.secrets_json, label="secrets_json").items()})
+
+    if args.from_env:
+        for key in accepted:
+            value = os.environ.get(key)
+            if value is not None and value != "":
+                credentials.setdefault(key, value)
+    credentials.update(_secret_env_map(args.secret_env))
+
+    unknown = sorted(key for key in credentials if key not in accepted_set)
+    if unknown:
+        raise ValueError(f"Credential keys are not accepted for this provider/venue: {', '.join(unknown)}")
+
+    if not args.no_input and sys.stdin.isatty():
+        for key in required:
+            if not credentials.get(key):
+                credentials[key] = getpass.getpass(f"{key}: ")
+
+    missing = [key for key in required if not credentials.get(key)]
+    if missing:
+        raise ValueError(
+            "Missing required secrets: "
+            + ", ".join(missing)
+            + ". Pass --secrets-json -, --from-env, --secret-env KEY=ENV_VAR, or run interactively."
+        )
+    if not any(credentials.get(key) for key in accepted):
+        raise ValueError("No credential values provided.")
+    return {key: str(value) for key, value in credentials.items() if str(value)}
+
+
+def _cmd_provider_credentials_add(args: argparse.Namespace) -> int:
+    client = _client(args)
+    schema = client.request_json(
+        "GET",
+        "/api/providers/credentials/schema",
+        params={
+            "provider_id": args.provider,
+            "venue_id": args.venue,
+            "environment": args.environment,
+        },
+    )
+    if not isinstance(schema, dict):
+        raise ApiError("GET credential schema returned an unexpected payload")
+    credentials = _collect_credential_values(args, schema)
+    payload = {
+        "provider_id": schema.get("provider_id"),
+        "venue_id": schema.get("venue_id"),
+        "credential_ref": args.ref or schema.get("default_credential_ref"),
+        "environment": schema.get("environment") or args.environment,
+        "display_name": args.display_name,
+        "credentials": credentials,
+    }
+    _print_json(client.request_json("POST", "/api/providers/credentials", payload=payload))
+    return 0
+
+
+def _cmd_provider_credentials_list(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/providers/credentials",
+            params={
+                "provider_id": args.provider,
+                "venue_id": args.venue,
+                "include_revoked": args.include_revoked,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_provider_credentials_validate(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/providers/credentials/{args.credential_ref}/validate",
+        )
+    )
+    return 0
+
+
+def _cmd_provider_credentials_revoke(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "DELETE",
+            f"/api/providers/credentials/{args.credential_ref}",
         )
     )
     return 0
@@ -922,12 +1113,17 @@ def build_parser() -> argparse.ArgumentParser:
     bots_create.add_argument("--exchange")
     bots_create.add_argument("--mode")
     bots_create.add_argument("--execution-mode")
+    bots_create.add_argument("--execution-behavior", choices=["simulated", "observe-only"])
     bots_create.add_argument("--run-type")
     bots_create.add_argument("--backtest-start")
     bots_create.add_argument("--backtest-end")
     bots_create.add_argument("--snapshot-interval-ms", type=int)
     bots_create.add_argument("--instrument-type")
     bots_create.add_argument("--wallet-json", help="wallet_config JSON object path, inline object, or '-'.")
+    bots_create.add_argument(
+        "--market-data-stream-policy-json",
+        help="market_data_stream_policy JSON object path, inline object, or '-'.",
+    )
     bots_create.add_argument("--risk-config-json", help="risk_config JSON object path, inline object, or '-'.")
     bots_create.add_argument("--bot-env-json", help="bot_env JSON object path, inline object, or '-'.")
     bots_create.set_defaults(func=_cmd_bots_create)
@@ -946,12 +1142,17 @@ def build_parser() -> argparse.ArgumentParser:
     bots_update.add_argument("--exchange")
     bots_update.add_argument("--mode")
     bots_update.add_argument("--execution-mode")
+    bots_update.add_argument("--execution-behavior", choices=["simulated", "observe-only"])
     bots_update.add_argument("--run-type")
     bots_update.add_argument("--backtest-start")
     bots_update.add_argument("--backtest-end")
     bots_update.add_argument("--snapshot-interval-ms", type=int)
     bots_update.add_argument("--instrument-type")
     bots_update.add_argument("--wallet-json", help="wallet_config JSON object path, inline object, or '-'.")
+    bots_update.add_argument(
+        "--market-data-stream-policy-json",
+        help="market_data_stream_policy JSON object path, inline object, or '-'.",
+    )
     bots_update.add_argument("--risk-config-json", help="risk_config JSON object path, inline object, or '-'.")
     bots_update.add_argument("--bot-env-json", help="bot_env JSON object path, inline object, or '-'.")
     bots_update.set_defaults(func=_cmd_bots_update)
@@ -965,6 +1166,13 @@ def build_parser() -> argparse.ArgumentParser:
     bots_start = bots_sub.add_parser("start", help="Start a bot run through the backend API.")
     bots_start.add_argument("bot_id")
     bots_start.add_argument("--request-id")
+    bots_start.add_argument("--run-type", choices=["backtest", "sim_trade", "paper", "live"])
+    bots_start.add_argument("--execution-behavior", "--execution", choices=["simulated", "observe-only"], dest="execution_behavior")
+    bots_start.add_argument("--duration-seconds", type=float, help="Optional bounded duration for observe-only paper runs.")
+    bots_start.add_argument(
+        "--market-data-stream-policy-json",
+        help="market_data_stream_policy JSON object path, inline object, or '-'.",
+    )
     bots_start.set_defaults(func=_cmd_bots_start)
     bots_stop = bots_sub.add_parser("stop", help="Stop a bot run through the backend API.")
     bots_stop.add_argument("bot_id")
@@ -1105,6 +1313,59 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--require-golden", action="store_true")
     compare.set_defaults(func=_cmd_reports_compare)
 
+    providers = subparsers.add_parser("providers", help="Provider metadata and stream checks.")
+    providers_sub = providers.add_subparsers(dest="providers_command", required=True)
+    providers_list = providers_sub.add_parser("list", help="List providers and safe credential metadata.")
+    providers_list.set_defaults(func=_cmd_providers_list)
+    stream_smoke = providers_sub.add_parser("stream-smoke", help="Run a bounded read-only provider stream smoke check.")
+    stream_smoke.add_argument("--provider", default="COINBASE")
+    stream_smoke.add_argument("--venue", default="COINBASE_DIRECT")
+    stream_smoke.add_argument("--symbol", required=True)
+    stream_smoke.add_argument("--product-id", help="Provider product id. Defaults to --symbol.")
+    stream_smoke.add_argument("--channel", action="append", default=[], help="Provider channel. Repeat for multiple channels.")
+    stream_smoke.add_argument("--timeframe")
+    stream_smoke.add_argument("--auth-mode", default="public")
+    stream_smoke.add_argument("--duration", type=float, default=10.0, help="Smoke duration in seconds.")
+    stream_smoke.add_argument("--sample-limit", type=int, default=10)
+    stream_smoke.set_defaults(func=_cmd_providers_stream_smoke)
+    credentials = providers_sub.add_parser("credentials", help="Manage encrypted provider credential references.")
+    credentials_sub = credentials.add_subparsers(dest="credentials_command", required=True)
+    credentials_schema = credentials_sub.add_parser("schema", help="Show accepted credential fields for a provider/venue.")
+    credentials_schema.add_argument("--provider", required=True)
+    credentials_schema.add_argument("--venue")
+    credentials_schema.add_argument("--environment", default="paper")
+    credentials_schema.set_defaults(func=_cmd_provider_credentials_schema)
+    credentials_add = credentials_sub.add_parser("add", help="Add or rotate a provider credential reference.")
+    credentials_add.add_argument("--provider", required=True)
+    credentials_add.add_argument("--venue")
+    credentials_add.add_argument("--environment", default="paper")
+    credentials_add.add_argument("--ref", help="Credential reference. Defaults to provider-venue-environment.")
+    credentials_add.add_argument("--display-name")
+    credentials_add.add_argument(
+        "--secrets-json",
+        help="Secret JSON object as a path, inline object, or '-' for stdin. Prefer '-' so secrets do not enter shell history.",
+    )
+    credentials_add.add_argument(
+        "--secret-env",
+        action="append",
+        default=[],
+        help="Map a credential key to an environment variable, e.g. COINBASE_API_KEY=QT_COINBASE_KEY.",
+    )
+    credentials_add.add_argument("--from-env", action="store_true", help="Read accepted credential keys from matching environment variables.")
+    credentials_add.add_argument("--no-input", action="store_true", help="Fail instead of prompting for missing required secrets.")
+    credentials_add.set_defaults(func=_cmd_provider_credentials_add)
+    credentials_list = credentials_sub.add_parser("list", help="List credential reference metadata. Secret values are never printed.")
+    credentials_list.add_argument("--provider")
+    credentials_list.add_argument("--venue")
+    credentials_list.add_argument("--include-revoked", action="store_true")
+    credentials_list.set_defaults(func=_cmd_provider_credentials_list)
+    credentials_validate = credentials_sub.add_parser("validate", help="Validate that a credential reference decrypts and has required keys.")
+    credentials_validate.add_argument("credential_ref")
+    credentials_validate.set_defaults(func=_cmd_provider_credentials_validate)
+    credentials_revoke = credentials_sub.add_parser("revoke", help="Revoke a credential reference.")
+    credentials_revoke.add_argument("credential_ref")
+    credentials_revoke.set_defaults(func=_cmd_provider_credentials_revoke)
+
     experiments = subparsers.add_parser("experiments", help="Small API-composed research workflows.")
     experiments_sub = experiments.add_subparsers(dest="experiments_command", required=True)
     validate_plan = experiments_sub.add_parser("validate-plan", help="Validate and preview a sequential experiment plan.")
@@ -1190,6 +1451,17 @@ def build_parser() -> argparse.ArgumentParser:
     run_bot.add_argument("--no-golden", action="store_true")
     run_bot.add_argument("--require-golden", action="store_true")
     run_bot.set_defaults(func=_cmd_experiments_run_bot)
+
+    mcp = subparsers.add_parser("mcp", help="MCP server entrypoint for agent/tool hosts.")
+    mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
+    mcp_serve = mcp_sub.add_parser("serve", help="Run the Quant-Trad MCP stdio server.")
+    mcp_serve.add_argument(
+        "--command-timeout",
+        type=float,
+        default=float(os.environ.get("QT_MCP_COMMAND_TIMEOUT_SECONDS", "7200")),
+        help="Timeout for long-running qt command tools.",
+    )
+    mcp_serve.set_defaults(func=_cmd_mcp_serve)
 
     return parser
 
