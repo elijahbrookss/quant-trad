@@ -63,9 +63,9 @@ const navItems = [
   },
   {
     id: 'system-deck',
-    label: 'System Deck',
-    description: 'Animated architecture map for the whole platform.',
-    kicker: 'System Lens',
+    label: 'Atlas',
+    description: 'Living 3D memory world for completed Quant-Trad activity.',
+    kicker: 'Atlas Lens',
     to: '/system-deck',
     icon: Network,
   },
@@ -246,6 +246,7 @@ function AppShell({ chartId }) {
   const { setAccentColor } = useAccentColor()
   const location = useLocation()
   const isQuantLabRoute = location.pathname.startsWith('/quantlab')
+  const isAtlasRoute = location.pathname.startsWith('/system-deck')
   const landingPage = settings?.landingPage || '/quantlab'
   const densityClass = settings?.uiDensity === 'comfortable' ? 'app-density-comfortable' : 'app-density-compact'
   const motionClass = settings?.motion === 'reduced' ? 'app-motion-reduced' : 'app-motion-full'
@@ -393,7 +394,7 @@ function AppShell({ chartId }) {
           </header>
 
           <main className="app-shell-main flex-1">
-            <div className={`app-section-stack flex w-full flex-col ${isQuantLabRoute ? 'max-w-none' : 'mx-auto max-w-[1600px]'}`}>
+            <div className={`app-section-stack flex w-full flex-col ${isQuantLabRoute || isAtlasRoute ? 'max-w-none' : 'mx-auto max-w-[1600px]'}`}>
               <Routes>
                 <Route path="/" element={<Navigate to={landingPage} replace />} />
                 <Route
@@ -502,7 +503,7 @@ function AppShell({ chartId }) {
                 <Route
                   path="/system-deck"
                   element={
-                    <Suspense fallback={<RouteSectionFallback title="system deck" />}>
+                    <Suspense fallback={<RouteSectionFallback title="Atlas" />}>
                       <SystemDeck />
                     </Suspense>
                   }
