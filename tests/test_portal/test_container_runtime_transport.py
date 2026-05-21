@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -377,26 +378,24 @@ def test_supervise_startup_and_runtime_shuts_down_manager_after_final_lifecycle_
     assert call_order == ["finalize", "persist", "shutdown"]
 
 
-class _FakeSyncWebSocket:
-    def __init__(self, *, fail_first_send: bool = False) -> None:
+class _FakeAsyncWebSocket:
+    def __init__(self, *, fail_first_send: bool = False, send_gate: threading.Event | None = None) -> None:
         self.sent: list[str] = []
         self.close_calls = 0
         self._fail_first_send = fail_first_send
+        self._send_gate = send_gate
 
-    def send(self, message: str) -> None:
+    async def send(self, message: str) -> None:
+        if self._send_gate is not None:
+            while not self._send_gate.is_set():
+                await asyncio.sleep(0.01)
         if self._fail_first_send:
             self._fail_first_send = False
             raise RuntimeError("simulated transport failure")
         self.sent.append(str(message))
 
-    def close(self) -> None:
+    async def close(self) -> None:
         self.close_calls += 1
-
-    def __enter__(self) -> "_FakeSyncWebSocket":
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self.close()
 
 
 class _ProxySeqCounter:
@@ -526,16 +525,16 @@ def _large_runtime_facts_payload(
 
 
 def test_telemetry_emitter_reuses_single_websocket_for_multiple_messages(monkeypatch: pytest.MonkeyPatch) -> None:
-    connections: list[_FakeSyncWebSocket] = []
+    connections: list[_FakeAsyncWebSocket] = []
 
-    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeSyncWebSocket:
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
         assert open_timeout == 2
         assert close_timeout == 1
-        ws = _FakeSyncWebSocket()
+        ws = _FakeAsyncWebSocket()
         connections.append(ws)
         return ws
 
-    monkeypatch.setattr(telemetry_mod, "sync_connect", _connect)
+    monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
 
     emitter = telemetry_mod.TelemetryEmitter(
         "ws://example.test/telemetry",
@@ -557,17 +556,17 @@ def test_telemetry_emitter_reuses_single_websocket_for_multiple_messages(monkeyp
     assert connections[0].close_calls == 1
 
 
-def test_ephemeral_telemetry_uses_sync_transport_inside_running_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    connections: list[_FakeSyncWebSocket] = []
+def test_ephemeral_telemetry_uses_async_transport_inside_running_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    connections: list[_FakeAsyncWebSocket] = []
 
-    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeSyncWebSocket:
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
         assert open_timeout == 2
         assert close_timeout == 1
-        ws = _FakeSyncWebSocket()
+        ws = _FakeAsyncWebSocket()
         connections.append(ws)
         return ws
 
-    monkeypatch.setattr(telemetry_mod, "sync_connect", _connect)
+    monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
 
     async def _send_inside_loop() -> bool:
         return telemetry_mod.emit_telemetry_ephemeral_message(
@@ -584,16 +583,16 @@ def test_ephemeral_telemetry_uses_sync_transport_inside_running_loop(monkeypatch
 def test_telemetry_emitter_reconnects_after_send_failure_without_dropping_queued_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    connections: list[_FakeSyncWebSocket] = []
+    connections: list[_FakeAsyncWebSocket] = []
 
-    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeSyncWebSocket:
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
         assert open_timeout == 2
         assert close_timeout == 1
-        ws = _FakeSyncWebSocket(fail_first_send=len(connections) == 0)
+        ws = _FakeAsyncWebSocket(fail_first_send=len(connections) == 0)
         connections.append(ws)
         return ws
 
-    monkeypatch.setattr(telemetry_mod, "sync_connect", _connect)
+    monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
 
     emitter = telemetry_mod.TelemetryEmitter(
         "ws://example.test/telemetry",
@@ -616,16 +615,16 @@ def test_telemetry_emitter_reconnects_after_send_failure_without_dropping_queued
 def test_telemetry_emitter_suppresses_identical_bootstrap_payloads_in_same_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    connections: list[_FakeSyncWebSocket] = []
+    connections: list[_FakeAsyncWebSocket] = []
 
-    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeSyncWebSocket:
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
         assert open_timeout == 2
         assert close_timeout == 1
-        ws = _FakeSyncWebSocket()
+        ws = _FakeAsyncWebSocket()
         connections.append(ws)
         return ws
 
-    monkeypatch.setattr(telemetry_mod, "sync_connect", _connect)
+    monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
 
     emitter = telemetry_mod.TelemetryEmitter(
         "ws://example.test/telemetry",
@@ -657,16 +656,16 @@ def test_telemetry_emitter_suppresses_identical_bootstrap_payloads_in_same_sessi
 def test_telemetry_emitter_allows_identical_bootstrap_payloads_for_new_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    connections: list[_FakeSyncWebSocket] = []
+    connections: list[_FakeAsyncWebSocket] = []
 
-    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeSyncWebSocket:
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
         assert open_timeout == 2
         assert close_timeout == 1
-        ws = _FakeSyncWebSocket()
+        ws = _FakeAsyncWebSocket()
         connections.append(ws)
         return ws
 
-    monkeypatch.setattr(telemetry_mod, "sync_connect", _connect)
+    monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
 
     emitter = telemetry_mod.TelemetryEmitter(
         "ws://example.test/telemetry",
@@ -700,14 +699,14 @@ def test_telemetry_emitter_allows_identical_bootstrap_payloads_for_new_session(
 def test_telemetry_emitter_suppresses_identical_large_facts_in_same_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    connections: list[_FakeSyncWebSocket] = []
+    connections: list[_FakeAsyncWebSocket] = []
 
-    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeSyncWebSocket:
-        ws = _FakeSyncWebSocket()
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
+        ws = _FakeAsyncWebSocket()
         connections.append(ws)
         return ws
 
-    monkeypatch.setattr(telemetry_mod, "sync_connect", _connect)
+    monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
 
     emitter = telemetry_mod.TelemetryEmitter(
         "ws://example.test/telemetry",
@@ -730,14 +729,14 @@ def test_telemetry_emitter_suppresses_identical_large_facts_in_same_session(
 def test_telemetry_emitter_allows_large_facts_when_forward_progress_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    connections: list[_FakeSyncWebSocket] = []
+    connections: list[_FakeAsyncWebSocket] = []
 
-    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeSyncWebSocket:
-        ws = _FakeSyncWebSocket()
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
+        ws = _FakeAsyncWebSocket()
         connections.append(ws)
         return ws
 
-    monkeypatch.setattr(telemetry_mod, "sync_connect", _connect)
+    monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
 
     emitter = telemetry_mod.TelemetryEmitter(
         "ws://example.test/telemetry",
@@ -763,14 +762,14 @@ def test_telemetry_emitter_allows_large_facts_when_forward_progress_changes(
 def test_telemetry_emitter_allows_large_facts_for_new_session_even_when_payload_matches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    connections: list[_FakeSyncWebSocket] = []
+    connections: list[_FakeAsyncWebSocket] = []
 
-    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeSyncWebSocket:
-        ws = _FakeSyncWebSocket()
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
+        ws = _FakeAsyncWebSocket()
         connections.append(ws)
         return ws
 
-    monkeypatch.setattr(telemetry_mod, "sync_connect", _connect)
+    monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
 
     emitter = telemetry_mod.TelemetryEmitter(
         "ws://example.test/telemetry",
@@ -795,14 +794,14 @@ def test_telemetry_emitter_allows_large_facts_for_new_session_even_when_payload_
 def test_telemetry_emitter_prioritizes_control_lane_over_general_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    connections: list[_FakeSyncWebSocket] = []
+    connections: list[_FakeAsyncWebSocket] = []
 
-    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeSyncWebSocket:
-        ws = _FakeSyncWebSocket(fail_first_send=len(connections) == 0)
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
+        ws = _FakeAsyncWebSocket(fail_first_send=len(connections) == 0)
         connections.append(ws)
         return ws
 
-    monkeypatch.setattr(telemetry_mod, "sync_connect", _connect)
+    monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
 
     emitter = telemetry_mod.TelemetryEmitter(
         "ws://example.test/telemetry",
@@ -840,22 +839,13 @@ def test_telemetry_emitter_prioritizes_control_lane_over_general_retry(
 def test_telemetry_emitter_pressure_snapshot_exposes_control_and_general_lanes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    gate = {"open": False}
+    gate = threading.Event()
 
-    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeSyncWebSocket:
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
         del open_timeout, close_timeout
-        ws = _FakeSyncWebSocket()
-        original_send = ws.send
+        return _FakeAsyncWebSocket(send_gate=gate)
 
-        def _send(message: str) -> None:
-            while not gate["open"]:
-                time.sleep(0.01)
-            original_send(message)
-
-        ws.send = _send  # type: ignore[method-assign]
-        return ws
-
-    monkeypatch.setattr(telemetry_mod, "sync_connect", _connect)
+    monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
 
     emitter = telemetry_mod.TelemetryEmitter(
         "ws://example.test/telemetry",
@@ -887,8 +877,93 @@ def test_telemetry_emitter_pressure_snapshot_exposes_control_and_general_lanes(
         assert snapshot["emit_queue_depth"] == 1
         assert snapshot["queue_capacity"] == snapshot["control_queue_capacity"] + snapshot["emit_queue_capacity"]
     finally:
-        gate["open"] = True
+        gate.set()
         emitter.close()
+
+
+def test_telemetry_emitter_send_and_wait_returns_after_control_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connections: list[_FakeAsyncWebSocket] = []
+
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
+        assert open_timeout == 2
+        assert close_timeout == 1
+        ws = _FakeAsyncWebSocket()
+        connections.append(ws)
+        return ws
+
+    monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
+
+    emitter = telemetry_mod.TelemetryEmitter(
+        "ws://example.test/telemetry",
+        queue_max=8,
+        queue_timeout_ms=50,
+        retry_ms=10,
+    )
+    try:
+        delivered = emitter.send_and_wait(
+            {
+                "kind": "botlens_lifecycle_event",
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "phase": "completed",
+                "status": "completed",
+                "seq": 9,
+            },
+            timeout_ms=1000,
+        )
+
+        assert delivered is True
+        assert len(connections) == 1
+        assert json.loads(connections[0].sent[0])["seq"] == 9
+    finally:
+        emitter.close()
+
+
+def test_telemetry_emitter_close_flushes_control_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    send_gate = threading.Event()
+    connections: list[_FakeAsyncWebSocket] = []
+
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
+        del open_timeout, close_timeout
+        ws = _FakeAsyncWebSocket(send_gate=send_gate)
+        connections.append(ws)
+        return ws
+
+    monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
+
+    emitter = telemetry_mod.TelemetryEmitter(
+        "ws://example.test/telemetry",
+        queue_max=8,
+        queue_timeout_ms=50,
+        retry_ms=10,
+    )
+    assert emitter.send(
+        {
+            "kind": "botlens_lifecycle_event",
+            "bot_id": "bot-1",
+            "run_id": "run-1",
+            "phase": "completed",
+            "status": "completed",
+            "seq": 10,
+        }
+    )
+
+    closer = threading.Thread(target=emitter.close)
+    closer.start()
+    try:
+        _wait_until(lambda: len(connections) == 1)
+        assert closer.is_alive()
+        send_gate.set()
+        closer.join(timeout=2.0)
+        assert not closer.is_alive()
+        assert json.loads(connections[0].sent[0])["seq"] == 10
+    finally:
+        send_gate.set()
+        closer.join(timeout=2.0)
 
 
 def test_notify_backend_lifecycle_event_prefers_persistent_sender(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -916,9 +991,9 @@ def test_notify_backend_lifecycle_event_prefers_persistent_sender(monkeypatch: p
     assert sender.send.call_args.args[0]["kind"] == "botlens_lifecycle_event"
 
 
-def test_notify_backend_lifecycle_event_terminal_prefers_direct_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_notify_backend_lifecycle_event_terminal_prefers_control_flush(monkeypatch: pytest.MonkeyPatch) -> None:
     sender = MagicMock()
-    sender.send.return_value = True
+    sender.send_and_wait.return_value = True
     ephemeral = MagicMock(return_value=True)
 
     monkeypatch.setattr(runtime_mod, "emit_telemetry_ephemeral_message", ephemeral)
@@ -936,16 +1011,17 @@ def test_notify_backend_lifecycle_event_terminal_prefers_direct_transport(monkey
     )
 
     assert delivered is True
-    ephemeral.assert_called_once()
+    sender.send_and_wait.assert_called_once()
+    ephemeral.assert_not_called()
     sender.send.assert_not_called()
 
 
-def test_notify_backend_lifecycle_event_terminal_falls_back_to_sender_when_direct_send_fails(
+def test_notify_backend_lifecycle_event_terminal_falls_back_to_direct_transport_when_control_flush_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sender = MagicMock()
-    sender.send.return_value = True
-    ephemeral = MagicMock(return_value=False)
+    sender.send_and_wait.return_value = False
+    ephemeral = MagicMock(return_value=True)
 
     monkeypatch.setattr(runtime_mod, "emit_telemetry_ephemeral_message", ephemeral)
 
@@ -962,8 +1038,9 @@ def test_notify_backend_lifecycle_event_terminal_falls_back_to_sender_when_direc
     )
 
     assert delivered is True
+    sender.send_and_wait.assert_called_once()
     ephemeral.assert_called_once()
-    sender.send.assert_called_once()
+    sender.send.assert_not_called()
 
 
 def test_handle_runtime_facts_event_emits_live_lifecycle_only_once(monkeypatch: pytest.MonkeyPatch) -> None:

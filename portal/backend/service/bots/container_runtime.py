@@ -653,16 +653,18 @@ def _notify_backend_lifecycle_event(
     is_terminal_lifecycle = phase in TERMINAL_PHASES or status in _TERMINAL_STATUSES
     delivered = False
     if is_terminal_lifecycle:
-        delivered = emit_telemetry_ephemeral_message(telemetry_url, json.dumps(safe_payload))
-        if not delivered and telemetry_sender is not None:
-            logger.warning(
-                "bot_runtime_lifecycle_event_direct_delivery_failed | bot_id=%s | run_id=%s | phase=%s | status=%s | fallback=queued_sender",
-                bot_id,
-                run_id,
-                phase,
-                status,
-            )
-            delivered = telemetry_sender.send(safe_payload)
+        if telemetry_sender is not None:
+            delivered = telemetry_sender.send_and_wait(safe_payload)
+            if not delivered:
+                logger.warning(
+                    "bot_runtime_lifecycle_event_control_flush_failed | bot_id=%s | run_id=%s | phase=%s | status=%s | fallback=direct_transport",
+                    bot_id,
+                    run_id,
+                    phase,
+                    status,
+                )
+        if not delivered:
+            delivered = emit_telemetry_ephemeral_message(telemetry_url, json.dumps(safe_payload))
     elif telemetry_sender is not None:
         delivered = telemetry_sender.send(safe_payload)
     else:

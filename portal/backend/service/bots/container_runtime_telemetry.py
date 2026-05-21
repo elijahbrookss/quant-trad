@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import threading
@@ -16,10 +17,10 @@ from ..observability import BackendObserver, normalize_failure_mode, payload_siz
 
 try:
     import websockets  # type: ignore
-    from websockets.sync.client import connect as sync_connect  # type: ignore
+    async_connect = websockets.connect  # type: ignore[attr-defined]
 except Exception:  # pragma: no cover
     websockets = None
-    sync_connect = None
+    async_connect = None
 
 logger = logging.getLogger(__name__)
 _OBSERVER = BackendObserver(component="container_runtime_telemetry", event_logger=logger)
@@ -27,6 +28,8 @@ _LARGE_FACT_DEDUPE_BYTES = 64 * 1024
 _FACT_DEDUPE_TTL_S = 5.0
 _GENERAL_QUEUE_NAME = "telemetry_emit_queue"
 _CONTROL_QUEUE_NAME = "telemetry_control_queue"
+_CONTROL_FLUSH_TIMEOUT_MS = 5000
+_EPHEMERAL_SEND_TIMEOUT_S = 4.0
 _CONTROL_MESSAGE_KINDS = frozenset(
     {
         "botlens_runtime_bootstrap_facts",
@@ -35,10 +38,56 @@ _CONTROL_MESSAGE_KINDS = frozenset(
 )
 
 
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _open_async_ws(connector: Any, url: str) -> Any:
+    connection = connector(url, open_timeout=2, close_timeout=1)
+    return await _maybe_await(connection)
+
+
+async def _close_async_ws(ws: Any) -> None:
+    if ws is None:
+        return
+    close = getattr(ws, "close", None)
+    if callable(close):
+        await _maybe_await(close())
+
+
+def _run_async_blocking(coro_factory: Any, *, timeout_s: float) -> Any:
+    async def _with_timeout() -> Any:
+        return await asyncio.wait_for(coro_factory(), timeout=timeout_s)
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_with_timeout())
+
+    result: Dict[str, Any] = {}
+
+    def _runner() -> None:
+        try:
+            result["value"] = asyncio.run(_with_timeout())
+        except BaseException as exc:  # noqa: BLE001
+            result["error"] = exc
+
+    thread = threading.Thread(target=_runner, name="bot-telemetry-ephemeral", daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_s + 0.5)
+    if thread.is_alive():
+        raise TimeoutError("ephemeral telemetry send timed out")
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
 def emit_telemetry_ephemeral_message(url: str, message: str, *, instrument: bool = True) -> bool:
     if not url:
         return False
-    if websockets is None:
+    if websockets is None or async_connect is None:
         if instrument:
             _OBSERVER.increment(
                 "telemetry_transport_send_fail_total",
@@ -54,69 +103,16 @@ def emit_telemetry_ephemeral_message(url: str, message: str, *, instrument: bool
             )
         return False
 
-    running_loop = False
-    try:
-        asyncio.get_running_loop()
-        running_loop = True
-    except RuntimeError:
-        running_loop = False
-
-    if running_loop:
-        if sync_connect is None:
-            return False
-        started = time.perf_counter()
-        try:
-            with sync_connect(url, open_timeout=2, close_timeout=1) as ws:
-                ws.send(message)
-        except Exception as exc:  # noqa: BLE001
-            if instrument:
-                failure_mode = normalize_failure_mode(exc)
-                _OBSERVER.increment("telemetry_transport_send_total", message_kind="ephemeral")
-                _OBSERVER.increment(
-                    "telemetry_transport_send_fail_total",
-                    message_kind="ephemeral",
-                    failure_mode=failure_mode,
-                )
-                _OBSERVER.observe(
-                    "telemetry_transport_send_ms",
-                    max((time.perf_counter() - started) * 1000.0, 0.0),
-                    message_kind="ephemeral",
-                    failure_mode=failure_mode,
-                )
-                _OBSERVER.observe(
-                    "telemetry_transport_payload_bytes",
-                    float(payload_size_bytes(message)),
-                    message_kind="ephemeral",
-                )
-                _OBSERVER.event(
-                    "telemetry_transport_send_failed",
-                    level=logging.WARN,
-                    message_kind="ephemeral",
-                    failure_mode=failure_mode,
-                    error=str(exc),
-                )
-            return False
-        if instrument:
-            _OBSERVER.increment("telemetry_transport_send_total", message_kind="ephemeral")
-            _OBSERVER.observe(
-                "telemetry_transport_send_ms",
-                max((time.perf_counter() - started) * 1000.0, 0.0),
-                message_kind="ephemeral",
-            )
-            _OBSERVER.observe(
-                "telemetry_transport_payload_bytes",
-                float(payload_size_bytes(message)),
-                message_kind="ephemeral",
-            )
-        return True
-
     async def _send() -> None:
-        async with websockets.connect(url, open_timeout=2, close_timeout=1) as ws:
-            await ws.send(message)
+        ws = await _open_async_ws(async_connect, url)
+        try:
+            await _maybe_await(ws.send(message))
+        finally:
+            await _close_async_ws(ws)
 
     started = time.perf_counter()
     try:
-        asyncio.run(_send())
+        _run_async_blocking(_send, timeout_s=_EPHEMERAL_SEND_TIMEOUT_S)
     except Exception as exc:  # noqa: BLE001
         if instrument:
             failure_mode = normalize_failure_mode(exc)
@@ -197,8 +193,8 @@ class TelemetryEmitter:
         self._control_queue_max = max(8, min(32, self._queue_max))
         self._queue_timeout_ms = int(queue_timeout_ms)
         self._retry_ms = int(retry_ms)
-        self._sync_connect = None
-        self._sync_ws = None
+        self._async_connect = None
+        self._async_ws = None
         self._state_lock = threading.Condition()
         self._pending_messages: Dict[str, deque[Dict[str, Any]]] = {
             _CONTROL_QUEUE_NAME: deque(),
@@ -209,6 +205,7 @@ class TelemetryEmitter:
             _GENERAL_QUEUE_NAME: self._queue_max,
         }
         self._stop = False
+        self._closing = False
         self._worker_thread: threading.Thread | None = None
         self._backpressure_active = {
             _CONTROL_QUEUE_NAME: False,
@@ -225,7 +222,9 @@ class TelemetryEmitter:
         self._last_send_ms = 0.0
         if not self.url:
             return
-        self._sync_connect = sync_connect
+        self._async_connect = async_connect
+        if self._async_connect is None:
+            return
         self._worker_thread = threading.Thread(target=self._worker_loop, name="bot-telemetry-emitter", daemon=True)
         self._worker_thread.start()
 
@@ -258,16 +257,6 @@ class TelemetryEmitter:
     def _queue_depth_total_locked(self) -> int:
         return sum(len(queue) for queue in self._pending_messages.values())
 
-    def _close_sync_ws(self) -> None:
-        ws = self._sync_ws
-        self._sync_ws = None
-        if ws is None:
-            return
-        try:
-            ws.close()
-        except Exception:
-            pass
-
     def _base_labels(self, context: Optional[Mapping[str, Any]] = None, **fields: Any) -> Dict[str, Any]:
         ctx = context or {}
         return {
@@ -294,8 +283,33 @@ class TelemetryEmitter:
                 queue_name=queue_name,
             )
 
-    def _send_sync_message(self, message: str, context: Optional[Mapping[str, Any]] = None) -> bool:
-        if self._sync_connect is None:
+    @staticmethod
+    def _mark_delivery(entry: Mapping[str, Any], delivered: bool) -> None:
+        state = entry.get("delivery_state")
+        if isinstance(state, dict):
+            state["delivered"] = bool(delivered)
+        event = entry.get("delivery_event")
+        setter = getattr(event, "set", None)
+        if callable(setter):
+            setter()
+
+    def _drop_queue_locked(self, queue_name: str) -> None:
+        queue = self._pending_messages[queue_name]
+        while queue:
+            self._mark_delivery(queue.popleft(), False)
+
+    async def _close_async_connection(self) -> None:
+        ws = self._async_ws
+        self._async_ws = None
+        if ws is None:
+            return
+        try:
+            await _close_async_ws(ws)
+        except Exception:
+            pass
+
+    async def _send_async_message(self, message: str, context: Optional[Mapping[str, Any]] = None) -> bool:
+        if self._async_connect is None:
             return False
         labels = self._base_labels(context, pipeline_stage="transport_send")
         _OBSERVER.increment("telemetry_transport_send_total", **labels)
@@ -307,10 +321,10 @@ class TelemetryEmitter:
         started = time.monotonic()
         opened_connection = False
         try:
-            if self._sync_ws is None:
-                self._sync_ws = self._sync_connect(self.url, open_timeout=2, close_timeout=1)
+            if self._async_ws is None:
+                self._async_ws = await _open_async_ws(self._async_connect, self.url)
                 opened_connection = True
-            self._sync_ws.send(message)
+            await asyncio.wait_for(_maybe_await(self._async_ws.send(message)), timeout=_EPHEMERAL_SEND_TIMEOUT_S)
         except Exception as exc:  # noqa: BLE001
             failure_mode = normalize_failure_mode(exc)
             elapsed_ms = max((time.monotonic() - started) * 1000.0, 0.0)
@@ -331,7 +345,7 @@ class TelemetryEmitter:
                 failure_mode=failure_mode,
                 **labels,
             )
-            if self._transport_connected or self._sync_ws is not None:
+            if self._transport_connected or self._async_ws is not None:
                 _OBSERVER.event(
                     "telemetry_transport_connection_lost",
                     level=logging.WARN,
@@ -339,7 +353,7 @@ class TelemetryEmitter:
                     **labels,
                 )
             self._transport_connected = False
-            self._close_sync_ws()
+            await self._close_async_connection()
             return False
 
         elapsed_ms = max((time.monotonic() - started) * 1000.0, 0.0)
@@ -359,63 +373,86 @@ class TelemetryEmitter:
             self._backpressure_active[queue_name] = False
         return True
 
-    def _deliver_message(self, message: str, context: Optional[Mapping[str, Any]] = None) -> bool:
-        if self._sync_connect is not None:
-            return self._send_sync_message(message, context=context)
-        return emit_telemetry_ephemeral_message(self.url, message, instrument=False)
+    async def _deliver_message(self, message: str, context: Optional[Mapping[str, Any]] = None) -> bool:
+        return await self._send_async_message(message, context=context)
 
     def _worker_loop(self) -> None:
-        while True:
-            entry = None
-            queue_name = _GENERAL_QUEUE_NAME
-            with self._state_lock:
-                while not self._stop and self._queue_depth_total_locked() <= 0:
-                    self._state_lock.wait(timeout=0.25)
-                if self._stop and self._queue_depth_total_locked() <= 0:
-                    break
-                for candidate in (_CONTROL_QUEUE_NAME, _GENERAL_QUEUE_NAME):
-                    queue = self._pending_messages[candidate]
-                    if queue:
-                        queue_name = candidate
-                        entry = dict(queue[0])
-                        break
-            if not isinstance(entry, Mapping):
-                continue
-            message = str(entry.get("message") or "")
-            context = entry.get("context") if isinstance(entry.get("context"), Mapping) else {}
-            delivery_context = {
-                **context,
-                "queue_name": queue_name,
-            }
-            enqueued_at = float(entry.get("enqueued_monotonic") or time.monotonic())
-            delivered = self._deliver_message(message, context=delivery_context)
-            if delivered:
-                queue_wait_ms = max((time.monotonic() - enqueued_at) * 1000.0, 0.0)
-                labels = self._base_labels(delivery_context, queue_name=queue_name)
-                with self._state_lock:
-                    queue = self._pending_messages[queue_name]
-                    if queue:
-                        queue.popleft()
-                    self._emit_queue_gauges_locked(context=context)
-                    self._state_lock.notify_all()
-                _OBSERVER.observe("telemetry_queue_wait_ms", queue_wait_ms, **labels)
-                continue
-
-            with self._state_lock:
-                queue_depth = self._queue_depth_locked(queue_name)
-                self._emit_queue_gauges_locked(context=context)
-            labels = self._base_labels(delivery_context, queue_name=queue_name)
-            _OBSERVER.increment("telemetry_transport_retries_total", **labels)
+        try:
+            asyncio.run(self._async_worker_loop())
+        except Exception as exc:  # noqa: BLE001
+            failure_mode = normalize_failure_mode(exc)
             _OBSERVER.event(
-                "telemetry_transport_retry_scheduled",
-                level=logging.WARN,
-                queue_depth=queue_depth,
-                queue_capacity=self._queue_capacities[queue_name],
-                retry_ms=self._retry_ms,
-                **labels,
+                "telemetry_worker_loop_failed",
+                level=logging.ERROR,
+                failure_mode=failure_mode,
+                error=str(exc),
             )
-            self._transport_retry_pending = True
-            time.sleep(self._retry_ms / 1000.0)
+            with self._state_lock:
+                for queue_name in self._pending_messages:
+                    self._drop_queue_locked(queue_name)
+                self._transport_connected = False
+                self._state_lock.notify_all()
+
+    async def _async_worker_loop(self) -> None:
+        try:
+            while True:
+                entry = None
+                queue_name = _GENERAL_QUEUE_NAME
+                with self._state_lock:
+                    while not self._stop and self._queue_depth_total_locked() <= 0:
+                        self._state_lock.wait(timeout=0.25)
+                    if self._stop and self._queue_depth_total_locked() <= 0:
+                        break
+                    for candidate in (_CONTROL_QUEUE_NAME, _GENERAL_QUEUE_NAME):
+                        queue = self._pending_messages[candidate]
+                        if queue:
+                            queue_name = candidate
+                            entry = dict(queue[0])
+                            break
+                if not isinstance(entry, Mapping):
+                    continue
+                message = str(entry.get("message") or "")
+                context = entry.get("context") if isinstance(entry.get("context"), Mapping) else {}
+                delivery_context = {
+                    **context,
+                    "queue_name": queue_name,
+                }
+                enqueued_at = float(entry.get("enqueued_monotonic") or time.monotonic())
+                delivered = await self._deliver_message(message, context=delivery_context)
+                if delivered:
+                    queue_wait_ms = max((time.monotonic() - enqueued_at) * 1000.0, 0.0)
+                    labels = self._base_labels(delivery_context, queue_name=queue_name)
+                    with self._state_lock:
+                        queue = self._pending_messages[queue_name]
+                        delivered_entry = queue.popleft() if queue else entry
+                        self._mark_delivery(delivered_entry, True)
+                        self._emit_queue_gauges_locked(context=context)
+                        self._state_lock.notify_all()
+                    _OBSERVER.observe("telemetry_queue_wait_ms", queue_wait_ms, **labels)
+                    continue
+
+                with self._state_lock:
+                    queue_depth = self._queue_depth_locked(queue_name)
+                    self._emit_queue_gauges_locked(context=context)
+                labels = self._base_labels(delivery_context, queue_name=queue_name)
+                _OBSERVER.increment("telemetry_transport_retries_total", **labels)
+                _OBSERVER.event(
+                    "telemetry_transport_retry_scheduled",
+                    level=logging.WARN,
+                    queue_depth=queue_depth,
+                    queue_capacity=self._queue_capacities[queue_name],
+                    retry_ms=self._retry_ms,
+                    **labels,
+                )
+                self._transport_retry_pending = True
+                retry_deadline = time.monotonic() + (self._retry_ms / 1000.0)
+                while time.monotonic() < retry_deadline:
+                    with self._state_lock:
+                        if self._stop:
+                            break
+                    await asyncio.sleep(min(max(retry_deadline - time.monotonic(), 0.0), 0.25))
+        finally:
+            await self._close_async_connection()
 
     def send_message(
         self,
@@ -423,8 +460,15 @@ class TelemetryEmitter:
         *,
         queue_name: str | None = None,
         context: Mapping[str, Any] | None = None,
+        delivery_event: Any | None = None,
+        delivery_state: Dict[str, Any] | None = None,
     ) -> bool:
-        if not self.url:
+        delivery_entry = {
+            "delivery_event": delivery_event,
+            "delivery_state": delivery_state,
+        }
+        if not self.url or self._async_connect is None or self._worker_thread is None:
+            self._mark_delivery(delivery_entry, False)
             return False
         resolved_context = dict(context or telemetry_message_context(message))
         resolved_queue_name = queue_name or self._lane_for_context(resolved_context)
@@ -432,9 +476,12 @@ class TelemetryEmitter:
         _OBSERVER.increment("telemetry_enqueue_attempt_total", **labels)
         deadline = time.monotonic() + (self._queue_timeout_ms / 1000.0)
         with self._state_lock:
+            if self._closing or self._stop:
+                self._mark_delivery(delivery_entry, False)
+                return False
             queue = self._pending_messages[resolved_queue_name]
             queue_capacity = self._queue_capacities[resolved_queue_name]
-            while len(queue) >= queue_capacity and not self._stop:
+            while len(queue) >= queue_capacity and not self._closing and not self._stop:
                 if not self._backpressure_active[resolved_queue_name]:
                     _OBSERVER.event(
                         "telemetry_backpressure_entered",
@@ -461,16 +508,20 @@ class TelemetryEmitter:
                         **labels,
                     )
                     self._emit_queue_gauges_locked(context=resolved_context)
+                    self._mark_delivery(delivery_entry, False)
                     return False
                 self._state_lock.wait(timeout=remaining)
                 queue = self._pending_messages[resolved_queue_name]
-            if self._stop:
+            if self._closing or self._stop:
+                self._mark_delivery(delivery_entry, False)
                 return False
             queue.append(
                 {
                     "message": str(message),
                     "context": resolved_context,
                     "enqueued_monotonic": time.monotonic(),
+                    "delivery_event": delivery_event,
+                    "delivery_state": delivery_state,
                 }
             )
             self._emit_queue_gauges_locked(context=resolved_context)
@@ -479,6 +530,42 @@ class TelemetryEmitter:
         return True
 
     def send(self, payload: Mapping[str, Any]) -> bool:
+        accepted, _queued = self._send_payload(payload)
+        return accepted
+
+    def send_and_wait(self, payload: Mapping[str, Any], *, timeout_ms: int = _CONTROL_FLUSH_TIMEOUT_MS) -> bool:
+        event = threading.Event()
+        state: Dict[str, Any] = {"delivered": False}
+        accepted, queued = self._send_payload(payload, delivery_event=event, delivery_state=state)
+        if not accepted:
+            return False
+        if not queued:
+            return True
+        context = telemetry_payload_context(payload)
+        queue_name = self._lane_for_payload(payload)
+        labels = self._base_labels(context, queue_name=queue_name)
+        if event.wait(timeout=max(float(timeout_ms), 0.0) / 1000.0):
+            return bool(state.get("delivered"))
+        _OBSERVER.increment("telemetry_control_flush_timeout_total", **labels)
+        _OBSERVER.event(
+            "telemetry_control_flush_timeout",
+            level=logging.WARN,
+            flush_timeout_ms=int(timeout_ms),
+            **labels,
+        )
+        return False
+
+    def _send_payload(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        delivery_event: Any | None = None,
+        delivery_state: Dict[str, Any] | None = None,
+    ) -> tuple[bool, bool]:
+        delivery_entry = {
+            "delivery_event": delivery_event,
+            "delivery_state": delivery_state,
+        }
         queue_name = self._lane_for_payload(payload)
         large_fact_dedupe = self._large_fact_dedupe_signature(payload)
         if large_fact_dedupe is not None:
@@ -509,7 +596,8 @@ class TelemetryEmitter:
                     suppression_reason="large_fact_duplicate",
                     **labels,
                 )
-                return True
+                self._mark_delivery(delivery_entry, True)
+                return True, False
         dedupe_key, dedupe_signature = self._bootstrap_dedupe_signature(payload)
         if dedupe_key is not None and dedupe_signature is not None:
             with self._state_lock:
@@ -533,7 +621,8 @@ class TelemetryEmitter:
                 )
                 with self._state_lock:
                     self._suppressed_bootstrap_duplicates += 1
-                return True
+                self._mark_delivery(delivery_entry, True)
+                return True, False
         message = json.dumps(payload, separators=(",", ":"), default=str)
         context = telemetry_payload_context(payload)
         labels = self._base_labels(context, queue_name=queue_name)
@@ -543,7 +632,13 @@ class TelemetryEmitter:
             float(payload_size_bytes(message)),
             **labels,
         )
-        accepted = self.send_message(message, queue_name=queue_name, context=context)
+        accepted = self.send_message(
+            message,
+            queue_name=queue_name,
+            context=context,
+            delivery_event=delivery_event,
+            delivery_state=delivery_state,
+        )
         if accepted and dedupe_key is not None and dedupe_signature is not None:
             with self._state_lock:
                 self._bootstrap_dedupe[dedupe_key] = dedupe_signature
@@ -559,7 +654,7 @@ class TelemetryEmitter:
         elif accepted:
             with self._state_lock:
                 self._last_payload_bytes = payload_size_bytes(message)
-        return accepted
+        return accepted, accepted
 
     @staticmethod
     def _bootstrap_dedupe_signature(payload: Mapping[str, Any]) -> tuple[tuple[str, str, str, str] | None, str | None]:
@@ -623,6 +718,7 @@ class TelemetryEmitter:
                 "backpressure_active": any(bool(active) for active in self._backpressure_active.values()),
                 "transport_connected": bool(self._transport_connected),
                 "transport_retry_pending": bool(self._transport_retry_pending),
+                "closing": bool(self._closing),
                 "control_queue_depth": self._queue_depth_locked(_CONTROL_QUEUE_NAME),
                 "control_queue_capacity": int(self._queue_capacities[_CONTROL_QUEUE_NAME]),
                 "control_queue_oldest_age_ms": round(self._queue_oldest_age_ms_locked(_CONTROL_QUEUE_NAME), 3),
@@ -638,16 +734,46 @@ class TelemetryEmitter:
             }
 
     def close(self) -> None:
+        flush_deadline = time.monotonic() + (_CONTROL_FLUSH_TIMEOUT_MS / 1000.0)
+        timed_out_depth = 0
         with self._state_lock:
-            self._stop = True
-            for queue in self._pending_messages.values():
-                queue.clear()
+            self._closing = True
+            self._drop_queue_locked(_GENERAL_QUEUE_NAME)
+            self._emit_queue_gauges_locked()
             self._state_lock.notify_all()
+            while self._queue_depth_locked(_CONTROL_QUEUE_NAME) > 0:
+                remaining = flush_deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out_depth = self._queue_depth_locked(_CONTROL_QUEUE_NAME)
+                    self._drop_queue_locked(_CONTROL_QUEUE_NAME)
+                    break
+                self._state_lock.wait(timeout=min(remaining, 0.25))
+            self._stop = True
+            self._emit_queue_gauges_locked()
+            self._state_lock.notify_all()
+        if timed_out_depth > 0:
+            _OBSERVER.increment(
+                "telemetry_control_flush_timeout_total",
+                queue_name=_CONTROL_QUEUE_NAME,
+            )
+            _OBSERVER.event(
+                "telemetry_control_flush_timeout",
+                level=logging.WARN,
+                queue_depth=timed_out_depth,
+                queue_name=_CONTROL_QUEUE_NAME,
+                flush_timeout_ms=_CONTROL_FLUSH_TIMEOUT_MS,
+            )
         thread = self._worker_thread
         self._worker_thread = None
         if thread is not None:
-            thread.join(timeout=0.5)
-        self._close_sync_ws()
+            thread.join(timeout=1.0)
+            if thread.is_alive():
+                _OBSERVER.event(
+                    "telemetry_worker_close_timeout",
+                    level=logging.WARN,
+                    queue_depth=0,
+                    flush_timeout_ms=_CONTROL_FLUSH_TIMEOUT_MS,
+                )
 
 
 __all__ = [
