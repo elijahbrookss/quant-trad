@@ -10,9 +10,10 @@ const EVENT_BADGES = {
   signal: { label: 'SIGNAL', color: 'bg-sky-500/15 text-sky-400 border-sky-500/30' },
   decision: { label: 'DECISION', color: 'bg-amber-500/15 text-amber-400 border-amber-500/30' },
   execution: { label: 'EXEC', color: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' },
-  outcome: { label: 'OUTCOME', color: 'bg-violet-500/15 text-violet-400 border-violet-500/30' },
-  wallet: { label: 'WALLET', color: 'bg-cyan-500/15 text-cyan-400 border-cyan-500/30' },
+  diagnostic: { label: 'DIAG', color: 'bg-orange-500/15 text-orange-300 border-orange-500/30' },
+  fault: { label: 'FAULT', color: 'bg-rose-500/15 text-rose-300 border-rose-500/30' },
   runtime: { label: 'RUNTIME', color: 'bg-rose-500/15 text-rose-400 border-rose-500/30' },
+  market: { label: 'MARKET', color: 'bg-slate-500/15 text-slate-300 border-slate-500/30' },
 };
 
 const formatTimeWithDate = (value) => {
@@ -96,9 +97,11 @@ const actionFromEvent = (event) => {
   if (['stop', 'sl'].includes(subtype)) return 'stop';
   if (['target', 'tp'].includes(subtype)) return 'tp';
   if (['close', 'exit'].includes(subtype)) return 'close';
+  if (event.event_type === 'diagnostic') return 'diagnostic';
+  if (event.event_type === 'fault') return 'fault';
   if (event.event_type === 'signal') return 'signal';
-  if (event.event_type === 'wallet') return subtype || 'wallet';
   if (event.event_type === 'runtime') return subtype || 'runtime';
+  if (event.event_type === 'market') return subtype || 'market';
   return subtype || '—';
 };
 
@@ -709,9 +712,10 @@ export default function DecisionTable({ ledgerEvents, onRowClick }) {
               <option value="signal">SIGNAL</option>
               <option value="decision">DECISION</option>
               <option value="execution">EXEC</option>
-              <option value="outcome">OUTCOME</option>
-              <option value="wallet">WALLET</option>
+              <option value="diagnostic">DIAG</option>
+              <option value="fault">FAULT</option>
               <option value="runtime">RUNTIME</option>
+              <option value="market">MARKET</option>
             </select>
           </div>
           <div className="decision-ledger-filter">

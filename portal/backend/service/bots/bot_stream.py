@@ -29,6 +29,26 @@ class BotStreamManager:
         message.setdefault("type", event)
         with self._lock:
             channels = list(self._subscribers.values())
+        if event == "bot":
+            bot = message.get("bot") if isinstance(message.get("bot"), Mapping) else {}
+            lifecycle = bot.get("lifecycle") if isinstance(bot.get("lifecycle"), Mapping) else {}
+            logger.info(
+                "bot_stream_broadcast | event=%s | subscribers=%s | bot_id=%s | run_id=%s | bot_status=%s | lifecycle_status=%s | lifecycle_phase=%s",
+                event,
+                len(channels),
+                bot.get("id"),
+                bot.get("active_run_id"),
+                bot.get("status"),
+                lifecycle.get("status"),
+                lifecycle.get("phase"),
+            )
+        elif event == "bot_deleted":
+            logger.info(
+                "bot_stream_broadcast | event=%s | subscribers=%s | bot_id=%s",
+                event,
+                len(channels),
+                message.get("bot_id"),
+            )
         if not channels:
             return
         for channel in channels:

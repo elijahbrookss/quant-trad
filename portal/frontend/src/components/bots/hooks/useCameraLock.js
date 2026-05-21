@@ -17,6 +17,7 @@ export const useCameraLock = ({
     setAnimationActive,
     attachRangeGuards,
     lockedRef,
+    resetViewport,
   } = useViewportController({ chartRef, levelSeriesRef, barSpacingRef, latestCandlesRef, debugRanges })
 
   const lock = useCallback(() => setLocked(true), [setLocked])
@@ -48,13 +49,15 @@ export const useCameraLock = ({
   )
 
   const recenter = useCallback(() => {
+    lock()
     requestIntent({ intent: CameraIntents.RECENTER, reason: 'recenter', isUser: true })
-  }, [requestIntent])
+  }, [lock, requestIntent])
 
   return {
     lock,
     unlock,
     recenter,
+    resetViewport,
     requestIntent,
     attachRangeGuards,
     notifyUserInteraction,

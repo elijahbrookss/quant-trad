@@ -1,5 +1,4 @@
 import datetime as dt
-import os
 import pandas as pd
 from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
@@ -9,15 +8,20 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import AssetClass
 from alpaca.common.exceptions import APIError
 from core.logger import logger
+from core.settings import get_settings
 from data_providers.registry import _REGISTRY
+from data_providers.services.credential_store import load_credentials
 from .base import BaseDataProvider, DataSource, InstrumentMetadata, InstrumentType
+
+_ALPACA_SETTINGS = get_settings().providers.alpaca
 
 class AlpacaProvider(BaseDataProvider):
     def __init__(self, *, persistence=None, settings=None):
         super().__init__(persistence=persistence, settings=settings)
 
-        self._api_key = os.getenv("ALPACA_API_KEY")
-        self._secret_key = os.getenv("ALPACA_SECRET_KEY")
+        credentials = self._resolve_credentials()
+        self._api_key = credentials.get("ALPACA_API_KEY")
+        self._secret_key = credentials.get("ALPACA_SECRET_KEY")
 
         self.client = StockHistoricalDataClient(
             self._api_key,
@@ -166,8 +170,32 @@ class AlpacaProvider(BaseDataProvider):
 
     @staticmethod
     def _paper_trading_enabled() -> bool:
-        flag = os.getenv("ALPACA_PAPER", "true").strip().lower()
-        return flag in {"1", "true", "yes", "on"}
+        return _ALPACA_SETTINGS.paper
+
+    @staticmethod
+    def _resolve_credentials() -> dict[str, str]:
+        try:
+            stored = load_credentials(
+                "ALPACA",
+                "ALPACA",
+                environment="paper",
+                mark_used=True,
+                warn_missing=False,
+            )
+        except Exception as exc:
+            if "PG_DSN is required" in str(exc):
+                return {}
+            logger.error("alpaca_credentials_store_error | error=%s", exc)
+            raise RuntimeError(
+                "Alpaca credentials unavailable from provider credential store. "
+                "Fix QT_SECURITY_PROVIDER_CREDENTIAL_KEY and re-save ALPACA credentials."
+            ) from exc
+        if not stored:
+            return {}
+        return {
+            "ALPACA_API_KEY": str(stored.get("ALPACA_API_KEY") or "").strip(),
+            "ALPACA_SECRET_KEY": str(stored.get("ALPACA_SECRET_KEY") or "").strip(),
+        }
 
 
 @_REGISTRY.provider(
@@ -186,6 +214,7 @@ def _register_alpaca_provider():
     provider_id="ALPACA",
     adapter_id=None,
     asset_class="equities",
+    required_secrets=["ALPACA_API_KEY", "ALPACA_SECRET_KEY"],
 )
 def _register_alpaca_venue():
     return "ALPACA"

@@ -1,7 +1,8 @@
 import { createLogger } from '../utils/logger.js'
+import { API_ORIGIN } from '../config/appConfig.js'
 import { openSse, openWebSocket } from './realtime.adapter.js'
 
-const BASE = import.meta.env.REACT_APP_API_BASE_URL || 'http://localhost:8000'
+const BASE = API_ORIGIN
 const log = createLogger('BotAdapter')
 
 async function request(path, options = {}) {
@@ -32,7 +33,7 @@ async function request(path, options = {}) {
 }
 
 export async function listBots() {
-  return request('/api/bots')
+  return request('/api/bots/')
 }
 
 export async function fetchBotRuntimeCapacity() {
@@ -41,7 +42,7 @@ export async function fetchBotRuntimeCapacity() {
 
 export async function createBot(payload) {
   log.info('create_bot', payload)
-  return request('/api/bots', {
+  return request('/api/bots/', {
     method: 'POST',
     body: JSON.stringify(payload),
   })
@@ -59,11 +60,27 @@ export async function deleteBot(botId) {
 }
 
 export async function startBot(botId) {
-  return request(`/api/bots/${botId}/start`, { method: 'POST' })
+  const requestId =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `start-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  const payload = await request(`/api/bots/${botId}/start`, {
+    method: 'POST',
+    body: JSON.stringify({ request_id: requestId }),
+  })
+  return payload?.bot || payload
 }
 
 export async function stopBot(botId) {
-  return request(`/api/bots/${botId}/stop`, { method: 'POST' })
+  const requestId =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `cancel-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  const payload = await request(`/api/bots/${botId}/stop`, {
+    method: 'POST',
+    body: JSON.stringify({ request_id: requestId }),
+  })
+  return payload?.bot || payload
 }
 
 
@@ -76,13 +93,6 @@ export function openBotsStream() {
   return source
 }
 
-
-
-export async function fetchBotSettingsCatalog() {
-  return request('/api/bots/settings-catalog')
-}
-
-
 export async function fetchBotActiveRun(botId) {
   return request(`/api/bots/${encodeURIComponent(botId)}/active-run`)
 }
@@ -93,48 +103,44 @@ export async function fetchBotRuns(botId, { limit = 25 } = {}) {
   return request(`/api/bots/${encodeURIComponent(botId)}/runs?${params.toString()}`)
 }
 
-export async function fetchBotLensSeriesCatalog(runId) {
-  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series`)
+export async function fetchBotLensRunBootstrap(botId) {
+  return request(`/api/bots/${encodeURIComponent(botId)}/botlens/bootstrap/run`)
 }
 
 
 
-export async function fetchBotRunLedgerEvents(botId, runId, { afterSeq = 0, limit = 500, eventNames } = {}) {
+export async function fetchBotRunLifecycleEvents(botId, runId) {
+  return request(`/api/bots/${encodeURIComponent(botId)}/runs/${encodeURIComponent(runId)}/lifecycle-events`)
+}
+
+
+export async function fetchBotLensSelectedSymbolSnapshot(runId, seriesKey, { limit = 320 } = {}) {
   const params = new URLSearchParams()
-  params.set('after_seq', String(Math.max(0, Number(afterSeq) || 0)))
-  params.set('limit', String(Math.max(1, Number(limit) || 500)))
-  if (Array.isArray(eventNames)) {
-    eventNames.forEach((name) => {
-      if (name === undefined || name === null) return
-      const normalized = String(name).trim()
-      if (!normalized) return
-      params.append('event_name', normalized)
-    })
-  }
+  params.set('limit', String(Math.max(1, Number(limit) || 320)))
+  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/snapshot?${params.toString()}`)
+}
+
+export const fetchBotLensSelectedSymbolBootstrap = fetchBotLensSelectedSymbolSnapshot
+export const fetchBotLensSelectedSymbolVisual = fetchBotLensSelectedSymbolSnapshot
+
+export async function fetchBotLensChartHistory(runId, seriesKey, { startTime, endTime, limit = 320 } = {}) {
+  const params = new URLSearchParams()
+  if (startTime) params.set('start_time', String(startTime))
+  if (endTime) params.set('end_time', String(endTime))
+  params.set('limit', String(Math.max(1, Number(limit) || 320)))
+  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/chart?${params.toString()}`)
+}
+
+export function openBotLensLiveStream(botId, {
+  resumeFromSeq = 0,
+  streamSessionId = null,
+  selectedSymbolKey = null,
+} = {}) {
+  const params = new URLSearchParams()
+  params.set('resume_from_seq', String(Math.max(0, Number(resumeFromSeq) || 0)))
+  if (streamSessionId) params.set('stream_session_id', String(streamSessionId))
+  if (selectedSymbolKey) params.set('selected_symbol_key', String(selectedSymbolKey))
   const query = params.toString()
-  return request(
-    `/api/bots/${encodeURIComponent(botId)}/runs/${encodeURIComponent(runId)}/events${query ? `?${query}` : ''}`,
-  )
-}
-
-
-export async function fetchBotLensSeriesWindow(runId, seriesKey, { to = 'now', limit = 320 } = {}) {
-  const params = new URLSearchParams()
-  if (to) params.set('to', String(to))
-  params.set('limit', String(Math.max(1, Number(limit) || 320)))
-  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/window?${params.toString()}`)
-}
-
-export async function fetchBotLensSeriesHistory(runId, seriesKey, { beforeTs, limit = 320 } = {}) {
-  const params = new URLSearchParams()
-  if (beforeTs) params.set('before_ts', String(beforeTs))
-  params.set('limit', String(Math.max(1, Number(limit) || 320)))
-  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/history?${params.toString()}`)
-}
-
-export function openBotLensSeriesLiveStream(runId, seriesKey, { afterSeq = 0 } = {}) {
-  const params = new URLSearchParams()
-  params.set('after_seq', String(Math.max(0, Number(afterSeq) || 0)))
-  const path = `/api/bots/ws/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/live?${params.toString()}`
+  const path = `/api/bots/ws/${encodeURIComponent(botId)}/botlens/live${query ? `?${query}` : ''}`
   return openWebSocket(path, { base: BASE })
 }

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 from .amount_constraints import AmountConstraints, normalize_qty_with_constraints
+from .fees import executed_fee, executed_notional
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,7 @@ class SpotExecutionConstraints:
     qty_step: Optional[float]
     min_qty: Optional[float]
     min_notional: Optional[float]
+    contract_size: float = 1.0
     max_qty: Optional[float] = None
     precision: Optional[int] = None
 
@@ -44,6 +46,9 @@ class FillResult:
     fee_rate: float
     side: str
     metadata: Dict[str, Any]
+    fee_role: str = "taker"
+    fee_source: str = "instrument"
+    fee_version: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -100,7 +105,11 @@ class SpotExecutionModel:
 
         rounded_qty = float(normalization.qty_final)
 
-        notional = float(fill_price) * float(rounded_qty)
+        notional = executed_notional(
+            price=fill_price,
+            quantity=rounded_qty,
+            contract_size=float(self.constraints.contract_size or 1.0),
+        )
         min_notional = self.constraints.min_notional
         if min_notional not in (None, 0) and notional < float(min_notional):
             return None, FillRejection(
@@ -108,7 +117,12 @@ class SpotExecutionModel:
                 metadata={"rounded_qty": rounded_qty, "notional": notional, "min_notional": min_notional},
             )
 
-        fee = notional * float(fee_rate or 0.0)
+        fee = executed_fee(
+            price=fill_price,
+            quantity=rounded_qty,
+            contract_size=float(self.constraints.contract_size or 1.0),
+            fee_rate=float(fee_rate or 0.0),
+        )
         return (
             FillResult(
                 filled_qty=float(rounded_qty),
@@ -121,8 +135,12 @@ class SpotExecutionModel:
                     **normalization.to_log_dict(),
                     "min_notional": min_notional,
                     "tick_size": self.constraints.tick_size,
+                    "contract_size": self.constraints.contract_size,
                     "slippage_bps": self.slippage_bps,
                 },
+                fee_role="taker",
+                fee_source="instrument",
+                fee_version=None,
             ),
             None,
         )
@@ -186,7 +204,11 @@ class DerivativesExecutionModel:
 
         rounded_qty = float(normalization.qty_final)
 
-        notional = float(fill_price) * float(rounded_qty) * float(self.constraints.contract_size)
+        notional = executed_notional(
+            price=fill_price,
+            quantity=rounded_qty,
+            contract_size=float(self.constraints.contract_size),
+        )
         min_notional = self.constraints.min_notional
         if min_notional not in (None, 0) and notional < float(min_notional):
             return None, FillRejection(
@@ -194,7 +216,12 @@ class DerivativesExecutionModel:
                 metadata={"rounded_qty": rounded_qty, "notional": notional, "min_notional": min_notional},
             )
 
-        fee = notional * float(fee_rate or 0.0)
+        fee = executed_fee(
+            price=fill_price,
+            quantity=rounded_qty,
+            contract_size=float(self.constraints.contract_size),
+            fee_rate=float(fee_rate or 0.0),
+        )
         return (
             FillResult(
                 filled_qty=float(rounded_qty),
@@ -210,6 +237,9 @@ class DerivativesExecutionModel:
                     "contract_size": self.constraints.contract_size,
                     "slippage_bps": self.slippage_bps,
                 },
+                fee_role="taker",
+                fee_source="instrument",
+                fee_version=None,
             ),
             None,
         )

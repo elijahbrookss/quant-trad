@@ -2,66 +2,36 @@
 
 from __future__ import annotations
 
-from collections import deque
 from threading import Lock
-from typing import Callable, Deque, Mapping, Optional, Protocol
+from typing import Callable, Deque, Optional, Protocol
+
+from core.events import CompositeEventSink as SharedCompositeEventSink
+from core.events import InMemoryEventSink as SharedInMemoryEventSink
+
+from engines.bot_runtime.core.runtime_events import RuntimeEvent
 
 
 class RuntimeEventSink(Protocol):
-    """Abstract sink for runtime and decision events."""
+    """Abstract sink for canonical runtime events."""
 
-    def record_log(self, entry: Mapping[str, object]) -> None:
-        ...
-
-    def record_decision(self, entry: Mapping[str, object]) -> None:
+    def emit(self, event: RuntimeEvent) -> None:
         ...
 
 
-class InMemoryEventSink:
-    """Event sink backed by deques."""
+class InMemoryEventSink(SharedInMemoryEventSink[RuntimeEvent]):
+    """Runtime event sink backed by a deque."""
 
     def __init__(
         self,
-        logs: Deque[Mapping[str, object]],
-        decisions: Deque[Mapping[str, object]],
+        events: Deque[RuntimeEvent],
         lock: Lock,
-        on_log: Optional[Callable[[], None]] = None,
-        on_decision: Optional[Callable[[], None]] = None,
+        on_event: Optional[Callable[[], None]] = None,
     ) -> None:
-        self._logs = logs
-        self._decisions = decisions
-        self._lock = lock
-        self._on_log = on_log
-        self._on_decision = on_decision
-
-    def record_log(self, entry: Mapping[str, object]) -> None:
-        with self._lock:
-            self._logs.append(dict(entry))
-            callback = self._on_log
-        if callback is not None:
-            callback()
-
-    def record_decision(self, entry: Mapping[str, object]) -> None:
-        with self._lock:
-            self._decisions.append(dict(entry))
-            callback = self._on_decision
-        if callback is not None:
-            callback()
+        super().__init__(events=events, lock=lock, on_event=on_event)
 
 
-class CompositeEventSink:
-    """Fan-out sink for multiple event targets."""
-
-    def __init__(self, sinks: list[RuntimeEventSink]) -> None:
-        self._sinks = list(sinks)
-
-    def record_log(self, entry: Mapping[str, object]) -> None:
-        for sink in self._sinks:
-            sink.record_log(entry)
-
-    def record_decision(self, entry: Mapping[str, object]) -> None:
-        for sink in self._sinks:
-            sink.record_decision(entry)
+class CompositeEventSink(SharedCompositeEventSink[RuntimeEvent]):
+    """Fan-out sink for multiple runtime event targets."""
 
 
 __all__ = ["RuntimeEventSink", "InMemoryEventSink", "CompositeEventSink"]

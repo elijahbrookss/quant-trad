@@ -10,6 +10,7 @@ from .domain import (
     LadderPosition,
     LadderRiskEngine,
     Leg,
+    SameBarResolutionPolicy,
     StrategySignal,
 )
 from .execution import (
@@ -27,7 +28,7 @@ from .execution_runtime import DeterministicExecutionModel
 from .entry_execution import EntryExecutionCoordinator, PendingEntry
 from .entry_settlement import EntrySettlement, EntrySettlementContext, EntrySettlementService
 from .exit_settlement import ExitSettlement, ExitSettlementContext, ExitSettlementService
-from .fees import FeeDetail, FeeResolver, FeeSchedule
+from .fees import FeeDetail, FeeResolver, FeeSchedule, executed_fee, executed_notional
 from .wallet import (
     LockedWalletLedger,
     WalletEvent,
@@ -36,7 +37,9 @@ from .wallet import (
     project_wallet,
     project_wallet_from_events,
     wallet_can_apply,
+    wallet_can_apply_exit,
     wallet_required_reservation,
+    wallet_required_reservation_details,
 )
 from .wallet_gateway import BaseWalletGateway, SharedWalletGateway, WalletGateway
 from .execution_profile import (
@@ -52,14 +55,26 @@ from .execution_profile import (
     compile_runtime_profile_or_error,
 )
 from .runtime_events import (
+    DecisionAcceptedContext,
+    DecisionRejectedContext,
     SCHEMA_VERSION,
+    SignalEmittedContext,
+    EntryFilledContext,
     ExitKind,
+    ExitFilledContext,
     ReasonCode,
+    RuntimeBar,
+    RuntimeErrorContext,
     RuntimeEvent,
     RuntimeEventCategory,
+    RuntimeStatusContext,
     RuntimeEventName,
+    WalletDelta,
+    WalletDepositedContext,
+    WalletInitializedContext,
     build_correlation_id,
     coerce_reason_code,
+    decision_trace_entry_from_runtime_event,
     format_correlation_bar_ts,
     new_runtime_event,
     normalize_utc_datetime,
@@ -76,6 +91,7 @@ __all__ = [
     "LadderPosition",
     "LadderRiskEngine",
     "Leg",
+    "SameBarResolutionPolicy",
     "StrategySignal",
     "FillRejection",
     "FillResult",
@@ -102,6 +118,8 @@ __all__ = [
     "FeeDetail",
     "FeeResolver",
     "FeeSchedule",
+    "executed_fee",
+    "executed_notional",
     "WalletEvent",
     "LockedWalletLedger",
     "WalletLedger",
@@ -109,7 +127,9 @@ __all__ = [
     "project_wallet",
     "project_wallet_from_events",
     "wallet_can_apply",
+    "wallet_can_apply_exit",
     "wallet_required_reservation",
+    "wallet_required_reservation_details",
     "BaseWalletGateway",
     "SharedWalletGateway",
     "WalletGateway",
@@ -123,14 +143,26 @@ __all__ = [
     "normalize_runtime_instrument_type",
     "compile_series_execution_profile",
     "compile_runtime_profile_or_error",
+    "DecisionAcceptedContext",
+    "DecisionRejectedContext",
     "SCHEMA_VERSION",
+    "SignalEmittedContext",
+    "EntryFilledContext",
     "ExitKind",
+    "ExitFilledContext",
     "ReasonCode",
+    "RuntimeBar",
+    "RuntimeErrorContext",
     "RuntimeEvent",
     "RuntimeEventCategory",
+    "RuntimeStatusContext",
     "RuntimeEventName",
+    "WalletDelta",
+    "WalletDepositedContext",
+    "WalletInitializedContext",
     "build_correlation_id",
     "coerce_reason_code",
+    "decision_trace_entry_from_runtime_event",
     "format_correlation_bar_ts",
     "new_runtime_event",
     "normalize_utc_datetime",

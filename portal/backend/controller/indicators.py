@@ -1,6 +1,6 @@
 # routers/indicators.py
 import logging
-import time
+from time import perf_counter
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Response
@@ -10,8 +10,14 @@ from portal.backend.service.indicators.async_dispatch import (
     AsyncJobFailedError,
     AsyncJobNotFoundError,
     AsyncJobTimeoutError,
+    JOB_TYPE_OVERLAYS,
+    JOB_TYPE_SIGNALS,
     enqueue_overlay_job,
     enqueue_signal_job,
+    quantlab_partition_key,
+    quantlab_request_fingerprint,
+    resolve_overlay_cursor_epoch,
+    reuse_quantlab_job,
     wait_for_job,
 )
 from portal.backend.service.indicators.indicator_service import (
@@ -31,39 +37,199 @@ from portal.backend.service.indicators.indicator_service import (
 from portal.backend.service.indicators.indicator_service.runtime_contract import (
     assert_engine_signal_runtime_path,
 )
+from portal.backend.service.indicators.signal_payload_filtering import (
+    enabled_signal_output_names_from_meta,
+    filter_signal_payload,
+    normalise_enabled_event_keys,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _raise_failed_job(error: str) -> None:
+def _signal_response_count(payload: Any) -> int | None:
+    machine_payload = payload.get("machine") if isinstance(payload, dict) else None
+    signals = machine_payload.get("signals") if isinstance(machine_payload, dict) else None
+    return len(signals) if isinstance(signals, list) else None
+
+
+def _indicator_instance_section(meta: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": meta.get("id"),
+        "type": meta.get("type"),
+        "name": meta.get("name"),
+        "params": dict(meta.get("params") or {}),
+        "dependencies": list(meta.get("dependencies") or []),
+        "enabled": bool(meta.get("enabled", False)),
+        "color": meta.get("color"),
+        "color_palette": meta.get("color_palette"),
+        "datasource": meta.get("datasource"),
+        "exchange": meta.get("exchange"),
+        "output_prefs": dict(meta.get("output_prefs") or {}),
+    }
+
+
+def _indicator_read(meta: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "instance": _indicator_instance_section(meta),
+        "manifest": dict(meta.get("manifest") or {}),
+        "outputs": {
+            "typed": list(meta.get("typed_outputs") or []),
+            "overlays": list(meta.get("overlay_outputs") or []),
+        },
+        "capabilities": {
+            "runtime_supported": bool(meta.get("runtime_supported", False)),
+            "compute_supported": bool(meta.get("compute_supported", False)),
+        },
+    }
+
+
+def _raise_indicator_http_error(
+    *,
+    event: str,
+    status_code: int,
+    detail: str,
+    inst_id: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    interval: Optional[str] = None,
+    symbol: Optional[str] = None,
+    datasource: Optional[str] = None,
+    exchange: Optional[str] = None,
+    instrument_id: Optional[str] = None,
+    cursor_epoch: Optional[Any] = None,
+    duration_ms: Optional[float] = None,
+) -> None:
+    log = logger.error if int(status_code) >= 500 else logger.warning
+    log(
+        "event=%s indicator_id=%s status_code=%s duration_ms=%s detail=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s cursor_epoch=%s",
+        event,
+        inst_id,
+        status_code,
+        f"{duration_ms:.3f}" if duration_ms is not None else None,
+        detail,
+        start,
+        end,
+        interval,
+        symbol,
+        datasource,
+        exchange,
+        instrument_id,
+        cursor_epoch,
+    )
+    raise HTTPException(status_code, detail)
+
+
+def _raise_failed_job(
+    error: str,
+    *,
+    event: str,
+    inst_id: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    interval: Optional[str] = None,
+    symbol: Optional[str] = None,
+    datasource: Optional[str] = None,
+    exchange: Optional[str] = None,
+    instrument_id: Optional[str] = None,
+    cursor_epoch: Optional[Any] = None,
+) -> None:
     message = str(error or "async job failed")
     lower = message.lower()
     if "keyerror" in lower or "not found" in lower:
-        raise HTTPException(404, message)
+        _raise_indicator_http_error(
+            event=event,
+            status_code=404,
+            detail=message,
+            inst_id=inst_id,
+            start=start,
+            end=end,
+            interval=interval,
+            symbol=symbol,
+            datasource=datasource,
+            exchange=exchange,
+            instrument_id=instrument_id,
+            cursor_epoch=cursor_epoch,
+        )
     if "lookuperror" in lower or "no overlays computed" in lower or "no candles" in lower:
-        raise HTTPException(404, message)
+        _raise_indicator_http_error(
+            event=event,
+            status_code=404,
+            detail=message,
+            inst_id=inst_id,
+            start=start,
+            end=end,
+            interval=interval,
+            symbol=symbol,
+            datasource=datasource,
+            exchange=exchange,
+            instrument_id=instrument_id,
+            cursor_epoch=cursor_epoch,
+        )
     if "valueerror" in lower or "invalid" in lower:
-        raise HTTPException(400, message)
-    raise HTTPException(500, message)
+        _raise_indicator_http_error(
+            event=event,
+            status_code=400,
+            detail=message,
+            inst_id=inst_id,
+            start=start,
+            end=end,
+            interval=interval,
+            symbol=symbol,
+            datasource=datasource,
+            exchange=exchange,
+            instrument_id=instrument_id,
+            cursor_epoch=cursor_epoch,
+        )
+    _raise_indicator_http_error(
+        event=event,
+        status_code=500,
+        detail=message,
+        inst_id=inst_id,
+        start=start,
+        end=end,
+        interval=interval,
+        symbol=symbol,
+        datasource=datasource,
+        exchange=exchange,
+        instrument_id=instrument_id,
+    )
 
 # ===== Schemas =====
 class IndicatorInstanceIn(BaseModel):
     type: str
     name: Optional[str] = None
-    params: Dict[str, Any]  # must include symbol/start/end/interval on create
+    params: Dict[str, Any]
+    dependencies: List[Dict[str, Any]] = Field(default_factory=list)
+    output_prefs: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     color: Optional[str] = None
+    color_palette: Optional[str] = None
 
 class IndicatorInstanceOut(BaseModel):
     id: str
     type: str
     name: str
     params: Dict[str, Any]
+    dependencies: List[Dict[str, Any]] = Field(default_factory=list)
     enabled: bool
     color: Optional[str] = None
+    color_palette: Optional[str] = None
+    color_mode: Optional[str] = None
+    color_palettes: Optional[List[Dict[str, Any]]] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
-    signal_rules: Optional[List[Dict[str, Any]]] = None
+    output_prefs: Optional[Dict[str, Dict[str, Any]]] = None
+    typed_outputs: Optional[List[Dict[str, Any]]] = None
+    overlay_outputs: Optional[List[Dict[str, Any]]] = None
+    runtime_supported: Optional[bool] = None
+    compute_supported: Optional[bool] = None
+
+
+class IndicatorReadOut(BaseModel):
+    instance: Dict[str, Any]
+    manifest: Dict[str, Any]
+    outputs: Dict[str, Any]
+    capabilities: Dict[str, Any]
 
 class OverlayRequest(BaseModel):
     start: str
@@ -74,6 +240,8 @@ class OverlayRequest(BaseModel):
     exchange: Optional[str] = None
     instrument_id: Optional[str] = None
     visibility_epoch: Optional[Any] = None
+    cursor_epoch: Optional[Any] = None
+    cursor_time: Optional[str] = None
 
 class SignalRequest(BaseModel):
     start: str
@@ -82,6 +250,7 @@ class SignalRequest(BaseModel):
     symbol: Optional[str] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
+    instrument_id: str
     config: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -101,32 +270,85 @@ class IndicatorBulkToggleRequest(BaseModel):
 class IndicatorBulkDeleteRequest(BaseModel):
     ids: List[str] = Field(default_factory=list)
 
+# ===== Types =====
+@router.get("-types", response_model=List[str])
+async def list_indicator_types():
+    return list_types()
+
+
+@router.get("/types", response_model=List[str])
+async def list_indicator_types_alias():
+    return list_types()
+
+
+@router.get("-types/{type_id}")
+async def get_indicator_type(type_id: str):
+    try:
+        return get_type_details(type_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
 # ===== Instances =====
 @router.get("/", response_model=List[IndicatorInstanceOut])
 async def list_instances():
     return list_instances_meta()
 
-@router.post("/", response_model=IndicatorInstanceOut, status_code=201)
+@router.post("/", response_model=IndicatorReadOut, status_code=201)
 async def create(body: IndicatorInstanceIn):
     try:
-        return create_instance(body.type, body.name, dict(body.params), body.color)
+        meta = create_instance(
+            body.type,
+            body.name,
+            dict(body.params),
+            dependencies=list(body.dependencies or []),
+            color=body.color,
+            color_palette=body.color_palette,
+            output_prefs=dict(body.output_prefs or {}),
+        )
+        return _indicator_read(meta)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except RuntimeError as e:
         raise HTTPException(500, str(e))
 
-@router.put("/{inst_id}", response_model=IndicatorInstanceOut)
+@router.put("/{inst_id}", response_model=IndicatorReadOut)
 async def update(inst_id: str, body: IndicatorInstanceIn):
     try:
         color_provided = "color" in body.__fields_set__
-        return update_instance(
+        color_palette_provided = "color_palette" in body.__fields_set__
+        logger.info(
+            "event=indicator_update_request indicator_id=%s indicator_type=%s output_prefs=%s dependency_count=%s",
+            inst_id,
+            body.type,
+            dict(body.output_prefs or {}),
+            len(list(body.dependencies or [])),
+        )
+        updated = update_instance(
             inst_id,
             body.type,
             dict(body.params),
             body.name,
+            dependencies=list(body.dependencies or []),
+            output_prefs=dict(body.output_prefs or {}),
             color=body.color,
             color_provided=color_provided,
+            color_palette=body.color_palette,
+            color_palette_provided=color_palette_provided,
         )
+        logger.info(
+            "event=indicator_update_response indicator_id=%s output_prefs=%s typed_outputs=%s",
+            inst_id,
+            dict(updated.get("output_prefs") or {}),
+            [
+                {
+                    "name": output.get("name"),
+                    "enabled": output.get("enabled", True),
+                }
+                for output in (updated.get("typed_outputs") or [])
+                if output.get("type") == "signal"
+            ],
+        )
+        return _indicator_read(updated)
     except KeyError:
         raise HTTPException(404, "Indicator not found")
     except ValueError as e:
@@ -134,10 +356,10 @@ async def update(inst_id: str, body: IndicatorInstanceIn):
     except RuntimeError as e:
         raise HTTPException(500, str(e))
 
-@router.get("/{inst_id}", response_model=IndicatorInstanceOut)
+@router.get("/{inst_id}", response_model=IndicatorReadOut)
 async def get_one(inst_id: str):
     try:
-        return get_instance_meta(inst_id)
+        return _indicator_read(get_instance_meta(inst_id))
     except KeyError:
         raise HTTPException(404, "Indicator not found")
 
@@ -157,22 +379,24 @@ async def delete(inst_id: str) -> Response:
         delete_instance(inst_id)
     except KeyError:
         raise HTTPException(404, "Indicator not found")
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
 
     return Response(status_code=204)
 
 
-@router.post("/{inst_id}/duplicate", response_model=IndicatorInstanceOut)
+@router.post("/{inst_id}/duplicate", response_model=IndicatorReadOut)
 async def duplicate(inst_id: str, body: Optional[IndicatorDuplicateRequest] = None):
     try:
-        return duplicate_instance(inst_id, name=body.name if body else None)
+        return _indicator_read(duplicate_instance(inst_id, name=body.name if body else None))
     except KeyError:
         raise HTTPException(404, "Indicator not found")
 
 
-@router.patch("/{inst_id}/enabled", response_model=IndicatorInstanceOut)
+@router.patch("/{inst_id}/enabled", response_model=IndicatorReadOut)
 async def toggle_enabled(inst_id: str, body: IndicatorToggleRequest):
     try:
-        return set_instance_enabled(inst_id, body.enabled)
+        return _indicator_read(set_instance_enabled(inst_id, body.enabled))
     except KeyError:
         raise HTTPException(404, "Indicator not found")
 
@@ -186,16 +410,17 @@ async def bulk_toggle(body: IndicatorBulkToggleRequest):
 
 @router.post("/bulk/delete")
 async def bulk_delete(body: IndicatorBulkDeleteRequest):
-    removed = bulk_delete_instances(body.ids or [])
-    return {"deleted": removed}
+    try:
+        removed = bulk_delete_instances(body.ids or [])
+        return {"deleted": removed}
+    except KeyError:
+        raise HTTPException(404, "Indicator not found")
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
 
-# ===== Types =====
-@router.get("-types", response_model=List[str])
-async def list_indicator_types():
-    return list_types()
 
-@router.get("-types/{type_id}")
-async def get_indicator_type(type_id: str):
+@router.get("/types/{type_id}")
+async def get_indicator_type_alias(type_id: str):
     try:
         return get_type_details(type_id)
     except KeyError as e:
@@ -204,25 +429,119 @@ async def get_indicator_type(type_id: str):
 # ===== Overlays by UUID =====
 @router.post("/{inst_id}/overlays")
 async def overlays(inst_id: str, req: OverlayRequest):
-    """
-    Returns TradingView Lightweight-Charts overlays for a stored indicator UUID
-    over the requested chart window. Does not accept indicator params.
-    """
-    job_id: Optional[str] = None
+    t0 = perf_counter()
+    resolved_cursor_epoch = None
     try:
-        started = time.perf_counter()
+        resolved_cursor_epoch = resolve_overlay_cursor_epoch(
+            cursor_epoch=req.cursor_epoch,
+            cursor_time=req.cursor_time,
+        )
         logger.info(
-            "event=overlay_request_received indicator_id=%s instrument_id=%s symbol=%s interval=%s datasource=%s exchange=%s start=%s end=%s",
+            "event=indicator_overlay_request_started indicator_id=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s visibility_epoch=%s cursor_epoch=%s cursor_time=%s",
             inst_id,
-            req.instrument_id,
-            req.symbol,
-            req.interval,
-            req.datasource,
-            req.exchange,
             req.start,
             req.end,
+            req.interval,
+            req.symbol,
+            req.datasource,
+            req.exchange,
+            req.instrument_id,
+            req.visibility_epoch,
+            resolved_cursor_epoch,
+            req.cursor_time,
         )
-        job_id = enqueue_overlay_job(
+        meta = get_instance_meta(inst_id)
+        request_fingerprint = quantlab_request_fingerprint(
+            job_type=JOB_TYPE_OVERLAYS,
+            indicator_id=inst_id,
+            indicator_updated_at=str(meta.get("updated_at") or ""),
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+            visibility_epoch=req.visibility_epoch,
+            cursor_epoch=resolved_cursor_epoch,
+            cursor_time=req.cursor_time,
+        )
+        request_payload = {
+            "inst_id": inst_id,
+            "start": req.start,
+            "end": req.end,
+            "interval": req.interval,
+            "symbol": req.symbol,
+            "datasource": req.datasource,
+            "exchange": req.exchange,
+            "instrument_id": req.instrument_id,
+            "visibility_epoch": req.visibility_epoch,
+            "cursor_epoch": resolved_cursor_epoch,
+        }
+        partition_key = quantlab_partition_key(request_payload)
+        reusable = reuse_quantlab_job(
+            job_type=JOB_TYPE_OVERLAYS,
+            partition_key=partition_key,
+            request_fingerprint=request_fingerprint,
+        )
+        if reusable and reusable.get("status") == "succeeded":
+            payload = reusable.get("result")
+            logger.info(
+                "event=indicator_overlay_request_finished indicator_id=%s status_code=200 duration_ms=%.3f overlays=%s runtime_path=%s cache_hit=true start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s cursor_epoch=%s",
+                inst_id,
+                (perf_counter() - t0) * 1000.0,
+                len(payload.get("overlays")) if isinstance(payload, dict) and isinstance(payload.get("overlays"), list) else None,
+                payload.get("runtime_path") if isinstance(payload, dict) else None,
+                req.start,
+                req.end,
+                req.interval,
+                req.symbol,
+                req.datasource,
+                req.exchange,
+                req.instrument_id,
+                resolved_cursor_epoch,
+            )
+            return payload
+
+        if reusable and reusable.get("id") and reusable.get("status") in {"queued", "running", "retry"}:
+            job_id = str(reusable["id"])
+        else:
+            job_id = enqueue_overlay_job(
+                inst_id=inst_id,
+                start=req.start,
+                end=req.end,
+                interval=req.interval,
+                symbol=req.symbol,
+                datasource=req.datasource,
+                exchange=req.exchange,
+                instrument_id=req.instrument_id,
+                visibility_epoch=req.visibility_epoch,
+                cursor_epoch=resolved_cursor_epoch,
+                request_fingerprint=request_fingerprint,
+            )
+        payload = await wait_for_job(job_id)
+        overlays = payload.get("overlays") if isinstance(payload, dict) else None
+        logger.info(
+            "event=indicator_overlay_request_finished indicator_id=%s status_code=200 duration_ms=%.3f overlays=%s runtime_path=%s cache_hit=false start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s cursor_epoch=%s",
+            inst_id,
+            (perf_counter() - t0) * 1000.0,
+            len(overlays) if isinstance(overlays, list) else None,
+            payload.get("runtime_path") if isinstance(payload, dict) else None,
+            req.start,
+            req.end,
+            req.interval,
+            req.symbol,
+            req.datasource,
+            req.exchange,
+            req.instrument_id,
+            resolved_cursor_epoch,
+        )
+        return payload
+    except AsyncJobNotFoundError:
+        _raise_indicator_http_error(
+            event="indicator_overlay_request_failed",
+            status_code=500,
+            detail="Overlay job disappeared before completion",
             inst_id=inst_id,
             start=req.start,
             end=req.end,
@@ -231,92 +550,14 @@ async def overlays(inst_id: str, req: OverlayRequest):
             datasource=req.datasource,
             exchange=req.exchange,
             instrument_id=req.instrument_id,
-            overlay_options={"visibility_epoch": req.visibility_epoch}
-            if req.visibility_epoch is not None
-            else None,
+            duration_ms=(perf_counter() - t0) * 1000.0,
+            cursor_epoch=resolved_cursor_epoch,
         )
-        logger.info("event=overlay_request_enqueued indicator_id=%s job_id=%s", inst_id, job_id)
-        payload = await wait_for_job(job_id)
-        elapsed_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
-        payload_obj = payload.get("payload") if isinstance(payload, dict) else None
-        logger.info(
-            "event=overlay_request_completed indicator_id=%s job_id=%s duration_ms=%.3f payload_keys=%s",
-            inst_id,
-            job_id,
-            elapsed_ms,
-            list(payload_obj.keys()) if isinstance(payload_obj, dict) else [],
-        )
-        return payload
-    except AsyncJobNotFoundError:
-        logger.error("event=overlay_request_failed indicator_id=%s job_id=%s reason=job_not_found", inst_id, job_id)
-        raise HTTPException(500, "Overlay job disappeared before completion")
     except AsyncJobTimeoutError as e:
-        logger.error(
-            "event=overlay_request_failed indicator_id=%s job_id=%s reason=job_timeout error=%s",
-            inst_id,
-            job_id,
-            str(e),
-        )
-        raise HTTPException(504, str(e))
-    except AsyncJobFailedError as e:
-        logger.error(
-            "event=overlay_request_failed indicator_id=%s job_id=%s reason=job_failed error=%s",
-            inst_id,
-            job_id,
-            str(e),
-        )
-        _raise_failed_job(str(e))
-    except KeyError:
-        logger.error("event=overlay_request_failed indicator_id=%s job_id=%s reason=indicator_not_found", inst_id, job_id)
-        raise HTTPException(404, "Indicator not found")
-    except LookupError as e:
-        # no candles or no overlays
-        logger.warning(
-            "event=overlay_request_failed indicator_id=%s job_id=%s reason=lookup_error error=%s",
-            inst_id,
-            job_id,
-            str(e),
-        )
-        raise HTTPException(404, str(e))
-    except ValueError as e:
-        logger.warning(
-            "event=overlay_request_failed indicator_id=%s job_id=%s reason=bad_request error=%s",
-            inst_id,
-            job_id,
-            str(e),
-        )
-        raise HTTPException(400, str(e))
-    except RuntimeError as e:
-        logger.error(
-            "event=overlay_request_failed indicator_id=%s job_id=%s reason=runtime_error error=%s",
-            inst_id,
-            job_id,
-            str(e),
-        )
-        raise HTTPException(500, str(e))
-    except Exception as e:
-        logger.exception("Unexpected overlay error")
-        logger.error(
-            "event=overlay_request_failed indicator_id=%s job_id=%s reason=unexpected error=%s",
-            inst_id,
-            job_id,
-            str(e),
-        )
-        raise HTTPException(500, "Unexpected error computing overlays")
-
-
-@router.post("/{inst_id}/signals")
-async def signals(inst_id: str, req: SignalRequest):
-    logger.info(
-        "event=signals_endpoint_called inst_id=%s req_datasource=%s req_exchange=%s req_symbol=%s req_interval=%s",
-        inst_id,
-        req.datasource,
-        req.exchange,
-        req.symbol,
-        req.interval,
-    )
-    try:
-        job_id = enqueue_signal_job(
+        _raise_indicator_http_error(
+            event="indicator_overlay_request_failed",
+            status_code=504,
+            detail=str(e),
             inst_id=inst_id,
             start=req.start,
             end=req.end,
@@ -324,30 +565,315 @@ async def signals(inst_id: str, req: SignalRequest):
             symbol=req.symbol,
             datasource=req.datasource,
             exchange=req.exchange,
-            config=req.config,
+            instrument_id=req.instrument_id,
+            duration_ms=(perf_counter() - t0) * 1000.0,
+            cursor_epoch=resolved_cursor_epoch,
         )
+    except AsyncJobFailedError as e:
+        _raise_failed_job(
+            str(e),
+            event="indicator_overlay_request_failed",
+            inst_id=inst_id,
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+            cursor_epoch=resolved_cursor_epoch,
+        )
+    except KeyError:
+        _raise_indicator_http_error(
+            event="indicator_overlay_request_failed",
+            status_code=404,
+            detail="Indicator not found",
+            inst_id=inst_id,
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+            duration_ms=(perf_counter() - t0) * 1000.0,
+            cursor_epoch=resolved_cursor_epoch,
+        )
+    except LookupError as e:
+        _raise_indicator_http_error(
+            event="indicator_overlay_request_failed",
+            status_code=404,
+            detail=str(e),
+            inst_id=inst_id,
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+            duration_ms=(perf_counter() - t0) * 1000.0,
+            cursor_epoch=resolved_cursor_epoch,
+        )
+    except ValueError as e:
+        _raise_indicator_http_error(
+            event="indicator_overlay_request_failed",
+            status_code=400,
+            detail=str(e),
+            inst_id=inst_id,
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+            duration_ms=(perf_counter() - t0) * 1000.0,
+            cursor_epoch=resolved_cursor_epoch,
+        )
+    except RuntimeError as e:
+        _raise_indicator_http_error(
+            event="indicator_overlay_request_failed",
+            status_code=500,
+            detail=str(e),
+            inst_id=inst_id,
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+            duration_ms=(perf_counter() - t0) * 1000.0,
+            cursor_epoch=resolved_cursor_epoch,
+        )
+    except Exception as e:
+        logger.exception(
+            "event=indicator_overlay_request_failed indicator_id=%s status_code=500 duration_ms=%.3f detail=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s cursor_epoch=%s",
+            inst_id,
+            (perf_counter() - t0) * 1000.0,
+            str(e),
+            req.start,
+            req.end,
+            req.interval,
+            req.symbol,
+            req.datasource,
+            req.exchange,
+            req.instrument_id,
+            resolved_cursor_epoch,
+        )
+        raise HTTPException(500, "Unexpected error computing overlays")
+
+
+@router.post("/{inst_id}/signals")
+async def signals(inst_id: str, req: SignalRequest):
+    logger.info(
+        "event=signals_endpoint_called inst_id=%s req_datasource=%s req_exchange=%s req_symbol=%s req_interval=%s req_instrument_id=%s",
+        inst_id,
+        req.datasource,
+        req.exchange,
+        req.symbol,
+        req.interval,
+        req.instrument_id,
+    )
+    try:
+        meta = get_instance_meta(inst_id)
+        enabled_output_names = enabled_signal_output_names_from_meta(meta)
+        effective_config = dict(req.config or {})
+        effective_config["enabled_signal_outputs"] = sorted(enabled_output_names)
+        enabled_event_keys = normalise_enabled_event_keys(effective_config)
+        request_fingerprint = quantlab_request_fingerprint(
+            job_type=JOB_TYPE_SIGNALS,
+            indicator_id=inst_id,
+            indicator_updated_at=str(meta.get("updated_at") or ""),
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+            config=effective_config,
+        )
+        request_payload = {
+            "inst_id": inst_id,
+            "start": req.start,
+            "end": req.end,
+            "interval": req.interval,
+            "symbol": req.symbol,
+            "datasource": req.datasource,
+            "exchange": req.exchange,
+            "instrument_id": req.instrument_id,
+            "config": dict(effective_config),
+        }
+        partition_key = quantlab_partition_key(request_payload)
+        reusable = reuse_quantlab_job(
+            job_type=JOB_TYPE_SIGNALS,
+            partition_key=partition_key,
+            request_fingerprint=request_fingerprint,
+        )
+        if reusable and reusable.get("status") == "succeeded":
+            payload = reusable.get("result")
+            if isinstance(payload, dict):
+                payload = filter_signal_payload(
+                    payload,
+                    enabled_output_names=enabled_output_names,
+                    enabled_event_keys=enabled_event_keys,
+                )
+                assert_engine_signal_runtime_path(
+                    payload,
+                    context="signals_endpoint_runtime_path_mismatch",
+                    indicator_id=inst_id,
+                )
+            logger.info(
+                "event=signals_endpoint_complete inst_id=%s cache_hit=true runtime_path=%s signals=%s",
+                inst_id,
+                payload.get("runtime_path") if isinstance(payload, dict) else None,
+                _signal_response_count(payload),
+            )
+            return payload
+
+        if reusable and reusable.get("id") and reusable.get("status") in {"queued", "running", "retry"}:
+            job_id = str(reusable["id"])
+        else:
+            job_id = enqueue_signal_job(
+                inst_id=inst_id,
+                start=req.start,
+                end=req.end,
+                interval=req.interval,
+                symbol=req.symbol,
+                datasource=req.datasource,
+                exchange=req.exchange,
+                instrument_id=req.instrument_id,
+                config=effective_config,
+                request_fingerprint=request_fingerprint,
+            )
         payload = await wait_for_job(job_id)
         if isinstance(payload, dict):
+            payload = filter_signal_payload(
+                payload,
+                enabled_output_names=enabled_output_names,
+                enabled_event_keys=enabled_event_keys,
+            )
             assert_engine_signal_runtime_path(
                 payload,
                 context="signals_endpoint_runtime_path_mismatch",
                 indicator_id=inst_id,
             )
+        logger.info(
+            "event=signals_endpoint_complete inst_id=%s cache_hit=false runtime_path=%s signals=%s",
+            inst_id,
+            payload.get("runtime_path") if isinstance(payload, dict) else None,
+            _signal_response_count(payload),
+        )
         return payload
     except AsyncJobNotFoundError:
-        raise HTTPException(500, "Signal job disappeared before completion")
+        _raise_indicator_http_error(
+            event="indicator_signal_request_failed",
+            status_code=500,
+            detail="Signal job disappeared before completion",
+            inst_id=inst_id,
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+        )
     except AsyncJobTimeoutError as e:
-        raise HTTPException(504, str(e))
+        _raise_indicator_http_error(
+            event="indicator_signal_request_failed",
+            status_code=504,
+            detail=str(e),
+            inst_id=inst_id,
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+        )
     except AsyncJobFailedError as e:
-        _raise_failed_job(str(e))
+        _raise_failed_job(
+            str(e),
+            event="indicator_signal_request_failed",
+            inst_id=inst_id,
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+        )
     except KeyError:
-        raise HTTPException(404, "Indicator not found")
+        _raise_indicator_http_error(
+            event="indicator_signal_request_failed",
+            status_code=404,
+            detail="Indicator not found",
+            inst_id=inst_id,
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+        )
     except LookupError as e:
-        raise HTTPException(404, str(e))
+        _raise_indicator_http_error(
+            event="indicator_signal_request_failed",
+            status_code=404,
+            detail=str(e),
+            inst_id=inst_id,
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+        )
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        _raise_indicator_http_error(
+            event="indicator_signal_request_failed",
+            status_code=400,
+            detail=str(e),
+            inst_id=inst_id,
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+        )
     except RuntimeError as e:
-        raise HTTPException(500, str(e))
+        _raise_indicator_http_error(
+            event="indicator_signal_request_failed",
+            status_code=500,
+            detail=str(e),
+            inst_id=inst_id,
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+        )
     except Exception:
-        logger.exception("Unexpected signal generation error")
+        logger.exception(
+            "event=indicator_signal_request_failed indicator_id=%s status_code=500 detail=unexpected_error start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s",
+            inst_id,
+            req.start,
+            req.end,
+            req.interval,
+            req.symbol,
+            req.datasource,
+            req.exchange,
+            req.instrument_id,
+        )
         raise HTTPException(500, "Unexpected error generating signals")

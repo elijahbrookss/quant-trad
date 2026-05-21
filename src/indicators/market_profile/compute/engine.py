@@ -6,27 +6,23 @@ No dependencies on visualization libraries, signal decorators, or UI concerns.
 """
 
 import logging
-import os
-import threading
-import time
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
 import pandas as pd
 
 from core.logger import logger
+from data_providers.utils.ohlcv import interval_to_timedelta
 from indicators.base import ComputeIndicator
-from indicators.config import DataContext
-from utils.log_context import build_log_context, with_log_context
-from utils.perf_log import get_obs_enabled, get_obs_step_sample_rate, should_sample
 
 from .models import Profile, ValueArea
+from ..manifest import (
+    DEFAULT_DAYS_BACK,
+    DEFAULT_MIN_MERGE_SESSIONS,
+)
 from .internal.computation import build_tpo_histogram, extract_value_area
 from .internal.bin_size import select_bin_size, infer_precision_from_step
 from .internal.merging import merge_profiles
-
-if TYPE_CHECKING:
-    from indicators.runtime.incremental_cache import IncrementalCache
 
 
 def _to_utc_timestamp(value: Any) -> pd.Timestamp:
@@ -34,6 +30,16 @@ def _to_utc_timestamp(value: Any) -> pd.Timestamp:
     if ts.tzinfo is None:
         return ts.tz_localize("UTC")
     return ts.tz_convert("UTC")
+
+
+def _ensure_utc_index(index: Any) -> pd.DatetimeIndex:
+    if not isinstance(index, pd.DatetimeIndex):
+        return pd.to_datetime(index, utc=True)
+    if index.tz is None:
+        return index.tz_localize("UTC")
+    if str(index.tz) != "UTC":
+        return index.tz_convert("UTC")
+    return index
 
 
 class MarketProfileIndicator(ComputeIndicator):
@@ -51,28 +57,8 @@ class MarketProfileIndicator(ComputeIndicator):
     """
 
     NAME = "market_profile"
-    DEFAULT_MIN_MERGE_SESSIONS = 3
-    DEFAULT_DAYS_BACK = 180
-
-    # Define required params with defaults (used during creation only)
-    # These params MUST be present in stored indicator records
-    REQUIRED_PARAMS = {
-        "use_merged_value_areas": True,
-        "merge_threshold": 0.6,
-        "min_merge_sessions": DEFAULT_MIN_MERGE_SESSIONS,
-        "extend_value_area_to_chart_end": True,
-        "days_back": DEFAULT_DAYS_BACK,
-    }
-    RUNTIME_INPUT_SPECS = [
-        {
-            "source_timeframe": "30m",
-            "lookback_days_param": "days_back",
-            "session_scope": "global",
-            "alignment": "closed_bar_only",
-            "normalization": "project_to_strategy_timeframe",
-            "incremental_eval": True,
-        }
-    ]
+    DEFAULT_MIN_MERGE_SESSIONS = DEFAULT_MIN_MERGE_SESSIONS
+    DEFAULT_DAYS_BACK = DEFAULT_DAYS_BACK
 
     def __init__(
         self,
@@ -123,309 +109,6 @@ class MarketProfileIndicator(ComputeIndicator):
 
         # Compute profiles on initialization
         self._profiles = self._compute_daily_profiles()
-        # Cache normalized profile timelines keyed by chart timeframe + merge policy.
-        self._normalized_runtime_profiles_cache: Dict[tuple[str, bool, float, int], List[Profile]] = {}
-
-    @classmethod
-    def from_context(
-        cls,
-        provider,
-        ctx: DataContext,
-        bin_size: Optional[float] = None,
-        use_merged_value_areas: bool = True,
-        merge_threshold: float = 0.6,
-        min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
-        extend_value_area_to_chart_end: bool = True,
-        days_back: int = DEFAULT_DAYS_BACK,
-        **kwargs
-    ):
-        """
-        Instantiate from a DataContext and data provider.
-
-        Market Profile always fetches data on a 30-minute interval for the specified
-        days_back period, regardless of the chart's timeframe or date range.
-
-        Args:
-            provider: Data provider with get_ohlcv method
-            ctx: DataContext with symbol, start, end, interval (interval and start are overridden)
-            bin_size: Price bucket size (auto-inferred if not provided)
-            use_merged_value_areas: Whether to merge overlapping value areas (default: True)
-            merge_threshold: Overlap threshold for merging (default: 0.6)
-            min_merge_sessions: Minimum sessions required for merge (default: 3)
-            extend_value_area_to_chart_end: Extend value area boxes to chart end (default: True)
-            days_back: Number of days of historical data to fetch (default: 180)
-            **kwargs: Additional parameters (bot_id, strategy_id)
-
-        Returns:
-            MarketProfileIndicator instance
-
-        Raises:
-            ValueError: If no OHLCV data is returned
-        """
-        from datetime import timedelta
-
-        # Normalize the request window once at the indicator boundary so provider
-        # data and computed profiles stay on a single UTC timeline.
-        end_date = ctx.end_utc()
-        start_date = end_date - timedelta(days=days_back)
-
-        mp_ctx = DataContext(
-            symbol=ctx.symbol,
-            start=start_date.isoformat(),
-            end=end_date.isoformat(),
-            interval="30m",  # Always use 30min for Market Profile
-            instrument_id=ctx.instrument_id,
-        )
-
-        logger.info(
-            "Fetching Market Profile data: symbol=%s, days_back=%d, start=%s, end=%s, interval=30m",
-            ctx.symbol,
-            days_back,
-            start_date.isoformat(),
-            end_date.isoformat(),
-        )
-
-        df = provider.get_ohlcv(mp_ctx)
-        if df is None or df.empty:
-            raise ValueError(
-                f"Missing OHLCV for {ctx.symbol} from {start_date.isoformat()} to {end_date.isoformat()}"
-            )
-
-        # Log the actual data range obtained
-        actual_start = _to_utc_timestamp(df.index.min())
-        actual_end = _to_utc_timestamp(df.index.max())
-
-        logger.info(
-            "✓ Market Profile instantiated | symbol=%s | requested_start=%s | actual_start=%s | end=%s | rows=%d | interval=30m",
-            ctx.symbol,
-            start_date.strftime("%Y-%m-%d %H:%M:%S"),
-            actual_start.strftime("%Y-%m-%d %H:%M:%S"),
-            actual_end.strftime("%Y-%m-%d %H:%M:%S"),
-            len(df),
-        )
-
-        if actual_start > start_date:
-            logger.warning(
-                "⚠ Market Profile: Requested data from %s but oldest available is %s (symbol=%s). "
-                "Historical data limited by provider.",
-                start_date.strftime("%Y-%m-%d"),
-                actual_start.strftime("%Y-%m-%d"),
-                ctx.symbol,
-            )
-
-        return cls(
-            df=df,
-            bin_size=bin_size,
-            use_merged_value_areas=use_merged_value_areas,
-            merge_threshold=merge_threshold,
-            min_merge_sessions=min_merge_sessions,
-            extend_value_area_to_chart_end=extend_value_area_to_chart_end,
-            days_back=days_back,
-            symbol=ctx.symbol,
-            bot_id=kwargs.get("bot_id"),
-            strategy_id=kwargs.get("strategy_id"),
-        )
-
-    @classmethod
-    def from_context_with_incremental_cache(
-        cls,
-        provider,
-        ctx: DataContext,
-        cache: "IncrementalCache",
-        inst_id: str,
-        bin_size: Optional[float] = None,
-        use_merged_value_areas: bool = True,
-        merge_threshold: float = 0.6,
-        min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
-        extend_value_area_to_chart_end: bool = True,
-        days_back: int = DEFAULT_DAYS_BACK,
-        **kwargs
-    ):
-        """
-        Instantiate from a DataContext with incremental caching.
-
-        This method checks the cache for previously computed daily profiles
-        and only fetches/computes data for missing days, enabling efficient
-        incremental updates.
-
-        Args:
-            provider: Data provider with get_ohlcv method
-            ctx: DataContext with symbol, start, end, interval
-            cache: IncrementalCache instance for storing/retrieving daily profiles
-            inst_id: Indicator instance ID for cache key
-            bin_size: Price bucket size (auto-inferred if not provided)
-            use_merged_value_areas: Whether to merge overlapping value areas
-            merge_threshold: Overlap threshold for merging
-            min_merge_sessions: Minimum sessions required for merge
-            extend_value_area_to_chart_end: Extend value area boxes to chart end
-            days_back: Number of days of historical data to use
-            **kwargs: Additional parameters (bot_id, strategy_id, etc.)
-
-        Returns:
-            MarketProfileIndicator instance with profiles from cache + fresh computation
-        """
-        from datetime import timedelta
-
-        end_date = ctx.end_utc()
-        start_date = end_date - timedelta(days=days_back)
-
-        # Build date keys for cache lookup
-        date_keys = []
-        current = start_date
-        while current <= end_date:
-            date_keys.append(current.strftime("%Y-%m-%d"))
-            current += timedelta(days=1)
-
-        # NOTE: Incremental cache is per-process; key=(inst_id, symbol, date).
-        # NOTE: No eviction beyond max_entries; multiprocessing/container-per-bot will duplicate work.
-        should_log = get_obs_enabled() and should_sample(get_obs_step_sample_rate())
-        get_started = time.perf_counter() if should_log else 0.0
-        # Check cache for existing daily profiles
-        cached_profiles_dict = cache.get_range(inst_id, ctx.symbol, date_keys)
-        if should_log:
-            get_ms = (time.perf_counter() - get_started) * 1000.0
-            cache_key_summary = f"{ctx.symbol}:{days_back}d"
-            base_context = build_log_context(
-                cache_name="incremental_profile_cache",
-                cache_scope="process",
-                cache_key_summary=cache_key_summary,
-                time_taken_ms=get_ms,
-                pid=os.getpid(),
-                thread_name=threading.current_thread().name,
-                symbol=ctx.symbol,
-                timeframe=ctx.interval,
-                indicator_id=inst_id,
-            )
-            logger.debug(
-                with_log_context(
-                    "cache.get",
-                    build_log_context(event="cache.get", **base_context),
-                )
-            )
-            if cached_profiles_dict:
-                logger.debug(
-                    with_log_context(
-                        "cache.hit",
-                        build_log_context(event="cache.hit", **base_context),
-                    )
-                )
-            if len(cached_profiles_dict) < len(date_keys):
-                logger.debug(
-                    with_log_context(
-                        "cache.miss",
-                        build_log_context(event="cache.miss", **base_context),
-                    )
-                )
-
-        logger.info(
-            "Incremental cache check | inst_id=%s symbol=%s | cached_days=%d | total_days=%d",
-            inst_id,
-            ctx.symbol,
-            len(cached_profiles_dict),
-            len(date_keys),
-        )
-
-        # If we have all profiles cached, we can skip data fetching entirely
-        if len(cached_profiles_dict) >= len(date_keys):
-            logger.info(
-                "Using fully cached profiles | inst_id=%s symbol=%s | profiles=%d",
-                inst_id,
-                ctx.symbol,
-                len(cached_profiles_dict),
-            )
-            # Create a minimal instance with cached profiles
-            empty_df = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-            empty_df.index = pd.DatetimeIndex([])
-
-            instance = cls.__new__(cls)
-            instance.bin_size = bin_size or 0.01
-            instance._bin_size_locked = bin_size is not None
-            instance._bin_precision = 2
-            instance.price_precision = 2
-            instance.use_merged_value_areas = use_merged_value_areas
-            instance.merge_threshold = merge_threshold
-            instance.min_merge_sessions = min_merge_sessions
-            instance.extend_value_area_to_chart_end = extend_value_area_to_chart_end
-            instance.days_back = days_back
-            instance.symbol = ctx.symbol
-            instance.bot_id = kwargs.get("bot_id")
-            instance.strategy_id = kwargs.get("strategy_id")
-            instance.df = empty_df
-            instance._profiles = sorted(cached_profiles_dict.values(), key=lambda p: p.start)
-            instance._normalized_runtime_profiles_cache = {}
-
-            return instance
-
-        # Need to fetch data and compute profiles
-        mp_ctx = DataContext(
-            symbol=ctx.symbol,
-            start=start_date.isoformat(),
-            end=end_date.isoformat(),
-            interval="30m",
-            instrument_id=ctx.instrument_id,
-        )
-
-        logger.info(
-            "Fetching Market Profile data with cache | symbol=%s days_back=%d cached_days=%d",
-            ctx.symbol,
-            days_back,
-            len(cached_profiles_dict),
-        )
-
-        df = provider.get_ohlcv(mp_ctx)
-        if df is None or df.empty:
-            raise ValueError(
-                f"Missing OHLCV for {ctx.symbol} from {start_date.isoformat()} to {end_date.isoformat()}"
-            )
-
-        # Create instance normally
-        instance = cls(
-            df=df,
-            bin_size=bin_size,
-            use_merged_value_areas=use_merged_value_areas,
-            merge_threshold=merge_threshold,
-            min_merge_sessions=min_merge_sessions,
-            extend_value_area_to_chart_end=extend_value_area_to_chart_end,
-            days_back=days_back,
-            symbol=ctx.symbol,
-            bot_id=kwargs.get("bot_id"),
-            strategy_id=kwargs.get("strategy_id"),
-        )
-
-        # Cache the newly computed profiles by date
-        set_started = time.perf_counter() if should_log else 0.0
-        for profile in instance._profiles:
-            date_key = profile.start.strftime("%Y-%m-%d")
-            cache.set(inst_id, ctx.symbol, date_key, profile)
-        if should_log:
-            set_ms = (time.perf_counter() - set_started) * 1000.0
-            cache_key_summary = f"{ctx.symbol}:{days_back}d"
-            set_context = build_log_context(
-                cache_name="incremental_profile_cache",
-                cache_scope="process",
-                cache_key_summary=cache_key_summary,
-                time_taken_ms=set_ms,
-                pid=os.getpid(),
-                thread_name=threading.current_thread().name,
-                symbol=ctx.symbol,
-                timeframe=ctx.interval,
-                indicator_id=inst_id,
-            )
-            logger.debug(
-                with_log_context(
-                    "cache.set",
-                    build_log_context(event="cache.set", **set_context),
-                )
-            )
-
-        logger.info(
-            "Cached %d daily profiles | inst_id=%s symbol=%s",
-            len(instance._profiles),
-            inst_id,
-            ctx.symbol,
-        )
-
-        return instance
 
     def get_profiles(self) -> List[Profile]:
         """
@@ -604,15 +287,18 @@ class MarketProfileIndicator(ComputeIndicator):
                 )
 
         for profile in raw_profiles:
+            end_ts = _to_utc_timestamp(profile.end)
             profiles_payload.append(
                 {
                     "start": int(_to_utc_timestamp(profile.start).timestamp()),
-                    "end": int(_to_utc_timestamp(profile.end).timestamp()),
+                    "end": int(end_ts.timestamp()),
                     "VAH": float(profile.vah),
                     "VAL": float(profile.val),
                     "POC": float(profile.poc),
                     "session_count": int(getattr(profile, "session_count", 1) or 1),
                     "precision": int(getattr(profile, "precision", 4) or 4),
+                    "formed_at": int(end_ts.timestamp()),
+                    "known_at": int(end_ts.timestamp()),
                 }
             )
 
@@ -640,6 +326,43 @@ class MarketProfileIndicator(ComputeIndicator):
             "strategy_id": self.strategy_id,
         }
 
+    def build_runtime_source_facts(
+        self,
+        *,
+        params: Optional[Mapping[str, Any]] = None,
+        symbol: Optional[str] = None,
+        chart_timeframe: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return immutable runtime source facts for walk-forward execution."""
+        profile_params = dict(params or {})
+        profile_params.setdefault("use_merged_value_areas", bool(self.use_merged_value_areas))
+        profile_params.setdefault("merge_threshold", float(self.merge_threshold))
+        profile_params.setdefault("min_merge_sessions", int(self.min_merge_sessions))
+        profile_params.setdefault(
+            "extend_value_area_to_chart_end", bool(self.extend_value_area_to_chart_end)
+        )
+        profile_params.setdefault("days_back", int(self.days_back))
+        resolved_chart_timeframe = str(chart_timeframe or "").strip().lower() or "30m"
+        base_profiles = self.get_profiles()
+        profile_params["profiles_premerged"] = False
+        profile_params["strategy_timeframe"] = resolved_chart_timeframe
+        payload_profiles: List[Dict[str, Any]] = []
+        for profile in base_profiles:
+            payload_profiles.append(
+                self._serialize_runtime_profile_for_strategy_timeframe(
+                    profile,
+                    chart_timeframe=resolved_chart_timeframe,
+                )
+            )
+        return {
+            "symbol": str(symbol or self.symbol or ""),
+            "profiles": payload_profiles,
+            "profile_params": profile_params,
+            "profile_chart_timeframe": resolved_chart_timeframe,
+            "profile_source_timeframe": "30m",
+            "profile_boundary_semantics": "strategy_timeframe_projection",
+        }
+
     def build_runtime_signal_payload(
         self,
         *,
@@ -649,139 +372,109 @@ class MarketProfileIndicator(ComputeIndicator):
         color: Optional[str] = None,
         chart_timeframe: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Return canonical runtime signal payload from already-computed profiles.
-
-        This allows signal execution to reuse the indicator instance/cache state
-        without replaying indicator computation per bar.
-        """
-        profile_params = dict(params or {})
-        profile_params.setdefault("use_merged_value_areas", bool(self.use_merged_value_areas))
-        profile_params.setdefault("merge_threshold", float(self.merge_threshold))
-        profile_params.setdefault("min_merge_sessions", int(self.min_merge_sessions))
-        profile_params.setdefault(
-            "extend_value_area_to_chart_end", bool(self.extend_value_area_to_chart_end)
+        """Return canonical runtime signal payload from already-computed profiles."""
+        payload = self.build_runtime_source_facts(
+            params=params,
+            symbol=symbol,
+            chart_timeframe=chart_timeframe,
         )
-        profile_params.setdefault("days_back", int(self.days_back))
-        use_merged = bool(profile_params.get("use_merged_value_areas", self.use_merged_value_areas))
-        merge_threshold = float(profile_params.get("merge_threshold", self.merge_threshold))
-        min_merge_sessions = int(profile_params.get("min_merge_sessions", self.min_merge_sessions))
-        resolved_chart_timeframe = str(chart_timeframe or "").strip().lower() or "30m"
-        # Signals run on chart timeframe bars, but profile boundaries must stay in
-        # source/session time semantics so overlays and runtime decisions share
-        # the same merged profile identity.
-        runtime_profiles = (
-            self.get_merged_profiles(merge_threshold, min_merge_sessions)
-            if use_merged
-            else self.get_profiles()
+        payload["_indicator_id"] = str(indicator_id or "")
+        payload["overlay_color"] = (
+            str(color).strip() if isinstance(color, str) and color.strip() else None
         )
-        profile_params["profiles_premerged"] = bool(use_merged)
-        payload_profiles: List[Dict[str, Any]] = []
-        for profile in runtime_profiles:
-            start_ts = _to_utc_timestamp(profile.start)
-            end_ts = _to_utc_timestamp(profile.end)
-            payload_profiles.append(
-                {
-                    "start": int(start_ts.timestamp()),
-                    "end": int(end_ts.timestamp()),
-                    "VAH": float(profile.vah),
-                    "VAL": float(profile.val),
-                    "POC": float(profile.poc),
-                    "session_count": int(getattr(profile, "session_count", 1) or 1),
-                    "precision": int(getattr(profile, "precision", self.price_precision) or self.price_precision),
-                    "formed_at": int(end_ts.timestamp()),
-                    "known_at": int(end_ts.timestamp()),
-                }
-            )
-        return {
-            "_indicator_id": str(indicator_id or ""),
-            "symbol": str(symbol or self.symbol or ""),
-            "profiles": payload_profiles,
-            "profile_params": profile_params,
-            "profile_chart_timeframe": resolved_chart_timeframe,
-            "profile_source_timeframe": "30m",
-            "profile_boundary_semantics": "source_session",
-            "overlay_color": str(color).strip() if isinstance(color, str) and color.strip() else None,
-        }
+        return payload
 
-    def _runtime_profiles_for_chart_timeframe(
+    def _serialize_runtime_profile_for_strategy_timeframe(
         self,
+        profile: Profile,
         *,
         chart_timeframe: str,
-        use_merged: bool,
-        merge_threshold: float,
-        min_merge_sessions: int,
-    ) -> List[Profile]:
-        key = (
-            str(chart_timeframe or "").strip().lower() or "30m",
-            bool(use_merged),
-            float(merge_threshold),
-            int(min_merge_sessions),
+    ) -> Dict[str, Any]:
+        source_start = _to_utc_timestamp(profile.start)
+        source_end = _to_utc_timestamp(profile.end)
+        projected_start = self._project_profile_start_to_strategy_timeframe(
+            source_start,
+            chart_timeframe=chart_timeframe,
         )
-        cached = self._normalized_runtime_profiles_cache.get(key)
-        if cached is not None:
-            logger.debug(
-                "Market Profile runtime profile cache hit | symbol=%s chart_timeframe=%s use_merged=%s profiles=%d",
-                self.symbol,
-                key[0],
-                key[1],
-                len(cached),
-            )
-            return cached
+        projected_end = self._project_profile_end_to_strategy_timeframe(
+            source_end,
+            chart_timeframe=chart_timeframe,
+        )
+        if projected_end < projected_start:
+            projected_end = projected_start
+        return {
+            "start": int(projected_start.timestamp()),
+            "end": int(projected_end.timestamp()),
+            "source_start": int(source_start.timestamp()),
+            "source_end": int(source_end.timestamp()),
+            "projected_start": int(projected_start.timestamp()),
+            "projected_end": int(projected_end.timestamp()),
+            "VAH": float(profile.vah),
+            "VAL": float(profile.val),
+            "POC": float(profile.poc),
+            "session_count": int(getattr(profile, "session_count", 1) or 1),
+            "precision": int(
+                getattr(profile, "precision", self.price_precision)
+                or self.price_precision
+            ),
+            "formed_at": int(source_end.timestamp()),
+            "known_at": int(projected_end.timestamp()),
+        }
 
-        base_profiles = (
-            self.get_merged_profiles(merge_threshold, min_merge_sessions)
-            if use_merged
-            else self.get_profiles()
-        )
-        normalized = self._normalize_profiles_to_chart_timeframe(base_profiles, key[0])
-        self._normalized_runtime_profiles_cache[key] = normalized
-        logger.info(
-            "Market Profile runtime profile cache miss | symbol=%s chart_timeframe=%s use_merged=%s source_profiles=%d normalized_profiles=%d",
-            self.symbol,
-            key[0],
-            key[1],
-            len(base_profiles),
-            len(normalized),
-        )
-        return normalized
-
-    def _normalize_profiles_to_chart_timeframe(
-        self,
-        profiles: List[Profile],
+    @staticmethod
+    def _project_profile_start_to_strategy_timeframe(
+        value: pd.Timestamp,
+        *,
         chart_timeframe: str,
-    ) -> List[Profile]:
+    ) -> pd.Timestamp:
+        return MarketProfileIndicator._project_timestamp_to_timeframe(
+            value,
+            chart_timeframe=chart_timeframe,
+            mode="floor",
+        )
+
+    @staticmethod
+    def _project_profile_end_to_strategy_timeframe(
+        value: pd.Timestamp,
+        *,
+        chart_timeframe: str,
+    ) -> pd.Timestamp:
+        return MarketProfileIndicator._project_timestamp_to_timeframe(
+            value,
+            chart_timeframe=chart_timeframe,
+            mode="ceil",
+        )
+
+    @staticmethod
+    def _project_timestamp_to_timeframe(
+        value: pd.Timestamp,
+        *,
+        chart_timeframe: str,
+        mode: str,
+    ) -> pd.Timestamp:
+        ts = _to_utc_timestamp(value)
         tf = str(chart_timeframe or "").strip().lower() or "30m"
         if tf in {"30m", "30min"}:
-            return list(profiles)
-        normalized: List[Profile] = []
-        for profile in profiles:
-            start = _to_utc_timestamp(profile.start)
-            end = _to_utc_timestamp(profile.end)
+            return ts
+        try:
+            step = interval_to_timedelta(tf)
+        except Exception:
+            step = None
+        if step is None:
             try:
-                norm_start = start.floor(tf)
+                return ts.floor(tf) if mode == "floor" else ts.ceil(tf)
             except Exception:
-                norm_start = start
-            try:
-                norm_end = end.ceil(tf)
-            except Exception:
-                norm_end = end
-            if norm_end < norm_start:
-                norm_end = norm_start
-            normalized.append(
-                Profile(
-                    start=norm_start,
-                    end=norm_end,
-                    value_area=ValueArea(
-                        vah=float(profile.vah),
-                        val=float(profile.val),
-                        poc=float(profile.poc),
-                    ),
-                    session_count=int(getattr(profile, "session_count", 1) or 1),
-                    tpo_histogram=getattr(profile, "tpo_histogram", None),
-                    precision=int(getattr(profile, "precision", self.price_precision) or self.price_precision),
-                )
-            )
-        return normalized
+                return ts
+        step_seconds = int(step.total_seconds())
+        if step_seconds <= 0:
+            return ts
+        epoch = int(ts.timestamp())
+        remainder = epoch % step_seconds
+        if mode == "floor":
+            projected_epoch = epoch - remainder
+        else:
+            projected_epoch = epoch if remainder == 0 else epoch + (step_seconds - remainder)
+        return pd.Timestamp(projected_epoch, unit="s", tz="UTC")
 
     def _compute_daily_profiles(self) -> List[Profile]:
         """
@@ -790,16 +483,34 @@ class MarketProfileIndicator(ComputeIndicator):
         Returns:
             List of Profile objects
         """
-        df = self.df.copy()
-        df.index = pd.to_datetime(df.index, utc=True)
-        profiles = []
+        if self.df is None or self.df.empty:
+            logger.info("Starting daily profile computation for %d sessions", 0)
+            logger.info("Completed daily profile computation. Total profiles: %d", 0)
+            return []
 
-        logger.info("Starting daily profile computation for %d sessions", len(np.unique(df.index.date)))
+        df = self.df
+        index = _ensure_utc_index(df.index)
+        if not index.is_monotonic_increasing:
+            order = np.argsort(index.asi8, kind="stable")
+            df = df.iloc[order]
+            index = index.take(order)
 
-        # Group rows by calendar date
-        grouped = df.groupby(df.index.date)
-        for session_date, group in grouped:
-            logger.debug("Processing session: %s, bars: %d", session_date, len(group))
+        session_keys = index.normalize()
+        session_values = session_keys.asi8
+        boundaries = (
+            np.flatnonzero(session_values[1:] != session_values[:-1]) + 1
+            if len(session_values) > 1
+            else np.array([], dtype=np.int64)
+        )
+        start_indices = np.concatenate((np.array([0], dtype=np.int64), boundaries))
+        end_indices = np.concatenate((boundaries, np.array([len(df)], dtype=np.int64)))
+        profiles: List[Profile] = []
+
+        logger.info("Starting daily profile computation for %d sessions", len(start_indices))
+
+        for start_idx, end_idx in zip(start_indices.tolist(), end_indices.tolist()):
+            group = df.iloc[start_idx:end_idx]
+            session_date = session_keys[start_idx].date()
 
             # Build TPO histogram
             tpo_hist = build_tpo_histogram(group, self.bin_size, self._bin_precision)
@@ -813,8 +524,8 @@ class MarketProfileIndicator(ComputeIndicator):
 
             # Create Profile object
             profile = Profile(
-                start=group.index.min(),
-                end=group.index.max(),
+                start=index[start_idx],
+                end=index[end_idx - 1],
                 value_area=value_area,
                 session_count=1,
                 tpo_histogram=tpo_hist,
@@ -822,13 +533,17 @@ class MarketProfileIndicator(ComputeIndicator):
             )
 
             profiles.append(profile)
-            logger.info(
-                "Profile for %s: POC=%.{prec}f, VAH=%.{prec}f, VAL=%.{prec}f".replace("{prec}", str(self.price_precision)),
-                session_date,
-                profile.poc,
-                profile.vah,
-                profile.val,
-            )
 
         logger.info("Completed daily profile computation. Total profiles: %d", len(profiles))
+        if logger.isEnabledFor(logging.DEBUG) and profiles:
+            sample = [
+                {
+                    "session": profiles[index].start.date().isoformat(),
+                    "poc": float(profiles[index].poc),
+                    "vah": float(profiles[index].vah),
+                    "val": float(profiles[index].val),
+                }
+                for index in range(min(3, len(profiles)))
+            ]
+            logger.debug("market_profile_daily_profiles_built | total=%s sample=%s", len(profiles), sample)
         return profiles

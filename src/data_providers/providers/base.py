@@ -1,16 +1,15 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from enum import Enum
 import datetime as dt
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from enum import Enum
-from typing import Iterable, List, Optional, Tuple
+import traceback
+from typing import Any, Iterable, List, Mapping, Optional, Tuple
 
 import pandas as pd
 from sqlalchemy.exc import SQLAlchemyError
 
 from core.chart_plotter import ChartPlotter
+from core.candle_continuity import INGESTION_FAILURE, PROVIDER_MISSING_DATA
 from core.logger import logger
 from indicators.config import DataContext
 from ..config.runtime import ProviderRuntimeConfig, runtime_config_from_env
@@ -231,17 +230,35 @@ class BaseDataProvider(ProviderInterface):
             requested_end,
         )
 
+    def _load_closure_evidence_ranges(
+        self,
+        ctx: DataContext,
+        requested_start: pd.Timestamp,
+        requested_end: pd.Timestamp,
+    ) -> List[Mapping[str, Any]]:
+        loader = getattr(self._persistence, "load_closure_evidence_ranges", None)
+        if callable(loader):
+            evidence = loader(ctx, self.get_datasource(), requested_start, requested_end)
+            if evidence:
+                return list(evidence)
+        return [
+            {"start": start, "end": end, "metadata": {}}
+            for start, end in self._load_closure_ranges(ctx, requested_start, requested_end)
+        ]
+
     def _record_closure_range(
         self,
         ctx: DataContext,
         start: pd.Timestamp,
         end: pd.Timestamp,
+        metadata: Mapping[str, Any] | None = None,
     ):
         self._persistence.record_closure_range(
             ctx,
             self.get_datasource(),
             start,
             end,
+            metadata=metadata,
         )
 
     def _write_dataframe(self, df: pd.DataFrame, ctx: DataContext) -> int:
@@ -407,10 +424,28 @@ class BaseDataProvider(ProviderInterface):
                 requested_end,
                 ctx.interval,
             )
+            detected_missing_ranges = list(missing_ranges)
+            gap_classification = list(getattr(df, "attrs", {}).get("gap_classification") or [])
 
-            closures = self._load_closure_ranges(ctx, requested_start, requested_end)
+            closures = self._load_closure_evidence_ranges(ctx, requested_start, requested_end)
             if closures:
-                missing_ranges = self._subtract_ranges(missing_ranges, closures)
+                gap_classification.extend(
+                    _closure_gap_classification_entries(
+                        detected_missing_ranges,
+                        closures,
+                    )
+                )
+                missing_ranges = self._subtract_ranges(
+                    missing_ranges,
+                    [
+                        (
+                            pd.to_datetime(entry.get("start"), utc=True),
+                            pd.to_datetime(entry.get("end"), utc=True),
+                        )
+                        for entry in closures
+                        if isinstance(entry, Mapping) and entry.get("start") and entry.get("end")
+                    ],
+                )
 
             supplemental_frames = []
             for start, end in missing_ranges:
@@ -436,9 +471,30 @@ class BaseDataProvider(ProviderInterface):
                         end.isoformat(),
                         exc,
                     )
+                    gap_classification.append(
+                        _provider_gap_classification_entry(
+                            start,
+                            end,
+                            classification=INGESTION_FAILURE,
+                            reason_code="provider_fetch_exception",
+                            evidence="provider_api_exception",
+                            provider=self.get_datasource(),
+                            symbol=ctx.symbol,
+                            interval=ctx.interval,
+                            exception=exc,
+                        )
+                    )
                     continue
 
                 if segment is None or segment.empty:
+                    metadata = _provider_gap_evidence_metadata(
+                        provider=self.get_datasource(),
+                        symbol=ctx.symbol,
+                        interval=ctx.interval,
+                        reason_code="provider_response_empty",
+                        evidence="provider_api_empty_response",
+                        segment=segment,
+                    )
                     logger.info(
                         "Partial fetch for %s [%s] returned no rows for %s to %s; caching closure.",
                         ctx.symbol,
@@ -446,7 +502,19 @@ class BaseDataProvider(ProviderInterface):
                         start.isoformat(),
                         end.isoformat(),
                     )
-                    self._record_closure_range(ctx, start, end)
+                    self._record_closure_range(ctx, start, end, metadata=metadata)
+                    gap_classification.append(
+                        _provider_gap_classification_entry(
+                            start,
+                            end,
+                            reason_code="provider_response_empty",
+                            evidence="provider_api_empty_response",
+                            provider=self.get_datasource(),
+                            symbol=ctx.symbol,
+                            interval=ctx.interval,
+                            metadata=metadata,
+                        )
+                    )
                     continue
 
                 segment = segment.copy()
@@ -454,6 +522,14 @@ class BaseDataProvider(ProviderInterface):
                 segment["timestamp"] = segment_ts
                 in_window = segment[(segment_ts >= start) & (segment_ts < end)]
                 if in_window.empty:
+                    metadata = _provider_gap_evidence_metadata(
+                        provider=self.get_datasource(),
+                        symbol=ctx.symbol,
+                        interval=ctx.interval,
+                        reason_code="provider_response_out_of_window",
+                        evidence="provider_api_out_of_window_response",
+                        segment=segment,
+                    )
                     logger.info(
                         "Partial fetch for %s [%s] produced data outside %s -> %s; caching closure.",
                         ctx.symbol,
@@ -461,7 +537,19 @@ class BaseDataProvider(ProviderInterface):
                         start.isoformat(),
                         end.isoformat(),
                     )
-                    self._record_closure_range(ctx, start, end)
+                    self._record_closure_range(ctx, start, end, metadata=metadata)
+                    gap_classification.append(
+                        _provider_gap_classification_entry(
+                            start,
+                            end,
+                            reason_code="provider_response_out_of_window",
+                            evidence="provider_api_out_of_window_response",
+                            provider=self.get_datasource(),
+                            symbol=ctx.symbol,
+                            interval=ctx.interval,
+                            metadata=metadata,
+                        )
+                    )
                     continue
 
                 segment.sort_values("timestamp", inplace=True)
@@ -490,12 +578,18 @@ class BaseDataProvider(ProviderInterface):
                 combined.drop_duplicates(subset="timestamp", keep="last", inplace=True)
                 combined.sort_values("timestamp", inplace=True)
                 df = combined.reset_index(drop=True)
+            if gap_classification:
+                df.attrs["gap_classification"] = gap_classification
 
         # Recompute ATR to ensure it's up-to-date with the latest calculation logic
         # This handles cases where cached data has stale or invalid ATR values
         df = self._compute_tr_atr(df)
 
-        return self._format_ohlcv_dataframe(df, ctx)
+        formatted = self._format_ohlcv_dataframe(df, ctx)
+        if getattr(df, "attrs", {}).get("gap_classification"):
+            formatted.attrs["gap_classification"] = list(df.attrs["gap_classification"])
+            formatted.attrs["gap_classification_source"] = "provider_closure"
+        return formatted
 
     def _fetch_and_format(self, ctx: DataContext) -> pd.DataFrame:
         try:
@@ -598,3 +692,133 @@ class BaseDataProvider(ProviderInterface):
         title = title or f"{plot_ctx.symbol} | {plot_ctx.interval}"
         logger.debug("df index sample: %s", df.index)
         ChartPlotter.plot_ohlc(df, title=title, ctx=plot_ctx, datasource=self.get_datasource(), **kwargs)
+
+
+def _safe_metadata_value(value: Any) -> Any:
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _safe_metadata_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_safe_metadata_value(item) for item in value]
+    return str(value)
+
+
+def _provider_response_metadata(segment: Any) -> dict:
+    attrs = getattr(segment, "attrs", {}) if segment is not None else {}
+    if not isinstance(attrs, Mapping):
+        return {}
+    allowed = {
+        "provider_status",
+        "provider_message",
+        "provider_reason",
+        "provider_response",
+        "response_status",
+        "response_message",
+        "request_id",
+    }
+    return {
+        key: _safe_metadata_value(value)
+        for key, value in attrs.items()
+        if str(key) in allowed and value not in (None, "", [], {})
+    }
+
+
+def _provider_gap_evidence_metadata(
+    *,
+    provider: str,
+    symbol: str,
+    interval: str,
+    reason_code: str,
+    evidence: str,
+    segment: Any = None,
+) -> dict:
+    metadata = {
+        "provider": str(provider or ""),
+        "symbol": str(symbol or ""),
+        "interval": str(interval or ""),
+        "reason_code": str(reason_code or ""),
+        "evidence": str(evidence or ""),
+    }
+    if segment is not None:
+        try:
+            metadata["response_row_count"] = int(len(segment))
+        except Exception:
+            pass
+    provider_response = _provider_response_metadata(segment)
+    if provider_response:
+        metadata["provider_response"] = provider_response
+    return metadata
+
+
+def _exception_metadata(exc: BaseException) -> dict:
+    stack_trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    return {
+        "exception_type": type(exc).__name__,
+        "exception_message": str(exc),
+        "stack_trace": stack_trace[:8000],
+        "stack_trace_truncated": len(stack_trace) > 8000,
+    }
+
+
+def _provider_gap_classification_entry(
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    *,
+    classification: str = PROVIDER_MISSING_DATA,
+    reason_code: str = "source_sparse",
+    evidence: str = "portal_candle_closure",
+    provider: str | None = None,
+    symbol: str | None = None,
+    interval: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    exception: BaseException | None = None,
+) -> dict:
+    provider_evidence = _safe_metadata_value(dict(metadata or {}))
+    if exception is not None:
+        provider_evidence = {
+            **(provider_evidence if isinstance(provider_evidence, Mapping) else {}),
+            **_exception_metadata(exception),
+        }
+    if provider:
+        provider_evidence.setdefault("provider", str(provider))
+    if symbol:
+        provider_evidence.setdefault("symbol", str(symbol))
+    if interval:
+        provider_evidence.setdefault("interval", str(interval))
+    return {
+        "start": pd.to_datetime(start, utc=True).isoformat(),
+        "end": pd.to_datetime(end, utc=True).isoformat(),
+        "classification": classification,
+        "reason_code": reason_code,
+        "evidence": evidence,
+        "provider_evidence": provider_evidence,
+    }
+
+
+def _closure_gap_classification_entries(
+    missing_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]],
+    closures: List[Mapping[str, Any]],
+) -> List[dict]:
+    entries: List[dict] = []
+    for missing_start, missing_end in missing_ranges:
+        for closure in closures:
+            closure_start = pd.to_datetime(closure.get("start"), utc=True)
+            closure_end = pd.to_datetime(closure.get("end"), utc=True)
+            if closure_end <= missing_start or closure_start >= missing_end:
+                continue
+            if closure_start <= missing_start and closure_end >= missing_end:
+                metadata = closure.get("metadata") if isinstance(closure.get("metadata"), Mapping) else {}
+                entries.append(
+                    _provider_gap_classification_entry(
+                        missing_start,
+                        missing_end,
+                        reason_code=str(metadata.get("reason_code") or "source_sparse"),
+                        evidence=str(metadata.get("evidence") or "portal_candle_closure"),
+                        metadata=metadata,
+                    )
+                )
+                break
+    return entries

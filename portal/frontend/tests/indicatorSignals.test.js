@@ -14,45 +14,50 @@ function createSignalsAdapter(response) {
       end: END,
       interval: '1h',
       symbol: 'ES',
-      config: {
-        pivot_breakout_confirmation_bars: 2,
-        enabled_rules: ['pivot_breakout', 'pivot_retest'],
-        include_overlays: true,
-      },
+      datasource: 'ALPACA',
+      exchange: 'cme',
+      instrument_id: 'instrument-1',
     });
     return response;
   };
 }
 
-function createSignalsAdapterWithOverlayObject(response) {
-  return async () => response;
-}
-
-test('runSignalGeneration merges overlays and toggles loading flag', async () => {
+test('runSignalGeneration stores signal events, merges signal overlays, and toggles loading flag', async () => {
   const indicator = {
     id: 'ind-1',
-    params: { pivot_breakout_confirmation_bars: 2 },
+    color: '#22c55e',
+    params: {},
   };
 
   const chartState = {
     symbol: 'ES',
     interval: '1h',
-    signalsConfig: {
-      pivotBreakoutConfirmationBars: 2,
-      enabledRules: {
-        'ind-1': ['pivot_breakout', 'pivot_retest'],
-      },
-    },
+    datasource: 'ALPACA',
+    exchange: 'cme',
+    instrument_id: 'instrument-1',
   };
 
-  const indColors = { 'ind-1': '#facc15' };
-
   let currentState = {
+    indicators: [{ id: 'ind-1', enabled: true }],
     overlays: [
-      { ind_id: 'ind-1', source: 'indicator', payload: { markers: [], price_lines: [] } },
-      { ind_id: 'ind-1', source: 'signals', payload: { markers: [{ time: 0, price: 90, color: '#fff' }], price_lines: [] } },
+      {
+        ind_id: 'ind-1',
+        source: 'indicator',
+        overlay_id: 'ind-1.overlay',
+        type: 'market_profile',
+        payload: { markers: [] },
+        ui: { color: '#22c55e' },
+      },
+      {
+        ind_id: 'ind-1',
+        source: 'signal',
+        overlay_id: 'ind-1.signal.legacy',
+        type: 'indicator_signal',
+        payload: { bubbles: [] },
+        ui: { color: '#ef4444' },
+      },
     ],
-    signalResults: { 'ind-1': [{ legacy: true }] },
+    signalEventsByIndicator: { 'ind-1': [{ legacy: true }] },
   };
 
   const updateCalls = [];
@@ -65,22 +70,24 @@ test('runSignalGeneration merges overlays and toggles loading flag', async () =>
   const getChart = () => currentState;
 
   const adapterResponse = {
-    signals: [
-      { type: 'breakout', symbol: 'ES', time: START },
-    ],
-    overlays: [
-      {
-        type: 'pivot_level',
-        payload: {
-          markers: [
-            { time: 1704067200, price: 120, color: '#6b7280' },
-          ],
-          price_lines: [
-            { price: 120, color: '#6b7280' },
-          ],
+    machine: {
+      signals: [
+        { event_key: 'breakout', symbol: 'ES', event_time: START },
+      ],
+    },
+    ui: {
+      overlays: [
+        {
+          type: 'indicator_signal',
+          source: 'signal',
+          payload: {
+            bubbles: [
+              { time: 1704067200, price: 100.5, label: 'Breakout', subtype: 'bubble' },
+            ],
+          },
         },
-      },
-    ],
+      ],
+    },
   };
 
   let errorMsg = 'seed';
@@ -92,7 +99,6 @@ test('runSignalGeneration merges overlays and toggles loading flag', async () =>
     chartState,
     startISO: START,
     endISO: END,
-    indColors,
     getChart,
     updateChart,
     setError,
@@ -114,52 +120,13 @@ test('runSignalGeneration merges overlays and toggles loading flag', async () =>
     signalsLoadingCount: 0,
   });
 
-  const overlayPatch = updateCalls.find(call => Object.prototype.hasOwnProperty.call(call, 'overlays'));
-  assert.ok(overlayPatch, 'expected overlays patch to be emitted');
-  assert.equal(overlayPatch.overlays.length, 2);
-
-  const signalOverlay = overlayPatch.overlays.find(ov => ov.source === 'signals');
-  assert.ok(signalOverlay, 'expected signal overlay to be present');
-  assert.equal(signalOverlay.payload.markers[0].color, '#facc15');
-
   const finalState = getChart();
-  assert.equal(finalState.signalResults['ind-1'].length, 1);
-  assert.equal(finalState.signalResults['ind-1'][0].type, 'breakout');
-});
-
-test('runSignalGeneration accepts object-wrapped overlays from backend', async () => {
-  const indicator = { id: 'ind-1', params: {} };
-  const chartState = { symbol: 'ES', interval: '1h', signalsConfig: {} };
-
-  let currentState = { overlays: [], signalResults: {} };
-  const updateChart = (chartId, patch) => {
-    assert.equal(chartId, 'chart-1');
-    currentState = { ...currentState, ...patch };
-  };
-
-  const success = await runSignalGeneration({
-    indicator,
-    chartId: 'chart-1',
-    chartState,
-    startISO: START,
-    endISO: END,
-    indColors: {},
-    getChart: () => currentState,
-    updateChart,
-    setError: () => {},
-    signalsAdapter: createSignalsAdapterWithOverlayObject({
-      signals: [],
-      overlays: {
-        entries: [
-          { type: 'pivot_level', payload: { markers: [], price_lines: [] } },
-        ],
-      },
-    }),
-  });
-
-  assert.equal(success, true);
-  assert.equal(currentState.overlays.length, 1);
-  assert.equal(currentState.overlays[0].source, 'signals');
+  assert.equal(finalState.signalEventsByIndicator['ind-1'].length, 1);
+  assert.equal(finalState.signalEventsByIndicator['ind-1'][0].event_key, 'breakout');
+  assert.equal(finalState.overlays.length, 2);
+  assert.equal(finalState.overlays[0].source, 'indicator');
+  assert.equal(finalState.overlays[1].source, 'signal');
+  assert.equal(finalState.overlays[1].ui.color, '#22c55e');
 });
 
 test('runSignalGeneration exits early when chart context missing', async () => {
@@ -172,14 +139,42 @@ test('runSignalGeneration exits early when chart context missing', async () => {
     chartState: { symbol: null, interval: null },
     startISO: START,
     endISO: END,
-    indColors: {},
     getChart: () => ({ overlays: [] }),
     updateChart: (id, patch) => updateCalls.push({ id, patch }),
     setError: (msg) => { errorMsg = msg; },
-    signalsAdapter: async () => ({ signals: [], overlays: [] }),
+    signalsAdapter: async () => ({ signals: [] }),
   });
 
   assert.equal(success, false);
-  assert.equal(errorMsg, 'Cannot generate signals: missing chart symbol or interval.');
+  assert.equal(errorMsg, 'Cannot generate signals: missing chart instrument or interval.');
   assert.equal(updateCalls.length, 0);
+});
+
+test('runSignalGeneration fails loud when the signal response omits canonical machine/ui sections', async () => {
+  const indicator = { id: 'ind-1', params: {} };
+  const chartState = {
+    symbol: 'ES',
+    interval: '1h',
+    datasource: 'ALPACA',
+    exchange: 'cme',
+    instrument_id: 'instrument-1',
+  };
+
+  let errorMsg = null;
+  const updates = [];
+  const success = await runSignalGeneration({
+    indicator,
+    chartId: 'chart-1',
+    chartState,
+    startISO: START,
+    endISO: END,
+    getChart: () => ({ overlays: [], indicators: [{ id: 'ind-1', enabled: true }] }),
+    updateChart: (id, patch) => updates.push({ id, patch }),
+    setError: (msg) => { errorMsg = msg; },
+    signalsAdapter: createSignalsAdapter({ signals: [] }),
+  });
+
+  assert.equal(success, false);
+  assert.equal(errorMsg, 'Indicator signal response is missing machine.signals.');
+  assert.ok(updates.length >= 2);
 });

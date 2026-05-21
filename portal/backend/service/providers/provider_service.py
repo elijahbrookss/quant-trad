@@ -18,8 +18,14 @@ from data_providers.registry import (
 )
 
 from . import persistence_bootstrap  # noqa: F401
-from .secret_status import resolve_status, required_keys
-from data_providers.services.credential_store import save_credentials
+from .secret_status import optional_keys, resolve_status, required_keys
+from data_providers.services.credential_store import (
+    default_credential_ref,
+    list_credentials,
+    revoke_credentials,
+    save_credentials,
+    validate_credentials,
+)
 
 from ..market import instrument_service
 
@@ -99,6 +105,11 @@ def validate_provider_venue(provider_id: Optional[str], venue_id: Optional[str])
         normalized_provider = provider_for_venue(normalized_venue)
 
     provider_cfg = get_provider_config(normalized_provider)
+    if provider_cfg and not normalized_venue:
+        venues = provider_cfg.supported_venues
+        if len(venues) == 1:
+            normalized_venue = venues[0]
+
     if not provider_cfg:
         errors["provider_id"] = "Select a valid data provider."
     else:
@@ -129,11 +140,6 @@ def validate_provider_venue(provider_id: Optional[str], venue_id: Optional[str])
             else:
                 missing = venue_status.get("missing", [])
                 errors["venue_id"] = f"Venue unavailable; missing secrets: {', '.join(missing)}"
-
-    if provider_cfg and not normalized_venue:
-        venues = provider_cfg.supported_venues
-        if len(venues) == 1:
-            normalized_venue = venues[0]
 
     return len(errors) == 0, errors, {"provider_id": normalized_provider, "venue_id": normalized_venue}
 
@@ -240,6 +246,7 @@ def tick_metadata(
             )
 
     metadata = {
+        "instrument_id": instrument.get("id"),
         "tick_size": instrument.get("tick_size"),
         "tick_value": instrument.get("tick_value"),
         "contract_size": instrument.get("contract_size"),
@@ -261,22 +268,118 @@ def tick_metadata(
     metadata["exchange"] = exchange
     metadata["symbol"] = normalized_symbol
     metadata["timeframe"] = timeframe
-    return {"metadata": metadata}
+    runtime_status = instrument_service.instrument_runtime_status(instrument)
+    metadata["research_ready"] = runtime_status.get("research_ready")
+    metadata["runtime_ready"] = runtime_status.get("runtime_ready")
+    metadata["runtime_message"] = runtime_status.get("runtime_message")
+    metadata["runtime_policy"] = runtime_status.get("runtime_policy")
+    return {
+        "metadata": metadata,
+        "instrument": instrument_service.instrument_api_payload(instrument),
+        "runtime": runtime_status,
+    }
 
 
-def upsert_provider_secrets(provider_id: Optional[str], venue_id: Optional[str], credentials: Dict[str, str]) -> Dict[str, object]:
-    """Persist credentials for a provider/venue and return the updated status."""
-
+def credential_schema(
+    provider_id: Optional[str],
+    venue_id: Optional[str],
+    *,
+    environment: Optional[str] = None,
+) -> Dict[str, object]:
     normalized_provider = normalize_provider_id(provider_id)
     normalized_venue = normalize_venue_id(venue_id)
-    required = required_keys(normalized_provider, normalized_venue)
-    if not required:
+    if normalized_venue and not normalized_provider:
+        normalized_provider = provider_for_venue(normalized_venue)
+    provider_cfg = get_provider_config(normalized_provider)
+    if provider_cfg and not normalized_venue and len(provider_cfg.supported_venues) == 1:
+        normalized_venue = provider_cfg.supported_venues[0]
+    if not provider_cfg:
+        raise ValueError("Select a valid data provider.")
+    if normalized_venue:
+        venue_cfg = get_venue_config(normalized_venue)
+        if not venue_cfg:
+            raise ValueError("Select an exchange/venue supported by the provider.")
+        if venue_cfg.provider_id != provider_cfg.id:
+            raise ValueError("Venue is not supported by the chosen provider.")
+
+    required = required_keys(provider_cfg.id, normalized_venue)
+    optional = [key for key in optional_keys(provider_cfg.id, normalized_venue) if key not in set(required)]
+    env = str(environment or "paper").strip().lower() or "paper"
+    return {
+        "provider_id": provider_cfg.id,
+        "venue_id": normalized_venue,
+        "environment": env,
+        "default_credential_ref": default_credential_ref(provider_cfg.id, normalized_venue, env),
+        "required": required,
+        "optional": optional,
+        "accepted": required + optional,
+        "secrets_are_returned": False,
+    }
+
+
+def list_provider_credentials(
+    provider_id: Optional[str] = None,
+    venue_id: Optional[str] = None,
+    *,
+    include_revoked: bool = False,
+) -> Dict[str, object]:
+    refs = [
+        item.to_public_dict()
+        for item in list_credentials(
+            provider_id=provider_id,
+            venue_id=venue_id,
+            include_revoked=include_revoked,
+        )
+    ]
+    return {"credentials": refs, "secrets_are_returned": False}
+
+
+def upsert_provider_secrets(
+    provider_id: Optional[str],
+    venue_id: Optional[str],
+    credentials: Dict[str, str],
+    *,
+    credential_ref: Optional[str] = None,
+    environment: Optional[str] = None,
+    display_name: Optional[str] = None,
+) -> Dict[str, object]:
+    """Persist credentials for a provider/venue and return the updated status."""
+
+    schema = credential_schema(provider_id, venue_id, environment=environment)
+    normalized_provider = str(schema["provider_id"])
+    normalized_venue = str(schema.get("venue_id") or "")
+    required = list(schema.get("required") or [])
+    accepted = list(schema.get("accepted") or [])
+    if not accepted:
         raise ValueError("This provider/venue does not accept credential updates.")
 
     missing = [key for key in required if not credentials.get(key)]
     if missing:
         raise ValueError(f"Missing required secrets: {', '.join(missing)}")
 
-    save_credentials(normalized_provider, normalized_venue, {key: str(credentials[key]) for key in required})
-    status = resolve_status(normalized_provider, normalized_venue)
-    return {"status": status}
+    filtered = {key: str(credentials[key]) for key in accepted if credentials.get(key)}
+    metadata = save_credentials(
+        normalized_provider,
+        normalized_venue,
+        filtered,
+        credential_ref=credential_ref or str(schema["default_credential_ref"]),
+        environment=str(schema["environment"]),
+        display_name=display_name,
+        required_secret_keys=required,
+    )
+    status = resolve_status(normalized_provider, normalized_venue, environment=str(schema["environment"]))
+    return {
+        "credential": metadata.to_public_dict(),
+        "status": status,
+        "secrets_are_returned": False,
+    }
+
+
+def validate_provider_credentials(credential_ref: str) -> Dict[str, object]:
+    metadata = validate_credentials(credential_ref)
+    return {"credential": metadata.to_public_dict(), "secrets_are_returned": False}
+
+
+def revoke_provider_credentials(credential_ref: str) -> Dict[str, object]:
+    metadata = revoke_credentials(credential_ref)
+    return {"credential": metadata.to_public_dict(), "secrets_are_returned": False}

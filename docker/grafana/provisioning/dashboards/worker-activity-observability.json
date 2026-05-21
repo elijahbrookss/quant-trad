@@ -224,7 +224,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "$stream |~ \"quantlab_worker_|stats_worker_|async_job_|overlay_request_received|overlay_build_start|overlay_build_complete|overlay_runtime_state_projection_\" |~ \"$contains\"",
+          "expr": "$stream |~ \"indicator_worker_|async_job_|overlay_request_received|overlay_build_start|overlay_build_complete|overlay_runtime_state_projection_\" |~ \"$contains\"",
           "queryType": "range",
           "editorMode": "code"
         }
@@ -422,7 +422,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "$stream | logfmt | indicator_id=~\"$indicator_re\" | event=~\"overlay_request_received|overlay_build_start|overlay_runtime_state_projection_start|overlay_runtime_state_projection_done|overlay_visibility_applied|overlay_visibility_empty|overlay_build_complete|quantlab_worker_job_failed|async_job_failed\" |~ \"$contains\"",
+              "expr": "$stream | logfmt | indicator_id=~\"$indicator_re\" | event=~\"overlay_request_received|overlay_build_start|overlay_runtime_state_projection_start|overlay_runtime_state_projection_done|overlay_visibility_applied|overlay_visibility_empty|overlay_build_complete|indicator_worker_job_failed|async_job_failed\" |~ \"$contains\"",
               "queryType": "range",
               "editorMode": "code"
             }

@@ -1,0 +1,23 @@
+flowchart TD
+    state["Indicator-owned state"]
+    apply["apply_bar(bar, inputs)"]
+    snapshot["snapshot()<br/>typed outputs"]
+    overlays["overlay_snapshot()<br/>chart projection"]
+    details["detail_snapshot()<br/>debug projection"]
+    decision["Decision layer"]
+    chart["BotLens / charts"]
+    debug["Operator/debug views"]
+
+    state --> apply
+    apply --> state
+    state --> snapshot
+    state --> overlays
+    state --> details
+    snapshot --> decision
+    overlays --> chart
+    details --> debug
+
+    classDef truth fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
+    classDef projection fill:#111827,stroke:#a78bfa,color:#ede9fe
+    class state,apply,snapshot,decision truth
+    class overlays,details,chart,debug projection

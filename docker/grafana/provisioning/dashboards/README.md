@@ -85,10 +85,17 @@ Each JSON file should contain a Grafana dashboard model. The filename will be us
 
 Example: `system-metrics.json` → Dashboard available at `/d/<uid>/system-metrics`
 
-## Recommended Entry Dashboard
+## Recommended Entry Dashboards
 
-For bot runtime process/thread health, start with:
+Primary operator dashboards:
 
-- `runtime-process-control-tower.json` (`uid=qt-runtime-control-tower`)
+- `runtime-hotpath-control.json` (`uid=qt-runtime-hotpath-control`) — per-bar runtime attribution and worst-bar context
+- `botlens-transport-control.json` (`uid=qt-botlens-transport-control`) — bounded BotLens transport, payload, replay, and queue pressure
+- `observability-cost-control.json` (`uid=qt-observability-cost-control`) — exporter write cost, rollup reduction, and DB pressure
 
-This dashboard links to profiler, attribution, workers, IO/DB, overlay optimization, and Loki error deep-dive dashboards.
+Focused supporting dashboards:
+
+- `botlens-diagnostics-failure-analysis.json` (`uid=qt-botlens-diagnostics`) — candle continuity and projection failure inspection
+- `runtime-process-control-tower.json` (`uid=qt-runtime-control-tower`) — process/thread health outside BotLens backend observability
+
+The older playground-style BotLens overview, queue, pipeline, per-run, attribution, and IO/DB dashboards were removed in favor of dashboards that map directly to runtime hot path, transport budget, and observability cost questions.

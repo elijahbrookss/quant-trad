@@ -14,7 +14,6 @@ class RuntimeScenarioBuilder:
             "contract_size": 1.0,
             "tick_value": 1.0,
             "initial_stop": {"atr_multiplier": 2.0},
-            "risk": {"base_risk_per_trade": base_risk_per_trade},
             "take_profit_orders": [{"id": "tp-1", "ticks": 10}],
             "execution_mode": execution_mode,
         }
@@ -32,7 +31,11 @@ class RuntimeScenarioBuilder:
             "quote_currency": "USD",
             "metadata": {"info": {"base_increment": "1"}},
         }
-        return LadderRiskEngine(config=config, instrument=instrument)
+        return LadderRiskEngine(
+            config=config,
+            instrument=instrument,
+            risk_config={"base_risk_per_trade": base_risk_per_trade},
+        )
 
     @staticmethod
     def candle(*, close: float, atr: float = 2.0) -> Candle:

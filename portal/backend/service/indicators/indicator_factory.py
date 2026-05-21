@@ -1,23 +1,25 @@
 from __future__ import annotations
 
-"""Factory utilities for indicator instantiation and metadata shaping."""
+"""Factory utilities for indicator metadata shaping and runtime-input planning."""
 
 import logging
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Mapping, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Mapping, Optional, TYPE_CHECKING
 
 from data_providers.utils.ohlcv import interval_to_timedelta
 
-from indicators.config import DataContext
-from indicators.market_profile import MarketProfileIndicator
-from indicators.pivot_level import PivotLevelIndicator
-from indicators.trendline import TrendlineIndicator
-from indicators.vwap import VWAPIndicator
+from indicators.definition_contract import definition_supports_compute, definition_supports_runtime
+from indicators.manifest import (
+    manifest_overlay_catalog,
+    manifest_runtime_input_specs,
+    serialize_indicator_manifest,
+)
+from indicators.registry import INDICATOR_MAP, get_indicator_definition, get_indicator_manifest
+from .output_prefs import typed_outputs_with_prefs
 
 from ..providers.data_provider_resolver import DataProviderResolver, default_resolver
-from ..market import instrument_service
 
 if TYPE_CHECKING:
     from .indicator_service.context import IndicatorServiceContext
@@ -25,12 +27,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-INDICATOR_MAP = {
-    "vwap": VWAPIndicator,
-    "pivot_level": PivotLevelIndicator,
-    "trendline": TrendlineIndicator,
-    "market_profile": MarketProfileIndicator,
-}
+def runtime_indicator_builder_for_type(indicator_type: str) -> Callable[..., Any]:
+    definition = get_indicator_definition(indicator_type)
+    builder = getattr(definition, "build_runtime_indicator", None)
+    if not callable(builder):
+        raise RuntimeError(
+            f"Indicator type '{indicator_type}' does not declare a runtime indicator builder"
+        )
+    return builder
 
 
 @dataclass(frozen=True)
@@ -41,10 +45,6 @@ class IndicatorRuntimeInputSpec:
     lookback_bars_param: Optional[str] = None
     lookback_days: Optional[int] = None
     lookback_days_param: Optional[str] = None
-    session_scope: str = "global"
-    alignment: str = "closed_bar_only"
-    normalization: str = "none"
-    incremental_eval: bool = False
 
 
 def _parse_utc(value: str) -> datetime:
@@ -72,66 +72,72 @@ def _coerce_positive_int(value: Any) -> Optional[int]:
 
 
 class IndicatorFactory:
-    """Build indicator metadata and runtime instances."""
+    """Build indicator metadata and runtime input plans."""
 
     def __init__(
         self,
         resolver: Optional[DataProviderResolver] = None,
-        ctx: Optional[IndicatorServiceContext] = None
+        ctx: Optional[IndicatorServiceContext] = None,
     ) -> None:
         self._resolver = resolver or default_resolver()
-        self._ctx = ctx  # Will be set by context during initialization
+        self._ctx = ctx
 
     def build_meta_from_record(self, record: Mapping[str, Any]) -> Dict[str, Any]:
-        from .indicator_service.utils import attach_signal_catalog
-
         meta = self._coerce_record_meta(record)
         meta = self._ensure_color(meta)
-
-        # Attach signal catalog to enrich metadata with available signal rules
-        if self._ctx:
-            meta = attach_signal_catalog(meta, ctx=self._ctx)
-            logger.debug(
-                "build_meta_from_record | id=%s | type=%s | signal_rules_attached=%s",
-                meta.get("id"),
-                meta.get("type"),
-                "signal_rules" in meta
+        indicator_type = str(meta.get("type") or "").strip()
+        if indicator_type:
+            try:
+                definition = get_indicator_definition(indicator_type)
+                manifest = get_indicator_manifest(indicator_type)
+            except Exception:
+                return meta
+            meta["manifest"] = serialize_indicator_manifest(manifest)
+            meta["color_mode"] = manifest.color_mode
+            meta["color_palettes"] = meta["manifest"].get("color_palettes", [])
+            typed_outputs, output_prefs = typed_outputs_with_prefs(
+                manifest=manifest,
+                output_prefs=meta.get("output_prefs"),
             )
-        else:
-            logger.warning(
-                "⚠ build_meta_from_record: No context available, signal catalog not attached | id=%s",
-                record.get("id")
-            )
-
+            meta["typed_outputs"] = typed_outputs
+            meta["output_prefs"] = output_prefs
+            meta["overlay_outputs"] = manifest_overlay_catalog(manifest)
+            meta["runtime_supported"] = definition_supports_runtime(definition)
+            meta["compute_supported"] = definition_supports_compute(definition)
         return meta
 
     def ensure_color(self, meta: Dict[str, Any]) -> Dict[str, Any]:
         return self._ensure_color(meta)
 
     def get_runtime_input_specs_for_type(self, type_str: str) -> List[IndicatorRuntimeInputSpec]:
-        indicator_cls = INDICATOR_MAP.get(type_str)
-        if indicator_cls is None:
+        try:
+            manifest = get_indicator_manifest(type_str)
+        except Exception:
             return []
-        raw_specs = getattr(indicator_cls, "RUNTIME_INPUT_SPECS", None) or []
         specs: List[IndicatorRuntimeInputSpec] = []
-        for raw in raw_specs:
-            if isinstance(raw, IndicatorRuntimeInputSpec):
-                specs.append(raw)
-                continue
-            if not isinstance(raw, Mapping):
-                continue
+        for raw in manifest_runtime_input_specs(manifest):
             specs.append(
                 IndicatorRuntimeInputSpec(
-                    source_timeframe=(str(raw.get("source_timeframe")).strip() or None) if raw.get("source_timeframe") is not None else None,
-                    source_timeframe_param=(str(raw.get("source_timeframe_param")).strip() or None) if raw.get("source_timeframe_param") is not None else None,
-                    lookback_bars=_coerce_positive_int(raw.get("lookback_bars")),
-                    lookback_bars_param=(str(raw.get("lookback_bars_param")).strip() or None) if raw.get("lookback_bars_param") is not None else None,
-                    lookback_days=_coerce_positive_int(raw.get("lookback_days")),
-                    lookback_days_param=(str(raw.get("lookback_days_param")).strip() or None) if raw.get("lookback_days_param") is not None else None,
-                    session_scope=str(raw.get("session_scope") or "global").strip() or "global",
-                    alignment=str(raw.get("alignment") or "closed_bar_only").strip() or "closed_bar_only",
-                    normalization=str(raw.get("normalization") or "none").strip() or "none",
-                    incremental_eval=bool(raw.get("incremental_eval", False)),
+                    source_timeframe=(str(raw.source_timeframe).strip() or None)
+                    if raw.source_timeframe is not None
+                    else None,
+                    source_timeframe_param=(
+                        str(raw.source_timeframe_param).strip() or None
+                    )
+                    if raw.source_timeframe_param is not None
+                    else None,
+                    lookback_bars=_coerce_positive_int(raw.lookback_bars),
+                    lookback_bars_param=(
+                        str(raw.lookback_bars_param).strip() or None
+                    )
+                    if raw.lookback_bars_param is not None
+                    else None,
+                    lookback_days=_coerce_positive_int(raw.lookback_days),
+                    lookback_days_param=(
+                        str(raw.lookback_days_param).strip() or None
+                    )
+                    if raw.lookback_days_param is not None
+                    else None,
                 )
             )
         return specs
@@ -145,18 +151,14 @@ class IndicatorFactory:
         end: str,
     ) -> Dict[str, Any]:
         indicator_type = str(meta.get("type") or "").strip()
-        params = meta.get("params") or {}
-        if not isinstance(params, Mapping):
-            params = {}
+        definition = get_indicator_definition(indicator_type)
+        params = definition.resolve_config(meta.get("params"), strict_unknown=True)
         specs = self.get_runtime_input_specs_for_type(indicator_type)
 
         source_timeframe = strategy_interval
         lookback_bars: Optional[int] = None
         lookback_days: Optional[int] = None
-        session_scope = "global"
-        alignment = "closed_bar_only"
-        normalization = "none"
-        incremental_eval = False
+        incremental_eval = bool(specs)
 
         if specs:
             spec = specs[0]
@@ -181,11 +183,6 @@ class IndicatorFactory:
                 param_days = _coerce_positive_int(params.get(spec.lookback_days_param))
                 if param_days is not None:
                     lookback_days = param_days
-
-            session_scope = spec.session_scope
-            alignment = spec.alignment
-            normalization = spec.normalization
-            incremental_eval = bool(spec.incremental_eval)
 
         effective_start = _parse_utc(start)
         effective_end = _parse_utc(end)
@@ -223,16 +220,13 @@ class IndicatorFactory:
             "source_timeframe": source_timeframe,
             "start": _iso_utc(effective_start),
             "end": _iso_utc(effective_end),
-            "session_scope": session_scope,
-            "alignment": alignment,
-            "normalization": normalization,
             "incremental_eval": incremental_eval,
             "lookback_bars": lookback_bars,
             "lookback_days": lookback_days,
             "lookback_seconds": lookback_seconds,
         }
         logger.debug(
-            "indicator_runtime_input_plan | indicator_id=%s indicator_type=%s strategy_interval=%s source_timeframe=%s start=%s end=%s lookback_bars=%s lookback_days=%s session_scope=%s alignment=%s normalization=%s incremental_eval=%s",
+            "indicator_runtime_input_plan | indicator_id=%s indicator_type=%s strategy_interval=%s source_timeframe=%s start=%s end=%s lookback_bars=%s lookback_days=%s incremental_eval=%s",
             plan["indicator_id"],
             indicator_type,
             strategy_interval,
@@ -241,97 +235,26 @@ class IndicatorFactory:
             plan["end"],
             lookback_bars,
             lookback_days,
-            session_scope,
-            alignment,
-            normalization,
             incremental_eval,
         )
         return plan
 
-    def build_indicator_instance(self, meta: Mapping[str, Any], *, datasource: Optional[str] = None, exchange: Optional[str] = None):
-        inst_id = str(meta.get("id") or "").strip()
-        type_str = str(meta.get("type") or "").strip()
-        Cls = INDICATOR_MAP.get(type_str)
-        if not inst_id or not Cls:
-            raise KeyError(f"Unknown indicator: {inst_id}")
-
-        params = deepcopy(meta.get("params") or {})
-        ctx_kwargs: Dict[str, Any] = {}
-        missing = []
-        for key in ("symbol", "start", "end", "interval"):
-            if key in params:
-                ctx_kwargs[key] = params.pop(key)
-            else:
-                missing.append(key)
-        if missing:
-            raise ValueError(
-                f"Indicator {inst_id} missing required context: {', '.join(missing)}"
-            )
-
-        # Allow caller to override provider selection with explicit datasource/exchange
-        if datasource is None:
-            datasource = self._resolver.normalize_datasource(meta.get("datasource"))
-        else:
-            datasource = self._resolver.normalize_datasource(datasource)
-
-        if exchange is None:
-            exchange = self._resolver.normalize_exchange(meta.get("exchange"))
-        else:
-            exchange = self._resolver.normalize_exchange(exchange)
-
-        if exchange and not datasource:
-            datasource = "CCXT"
-
-        instrument_id = instrument_service.require_instrument_id(
-            datasource,
-            exchange,
-            ctx_kwargs.get("symbol"),
-        )
-        ctx = DataContext(**ctx_kwargs, instrument_id=instrument_id)
-        ctx.validate()
-        provider = self._resolver.resolve(datasource, exchange=exchange)
-        use_incremental_cache = (
-            Cls is MarketProfileIndicator
-            and self._ctx is not None
-            and getattr(self._ctx, "incremental_cache", None) is not None
-            and bool(inst_id)
-        )
-        if use_incremental_cache:
-            inst = Cls.from_context_with_incremental_cache(
-                provider=provider,
-                ctx=ctx,
-                cache=self._ctx.incremental_cache,
-                inst_id=inst_id,
-                **params,
-            )
-            logger.debug(
-                "indicator_factory_instance_built_with_incremental_cache | indicator_id=%s type=%s symbol=%s interval=%s datasource=%s exchange=%s",
-                inst_id,
-                type_str,
-                ctx_kwargs.get("symbol"),
-                ctx_kwargs.get("interval"),
-                datasource,
-                exchange,
-            )
-        else:
-            inst = Cls.from_context(provider=provider, ctx=ctx, **params)
-        if isinstance(inst, MarketProfileIndicator):
-            setattr(inst, "symbol", ctx_kwargs.get("symbol"))
-        return inst
-
     def _coerce_record_meta(self, record: Mapping[str, Any]) -> Dict[str, Any]:
         inst_id = str(record.get("id") or "").strip()
-        payload = {
+        return {
             "id": inst_id,
             "type": record.get("type"),
+            "version": record.get("version") or "v1",
             "name": record.get("name") or record.get("type") or inst_id or "Indicator",
             "params": deepcopy(record.get("params") or {}),
+            "dependencies": deepcopy(record.get("dependencies") or []),
+            "output_prefs": deepcopy(record.get("output_prefs") or {}),
             "color": record.get("color"),
+            "color_palette": record.get("color_palette"),
             "datasource": record.get("datasource"),
             "exchange": record.get("exchange"),
             "enabled": bool(record.get("enabled", True)),
         }
-        return self._ensure_color(payload)
 
     def _normalize_color(self, value: Optional[str]) -> Optional[str]:
         if value is None:

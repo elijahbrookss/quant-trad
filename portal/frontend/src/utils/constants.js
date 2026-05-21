@@ -8,7 +8,6 @@
 export const DEFAULT_ATM_TEMPLATE = {
   name: 'Untitled Template',
   schema_version: 2,
-  contracts: 1,
   stop_r_multiple: null,
   stop_ticks: null,
   stop_price: null,
@@ -21,10 +20,6 @@ export const DEFAULT_ATM_TEMPLATE = {
     mode: 'atr',
     atr_period: 14,
     atr_multiplier: 1.0,
-  },
-  risk: {
-    base_risk_per_trade: null,
-    global_risk_multiplier: 1.0,
   },
   _meta: {},
 }

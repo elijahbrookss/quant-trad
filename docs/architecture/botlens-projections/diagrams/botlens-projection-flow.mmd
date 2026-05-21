@@ -1,0 +1,29 @@
+flowchart LR
+    runtime["Runtime producer<br/>canonical facts"]
+    ledger["Runtime event ledger"]
+    intake["Backend intake/router"]
+    registry["Projector registry"]
+    runProjector["Run projector"]
+    symbolProjector["Symbol projector"]
+    snapshots["Projection snapshots"]
+    stream["API/websocket transport"]
+    frontend["BotLens frontend state"]
+    forensics["Cold-path forensics"]
+
+    runtime --> ledger
+    runtime --> intake
+    ledger --> registry
+    intake --> registry
+    registry --> runProjector
+    registry --> symbolProjector
+    runProjector --> snapshots
+    symbolProjector --> snapshots
+    snapshots --> stream --> frontend
+    ledger --> forensics --> frontend
+
+    classDef truth fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
+    classDef projection fill:#111827,stroke:#a78bfa,color:#ede9fe
+    classDef cold fill:#1f2937,stroke:#94a3b8,color:#e5e7eb
+    class runtime,ledger truth
+    class intake,registry,runProjector,symbolProjector,snapshots,stream,frontend projection
+    class forensics cold

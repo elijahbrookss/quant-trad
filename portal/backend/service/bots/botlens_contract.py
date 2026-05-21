@@ -1,0 +1,240 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+from collections.abc import Mapping
+from datetime import datetime
+from typing import Any, Dict
+
+from engines.bot_runtime.core.series_identity import normalize_series_key as normalize_public_series_key
+
+_EVENT_ID_MAX_LEN = 128
+
+
+def _event_id(
+    *,
+    bot_id: str,
+    run_id: str,
+    event_type: str,
+    symbol_key: str,
+    bridge_session_id: str,
+    bridge_seq: int,
+    seq: int,
+) -> str:
+    base = f"{bot_id}:{run_id}:{event_type}"
+    raw_suffix = f"{symbol_key}:{bridge_session_id}:{max(int(bridge_seq), int(seq))}"
+    event_id = f"{base}:{raw_suffix}"
+    if len(event_id) <= _EVENT_ID_MAX_LEN:
+        return event_id
+    digest = hashlib.sha1(raw_suffix.encode("utf-8")).hexdigest()[:20]
+    compact = f"{base}:{digest}:{max(int(bridge_seq), int(seq))}"
+    if len(compact) <= _EVENT_ID_MAX_LEN:
+        return compact
+    overflow = len(compact) - _EVENT_ID_MAX_LEN
+    trimmed_base = base[: max(1, len(base) - overflow)]
+    return f"{trimmed_base}:{digest}:{max(int(bridge_seq), int(seq))}"
+
+
+def _sanitize_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(k): _sanitize_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_json(v) for v in value]
+    if isinstance(value, tuple):
+        return [_sanitize_json(v) for v in value]
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None).isoformat() + "Z"
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value
+
+SCHEMA_VERSION = 4
+RUN_SCOPE_KEY = "__run__"
+
+BRIDGE_BOOTSTRAP_KIND = "botlens_runtime_bootstrap_facts"
+BRIDGE_FACTS_KIND = "botlens_runtime_facts"
+LIFECYCLE_KIND = "botlens_lifecycle_event"
+# Legacy compatibility kind. Intake treats this as deprecated and does not
+# project it into the BotLens runtime state model.
+PROJECTION_REFRESH_KIND = "bot_projection_refresh"
+
+EVENT_TYPE_RUNTIME_BOOTSTRAP = "botlens.runtime_bootstrap_facts"
+EVENT_TYPE_RUNTIME_FACTS = "botlens.runtime_facts"
+EVENT_TYPE_LIFECYCLE = "botlens.lifecycle_event"
+
+FACT_TYPE_RUNTIME_STATE = "runtime_state_observed"
+FACT_TYPE_SERIES_STATE = "series_state_observed"
+FACT_TYPE_CANDLE_UPSERTED = "candle_upserted"
+FACT_TYPE_PROVISIONAL_CANDLE_UPDATED = "provisional_candle_updated"
+FACT_TYPE_OVERLAY_OPS = "overlay_ops_emitted"
+FACT_TYPE_SERIES_STATS = "series_stats_updated"
+FACT_TYPE_TRADE_OPENED = "trade_opened"
+FACT_TYPE_TRADE_UPDATED = "trade_updated"
+FACT_TYPE_TRADE_CLOSED = "trade_closed"
+FACT_TYPE_WALLET_LEDGER_EVENT = "wallet_ledger_event"
+FACT_TYPE_LOG_EMITTED = "log_emitted"
+FACT_TYPE_DECISION_EMITTED = "decision_emitted"
+
+STREAM_CONNECTED_TYPE = "botlens_live_connected"
+STREAM_RESET_REQUIRED_TYPE = "botlens_live_reset_required"
+STREAM_RUN_LIFECYCLE_DELTA_TYPE = "botlens_run_lifecycle_delta"
+STREAM_RUN_HEALTH_DELTA_TYPE = "botlens_run_health_delta"
+STREAM_RUN_FAULT_DELTA_TYPE = "botlens_run_fault_delta"
+STREAM_RUN_SYMBOL_CATALOG_DELTA_TYPE = "botlens_run_symbol_catalog_delta"
+STREAM_RUN_OPEN_TRADES_DELTA_TYPE = "botlens_run_open_trades_delta"
+STREAM_SYMBOL_CANDLE_DELTA_TYPE = "botlens_symbol_candle_delta"
+STREAM_SYMBOL_PROVISIONAL_CANDLE_DELTA_TYPE = "botlens_symbol_provisional_candle_delta"
+STREAM_SYMBOL_OVERLAY_DELTA_TYPE = "botlens_symbol_overlay_delta"
+STREAM_SYMBOL_SIGNAL_DELTA_TYPE = "botlens_symbol_signal_delta"
+STREAM_SYMBOL_DECISION_DELTA_TYPE = "botlens_symbol_decision_delta"
+STREAM_SYMBOL_DIAGNOSTIC_DELTA_TYPE = "botlens_symbol_diagnostic_delta"
+STREAM_SYMBOL_TRADE_DELTA_TYPE = "botlens_symbol_trade_delta"
+STREAM_SYMBOL_STATS_DELTA_TYPE = "botlens_symbol_stats_delta"
+STREAM_RUN_DELTA_TYPES = (
+    STREAM_RUN_LIFECYCLE_DELTA_TYPE,
+    STREAM_RUN_HEALTH_DELTA_TYPE,
+    STREAM_RUN_FAULT_DELTA_TYPE,
+    STREAM_RUN_SYMBOL_CATALOG_DELTA_TYPE,
+    STREAM_RUN_OPEN_TRADES_DELTA_TYPE,
+)
+STREAM_SYMBOL_DELTA_TYPES = (
+    STREAM_SYMBOL_CANDLE_DELTA_TYPE,
+    STREAM_SYMBOL_PROVISIONAL_CANDLE_DELTA_TYPE,
+    STREAM_SYMBOL_OVERLAY_DELTA_TYPE,
+    STREAM_SYMBOL_SIGNAL_DELTA_TYPE,
+    STREAM_SYMBOL_DECISION_DELTA_TYPE,
+    STREAM_SYMBOL_DIAGNOSTIC_DELTA_TYPE,
+    STREAM_SYMBOL_TRADE_DELTA_TYPE,
+    STREAM_SYMBOL_STATS_DELTA_TYPE,
+)
+
+
+def _mapping(value: Any) -> Dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def normalize_series_key(value: Any) -> str:
+    return normalize_public_series_key(value)
+
+
+def is_run_scope_key(value: Any) -> bool:
+    return str(value or "").strip() == RUN_SCOPE_KEY
+
+
+def normalize_view_scope_key(value: Any) -> str:
+    if is_run_scope_key(value):
+        return RUN_SCOPE_KEY
+    return normalize_series_key(value)
+
+
+def normalize_ingest_kind(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def normalize_bridge_session_id(payload: Mapping[str, Any]) -> str:
+    session_id = str(
+        payload.get("bridge_session_id")
+        or payload.get("stream_session_id")
+        or payload.get("session_id")
+        or "legacy"
+    ).strip()
+    return session_id or "legacy"
+
+
+def normalize_bridge_seq(payload: Mapping[str, Any]) -> int:
+    for key in ("bridge_seq", "transport_seq"):
+        try:
+            value = int(payload.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return 0
+
+
+def normalize_fact_entries(payload: Any) -> list[Dict[str, Any]]:
+    entries = payload if isinstance(payload, list) else []
+    normalized: list[Dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        fact_type = str(entry.get("fact_type") or "").strip().lower()
+        if not fact_type:
+            continue
+        normalized.append({"fact_type": fact_type, **dict(entry)})
+    return normalized
+
+
+def normalize_lifecycle_payload(payload: Any) -> Dict[str, Any]:
+    source = _mapping(payload)
+    checkpoint_at = source.get("checkpoint_at") or source.get("updated_at") or source.get("known_at")
+    phase = str(source.get("phase") or "").strip()
+    status = str(source.get("status") or "").strip().lower()
+    lifecycle = {
+        "run_id": str(source.get("run_id") or "").strip() or None,
+        "phase": phase or None,
+        "status": status or None,
+        "owner": str(source.get("owner") or "").strip() or None,
+        "message": str(source.get("message") or "").strip() or None,
+        "checkpoint_at": checkpoint_at,
+        "updated_at": source.get("updated_at") or checkpoint_at,
+        "metadata": _mapping(source.get("metadata")),
+        "failure": _mapping(source.get("failure")),
+    }
+    lifecycle["live"] = bool(
+        lifecycle["phase"] == "live"
+        or lifecycle["status"] in {"running", "degraded", "telemetry_degraded", "paused"}
+    )
+    return {key: value for key, value in lifecycle.items() if value not in (None, "", [])}
+
+
+__all__ = [
+    "BRIDGE_BOOTSTRAP_KIND",
+    "BRIDGE_FACTS_KIND",
+    "EVENT_TYPE_LIFECYCLE",
+    "EVENT_TYPE_RUNTIME_BOOTSTRAP",
+    "EVENT_TYPE_RUNTIME_FACTS",
+    "FACT_TYPE_CANDLE_UPSERTED",
+    "FACT_TYPE_DECISION_EMITTED",
+    "FACT_TYPE_LOG_EMITTED",
+    "FACT_TYPE_OVERLAY_OPS",
+    "FACT_TYPE_PROVISIONAL_CANDLE_UPDATED",
+    "FACT_TYPE_RUNTIME_STATE",
+    "FACT_TYPE_SERIES_STATE",
+    "FACT_TYPE_SERIES_STATS",
+    "FACT_TYPE_TRADE_CLOSED",
+    "FACT_TYPE_TRADE_OPENED",
+    "FACT_TYPE_TRADE_UPDATED",
+    "LIFECYCLE_KIND",
+    "PROJECTION_REFRESH_KIND",
+    "RUN_SCOPE_KEY",
+    "SCHEMA_VERSION",
+    "STREAM_CONNECTED_TYPE",
+    "STREAM_RESET_REQUIRED_TYPE",
+    "STREAM_RUN_DELTA_TYPES",
+    "STREAM_RUN_FAULT_DELTA_TYPE",
+    "STREAM_RUN_HEALTH_DELTA_TYPE",
+    "STREAM_RUN_LIFECYCLE_DELTA_TYPE",
+    "STREAM_RUN_OPEN_TRADES_DELTA_TYPE",
+    "STREAM_RUN_SYMBOL_CATALOG_DELTA_TYPE",
+    "STREAM_SYMBOL_CANDLE_DELTA_TYPE",
+    "STREAM_SYMBOL_DELTA_TYPES",
+    "STREAM_SYMBOL_DECISION_DELTA_TYPE",
+    "STREAM_SYMBOL_DIAGNOSTIC_DELTA_TYPE",
+    "STREAM_SYMBOL_OVERLAY_DELTA_TYPE",
+    "STREAM_SYMBOL_PROVISIONAL_CANDLE_DELTA_TYPE",
+    "STREAM_SYMBOL_SIGNAL_DELTA_TYPE",
+    "STREAM_SYMBOL_STATS_DELTA_TYPE",
+    "STREAM_SYMBOL_TRADE_DELTA_TYPE",
+    "_event_id",
+    "_sanitize_json",
+    "is_run_scope_key",
+    "normalize_bridge_seq",
+    "normalize_bridge_session_id",
+    "normalize_fact_entries",
+    "normalize_ingest_kind",
+    "normalize_lifecycle_payload",
+    "normalize_series_key",
+    "normalize_view_scope_key",
+]

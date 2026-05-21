@@ -3,6 +3,15 @@ import { ExternalLink, Unlink2 } from 'lucide-react'
 import { Button } from '../../ui'
 import { countIndicatorRuleUsage, requiresDetachConfirm } from '../utils/indicatorUsage.js'
 
+const outputDotClass = (type) => {
+  if (!type) return 'bg-slate-500'
+  const t = String(type).toLowerCase()
+  if (t.includes('signal')) return 'bg-emerald-400'
+  if (t.includes('context')) return 'bg-sky-400'
+  if (t.includes('metric')) return 'bg-amber-400'
+  return 'bg-slate-500'
+}
+
 /**
  * Component for managing attached indicators to a strategy.
  */
@@ -34,13 +43,6 @@ export const AttachedIndicators = ({
     setSelected('')
   }
 
-  const handleFocusAttach = () => {
-    if (!attachRef.current) return
-    attachRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    const focusTarget = attachRef.current.querySelector('button')
-    focusTarget?.focus()
-  }
-
   const handleDetachRequest = (entry) => {
     const impact = usageMap.get(entry.id) || 0
     if (requiresDetachConfirm(entry.id, strategy?.rules)) {
@@ -56,15 +58,19 @@ export const AttachedIndicators = ({
     setConfirm(null)
   }
 
-  const renderSignalBadge = (rule, entryId) => {
-    const label = rule?.label || rule?.id || 'Signal'
+  const renderOutputRow = (output) => {
+    const label = output?.label || output?.name || 'Output'
     return (
-      <span
-        key={`${entryId}-${label}`}
-        className="inline-flex items-center gap-1 rounded-md border border-white/12 bg-white/5 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-200"
+      <div
+        key={output?.name || label}
+        className="group flex items-center gap-2 rounded px-1 py-0.5 hover:bg-white/[0.03]"
+        title={label}
       >
-        {rule?.signal_type ? rule.signal_type.toUpperCase() : label}
-      </span>
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${outputDotClass(output?.type)}`} />
+        <span className="truncate text-xs text-slate-300 transition-colors group-hover:text-white">
+          {label}
+        </span>
+      </div>
     )
   }
 
@@ -74,7 +80,7 @@ export const AttachedIndicators = ({
         <form onSubmit={handleAttach} className="flex flex-1 items-center gap-2">
           <div className="flex-1">
             <DropdownSelect
-              label="Attach signal source"
+              label="Attach indicator"
               value={selected}
               onChange={setSelected}
               placeholder="Search indicators…"
@@ -82,7 +88,7 @@ export const AttachedIndicators = ({
                 value: indicator.id,
                 label: indicator.name || indicator.type,
                 description: indicator.type,
-                badge: Array.isArray(indicator.signal_rules) ? `${indicator.signal_rules.length} signals` : null,
+                badge: Array.isArray(indicator.typed_outputs) ? `${indicator.typed_outputs.length} outputs` : null,
               }))}
               disabled={!availableIndicators.length}
               className="w-full"
@@ -95,21 +101,17 @@ export const AttachedIndicators = ({
       </div>
 
       {entries.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-white/10 bg-black/30 p-4 text-sm text-slate-400">
-          <p>No indicators attached. Add signal sources from QuantLab, then attach them here.</p>
-          <div className="mt-3">
-            <ActionButton variant="ghost" onClick={handleFocusAttach}>
-              Attach indicator
-            </ActionButton>
-          </div>
+        <div className="rounded-xl border border-dashed border-white/8 bg-black/20 px-4 py-5">
+          <p className="text-sm text-slate-400">No indicators attached yet.</p>
+          <p className="mt-1 text-xs text-slate-600">Use the attach control above to bring typed outputs into this strategy.</p>
         </div>
       ) : (
         <div className="divide-y divide-white/5 rounded-xl border border-white/10 bg-black/30">
           {entries.map((entry) => {
-            const signals = Array.isArray(entry.signal_rules)
-              ? entry.signal_rules
-              : Array.isArray(entry.meta?.signal_rules)
-                ? entry.meta.signal_rules
+            const typedOutputs = Array.isArray(entry.typed_outputs)
+              ? entry.typed_outputs
+              : Array.isArray(entry.meta?.typed_outputs)
+                ? entry.meta.typed_outputs
                 : []
             const impact = usageMap.get(entry.id) || 0
             return (
@@ -121,11 +123,16 @@ export const AttachedIndicators = ({
                       {entry.type || entry.snapshot?.meta?.type || 'Custom'}
                     </span>
                   </div>
-                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-400">
-                    {signals.length ? signals.map((rule) => renderSignalBadge(rule, entry.id)) : (
-                      <span className="text-slate-500">No signals</span>
+                  <div className="mt-2 space-y-1">
+                    {typedOutputs.length ? typedOutputs.map((output) => renderOutputRow(output)) : (
+                      <span className="text-slate-500">No typed outputs</span>
                     )}
                   </div>
+                  {impact > 0 && (
+                    <p className="mt-1 text-[10px] text-amber-400/70">
+                      Referenced by {impact} rule{impact === 1 ? '' : 's'}
+                    </p>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-1">
@@ -148,11 +155,6 @@ export const AttachedIndicators = ({
                   </button>
                 </div>
 
-                {impact > 0 && (
-                  <p className="w-full text-[11px] text-amber-200">
-                    Referenced by {impact} rule{impact === 1 ? '' : 's'} — detaching will break them.
-                  </p>
-                )}
               </div>
             )
           })}

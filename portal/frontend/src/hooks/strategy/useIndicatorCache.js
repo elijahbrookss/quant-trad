@@ -22,7 +22,7 @@ const useIndicatorCache = ({ indicators, setIndicators, logger } = {}) => {
         return null
       }
       const existing = indicatorLookup.get(trimmed)
-      if (existing?.signal_rules && existing.signal_rules.length > 0) {
+      if (Array.isArray(existing?.typed_outputs) && existing.typed_outputs.length > 0) {
         return existing
       }
       try {

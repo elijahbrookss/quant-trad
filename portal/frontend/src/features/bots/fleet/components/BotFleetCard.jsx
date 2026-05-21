@@ -1,0 +1,752 @@
+import { AlertTriangle, Check, Copy, Eye, FileText, LoaderCircle, Play, RotateCw, Square, Trash2 } from 'lucide-react'
+import { memo, useEffect, useMemo, useState } from 'react'
+import { buildBotCardViewModel } from '../buildBotFleetViewModel.js'
+import { ErrorCard } from '../../../../components/ui/ErrorCard.jsx'
+import { SemanticStatusBadge } from '../../../../components/ui/StatusBadge.jsx'
+
+export const BotFleetCard = memo(function BotFleetCard({
+  bot,
+  strategyLookup,
+  nowEpochMs,
+  onStart,
+  onStop,
+  onDelete,
+  onOpenLens,
+  onOpenDiagnostics,
+  onViewReport,
+  pendingStart,
+  pendingStop,
+  pendingDelete,
+}) {
+  const view = useMemo(
+    () => buildBotCardViewModel(bot, { strategyLookup, nowEpochMs, pendingStart: pendingStart === bot.id }),
+    [bot, strategyLookup, nowEpochMs, pendingStart],
+  )
+  const display = view.display
+  const mainActions = display.allowedActions.filter((action) => action.variant !== 'danger')
+  const dangerActions = display.allowedActions.filter((action) => action.variant === 'danger')
+  const metricStats = view.metricStats || []
+  const stateFacts = view.stateFacts || []
+  const runView = view.runView || {}
+  const performanceTrace = view.performanceTrace || {}
+
+  return (
+    <article className="qt-ops-panel group relative overflow-hidden transition-[border-color,background-color] duration-150 hover:border-white/14">
+      <div className="qt-ops-grid pointer-events-none absolute inset-0 opacity-40" aria-hidden="true" />
+      <div className="relative px-3.5 py-3">
+        <div className="space-y-3">
+          <header className="pb-0.5">
+            <div className="min-w-0">
+              <div className="flex min-w-0 items-center gap-2">
+                <StatusBadge tone={display.tone} label={view.statusLabel} statusKey={display.statusKey} />
+                <RunModeBadge badge={view.runMode} />
+                {runView.healthState && runView.healthState !== 'unknown' ? (
+                  <SemanticStatusBadge kind="health" value={runView.healthState} />
+                ) : null}
+                <h4 className="min-w-0 flex-1 truncate text-[14px] font-semibold tracking-[0.01em] text-slate-50">
+                  {bot.name}
+                </h4>
+              </div>
+              <p title={view.headerMetaText} className="mt-1.5 truncate text-[11px] leading-4 text-slate-400">
+                {view.headerMetaText}
+              </p>
+            </div>
+
+            {view.statusDetail ? (
+              <p title={view.statusDetail} className="mt-2 max-w-4xl truncate text-[11px] leading-4 text-slate-500">
+                {view.statusDetail}
+                {display.statusKey === 'starting' ? '…' : ''}
+              </p>
+            ) : null}
+          </header>
+
+          <section className="border-y border-white/6 py-2">
+            <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2 xl:grid-cols-4">
+              {view.metadataItems.map((item) => (
+                <MetadataField key={item.key} {...item} />
+              ))}
+            </div>
+          </section>
+
+          <div className="grid gap-3 xl:grid-cols-[minmax(0,1.75fr)_minmax(13rem,0.7fr)]">
+            <div className="min-w-0 space-y-2">
+              <section className="space-y-1.5">
+                <dl className="grid gap-x-4 gap-y-1.5 sm:grid-cols-2">
+                  {metricStats.map((item) => (
+                    <MetricRow key={item.key} {...item} />
+                  ))}
+                </dl>
+
+                {stateFacts.length ? (
+                  <dl className="grid gap-1 pt-0.5">
+                    {stateFacts.map((item) => (
+                      <MetricRow key={item.key} {...item} />
+                    ))}
+                  </dl>
+                ) : null}
+              </section>
+
+              <section className="border-t border-white/6 pt-1.5">
+                <SymbolsRow symbols={view.symbols} />
+              </section>
+
+              {runView.primaryError ? (
+                <section className="border-t border-white/6 pt-2">
+                  <ErrorCard error={runView.primaryError} compact showCode={false} />
+                </section>
+              ) : null}
+            </div>
+
+            <aside className="min-w-0 border-t border-white/8 pt-2.5 xl:border-t-0 xl:border-l xl:border-white/8 xl:pl-3 xl:pt-0">
+              <PerformanceTracePanel
+                trace={performanceTrace}
+                rows={view.operationalRows}
+              />
+            </aside>
+          </div>
+
+          <footer className="flex flex-col gap-1.5 border-t border-white/8 pt-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {mainActions.map((action) => (
+                <ActionButton
+                  key={action.key}
+                  onClick={() => handleAction(action.key, { bot, onOpenLens, onOpenDiagnostics, onViewReport, onStart, onStop, onDelete })}
+                  title={action.title}
+                  icon={actionIcon(action.key, display.statusKey)}
+                  label={action.label}
+                  busy={actionBusy(action, bot.id, { pendingStart, pendingStop, pendingDelete })}
+                  disabled={Boolean(action.disabled)}
+                  variant={action.variant}
+                />
+              ))}
+            </div>
+            {dangerActions.length ? (
+              <div className="flex flex-wrap items-center gap-1.5 sm:justify-end">
+                {dangerActions.map((action) => (
+                  <ActionButton
+                    key={action.key}
+                    onClick={() => handleAction(action.key, { bot, onOpenLens, onOpenDiagnostics, onViewReport, onStart, onStop, onDelete })}
+                    title={action.title}
+                    icon={actionIcon(action.key, display.statusKey)}
+                    label={action.label}
+                    busy={actionBusy(action, bot.id, { pendingStart, pendingStop, pendingDelete })}
+                    disabled={Boolean(action.disabled)}
+                    variant={action.variant}
+                  />
+                ))}
+              </div>
+            ) : null}
+          </footer>
+        </div>
+      </div>
+    </article>
+  )
+})
+
+async function copyText(value) {
+  const normalized = String(value || '').trim()
+  if (!normalized) return false
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(normalized)
+      return true
+    } catch {
+      return false
+    }
+  }
+  if (typeof document !== 'undefined') {
+    const textarea = document.createElement('textarea')
+    textarea.value = normalized
+    textarea.setAttribute('readonly', 'true')
+    textarea.style.position = 'absolute'
+    textarea.style.left = '-9999px'
+    document.body.appendChild(textarea)
+    textarea.select()
+    const copied = document.execCommand('copy')
+    document.body.removeChild(textarea)
+    return copied
+  }
+  return false
+}
+
+function actionBusy(action, botId, { pendingStart, pendingStop, pendingDelete }) {
+  return (
+    action.busy ||
+    (action.key === 'start' && pendingStart === botId) ||
+    (action.key === 'stop' && pendingStop === botId) ||
+    (action.key === 'delete' && pendingDelete === botId)
+  )
+}
+
+function actionIcon(actionKey, statusKey) {
+  if (actionKey === 'open') return <Eye className="size-3.5" />
+  if (actionKey === 'report') return <FileText className="size-3.5" />
+  if (actionKey === 'diagnostics') return <AlertTriangle className="size-3.5" />
+  if (actionKey === 'stop') return <Square className="size-3.5" />
+  if (actionKey === 'delete') return <Trash2 className="size-3.5" />
+  if (actionKey === 'start') {
+    return statusKey === 'completed' || statusKey === 'crashed' || statusKey === 'failed_start'
+      ? <RotateCw className="size-3.5" />
+      : <Play className="size-3.5" />
+  }
+  return <RotateCw className="size-3.5" />
+}
+
+function handleAction(actionKey, { bot, onOpenLens, onOpenDiagnostics, onViewReport, onStart, onStop, onDelete }) {
+  if (actionKey === 'open') {
+    onOpenLens?.(bot)
+    return
+  }
+  if (actionKey === 'report') {
+    onViewReport?.(bot)
+    return
+  }
+  if (actionKey === 'diagnostics') {
+    onOpenDiagnostics?.(bot)
+    return
+  }
+  if (actionKey === 'start') {
+    onStart?.(bot.id)
+    return
+  }
+  if (actionKey === 'stop') {
+    onStop?.(bot.id)
+    return
+  }
+  if (actionKey === 'delete') {
+    onDelete?.(bot.id)
+  }
+}
+
+function MetadataField({ label, value, rawValue, title, mono = false, copyable = false, missing = false }) {
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    if (!copied) return undefined
+    const timeoutId = setTimeout(() => setCopied(false), 1400)
+    return () => clearTimeout(timeoutId)
+  }, [copied])
+
+  const valueClass = missing
+    ? 'text-rose-200'
+    : mono
+      ? 'qt-mono text-[12px] text-slate-300'
+      : 'text-[12px] text-slate-300'
+
+  async function handleCopy() {
+    if (!copyable || !rawValue) return
+    const didCopy = await copyText(rawValue)
+    if (didCopy) setCopied(true)
+  }
+
+  return (
+    <div className="min-w-0">
+      <p className="qt-ops-kicker">{label}</p>
+      <div className="mt-0.5 flex items-center gap-1">
+        <span title={title || rawValue || value} className={`min-w-0 truncate ${valueClass}`}>
+          {value}
+        </span>
+        {copyable ? (
+          <button
+            type="button"
+            onClick={handleCopy}
+            title={`Copy full ${label}`}
+            aria-label={`Copy full ${label}`}
+            className="inline-flex shrink-0 items-center justify-center rounded-[3px] border border-white/8 bg-white/[0.03] p-[3px] text-slate-500 transition hover:border-white/14 hover:bg-white/[0.06] hover:text-slate-100"
+          >
+            {copied ? <Check className="size-3 text-emerald-300" /> : <Copy className="size-3" />}
+          </button>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+function MetricRow({ label, value, title, mono = false, tone = 'default' }) {
+  const toneClass = tone === 'attention'
+    ? 'text-amber-200'
+    : tone === 'positive'
+      ? 'text-emerald-200'
+      : tone === 'danger'
+        ? 'text-rose-200'
+        : 'text-slate-100'
+
+  return (
+    <div title={title} className="min-w-0">
+      <div className="flex min-w-0 items-baseline gap-1.5">
+        <dt className="shrink-0 text-[9px] font-medium uppercase tracking-[0.16em] text-slate-600">{label}</dt>
+        <dd className={`min-w-0 truncate text-[13px] font-semibold ${mono ? 'qt-mono tabular-nums' : ''} ${toneClass}`}>
+          {value}
+        </dd>
+      </div>
+    </div>
+  )
+}
+
+function SymbolsRow({ symbols }) {
+  return (
+    <div className="space-y-0.5">
+      <div className="flex min-w-0 items-baseline gap-1.5">
+        <p className="shrink-0 text-[9px] font-medium uppercase tracking-[0.16em] text-slate-600">Symbols</p>
+        <p className="min-w-0 truncate text-[13px] font-semibold text-slate-100">{symbols.summaryLabel || symbols.trackedLabel}</p>
+      </div>
+      <p title={symbols.title} className="truncate text-[11px] leading-4 text-slate-500">
+        {symbols.preview}
+      </p>
+    </div>
+  )
+}
+
+function formatTraceValue(value, quoteCurrency) {
+  if (value == null || value === '') return '—'
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return '—'
+  const formatted = new Intl.NumberFormat(undefined, {
+    maximumFractionDigits: Math.abs(numeric) >= 100 ? 0 : 2,
+    minimumFractionDigits: Math.abs(numeric) >= 100 ? 0 : 2,
+  }).format(numeric)
+  return quoteCurrency ? `${formatted} ${quoteCurrency}` : formatted
+}
+
+function traceDelta(trace) {
+  const points = Array.isArray(trace?.points) ? trace.points : []
+  if (points.length < 2) return null
+  const first = Number(points[0]?.y)
+  const last = Number(points[points.length - 1]?.y)
+  if (!Number.isFinite(first) || !Number.isFinite(last)) return null
+  return last - first
+}
+
+function buildSparkline(points) {
+  const normalized = Array.isArray(points)
+    ? points
+        .map((point, index) => ({
+          x: Number.isFinite(Number(point?.x)) ? Number(point.x) : index,
+          y: Number(point?.y),
+        }))
+        .filter((point) => Number.isFinite(point.y))
+    : []
+  if (normalized.length < 2) return null
+
+  const width = 240
+  const height = 84
+  const padX = 4
+  const padY = 8
+  const minX = Math.min(...normalized.map((point) => point.x))
+  const maxX = Math.max(...normalized.map((point) => point.x))
+  let minY = Math.min(...normalized.map((point) => point.y))
+  let maxY = Math.max(...normalized.map((point) => point.y))
+  if (minY === maxY) {
+    const padding = Math.max(1, Math.abs(minY) * 0.002)
+    minY -= padding
+    maxY += padding
+  }
+  const xRange = maxX - minX || normalized.length - 1 || 1
+  const yRange = maxY - minY || 1
+  const projected = normalized.map((point, index) => {
+    const x = minX === maxX
+      ? padX + ((width - padX * 2) * index) / Math.max(1, normalized.length - 1)
+      : padX + ((point.x - minX) / xRange) * (width - padX * 2)
+    const y = padY + (1 - ((point.y - minY) / yRange)) * (height - padY * 2)
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  })
+  return {
+    line: projected.join(' '),
+    area: `${padX},${height - padY} ${projected.join(' ')} ${width - padX},${height - padY}`,
+    minY,
+    maxY,
+  }
+}
+
+function PerformanceTracePanel({ trace, rows = [] }) {
+  const points = Array.isArray(trace?.points) ? trace.points : []
+  const chart = buildSparkline(points)
+  const delta = traceDelta(trace)
+  const hasSeries = trace?.kind === 'series' && chart
+  const trend = delta > 0 ? 'positive' : delta < 0 ? 'danger' : 'default'
+  const strokeClass = trend === 'positive'
+    ? 'stroke-emerald-300'
+    : trend === 'danger'
+      ? 'stroke-rose-300'
+      : 'stroke-slate-300'
+  const fillClass = trend === 'positive'
+    ? 'fill-emerald-400/10'
+    : trend === 'danger'
+      ? 'fill-rose-400/10'
+      : 'fill-slate-400/10'
+  const deltaClass = trend === 'positive'
+    ? 'text-emerald-200'
+    : trend === 'danger'
+      ? 'text-rose-200'
+      : 'text-slate-300'
+  const compactRows = rows.filter((row) => ['mode', 'heartbeat', 'container'].includes(row.key)).slice(0, 3)
+
+  return (
+    <div className="space-y-2">
+      <div className="flex min-w-0 items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="qt-ops-kicker text-slate-500">{trace?.label || 'Equity'}</p>
+          <p className="mt-0.5 truncate text-[13px] font-semibold text-slate-100">
+            {hasSeries ? formatTraceValue(trace.latestValue, trace.quoteCurrency) : trace?.label || 'No trace'}
+          </p>
+        </div>
+        {hasSeries ? (
+          <div className="shrink-0 text-right">
+            <p className="qt-ops-kicker text-slate-600">Delta</p>
+            <p className={`qt-mono text-[12px] font-semibold tabular-nums ${deltaClass}`}>
+              {delta > 0 ? '+' : ''}{formatTraceValue(delta, trace.quoteCurrency)}
+            </p>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="h-24 overflow-hidden border-y border-white/6 py-1.5">
+        {hasSeries ? (
+          <svg viewBox="0 0 240 84" role="img" aria-label={`${trace.label} trace`} className="h-full w-full">
+            <line x1="4" y1="76" x2="236" y2="76" className="stroke-white/8" strokeWidth="1" />
+            <polygon points={chart.area} className={fillClass} />
+            <polyline points={chart.line} fill="none" className={strokeClass} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        ) : (
+          <div className="flex h-full items-center justify-center text-center">
+            <p className="text-[11px] leading-4 text-slate-500">{trace?.label || 'No performance trace'}</p>
+          </div>
+        )}
+      </div>
+
+      <div className="grid gap-1 sm:grid-cols-3 xl:grid-cols-1 2xl:grid-cols-3">
+        {compactRows.map((row) => (
+          <OperationalRow key={row.key} {...row} compact />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function OperationalRow({ label, value, mono = false, compact = false }) {
+  return (
+    <div className={`flex items-center justify-between gap-3 ${compact ? 'py-0' : 'py-[0.3125rem]'}`}>
+      <span className="text-[9px] font-medium uppercase tracking-[0.16em] text-slate-600">{label}</span>
+      <span className={`min-w-0 truncate text-right text-[11px] ${mono ? 'qt-mono tabular-nums text-slate-300' : 'text-slate-400'}`}>{value}</span>
+    </div>
+  )
+}
+
+function StatusBadge({ tone, label, statusKey }) {
+  const toneClass = {
+    emerald: 'border-emerald-500/45 bg-emerald-500/10 text-emerald-200',
+    amber: 'border-amber-500/45 bg-amber-500/10 text-amber-200',
+    rose: 'border-rose-500/50 bg-rose-500/12 text-rose-200',
+    sky: 'border-sky-500/45 bg-sky-500/10 text-sky-200',
+    slate: 'border-slate-700 bg-slate-950/90 text-slate-200',
+  }[tone] || 'border-slate-700 bg-slate-950/90 text-slate-200'
+
+  const isStarting = statusKey === 'starting'
+  const isRunning = statusKey === 'running'
+  const badgeMotionClass = isStarting ? 'qt-bot-status-badge-starting' : ''
+  const dotMotionClass = isStarting
+    ? 'qt-bot-status-dot-starting'
+    : isRunning
+      ? 'qt-bot-status-dot-running'
+      : ''
+
+  return (
+    <span
+      className={`qt-mono inline-flex items-center gap-1.5 rounded-[3px] border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] ${toneClass} ${badgeMotionClass}`}
+    >
+      {(isStarting || isRunning) ? <span aria-hidden="true" className={`qt-bot-status-dot ${dotMotionClass}`} /> : null}
+      {label}
+    </span>
+  )
+}
+
+function RunModeBadge({ badge }) {
+  if (!badge?.label) return null
+  const toneClass = {
+    amber: 'border-amber-400/40 bg-amber-400/10 text-amber-100',
+    rose: 'border-rose-400/45 bg-rose-400/10 text-rose-100',
+    sky: 'border-sky-400/35 bg-sky-400/10 text-sky-100',
+    slate: 'border-white/10 bg-white/5 text-slate-200',
+  }[badge.tone] || 'border-white/10 bg-white/5 text-slate-200'
+
+  return (
+    <span className={`inline-flex items-center rounded-[3px] border px-2 py-0.5 text-[11px] font-semibold ${toneClass}`}>
+      {badge.label}
+    </span>
+  )
+}
+
+function ActionButton({ onClick, icon, label, busy, disabled = false, variant = 'tertiary', title }) {
+  const variantClass = {
+    primary:
+      'border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-12)] text-[color:var(--accent-text-strong)] hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-20)]',
+    diagnostic:
+      'border-amber-500/22 bg-amber-500/[0.08] text-amber-100 hover:border-amber-400/30 hover:bg-amber-500/[0.12]',
+    secondary:
+      'border-white/[0.10] bg-white/[0.04] text-slate-200 hover:border-white/[0.16] hover:bg-white/[0.07] hover:text-slate-50',
+    danger:
+      'border-rose-800/70 bg-rose-950/35 text-rose-200 hover:border-rose-700/80 hover:bg-rose-950/50',
+    tertiary:
+      'border-white/[0.08] bg-black/20 text-slate-300 hover:border-white/[0.14] hover:bg-black/35 hover:text-slate-100',
+  }[variant]
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      className={`qt-mono inline-flex items-center gap-1.5 rounded-[3px] border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] transition-colors ${variantClass} disabled:cursor-not-allowed disabled:opacity-50`}
+      disabled={busy || disabled}
+      aria-label={label}
+      aria-busy={busy ? 'true' : 'false'}
+    >
+      {busy ? <LoaderCircle className="size-3.5 animate-spin" /> : icon}
+      <span>{label}</span>
+    </button>
+  )
+}
+
+// --- LiveMonitorRow ----------------------------------------------------------
+
+export const LiveMonitorRow = memo(function LiveMonitorRow({
+  bot,
+  strategyLookup,
+  nowEpochMs,
+  pendingStart,
+  pendingStop,
+  pendingDelete,
+  onStart,
+  onStop,
+  onDelete,
+  onOpenLens,
+  onOpenDiagnostics,
+  onViewReport,
+}) {
+  const view = useMemo(
+    () => buildBotCardViewModel(bot, { strategyLookup, nowEpochMs, pendingStart: pendingStart === bot.id }),
+    [bot, strategyLookup, nowEpochMs, pendingStart],
+  )
+  const display = view.display
+  const pnlStat = view.metricStats.find((s) => s.key === 'net-pnl')
+  const warnStat = view.metricStats.find((s) => s.key === 'warnings')
+  const heartbeatRow = view.operationalRows.find((r) => r.key === 'heartbeat')
+  const mainActions = display.allowedActions.filter((a) => a.variant !== 'danger').slice(0, 2)
+  const dangerActions = display.allowedActions.filter((a) => a.variant === 'danger').slice(0, 1)
+
+  return (
+    <div className="flex min-h-[3.25rem] items-center gap-3 px-4 py-2.5">
+      <div className="flex min-w-0 flex-1 items-center gap-2.5">
+        <StatusBadge tone={display.tone} label={view.statusLabel} statusKey={display.statusKey} />
+        <RunModeBadge badge={view.runMode} />
+        <span className="min-w-0 truncate text-sm font-semibold text-slate-50">{bot.name}</span>
+        <span className="hidden min-w-0 truncate text-[11px] text-slate-500 xl:block">
+          {[view.strategyLabel, view.strategyVariantLabel, view.timeframeLabel].filter((s) => s && s !== '—').join(' · ')}
+        </span>
+      </div>
+
+      <div className="flex shrink-0 items-center gap-4">
+        {Number(warnStat?.value) > 0 ? (
+          <span className="flex items-center gap-1 text-[10px] font-semibold text-amber-300" title={`${warnStat.value} warning${Number(warnStat.value) === 1 ? '' : 's'}`}>
+            <AlertTriangle className="size-3" />
+            <span className="qt-mono">{warnStat.value}</span>
+          </span>
+        ) : null}
+        {pnlStat && pnlStat.value !== '—' ? (
+          <div className="hidden items-baseline gap-1.5 sm:flex">
+            <span className="text-[9px] font-medium uppercase tracking-[0.16em] text-slate-600">P&L</span>
+            <span className={`qt-mono text-xs font-semibold ${metricToneClass(pnlStat.tone)}`}>{pnlStat.value}</span>
+          </div>
+        ) : null}
+        {heartbeatRow ? <HeartbeatIndicator state={heartbeatRow.value} /> : null}
+        <div className="flex items-center gap-1">
+          {[...mainActions, ...dangerActions].map((action) => (
+            <ActionButton
+              key={action.key}
+              onClick={() => handleAction(action.key, { bot, onOpenLens, onOpenDiagnostics, onViewReport, onStart, onStop, onDelete })}
+              icon={actionIcon(action.key, display.statusKey)}
+              label={action.label}
+              busy={actionBusy(action, bot.id, { pendingStart, pendingStop, pendingDelete })}
+              disabled={Boolean(action.disabled)}
+              variant={action.variant}
+              title={action.title}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+})
+
+// --- BacktestRunCard ---------------------------------------------------------
+
+export const BacktestRunCard = memo(function BacktestRunCard({
+  bots,
+  strategyLookup,
+  nowEpochMs,
+  pendingStart,
+  pendingStop,
+  pendingDelete,
+  onStart,
+  onStop,
+  onDelete,
+  onOpenLens,
+  onOpenDiagnostics,
+  onViewReport,
+}) {
+  const primaryBot = bots[0]
+  const view = useMemo(
+    () => buildBotCardViewModel(primaryBot, { strategyLookup, nowEpochMs, pendingStart: pendingStart === primaryBot.id }),
+    [primaryBot, strategyLookup, nowEpochMs, pendingStart],
+  )
+  const display = view.display
+  const runView = view.runView
+  const pnlStat = view.metricStats.find((s) => s.key === 'net-pnl')
+  const tradesStat = view.metricStats.find((s) => s.key === 'total-trades')
+  const warnStat = view.metricStats.find((s) => s.key === 'warnings')
+  const durationItem = view.metadataItems.find((m) => m.key === 'duration')
+  const activityItem = view.metadataItems.find((m) => m.key === 'activity')
+  const mainActions = display.allowedActions
+    .filter((a) => a.variant !== 'danger')
+    .filter((a) => !a.disabled || ['primary', 'diagnostic'].includes(a.variant))
+  const dangerActions = display.allowedActions.filter((a) => a.variant === 'danger')
+  const backtestMeta = [
+    view.strategyLabel,
+    view.strategyVariantLabel,
+    runView.executionModeLabel,
+    view.timeframeLabel,
+  ].filter((s) => s && s !== '—').join(' · ')
+
+  return (
+    <article className="qt-ops-panel group relative overflow-hidden transition-[border-color] duration-150 hover:border-white/14">
+      <div className="qt-ops-grid pointer-events-none absolute inset-0 opacity-40" aria-hidden="true" />
+      <div className="relative px-4 py-3">
+        <div className="space-y-2.5">
+          <header>
+            <div className="flex min-w-0 items-center gap-2">
+              <StatusBadge tone={display.tone} label={view.statusLabel} statusKey={display.statusKey} />
+              {runView.healthState && runView.healthState !== 'unknown' ? (
+                <SemanticStatusBadge kind="health" value={runView.healthState} />
+              ) : null}
+              <h4 className="min-w-0 flex-1 truncate text-[14px] font-semibold tracking-[0.01em] text-slate-50">
+                {primaryBot.name}
+              </h4>
+              {activityItem && activityItem.value !== '—' ? (
+                <span className="shrink-0 text-[11px] text-slate-500">{activityItem.value}</span>
+              ) : null}
+            </div>
+            <p className="mt-1 truncate text-[11px] leading-4 text-slate-400">{backtestMeta}</p>
+            {view.statusDetail && display.statusKey === 'starting' ? (
+              <p className="mt-1 truncate text-[11px] leading-4 text-slate-500">{view.statusDetail}…</p>
+            ) : null}
+          </header>
+
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+            {pnlStat && pnlStat.value !== '—' ? (
+              <StatChip label="P&L" value={pnlStat.value} tone={pnlStat.tone} mono />
+            ) : null}
+            {tradesStat && tradesStat.value !== '—' ? (
+              <StatChip label="Trades" value={tradesStat.value} mono />
+            ) : null}
+            {view.symbols.count > 0 ? (
+              <StatChip label="Symbols" value={String(view.symbols.count)} title={view.symbols.title} />
+            ) : null}
+            {durationItem && durationItem.value !== '—' ? (
+              <StatChip label="Duration" value={durationItem.value} mono />
+            ) : null}
+            {Number(warnStat?.value) > 0 ? (
+              <StatChip label="Warnings" value={warnStat.value} tone="attention" />
+            ) : null}
+            {view.stateFacts.map((fact) => (
+              <StatChip key={fact.key} label={fact.label} value={fact.value} title={fact.title} />
+            ))}
+          </div>
+
+          {runView.primaryError ? (
+            <ErrorCard error={runView.primaryError} compact showCode={false} />
+          ) : null}
+
+          <footer className="flex items-center justify-between gap-3 border-t border-white/6 pt-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {mainActions.map((action) => (
+                <ActionButton
+                  key={action.key}
+                  onClick={() => handleAction(action.key, { bot: primaryBot, onOpenLens, onOpenDiagnostics, onViewReport, onStart, onStop, onDelete })}
+                  icon={actionIcon(action.key, display.statusKey)}
+                  label={action.label}
+                  busy={actionBusy(action, primaryBot.id, { pendingStart, pendingStop, pendingDelete })}
+                  disabled={Boolean(action.disabled)}
+                  variant={action.variant}
+                  title={action.title}
+                />
+              ))}
+            </div>
+            {dangerActions.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {dangerActions.map((action) => (
+                  <ActionButton
+                    key={action.key}
+                    onClick={() => handleAction(action.key, { bot: primaryBot, onOpenLens, onOpenDiagnostics, onViewReport, onStart, onStop, onDelete })}
+                    icon={actionIcon(action.key, display.statusKey)}
+                    label={action.label}
+                    busy={actionBusy(action, primaryBot.id, { pendingStart, pendingStop, pendingDelete })}
+                    disabled={Boolean(action.disabled)}
+                    variant={action.variant}
+                    title={action.title}
+                  />
+                ))}
+              </div>
+            ) : null}
+          </footer>
+        </div>
+      </div>
+    </article>
+  )
+})
+
+// --- Shared sub-components ---------------------------------------------------
+
+function HeartbeatIndicator({ state }) {
+  const normalized = String(state || '').toLowerCase()
+  const dotClass = normalized === 'fresh'
+    ? 'bg-emerald-400'
+    : normalized === 'stale'
+      ? 'bg-amber-400'
+      : 'bg-slate-600'
+  const textClass = normalized === 'fresh'
+    ? 'text-emerald-400'
+    : normalized === 'stale'
+      ? 'text-amber-400'
+      : 'text-slate-500'
+  const label = normalized === 'fresh' ? 'Fresh' : normalized === 'stale' ? 'Stale' : 'Offline'
+
+  return (
+    <span className={`qt-mono flex items-center gap-1 text-[10px] font-medium ${textClass}`}>
+      <span className={`size-1.5 rounded-full ${dotClass}`} />
+      <span className="hidden sm:inline">{label}</span>
+    </span>
+  )
+}
+
+function StatChip({ label, value, tone, mono = false, title }) {
+  const valueClass = tone === 'attention'
+    ? 'text-amber-200'
+    : tone === 'positive'
+      ? 'text-emerald-200'
+      : tone === 'danger'
+        ? 'text-rose-200'
+        : 'text-slate-100'
+
+  return (
+    <div title={title} className="flex items-baseline gap-1.5">
+      <span className="shrink-0 text-[9px] font-medium uppercase tracking-[0.16em] text-slate-600">{label}</span>
+      <span className={`text-[13px] font-semibold ${mono ? 'qt-mono tabular-nums' : ''} ${valueClass}`}>{value}</span>
+    </div>
+  )
+}
+
+function metricToneClass(tone) {
+  if (tone === 'positive') return 'text-emerald-300'
+  if (tone === 'danger') return 'text-rose-300'
+  if (tone === 'attention') return 'text-amber-300'
+  return 'text-slate-200'
+}

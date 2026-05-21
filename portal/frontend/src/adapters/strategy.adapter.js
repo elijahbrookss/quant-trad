@@ -1,7 +1,83 @@
 import { createLogger } from '../utils/logger.js'
 
-const BASE = import.meta.env.REACT_APP_API_BASE_URL || 'http://localhost:8000'
+import { API_ORIGIN as BASE } from '../config/appConfig.js'
 const adapterLogger = createLogger('StrategyAdapter')
+
+const normalizeStrategyCore = (strategy = {}) => ({
+  id: strategy?.id ?? null,
+  name: strategy?.name ?? '',
+  description: strategy?.description ?? null,
+  timeframe: strategy?.timeframe ?? '',
+  datasource: strategy?.datasource ?? '',
+  exchange: strategy?.exchange ?? '',
+  provider_id: strategy?.provider_id ?? null,
+  venue_id: strategy?.venue_id ?? null,
+  atm_template_id: strategy?.atm_template_id ?? null,
+  atm_template:
+    strategy?.atm_template && typeof strategy.atm_template === 'object'
+      ? { ...strategy.atm_template }
+      : {},
+  risk_config:
+    strategy?.risk_config && typeof strategy.risk_config === 'object'
+      ? { ...strategy.risk_config }
+      : {},
+  created_at: strategy?.created_at ?? null,
+  updated_at: strategy?.updated_at ?? null,
+})
+
+const normalizeStrategyBindings = (bindings = {}) => ({
+  symbols: Array.isArray(bindings?.symbols) ? bindings.symbols : [],
+  instrument_slots: Array.isArray(bindings?.instrument_slots) ? bindings.instrument_slots : [],
+  instruments: Array.isArray(bindings?.instruments) ? bindings.instruments : [],
+  indicator_ids: Array.isArray(bindings?.indicator_ids) ? bindings.indicator_ids : [],
+  indicators: Array.isArray(bindings?.indicators) ? bindings.indicators : [],
+})
+
+export function normalizeStrategySummary(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return null
+  }
+
+  const strategy = normalizeStrategyCore(payload.strategy)
+  const bindings = normalizeStrategyBindings(payload.bindings)
+
+  return {
+    ...strategy,
+    ...bindings,
+    strategy,
+    bindings,
+  }
+}
+
+export function normalizeStrategyDetail(payload) {
+  const summary = normalizeStrategySummary(payload)
+  if (!summary) {
+    return null
+  }
+
+  const decision = {
+    rules: Array.isArray(payload?.decision?.rules) ? payload.decision.rules : [],
+  }
+  const read_context = {
+    missing_indicators: Array.isArray(payload?.read_context?.missing_indicators)
+      ? payload.read_context.missing_indicators
+      : [],
+    instrument_messages: Array.isArray(payload?.read_context?.instrument_messages)
+      ? payload.read_context.instrument_messages
+      : [],
+  }
+  const variants = Array.isArray(payload?.variants) ? payload.variants : []
+
+  return {
+    ...summary,
+    rules: decision.rules,
+    missing_indicators: read_context.missing_indicators,
+    instrument_messages: read_context.instrument_messages,
+    variants,
+    decision,
+    read_context,
+  }
+}
 
 async function handleResponse(res) {
   if (res.ok) {
@@ -47,7 +123,15 @@ async function handleResponse(res) {
 /** Fetch all strategy records. */
 export async function fetchStrategies() {
   const res = await fetch(`${BASE}/api/strategies/`, { mode: 'cors' })
-  return handleResponse(res)
+  const payload = await handleResponse(res)
+  const list = Array.isArray(payload) ? payload : []
+  return list.map(normalizeStrategySummary).filter(Boolean)
+}
+
+/** Fetch a single strategy detail record. */
+export async function fetchStrategy(strategyId) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}`, { mode: 'cors' })
+  return normalizeStrategyDetail(await handleResponse(res))
 }
 
 /** Create a new strategy. */
@@ -56,6 +140,37 @@ export async function createStrategy(payload) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    mode: 'cors',
+  })
+  return normalizeStrategyDetail(await handleResponse(res))
+}
+
+/** Create a saved strategy variant. */
+export async function createStrategyVariant(strategyId, payload) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}/variants`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
+/** Update a saved strategy variant. */
+export async function updateStrategyVariant(strategyId, variantId, payload) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}/variants/${variantId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
+/** Delete a saved non-default strategy variant. */
+export async function deleteStrategyVariant(strategyId, variantId) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}/variants/${variantId}`, {
+    method: 'DELETE',
     mode: 'cors',
   })
   return handleResponse(res)
@@ -69,7 +184,7 @@ export async function updateStrategy(strategyId, payload) {
     body: JSON.stringify(payload),
     mode: 'cors',
   })
-  return handleResponse(res)
+  return normalizeStrategyDetail(await handleResponse(res))
 }
 
 /** Delete a strategy. */
@@ -87,7 +202,7 @@ export async function attachStrategyIndicator(strategyId, indicatorId) {
     method: 'POST',
     mode: 'cors',
   })
-  return handleResponse(res)
+  return normalizeStrategyDetail(await handleResponse(res))
 }
 
 /** Detach an indicator instance from a strategy. */
@@ -96,7 +211,7 @@ export async function detachStrategyIndicator(strategyId, indicatorId) {
     method: 'DELETE',
     mode: 'cors',
   })
-  return handleResponse(res)
+  return normalizeStrategyDetail(await handleResponse(res))
 }
 
 /** Create a rule for a strategy. */
@@ -107,7 +222,7 @@ export async function createStrategyRule(strategyId, payload) {
     body: JSON.stringify(payload),
     mode: 'cors',
   })
-  return handleResponse(res)
+  return normalizeStrategyDetail(await handleResponse(res))
 }
 
 /** Update an existing strategy rule. */
@@ -118,7 +233,7 @@ export async function updateStrategyRule(strategyId, ruleId, payload) {
     body: JSON.stringify(payload),
     mode: 'cors',
   })
-  return handleResponse(res)
+  return normalizeStrategyDetail(await handleResponse(res))
 }
 
 /** Delete a strategy rule. */
@@ -127,89 +242,15 @@ export async function deleteStrategyRule(strategyId, ruleId) {
     method: 'DELETE',
     mode: 'cors',
   })
-  return handleResponse(res)
+  return normalizeStrategyDetail(await handleResponse(res))
 }
 
-/** Generate signals for a strategy over the requested window. */
-export async function generateStrategySignals(strategyId, payload) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/signals`, {
+/** Run a rule-logic preview for a strategy over the requested window. */
+export async function runStrategyPreview(strategyId, payload) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}/preview`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
-    mode: 'cors',
-  })
-  return handleResponse(res)
-}
-
-/** List strategy-wide filters. */
-export async function fetchStrategyFilters(strategyId) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/filters`, { mode: 'cors' })
-  return handleResponse(res)
-}
-
-/** Create a strategy-wide filter. */
-export async function createStrategyFilter(strategyId, payload) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/filters`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    mode: 'cors',
-  })
-  return handleResponse(res)
-}
-
-/** Update a strategy-wide filter. */
-export async function updateStrategyFilter(strategyId, filterId, payload) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/filters/${filterId}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    mode: 'cors',
-  })
-  return handleResponse(res)
-}
-
-/** Delete a strategy-wide filter. */
-export async function deleteStrategyFilter(strategyId, filterId) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/filters/${filterId}`, {
-    method: 'DELETE',
-    mode: 'cors',
-  })
-  return handleResponse(res)
-}
-
-/** List filters attached to a rule. */
-export async function fetchRuleFilters(strategyId, ruleId) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/rules/${ruleId}/filters`, { mode: 'cors' })
-  return handleResponse(res)
-}
-
-/** Create a rule-scoped filter. */
-export async function createRuleFilter(strategyId, ruleId, payload) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/rules/${ruleId}/filters`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    mode: 'cors',
-  })
-  return handleResponse(res)
-}
-
-/** Update a rule-scoped filter. */
-export async function updateRuleFilter(strategyId, ruleId, filterId, payload) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/rules/${ruleId}/filters/${filterId}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    mode: 'cors',
-  })
-  return handleResponse(res)
-}
-
-/** Delete a rule-scoped filter. */
-export async function deleteRuleFilter(strategyId, ruleId, filterId) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/rules/${ruleId}/filters/${filterId}`, {
-    method: 'DELETE',
     mode: 'cors',
   })
   return handleResponse(res)

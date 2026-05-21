@@ -5,7 +5,6 @@ from typing import Any, List, Tuple, Dict, Literal, Mapping, Optional
 import logging
 
 from indicators.base import ComputeIndicator
-from indicators.config import DataContext
 
 log = logging.getLogger("TrendlineIndicator")
 
@@ -154,49 +153,6 @@ class TrendlineIndicator(ComputeIndicator):
         self.max_lines_per_side = int(max_lines_per_side)
         self.lines: List[TL] = []
         self._compute()
-
-    @classmethod
-    def from_context(
-        cls,
-        provider,
-        ctx: DataContext,
-        lookbacks: List[int] = list(LOOKBACKS_DEFAULT),
-        tolerance: float = TOUCH_TOL_FRAC,
-        timeframe: str = "1d",
-        min_span_bars: int = MIN_SPAN_BARS,
-        window_size: int = WINDOW_SIZE,
-        max_windows_per_side: int = MAX_WINDOWS_PER_SIDE,
-        pivot_dedupe_frac: float = PIVOT_DEDUPE_FRAC,
-        enforce_direction: bool = ENFORCE_DIRECTION,
-        algo: str = "pivot_ransac",
-        projection_bars: int = PROJECTION_BARS,
-        ransac_trials: int = RANSAC_TRIALS,
-        ransac_tol_frac: float = RANSAC_TOL_FRAC,
-        ransac_min_inliers: int = RANSAC_MIN_INLIERS,
-        max_lines_per_side: int = MAX_LINES_PER_SIDE,
-    ):
-        log.info("[Trendline.from_context] Fetching OHLCV for %s [%s - %s] interval=%s",
-                 ctx.symbol, ctx.start, ctx.end, ctx.interval)
-        df = provider.get_ohlcv(ctx)
-        if df is None or df.empty:
-            raise ValueError("No OHLCV to compute trendlines.")
-        return cls(
-            df=df,
-            lookbacks=lookbacks,
-            tolerance=tolerance,
-            timeframe=timeframe,
-            min_span_bars=min_span_bars,
-            window_size=window_size,
-            max_windows_per_side=max_windows_per_side,
-            pivot_dedupe_frac=pivot_dedupe_frac,
-            enforce_direction=enforce_direction,
-            algo=algo,
-            projection_bars=projection_bars,
-            ransac_trials=ransac_trials,
-            ransac_tol_frac=ransac_tol_frac,
-            ransac_min_inliers=ransac_min_inliers,
-            max_lines_per_side=max_lines_per_side,
-        )
 
     # ----- pivots -----
 
@@ -466,38 +422,3 @@ class TrendlineIndicator(ComputeIndicator):
                     })
 
         return {"segments": segs, "markers": markers}
-
-    def build_runtime_signal_payload(
-        self,
-        *,
-        indicator_id: Optional[str] = None,
-        params: Optional[Mapping[str, Any]] = None,
-        symbol: Optional[str] = None,
-        color: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Provide canonical runtime payload for strict signal execution path."""
-        payload_params = dict(params or {})
-        if not payload_params:
-            payload_params = {
-                "lookbacks": list(self.lookbacks),
-                "tolerance": float(self.tolerance),
-                "timeframe": str(self.timeframe),
-                "min_span_bars": int(self.min_span_bars),
-                "window_size": int(self.window_size),
-                "max_windows_per_side": int(self.max_windows_per_side),
-                "pivot_dedupe_frac": float(self.pivot_dedupe_frac),
-                "enforce_direction": bool(self.enforce_direction),
-                "algo": str(self.algo),
-                "projection_bars": int(self.projection_bars),
-                "ransac_trials": int(self.ransac_trials),
-                "ransac_tol_frac": float(self.ransac_tol_frac),
-                "ransac_min_inliers": int(self.ransac_min_inliers),
-                "max_lines_per_side": int(self.max_lines_per_side),
-            }
-        return {
-            "_indicator_id": str(indicator_id or ""),
-            "symbol": str(symbol or ""),
-            "signals": [],
-            "profile_params": payload_params,
-            "overlay_color": str(color).strip() if isinstance(color, str) and color.strip() else None,
-        }

@@ -1,10 +1,11 @@
 import { createTouchPaneView } from './touchPaneView';
 import { createVABoxPaneView } from './vaBoxPaneView';
 import { createSegmentPaneView } from './segmentPaneView';
-import { createPolylinePaneView } from './polylinePaneView';
+import { buildPolylineSeriesData, createPolylinePaneView } from './polylinePaneView';
 import { createSignalBubblePaneView } from './signalBubblePaneView';
 import { createMarkerPaneView } from './markerPaneView';
 import { createHighlightBandPaneView } from './highlightBandPaneView';
+import { getPaneDefinition, listPaneDefinitions, normalizePaneKey } from '../panes/registry.js';
 
 const toSec = (t) => (typeof t === 'number' && t > 2e10 ? Math.floor(t / 1000) : t);
 
@@ -18,25 +19,89 @@ export const PaneViewType = {
   HIGHLIGHT_BAND: 'highlight_band',
 };
 
+const paneSignature = (paneKey, type) => `${String(paneKey || 'price')}::${type}`;
+
+const resolvePaneConfig = (paneKey) => getPaneDefinition(paneKey);
+
 export class PaneViewManager {
   constructor(chart) {
     this.chart = chart;
     this.ts = chart.timeScale();
     this.series = new Map();
     this.views = new Map();
-    this.vaBoxState = { boxes: [], lastSeriesTime: null, barSpacing: null };
+    this.vaBoxState = new Map();
     // Pre-initialize all overlay series so they sit below candles in z-order.
     // Candles must be added to the chart AFTER PaneViewManager is constructed.
-    this.ensure(PaneViewType.VA_BOX);
-    this.ensure(PaneViewType.SEGMENT);
-    this.ensure(PaneViewType.POLYLINE);
-    this.ensure(PaneViewType.HIGHLIGHT_BAND);
-    this.ensure(PaneViewType.TOUCH);
-    this.ensure(PaneViewType.SIGNAL_BUBBLE);
-    this.ensure(PaneViewType.MARKER);
+    this.ensure(PaneViewType.VA_BOX, 'price');
+    this.ensure(PaneViewType.SEGMENT, 'price');
+    this.ensure(PaneViewType.POLYLINE, 'price');
+    this.ensure(PaneViewType.HIGHLIGHT_BAND, 'price');
+    this.ensure(PaneViewType.TOUCH, 'price');
+    this.ensure(PaneViewType.SIGNAL_BUBBLE, 'price');
+    this.ensure(PaneViewType.MARKER, 'price');
+    this.syncActivePanes(['price']);
   }
-  ensure(type) {
-    if (this.series.has(type)) return;
+  _ensurePaneIndex(index) {
+    while (this.chart.panes().length <= index) {
+      this.chart.addPane();
+    }
+  }
+  syncActivePanes(activePaneKeys = ['price']) {
+    const requested = new Set((activePaneKeys || []).map((paneKey) => normalizePaneKey(paneKey)));
+    requested.add('price');
+
+    const requestedConfigs = [...requested]
+      .map((paneKey) => ({ paneKey, config: resolvePaneConfig(paneKey) }))
+      .sort((a, b) => b.config.index - a.config.index);
+
+    for (const { paneKey, config } of requestedConfigs) {
+      this._ensurePaneIndex(config.index);
+    }
+
+    const removablePanes = listPaneDefinitions()
+      .filter((config) => config.key !== 'price' && !requested.has(config.key) && this.chart.panes().length > config.index)
+      .sort((left, right) => right.index - left.index);
+
+    removablePanes.forEach((config) => {
+      const paneKey = config.key;
+      try {
+        this.chart.removePane(config.index);
+      } catch {
+        // Ignore pane removal failures and continue cleaning local state.
+      }
+      for (const signature of [...this.series.keys()]) {
+        if (!signature.startsWith(`${paneKey}::`)) continue;
+        this.series.delete(signature);
+        this.views.delete(signature);
+      }
+      this.vaBoxState.delete(paneKey);
+    });
+
+    const hasAuxiliaryPane = [...requested].some((paneKey) => paneKey !== 'price');
+    const pricePane = this.chart.panes()[0];
+    if (pricePane && typeof pricePane.setStretchFactor === 'function') {
+      pricePane.setStretchFactor(hasAuxiliaryPane ? getPaneDefinition('price').stretchFactor : 1);
+    }
+
+    [...requested]
+      .filter((paneKey) => paneKey !== 'price')
+      .forEach((paneKey) => {
+        const config = resolvePaneConfig(paneKey);
+        const paneApi = this.chart.panes()[config.index];
+        if (paneApi && typeof paneApi.setStretchFactor === 'function') {
+          paneApi.setStretchFactor(config.stretchFactor);
+        }
+      });
+  }
+  ensure(type, paneKey = 'price') {
+    const signature = paneSignature(paneKey, type);
+    if (this.series.has(signature)) return;
+    const paneConfig = resolvePaneConfig(paneKey);
+    this._ensurePaneIndex(paneConfig.index);
+    const paneApi = this.chart.panes()[paneConfig.index];
+    if (paneApi && typeof paneApi.setStretchFactor === 'function') {
+      paneApi.setStretchFactor(paneConfig.stretchFactor);
+    }
     let view;
     if (type === PaneViewType.TOUCH)      view = createTouchPaneView(this.ts);
     else if (type === PaneViewType.VA_BOX)  view = createVABoxPaneView(this.ts, { hatchOverlap: true, outlineFront: true });
@@ -52,21 +117,24 @@ export class PaneViewManager {
       priceScaleId: 'right',            // or mainSeries.priceScale().id()
       lastValueVisible: false,
       priceLineVisible: false,
-    });
-    this.views.set(type, view);
-    this.series.set(type, s);
+    }, paneConfig.index);
+    this.views.set(signature, view);
+    this.series.set(signature, s);
   }
   clearFrame() {
-    for (const [type, view] of this.views.entries()) {
-      if (type === PaneViewType.TOUCH)    { view.setRows?.([]);   this.series.get(type)?.setData([]); }
+    for (const [signature, view] of this.views.entries()) {
+      const [, type] = signature.split('::');
+      if (type === PaneViewType.TOUCH)    { view.setRows?.([]);   this.series.get(signature)?.setData([]); }
       if (type === PaneViewType.VA_BOX)   {
-        this.vaBoxState.boxes = [];
-        this._syncVABlocks();
+        const [paneKey] = signature.split('::');
+        this.vaBoxState.set(paneKey, { boxes: [], lastSeriesTime: null, barSpacing: null });
+        this._syncVABlocks(paneKey);
       }
-      if (type === PaneViewType.SEGMENT)  { view.setSegments?.([]); this.series.get(type)?.setData([]); }
-      if (type === PaneViewType.POLYLINE) { view.setPolylines?.([]); this.series.get(type)?.setData([]); }
-      if (type === PaneViewType.SIGNAL_BUBBLE) { view.setBubbles?.([]); this.series.get(type)?.setData([]); }
-      if (type === PaneViewType.MARKER) { view.setMarkers?.([]); this.series.get(type)?.setData([]); }
+      if (type === PaneViewType.SEGMENT)  { view.setSegments?.([]); this.series.get(signature)?.setData([]); }
+      if (type === PaneViewType.POLYLINE) { view.setPolylines?.([]); this.series.get(signature)?.setData([]); }
+      if (type === PaneViewType.SIGNAL_BUBBLE) { view.setBubbles?.([]); this.series.get(signature)?.setData([]); }
+      if (type === PaneViewType.MARKER) { view.setMarkers?.([]); this.series.get(signature)?.setData([]); }
+      if (type === PaneViewType.HIGHLIGHT_BAND) { view.setBands?.([]); this.series.get(signature)?.setData([]); }
     }
   }
   destroy() {
@@ -77,47 +145,54 @@ export class PaneViewManager {
       }
     }
     this.series.clear(); this.views.clear();
-    this.vaBoxState = { boxes: [], lastSeriesTime: null, barSpacing: null };
+    this.vaBoxState = new Map();
   }
 
-  setVABlocks(boxes, opts = {}){
-    this.ensure(PaneViewType.VA_BOX);
+  setVABlocks(boxes, opts = {}, paneKey = 'price'){
+    this.ensure(PaneViewType.VA_BOX, paneKey);
 
-    this.vaBoxState.boxes = Array.isArray(boxes) ? boxes : [];
+    const current = this.vaBoxState.get(paneKey) || { boxes: [], lastSeriesTime: null, barSpacing: null };
+    current.boxes = Array.isArray(boxes) ? boxes : [];
     if (opts && Object.prototype.hasOwnProperty.call(opts, 'lastSeriesTime')) {
-      this.vaBoxState.lastSeriesTime = opts.lastSeriesTime;
+      current.lastSeriesTime = opts.lastSeriesTime;
     }
     if (opts && Object.prototype.hasOwnProperty.call(opts, 'barSpacing')) {
-      this.vaBoxState.barSpacing = opts.barSpacing;
+      current.barSpacing = opts.barSpacing;
     }
+    this.vaBoxState.set(paneKey, current);
 
-    this._syncVABlocks();
+    this._syncVABlocks(paneKey);
   }
 
-  updateVABlockContext(opts = {}) {
-    if (!this.views.has(PaneViewType.VA_BOX)) return;
+  updateVABlockContext(opts = {}, paneKey = 'price') {
+    const signature = paneSignature(paneKey, PaneViewType.VA_BOX);
+    if (!this.views.has(signature)) return;
+    const current = this.vaBoxState.get(paneKey) || { boxes: [], lastSeriesTime: null, barSpacing: null };
     if (Object.prototype.hasOwnProperty.call(opts, 'lastSeriesTime')) {
-      this.vaBoxState.lastSeriesTime = opts.lastSeriesTime;
+      current.lastSeriesTime = opts.lastSeriesTime;
     }
     if (Object.prototype.hasOwnProperty.call(opts, 'barSpacing')) {
-      this.vaBoxState.barSpacing = opts.barSpacing;
+      current.barSpacing = opts.barSpacing;
     }
-    this._syncVABlocks();
+    this.vaBoxState.set(paneKey, current);
+    this._syncVABlocks(paneKey);
   }
 
-  _syncVABlocks() {
-    if (!this.views.has(PaneViewType.VA_BOX)) {
+  _syncVABlocks(paneKey = 'price') {
+    const signature = paneSignature(paneKey, PaneViewType.VA_BOX);
+    if (!this.views.has(signature)) {
       return;
     }
 
-    const view = this.views.get(PaneViewType.VA_BOX);
-    const series = this.series.get(PaneViewType.VA_BOX);
+    const view = this.views.get(signature);
+    const series = this.series.get(signature);
     if (!view || !series) {
       return;
     }
 
-    const boxes = this.vaBoxState.boxes || [];
-    const { lastSeriesTime } = this.vaBoxState;
+    const state = this.vaBoxState.get(paneKey) || { boxes: [], lastSeriesTime: null, barSpacing: null };
+    const boxes = state.boxes || [];
+    const { lastSeriesTime } = state;
 
     view.setBoxes(boxes);
 
@@ -129,25 +204,23 @@ export class PaneViewManager {
 
     series.setData(seriesTimes.map(t => ({ time: t, originalData: {} })));
   }
-  setSegments(segs){ this.ensure(PaneViewType.SEGMENT);
-    this.views.get(PaneViewType.SEGMENT).setSegments(segs || []);
+  setSegments(segs, paneKey = 'price'){ this.ensure(PaneViewType.SEGMENT, paneKey);
+    const signature = paneSignature(paneKey, PaneViewType.SEGMENT);
+    this.views.get(signature).setSegments(segs || []);
     const times = [...new Set((segs||[]).flatMap(s => [toSec(s.x1), toSec(s.x2)]))]
        .filter(Number.isFinite).sort((a,b)=>a-b)
        .map(t => ({ time: t, originalData: {} }));
-    this.series.get(PaneViewType.SEGMENT).setData(times);
+    this.series.get(signature).setData(times);
   }
-  setPolylines(lines){ this.ensure(PaneViewType.POLYLINE);
-    this.views.get(PaneViewType.POLYLINE).setPolylines(lines || []);
-    const times = [...new Set((lines||[]).flatMap(
-       l => (l.points || []).map(p => toSec(p.time))
-     ))]
-       .filter(Number.isFinite).sort((a,b)=>a-b)
-       .map(t => ({ time: t, originalData: {} }));
-    this.series.get(PaneViewType.POLYLINE).setData(times);
+  setPolylines(lines, paneKey = 'price'){ this.ensure(PaneViewType.POLYLINE, paneKey);
+    const signature = paneSignature(paneKey, PaneViewType.POLYLINE);
+    this.views.get(signature).setPolylines(lines || []);
+    this.series.get(signature).setData(buildPolylineSeriesData(lines || []));
   }
-  setSignalBubbles(bubs){ this.ensure(PaneViewType.SIGNAL_BUBBLE);
+  setSignalBubbles(bubs, paneKey = 'price'){ this.ensure(PaneViewType.SIGNAL_BUBBLE, paneKey);
+    const signature = paneSignature(paneKey, PaneViewType.SIGNAL_BUBBLE);
     const normalized = (bubs || []).map(b => ({ ...b, time: toSec(b.time) }));
-    this.views.get(PaneViewType.SIGNAL_BUBBLE).setBubbles(normalized);
+    this.views.get(signature).setBubbles(normalized);
 
     const grouped = new Map();
     for (const bubble of normalized) {
@@ -161,11 +234,12 @@ export class PaneViewManager {
       .sort((a,b) => a[0] - b[0])
       .map(([time, entries]) => ({ time, originalData: { bubbles: entries } }));
 
-    this.series.get(PaneViewType.SIGNAL_BUBBLE).setData(data);
+    this.series.get(signature).setData(data);
   }
-    setTouchPoints(points) {
+    setTouchPoints(points, paneKey = 'price') {
     // points: [{ time, price, color, size }]
-    this.ensure(PaneViewType.TOUCH);
+    this.ensure(PaneViewType.TOUCH, paneKey);
+    const signature = paneSignature(paneKey, PaneViewType.TOUCH);
     // group by time → rows
     const byTime = new Map();
     for (const p of points || []) {
@@ -178,15 +252,16 @@ export class PaneViewManager {
       .map(([time, pts]) => ({ time, originalData: { points: pts } }))
       .sort((a, b) => a.time - b.time);
 
-    this.views.get(PaneViewType.TOUCH).setRows(rows);
-    this.series.get(PaneViewType.TOUCH).setData(rows);
+    this.views.get(signature).setRows(rows);
+    this.series.get(signature).setData(rows);
   }
 
-  setMarkers(markers) {
+  setMarkers(markers, paneKey = 'price') {
     // markers: [{ time, price, color, size, shape, text, position }]
-    this.ensure(PaneViewType.MARKER);
+    this.ensure(PaneViewType.MARKER, paneKey);
+    const signature = paneSignature(paneKey, PaneViewType.MARKER);
     const normalized = (markers || []).map(m => ({ ...m, time: toSec(m.time) }));
-    this.views.get(PaneViewType.MARKER).setMarkers(normalized);
+    this.views.get(signature).setMarkers(normalized);
 
     // Group by time for series data
     const byTime = new Map();
@@ -201,24 +276,25 @@ export class PaneViewManager {
       .sort((a, b) => a[0] - b[0])
       .map(([time, entries]) => ({ time, originalData: { markers: entries } }));
 
-    this.series.get(PaneViewType.MARKER).setData(data);
+    this.series.get(signature).setData(data);
   }
 
-  setHighlightBands(bands) {
-    this.ensure(PaneViewType.HIGHLIGHT_BAND);
+  setHighlightBands(bands, paneKey = 'price') {
+    this.ensure(PaneViewType.HIGHLIGHT_BAND, paneKey);
+    const signature = paneSignature(paneKey, PaneViewType.HIGHLIGHT_BAND);
     const normalized = (bands || []).map((b) => ({
       ...b,
       x1: toSec(b.x1),
       x2: toSec(b.x2),
     }));
-    this.views.get(PaneViewType.HIGHLIGHT_BAND).setBands(normalized);
+    this.views.get(signature).setBands(normalized);
 
     const times = [...new Set(normalized.flatMap((b) => [b.x1, b.x2]))]
       .filter(Number.isFinite)
       .sort((a, b) => a - b)
       .map((time) => ({ time, originalData: {} }));
 
-    this.series.get(PaneViewType.HIGHLIGHT_BAND).setData(times);
+    this.series.get(signature).setData(times);
   }
 
 

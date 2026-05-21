@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Optional, Protocol, TYPE_CHECKING
 
 from utils.log_context import build_log_context, merge_log_context, with_log_context
-from .wallet import wallet_required_reservation
+from .wallet import wallet_required_reservation_details
 
 if TYPE_CHECKING:
     from .domain import LadderRiskEngine
@@ -107,9 +107,13 @@ class EntrySettlementService:
         margin_locked = None
         if accounting_mode == "margin":
             accounting_mode = "margin"
-            margin_locked = payload.get("reserved_amount") if isinstance(payload, dict) else None
+            required_delta = payload.get("required_delta") if isinstance(payload, dict) else None
+            if isinstance(required_delta, dict):
+                margin_locked = required_delta.get("collateral_reserved")
+            if margin_locked in (None, 0, 0.0) and isinstance(payload, dict):
+                margin_locked = payload.get("collateral_reserved") or payload.get("collateral_to_lock")
             if margin_locked in (None, 0, 0.0):
-                _, computed_margin_locked = wallet_required_reservation(
+                _, _reservation_total, reservation_details = wallet_required_reservation_details(
                     side=context.side,
                     base_currency=context.base_currency,
                     quote_currency=context.quote_currency,
@@ -119,6 +123,11 @@ class EntrySettlementService:
                     short_requires_borrow=bool(engine.short_requires_borrow),
                     instrument=engine.instrument,
                     execution_profile=engine.execution_profile,
+                )
+                computed_margin_locked = (
+                    reservation_details.get("collateral_reserved")
+                    if reservation_details.get("collateral_reserved") is not None
+                    else reservation_details.get("collateral_to_lock", 0.0)
                 )
                 margin_locked = computed_margin_locked
         reservation_id = payload.get("reservation_id") if isinstance(payload, dict) else None

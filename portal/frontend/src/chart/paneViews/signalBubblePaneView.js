@@ -34,6 +34,25 @@ const drawRoundedRect = (ctx, x, y, width, height, radius, fill, stroke) => {
   ctx.stroke();
 };
 
+const drawHighlightHalo = (ctx, x, y, width, height, radius, color) => {
+  const expansion = 4;
+  ctx.save();
+  ctx.globalAlpha = 0.34;
+  ctx.shadowBlur = 20;
+  ctx.shadowColor = color;
+  drawRoundedRect(
+    ctx,
+    x - expansion,
+    y - expansion,
+    width + expansion * 2,
+    height + expansion * 2,
+    radius + expansion,
+    'rgba(0,0,0,0)',
+    color,
+  );
+  ctx.restore();
+};
+
 const abbreviateSignalLabel = (raw = '', max = 40) => {
   const label = String(raw || '').trim();
   if (!label) return 'SIG';
@@ -90,8 +109,13 @@ export function createSignalBubblePaneView(timeScaleApi) {
         if (canvasX < -24 * hpr || canvasX > widthPx + 24 * hpr) continue;
 
         const accent = bubble?.accentColor ?? '#38bdf8';
+        const isSelected = Boolean(bubble?.isSelected);
         const background = bubble?.backgroundColor ?? hexToRgba(accent, 0.14) ?? 'rgba(15,23,42,0.82)';
+        const selectedBackground = isSelected
+          ? hexToRgba(accent, 0.30) ?? background
+          : background;
         const textColor = bubble?.textColor ?? '#dbeafe';
+        const selectedStroke = isSelected ? '#f8fafc' : accent;
 
         const lines = normalizeBubbleLines(bubble);
         const widths = [];
@@ -116,7 +140,11 @@ export function createSignalBubblePaneView(timeScaleApi) {
           : py * vpr + gap;
         y = clamp(y, 8 * vpr, Math.max(8 * vpr, heightPx - tagHeight - 8 * vpr));
 
-        drawRoundedRect(ctx, x, y, tagWidth, tagHeight, radius, background, accent);
+        if (isSelected) {
+          drawHighlightHalo(ctx, x, y, tagWidth, tagHeight, radius, accent);
+        }
+
+        drawRoundedRect(ctx, x, y, tagWidth, tagHeight, radius, selectedBackground, selectedStroke);
 
         ctx.fillStyle = textColor;
         ctx.font = `600 ${labelFontPx}px "Inter", "Segoe UI", sans-serif`;
@@ -129,7 +157,7 @@ export function createSignalBubblePaneView(timeScaleApi) {
         }
 
         ctx.beginPath();
-        ctx.fillStyle = accent;
+        ctx.fillStyle = isSelected ? '#f8fafc' : accent;
         const markerY = direction === 'above' ? y + tagHeight + 3 * vpr : y - 3 * vpr;
         ctx.arc(clamp(canvasX, x + 4 * hpr, x + tagWidth - 4 * hpr), markerY, markerRadius, 0, Math.PI * 2);
         ctx.fill();

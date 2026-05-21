@@ -8,6 +8,21 @@ export default defineConfig(({ mode }) => {
   const apiTarget = env.VITE_API_PROXY_TARGET || 'http://localhost:8000'
   return {
     plugins: [tailwindcss(), react()],
+    optimizeDeps: {
+      include: ['three', '@react-three/fiber', '@react-three/drei'],
+    },
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            react: ['react', 'react-dom', 'react-router-dom'],
+            charts: ['lightweight-charts'],
+            dates: ['flatpickr', 'react-flatpickr', 'flowbite-datepicker'],
+            ui: ['@headlessui/react', 'lucide-react'],
+          },
+        },
+      },
+    },
     server: {
       proxy: {
         '/api': apiTarget,

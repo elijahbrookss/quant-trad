@@ -19,21 +19,34 @@ const resolveOverlayColor = (overlay) => {
   return overlay?.color || overlay?.ui?.color || null
 }
 
-const resolveOverlayGroup = (overlay) => {
+const isSuppressedOverlay = (overlay) => {
+  const type = String(overlay?.type || '').trim().toLowerCase()
+  const label = String(resolveOverlayLabel(overlay) || '').trim().toLowerCase()
+  const tokens = `${type} ${label}`
+  return /previous[\s_-]*zones?/.test(tokens)
+}
+
+export const resolveOverlayGroup = (overlay) => {
   const explicit = overlay?.ui?.group || overlay?.group
-  if (explicit) return explicit
+  const explicitGroup = String(explicit || '').trim().toLowerCase()
+  if (explicitGroup === 'trade') return 'trade'
+  if (explicitGroup === 'regime') return 'regime'
+  if (explicitGroup === 'market' || explicitGroup === 'session') return 'market'
+  if (explicitGroup === 'indicator' || explicitGroup === 'context') return 'indicator'
 
   const type = (overlay?.type || '').toString().toLowerCase()
+  const label = resolveOverlayLabel(overlay).toLowerCase()
+  const tokens = `${type} ${label}`
+
+  if (tokens.includes('market_profile') || tokens.includes('market profile')) return 'market'
+  if (tokens.includes('regime')) return 'regime'
+  if (tokens.includes('atr') || tokens.includes('candle_stats') || tokens.includes('candle stats')) return 'indicator'
 
   const isTrade = ['trade', 'tp', 'sl', 'stop', 'target', 'ray', 'leg', 'exit', 'entry'].some((token) =>
     type.includes(token),
   )
   if (isTrade) return 'trade'
 
-  const isRegime = ['regime', 'context', 'session'].some((token) => type.includes(token))
-  if (isRegime) return 'regime'
-
-  // default bucket
   return 'indicator'
 }
 
@@ -43,6 +56,7 @@ export const useOverlayControls = ({ overlays = [], extraOptions = [] } = {}) =>
   const overlayOptions = useMemo(() => {
     const seen = new Map()
     const push = (overlay) => {
+      if (isSuppressedOverlay(overlay)) return
       const type = overlay?.type
       if (!type || seen.has(type)) return
       seen.set(type, {
@@ -94,6 +108,7 @@ export const useOverlayControls = ({ overlays = [], extraOptions = [] } = {}) =>
 
   const visibleOverlays = useMemo(() => {
     const visible = overlays.filter((overlay) => {
+      if (isSuppressedOverlay(overlay)) return false
       const type = overlay?.type
       if (!type) return false
       return visibility[type] !== false

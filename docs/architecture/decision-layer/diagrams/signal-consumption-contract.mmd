@@ -1,0 +1,21 @@
+flowchart TD
+    signalOutput["Indicator RuntimeOutput<br/>type=signal"]
+    trigger["Rule trigger<br/>signal_match"]
+    guards["Guards<br/>context / metric / held / signal window"]
+    artifact["Decision artifact"]
+    selected["Selected decision"]
+    strategySignal["Runtime StrategySignal<br/>execution provenance"]
+    runtimeEvents["SIGNAL_EMITTED<br/>DECISION_EMITTED<br/>TRADE_*"]
+
+    signalOutput --> trigger
+    signalOutput --> guards
+    trigger --> artifact
+    guards --> artifact
+    artifact --> selected
+    selected --> strategySignal
+    strategySignal --> runtimeEvents
+
+    classDef typed fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
+    classDef decision fill:#2a1f0f,stroke:#fbbf24,color:#fef3c7
+    class signalOutput typed
+    class trigger,guards,artifact,selected,strategySignal,runtimeEvents decision

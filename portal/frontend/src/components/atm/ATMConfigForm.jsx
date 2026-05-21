@@ -8,10 +8,6 @@ export const DEFAULT_ATM_TEMPLATE = {
     atr_period: 14,
     atr_multiplier: 1.0,
   },
-  risk: {
-    global_risk_multiplier: 1.0,
-    base_risk_per_trade: null,
-  },
   take_profit_orders: [],
   stop_adjustments: [],
   _meta: { instrument_overrides: false },
@@ -36,13 +32,6 @@ export function cloneATMTemplate(template = DEFAULT_ATM_TEMPLATE) {
     if (!cloned.initial_stop.mode) cloned.initial_stop.mode = 'atr'
     if (cloned.initial_stop.atr_period === undefined) cloned.initial_stop.atr_period = 14
     if (cloned.initial_stop.atr_multiplier === undefined) cloned.initial_stop.atr_multiplier = 1.0
-  }
-
-  if (!cloned.risk || typeof cloned.risk !== 'object') {
-    cloned.risk = { ...DEFAULT_ATM_TEMPLATE.risk }
-  } else {
-    if (cloned.risk.global_risk_multiplier === undefined) cloned.risk.global_risk_multiplier = 1.0
-    if (cloned.risk.base_risk_per_trade === undefined) cloned.risk.base_risk_per_trade = null
   }
 
   if (!Array.isArray(cloned.stop_adjustments)) {
@@ -478,8 +467,8 @@ export default function ATMConfigForm({
             <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Position setup</p>
-                  <p className="text-[11px] text-slate-500">Contracts and market sizing inputs.</p>
+                  <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Instrument inputs</p>
+                  <p className="text-[11px] text-slate-500">Optional instrument metadata overrides used for execution math.</p>
                 </div>
                 {collapsible && (
                   <button
@@ -493,34 +482,19 @@ export default function ATMConfigForm({
               </div>
               {(positionOpen || !collapsible) && (
                 <div className="mt-3 space-y-4">
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <div>
-                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Contracts</label>
-                      <input
-                        className={inputClasses}
-                        type="number"
-                        min={1}
-                        value={template.contracts ?? ''}
-                        onChange={(event) =>
-                          update({
-                            contracts: Math.max(1, Number(event.target.value) || DEFAULT_ATM_TEMPLATE.contracts),
-                          })
-                        }
-                      />
-                      <p className="mt-1 text-[11px] text-slate-500">How many contracts to open per position.</p>
-                    </div>
-                    <div>
-                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Contract size</label>
-                      <input
-                        className={inputClasses}
-                        type="number"
-                        step="any"
-                        placeholder="Auto"
-                        value={template._meta?.contract_size_override ? template.contract_size ?? '' : ''}
-                        onChange={(event) => applyOverrideField('contract_size', event.target.value)}
-                      />
-                      <p className="mt-1 text-[11px] text-slate-500">{autoLabel(template.contract_size, template._meta?.contract_size_override, resolvedContractSize, ' contracts')}</p>
-                    </div>
+                  <div>
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Contract size</label>
+                    <input
+                      className={inputClasses}
+                      type="number"
+                      step="any"
+                      placeholder="Auto"
+                      value={template._meta?.contract_size_override ? template.contract_size ?? '' : ''}
+                      onChange={(event) => applyOverrideField('contract_size', event.target.value)}
+                    />
+                    <p className="mt-1 text-[11px] text-slate-500">
+                      {autoLabel(template.contract_size, template._meta?.contract_size_override, resolvedContractSize, ' contracts')}
+                    </p>
                   </div>
                 </div>
               )}
@@ -532,7 +506,7 @@ export default function ATMConfigForm({
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Risk unit (R) settings</p>
-                  <p className="text-[11px] text-slate-500">1R uses ATR-based sizing from your risk step.</p>
+                  <p className="text-[11px] text-slate-500">Define how this ATM measures stop and target distance.</p>
                 </div>
                 {collapsible && (
                   <button type="button" className="text-xs text-slate-300" onClick={() => setRiskUnitOpen((open) => !open)}>
@@ -627,7 +601,7 @@ export default function ATMConfigForm({
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Take-profit targets</p>
-                <p className="text-[11px] text-slate-500">All targets use R multiples from your risk settings.</p>
+                <p className="text-[11px] text-slate-500">All targets use the R unit defined above.</p>
               </div>
               <div className="flex items-center gap-2">
                 {collapsible && (

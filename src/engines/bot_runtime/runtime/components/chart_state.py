@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import logging
-from signals.overlays.transformers import apply_overlay_transform
+from overlays.transformers import apply_overlay_transform
 from utils.perf_log import LogThrottle, get_obs_log_throttle_seconds
 
 logger = logging.getLogger(__name__)
@@ -16,10 +16,12 @@ class ChartStateBuilder:
         normalise_epoch_fn: Callable[[Any], Optional[int]],
         log_sequence_fn: Callable[[str, Optional[str], Sequence[Any]], None],
         strategy_key_fn: Callable[[Any], str],
+        max_candles: Optional[int] = None,
     ) -> None:
         self._normalise_epoch = normalise_epoch_fn
         self._log_sequence = log_sequence_fn
         self._strategy_key = strategy_key_fn
+        self._max_candles = max(int(max_candles or 0), 0)
         self._regime_log_throttle = LogThrottle(interval_s=get_obs_log_throttle_seconds())
 
     def visible_candles(
@@ -46,6 +48,8 @@ class ChartStateBuilder:
         snapshot = intrabar_manager.snapshots.get(key)
         if snapshot and candles:
             candles[-1] = intrabar_manager.merge_snapshot_payload(candles[-1], snapshot)
+        if self._max_candles > 0 and len(candles) > self._max_candles:
+            candles = candles[-self._max_candles :]
         self._log_sequence("visible_payload", getattr(primary, "strategy_id", None), candles)
         return candles
 

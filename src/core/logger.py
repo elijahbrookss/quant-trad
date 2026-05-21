@@ -1,15 +1,12 @@
 import logging
-import os
-from dotenv import load_dotenv
 from utils.logging_utils import LokiHandler, ExcludeLoggerFilter
+from core.settings import ensure_env_loaded, get_settings
 
-# Only load .env if not running inside GitHub Actions
-if not os.getenv("GITHUB_ACTIONS"):
-    load_dotenv("secrets.env")
-    load_dotenv(".env")
+ensure_env_loaded()
+_SETTINGS = get_settings()
 
-debug_mode = os.getenv("DEBUG", "false").lower() == "true"
-log_level = logging.DEBUG if debug_mode else logging.INFO
+debug_mode = _SETTINGS.logging.debug
+log_level = _SETTINGS.logging.level
 
 LOG_FMT = "%(asctime)s %(levelname)-5s %(filename)s:%(lineno)d | %(message)s"
 logging.basicConfig(level=log_level, format=LOG_FMT)
@@ -21,8 +18,8 @@ for handler in root_logger.handlers:
     handler.setLevel(log_level)
 
 # Loki config
-LOKI_URL = os.getenv("LOKI_URL", "").strip()
-LOKI_LABELS = {"app": "quant_trad", "env": os.getenv("ENV", "dev") }
+LOKI_URL = (_SETTINGS.logging.loki_url or "").strip()
+LOKI_LABELS = {"app": "quant_trad", "env": _SETTINGS.logging.env_name}
 
 if LOKI_URL:
     try:

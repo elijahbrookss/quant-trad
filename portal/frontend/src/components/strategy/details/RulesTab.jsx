@@ -1,14 +1,11 @@
 import React, { useMemo } from 'react'
 import { Plus } from 'lucide-react'
+
 import { Button } from '../../ui'
 import { AttachedIndicators } from '../indicators'
-import { FilterPanel } from '../filters/FilterPanel.jsx'
 import { RuleList } from '../rules'
 import { findBrokenRuleIndicators } from '../utils/indicatorUsage.js'
 
-/**
- * Decision Logic tab combining indicator attachment, rule management, and filter gates.
- */
 export const RulesTab = ({
   strategy,
   attachedIndicators,
@@ -19,52 +16,42 @@ export const RulesTab = ({
   onEditRule,
   onDeleteRule,
   onDuplicateRule,
-  onCreateGlobalFilter,
-  onUpdateGlobalFilter,
-  onDeleteGlobalFilter,
-  onCreateRuleFilter,
-  onUpdateRuleFilter,
-  onDeleteRuleFilter,
   indicatorLookup,
-  // These components need to be passed in
   DropdownSelect,
   ActionButton,
 }) => {
+  const attachedIndicatorEntries = Array.isArray(attachedIndicators) ? attachedIndicators : []
   const brokenIndicatorIds = useMemo(
-    () => findBrokenRuleIndicators(attachedIndicators.map((ind) => ind.id), strategy?.rules),
-    [attachedIndicators, strategy?.rules],
+    () => findBrokenRuleIndicators(attachedIndicatorEntries.map((ind) => ind.id), strategy?.rules),
+    [attachedIndicatorEntries, strategy?.rules],
   )
 
   const rules = Array.isArray(strategy?.rules) ? strategy.rules : []
-  const globalFilters = Array.isArray(strategy?.global_filters) ? strategy.global_filters : []
 
   if (!strategy) {
     return (
-      <div className="flex h-32 items-center justify-center rounded-xl border border-dashed border-white/10 bg-black/20">
+      <div className="flex h-32 items-center justify-center rounded-sm border border-dashed border-white/10 bg-[#0a0d13]">
         <div className="flex items-center gap-2 text-sm text-slate-500">
           <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-500 border-t-transparent" />
-          Loading decision logic...
+          Loading strategy rules...
         </div>
       </div>
     )
   }
 
   return (
-    <div className="space-y-8">
-      {/* Signal Sources - compact section */}
-      <section className="rounded-xl border border-white/8 bg-black/20 p-5">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h3 className="text-sm font-semibold text-white">Signal Sources</h3>
-            <p className="mt-0.5 text-xs text-slate-500">
-              Attach indicators to use their signals in rules
-            </p>
-          </div>
-        </div>
-        <div className="mt-4">
+    <div className="flex min-h-0 divide-x divide-white/[0.06]">
+      <div className="w-[260px] shrink-0 overflow-y-auto p-4 space-y-3">
+        <span className="text-[10px] uppercase tracking-[0.2em] text-slate-500">
+          Indicator Inputs
+        </span>
+        <p className="text-xs text-slate-600">
+          Attach indicators; use their outputs in rules.
+        </p>
+        <div>
           <AttachedIndicators
             strategy={strategy}
-            attached={attachedIndicators}
+            attached={attachedIndicatorEntries}
             availableIndicators={availableIndicators}
             onAttach={onAttachIndicator}
             onDetach={onDetachIndicator}
@@ -72,57 +59,41 @@ export const RulesTab = ({
             ActionButton={ActionButton}
           />
         </div>
-      </section>
+      </div>
 
-      {/* Rules - primary section */}
-      <section className="rounded-xl border border-white/10 bg-black/20 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-4">
-            <h3 className="text-base font-semibold text-white">Trading Rules</h3>
+      <div className="min-w-0 flex-1 overflow-y-auto p-4 space-y-3">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <span className="text-[10px] uppercase tracking-[0.2em] text-slate-500">
+              Rule Flows
+            </span>
             {rules.length > 0 && (
-              <span className="rounded-full bg-white/5 px-2 py-0.5 text-[11px] text-slate-400">
-                {rules.length} rule{rules.length === 1 ? '' : 's'}
+              <span className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-slate-400">
+                <span className="qt-mono">{rules.length}</span> rule{rules.length === 1 ? '' : 's'}
               </span>
             )}
           </div>
-          <Button onClick={onAddRule} className="gap-1.5">
-            <Plus className="h-4 w-4" />
+          <Button onClick={onAddRule} className="h-7 gap-1.5 px-2.5 text-xs">
+            <Plus className="h-3 w-3" />
             New rule
           </Button>
         </div>
-        <p className="mt-1 text-xs text-slate-500">
-          Define when to buy or sell based on indicator signals
+        <p className="text-xs text-slate-600">
+          Signal trigger + up to two optional context or metric guards.
         </p>
-        <div className="mt-5">
+        <div>
           <RuleList
             rules={rules}
             onEdit={onEditRule}
             onDelete={onDeleteRule}
             onDuplicate={onDuplicateRule}
-            onCreateFilter={onCreateRuleFilter}
-            onUpdateFilter={onUpdateRuleFilter}
-            onDeleteFilter={onDeleteRuleFilter}
             indicatorLookup={indicatorLookup}
             brokenIndicatorIds={brokenIndicatorIds}
             ActionButton={ActionButton}
             onAddRule={onAddRule}
           />
         </div>
-      </section>
-
-      {/* Global Gates */}
-      <section className="rounded-xl border border-white/8 bg-black/20 p-5">
-        <FilterPanel
-          title="Global Gates"
-          description="Filter out weak setups after rules match"
-          filters={globalFilters}
-          onCreate={onCreateGlobalFilter}
-          onUpdate={onUpdateGlobalFilter}
-          onDelete={onDeleteGlobalFilter}
-          ActionButton={ActionButton}
-          emptyState="No global gates yet. Add gates to filter by market regime, candle patterns, or other conditions."
-        />
-      </section>
+      </div>
     </div>
   )
 }

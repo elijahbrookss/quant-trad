@@ -1,0 +1,1318 @@
+"""Run-scoped report artifact bundle generation."""
+
+from __future__ import annotations
+
+import csv
+from datetime import datetime, timezone
+import io
+import json
+import logging
+from pathlib import Path
+import shutil
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from zipfile import ZIP_DEFLATED, ZipFile
+
+from core.settings import get_settings
+from utils.log_context import build_log_context, with_log_context
+
+
+logger = logging.getLogger(__name__)
+_SETTINGS = get_settings()
+_ARTIFACT_SETTINGS = _SETTINGS.reports.artifacts
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_SUPPORTED_OUTPUT_FORMATS = {"csv", "parquet"}
+_MANIFEST_VERSION = 1
+
+
+def _storage():
+    from portal.backend.service.storage import storage
+
+    return storage
+
+
+def _report_helpers():
+    from .summary_metrics import closed_trades, compute_summary, parse_iso
+
+    return closed_trades, compute_summary, parse_iso
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def _execution_mode_from_config(config: Mapping[str, Any]) -> str:
+    risk = config.get("risk") if isinstance(config.get("risk"), Mapping) else {}
+    value = config.get("execution_mode") or risk.get("execution_mode")
+    normalized = str(value or "fast").strip().lower()
+    return "full" if normalized == "full" else "fast"
+
+
+def _sanitize_segment(value: Any, default: str = "unknown") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return default
+    return "".join(char if char.isalnum() or char in {"-", "_", "="} else "_" for char in text)
+
+
+def _artifact_root() -> Path:
+    configured = Path(_ARTIFACT_SETTINGS.root_dir)
+    if configured.is_absolute():
+        return configured
+    return (_REPO_ROOT / configured).resolve()
+
+
+def _run_directory(bot_id: str, run_id: str) -> Path:
+    return _artifact_root() / f"bot_id={_sanitize_segment(bot_id)}" / f"run_id={_sanitize_segment(run_id)}"
+
+
+def _manifest_path(run_dir: Path) -> Path:
+    return run_dir / "manifest.json"
+
+
+def _artifact_status(runtime_status: str) -> str:
+    normalized = str(runtime_status or "").strip().lower()
+    if normalized == "completed":
+        return "completed"
+    if normalized == "stopped":
+        return "aborted"
+    if normalized in {"error", "failed", "startup_failed", "crashed", "degraded", "telemetry_degraded"}:
+        return "failed"
+    return "in_progress"
+
+
+def _output_extension(output_format: str) -> str:
+    fmt = str(output_format or "").strip().lower()
+    if fmt not in _SUPPORTED_OUTPUT_FORMATS:
+        raise RuntimeError(f"report_artifacts_invalid_output_format: {fmt}")
+    return fmt
+
+
+def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_json_safe(dict(payload)), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_json_safe(dict(payload)), sort_keys=True) + "\n")
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            rows.append(dict(json.loads(text)))
+    return rows
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    return dict(json.loads(path.read_text(encoding="utf-8")))
+
+
+def _append_jsonl_rows(path: Path, rows: Sequence[Mapping[str, Any]]) -> int:
+    written = 0
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        _append_jsonl(path, row)
+        written += 1
+    return written
+
+
+def _write_tabular(path: Path, rows: Sequence[Mapping[str, Any]], *, output_format: str) -> int:
+    clean_rows = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        normalized: dict[str, Any] = {}
+        for key, value in dict(row).items():
+            safe_value = _json_safe(value)
+            if isinstance(safe_value, (dict, list)):
+                normalized[str(key)] = json.dumps(safe_value, sort_keys=True)
+            else:
+                normalized[str(key)] = safe_value
+        clean_rows.append(normalized)
+    if not clean_rows:
+        return 0
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fmt = _output_extension(output_format)
+    if fmt == "csv":
+        fieldnames: list[str] = []
+        for row in clean_rows:
+            for key in row.keys():
+                if key not in fieldnames:
+                    fieldnames.append(str(key))
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in clean_rows:
+                writer.writerow({key: row.get(key) for key in fieldnames})
+        return len(clean_rows)
+    try:
+        import pyarrow  # noqa: F401
+    except ImportError as exc:  # pragma: no cover - environment specific
+        raise RuntimeError("report_artifacts_parquet_requires_pyarrow") from exc
+    import pandas as pd
+
+    frame = pd.DataFrame(clean_rows)
+    frame.to_parquet(path, index=False)
+    return len(clean_rows)
+
+
+def _stream_zip_bytes(root: Path) -> bytes:
+    buffer = io.BytesIO()
+    with ZipFile(buffer, mode="w", compression=ZIP_DEFLATED) as archive:
+        for path in sorted(root.rglob("*")):
+            if path.is_dir():
+                continue
+            archive.write(path, arcname=str(path.relative_to(root.parent)))
+    return buffer.getvalue()
+
+
+def _build_series_snapshot(series: Sequence[Any]) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    snapshots: list[dict[str, Any]] = []
+    indicator_meta_by_id: dict[str, dict[str, Any]] = {}
+    storage = _storage()
+    for entry in series:
+        meta = dict(getattr(entry, "meta", {}) or {})
+        indicator_links = list(meta.get("indicator_links") or [])
+        compiled_strategy = meta.get("compiled_strategy")
+        strategy_hash = (
+            getattr(compiled_strategy, "strategy_hash", None)
+            if compiled_strategy is not None
+            else None
+        )
+        if strategy_hash is None and isinstance(compiled_strategy, Mapping):
+            strategy_hash = compiled_strategy.get("strategy_hash")
+        indicator_ids = []
+        for link in indicator_links:
+            indicator_id = str(link.get("indicator_id") or link.get("id") or "").strip()
+            if not indicator_id:
+                continue
+            indicator_ids.append(indicator_id)
+            if indicator_id not in indicator_meta_by_id:
+                record = storage.get_indicator(indicator_id) or {}
+                indicator_meta_by_id[indicator_id] = {
+                    "id": indicator_id,
+                    "type": record.get("type") or "unknown",
+                    "version": record.get("version") or "v1",
+                    "name": record.get("name") or indicator_id,
+                    "params": dict(record.get("params") or {}),
+                    "enabled": bool(record.get("enabled", True)),
+                }
+        snapshots.append(
+            {
+                "strategy_id": getattr(entry, "strategy_id", None),
+                "name": getattr(entry, "name", None),
+                "symbol": getattr(entry, "symbol", None),
+                "timeframe": getattr(entry, "timeframe", None),
+                "datasource": getattr(entry, "datasource", None),
+                "exchange": getattr(entry, "exchange", None),
+                "window_start": getattr(entry, "window_start", None),
+                "window_end": getattr(entry, "window_end", None),
+                "indicator_ids": indicator_ids,
+                "strategy_hash": strategy_hash,
+                "variant_id": meta.get("variant_id"),
+                "variant_name": meta.get("variant_name"),
+                "resolved_params": dict(meta.get("resolved_params") or {}),
+                "effective_params": dict(meta.get("effective_params") or meta.get("resolved_params") or {}),
+                "param_source_map": dict(meta.get("param_source_map") or {}),
+                "output_filters": list(
+                    (meta.get("effective_strategy_config") or {}).get("output_filters") or []
+                ),
+                "effective_strategy_config": dict(meta.get("effective_strategy_config") or {}),
+                "run_strategy_snapshot": dict(meta.get("run_strategy_snapshot") or {}),
+                "atm_template_id": meta.get("atm_template_id"),
+                "atm_template": dict(meta.get("atm_template") or {}),
+                "rules": dict(meta.get("rules") or {}),
+                "instruments": list(meta.get("instrument_links") or []),
+            }
+        )
+    return snapshots, indicator_meta_by_id
+
+
+def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> dict[str, Any]:
+    symbols: list[str] = []
+    strategies: list[dict[str, Any]] = []
+    strategy_ids_seen: set[str] = set()
+    storage = _storage()
+    for entry in series:
+        symbol = str(getattr(entry, "symbol", "") or "").strip()
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+        strategy_id = str(getattr(entry, "strategy_id", "") or "").strip()
+        if not strategy_id or strategy_id in strategy_ids_seen:
+            continue
+        strategy_ids_seen.add(strategy_id)
+        meta = dict(getattr(entry, "meta", {}) or {})
+        indicator_links = list(meta.get("indicator_links") or [])
+        indicator_params = []
+        for link in indicator_links:
+            indicator_id = str(link.get("indicator_id") or link.get("id") or "").strip()
+            if not indicator_id:
+                continue
+            record = storage.get_indicator(indicator_id)
+            if record:
+                indicator_params.append(record)
+        compiled_strategy = meta.get("compiled_strategy")
+        strategy_hash = (
+            getattr(compiled_strategy, "strategy_hash", None)
+            if compiled_strategy is not None
+            else None
+        )
+        if strategy_hash is None and isinstance(compiled_strategy, Mapping):
+            strategy_hash = compiled_strategy.get("strategy_hash")
+        strategies.append(
+            {
+                "id": strategy_id,
+                "name": meta.get("name") or getattr(entry, "name", strategy_id),
+                "timeframe": meta.get("timeframe") or getattr(entry, "timeframe", None),
+                "datasource": meta.get("datasource") or getattr(entry, "datasource", None),
+                "exchange": meta.get("exchange") or getattr(entry, "exchange", None),
+                "strategy_hash": strategy_hash,
+                "variant_id": meta.get("variant_id"),
+                "variant_name": meta.get("variant_name"),
+                "resolved_params": dict(meta.get("resolved_params") or {}),
+                "effective_params": dict(meta.get("effective_params") or meta.get("resolved_params") or {}),
+                "param_source_map": dict(meta.get("param_source_map") or {}),
+                "output_filters": list(
+                    (meta.get("effective_strategy_config") or {}).get("output_filters") or []
+                ),
+                "effective_strategy_config": dict(meta.get("effective_strategy_config") or {}),
+                "run_strategy_snapshot": dict(meta.get("run_strategy_snapshot") or {}),
+                "atm_template_id": meta.get("atm_template_id"),
+                "atm_template": meta.get("atm_template") or {},
+                "rules": meta.get("rules") or {},
+                "indicator_ids": [row.get("id") for row in indicator_params],
+                "indicator_params": indicator_params,
+                "instruments": list(meta.get("instrument_links") or []),
+            }
+        )
+    timeframe = getattr(series[0], "timeframe", None) if series else None
+    datasource = getattr(series[0], "datasource", None) if series else None
+    exchange = getattr(series[0], "exchange", None) if series else None
+    return {
+        "execution_mode": _execution_mode_from_config(config),
+        "request_id": str(config.get("request_id") or config.get("_runtime_request_id") or "").strip() or None,
+        "wallet_start": dict(config.get("wallet_config") or {}),
+        "risk_settings": dict(config.get("risk") or {}),
+        "date_range": {
+            "start": config.get("backtest_start"),
+            "end": config.get("backtest_end"),
+        },
+        "symbols": symbols,
+        "timeframe": timeframe,
+        "datasource": datasource,
+        "exchange": exchange,
+        "fee_model": (config.get("risk") or {}).get("fee_model"),
+        "slippage_model": (config.get("risk") or {}).get("slippage_model"),
+        "strategies": strategies,
+    }
+
+
+class RunArtifactBundle:
+    """Filesystem-backed run artifact bundle with incremental spool semantics."""
+
+    def __init__(
+        self,
+        *,
+        bot_id: str,
+        run_id: str,
+        config: Mapping[str, Any],
+        series: Sequence[Any],
+    ) -> None:
+        self.bot_id = str(bot_id)
+        self.run_id = str(run_id)
+        self.config = dict(config or {})
+        self.series = list(series or [])
+        self.run_type = str(self.config.get("run_type") or "backtest").strip().lower()
+        self.settings = get_settings().reports.artifacts
+        self.output_format = _output_extension(self.settings.output_format)
+        self.run_dir = _run_directory(self.bot_id, self.run_id)
+        self.spool_dir = self.run_dir / ".spool"
+        self.worker_id = str(self.config.get("worker_id") or "").strip() or None
+        self.artifact_role = str(self.config.get("report_artifact_role") or "").strip().lower() or "standalone"
+        self.worker_mode = self.worker_id is not None and self.artifact_role == "worker"
+        self.worker_dir = (
+            self.spool_dir / "workers" / f"worker_id={_sanitize_segment(self.worker_id)}"
+            if self.worker_mode
+            else self.spool_dir
+        )
+        self.execution_dir = self.run_dir / "execution"
+        self.run_meta_dir = self.run_dir / "run"
+        self.summary_dir = self.run_dir / "summary"
+        self._started = False
+        self._series_snapshot, self._indicator_meta_by_id = _build_series_snapshot(self.series)
+
+    @property
+    def enabled(self) -> bool:
+        if not self.settings.enabled:
+            return False
+        if self.run_type == "backtest":
+            return bool(self.settings.capture_backtest)
+        if self.run_type == "preview":
+            return False
+        return bool(self.settings.capture_live)
+
+    def start(self, *, started_at: str) -> None:
+        if not self.enabled or self._started:
+            return
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.worker_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            _manifest_path(self.run_dir),
+            {
+                "manifest_version": _MANIFEST_VERSION,
+                "bot_id": self.bot_id,
+                "run_id": self.run_id,
+                "run_type": self.run_type,
+                "status": "in_progress",
+                "started_at": started_at,
+                "ended_at": None,
+                "output_format": self.output_format,
+                "generated_at": _utcnow_iso(),
+                "files": [],
+            },
+        )
+        _write_json(
+            self._run_metadata_dir() / "metadata.json",
+            {
+                "bot_id": self.bot_id,
+                "run_id": self.run_id,
+                "run_type": self.run_type,
+                "execution_mode": _execution_mode_from_config(self.config),
+                "request_id": str(self.config.get("request_id") or self.config.get("_runtime_request_id") or "").strip() or None,
+                "started_at": started_at,
+            },
+        )
+        _write_json(self._run_metadata_dir() / "config.json", self.config)
+        _write_json(self._run_metadata_dir() / "series.json", {"series": self._series_snapshot})
+        _write_json(self._run_metadata_dir() / "indicators.json", {"indicators": list(self._indicator_meta_by_id.values())})
+        if self.settings.include_candles:
+            for entry in self.series:
+                series_spool = self._series_spool_dir(entry)
+                for candle in list(getattr(entry, "candles", []) or []):
+                    _append_jsonl(
+                        series_spool / "candles.jsonl",
+                        {
+                            "time": getattr(candle, "time", None),
+                            "open": getattr(candle, "open", None),
+                            "high": getattr(candle, "high", None),
+                            "low": getattr(candle, "low", None),
+                            "close": getattr(candle, "close", None),
+                            "volume": getattr(candle, "volume", None),
+                        },
+                    )
+        self._started = True
+
+    def record_runtime_event(self, *, serialized: Mapping[str, Any]) -> None:
+        if not self.enabled:
+            return
+        if self.settings.include_runtime_events:
+            _append_jsonl(self._execution_spool_dir() / "runtime_events.jsonl", serialized)
+
+    def record_indicator_frame(self, *, state: Any, candle: Any, frame: Any = None) -> None:
+        if not self.enabled:
+            return
+        series = getattr(state, "series", None)
+        if series is None:
+            return
+        series_spool = self._series_spool_dir(series)
+        if self.settings.include_indicator_outputs:
+            outputs = dict(getattr(state, "indicator_outputs", {}) or {})
+            deltas = {
+                str(getattr(delta, "output_key", "")): delta
+                for delta in (getattr(frame, "output_deltas", ()) if frame is not None else ())
+                if getattr(delta, "output_key", None)
+            }
+            for output_key, runtime_output in outputs.items():
+                indicator_id, _, output_name = str(output_key).partition(".")
+                indicator_meta = self._indicator_meta_by_id.get(indicator_id, {})
+                output_delta = deltas.get(str(output_key))
+                _append_jsonl(
+                    series_spool / "indicators" / f"{_sanitize_segment(indicator_id)}.jsonl",
+                    {
+                        "bar_time": getattr(runtime_output, "bar_time", None),
+                        "known_at": getattr(runtime_output, "bar_time", None),
+                        "indicator_id": indicator_id,
+                        "indicator_type": indicator_meta.get("type") or "unknown",
+                        "indicator_version": indicator_meta.get("version") or "v1",
+                        "output_name": output_name,
+                        "output_type": (getattr(state, "indicator_output_types", {}) or {}).get(output_key),
+                        "output_op": getattr(output_delta, "op", "set") if output_delta is not None else "set",
+                        "base_indicator_commit_seq": getattr(output_delta, "base_indicator_commit_seq", None),
+                        "indicator_commit_seq": getattr(runtime_output, "indicator_commit_seq", None),
+                        "indicator_commit_seq_status": getattr(runtime_output, "indicator_commit_seq_status", None),
+                        "ready": bool(getattr(runtime_output, "ready", False)),
+                        "value_json": json.dumps(_json_safe(getattr(runtime_output, "value", {})), sort_keys=True),
+                    },
+                )
+        if self.settings.include_overlays:
+            overlay_source = getattr(frame, "overlays", None) if frame is not None else getattr(state, "indicator_overlays", {})
+            overlays = dict(overlay_source or {})
+            for overlay_key, runtime_overlay in overlays.items():
+                indicator_id, _, overlay_name = str(overlay_key).partition(".")
+                indicator_meta = self._indicator_meta_by_id.get(indicator_id, {})
+                _append_jsonl(
+                    series_spool / "overlays" / f"{_sanitize_segment(indicator_id)}.jsonl",
+                    {
+                        "bar_time": getattr(runtime_overlay, "bar_time", None),
+                        "known_at": getattr(runtime_overlay, "bar_time", None),
+                        "indicator_id": indicator_id,
+                        "indicator_type": indicator_meta.get("type") or "unknown",
+                        "indicator_version": indicator_meta.get("version") or "v1",
+                        "overlay_name": overlay_name,
+                        "indicator_commit_seq": getattr(runtime_overlay, "indicator_commit_seq", None),
+                        "indicator_commit_seq_status": getattr(runtime_overlay, "indicator_commit_seq_status", None),
+                        "ready": bool(getattr(runtime_overlay, "ready", False)),
+                        "value": _json_safe(getattr(runtime_overlay, "value", {})),
+                    },
+                )
+
+    def finalize(
+        self,
+        *,
+        runtime_status: str,
+        artifact: Mapping[str, Any],
+    ) -> None:
+        if self.worker_mode:
+            self._finalize_worker(runtime_status=runtime_status, artifact=artifact)
+            return
+        if not self.enabled:
+            return
+        if not self._started:
+            self.start(started_at=str(artifact.get("started_at") or _utcnow_iso()))
+        artifact_status = _artifact_status(runtime_status)
+        log_context = build_log_context(bot_id=self.bot_id, run_id=self.run_id, status=artifact_status)
+        logger.info(with_log_context("report_artifacts_finalize_start", log_context))
+
+        _write_json(self.run_meta_dir / "runtime_artifact.json", artifact)
+        config_snapshot = _build_config_snapshot(self.config, self.series)
+        config_snapshot["runtime_warnings"] = list(artifact.get("warnings") or [])
+        config_snapshot["report_warnings"] = list(artifact.get("report_warnings") or [])
+        storage = _storage()
+        _closed_trades, _compute_summary, _parse_iso = _report_helpers()
+
+        files: list[dict[str, Any]] = []
+        if self.settings.include_decision_trace:
+            rows = list(artifact.get("decision_trace") or [])
+            rows_written = _write_tabular(
+                self.execution_dir / f"decision_trace.{self.output_format}",
+                rows,
+                output_format=self.output_format,
+            )
+            files.append(
+                {
+                    "path": f"execution/decision_trace.{self.output_format}",
+                    "rows": rows_written,
+                    "source": "runtime",
+                    "kind": "decision_trace",
+                }
+            )
+        if self.settings.include_candles or self.settings.include_indicator_outputs:
+            for entry in self.series:
+                final_series_dir = self._series_final_dir(entry)
+                series_spool = self._series_spool_dir(entry)
+                if self.settings.include_candles:
+                    candle_rows = _read_jsonl(series_spool / "candles.jsonl")
+                    rows_written = _write_tabular(
+                        final_series_dir / f"candles.{self.output_format}",
+                        candle_rows,
+                        output_format=self.output_format,
+                    )
+                    files.append(
+                        {
+                            "path": str((final_series_dir / f"candles.{self.output_format}").relative_to(self.run_dir)),
+                            "rows": rows_written,
+                            "source": "runtime",
+                            "kind": "candles",
+                        }
+                    )
+                if self.settings.include_indicator_outputs:
+                    indicators_spool = series_spool / "indicators"
+                    indicator_paths = sorted(indicators_spool.glob("*.jsonl")) if indicators_spool.exists() else []
+                    for path in indicator_paths:
+                        indicator_rows = _read_jsonl(path)
+                        output_name = path.stem
+                        final_path = final_series_dir / "indicators" / f"{output_name}.{self.output_format}"
+                        rows_written = _write_tabular(final_path, indicator_rows, output_format=self.output_format)
+                        files.append(
+                            {
+                                "path": str(final_path.relative_to(self.run_dir)),
+                                "rows": rows_written,
+                                "source": "runtime",
+                                "kind": "indicator_outputs",
+                            }
+                        )
+                if self.settings.include_overlays:
+                    overlays_spool = series_spool / "overlays"
+                    overlay_paths = sorted(overlays_spool.glob("*.jsonl")) if overlays_spool.exists() else []
+                    for path in overlay_paths:
+                        final_path = final_series_dir / "overlays" / path.name
+                        final_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(path, final_path)
+                        files.append(
+                            {
+                                "path": str(final_path.relative_to(self.run_dir)),
+                                "rows": len(_read_jsonl(path)),
+                                "source": "runtime",
+                                "kind": "overlays",
+                            }
+                        )
+        trades = storage.list_bot_trades_for_run(self.run_id) if self.settings.include_trades else []
+        closed_trades = _closed_trades(trades)
+        if self.settings.include_trades:
+            rows_written = _write_tabular(
+                self.execution_dir / f"trades.{self.output_format}",
+                trades,
+                output_format=self.output_format,
+            )
+            files.append(
+                {
+                    "path": f"execution/trades.{self.output_format}",
+                    "rows": rows_written,
+                    "source": "postrun_db",
+                    "kind": "trades",
+                }
+            )
+        if self.settings.include_trade_events:
+            trade_ids = [str(row.get("id") or "") for row in trades if row.get("id")]
+            trade_events = storage.list_bot_trade_events_for_trades(trade_ids)
+            rows_written = _write_tabular(
+                self.execution_dir / f"trade_events.{self.output_format}",
+                trade_events,
+                output_format=self.output_format,
+            )
+            files.append(
+                {
+                    "path": f"execution/trade_events.{self.output_format}",
+                    "rows": rows_written,
+                    "source": "postrun_db",
+                    "kind": "trade_events",
+                }
+            )
+        summary = _compute_summary(
+            closed_trades,
+            config_snapshot,
+            start_time=_parse_iso(self.config.get("backtest_start") or artifact.get("started_at")),
+            end_time=_parse_iso(self.config.get("backtest_end") or artifact.get("ended_at")),
+        )
+        performance_summary = dict(artifact.get("performance_summary") or {})
+        if performance_summary:
+            summary["performance"] = performance_summary
+        _write_json(self.summary_dir / "summary.json", {"summary": summary, "status": artifact_status})
+        (self.summary_dir / "run_summary.md").write_text(
+            self._build_summary_markdown(summary, artifact_status=artifact_status),
+            encoding="utf-8",
+        )
+        if self.settings.include_runtime_events:
+            files.append(
+                {
+                    "path": "execution/runtime_events.jsonl",
+                    "rows": len(_read_jsonl(self.execution_dir / "runtime_events.jsonl")),
+                    "source": "runtime",
+                    "kind": "runtime_events",
+                }
+            )
+        files.extend(
+            [
+                {"path": "summary/summary.json", "rows": 1, "source": "postrun_derived", "kind": "summary"},
+                {"path": "summary/run_summary.md", "rows": 1, "source": "postrun_derived", "kind": "summary_markdown"},
+                {"path": "run/config.json", "rows": 1, "source": "runtime", "kind": "config"},
+                {"path": "run/metadata.json", "rows": 1, "source": "runtime", "kind": "metadata"},
+                {"path": "run/series.json", "rows": len(self._series_snapshot), "source": "runtime", "kind": "series"},
+                {"path": "run/indicators.json", "rows": len(self._indicator_meta_by_id), "source": "runtime", "kind": "indicator_index"},
+                {"path": "run/runtime_artifact.json", "rows": 1, "source": "runtime", "kind": "runtime_artifact"},
+            ]
+        )
+        self._upsert_run_index(
+            config_snapshot=config_snapshot,
+            summary=summary,
+            status=runtime_status,
+            started_at=artifact.get("started_at"),
+            ended_at=artifact.get("ended_at"),
+            decision_trace=list(artifact.get("decision_trace") or []),
+        )
+        if self.spool_dir.exists():
+            shutil.rmtree(self.spool_dir)
+        zip_path = None
+        if self.settings.compress_zip_on_finalize:
+            zip_path = shutil.make_archive(str(self.run_dir), "zip", root_dir=self.run_dir.parent, base_dir=self.run_dir.name)
+            files.append(
+                {
+                    "path": str(Path(zip_path).name),
+                    "rows": 1,
+                    "source": "postrun_derived",
+                    "kind": "zip_bundle",
+                }
+            )
+        _write_json(
+            _manifest_path(self.run_dir),
+            {
+                "manifest_version": _MANIFEST_VERSION,
+                "bot_id": self.bot_id,
+                "run_id": self.run_id,
+                "run_type": self.run_type,
+                "status": artifact_status,
+                "started_at": artifact.get("started_at"),
+                "ended_at": artifact.get("ended_at"),
+                "output_format": self.output_format,
+                "generated_at": _utcnow_iso(),
+                "files": files,
+            },
+        )
+        logger.info(with_log_context("report_artifacts_finalize_done", log_context | {"files": len(files), "zip": zip_path}))
+
+    def _series_spool_dir(self, entry: Any) -> Path:
+        return self.worker_dir / "series" / f"symbol={_sanitize_segment(getattr(entry, 'symbol', None))}" / f"timeframe={_sanitize_segment(getattr(entry, 'timeframe', None))}"
+
+    def _series_final_dir(self, entry: Any) -> Path:
+        return self.run_dir / "series" / f"symbol={_sanitize_segment(getattr(entry, 'symbol', None))}" / f"timeframe={_sanitize_segment(getattr(entry, 'timeframe', None))}"
+
+    def _run_metadata_dir(self) -> Path:
+        return self.worker_dir / "run" if self.worker_mode else self.run_meta_dir
+
+    def _execution_spool_dir(self) -> Path:
+        return self.worker_dir / "execution" if self.worker_mode else self.execution_dir
+
+    def _finalize_worker(
+        self,
+        *,
+        runtime_status: str,
+        artifact: Mapping[str, Any],
+    ) -> None:
+        if not self.enabled:
+            return
+        if not self._started:
+            self.start(started_at=str(artifact.get("started_at") or _utcnow_iso()))
+        artifact_status = _artifact_status(runtime_status)
+        log_context = build_log_context(
+            bot_id=self.bot_id,
+            run_id=self.run_id,
+            worker_id=self.worker_id,
+            status=artifact_status,
+        )
+        logger.info(with_log_context("report_artifacts_worker_finalize_start", log_context))
+        _write_json(self._run_metadata_dir() / "runtime_artifact.json", artifact)
+        logger.info(with_log_context("report_artifacts_worker_finalize_done", log_context))
+
+    def _build_summary_markdown(self, summary: Mapping[str, Any], *, artifact_status: str) -> str:
+        lines = [
+            f"# Run Summary: {self.run_id}",
+            "",
+            f"- Bot ID: `{self.bot_id}`",
+            f"- Status: `{artifact_status}`",
+            f"- Execution Mode: `{_execution_mode_from_config(self.config)}`",
+            f"- Net PnL: `{summary.get('net_pnl')}`",
+            f"- Total Return: `{summary.get('total_return')}`",
+            f"- Sharpe: `{summary.get('sharpe')}`",
+            f"- Max Drawdown %: `{summary.get('max_drawdown_pct')}`",
+            f"- Total Trades: `{summary.get('total_trades')}`",
+        ]
+        performance = summary.get("performance") if isinstance(summary.get("performance"), Mapping) else {}
+        if performance:
+            lines.extend(
+                [
+                    f"- User Wall Clock Seconds: `{performance.get('user_wall_clock_seconds')}`",
+                    f"- Runtime Loop Seconds: `{performance.get('runtime_loop_duration_seconds')}`",
+                    f"- DB Run Started/Ended Seconds: `{performance.get('db_run_started_ended_seconds')}`",
+                    f"- Async Flush Drain Seconds: `{performance.get('async_projection_flush_drain_seconds')}`",
+                ]
+            )
+        return "\n".join(lines) + "\n"
+
+    def _upsert_run_index(
+        self,
+        *,
+        config_snapshot: Mapping[str, Any],
+        summary: Mapping[str, Any],
+        status: str,
+        started_at: Any,
+        ended_at: Any,
+        decision_trace: Sequence[Mapping[str, Any]],
+    ) -> None:
+        strategy = next(iter(config_snapshot.get("strategies") or []), {})
+        _storage().upsert_bot_run(
+            {
+                "run_id": self.run_id,
+                "bot_id": self.bot_id,
+                "bot_name": self.config.get("name"),
+                "strategy_id": strategy.get("id"),
+                "strategy_name": strategy.get("name"),
+                "run_type": self.run_type,
+                "status": status,
+                "timeframe": config_snapshot.get("timeframe"),
+                "datasource": config_snapshot.get("datasource"),
+                "exchange": config_snapshot.get("exchange"),
+                "symbols": list(config_snapshot.get("symbols") or []),
+                "backtest_start": self.config.get("backtest_start"),
+                "backtest_end": self.config.get("backtest_end"),
+                "started_at": started_at,
+                "ended_at": ended_at,
+                "summary": dict(summary or {}),
+                "config_snapshot": dict(config_snapshot or {}),
+                "decision_ledger": list(decision_trace or []),
+            }
+        )
+
+
+def build_run_artifact_bundle(bot_id: str, run_id: str, config: Mapping[str, Any], series: Sequence[Any]) -> Optional[RunArtifactBundle]:
+    bundle = RunArtifactBundle(bot_id=bot_id, run_id=run_id, config=config, series=series)
+    if not bundle.enabled:
+        return None
+    return bundle
+
+
+def _worker_directories(spool_dir: Path) -> list[Path]:
+    workers_root = spool_dir / "workers"
+    if not workers_root.exists():
+        return []
+    return sorted(path for path in workers_root.iterdir() if path.is_dir())
+
+
+def _aggregate_series_snapshot(worker_dirs: Sequence[Path]) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    series_snapshot: list[dict[str, Any]] = []
+    indicator_meta_by_id: dict[str, dict[str, Any]] = {}
+    seen_series_keys: set[tuple[str, str, str]] = set()
+    for worker_dir in worker_dirs:
+        run_dir = worker_dir / "run"
+        for entry in _read_json(run_dir / "series.json").get("series") or []:
+            if not isinstance(entry, Mapping):
+                continue
+            normalized = dict(entry)
+            series_key = (
+                str(normalized.get("strategy_id") or ""),
+                str(normalized.get("symbol") or ""),
+                str(normalized.get("timeframe") or ""),
+            )
+            if series_key in seen_series_keys:
+                continue
+            seen_series_keys.add(series_key)
+            series_snapshot.append(normalized)
+        for entry in _read_json(run_dir / "indicators.json").get("indicators") or []:
+            if not isinstance(entry, Mapping):
+                continue
+            indicator_id = str(entry.get("id") or "").strip()
+            if indicator_id and indicator_id not in indicator_meta_by_id:
+                indicator_meta_by_id[indicator_id] = dict(entry)
+    return series_snapshot, indicator_meta_by_id
+
+
+def _build_config_snapshot_from_series_snapshot(
+    config: Mapping[str, Any],
+    series_snapshot: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    storage = _storage()
+    symbols: list[str] = []
+    strategies: list[dict[str, Any]] = []
+    strategy_ids_seen: set[str] = set()
+    timeframe = None
+    datasource = None
+    exchange = None
+    for entry in series_snapshot:
+        symbol = str(entry.get("symbol") or "").strip()
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+        timeframe = timeframe or entry.get("timeframe")
+        datasource = datasource or entry.get("datasource")
+        exchange = exchange or entry.get("exchange")
+        strategy_id = str(entry.get("strategy_id") or "").strip()
+        if not strategy_id or strategy_id in strategy_ids_seen:
+            continue
+        strategy_ids_seen.add(strategy_id)
+        indicator_ids = [str(indicator_id) for indicator_id in entry.get("indicator_ids") or [] if str(indicator_id).strip()]
+        indicator_params = []
+        for indicator_id in indicator_ids:
+            record = storage.get_indicator(indicator_id)
+            if record:
+                indicator_params.append(record)
+        strategies.append(
+            {
+                "id": strategy_id,
+                "name": entry.get("name") or strategy_id,
+                "timeframe": entry.get("timeframe"),
+                "datasource": entry.get("datasource"),
+                "exchange": entry.get("exchange"),
+                "strategy_hash": entry.get("strategy_hash"),
+                "variant_id": entry.get("variant_id"),
+                "variant_name": entry.get("variant_name"),
+                "resolved_params": dict(entry.get("resolved_params") or {}),
+                "effective_params": dict(entry.get("effective_params") or entry.get("resolved_params") or {}),
+                "param_source_map": dict(entry.get("param_source_map") or {}),
+                "output_filters": list(
+                    (entry.get("effective_strategy_config") or {}).get("output_filters") or []
+                ),
+                "effective_strategy_config": dict(entry.get("effective_strategy_config") or {}),
+                "run_strategy_snapshot": dict(entry.get("run_strategy_snapshot") or {}),
+                "atm_template_id": entry.get("atm_template_id"),
+                "atm_template": dict(entry.get("atm_template") or {}),
+                "rules": dict(entry.get("rules") or {}),
+                "indicator_ids": indicator_ids,
+                "indicator_params": indicator_params,
+                "instruments": list(entry.get("instruments") or []),
+            }
+        )
+    return {
+        "execution_mode": _execution_mode_from_config(config),
+        "request_id": str(config.get("request_id") or config.get("_runtime_request_id") or "").strip() or None,
+        "wallet_start": dict(config.get("wallet_config") or {}),
+        "risk_settings": dict(config.get("risk") or {}),
+        "date_range": {
+            "start": config.get("backtest_start"),
+            "end": config.get("backtest_end"),
+        },
+        "symbols": symbols,
+        "timeframe": timeframe,
+        "datasource": datasource,
+        "exchange": exchange,
+        "fee_model": (config.get("risk") or {}).get("fee_model"),
+        "slippage_model": (config.get("risk") or {}).get("slippage_model"),
+        "strategies": strategies,
+    }
+
+
+def _aggregate_worker_artifact(
+    *,
+    bot_id: str,
+    run_id: str,
+    config: Mapping[str, Any],
+    runtime_status: str,
+    worker_dirs: Sequence[Path],
+) -> dict[str, Any]:
+    worker_artifacts: list[dict[str, Any]] = []
+    decision_trace: list[dict[str, Any]] = []
+    decision_artifacts: list[Any] = []
+    rejection_artifacts: list[Any] = []
+    warnings: list[dict[str, Any]] = []
+    report_warnings: list[dict[str, Any]] = []
+    started_at_values: list[str] = []
+    ended_at_values: list[str] = []
+    template_artifact: dict[str, Any] = {}
+    for worker_dir in worker_dirs:
+        artifact = _read_json(worker_dir / "run" / "runtime_artifact.json")
+        if not artifact:
+            continue
+        worker_artifacts.append(
+            {
+                "worker_id": worker_dir.name.removeprefix("worker_id="),
+                "status": artifact.get("status"),
+                "started_at": artifact.get("started_at"),
+                "ended_at": artifact.get("ended_at"),
+            }
+        )
+        started_at = str(artifact.get("started_at") or "").strip()
+        ended_at = str(artifact.get("ended_at") or "").strip()
+        if started_at:
+            started_at_values.append(started_at)
+        if ended_at:
+            ended_at_values.append(ended_at)
+        decision_trace.extend(
+            dict(entry) for entry in artifact.get("decision_trace") or [] if isinstance(entry, Mapping)
+        )
+        decision_artifacts.extend(list(artifact.get("decision_artifacts") or []))
+        rejection_artifacts.extend(list(artifact.get("rejection_artifacts") or []))
+        warnings.extend(
+            dict(entry) for entry in artifact.get("warnings") or [] if isinstance(entry, Mapping)
+        )
+        report_warnings.extend(
+            dict(entry) for entry in artifact.get("report_warnings") or [] if isinstance(entry, Mapping)
+        )
+        if not template_artifact:
+            template_artifact = dict(artifact)
+    aggregate = dict(template_artifact or {})
+    aggregate["run_id"] = run_id
+    aggregate["bot_id"] = bot_id
+    aggregate["status"] = runtime_status
+    aggregate["started_at"] = min(started_at_values) if started_at_values else None
+    aggregate["ended_at"] = max(ended_at_values) if ended_at_values else None
+    aggregate["wallet_start"] = dict(config.get("wallet_config") or {})
+    aggregate["decision_trace"] = decision_trace
+    aggregate["decision_artifacts"] = decision_artifacts
+    aggregate["rejection_artifacts"] = rejection_artifacts
+    aggregate["execution_mode"] = _execution_mode_from_config(config)
+    aggregate["request_id"] = str(config.get("request_id") or config.get("_runtime_request_id") or "").strip() or None
+    aggregate["runtime_metadata"] = {
+        "execution_mode": _execution_mode_from_config(config),
+        "request_id": aggregate["request_id"],
+        "playback_mode": config.get("playback_mode") or config.get("mode") or "instant",
+        "run_type": str(config.get("run_type") or "backtest").strip().lower(),
+        "intrabar_execution": _execution_mode_from_config(config) == "full",
+    }
+    aggregate["warnings"] = warnings
+    aggregate["report_warnings"] = report_warnings
+    aggregate["worker_artifacts"] = worker_artifacts
+    return aggregate
+
+
+def finalize_run_artifact_bundle_from_workers(
+    *,
+    bot_id: str,
+    run_id: str,
+    config: Mapping[str, Any],
+    runtime_status: str,
+) -> None:
+    settings = get_settings().reports.artifacts
+    run_type = str(config.get("run_type") or "backtest").strip().lower()
+    if not settings.enabled:
+        return
+    if run_type == "backtest" and not settings.capture_backtest:
+        return
+    if run_type == "preview":
+        return
+    if run_type != "backtest" and not settings.capture_live:
+        return
+
+    output_format = _output_extension(settings.output_format)
+    run_dir = _run_directory(bot_id, run_id)
+    spool_dir = run_dir / ".spool"
+    worker_dirs = _worker_directories(spool_dir)
+    if not worker_dirs:
+        return
+
+    artifact_status = _artifact_status(runtime_status)
+    log_context = build_log_context(bot_id=bot_id, run_id=run_id, status=artifact_status)
+    logger.info(with_log_context("report_artifacts_finalize_start", log_context | {"workers": len(worker_dirs)}))
+
+    series_snapshot, indicator_meta_by_id = _aggregate_series_snapshot(worker_dirs)
+    config_snapshot = _build_config_snapshot_from_series_snapshot(config, series_snapshot)
+    aggregate_artifact = _aggregate_worker_artifact(
+        bot_id=bot_id,
+        run_id=run_id,
+        config=config,
+        runtime_status=runtime_status,
+        worker_dirs=worker_dirs,
+    )
+    config_snapshot["runtime_warnings"] = list(aggregate_artifact.get("warnings") or [])
+    config_snapshot["report_warnings"] = list(aggregate_artifact.get("report_warnings") or [])
+    storage = _storage()
+    _closed_trades, _compute_summary, _parse_iso = _report_helpers()
+    execution_dir = run_dir / "execution"
+    run_meta_dir = run_dir / "run"
+    summary_dir = run_dir / "summary"
+
+    _write_json(
+        _manifest_path(run_dir),
+        {
+            "manifest_version": _MANIFEST_VERSION,
+            "bot_id": bot_id,
+            "run_id": run_id,
+            "run_type": run_type,
+            "status": "in_progress",
+            "started_at": aggregate_artifact.get("started_at"),
+            "ended_at": None,
+            "output_format": output_format,
+            "generated_at": _utcnow_iso(),
+            "files": [],
+        },
+    )
+    _write_json(
+        run_meta_dir / "metadata.json",
+        {
+            "bot_id": bot_id,
+            "run_id": run_id,
+            "run_type": run_type,
+            "execution_mode": _execution_mode_from_config(config),
+            "request_id": str(config.get("request_id") or config.get("_runtime_request_id") or "").strip() or None,
+            "started_at": aggregate_artifact.get("started_at"),
+        },
+    )
+    _write_json(run_meta_dir / "config.json", dict(config))
+    _write_json(run_meta_dir / "series.json", {"series": series_snapshot})
+    _write_json(run_meta_dir / "indicators.json", {"indicators": list(indicator_meta_by_id.values())})
+    _write_json(run_meta_dir / "runtime_artifact.json", aggregate_artifact)
+
+    files: list[dict[str, Any]] = []
+    decision_trace = list(aggregate_artifact.get("decision_trace") or [])
+    if decision_trace:
+        rows_written = _write_tabular(
+            execution_dir / f"decision_trace.{output_format}",
+            decision_trace,
+            output_format=output_format,
+        )
+        files.append(
+            {
+                "path": f"execution/decision_trace.{output_format}",
+                "rows": rows_written,
+                "source": "runtime",
+                "kind": "decision_trace",
+            }
+        )
+
+    for worker_dir in worker_dirs:
+        for series_dir in sorted((worker_dir / "series").glob("symbol=*/timeframe=*")):
+            final_series_dir = run_dir / "series" / series_dir.parent.name / series_dir.name
+            candle_rows = _read_jsonl(series_dir / "candles.jsonl")
+            if candle_rows:
+                rows_written = _write_tabular(
+                    final_series_dir / f"candles.{output_format}",
+                    candle_rows,
+                    output_format=output_format,
+                )
+                files.append(
+                    {
+                        "path": str((final_series_dir / f"candles.{output_format}").relative_to(run_dir)),
+                        "rows": rows_written,
+                        "source": "runtime",
+                        "kind": "candles",
+                    }
+                )
+            indicators_spool = series_dir / "indicators"
+            for path in sorted(indicators_spool.glob("*.jsonl")) if indicators_spool.exists() else []:
+                indicator_rows = _read_jsonl(path)
+                final_path = final_series_dir / "indicators" / f"{path.stem}.{output_format}"
+                rows_written = _write_tabular(final_path, indicator_rows, output_format=output_format)
+                files.append(
+                    {
+                        "path": str(final_path.relative_to(run_dir)),
+                        "rows": rows_written,
+                        "source": "runtime",
+                        "kind": "indicator_outputs",
+                    }
+                )
+            overlays_spool = series_dir / "overlays"
+            for path in sorted(overlays_spool.glob("*.jsonl")) if overlays_spool.exists() else []:
+                final_path = final_series_dir / "overlays" / path.name
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, final_path)
+                files.append(
+                    {
+                        "path": str(final_path.relative_to(run_dir)),
+                        "rows": len(_read_jsonl(path)),
+                        "source": "runtime",
+                        "kind": "overlays",
+                    }
+                )
+
+    runtime_event_rows: list[dict[str, Any]] = []
+    for worker_dir in worker_dirs:
+        runtime_event_rows.extend(_read_jsonl(worker_dir / "execution" / "runtime_events.jsonl"))
+    if runtime_event_rows:
+        _append_jsonl_rows(execution_dir / "runtime_events.jsonl", runtime_event_rows)
+        files.append(
+            {
+                "path": "execution/runtime_events.jsonl",
+                "rows": len(runtime_event_rows),
+                "source": "runtime",
+                "kind": "runtime_events",
+            }
+        )
+
+    trades = storage.list_bot_trades_for_run(run_id) if settings.include_trades else []
+    closed_trades = _closed_trades(trades)
+    if settings.include_trades:
+        rows_written = _write_tabular(execution_dir / f"trades.{output_format}", trades, output_format=output_format)
+        files.append(
+            {
+                "path": f"execution/trades.{output_format}",
+                "rows": rows_written,
+                "source": "postrun_db",
+                "kind": "trades",
+            }
+        )
+    if settings.include_trade_events:
+        trade_ids = [str(row.get("id") or "") for row in trades if row.get("id")]
+        trade_events = storage.list_bot_trade_events_for_trades(trade_ids)
+        rows_written = _write_tabular(
+            execution_dir / f"trade_events.{output_format}",
+            trade_events,
+            output_format=output_format,
+        )
+        files.append(
+            {
+                "path": f"execution/trade_events.{output_format}",
+                "rows": rows_written,
+                "source": "postrun_db",
+                "kind": "trade_events",
+            }
+        )
+
+    summary = _compute_summary(
+        closed_trades,
+        config_snapshot,
+        start_time=_parse_iso(config.get("backtest_start") or aggregate_artifact.get("started_at")),
+        end_time=_parse_iso(config.get("backtest_end") or aggregate_artifact.get("ended_at")),
+    )
+    _write_json(summary_dir / "summary.json", {"summary": summary, "status": artifact_status})
+    (summary_dir / "run_summary.md").write_text(
+        "\n".join(
+            [
+                f"# Run Summary: {run_id}",
+                "",
+                f"- Bot ID: `{bot_id}`",
+                f"- Status: `{artifact_status}`",
+                f"- Execution Mode: `{_execution_mode_from_config(config)}`",
+                f"- Net PnL: `{summary.get('net_pnl')}`",
+                f"- Total Return: `{summary.get('total_return')}`",
+                f"- Sharpe: `{summary.get('sharpe')}`",
+                f"- Max Drawdown %: `{summary.get('max_drawdown_pct')}`",
+                f"- Total Trades: `{summary.get('total_trades')}`",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    files.extend(
+        [
+            {"path": "summary/summary.json", "rows": 1, "source": "postrun_derived", "kind": "summary"},
+            {"path": "summary/run_summary.md", "rows": 1, "source": "postrun_derived", "kind": "summary_markdown"},
+            {"path": "run/config.json", "rows": 1, "source": "runtime", "kind": "config"},
+            {"path": "run/metadata.json", "rows": 1, "source": "runtime", "kind": "metadata"},
+            {"path": "run/series.json", "rows": len(series_snapshot), "source": "runtime", "kind": "series"},
+            {"path": "run/indicators.json", "rows": len(indicator_meta_by_id), "source": "runtime", "kind": "indicator_index"},
+            {"path": "run/runtime_artifact.json", "rows": 1, "source": "runtime", "kind": "runtime_artifact"},
+        ]
+    )
+    storage.upsert_bot_run(
+        {
+            "run_id": run_id,
+            "bot_id": bot_id,
+            "bot_name": config.get("name"),
+            "strategy_id": next(iter(config_snapshot.get("strategies") or []), {}).get("id"),
+            "strategy_name": next(iter(config_snapshot.get("strategies") or []), {}).get("name"),
+            "run_type": run_type,
+            "status": runtime_status,
+            "timeframe": config_snapshot.get("timeframe"),
+            "datasource": config_snapshot.get("datasource"),
+            "exchange": config_snapshot.get("exchange"),
+            "symbols": list(config_snapshot.get("symbols") or []),
+            "backtest_start": config.get("backtest_start"),
+            "backtest_end": config.get("backtest_end"),
+            "started_at": aggregate_artifact.get("started_at"),
+            "ended_at": aggregate_artifact.get("ended_at"),
+            "summary": dict(summary or {}),
+            "config_snapshot": dict(config_snapshot or {}),
+            "decision_ledger": decision_trace,
+        }
+    )
+    if spool_dir.exists():
+        shutil.rmtree(spool_dir)
+    zip_path = None
+    if settings.compress_zip_on_finalize:
+        zip_path = shutil.make_archive(str(run_dir), "zip", root_dir=run_dir.parent, base_dir=run_dir.name)
+        files.append(
+            {
+                "path": str(Path(zip_path).name),
+                "rows": 1,
+                "source": "postrun_derived",
+                "kind": "zip_bundle",
+            }
+        )
+    _write_json(
+        _manifest_path(run_dir),
+        {
+            "manifest_version": _MANIFEST_VERSION,
+            "bot_id": bot_id,
+            "run_id": run_id,
+            "run_type": run_type,
+            "status": artifact_status,
+            "started_at": aggregate_artifact.get("started_at"),
+            "ended_at": aggregate_artifact.get("ended_at"),
+            "output_format": output_format,
+            "generated_at": _utcnow_iso(),
+            "files": files,
+        },
+    )
+    logger.info(with_log_context("report_artifacts_finalize_done", log_context | {"files": len(files), "zip": zip_path}))
+
+
+def run_artifact_readiness(bot_id: str | None, run_id: str) -> Dict[str, Any]:
+    if bot_id:
+        candidate = _run_directory(str(bot_id), str(run_id))
+        run_dir = candidate if candidate.exists() else find_run_directory(str(run_id))
+    else:
+        run_dir = find_run_directory(str(run_id))
+    if run_dir is None:
+        return {
+            "ready": False,
+            "reason": "artifact_directory_missing",
+            "manifest_path": None,
+            "status": None,
+            "files": [],
+        }
+    manifest_path = _manifest_path(run_dir)
+    if not manifest_path.exists():
+        return {
+            "ready": False,
+            "reason": "artifact_manifest_missing",
+            "manifest_path": str(manifest_path),
+            "status": None,
+            "files": [],
+        }
+    manifest = _read_json(manifest_path)
+    status = str(manifest.get("status") or "").strip().lower()
+    files = [dict(entry) for entry in manifest.get("files") or [] if isinstance(entry, Mapping)]
+    missing_files = []
+    for entry in files:
+        path = str(entry.get("path") or "").strip()
+        if not path or path.endswith(".zip"):
+            continue
+        if not (run_dir / path).exists():
+            missing_files.append(path)
+    ready = status == "completed" and bool(files) and not missing_files
+    reason = "ready" if ready else "artifact_files_missing" if missing_files else "artifact_manifest_incomplete"
+    return {
+        "ready": ready,
+        "reason": reason,
+        "manifest_path": str(manifest_path),
+        "status": status or None,
+        "files": files,
+        "missing_files": missing_files,
+    }
+
+
+def build_run_archive(run_id: str) -> tuple[bytes, str]:
+    run_dir = find_run_directory(run_id)
+    if run_dir is None:
+        raise KeyError(f"Run {run_id} report bundle was not found")
+    zip_candidate = Path(str(run_dir) + ".zip")
+    if zip_candidate.exists():
+        return zip_candidate.read_bytes(), zip_candidate.name
+    return _stream_zip_bytes(run_dir), f"{run_dir.name}.zip"
+
+
+def find_run_directory(run_id: str) -> Optional[Path]:
+    root = _artifact_root()
+    if not root.exists():
+        return None
+    matches = sorted(root.glob(f"bot_id=*/run_id={_sanitize_segment(run_id)}"))
+    if matches:
+        return matches[0]
+    fallback_matches = sorted(root.rglob(f"run_id={_sanitize_segment(run_id)}"))
+    return fallback_matches[0] if fallback_matches else None
+
+
+__all__ = [
+    "RunArtifactBundle",
+    "build_run_archive",
+    "build_run_artifact_bundle",
+    "finalize_run_artifact_bundle_from_workers",
+    "find_run_directory",
+    "run_artifact_readiness",
+]

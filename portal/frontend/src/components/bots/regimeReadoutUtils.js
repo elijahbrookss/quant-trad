@@ -66,27 +66,14 @@ export const buildRegimeBlockSnapshots = (blocks = []) => {
       expansion: block?.expansion || {},
       confidence: block?.confidence ?? null,
       entry_confidence: block?.entry_confidence ?? null,
+      score_margin: block?.score_margin ?? null,
       bars: block?.bars ?? null,
       regime_key: block?.regime_key,
       block_id: block?.block_id,
+      trend_direction: block?.structure?.trend_direction ?? 'neutral',
     }))
     .filter((block) => Number.isFinite(block?.x1) && Number.isFinite(block?.x2))
     .sort((a, b) => (a.x1 ?? 0) - (b.x1 ?? 0))
-}
-
-export const buildCandleSnapshots = (points = []) => {
-  if (!Array.isArray(points) || points.length === 0) return []
-  return points
-    .map((point) => ({
-      ts: normalizeEpoch(point?.time),
-      structure: point?.structure || {},
-      volatility: point?.volatility || {},
-      liquidity: point?.liquidity || {},
-      expansion: point?.expansion || {},
-      confidence: point?.confidence ?? null,
-    }))
-    .filter((point) => Number.isFinite(point?.ts))
-    .sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0))
 }
 
 export const getActiveRegimeBlock = (blocks, ts) => {
@@ -123,19 +110,10 @@ export const getActiveRegimeBlock = (blocks, ts) => {
   return null
 }
 
-export const getNearestCandleStats = (points, ts) => {
-  if (!Array.isArray(points) || points.length === 0 || !Number.isFinite(ts)) return null
-  const times = points.map((point) => point?.ts)
-  const idx = findNearestIndex(times, ts)
-  if (idx === null) return null
-  return points[idx] || null
-}
-
-export const buildReadoutSnapshot = ({ focusTs, blocks, points, lastSnapshot }) => {
+export const buildReadoutSnapshot = ({ focusTs, blocks, lastSnapshot }) => {
   if (!Number.isFinite(focusTs)) return lastSnapshot || null
   const block = getActiveRegimeBlock(blocks, focusTs)
-  const candle = getNearestCandleStats(points, focusTs)
-  if (!candle) return lastSnapshot || null
+  if (!block) return lastSnapshot || null
   const structureConfidence =
     block && Number.isFinite(block?.confidence)
       ? Number(block.confidence)
@@ -143,26 +121,29 @@ export const buildReadoutSnapshot = ({ focusTs, blocks, points, lastSnapshot }) 
         ? Number(block.entry_confidence)
         : null
   return {
-    structure: {
-      state: block?.structure?.state ?? 'unknown',
-      confidence: structureConfidence,
-      block_id: block?.block_id ?? null,
-      bars: block?.bars ?? null,
-    },
+      structure: {
+        state: block?.structure?.state ?? 'unknown',
+        confidence: structureConfidence,
+        block_id: block?.block_id ?? null,
+        bars: block?.bars ?? null,
+        score_margin: block?.score_margin ?? null,
+        trend_direction: block?.trend_direction ?? block?.structure?.trend_direction ?? 'neutral',
+        known_at: block?.known_at ?? null,
+      },
     volatility: {
-      ...(candle?.volatility || {}),
-      state: candle?.volatility?.state ?? 'unknown',
-      confidence: candle?.volatility?.confidence ?? candle?.confidence ?? null,
+      ...(block?.volatility || {}),
+      state: block?.volatility?.state ?? 'unknown',
+      confidence: block?.volatility?.confidence ?? block?.confidence ?? null,
     },
     liquidity: {
-      ...(candle?.liquidity || {}),
-      state: candle?.liquidity?.state ?? 'unknown',
-      confidence: candle?.liquidity?.confidence ?? candle?.confidence ?? null,
+      ...(block?.liquidity || {}),
+      state: block?.liquidity?.state ?? 'unknown',
+      confidence: block?.liquidity?.confidence ?? block?.confidence ?? null,
     },
     expansion: {
-      ...(candle?.expansion || {}),
-      state: candle?.expansion?.state ?? 'unknown',
-      confidence: candle?.expansion?.confidence ?? candle?.confidence ?? null,
+      ...(block?.expansion || {}),
+      state: block?.expansion?.state ?? 'unknown',
+      confidence: block?.expansion?.confidence ?? block?.confidence ?? null,
     },
   }
 }
@@ -185,8 +166,14 @@ export const buildAxisTooltip = (axis, payload = {}) => {
     const confidenceText = Number.isFinite(Number(confidence))
       ? `avg_conf ${(Number(confidence) * 100).toFixed(0)}%`
       : 'avg_conf n/a'
+    const marginText = Number.isFinite(Number(payload?.score_margin))
+      ? `margin ${Number(payload.score_margin).toFixed(2)}`
+      : 'margin n/a'
     const barsText = bars ? `bars ${bars}` : 'bars n/a'
-    return `${state} • ${confidenceText} • ${barsText} • block ${blockId}`
+    const direction = payload?.trend_direction && payload?.trend_direction !== 'neutral'
+      ? ` • ${payload.trend_direction}`
+      : ''
+    return `${state}${direction} • ${confidenceText} • ${marginText} • ${barsText} • block ${blockId}`
   }
   const drivers = []
   if (axis === 'volatility') {

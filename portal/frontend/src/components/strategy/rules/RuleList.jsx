@@ -1,25 +1,44 @@
 import React, { useState } from 'react'
 import { GitBranch, Plus } from 'lucide-react'
-import { buildRuleConditionSummary } from './ruleUtils.js'
-import { RuleCard } from './RuleCard.jsx'
-import { RuleGateSection } from './RuleGateSection.jsx'
 
-/**
- * Component displaying a list of strategy rules with conditions.
- *
- * Note: This component expects ActionButton which is passed in from the parent.
- */
+import { buildRuleConditionSummary, extractRuleFlow } from './ruleUtils.js'
+import { RuleCard } from './RuleCard.jsx'
+
+const resolveIndicatorLabel = (indicatorLookup, indicatorId) => {
+  const meta = indicatorLookup?.get?.(indicatorId) || indicatorLookup?.[indicatorId]
+  return meta?.name || meta?.type || indicatorId || 'Indicator'
+}
+
+const guardSummary = (guard) => {
+  if (guard?.type === 'context_match') {
+    if (Array.isArray(guard?.value)) {
+      return `${guard.output_name}.${guard.field || 'state'} ∈ [${guard.value.join(', ')}]`
+    }
+    return `${guard.output_name}.${guard.field || 'state'} = ${guard.value}`
+  }
+  if (guard?.type === 'metric_match') {
+    return `${guard.output_name}.${guard.field} ${guard.operator} ${guard.value}`
+  }
+  if (guard?.type === 'holds_for_bars') {
+    return `${guard.base?.output_name || 'signal'} held for ${guard.bars} bars`
+  }
+  if (guard?.type === 'signal_seen_within_bars') {
+    return `${guard.output_name}.${guard.event_key} seen within ${guard.lookback_bars} bars`
+  }
+  if (guard?.type === 'signal_absent_within_bars') {
+    return `${guard.output_name}.${guard.event_key} absent within ${guard.lookback_bars} bars`
+  }
+  return 'Guard'
+}
+
 export const RuleList = ({
   rules,
   onEdit,
   onDelete,
   onDuplicate,
-  onCreateFilter,
-  onUpdateFilter,
-  onDeleteFilter,
   indicatorLookup,
-  ActionButton,
   brokenIndicatorIds,
+  ActionButton,
   onAddRule,
 }) => {
   const [expanded, setExpanded] = useState(null)
@@ -33,9 +52,9 @@ export const RuleList = ({
         <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white/5">
           <GitBranch className="h-6 w-6 text-slate-500" />
         </div>
-        <h4 className="mt-4 text-sm font-medium text-white">No trading rules yet</h4>
+        <h4 className="mt-4 text-sm font-medium text-white">No strategy rules yet</h4>
         <p className="mt-1.5 max-w-sm text-xs text-slate-500">
-          Rules define when to buy or sell based on your indicator signals. Create a rule to start building your strategy.
+          Each rule starts with one signal trigger, then optional context and metric guards.
         </p>
         <button
           type="button"
@@ -50,89 +69,87 @@ export const RuleList = ({
   }
 
   return (
-    <>
-      <div className="space-y-3">
-        {rules.map((rule) => {
-          const conditionCount = Array.isArray(rule.conditions) ? rule.conditions.length : 0
-          const filterCount = Array.isArray(rule.filters) ? rule.filters.length : 0
-          const summary = buildRuleConditionSummary({
-            conditions: rule.conditions,
-            match: rule.match,
-            indicatorLookup,
-          })
-          const expandedState = expanded === rule.id
+    <div className="space-y-3">
+      {rules.map((rule) => {
+        const { trigger, guards } = extractRuleFlow(rule)
+        const isLong = rule.intent !== 'enter_short'
+        const triggerCount = trigger?.indicator_id ? 1 : 0
+        const guardCount = Array.isArray(guards) ? guards.length : 0
+        const summary = buildRuleConditionSummary({ rule, indicatorLookup })
+        const expandedState = expanded === rule.id
+        const triggerLabel = resolveIndicatorLabel(indicatorLookup, trigger?.indicator_id)
+        const brokenTrigger = brokenIndicatorIds?.has?.(trigger?.indicator_id)
 
-          return (
-            <RuleCard
-              key={rule.id}
-              rule={rule}
-              summary={summary}
-              conditionCount={conditionCount}
-              filterCount={filterCount}
-              expanded={expandedState}
-              onToggleExpand={() => toggleExpanded(rule.id)}
-              onEdit={() => onEdit(rule)}
-              onDelete={() => onDelete(rule)}
-              onDuplicate={() => onDuplicate?.(rule)}
-            >
-              <div>
-                <div className="flex items-center justify-between">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Conditions</p>
+        return (
+          <RuleCard
+            key={rule.id}
+            rule={rule}
+            summary={summary}
+            triggerCount={triggerCount}
+            guardCount={guardCount}
+            expanded={expandedState}
+            onToggleExpand={() => toggleExpanded(rule.id)}
+            onEdit={() => onEdit(rule)}
+            onDelete={() => onDelete(rule)}
+            onDuplicate={() => onDuplicate?.(rule)}
+          >
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <p className={`text-[10px] uppercase tracking-[0.2em] ${brokenTrigger ? 'text-amber-400/80' : 'text-slate-500'}`}>Trigger</p>
+                {triggerCount ? (
+                  <>
+                    <p className="text-sm text-white">{triggerLabel}</p>
+                    <p className="text-xs text-slate-300">{trigger?.output_name}</p>
+                    <p className="text-xs text-slate-400">{trigger?.event_key || 'event'}</p>
+                  </>
+                ) : (
+                  <p className="text-xs text-slate-400">No signal trigger configured.</p>
+                )}
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Conditions</p>
                   <ActionButton variant="ghost" onClick={() => onEdit(rule)}>
-                    Edit logic
+                    Edit rule
                   </ActionButton>
                 </div>
-                {conditionCount ? (
-                  <div className="mt-3 space-y-2">
-                    <div className="hidden grid-cols-[1.1fr_1fr_120px] gap-2 text-[10px] uppercase tracking-[0.16em] text-slate-500 md:grid">
-                      <div>Source</div>
-                      <div>Signal</div>
-                      <div>Direction</div>
-                    </div>
-                    {rule.conditions.map((condition, index) => {
-                      const indicatorMeta = indicatorLookup?.get?.(condition.indicator_id) || indicatorLookup?.[condition.indicator_id]
-                      const label = indicatorMeta?.name || indicatorMeta?.type || condition.indicator_id
-                      const isBroken = brokenIndicatorIds?.has?.(condition.indicator_id)
+                {guardCount ? (
+                  <div className="space-y-1">
+                    {guards.map((guard, index) => {
+                      const label = resolveIndicatorLabel(indicatorLookup, guard?.indicator_id)
+                      const broken = brokenIndicatorIds?.has?.(guard?.indicator_id)
                       return (
-                        <div
-                          key={`${rule.id}-condition-${index}`}
-                          className={`grid gap-2 rounded-lg border px-3 py-2 text-xs text-slate-200 md:grid-cols-[1.1fr_1fr_120px] ${
-                            isBroken ? 'border-amber-500/50 bg-amber-500/10 text-amber-100' : 'border-white/10 bg-black/40'
-                          }`}
+                        <p
+                          key={`${rule.id}-guard-${index}`}
+                          className={`text-xs ${broken ? 'text-amber-200' : 'text-slate-300'}`}
                         >
-                          <div className="flex items-center gap-2">
-                            <span className="truncate font-semibold text-white">{label}</span>
-                            {isBroken && (
-                              <span className="rounded-full border border-amber-400/60 bg-amber-500/20 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.2em] text-amber-100">
-                                Detached
-                              </span>
-                            )}
-                          </div>
-                          <div>{condition.signal_type || 'Signal'}</div>
-                          <div className="text-slate-300">
-                            {condition.direction ? condition.direction.toUpperCase() : 'Any bias'}
-                          </div>
-                        </div>
+                          <span className="text-white">{label}</span> {guardSummary(guard)}
+                        </p>
                       )
                     })}
                   </div>
                 ) : (
-                  <p className="mt-2 text-[11px] text-slate-400">No conditions configured.</p>
+                  <p className="text-xs text-slate-400">No guards. This rule fires on the trigger alone.</p>
                 )}
               </div>
 
-              <RuleGateSection
-                ruleId={rule.id}
-                filters={rule.filters || []}
-                onCreateFilter={onCreateFilter}
-                onUpdateFilter={onUpdateFilter}
-                onDeleteFilter={onDeleteFilter}
-                ActionButton={ActionButton}
-              />
-            </RuleCard>
-          )
-        })}
-      </div>
-    </>
+              <div className="space-y-1.5">
+                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Intent</p>
+                <div>
+                  <span className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] ${
+                    isLong
+                      ? 'border-emerald-400/30 bg-emerald-400/15 text-emerald-100'
+                      : 'border-rose-400/30 bg-rose-400/15 text-rose-100'
+                  }`}>
+                    {isLong ? 'LONG' : 'SHORT'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </RuleCard>
+        )
+      })}
+    </div>
   )
 }

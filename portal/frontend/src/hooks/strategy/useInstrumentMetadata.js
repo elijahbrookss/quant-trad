@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react'
 
 import { fetchTickMetadata } from '../../adapters/provider.adapter.js'
 
-const useInstrumentMetadata = ({ selectedStrategy, refreshStrategies, logger } = {}) => {
+const useInstrumentMetadata = ({ selectedStrategy, refreshStrategies, refreshStrategyDetail, logger } = {}) => {
   const [instrumentRefreshStatus, setInstrumentRefreshStatus] = useState({})
 
   const refreshInstrumentMetadata = useCallback(
@@ -33,6 +33,9 @@ const useInstrumentMetadata = ({ selectedStrategy, refreshStrategies, logger } =
           throw new Error(firstError || 'Tick metadata unavailable')
         }
         await refreshStrategies()
+        if (selectedStrategy?.id && typeof refreshStrategyDetail === 'function') {
+          await refreshStrategyDetail(selectedStrategy.id)
+        }
         logger?.info?.('instrument_metadata_refreshed', { symbol, provider_id: providerId, venue_id: venueId })
         setInstrumentRefreshStatus((prev) => ({
           ...prev,
@@ -46,7 +49,7 @@ const useInstrumentMetadata = ({ selectedStrategy, refreshStrategies, logger } =
         }))
       }
     },
-    [logger, refreshStrategies, selectedStrategy],
+    [logger, refreshStrategies, refreshStrategyDetail, selectedStrategy],
   )
 
   return {

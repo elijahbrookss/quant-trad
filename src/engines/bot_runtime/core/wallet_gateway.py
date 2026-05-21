@@ -16,7 +16,7 @@ from .wallet import (
     WalletState,
     project_wallet_from_events,
     wallet_can_apply,
-    wallet_required_reservation,
+    wallet_required_reservation_details,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,6 @@ _RESERVATION_STATUS_EXPIRED = "EXPIRED"
 _RESERVATION_STATUS_STUCK = "STUCK"
 _HOLD_STATUSES = {
     _RESERVATION_STATUS_ACTIVE,
-    _RESERVATION_STATUS_CONSUMED,
     _RESERVATION_STATUS_STUCK,
 }
 _DEFAULT_RESERVATION_TTL_SECONDS = 30.0
@@ -134,6 +133,14 @@ class BaseWalletGateway:
     def _reservation_pop(self, reservation_id: str) -> Optional[Mapping[str, Any]]:
         raise NotImplementedError("BaseWalletGateway requires reservation storage")
 
+    def _next_wallet_event_seq(self) -> int:
+        self._last_seen_seq = int(self._last_seen_seq) + 1
+        return int(self._last_seen_seq)
+
+    def _append_wallet_event(self, event: Mapping[str, Any]) -> None:
+        # Concrete shared gateways commit fill events under their process lock.
+        _ = event
+
     @staticmethod
     def _utc_now() -> datetime:
         return datetime.now(timezone.utc)
@@ -174,31 +181,33 @@ class BaseWalletGateway:
     @staticmethod
     def _event_trade_id(event: RuntimeEvent | Mapping[str, Any]) -> Optional[str]:
         if isinstance(event, RuntimeEvent):
-            trade_id = event.payload.get("trade_id")
+            trade_id = getattr(event.context, "trade_id", None)
             return str(trade_id) if trade_id else None
         if not isinstance(event, Mapping):
             return None
-        payload = event.get("payload")
-        if not isinstance(payload, Mapping):
-            return None
+        payload = BaseWalletGateway._event_payload(event)
         trade_id = payload.get("trade_id")
         return str(trade_id) if trade_id else None
 
     @staticmethod
     def _event_payload(event: RuntimeEvent | Mapping[str, Any]) -> Dict[str, Any]:
         if isinstance(event, RuntimeEvent):
-            return dict(event.payload or {})
+            return dict(event.context.to_dict())
         if not isinstance(event, Mapping):
             return {}
-        payload = event.get("payload")
+        payload = event.get("context")
         if isinstance(payload, Mapping):
             return dict(payload)
+        payload = event.get("payload")
+        if isinstance(payload, Mapping):
+            nested = payload.get("context") if isinstance(payload.get("context"), Mapping) else payload
+            return dict(nested)
         return {}
 
     @staticmethod
     def _event_correlation_id(event: RuntimeEvent | Mapping[str, Any]) -> Optional[str]:
         payload = BaseWalletGateway._event_payload(event)
-        payload_correlation = str(payload.get("correlation_id") or "").strip()
+        payload_correlation = str(payload.get("wallet_correlation_id") or "").strip()
         if payload_correlation:
             return payload_correlation
         if isinstance(event, RuntimeEvent):
@@ -228,12 +237,122 @@ class BaseWalletGateway:
     def _event_seq(event: RuntimeEvent | Mapping[str, Any], *, fallback: int = 0) -> int:
         if isinstance(event, Mapping):
             try:
-                value = int(event.get("seq") or 0)
-                if value > 0:
+                raw_value = event.get("seq")
+                value = int(raw_value) if raw_value not in (None, "") else -1
+                if value >= 0:
                     return value
             except (TypeError, ValueError):
                 pass
         return int(max(fallback, 0))
+
+    @staticmethod
+    def _event_id(event: RuntimeEvent | Mapping[str, Any]) -> str:
+        if isinstance(event, RuntimeEvent):
+            return str(event.event_id or "")
+        if isinstance(event, Mapping):
+            payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+            return str(event.get("event_id") or payload.get("event_id") or "")
+        return ""
+
+    @staticmethod
+    def _wallet_state_snapshot(state: WalletState) -> Dict[str, Any]:
+        def _float_mapping(value: Mapping[str, Any]) -> Dict[str, float]:
+            result: Dict[str, float] = {}
+            for key, raw in dict(value or {}).items():
+                try:
+                    result[str(key)] = float(raw or 0.0)
+                except (TypeError, ValueError):
+                    result[str(key)] = 0.0
+            return result
+
+        margin_positions: Dict[str, Dict[str, Any]] = {}
+        for trade_id, raw_position in dict(getattr(state, "margin_positions", {}) or {}).items():
+            if not isinstance(raw_position, Mapping):
+                continue
+            margin_positions[str(trade_id)] = {
+                str(key): (float(value) if isinstance(value, (int, float)) else value)
+                for key, value in raw_position.items()
+            }
+        return {
+            "balances": _float_mapping(getattr(state, "balances", {}) or {}),
+            "locked_margin": _float_mapping(getattr(state, "locked_margin", {}) or {}),
+            "free_collateral": _float_mapping(getattr(state, "free_collateral", {}) or {}),
+            "margin_positions": margin_positions,
+        }
+
+    @staticmethod
+    def _wallet_state_from_snapshot(snapshot: Mapping[str, Any]) -> WalletState:
+        def _float_mapping(value: Any) -> Dict[str, float]:
+            if not isinstance(value, Mapping):
+                return {}
+            result: Dict[str, float] = {}
+            for key, raw in dict(value or {}).items():
+                try:
+                    result[str(key)] = float(raw or 0.0)
+                except (TypeError, ValueError):
+                    result[str(key)] = 0.0
+            return result
+
+        raw_positions = snapshot.get("margin_positions") if isinstance(snapshot, Mapping) else {}
+        margin_positions: Dict[str, Dict[str, Any]] = {}
+        if isinstance(raw_positions, Mapping):
+            for trade_id, raw_position in dict(raw_positions or {}).items():
+                if not isinstance(raw_position, Mapping):
+                    continue
+                position: Dict[str, Any] = {}
+                for key, value in dict(raw_position).items():
+                    if key in {"open_qty", "locked_margin"}:
+                        try:
+                            position[str(key)] = float(value or 0.0)
+                        except (TypeError, ValueError):
+                            position[str(key)] = 0.0
+                    else:
+                        position[str(key)] = value
+                margin_positions[str(trade_id)] = position
+        balances = _float_mapping(snapshot.get("balances") if isinstance(snapshot, Mapping) else {})
+        locked_margin = _float_mapping(snapshot.get("locked_margin") if isinstance(snapshot, Mapping) else {})
+        free_collateral = _float_mapping(snapshot.get("free_collateral") if isinstance(snapshot, Mapping) else {})
+        if not free_collateral:
+            for currency in set(balances.keys()) | set(locked_margin.keys()):
+                free_collateral[currency] = balances.get(currency, 0.0) - locked_margin.get(currency, 0.0)
+        return WalletState(
+            balances=balances,
+            locked_margin=locked_margin,
+            free_collateral=free_collateral,
+            margin_positions=margin_positions,
+        )
+
+    @staticmethod
+    def _copy_wallet_state(state: WalletState) -> WalletState:
+        return BaseWalletGateway._wallet_state_from_snapshot(BaseWalletGateway._wallet_state_snapshot(state))
+
+    @staticmethod
+    def _recompute_free_collateral(
+        balances: Mapping[str, float],
+        locked_margin: Mapping[str, float],
+    ) -> Dict[str, float]:
+        free: Dict[str, float] = {}
+        for currency in set(balances.keys()) | set(locked_margin.keys()):
+            value = float(balances.get(currency, 0.0)) - float(locked_margin.get(currency, 0.0))
+            free[currency] = 0.0 if abs(value) <= 1e-9 else value
+        return free
+
+    @staticmethod
+    def _wallet_delta_currency(
+        *,
+        quote_currency: str,
+        required_delta: Mapping[str, Any],
+        wallet_delta: Mapping[str, Any],
+    ) -> str:
+        for value in (
+            quote_currency,
+            required_delta.get("currency") if isinstance(required_delta, Mapping) else None,
+            wallet_delta.get("currency") if isinstance(wallet_delta, Mapping) else None,
+        ):
+            text = str(value or "").strip().upper()
+            if text:
+                return text
+        return "USD"
 
     @staticmethod
     def _expected_runtime_event_name(fill_event_type: Optional[str]) -> str:
@@ -283,6 +402,107 @@ class BaseWalletGateway:
             return dict(value)
         return {}
 
+    @staticmethod
+    def _margin_collateral_release(
+        *,
+        state: WalletState,
+        trade_id: Optional[str],
+        qty: float,
+    ) -> float:
+        trade_key = str(trade_id or "").strip()
+        if not trade_key:
+            return 0.0
+        position = state.margin_positions.get(trade_key) if state.margin_positions else None
+        if not isinstance(position, Mapping):
+            return 0.0
+        try:
+            open_qty = max(float(position.get("open_qty") or 0.0), 0.0)
+            locked = max(float(position.get("locked_margin") or 0.0), 0.0)
+            close_qty = max(float(qty or 0.0), 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        if open_qty <= 0.0 or locked <= 0.0 or close_qty <= 0.0:
+            return 0.0
+        return min(locked * min(close_qty / open_qty, 1.0), locked)
+
+    @staticmethod
+    def _wallet_balance_delta(
+        *,
+        expected_event_name: str,
+        accounting_mode: Optional[str],
+        fee: float,
+        realized_pnl: Optional[float],
+    ) -> Optional[float]:
+        if accounting_mode != "margin":
+            return None
+        if expected_event_name == RuntimeEventName.ENTRY_FILLED.value:
+            return -float(fee or 0.0)
+        if expected_event_name == RuntimeEventName.EXIT_FILLED.value:
+            return float(realized_pnl or 0.0) - float(fee or 0.0)
+        return None
+
+    def _committed_fill_event(
+        self,
+        *,
+        expected_event_name: str,
+        side: str,
+        base_currency: str,
+        quote_currency: str,
+        qty: float,
+        price: float,
+        fee: float,
+        notional: float,
+        trade_id: Optional[str],
+        leg_id: Optional[str],
+        position_direction: Optional[str],
+        accounting_mode: Optional[str],
+        realized_pnl: Optional[float],
+        reservation_id: Optional[str],
+        reservation_status: Optional[str],
+        required_delta: Mapping[str, Any],
+        wallet_delta: Mapping[str, Any],
+        wallet_before: Mapping[str, Any],
+        correlation_id: Optional[str],
+        exit_kind: Optional[str],
+    ) -> Dict[str, Any]:
+        seq = self._next_wallet_event_seq()
+        resolved_trade_id = str(trade_id or "").strip()
+        event_id_trade = resolved_trade_id or "fill"
+        event_ts = self._utc_now_iso()
+        context: Dict[str, Any] = {
+            "trade_id": resolved_trade_id or None,
+            "leg_id": str(leg_id or "").strip() or None,
+            "wallet_correlation_id": str(correlation_id or "").strip()
+            or (f"trade:{resolved_trade_id}" if resolved_trade_id else None),
+            "side": str(side or "").strip() or None,
+            "direction": str(position_direction or "").strip() or None,
+            "qty": float(qty or 0.0),
+            "price": float(price or 0.0),
+            "notional": float(notional or 0.0),
+            "fee_paid": float(fee or 0.0),
+            "realized_pnl": float(realized_pnl or 0.0),
+            "base_currency": str(base_currency or "").strip().upper() or None,
+            "quote_currency": str(quote_currency or "").strip().upper() or None,
+            "accounting_mode": accounting_mode,
+            "exit_kind": str(exit_kind or "").strip().upper() or None,
+            "reservation_id": str(reservation_id or "").strip() or None,
+            "reservation_status": str(reservation_status or "").strip() or None,
+            "wallet_commit_seq": int(seq),
+            "wallet_commit_seq_status": "runtime_assigned",
+            "wallet_eval_seq": max(int(seq) - 1, 0),
+            "required_delta": dict(required_delta or {}),
+            "wallet_delta": dict(wallet_delta or {}),
+            "wallet_before": dict(wallet_before or {}),
+        }
+        return {
+            "event_id": f"wallet-gateway:{seq:012d}:{event_id_trade}:{expected_event_name.lower()}",
+            "event_name": expected_event_name,
+            "event_ts": event_ts,
+            "seq": int(seq),
+            "correlation_id": context.get("wallet_correlation_id"),
+            "context": {key: value for key, value in context.items() if value not in (None, "", {}, [])},
+        }
+
     def _runtime_events_with_seq(self) -> list[tuple[int, RuntimeEvent | Mapping[str, Any]]]:
         raw = list(self._iter_runtime_events())
         events: list[tuple[int, RuntimeEvent | Mapping[str, Any]]] = []
@@ -292,6 +512,7 @@ class BaseWalletGateway:
             if seq > max_seq:
                 max_seq = seq
             events.append((seq, item))
+        events.sort(key=lambda item: (int(item[0]), self._event_id(item[1])))
         self._last_seen_seq = max(int(self._last_seen_seq), int(max_seq))
         return events
 
@@ -382,12 +603,127 @@ class BaseWalletGateway:
                             current.get("correlation_id"),
                         )
 
-    def _release_consumed_reservations(
+    def _current_committed_state(
         self,
-        events: Iterable[RuntimeEvent | Mapping[str, Any]],
-    ) -> None:
-        # Deprecated hook retained for compatibility. Reconciliation uses seq-based checks.
-        _ = list(events)
+        *,
+        events_with_seq: Optional[Iterable[tuple[int, RuntimeEvent | Mapping[str, Any]]]] = None,
+    ) -> WalletState:
+        events = (
+            [event for _seq, event in events_with_seq]
+            if events_with_seq is not None
+            else list(self._iter_runtime_events())
+        )
+        return project_wallet_from_events(events)
+
+    def _store_committed_state(self, state: WalletState) -> None:
+        _ = state
+
+    def _state_with_reservation_holds(self, state: WalletState) -> WalletState:
+        next_state = self._copy_wallet_state(state)
+        balances = dict(next_state.balances or {})
+        locked_margin = dict(next_state.locked_margin or {})
+        margin_positions = dict(next_state.margin_positions or {})
+        free_collateral = dict(next_state.free_collateral or {})
+        if not free_collateral:
+            free_collateral = self._recompute_free_collateral(balances, locked_margin)
+        for _reservation_id, payload in list(self._reservation_items()):
+            if not isinstance(payload, Mapping):
+                continue
+            status = self._reservation_status(payload)
+            if status not in _HOLD_STATUSES:
+                continue
+            currency = self._reservation_currency(payload)
+            if not currency:
+                continue
+            amount = self._reservation_hold_amount(payload)
+            if amount <= 0.0:
+                continue
+            free_collateral[currency] = free_collateral.get(currency, balances.get(currency, 0.0)) - amount
+        return WalletState(
+            balances=balances,
+            locked_margin=locked_margin,
+            free_collateral=free_collateral,
+            margin_positions=margin_positions,
+        )
+
+    def _apply_committed_fill_to_state(
+        self,
+        *,
+        state: WalletState,
+        expected_event_name: str,
+        side: str,
+        base_currency: str,
+        quote_currency: str,
+        qty: float,
+        notional: float,
+        accounting_mode: Optional[str],
+        trade_id: Optional[str],
+        required_delta: Mapping[str, Any],
+        wallet_delta: Mapping[str, Any],
+    ) -> WalletState:
+        next_state = self._copy_wallet_state(state)
+        balances = dict(next_state.balances or {})
+        locked_margin = dict(next_state.locked_margin or {})
+        margin_positions = {
+            str(key): dict(value)
+            for key, value in dict(next_state.margin_positions or {}).items()
+            if isinstance(value, Mapping)
+        }
+        quote = self._wallet_delta_currency(
+            quote_currency=quote_currency,
+            required_delta=required_delta,
+            wallet_delta=wallet_delta,
+        )
+        base = str(base_currency or "").strip().upper()
+        side_text = str(side or "").strip().lower()
+        quantity = max(float(qty or 0.0), 0.0)
+        if accounting_mode == "margin":
+            if wallet_delta.get("balance_delta") is not None:
+                balance_delta = float(wallet_delta.get("balance_delta") or 0.0)
+            elif expected_event_name == RuntimeEventName.ENTRY_FILLED.value:
+                balance_delta = -float(wallet_delta.get("fee_paid") or 0.0)
+            else:
+                balance_delta = float(wallet_delta.get("realized_pnl") or 0.0) - float(wallet_delta.get("fee_paid") or 0.0)
+            balances[quote] = balances.get(quote, 0.0) + balance_delta
+            trade_key = str(trade_id or "").strip()
+            if expected_event_name == RuntimeEventName.ENTRY_FILLED.value:
+                margin_reserved = max(float(wallet_delta.get("collateral_reserved") or 0.0), 0.0)
+                locked_margin[quote] = locked_margin.get(quote, 0.0) + margin_reserved
+                if trade_key:
+                    position = dict(margin_positions.get(trade_key) or {})
+                    position["currency"] = quote
+                    position["open_qty"] = float(position.get("open_qty") or 0.0) + quantity
+                    position["locked_margin"] = float(position.get("locked_margin") or 0.0) + margin_reserved
+                    margin_positions[trade_key] = position
+            elif expected_event_name == RuntimeEventName.EXIT_FILLED.value:
+                margin_released = max(float(wallet_delta.get("collateral_released") or 0.0), 0.0)
+                locked_margin[quote] = locked_margin.get(quote, 0.0) - margin_released
+                if abs(locked_margin.get(quote, 0.0)) <= 1e-9:
+                    locked_margin.pop(quote, None)
+                if trade_key and trade_key in margin_positions:
+                    position = dict(margin_positions.get(trade_key) or {})
+                    open_qty = max(float(position.get("open_qty") or 0.0), 0.0)
+                    position_locked = max(float(position.get("locked_margin") or 0.0), 0.0)
+                    position["open_qty"] = max(open_qty - quantity, 0.0)
+                    position["locked_margin"] = max(position_locked - margin_released, 0.0)
+                    if position["open_qty"] <= 1e-9 or position["locked_margin"] <= 1e-9:
+                        margin_positions.pop(trade_key, None)
+                    else:
+                        margin_positions[trade_key] = position
+        elif side_text in {"buy", "long"}:
+            if base:
+                balances[base] = balances.get(base, 0.0) + quantity
+            balances[quote] = balances.get(quote, 0.0) - float(notional or 0.0) - float(wallet_delta.get("fee_paid") or 0.0)
+        elif side_text in {"sell", "short"}:
+            if base:
+                balances[base] = balances.get(base, 0.0) - quantity
+            balances[quote] = balances.get(quote, 0.0) + float(notional or 0.0) - float(wallet_delta.get("fee_paid") or 0.0)
+        return WalletState(
+            balances=balances,
+            locked_margin=locked_margin,
+            free_collateral=self._recompute_free_collateral(balances, locked_margin),
+            margin_positions=margin_positions,
+        )
 
     def _project_from_events(
         self,
@@ -396,34 +732,9 @@ class BaseWalletGateway:
         include_reservations: bool,
     ) -> WalletState:
         state = project_wallet_from_events(events)
-        balances = dict(state.balances or {})
-        locked_margin = dict(state.locked_margin or {})
-        margin_positions = dict(state.margin_positions or {})
-        free_collateral = dict(state.free_collateral or {})
-        if not free_collateral:
-            currencies = set(balances.keys()) | set(locked_margin.keys())
-            for currency in currencies:
-                free_collateral[currency] = balances.get(currency, 0.0) - locked_margin.get(currency, 0.0)
         if include_reservations:
-            for _reservation_id, payload in list(self._reservation_items()):
-                if not isinstance(payload, Mapping):
-                    continue
-                status = self._reservation_status(payload)
-                if status not in _HOLD_STATUSES:
-                    continue
-                currency = self._reservation_currency(payload)
-                if not currency:
-                    continue
-                amount = self._reservation_hold_amount(payload)
-                if amount <= 0.0:
-                    continue
-                free_collateral[currency] = free_collateral.get(currency, 0.0) - amount
-        return WalletState(
-            balances=balances,
-            locked_margin=locked_margin,
-            free_collateral=free_collateral,
-            margin_positions=margin_positions,
-        )
+            return self._state_with_reservation_holds(state)
+        return state
 
     def can_apply(
         self,
@@ -447,8 +758,10 @@ class BaseWalletGateway:
         with self:
             events_with_seq = self._runtime_events_with_seq()
             self._reconcile_reservations(events_with_seq)
-            runtime_events = [event for _seq, event in events_with_seq]
-            state = self._project_from_events(events=runtime_events, include_reservations=True)
+            state = self._state_with_reservation_holds(
+                self._current_committed_state(events_with_seq=events_with_seq)
+            )
+            wallet_before = self._wallet_state_snapshot(state)
             allowed, reason, payload = wallet_can_apply(
                 state=state,
                 side=side,
@@ -465,12 +778,31 @@ class BaseWalletGateway:
                 margin_session=margin_session,
             )
             details = dict(payload or {})
+            quote = str(quote_currency or "").strip().upper()
+            details.setdefault("wallet_before", wallet_before)
+            details.setdefault("wallet_snapshot", wallet_before)
+            if quote:
+                details.setdefault(
+                    "available_collateral",
+                    wallet_before.get("free_collateral", {}).get(
+                        quote,
+                        wallet_before.get("balances", {}).get(quote, 0.0),
+                    ),
+                )
+                details.setdefault("currency", quote)
             if not allowed:
+                commit_seq = self._next_wallet_event_seq()
+                details.setdefault("wallet_commit_seq", int(commit_seq))
+                details.setdefault("wallet_commit_seq_status", "runtime_assigned")
+                details.setdefault("wallet_eval_seq", max(int(commit_seq) - 1, 0))
+                details.setdefault("wallet_before", wallet_before)
+                details.setdefault("wallet_after", wallet_before)
+                details.setdefault("wallet_snapshot", wallet_before)
                 return allowed, reason, details
 
             if reserve:
                 now = self._utc_now()
-                reserve_currency, reserve_amount = wallet_required_reservation(
+                reserve_currency, reserve_amount, reservation_requirement = wallet_required_reservation_details(
                     side=side,
                     base_currency=base_currency,
                     quote_currency=quote_currency,
@@ -493,14 +825,33 @@ class BaseWalletGateway:
                         resolved_correlation_id = f"reservation:{reservation_id}"
                     max_seq = max((seq for seq, _event in events_with_seq), default=int(self._last_seen_seq))
                     expires_at = now + timedelta(seconds=self._reservation_ttl_seconds)
-                    fee_estimate = max(float(fee), 0.0)
-                    collateral_reserved = max(float(reserve_amount) - fee_estimate, 0.0)
+                    fee_estimate = max(float(reservation_requirement.get("estimated_entry_fee", fee) or 0.0), 0.0)
+                    collateral_reserved = max(
+                        float(
+                            reservation_requirement.get("collateral_reserved")
+                            if reservation_requirement.get("collateral_reserved") is not None
+                            else reservation_requirement.get("collateral_to_lock", 0.0)
+                        ),
+                        0.0,
+                    )
                     required_delta = {
                         "currency": reserve_currency,
                         "collateral_reserved": float(collateral_reserved),
                         "fee_estimate": float(fee_estimate),
+                        "estimated_entry_fee": fee_estimate,
+                        "estimated_exit_fee": max(
+                            float(reservation_requirement.get("estimated_exit_fee") or 0.0),
+                            0.0,
+                        ),
+                        "fee_buffer": max(float(reservation_requirement.get("fee_buffer") or fee_estimate), 0.0),
+                        "total_required_collateral": max(float(reserve_amount), 0.0),
+                        "margin_requirement": (
+                            dict(reservation_requirement.get("margin_requirement"))
+                            if isinstance(reservation_requirement.get("margin_requirement"), Mapping)
+                            else dict(reservation_requirement)
+                        ),
                     }
-                    total_hold = float(collateral_reserved + fee_estimate)
+                    total_hold = float(reserve_amount)
                     self._reservation_set(
                         reservation_id,
                         {
@@ -524,6 +875,7 @@ class BaseWalletGateway:
                     details["reserved_currency"] = reserve_currency
                     details["reserved_amount"] = total_hold
                     details["required_delta"] = required_delta
+                    details["margin_requirement"] = dict(required_delta)
             return True, None, details
 
     def apply_fill(
@@ -551,9 +903,26 @@ class BaseWalletGateway:
         with self:
             events_with_seq = self._runtime_events_with_seq()
             self._reconcile_reservations(events_with_seq)
+            prior_state = self._current_committed_state(events_with_seq=events_with_seq)
+            wallet_before = self._wallet_state_snapshot(prior_state)
             expected_event_name = self._expected_runtime_event_name(event_type)
             resolved_trade_id = str(trade_id or "").strip() or None
             resolved_correlation_id = str(correlation_id or "").strip() or None
+            collateral_released = (
+                self._margin_collateral_release(
+                    state=prior_state,
+                    trade_id=resolved_trade_id,
+                    qty=float(qty or 0.0),
+                )
+                if expected_event_name == RuntimeEventName.EXIT_FILLED.value
+                else 0.0
+            )
+            balance_delta = self._wallet_balance_delta(
+                expected_event_name=expected_event_name,
+                accounting_mode=accounting_mode,
+                fee=float(fee or 0.0),
+                realized_pnl=realized_pnl,
+            )
             if reservation_id:
                 key = str(reservation_id)
                 reservation = self._reservation_get(key)
@@ -586,33 +955,137 @@ class BaseWalletGateway:
                     except Exception:
                         collateral_reserved = 0.0
                 wallet_delta: Dict[str, Any] = {
-                    "collateral_reserved": float(max(collateral_reserved, 0.0)),
-                    "collateral_released": 0.0,
+                    "collateral_reserved": (
+                        float(max(collateral_reserved, 0.0))
+                        if expected_event_name == RuntimeEventName.ENTRY_FILLED.value
+                        else 0.0
+                    ),
+                    "collateral_released": float(max(collateral_released, 0.0)),
                     "fee_paid": float(max(float(fee or 0.0), 0.0)),
                 }
+                if balance_delta is not None:
+                    wallet_delta["balance_delta"] = float(balance_delta)
+                committed_event = self._committed_fill_event(
+                    expected_event_name=expected_event_name,
+                    side=side,
+                    base_currency=base_currency,
+                    quote_currency=quote_currency,
+                    qty=qty,
+                    price=price,
+                    fee=fee,
+                    notional=notional,
+                    trade_id=resolved_trade_id,
+                    leg_id=leg_id,
+                    position_direction=position_direction,
+                    accounting_mode=accounting_mode,
+                    realized_pnl=realized_pnl,
+                    reservation_id=key,
+                    reservation_status=_RESERVATION_STATUS_CONSUMED,
+                    required_delta=required_delta,
+                    wallet_delta=wallet_delta,
+                    wallet_before=wallet_before,
+                    correlation_id=str(next_payload.get("correlation_id") or resolved_correlation_id or ""),
+                    exit_kind=exit_kind,
+                )
+                wallet_after_state = self._apply_committed_fill_to_state(
+                    state=prior_state,
+                    expected_event_name=expected_event_name,
+                    side=side,
+                    base_currency=base_currency,
+                    quote_currency=quote_currency,
+                    qty=qty,
+                    notional=notional,
+                    accounting_mode=accounting_mode,
+                    trade_id=resolved_trade_id,
+                    required_delta=required_delta,
+                    wallet_delta=wallet_delta,
+                )
+                wallet_after = self._wallet_state_snapshot(wallet_after_state)
+                self._append_wallet_event(committed_event)
+                self._store_committed_state(wallet_after_state)
+                committed_context = (
+                    dict(committed_event.get("context"))
+                    if isinstance(committed_event.get("context"), Mapping)
+                    else {}
+                )
                 return {
                     "reservation_id": key,
                     "reservation_status": _RESERVATION_STATUS_CONSUMED,
                     "correlation_id": str(next_payload.get("correlation_id") or ""),
                     "trade_id": str(next_payload.get("trade_id") or ""),
+                    "wallet_commit_seq": committed_context.get("wallet_commit_seq"),
+                    "wallet_commit_seq_status": committed_context.get("wallet_commit_seq_status"),
+                    "wallet_eval_seq": committed_context.get("wallet_eval_seq"),
                     "required_delta": required_delta,
                     "wallet_delta": wallet_delta,
+                    "wallet_before": wallet_before,
+                    "wallet_after": wallet_after,
                     "event_name": expected_event_name,
                 }
             wallet_delta = {
                 "collateral_reserved": float(max(float(margin_locked or 0.0), 0.0))
                 if expected_event_name == RuntimeEventName.ENTRY_FILLED.value
                 else 0.0,
-                "collateral_released": 0.0,
+                "collateral_released": float(max(collateral_released, 0.0)),
                 "fee_paid": float(max(float(fee or 0.0), 0.0)),
             }
+            if balance_delta is not None:
+                wallet_delta["balance_delta"] = float(balance_delta)
+            committed_event = self._committed_fill_event(
+                expected_event_name=expected_event_name,
+                side=side,
+                base_currency=base_currency,
+                quote_currency=quote_currency,
+                qty=qty,
+                price=price,
+                fee=fee,
+                notional=notional,
+                trade_id=resolved_trade_id,
+                leg_id=leg_id,
+                position_direction=position_direction,
+                accounting_mode=accounting_mode,
+                realized_pnl=realized_pnl,
+                reservation_id=None,
+                reservation_status=None,
+                required_delta={},
+                wallet_delta=wallet_delta,
+                wallet_before=wallet_before,
+                correlation_id=resolved_correlation_id,
+                exit_kind=exit_kind,
+            )
+            wallet_after_state = self._apply_committed_fill_to_state(
+                state=prior_state,
+                expected_event_name=expected_event_name,
+                side=side,
+                base_currency=base_currency,
+                quote_currency=quote_currency,
+                qty=qty,
+                notional=notional,
+                accounting_mode=accounting_mode,
+                trade_id=resolved_trade_id,
+                required_delta={},
+                wallet_delta=wallet_delta,
+            )
+            wallet_after = self._wallet_state_snapshot(wallet_after_state)
+            self._append_wallet_event(committed_event)
+            self._store_committed_state(wallet_after_state)
+            committed_context = (
+                dict(committed_event.get("context"))
+                if isinstance(committed_event.get("context"), Mapping)
+                else {}
+            )
             return {
                 "reservation_id": None,
                 "reservation_status": None,
                 "correlation_id": str(resolved_correlation_id or ""),
                 "trade_id": str(resolved_trade_id or ""),
+                "wallet_commit_seq": committed_context.get("wallet_commit_seq"),
+                "wallet_commit_seq_status": committed_context.get("wallet_commit_seq_status"),
+                "wallet_eval_seq": committed_context.get("wallet_eval_seq"),
                 "required_delta": {},
                 "wallet_delta": wallet_delta,
+                "wallet_before": wallet_before,
+                "wallet_after": wallet_after,
                 "event_name": expected_event_name,
             }
 
@@ -639,8 +1112,7 @@ class BaseWalletGateway:
         with self:
             events_with_seq = self._runtime_events_with_seq()
             self._reconcile_reservations(events_with_seq)
-            runtime_events = [event for _seq, event in events_with_seq]
-            return self._project_from_events(events=runtime_events, include_reservations=False)
+            return self._current_committed_state(events_with_seq=events_with_seq)
 
     def events(self) -> Iterable[WalletEvent]:
         with self:
@@ -655,7 +1127,7 @@ class BaseWalletGateway:
                         event_id=str(item.event_id),
                         event_type=str(item.event_name.value),
                         timestamp=item.event_ts.isoformat().replace("+00:00", "Z"),
-                        payload=dict(item.payload or {}),
+                        payload=dict(item.context.to_dict()),
                     )
                 )
                 continue
@@ -677,7 +1149,7 @@ class BaseWalletGateway:
                     event_id=str(item.get("event_id") or ""),
                     event_type=str(event_name),
                     timestamp=str(timestamp or ""),
-                    payload=dict(item.get("payload") or {}),
+                    payload=BaseWalletGateway._event_payload(item),
                 )
             )
         return normalised
@@ -698,20 +1170,23 @@ class SharedWalletGateway(BaseWalletGateway):
             consumed_timeout_seconds=consumed_timeout_seconds,
         )
         runtime_events = proxy.get("runtime_events")
+        wallet_events = proxy.get("wallet_events")
         lock = proxy.get("lock")
         reservations = proxy.get("reservations")
         if runtime_events is None or lock is None or reservations is None:
             raise ValueError("shared wallet proxy requires runtime_events/reservations/lock")
         self._runtime_events = runtime_events
+        self._wallet_events = wallet_events if wallet_events is not None else runtime_events
         self._lock = lock
         self._reservations = reservations
         self._local_lock = threading.RLock()
-        seq_counter = proxy.get("runtime_event_seq")
-        if seq_counter is not None:
+        self._wallet_state = proxy.get("wallet_state")
+        self._wallet_event_seq = proxy.get("wallet_event_seq")
+        if self._wallet_event_seq is not None:
             try:
-                self._last_seen_seq = int(seq_counter.get())
+                self._last_seen_seq = int(self._wallet_event_seq.get())
             except Exception:
-                self._last_seen_seq = int(getattr(seq_counter, "value", 0))
+                self._last_seen_seq = int(getattr(self._wallet_event_seq, "value", 0))
 
     def _with_lock(self):
         # Manager lock proxies are process-safe; local lock prevents re-entrant deadlocks in one process.
@@ -727,7 +1202,41 @@ class SharedWalletGateway(BaseWalletGateway):
         self._local_lock.release()
 
     def _iter_runtime_events(self) -> Iterable[RuntimeEvent | Mapping[str, Any]]:
-        return list(self._runtime_events)
+        return list(self._wallet_events)
+
+    def _current_committed_state(
+        self,
+        *,
+        events_with_seq: Optional[Iterable[tuple[int, RuntimeEvent | Mapping[str, Any]]]] = None,
+    ) -> WalletState:
+        if self._wallet_state is not None:
+            return self._wallet_state_from_snapshot(dict(self._wallet_state))
+        return super()._current_committed_state(events_with_seq=events_with_seq)
+
+    def _store_committed_state(self, state: WalletState) -> None:
+        if self._wallet_state is None:
+            return
+        snapshot = self._wallet_state_snapshot(state)
+        self._wallet_state["balances"] = dict(snapshot.get("balances") or {})
+        self._wallet_state["locked_margin"] = dict(snapshot.get("locked_margin") or {})
+        self._wallet_state["free_collateral"] = dict(snapshot.get("free_collateral") or {})
+        self._wallet_state["margin_positions"] = dict(snapshot.get("margin_positions") or {})
+
+    def _next_wallet_event_seq(self) -> int:
+        counter = self._wallet_event_seq
+        if counter is None:
+            return super()._next_wallet_event_seq()
+        try:
+            current = int(counter.get())
+            counter.set(current + 1)
+        except Exception:
+            current = int(getattr(counter, "value", 0))
+            setattr(counter, "value", current + 1)
+        self._last_seen_seq = max(int(self._last_seen_seq), current + 1)
+        return current + 1
+
+    def _append_wallet_event(self, event: Mapping[str, Any]) -> None:
+        self._wallet_events.append(dict(event or {}))
 
     def _reservation_items(self) -> Iterable[Tuple[str, Mapping[str, Any]]]:
         return list(dict(self._reservations).items())

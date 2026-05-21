@@ -1,28 +1,20 @@
-"""Bot services and runtime package."""
+"""Bot services package with light import-time surface."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .bot_runtime import BotRuntime
-    from .bot_service import start_bot, stop_bot
-    from .bot_stream import BotStreamManager
-
-__all__ = ["BotRuntime", "BotStreamManager", "start_bot", "stop_bot"]
+from .bot_stream import BotStreamManager
 
 
-def __getattr__(name: str):
-    if name == "BotRuntime":
-        from .bot_runtime import BotRuntime
+def start_bot(bot_id: str):
+    from .bot_service import start_bot as _start_bot
 
-        return BotRuntime
-    if name in {"start_bot", "stop_bot"}:
-        from .bot_service import start_bot, stop_bot
+    return _start_bot(bot_id)
 
-        return start_bot if name == "start_bot" else stop_bot
-    if name == "BotStreamManager":
-        from .bot_stream import BotStreamManager
 
-        return BotStreamManager
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+def stop_bot(bot_id: str, *, preserve_container: bool = False):
+    from .bot_service import stop_bot as _stop_bot
+
+    return _stop_bot(bot_id, preserve_container=preserve_container)
+
+
+__all__ = ["BotStreamManager", "start_bot", "stop_bot"]

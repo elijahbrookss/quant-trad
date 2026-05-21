@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Protocol, Tuple
+from typing import Any, List, Mapping, Protocol, Tuple
 
 import pandas as pd
 
@@ -35,7 +35,17 @@ class DataPersistence(Protocol):
         datasource: str,
         start: pd.Timestamp,
         end: pd.Timestamp,
+        metadata: Mapping[str, Any] | None = None,
     ) -> None:
+        ...
+
+    def load_closure_evidence_ranges(
+        self,
+        ctx: DataContext,
+        datasource: str,
+        requested_start: pd.Timestamp,
+        requested_end: pd.Timestamp,
+    ) -> List[Mapping[str, Any]]:
         ...
 
     def write_dataframe(self, df: pd.DataFrame, ctx: DataContext) -> int:
@@ -68,8 +78,18 @@ class NullPersistence:
         datasource: str,
         start: pd.Timestamp,
         end: pd.Timestamp,
+        metadata: Mapping[str, Any] | None = None,
     ) -> None:
         return None
+
+    def load_closure_evidence_ranges(
+        self,
+        ctx: DataContext,
+        datasource: str,
+        requested_start: pd.Timestamp,
+        requested_end: pd.Timestamp,
+    ) -> List[Mapping[str, Any]]:
+        return []
 
     def write_dataframe(self, df: pd.DataFrame, ctx: DataContext) -> int:
         return 0

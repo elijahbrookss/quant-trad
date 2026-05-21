@@ -3,60 +3,62 @@
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 import logging
-import os
 from typing import List
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from core.settings import get_settings
 from .controller import bots, candles, indicators as ind_controller, instruments, providers, reports, strategies
+from .service.bots import bot_service
 from .service.bots.bot_watchdog import get_watchdog
+from .service.bots.runner_observability import start_runner_observability, stop_runner_observability
 from .service.db.postgres_extensions import ensure_postgres_extensions
+from .service.observability_exporter import start_observability_exporter, stop_observability_exporter
 
-# Auto-discover indicators and signal rules via package imports
-# Indicators: pure computation, returns domain objects
+# Auto-discover indicators via package imports.
 import indicators  # noqa: F401
+from overlays.builtins import ensure_builtin_overlays_registered
 
-# Signals: auto-discovers all @signal_rule decorated functions
-# This triggers decorator execution and registration in _REGISTRY
-import signals  # noqa: F401
-from signals.overlays.builtins import ensure_builtin_overlays_registered
-from engines.indicator_engine import ensure_builtin_indicator_plugins_registered
+_SETTINGS = get_settings()
+
+
+class _HealthAccessFilter(logging.Filter):
+    """Drop routine health-probe access logs without muting real API traffic."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = getattr(record, "args", ())
+        if not isinstance(args, tuple) or len(args) < 3:
+            return True
+        path = str(args[2] or "")
+        return "/api/health" not in path
 
 
 def _allowed_origins() -> List[str]:
-    """Load allowed origins from env, defaulting to common dev hosts."""
+    """Load allowed origins from centralized settings."""
 
-    raw = os.getenv("PORTAL_ALLOWED_ORIGINS", "")
-    if raw:
-        origins = [item.strip() for item in raw.split(",") if item.strip()]
-        if origins:
-            return origins
-    # default to typical local dev hosts/ports
-    return [
-        "http://localhost",
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1",
-        "http://127.0.0.1:5173",
-    ]
+    return list(_SETTINGS.backend.allowed_origins)
 
 
 def _configure_logging() -> None:
     """Configure basic logging once for the API server."""
 
-    level_name = os.getenv("PORTAL_LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
+    level = _SETTINGS.logging.level
     logging.basicConfig(
         level=level,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(existing, _HealthAccessFilter) for existing in access_logger.filters):
+        access_logger.addFilter(_HealthAccessFilter())
 
 def _startup_watchdog() -> None:
     ensure_builtin_overlays_registered()
-    ensure_builtin_indicator_plugins_registered()
     ensure_postgres_extensions()
+    start_observability_exporter()
+    bot_service.ensure_watchdog_stream_bridge()
     watchdog = get_watchdog()
+    start_runner_observability(runner_id=watchdog.runner_id)
     watchdog.recover_local_orphans()
     watchdog.start_background_monitor()
     logger.info("bot_watchdog_ready | runner_id=%s", watchdog.runner_id)
@@ -65,6 +67,8 @@ def _startup_watchdog() -> None:
 def _shutdown_watchdog() -> None:
     watchdog = get_watchdog()
     watchdog.stop_background_monitor()
+    stop_runner_observability()
+    stop_observability_exporter()
     logger.info("bot_watchdog_stopped | runner_id=%s", watchdog.runner_id)
 
 

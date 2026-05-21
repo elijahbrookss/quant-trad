@@ -1,0 +1,736 @@
+"""Backend observability substrate for contract-based instrumentation.
+
+This module intentionally keeps metrics and structured operational events
+separate:
+  - metrics are emitted into a lightweight in-memory sink for counters,
+    histograms, and gauges,
+  - events are emitted into the same sink and logged as structured records.
+
+The sink is process-local and test-friendly, but it also exposes a bounded
+drain surface for the DB-backed persistence/export worker.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import threading
+import time
+from collections import deque
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterator, Mapping, MutableMapping, Optional
+
+from core.settings import get_settings
+from core.metrics import Metric, MetricType
+from utils.log_context import build_log_context, with_log_context
+
+logger = logging.getLogger(__name__)
+_OBSERVABILITY_SETTINGS = get_settings().observability
+
+_NAME_RE = re.compile(r"[^a-z0-9]+")
+_DEFAULT_GAUGE_INTERVAL_S = 1.0
+_ALLOWED_METRIC_LABELS = frozenset(
+    {
+        "bot_id",
+        "run_id",
+        "instrument_id",
+        "series_key",
+        "component",
+        "worker_id",
+        "queue_name",
+        "pipeline_stage",
+        "message_kind",
+        "delta_type",
+        "storage_target",
+        "failure_mode",
+        "source_reason",
+        "outcome",
+        "duplicate_reason",
+        "payload_size_bucket",
+        "gap_type",
+        "sample_count",
+        "value_sum",
+        "value_min",
+        "value_max",
+        "latest_value",
+        "capture_policy",
+    }
+)
+_DISALLOWED_METRIC_LABELS = frozenset(
+    {
+        "viewer_id",
+        "viewer_session_id",
+        "event_id",
+        "request_id",
+        "trade_id",
+        "exception",
+        "error",
+        "payload",
+        "raw_payload",
+    }
+)
+_DEPRECATED_MESSAGE_KINDS = frozenset({"bot_projection_refresh"})
+_ALLOWED_METRIC_MESSAGE_KINDS = frozenset(
+    {
+        "bootstrap",
+        "botlens_live_connected",
+        "botlens_lifecycle_event",
+        "botlens_run_fault_delta",
+        "botlens_run_health_delta",
+        "botlens_run_lifecycle_delta",
+        "botlens_run_open_trades_delta",
+        "botlens_run_symbol_catalog_delta",
+        "botlens_runtime_bootstrap_facts",
+        "botlens_runtime_facts",
+        "botlens_symbol_candle_delta",
+        "botlens_symbol_decision_delta",
+        "botlens_symbol_diagnostic_delta",
+        "botlens_symbol_overlay_delta",
+        "botlens_symbol_signal_delta",
+        "botlens_symbol_stats_delta",
+        "botlens_symbol_trade_delta",
+        "broadcast",
+        "connected",
+        "domain_batch",
+        "ephemeral",
+        "facts",
+        "ingest_ws",
+        "legacy",
+        "reset_required",
+        "selected_symbol_snapshot",
+        "symbol_projection_delta",
+        "symbol_summary",
+        "heartbeat",
+        "lifecycle",
+        "notification",
+        "run_projection_delta",
+        "unknown",
+        "deprecated",
+    }
+)
+_SOURCE_BUDGETED_METRIC_COMPONENTS: dict[str, tuple[str, ...]] = {
+    "botlens_run_stream": (
+        "live_transport_",
+        "viewer_broadcast_",
+        "viewer_payload_bytes",
+    ),
+    "botlens_projector_registry": (
+        "fanout_delivery_items_total",
+        "fanout_delivery_ms",
+        "fanout_queue_wait_ms",
+        "live_transport_",
+    ),
+    "botlens_run_projector": (
+        "live_transport_",
+        "run_projector_apply_ms",
+        "run_notification_queue_wait_ms",
+    ),
+    "botlens_symbol_projector": (
+        "live_transport_",
+        "run_notification_coalesced_total",
+        "run_notification_enqueued_total",
+        "symbol_projector_apply_ms",
+        "symbol_fact_queue_wait_ms",
+    ),
+    "botlens_intake_router": (
+        "ingest_route_ms",
+        "ingest_messages_total",
+    ),
+    "botlens_mailbox": (
+        "run_notification_enqueued_total",
+        "symbol_fact_enqueued_total",
+    ),
+    "botlens_ingest_ws": (
+        "ingest_json_decode_ms",
+        "ingest_payload_bytes",
+        "ingest_receive_wait_ms",
+    ),
+    "container_runtime_telemetry": (
+        "telemetry_emitted_total",
+        "telemetry_enqueue_",
+        "telemetry_payload_bytes",
+        "telemetry_queue_wait_ms",
+        "telemetry_transport_payload_bytes",
+        "telemetry_transport_send_ms",
+        "telemetry_transport_send_total",
+    ),
+}
+_SOURCE_BUDGET_EXPLICIT_METRIC_NAMES: dict[str, frozenset[str]] = {
+    "botlens_intake_router": frozenset(
+        {
+            "runtime_event_retention_dropped_total",
+        }
+    ),
+}
+_SOURCE_BUDGET_ALWAYS_CAPTURE_SUFFIXES = (
+    "_drop_total",
+    "_dropped_total",
+    "_error",
+    "_error_total",
+    "_errors",
+    "_errors_total",
+    "_failed_total",
+    "_fail_total",
+    "_invalid_total",
+    "_overflow",
+    "_overflow_total",
+    "_rejected_total",
+    "_retries_total",
+)
+_SOURCE_BUDGET_ALWAYS_CAPTURE_PREFIXES = (
+    "db_write_",
+    "observability_",
+)
+
+
+def normalize_name(value: str) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return "unknown"
+    return _NAME_RE.sub("_", text).strip("_") or "unknown"
+
+
+def normalize_failure_mode(value: Any) -> str:
+    if isinstance(value, BaseException):
+        text = value.__class__.__name__
+    else:
+        text = str(value or "").strip()
+    return normalize_name(text or "unknown")
+
+
+def normalize_metric_message_kind(value: Any) -> str:
+    normalized = normalize_name(value or "unknown")
+    if normalized in _DEPRECATED_MESSAGE_KINDS:
+        return "deprecated"
+    if normalized in _ALLOWED_METRIC_MESSAGE_KINDS:
+        return normalized
+    return "unknown"
+
+
+def payload_size_bytes(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bytes):
+        return len(value)
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    try:
+        return len(json.dumps(value, separators=(",", ":"), default=str).encode("utf-8"))
+    except Exception:
+        return len(str(value).encode("utf-8"))
+
+
+def canonical_context(
+    *,
+    bot_id: Any = None,
+    run_id: Any = None,
+    instrument_id: Any = None,
+    series_key: Any = None,
+    component: Any = None,
+    worker_id: Any = None,
+    **fields: Any,
+) -> Dict[str, Any]:
+    context = build_log_context(
+        bot_id=str(bot_id).strip() or None if bot_id is not None else None,
+        run_id=str(run_id).strip() or None if run_id is not None else None,
+        instrument_id=str(instrument_id).strip() or None if instrument_id is not None else None,
+        series_key=str(series_key).strip() or None if series_key is not None else None,
+        component=normalize_name(component) if component is not None else None,
+        worker_id=str(worker_id).strip() or None if worker_id is not None else None,
+    )
+    context.update(build_log_context(**fields))
+    return context
+
+
+def metric_labels(*contexts: Mapping[str, Any], **fields: Any) -> Dict[str, str]:
+    merged: Dict[str, Any] = {}
+    for context in contexts:
+        for key, value in (context or {}).items():
+            merged[key] = value
+    merged.update(fields)
+    labels: Dict[str, str] = {}
+    for key, value in merged.items():
+        normalized_key = normalize_name(key)
+        if normalized_key in _DISALLOWED_METRIC_LABELS:
+            continue
+        if normalized_key not in _ALLOWED_METRIC_LABELS:
+            continue
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        if normalized_key == "message_kind":
+            labels[normalized_key] = normalize_metric_message_kind(text)
+            continue
+        if normalized_key == "failure_mode":
+            labels[normalized_key] = normalize_failure_mode(text)
+            continue
+        labels[normalized_key] = text
+    return labels
+
+
+@dataclass(frozen=True)
+class EventRecord:
+    name: str
+    level: str
+    context: Dict[str, Any]
+    timestamp: str
+
+
+@dataclass
+class _MetricBudgetState:
+    count: int = 0
+    value_sum: float = 0.0
+    value_min: float = 0.0
+    value_max: float = 0.0
+    latest_value: float = 0.0
+    first_sample_monotonic: float = 0.0
+
+
+@dataclass(frozen=True)
+class QueueStateMetricOwner:
+    observer: "BackendObserver"
+    key: str
+    depth_metric: str
+    utilization_metric: str
+    labels: Dict[str, Any]
+    oldest_age_metric: Optional[str] = None
+
+    def emit(
+        self,
+        *,
+        depth: int,
+        capacity: int,
+        oldest_age_ms: Optional[float] = None,
+    ) -> None:
+        self.observer.maybe_emit_gauges(
+            self.key,
+            depth_metric=self.depth_metric,
+            utilization_metric=self.utilization_metric,
+            oldest_age_metric=self.oldest_age_metric,
+            oldest_age_ms=oldest_age_ms,
+            depth=depth,
+            capacity=capacity,
+            **self.labels,
+        )
+
+
+class _ObservabilityMetricSink:
+    def __init__(self, owner: "InMemoryObservabilitySink") -> None:
+        self._owner = owner
+
+    def emit(self, metric: Metric) -> None:
+        owner = self._owner
+        with owner._lock:
+            owner._metrics.append(metric)
+            if len(owner._pending_metrics) == owner._pending_metrics.maxlen:
+                owner._pending_metrics.popleft()
+                owner._dropped_pending_metrics += 1
+            owner._pending_metrics.append(metric)
+            owner._condition.notify_all()
+
+
+class _ObservabilityEventSink:
+    def __init__(self, owner: "InMemoryObservabilitySink") -> None:
+        self._owner = owner
+
+    def emit(self, event: EventRecord) -> None:
+        owner = self._owner
+        with owner._lock:
+            owner._events.append(event)
+            if len(owner._pending_events) == owner._pending_events.maxlen:
+                owner._pending_events.popleft()
+                owner._dropped_pending_events += 1
+            owner._pending_events.append(event)
+            owner._condition.notify_all()
+
+
+class InMemoryObservabilitySink:
+    """Thread-safe process-local sink used by backend instrumentation."""
+
+    def __init__(
+        self,
+        *,
+        max_metrics: int = 50_000,
+        max_events: int = 10_000,
+        pending_metrics_max: Optional[int] = None,
+        pending_events_max: Optional[int] = None,
+    ) -> None:
+        self._metrics: deque[Metric] = deque(maxlen=max_metrics)
+        self._events: deque[EventRecord] = deque(maxlen=max_events)
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._pending_metrics: deque[Metric] = deque(
+            maxlen=max(
+                int(
+                    pending_metrics_max
+                    or _OBSERVABILITY_SETTINGS.persist_pending_metrics_max
+                    or max_metrics
+                ),
+                1,
+            )
+        )
+        self._pending_events: deque[EventRecord] = deque(
+            maxlen=max(
+                int(
+                    pending_events_max
+                    or _OBSERVABILITY_SETTINGS.persist_pending_events_max
+                    or max_events
+                ),
+                1,
+            )
+        )
+        self._dropped_pending_metrics = 0
+        self._dropped_pending_events = 0
+        self._metric_sink = _ObservabilityMetricSink(self)
+        self._event_sink = _ObservabilityEventSink(self)
+
+    def emit_metric(self, record: Metric) -> None:
+        self._metric_sink.emit(record)
+
+    def emit_event(self, record: EventRecord) -> None:
+        self._event_sink.emit(record)
+
+    def snapshot(self) -> Dict[str, list[Dict[str, Any]]]:
+        with self._lock:
+            return {
+                "metrics": [item.to_dict() for item in list(self._metrics)],
+                "events": [
+                    {
+                        "name": item.name,
+                        "level": item.level,
+                        "context": dict(item.context),
+                        "timestamp": item.timestamp,
+                    }
+                    for item in list(self._events)
+                ],
+            }
+
+    def wait_for_pending(self, timeout_s: float) -> bool:
+        timeout = max(float(timeout_s), 0.0)
+        with self._condition:
+            if self._pending_metrics or self._pending_events or self._has_pending_drops_locked():
+                return True
+            self._condition.wait(timeout=timeout)
+            return bool(
+                self._pending_metrics or self._pending_events or self._has_pending_drops_locked()
+            )
+
+    def drain_pending(
+        self,
+        *,
+        metric_limit: int,
+        event_limit: int,
+    ) -> Dict[str, Any]:
+        metrics: list[Metric] = []
+        events: list[EventRecord] = []
+        with self._lock:
+            while self._pending_metrics and len(metrics) < max(int(metric_limit), 0):
+                metrics.append(self._pending_metrics.popleft())
+            while self._pending_events and len(events) < max(int(event_limit), 0):
+                events.append(self._pending_events.popleft())
+            dropped = self._pending_drop_counts_locked()
+            self._dropped_pending_metrics = 0
+            self._dropped_pending_events = 0
+        return {
+            "metrics": metrics,
+            "events": events,
+            "dropped": dropped,
+        }
+
+    def reset(self) -> None:
+        with self._lock:
+            self._metrics.clear()
+            self._events.clear()
+            self._pending_metrics.clear()
+            self._pending_events.clear()
+            self._dropped_pending_metrics = 0
+            self._dropped_pending_events = 0
+            self._condition.notify_all()
+
+    def _pending_drop_counts_locked(self) -> Dict[str, int]:
+        return {
+            "metrics": int(self._dropped_pending_metrics),
+            "events": int(self._dropped_pending_events),
+        }
+
+    def _has_pending_drops_locked(self) -> bool:
+        return bool(self._dropped_pending_metrics or self._dropped_pending_events)
+
+
+_DEFAULT_SINK = InMemoryObservabilitySink()
+
+
+def get_observability_sink() -> InMemoryObservabilitySink:
+    return _DEFAULT_SINK
+
+
+def reset_observability_sink() -> None:
+    _DEFAULT_SINK.reset()
+
+
+class BackendObserver:
+    """Reusable observer for backend components."""
+
+    def __init__(
+        self,
+        *,
+        component: str,
+        sink: Optional[InMemoryObservabilitySink] = None,
+        event_logger: Optional[logging.Logger] = None,
+        gauge_interval_s: float = _DEFAULT_GAUGE_INTERVAL_S,
+    ) -> None:
+        self.component = normalize_name(component)
+        self._sink = sink or _DEFAULT_SINK
+        self._event_logger = event_logger or logger
+        self._gauge_interval_s = max(float(gauge_interval_s), 0.1)
+        self._gauge_emit_at: Dict[str, float] = {}
+        self._budget_seen_keys: set[tuple[Any, ...]] = set()
+        self._budget_states: Dict[tuple[Any, ...], _MetricBudgetState] = {}
+        self._lock = threading.Lock()
+
+    def context(self, **fields: Any) -> Dict[str, Any]:
+        return canonical_context(component=self.component, **fields)
+
+    def increment(self, name: str, value: float = 1.0, **fields: Any) -> None:
+        self._emit_metric("counter", name, value, fields)
+
+    def observe(self, name: str, value: float, **fields: Any) -> None:
+        self._emit_metric("histogram", name, value, fields)
+
+    def gauge(self, name: str, value: float, **fields: Any) -> None:
+        self._emit_metric("gauge", name, value, fields)
+
+    def event(
+        self,
+        name: str,
+        *,
+        level: int = logging.INFO,
+        log_to_logger: Optional[bool] = None,
+        **fields: Any,
+    ) -> None:
+        normalized = normalize_name(name)
+        context = self.context(**fields)
+        record = EventRecord(
+            name=normalized,
+            level=logging.getLevelName(level),
+            context=context,
+            timestamp=_utcnow_iso(),
+        )
+        self._sink.emit_event(record)
+        should_log = bool(level >= logging.WARN) if log_to_logger is None else bool(log_to_logger)
+        if should_log:
+            log_context = dict(context)
+            log_context["event_name"] = normalized
+            self._event_logger.log(level, with_log_context(normalized, log_context))
+
+    @contextmanager
+    def timed(self, metric_name: str, **fields: Any) -> Iterator[MutableMapping[str, Any]]:
+        started = time.perf_counter()
+        mutable_fields: Dict[str, Any] = dict(fields)
+        try:
+            yield mutable_fields
+        finally:
+            elapsed_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
+            self.observe(metric_name, elapsed_ms, unit="ms", **mutable_fields)
+
+    def maybe_emit_gauges(
+        self,
+        key: str,
+        *,
+        depth_metric: str,
+        utilization_metric: str,
+        depth: int,
+        capacity: int,
+        oldest_age_metric: Optional[str] = None,
+        oldest_age_ms: Optional[float] = None,
+        **fields: Any,
+    ) -> None:
+        token = f"{self.component}:{normalize_name(key)}"
+        now = time.monotonic()
+        with self._lock:
+            last = self._gauge_emit_at.get(token)
+            if last is not None and now - float(last) < self._gauge_interval_s:
+                return
+            self._gauge_emit_at[token] = now
+        depth_value = max(int(depth), 0)
+        capacity_value = max(int(capacity), 1)
+        self.gauge(depth_metric, float(depth_value), **fields)
+        self.gauge(utilization_metric, float(depth_value) / float(capacity_value), **fields)
+        if oldest_age_metric and oldest_age_ms is not None:
+            self.gauge(oldest_age_metric, max(float(oldest_age_ms), 0.0), **fields)
+
+    def maybe_gauge(self, key: str, name: str, value: float, **fields: Any) -> None:
+        token = f"{self.component}:{normalize_name(key)}:{normalize_name(name)}"
+        now = time.monotonic()
+        with self._lock:
+            last = self._gauge_emit_at.get(token)
+            if last is not None and now - float(last) < self._gauge_interval_s:
+                return
+            self._gauge_emit_at[token] = now
+        self.gauge(name, value, **fields)
+
+    def _emit_metric(self, kind: str, name: str, value: float, fields: Mapping[str, Any]) -> None:
+        normalized = normalize_name(name)
+        mutable_fields = dict(fields)
+        unit = str(mutable_fields.pop("unit", "") or "")
+        labels = metric_labels(self.context(), mutable_fields)
+        labels.pop("component", None)
+        sample_every = self._source_budget_sample_every(normalized)
+        if sample_every > 1:
+            self._emit_source_budgeted_metric(
+                kind=kind,
+                name=normalized,
+                value=float(value),
+                unit=unit,
+                labels=labels,
+                sample_every=sample_every,
+            )
+            return
+        self._emit_metric_record(
+            kind=kind,
+            name=normalized,
+            value=float(value),
+            unit=unit,
+            labels=labels,
+        )
+
+    def _source_budget_sample_every(self, metric_name: str) -> int:
+        normalized = normalize_name(metric_name)
+        explicit_names = _SOURCE_BUDGET_EXPLICIT_METRIC_NAMES.get(self.component, frozenset())
+        if normalized in explicit_names:
+            return max(int(_OBSERVABILITY_SETTINGS.high_volume_metric_sample_every or 50), 1)
+        if normalized.startswith(_SOURCE_BUDGET_ALWAYS_CAPTURE_PREFIXES):
+            return 1
+        if normalized.endswith(_SOURCE_BUDGET_ALWAYS_CAPTURE_SUFFIXES):
+            return 1
+        prefixes = _SOURCE_BUDGETED_METRIC_COMPONENTS.get(self.component, ())
+        if not prefixes or not any(normalized == prefix or normalized.startswith(prefix) for prefix in prefixes):
+            return 1
+        return max(int(_OBSERVABILITY_SETTINGS.high_volume_metric_sample_every or 50), 1)
+
+    def _emit_source_budgeted_metric(
+        self,
+        *,
+        kind: str,
+        name: str,
+        value: float,
+        unit: str,
+        labels: Dict[str, str],
+        sample_every: int,
+    ) -> None:
+        key = (
+            kind,
+            name,
+            unit,
+            tuple(sorted((str(label_key), str(label_value)) for label_key, label_value in labels.items())),
+        )
+        now = time.monotonic()
+        with self._lock:
+            if key not in self._budget_seen_keys:
+                self._budget_seen_keys.add(key)
+                emit_now: _MetricBudgetState | None = _MetricBudgetState(
+                    count=1,
+                    value_sum=float(value),
+                    value_min=float(value),
+                    value_max=float(value),
+                    latest_value=float(value),
+                    first_sample_monotonic=now,
+                )
+            else:
+                state = self._budget_states.get(key)
+                if state is None:
+                    state = _MetricBudgetState(
+                        count=0,
+                        value_sum=0.0,
+                        value_min=float(value),
+                        value_max=float(value),
+                        latest_value=float(value),
+                        first_sample_monotonic=now,
+                    )
+                    self._budget_states[key] = state
+                if state.count <= 0:
+                    state.value_min = float(value)
+                    state.value_max = float(value)
+                    state.first_sample_monotonic = now
+                state.count += 1
+                state.value_sum += float(value)
+                state.value_min = min(float(state.value_min), float(value))
+                state.value_max = max(float(state.value_max), float(value))
+                state.latest_value = float(value)
+                max_lag_s = max(float(_OBSERVABILITY_SETTINGS.high_volume_metric_max_lag_ms or 1000) / 1000.0, 0.01)
+                if state.count >= max(int(sample_every), 1) or now - state.first_sample_monotonic >= max_lag_s:
+                    emit_now = _MetricBudgetState(
+                        count=state.count,
+                        value_sum=state.value_sum,
+                        value_min=state.value_min,
+                        value_max=state.value_max,
+                        latest_value=state.latest_value,
+                        first_sample_monotonic=state.first_sample_monotonic,
+                    )
+                    self._budget_states.pop(key, None)
+                else:
+                    emit_now = None
+        if emit_now is None:
+            return
+        metric_value = emit_now.value_sum if kind == "counter" else emit_now.latest_value
+        budget_labels = dict(labels)
+        budget_labels.update(
+            {
+                "sample_count": str(max(int(emit_now.count), 1)),
+                "value_sum": repr(float(emit_now.value_sum)),
+                "value_min": repr(float(emit_now.value_min)),
+                "value_max": repr(float(emit_now.value_max)),
+                "latest_value": repr(float(emit_now.latest_value)),
+                "capture_policy": "source_budgeted",
+            }
+        )
+        self._emit_metric_record(
+            kind=kind,
+            name=name,
+            value=float(metric_value),
+            unit=unit,
+            labels=budget_labels,
+        )
+
+    def _emit_metric_record(
+        self,
+        *,
+        kind: str,
+        name: str,
+        value: float,
+        unit: str,
+        labels: Dict[str, str],
+    ) -> None:
+        record = Metric(
+            metric_name=name,
+            metric_type=MetricType(kind),
+            value=float(value),
+            unit=unit,
+            timestamp=datetime.now(timezone.utc),
+            source=self.component,
+            tags=labels,
+        )
+        self._sink.emit_metric(record)
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+__all__ = [
+    "BackendObserver",
+    "EventRecord",
+    "InMemoryObservabilitySink",
+    "canonical_context",
+    "get_observability_sink",
+    "metric_labels",
+    "normalize_failure_mode",
+    "normalize_name",
+    "payload_size_bytes",
+    "reset_observability_sink",
+]

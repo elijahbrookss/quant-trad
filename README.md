@@ -1,190 +1,224 @@
-# quant-trad
+# Quant-Trad
 
-Quant-trad is a quantitative trading platform for research, strategy evaluation, execution realism, and playback inspection.
+Quant-Trad is a deterministic trading research, paper execution, and runtime
+inspection platform.
 
-The repo is organized around one core idea: trading behavior should be explainable from a single runtime timeline, not reconstructed later from loosely related artifacts.
+It is built around one question:
 
-## What This Repo Is
+> **What happened during a trade, and why?**
 
-Quant-trad separates responsibilities into explicit layers:
-
-- QuantLab: research and indicator exploration
-- Strategy: decision logic from indicator outputs
-- Bot: execution realism, fills, costs, risk, and lifecycle outcomes
-- Playback / BotLens: audit and debugging surfaces for what the runtime actually did
-
-The system contract is strict about live-equivalent sequencing. Derived outputs are valid only when they respect known-at timing and can be explained by sequential candle arrival.
-
-## Platform Guarantees
-
-These are the semantics the repo is built around:
-
-- Live-equivalent evaluation: logic must hold under sequential market-data arrival
-- Known-at causality: artifacts are usable only when `known_at <= evaluation_time`
-- Determinism: fixed inputs, params, and versions should produce stable outputs
-- Layer integrity: research, decision, execution, and playback stay separated
-- Single runtime path: `initialize -> apply_bar -> snapshot`
-- Playback is an audit surface, not a demo layer
-
-If code conflicts with these semantics, the contracts in [`docs/agents/`](docs/agents/) are the source of truth.
-
-## Main Components
-
-- `src/engines/indicator_engine`: indicator execution and snapshot flow
-- `src/engines/bot_runtime`: bot runtime engine and execution semantics
-- `src/indicators`: indicator implementations and runtime-facing payloads
-- `src/signals`: signal rules, overlays, and runtime signal plumbing
-- `src/strategies`: strategy logic built on indicator and signal outputs
-- `portal/backend`: FastAPI services for bots, data, storage, reports, and APIs
-- `portal/frontend`: React/Vite UI including bot cards, BotLens, and operational views
-- `docker/`: compose stack, observability services, database, and broker support
+Use it to run research/backtests, operate provider-backed paper runs, inspect
+runtime behavior in BotLens, and compare reports from the same walk-forward
+runtime timeline.
 
 ## Quick Start
 
-Prerequisites:
+### Prerequisites
 
 - Docker
 - GNU Make
-- Python 3.12+ if you want to run local tooling outside Docker
+- Python 3.12+ for local tooling outside Docker
 
-Create local secrets:
+### Create Local Env
 
 ```bash
 cp secrets.env.example secrets.env
 ```
 
-Config file roles:
+Fill the local values required by the stack:
 
-- `.env`: checked-in local defaults for root Python tooling and test bootstrap
-- `.env.test`: docker-compose test defaults
-- `secrets.env`: private credentials and operator overrides
-- `portal/frontend/.env`: frontend Vite defaults
+```bash
+POSTGRES_DB=quanttrad
+POSTGRES_USER=quanttrad
+POSTGRES_PASSWORD=<local-db-password>
+PGADMIN_DEFAULT_PASSWORD=<local-pgadmin-password>
+```
 
-Bring up the core stack:
+If you plan to save provider credentials, also set a credential encryption key:
+
+```bash
+QT_SECURITY_PROVIDER_CREDENTIAL_KEY=<fernet-key>
+```
+
+Generate one with:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Provider API keys should be saved through the encrypted provider credential
+store, not committed to docs, configs, plans, logs, or strategy files.
+
+### Start Core Services
 
 ```bash
 make up BUILD=1 STACK_PROFILES=core
 ```
 
-This starts:
+Open:
 
 - Frontend: `http://localhost:5173`
 - Backend API: `http://localhost:8000`
 - TimescaleDB: `localhost:15432`
 - pgAdmin: `http://localhost:8080`
 
-If you want observability as well:
+### Add Coinbase Credentials
+
+Coinbase Direct is the active provider-backed paper/streaming path. Backtests
+from local or cached data do not require Coinbase credentials, but provider
+streaming and authenticated provider calls do.
+
+After the core stack is running and `QT_SECURITY_PROVIDER_CREDENTIAL_KEY` is
+set, store Coinbase credentials with:
+
+```bash
+qt providers credentials schema --provider COINBASE --venue COINBASE_DIRECT
+qt providers credentials add --provider COINBASE --venue COINBASE_DIRECT
+```
+
+Required Coinbase credential fields:
+
+```text
+COINBASE_API_KEY
+COINBASE_API_SECRET
+```
+
+For non-interactive setup, map short-lived shell env vars into the credential
+store:
+
+```bash
+qt providers credentials add \
+  --provider COINBASE \
+  --venue COINBASE_DIRECT \
+  --secret-env COINBASE_API_KEY=LOCAL_COINBASE_KEY \
+  --secret-env COINBASE_API_SECRET=LOCAL_COINBASE_SECRET \
+  --no-input
+```
+
+### Add Observability
 
 ```bash
 make up BUILD=1 STACK_PROFILES=all
 ```
 
-That adds:
+Open:
 
 - Grafana: `http://localhost:3000`
 - Loki: `http://localhost:3100`
 
-## Daily Workflow
+## Entry Points
 
-Common commands:
+| Surface | Use it for |
+| --- | --- |
+| `qt` CLI | Canonical workflow and operation entrypoint for bots, runs, providers, reports, exports, comparisons, and experiments. |
+| `qt mcp serve` | MCP adapter for agent hosts. It exposes the same workflow boundary as `qt`; it is not a second source of truth. |
+| UI | Human visualization and inspection: BotLens, charts, fleets, strategies, reports, and playback. |
+| Makefile | Local stack, DB, tests, logs, docs sync, and forensic support helpers. |
+
+Start with `qt` for normal agent/operator workflows. Use Make when the task is
+about the local development stack, tests, logs, DB access, or diagnostics.
+
+## Common Commands
+
+Local stack and support:
 
 ```bash
-make up BUILD=1 STACK_PROFILES=core   # build and start the core stack
-make logs SERVICE=backend             # tail backend logs
-make restart BUILD=1                  # rebuild/restart the current stack
-make ps                               # inspect running services
-make down                             # stop and remove containers
-make test                             # run tests
-make fmt                              # format code
-make lint                             # lint code
-make sync-docs                        # sync docs to your Obsidian/docs target
+make help                            # list available commands
+make up BUILD=1 STACK_PROFILES=core  # build and start core services
+make up BUILD=1 STACK_PROFILES=all   # build and start core + observability
+make ps                              # inspect running services
+make logs SERVICE=backend            # tail backend logs
+make restart BUILD=1                 # rebuild/restart current stack
+make mcp-ready                       # print MCP stdio command/registration state
+make test                            # run tests
+make check                           # run standard developer/audit checks
+make down                            # stop and remove containers
 ```
 
-Run `make help` for the full command set.
+Normal `qt` workflows:
 
-## Configuration
+```bash
+qt bots list
+qt bots start <bot_id> --run-type backtest
+qt bots start <bot_id> --run-type paper --execution observe-only --duration-seconds 30
+qt runs wait <bot_id> <run_id>
+qt providers list
+qt providers stream-smoke --provider COINBASE --venue COINBASE_DIRECT --symbol <product>
+qt reports summary <run_id>
+qt reports export <run_id>
+qt reports compare <baseline_run_id> <candidate_run_id>
+qt experiments validate-plan <plan.json>
+qt experiments run-plan <plan.json> --experiment-id <experiment_id>
+qt mcp serve
+```
 
-Runtime configuration is split across a few files on purpose:
+## Runtime Contract
 
-- `.env`: tracked local defaults for Python tooling, local DB wiring, and root test bootstrap
-- `.env.test`: tracked defaults for `docker/docker-compose.test.yml`
-- `secrets.env`: untracked private credentials and machine-specific overrides
-- `portal/frontend/.env`: frontend API base defaults for Vite
-
-Tests load `.env` and `secrets.env`. The Docker test stack uses `.env.test`.
-
-Common integrations in this repo include:
-
-- Alpaca
-- Interactive Brokers
-- CCXT-backed crypto exchanges
-- TimescaleDB/Postgres
-- Grafana / Loki
-
-See [`secrets.env.example`](secrets.env.example) for the available settings and operational knobs. The platform uses a single database DSN: `PG_DSN`.
-
-## Repository Map
+The core runtime model is:
 
 ```text
-quant-trad/
-├── src/
-│   ├── engines/            # indicator and bot runtime engines
-│   ├── indicators/         # indicator implementations
-│   ├── signals/            # signal rules and overlays
-│   ├── strategies/         # strategy definitions
-│   ├── data_providers/     # provider integrations
-│   └── core/               # shared runtime utilities
-├── portal/
-│   ├── backend/            # FastAPI backend and services
-│   └── frontend/           # React/Vite frontend
-├── docker/                 # compose stack and service images
-├── docs/
-│   ├── agents/             # canonical system/runtime contracts
-│   └── architecture/       # focused architecture notes
-└── tests/                  # test coverage
+initialize -> apply_bar -> snapshot
 ```
 
-## Recommended Reading
+Indicators, strategy decisions, execution behavior, BotLens views, and reports
+must come from that walk-forward runtime timeline. Derived artifacts should only
+exist after they would have been known in live operation.
 
-Start here if you are new to the repo:
+Reports and visualizations are views over runtime truth. They do not create
+alternate execution logic.
 
-1. [`docs/agents/README.md`](docs/agents/README.md)
-2. [`docs/agents/00_system_contract.md`](docs/agents/00_system_contract.md)
-3. [`docs/agents/01_runtime_contract.md`](docs/agents/01_runtime_contract.md)
-4. [`docs/agents/02_execution_playback_contract.md`](docs/agents/02_execution_playback_contract.md)
-5. [`docs/agents/03_engineering_contract.md`](docs/agents/03_engineering_contract.md)
+<p align="center">
+  <img src="docs/assets/quant-trad-platform-flow.svg" alt="Quant-Trad platform flow" width="100%">
+</p>
 
-Then use these architecture docs for current implementation details:
+## Documentation
 
-- [`docs/architecture/ENGINE_OVERVIEW.md`](docs/architecture/ENGINE_OVERVIEW.md)
-- [`docs/architecture/SIGNAL_PIPELINE_ARCHITECTURE.md`](docs/architecture/SIGNAL_PIPELINE_ARCHITECTURE.md)
-- [`docs/architecture/BOT_RUNTIME_DOCS_HUB.md`](docs/architecture/BOT_RUNTIME_DOCS_HUB.md)
-- [`docs/architecture/RUNTIME_EVENT_MODEL_V1.md`](docs/architecture/RUNTIME_EVENT_MODEL_V1.md)
-- [`docs/architecture/WALLET_GATEWAY_ARCHITECTURE.md`](docs/architecture/WALLET_GATEWAY_ARCHITECTURE.md)
+Start here:
 
-## Current State
+- [Documentation homepage](docs/index.md)
+- [Overview](docs/overview.md)
+- [Getting started](docs/getting-started.md)
+- [Developer audit workflow](docs/engineering/developer-audit-workflow.md)
+- [Coinbase derivatives paper setup](docs/guides/coinbase-derivatives-paper-setup.md)
 
-This is an active development repo, not a polished end-user product.
+Core concepts:
 
-That means:
+- [Runtime timeline](docs/concepts/runtime-timeline.md)
+- [Execution model](docs/concepts/execution-model.md)
+- [Strategies and signals](docs/concepts/strategies-and-signals.md)
+- [BotLens](docs/concepts/botlens.md)
+- [Reporting datasets](docs/concepts/reporting-datasets.md)
 
-- architecture and APIs are still evolving
-- correctness and semantic consistency are prioritized over convenience
-- logs are treated as part of the product
-- invalid runtime states should fail loudly, not be hidden
+Contracts:
 
-Use caution before pointing this at real capital. The repo is built to be explainable first, optimized second.
+- [System contract](docs/contracts/platform/00_system_contract.md)
+- [Runtime contract](docs/contracts/platform/01_runtime_contract.md)
+- [Execution and playback contract](docs/contracts/platform/02_execution_playback_contract.md)
+- [Engineering contract](docs/contracts/platform/03_engineering_contract.md)
 
-## Contributing
+Architecture and decisions:
 
-Before making non-trivial changes:
+- [Architecture component index](docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md)
+- [Architecture docs](docs/architecture/README.md)
+- [Architecture decision records](docs/architecture/decisions/README.md)
+- [MCP research server](docs/architecture/research-orchestration/MCP_RESEARCH_SERVER.md)
+- [Paper engine v1 design](docs/architecture/execution-runtime/PAPER_ENGINE_V1_DESIGN.md)
+- [Security layer](docs/architecture/security/SECURITY_LAYER.md)
 
-1. Read the system and runtime contracts in [`docs/agents/`](docs/agents/)
-2. Preserve the layer boundaries between research, strategy, execution, and playback
-3. Prefer extending canonical snapshot/runtime contracts over adding alternate reconstruction paths
-4. Add tests or targeted verification when behavior changes
-5. Run `make sync-docs` after doc updates
+Contracts are the source of truth when code and explanatory docs disagree.
 
-## License
+## Project Status
 
-MIT. See [`LICENSE`](LICENSE).
+Quant-Trad is in active development.
+
+The runtime, execution semantics, reporting datasets, BotLens inspection,
+provider behavior, and operator workflows are still evolving. MCP v0 covers
+bounded agent access to run, experiment, provider, report, and comparison
+workflows.
+
+The system is intended for research, backtesting, paper trading, and controlled
+environments unless you have independently reviewed the execution path, provider
+configuration, and risk controls for your use case.
+
+Do not treat this as production trading infrastructure without your own
+validation.

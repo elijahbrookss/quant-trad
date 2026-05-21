@@ -5,7 +5,7 @@ This file is the **entry point for all agents and contributors**.
 It defines the expectations, principles, and engineering discipline required
 to work safely inside the Quant-Trad codebase.
 
-If behavior conflicts with this document or the docs under `docs/agents/`,
+If behavior conflicts with this document or the docs under `docs/contracts/`,
 the code is wrong.
 
 ---
@@ -15,6 +15,10 @@ the code is wrong.
 - QuantLab = research only
 - Strategy = decision logic only
 - Bot = execution + realism only
+- UI = human visualization and inspection only
+- `qt` CLI = agent/tool workflow and operation entrypoint
+- `qt mcp serve` = MCP adapter over `qt`/backend contracts, not new truth
+- Make = local stack, DB, tests, and forensic helpers
 - All bot runs are walk-forward
 - Derived artifacts must respect known-at timing
 - Playback is a debugger, not a demo
@@ -32,10 +36,10 @@ the code is wrong.
 
 Agents MUST understand these documents before making architectural or behavioral changes:
 
-- `docs/agents/00_system_contract.md`
-- `docs/agents/01_runtime_contract.md`
-- `docs/agents/02_execution_playback_contract.md`
-- `docs/agents/03_engineering_contract.md`
+- `docs/contracts/platform/00_system_contract.md`
+- `docs/contracts/platform/01_runtime_contract.md`
+- `docs/contracts/platform/02_execution_playback_contract.md`
+- `docs/contracts/platform/03_engineering_contract.md`
 
 These define the system contract.
 
@@ -184,13 +188,38 @@ Performance, polish, and optimization come second.
   - or `OBSIDIAN_SYNC_DOCS_DEST`
   - optional local override file: `.sync-docs.mk`
 
+## Developer/Audit Workflow
+
+- Use `qt` as the primary command surface for agent/tool workflows and
+  operations: bot runs, experiments, provider checks, report summaries, report
+  exports, and comparisons.
+- Use the UI for human visualization and inspection. Do not use frontend state
+  as workflow truth.
+- Use `make help` as the repo-native support index for Docker, DB, validation,
+  git, local stack control, and direct forensic helpers.
+- Use `docs/engineering/developer-audit-workflow.md` for the standard Codex
+  and local audit workflow before inventing new one-off commands.
+- Keep local support and forensic helpers in existing locations such as the root
+  `Makefile`, `scripts/reporting/`, and `docs/engineering/`; do not add new
+  root-level workflow files or folders. Normal bot/run/report workflows belong
+  in `qt`, not Make.
+
+## Commit Hygiene
+
+- Commit coherent slices as they become reviewable instead of saving every
+  change for branch closeout.
+- Prefer small one-line messages in the existing `<area>: <core change>` style.
+- Use `make commit msg="area: core change"` when the whole staged scope belongs
+  together; otherwise stage explicit paths and run `git commit -m` directly.
+- Never stage unrelated local changes just to make the tree clean.
+
 ## Architecture Docs Tagging + Index Workflow
 
 When a change materially affects runtime/service/provider/storage/reporting architecture, docs updates are required in the same pass.
 
 Required workflow:
 1. Locate existing component docs via `docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md` before changing architecture.
-2. Update/create relevant component docs under `docs/architecture/`.
+2. Update/create relevant component docs under `docs/architecture/<subsystem>/`.
 3. Ensure each affected architecture doc has frontmatter metadata with at least:
    - `component`
    - `subsystem`

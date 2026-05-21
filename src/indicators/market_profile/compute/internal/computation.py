@@ -5,9 +5,9 @@ Pure functions with no dependencies on indicator class or UI concerns.
 """
 
 import logging
-import math
 from typing import Dict, Optional
 
+import numpy as np
 import pandas as pd
 
 from ..models import ValueArea
@@ -31,32 +31,48 @@ def build_tpo_histogram(
     Returns:
         Dictionary mapping price bucket -> count of TPO occurrences
     """
-    tpo_counts = {}
+    tpo_counts: Dict[float, int] = {}
     logger.debug("Building TPO histogram for session with %d bars", len(data))
+    if data is None or data.empty or bin_size <= 0:
+        logger.debug("Built TPO histogram with %d buckets", len(tpo_counts))
+        return tpo_counts
 
-    for _, row in data.iterrows():
-        low, high = float(row["low"]), float(row["high"])
+    lows = data["low"].to_numpy(dtype=float, copy=False)
+    highs = data["high"].to_numpy(dtype=float, copy=False)
+    finite_mask = np.isfinite(lows) & np.isfinite(highs)
+    if not finite_mask.any():
+        logger.debug("Built TPO histogram with %d buckets", len(tpo_counts))
+        return tpo_counts
 
-        if not math.isfinite(low) or not math.isfinite(high):
-            continue
-        if high < low:
-            low, high = high, low
+    lows = lows[finite_mask]
+    highs = highs[finite_mask]
+    lows, highs = np.minimum(lows, highs), np.maximum(lows, highs)
 
-        if bin_size <= 0:
-            continue
+    spans = np.maximum(highs - lows, 0.0)
+    steps = np.floor(spans / bin_size + 1e-9).astype(np.int64)
+    run_lengths = steps + 1
+    total_bins = int(run_lengths.sum())
+    if total_bins <= 0:
+        logger.debug("Built TPO histogram with %d buckets", len(tpo_counts))
+        return tpo_counts
 
-        tolerance = abs(bin_size) * 1e-9
-        span = max(high - low, 0.0)
-        steps = int(math.floor(span / bin_size + 1e-9))
+    start_scaled = np.rint(lows / bin_size).astype(np.int64)
+    all_scaled = np.empty(total_bins, dtype=np.int64)
+    cursor = 0
+    for scaled_start, length in zip(start_scaled.tolist(), run_lengths.tolist()):
+        next_cursor = cursor + length
+        all_scaled[cursor:next_cursor] = np.arange(
+            scaled_start,
+            scaled_start + length,
+            dtype=np.int64,
+        )
+        cursor = next_cursor
 
-        for idx in range(steps + 1):
-            price = low + idx * bin_size
-            if price > high + tolerance:
-                break
-
-            scaled = round(price / bin_size)
-            bucket = round(scaled * bin_size, bin_precision)
-            tpo_counts[bucket] = tpo_counts.get(bucket, 0) + 1
+    unique_scaled, counts = np.unique(all_scaled, return_counts=True)
+    tpo_counts = {
+        round(float(scaled * bin_size), bin_precision): int(count)
+        for scaled, count in zip(unique_scaled.tolist(), counts.tolist())
+    }
 
     logger.debug("Built TPO histogram with %d buckets", len(tpo_counts))
     return tpo_counts

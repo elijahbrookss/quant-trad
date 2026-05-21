@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from data_providers.providers.factory import get_provider
+from engines.bot_runtime.core.execution_profile import compile_runtime_profile_or_error
 
 from ..providers import persistence_bootstrap  # noqa: F401
 
@@ -20,6 +21,8 @@ from ..storage.storage import (
 
 
 logger = logging.getLogger(__name__)
+
+_RUNTIME_ALLOWED_DERIVATIVE_TYPES = {"future", "futures", "perp", "perps"}
 
 
 
@@ -533,3 +536,43 @@ def resolve_or_create_instrument(
     if not record:
         return None, "Instrument validation returned no record."
     return record, None
+
+
+def instrument_runtime_status(record: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Return research/runtime readiness derived from canonical instrument metadata."""
+
+    if not isinstance(record, Mapping) or not record:
+        return {
+            "research_ready": False,
+            "runtime_ready": False,
+            "runtime_message": "Instrument metadata is unavailable.",
+            "runtime_policy": "derivatives_v1",
+        }
+
+    try:
+        compile_runtime_profile_or_error(
+            record,
+            allowed_derivative_types=_RUNTIME_ALLOWED_DERIVATIVE_TYPES,
+        )
+    except ValueError as exc:
+        return {
+            "research_ready": True,
+            "runtime_ready": False,
+            "runtime_message": str(exc),
+            "runtime_policy": "derivatives_v1",
+        }
+
+    return {
+        "research_ready": True,
+        "runtime_ready": True,
+        "runtime_message": None,
+        "runtime_policy": "derivatives_v1",
+    }
+
+
+def instrument_api_payload(record: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return an API-safe instrument payload annotated with research/runtime status."""
+
+    payload = dict(record)
+    payload.update(instrument_runtime_status(record))
+    return payload

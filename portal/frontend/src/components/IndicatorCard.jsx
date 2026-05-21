@@ -13,6 +13,7 @@ import {
   Loader2,
 } from "lucide-react";
 import VisibilityToggle from "./ui/VisibilityToggle";
+import { buildSignalOutputEnabledMap } from "../utils/indicatorOutputs.js";
 
 // Keys to hide from param display
 const HIDE_KEYS = new Set([
@@ -72,6 +73,15 @@ const formatParamKey = (key) => {
     .join(" ");
 };
 
+const enabledSignalOutputs = (indicator) => (
+  Array.isArray(indicator?.typed_outputs)
+    ? indicator.typed_outputs.filter((entry) => {
+        if (entry?.type !== "signal" || !entry?.name) return false;
+        return buildSignalOutputEnabledMap(indicator)[String(entry.name).trim()] !== false;
+      })
+    : []
+);
+
 export default function IndicatorCard({
   indicator,
   color = "#60a5fa",
@@ -85,7 +95,9 @@ export default function IndicatorCard({
   onDuplicate,
   onGenerateSignals,
   onSelectColor,
+  onSelectPalette,
   onRecompute,
+  showSignalAction = true,
   isGeneratingSignals = false,
   disableSignalAction = false,
   selected = false,
@@ -93,6 +105,10 @@ export default function IndicatorCard({
   duplicatePending = false,
   busy = false,
   activeJobId = null,
+  isVisible = undefined,
+  showColorControl = true,
+  showPaletteControl = false,
+  paletteOptions = [],
   onRetryCreate,
   onRemoveLocal,
 }) {
@@ -136,7 +152,11 @@ export default function IndicatorCard({
   const displayName = indicator?.name?.trim() || typeLabel || "Indicator";
   const lastUpdated = indicator?.updated_at || indicator?.created_at || null;
   const relativeTime = formatRelativeTime(lastUpdated);
-  const isVisible = !!indicator?.enabled;
+  const signalOutputs = useMemo(() => enabledSignalOutputs(indicator), [indicator]);
+  const signalSummary = useMemo(() => signalOutputs.slice(0, 2), [signalOutputs]);
+  const signalOverflow = Math.max(signalOutputs.length - signalSummary.length, 0);
+
+  const visibleOnChart = typeof isVisible === "boolean" ? isVisible : indicator?.enabled !== false;
 
   // Determine status - only show transient states
   const statusKey = useMemo(() => {
@@ -178,12 +198,12 @@ export default function IndicatorCard({
   };
 
   // Hidden state styling - subtle desaturation
-  const hiddenStyles = !isVisible ? "opacity-60 saturate-[0.85]" : "";
+  const hiddenStyles = !visibleOnChart ? "opacity-60 saturate-[0.85]" : "";
 
   return (
     <div
       className={`
-        group relative overflow-visible rounded-lg border transition-all
+        group relative overflow-visible rounded-[6px] border transition-all
         ${selected ? "border-[color:var(--accent-alpha-60)] shadow-[0_8px_30px_-20px_rgba(0,0,0,0.9)]" : "border-white/8"}
         bg-[#0d1422]/90 hover:bg-[#0f1626] px-3 py-2.5
         ${hiddenStyles}
@@ -191,7 +211,7 @@ export default function IndicatorCard({
     >
       {/* Left color accent bar */}
       <div
-        className="absolute left-0 top-0 h-full w-1 rounded-l-lg"
+        className="absolute left-0 top-0 h-full w-1 rounded-l-[6px]"
         style={{ backgroundColor: color }}
         aria-hidden="true"
       />
@@ -222,7 +242,7 @@ export default function IndicatorCard({
             <button
               type="button"
               onClick={() => setExpanded((prev) => !prev)}
-              className="flex items-center gap-1 text-left text-sm font-semibold text-white hover:text-[color:var(--accent-text-soft)] transition"
+              className="flex items-center gap-1 text-left text-[12px] font-semibold text-white transition hover:text-[color:var(--accent-text-soft)]"
             >
               <span className="truncate max-w-[180px]" title={displayName}>
                 {displayName}
@@ -231,14 +251,14 @@ export default function IndicatorCard({
             </button>
 
             {/* Type badge */}
-            <span className="rounded bg-white/5 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-slate-400">
+            <span className="rounded-[6px] border border-white/10 bg-white/6 px-2.5 py-1 text-[10px] uppercase tracking-[0.12em] text-slate-300">
               {typeLabel}
             </span>
 
             {/* Transient status badge - only shown during operations */}
             {statusMeta && (
               <span
-                className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${statusMeta.tone}`}
+                className={`inline-flex items-center gap-1.5 rounded-[7px] border px-2 py-0.5 text-[9px] font-semibold ${statusMeta.tone}`}
               >
                 <Loader2 className="size-3 animate-spin" />
                 {statusMeta.label}
@@ -251,97 +271,203 @@ export default function IndicatorCard({
                 {summaryParams.map((item) => (
                   <span
                     key={item.key}
-                    className="inline-flex items-center gap-1 rounded border border-white/8 bg-white/5 px-1.5 py-0.5 text-[10px] text-slate-300"
+                    className="inline-flex items-center gap-1.5 rounded-[6px] border border-white/12 bg-white/7 px-2.5 py-1 text-[10px] text-slate-200"
                   >
-                    <span className="text-slate-500">{formatParamKey(item.key)}</span>
-                    <span className="text-slate-200">{formatValue(item.value)}</span>
+                    <span className="text-slate-400">{formatParamKey(item.key)}</span>
+                    <span className="text-slate-100">{formatValue(item.value)}</span>
                   </span>
                 ))}
               </div>
             )}
           </div>
 
+          {!expanded && signalSummary.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+              {signalSummary.map((entry) => (
+                <span
+                  key={entry.name}
+                  className="inline-flex items-center rounded-[6px] border border-emerald-400/20 bg-emerald-500/8 px-2 py-0.5 text-[9px] uppercase tracking-[0.12em] text-emerald-200"
+                >
+                  {entry.label || entry.name}
+                </span>
+              ))}
+              {signalOverflow > 0 && (
+                <span className="text-[9px] text-slate-500">+{signalOverflow} more</span>
+              )}
+            </div>
+          )}
+
           {/* Relative time */}
           {relativeTime && !expanded && (
-            <p className="mt-0.5 text-[10px] text-slate-500">Updated {relativeTime}</p>
+            <p className="mt-0.5 text-[9px] text-slate-500">Updated {relativeTime}</p>
           )}
         </div>
 
         {/* Actions section */}
         <div className="flex items-center gap-2 shrink-0">
           {/* Generate Signals button */}
+          {showSignalAction && (
+            <button
+              type="button"
+              onClick={() => onGenerateSignals?.(indicator.id)}
+              className={`
+                inline-flex items-center gap-1.5 rounded-[7px] px-3 py-1.5 text-[11px] font-semibold transition
+                ${
+                  disableSignalAction || isGeneratingSignals
+                    ? "cursor-not-allowed border border-white/10 text-slate-500"
+                    : "border border-emerald-400/30 text-emerald-200 hover:border-emerald-300/50 hover:bg-emerald-500/10"
+                }
+              `}
+              title={isGeneratingSignals ? "Generating signals..." : "Generate signals"}
+              disabled={disableSignalAction || isGeneratingSignals}
+              aria-busy={isGeneratingSignals}
+            >
+              {isGeneratingSignals ? (
+                <>
+                  <Loader2 className="size-3 animate-spin" />
+                  <span>Working</span>
+                </>
+              ) : (
+                <span>Generate</span>
+              )}
+            </button>
+          )}
+
           <button
             type="button"
-            onClick={() => onGenerateSignals?.(indicator.id)}
-            className={`
-              inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition
-              ${
-                disableSignalAction || isGeneratingSignals
-                  ? "cursor-not-allowed border border-white/10 text-slate-500"
-                  : "border border-emerald-400/30 text-emerald-200 hover:border-emerald-300/50 hover:bg-emerald-500/10"
-              }
-            `}
-            title={isGeneratingSignals ? "Generating signals..." : "Generate signals"}
-            disabled={disableSignalAction || isGeneratingSignals}
-            aria-busy={isGeneratingSignals}
+            onClick={() => onEdit?.(indicator)}
+            className="flex h-10 w-10 items-center justify-center rounded-[6px] border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
+            title="Edit indicator"
+            disabled={disableActions}
           >
-            {isGeneratingSignals ? (
-              <>
-                <Loader2 className="size-3 animate-spin" />
-                <span>Working</span>
-              </>
-            ) : (
-              <span>Generate</span>
-            )}
+            <Pencil className="size-[1.05rem]" />
           </button>
 
           {/* Color picker popover */}
-          <Popover className="relative">
-            {({ close }) => (
-              <>
-                <PopoverButton
-                  className="flex h-8 w-8 items-center justify-center rounded-md border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
-                  title="Change color"
-                >
-                  <Palette className="size-3.5" />
-                </PopoverButton>
-                <Transition
-                  as={Fragment}
-                  enter="transition ease-out duration-100"
-                  enterFrom="opacity-0 translate-y-1"
-                  enterTo="opacity-100 translate-y-0"
-                  leave="transition ease-in duration-75"
-                  leaveFrom="opacity-100 translate-y-0"
-                  leaveTo="opacity-0 translate-y-1"
-                >
-                  <PopoverPanel className="absolute right-0 top-full z-40 mt-2 w-48 rounded-xl border border-white/12 bg-[#131a2b] p-3 shadow-2xl">
-                    <div className="grid grid-cols-6 gap-1.5">
-                      {colorSwatches.map((c) => (
-                        <button
-                          key={c}
-                          className="h-5 w-5 rounded-sm border border-white/15 transition hover:border-[color:var(--accent-alpha-60)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-ring)]"
-                          style={{ backgroundColor: c }}
-                          onClick={() => {
-                            onSelectColor?.(indicator.id, c);
-                            close();
-                          }}
-                          aria-label={`Set color ${c}`}
-                          disabled={disableActions}
-                        />
-                      ))}
-                    </div>
-                  </PopoverPanel>
-                </Transition>
-              </>
-            )}
-          </Popover>
+          {showColorControl && (
+            <Popover className="relative">
+              {({ close }) => (
+                <>
+                  <PopoverButton
+                    className="flex h-10 w-10 items-center justify-center rounded-[6px] border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
+                    title="Change colors"
+                  >
+                    <Palette className="size-[1.15rem]" />
+                  </PopoverButton>
+                  <Transition
+                    as={Fragment}
+                    enter="transition ease-out duration-100"
+                    enterFrom="opacity-0 translate-y-1"
+                    enterTo="opacity-100 translate-y-0"
+                    leave="transition ease-in duration-75"
+                    leaveFrom="opacity-100 translate-y-0"
+                    leaveTo="opacity-0 translate-y-1"
+                  >
+                    <PopoverPanel className="absolute right-0 top-full z-40 mt-2 w-48 rounded-[6px] border border-white/12 bg-[#131a2b] p-3 shadow-2xl">
+                      <div className="mb-2">
+                        <p className="text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-200">Colors</p>
+                      </div>
+                      <div className="grid grid-cols-6 gap-1.5">
+                        {colorSwatches.map((c) => (
+                          <button
+                            key={c}
+                            className="h-5 w-5 rounded-sm border border-white/15 transition hover:border-[color:var(--accent-alpha-60)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-ring)]"
+                            style={{ backgroundColor: c }}
+                            onClick={() => {
+                              onSelectColor?.(indicator.id, c);
+                              close();
+                            }}
+                            aria-label={`Set color ${c}`}
+                            disabled={disableActions}
+                          />
+                        ))}
+                      </div>
+                    </PopoverPanel>
+                  </Transition>
+                </>
+              )}
+            </Popover>
+          )}
+
+          {showPaletteControl && Array.isArray(paletteOptions) && paletteOptions.length > 0 && (
+            <Popover className="relative">
+              {({ close }) => (
+                <>
+                  <PopoverButton
+                    className="flex h-10 w-10 items-center justify-center rounded-[6px] border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
+                    title="Change colors"
+                  >
+                    <Palette className="size-[1.15rem]" />
+                  </PopoverButton>
+                  <Transition
+                    as={Fragment}
+                    enter="transition ease-out duration-100"
+                    enterFrom="opacity-0 translate-y-1"
+                    enterTo="opacity-100 translate-y-0"
+                    leave="transition ease-in duration-75"
+                    leaveFrom="opacity-100 translate-y-0"
+                    leaveTo="opacity-0 translate-y-1"
+                  >
+                    <PopoverPanel className="absolute right-0 top-full z-40 mt-2 w-64 rounded-[6px] border border-white/12 bg-[#131a2b] p-2 shadow-2xl">
+                      <div className="px-2 pb-2 pt-1">
+                        <p className="text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-200">Colors</p>
+                      </div>
+                      <div className="space-y-1">
+                        {paletteOptions.map((palette) => {
+                          const swatches = Object.values(palette?.overlay_colors || {}).slice(0, 3)
+                          const selectedPalette = (indicator?.color_palette || paletteOptions?.[0]?.key || '') === palette?.key
+                          return (
+                            <button
+                              key={palette?.key}
+                              type="button"
+                              className={`flex w-full items-center justify-between gap-3 rounded-[7px] border px-3 py-2 text-left transition ${
+                                selectedPalette
+                                  ? 'border-[color:var(--accent-alpha-50)] bg-[color:var(--accent-alpha-10)]'
+                                  : 'border-white/8 bg-white/5 hover:border-[color:var(--accent-alpha-30)]'
+                              }`}
+                              onClick={() => {
+                                onSelectPalette?.(indicator.id, palette?.key);
+                                close();
+                              }}
+                              disabled={disableActions}
+                            >
+                              <div className="min-w-0">
+                                <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-100">
+                                  {palette?.label || palette?.key || 'Colors'}
+                                </div>
+                                {palette?.description ? (
+                                  <div className="mt-0.5 text-[10px] text-slate-400">
+                                    {palette.description}
+                                  </div>
+                                ) : null}
+                              </div>
+                              <div className="flex shrink-0 items-center gap-1">
+                                {swatches.map((swatch, index) => (
+                                  <span
+                                    key={`${palette?.key || 'palette'}-${index}`}
+                                    className="h-4 w-4 rounded-sm border border-white/10"
+                                    style={{ backgroundColor: swatch }}
+                                    aria-hidden="true"
+                                  />
+                                ))}
+                              </div>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </PopoverPanel>
+                  </Transition>
+                </>
+              )}
+            </Popover>
+          )}
 
           {/* Visibility toggle - allowed during compute per requirements */}
           <VisibilityToggle
-            visible={isVisible}
+            visible={visibleOnChart}
             onChange={() => onToggle?.(indicator.id)}
             disabled={busy && statusKey !== "computing" && statusKey !== "updating"}
-            size="sm"
+            size="xl"
           />
 
           {/* Context menu */}
@@ -349,26 +475,26 @@ export default function IndicatorCard({
             {({ close }) => (
               <>
                 <PopoverButton
-                  className="flex h-8 w-8 items-center justify-center rounded-md border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
+                  className="flex h-10 w-10 items-center justify-center rounded-[6px] border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
                   title="More actions"
                 >
-                  <MoreHorizontal className="size-4" />
+                  <MoreHorizontal className="size-[1.15rem]" />
                 </PopoverButton>
                 <Transition
                   as={Fragment}
                   enter="transition ease-out duration-100"
-                  enterFrom="opacity-0 translate-y-1"
-                  enterTo="opacity-100 translate-y-0"
+                  enterFrom="opacity-0 translate-y-1 scale-[0.98]"
+                  enterTo="opacity-100 translate-y-0 scale-100"
                   leave="transition ease-in duration-75"
-                  leaveFrom="opacity-100 translate-y-0"
-                  leaveTo="opacity-0 translate-y-1"
+                  leaveFrom="opacity-100 translate-y-0 scale-100"
+                  leaveTo="opacity-0 translate-y-1 scale-[0.98]"
                 >
-                  <PopoverPanel className="absolute right-0 top-full z-40 mt-2 w-56 rounded-xl border border-white/12 bg-[#131a2b] p-2 shadow-2xl">
-                    {/* Runtime / Trading section */}
-                    <div className="mb-2">
-                      <p className="px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.3em] text-slate-500">
-                        Runtime
-                      </p>
+                  <PopoverPanel
+                    anchor={{ to: "bottom end", gap: 10, padding: 12 }}
+                    portal
+                    className="z-50 w-44 rounded-[6px] border border-white/12 bg-[#131a2b] p-1.5 shadow-2xl"
+                  >
+                    <div className="space-y-0.5">
                       <button
                         onClick={() => {
                           onRecompute?.(indicator.id);
@@ -376,7 +502,7 @@ export default function IndicatorCard({
                         }}
                         disabled={disableActions || typeof onRecompute !== "function"}
                         className={`
-                          w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm transition
+                          flex w-full items-center gap-2 rounded-[6px] px-2.5 py-2 text-left text-[11px] transition
                           ${
                             disableActions || typeof onRecompute !== "function"
                               ? "cursor-not-allowed text-slate-500"
@@ -385,26 +511,7 @@ export default function IndicatorCard({
                         `}
                       >
                         <RefreshCw className="size-4" />
-                        Recompute Overlays
-                      </button>
-                    </div>
-
-                    <div className="h-px bg-white/8 my-1" />
-
-                    {/* Configuration section */}
-                    <div className="my-2">
-                      <p className="px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.3em] text-slate-500">
-                        Configuration
-                      </p>
-                      <button
-                        onClick={() => {
-                          onEdit?.(indicator);
-                          close();
-                        }}
-                        className="w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/5"
-                      >
-                        <Pencil className="size-4" />
-                        Edit Parameters
+                        Recompute
                       </button>
                       <button
                         onClick={() => {
@@ -415,7 +522,7 @@ export default function IndicatorCard({
                         }}
                         disabled={duplicateDisabled}
                         className={`
-                          w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm transition
+                          flex w-full items-center gap-2 rounded-[6px] px-2.5 py-2 text-left text-[11px] transition
                           ${
                             duplicateDisabled
                               ? "cursor-not-allowed text-slate-500"
@@ -431,20 +538,16 @@ export default function IndicatorCard({
                           await copyParams();
                           close();
                         }}
-                        className="w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/5"
+                        className="flex w-full items-center gap-2 rounded-[6px] px-2.5 py-2 text-left text-[11px] text-slate-200 transition hover:bg-white/5"
                       >
                         <Copy className="size-4" />
-                        Copy Params JSON
+                        Copy
                       </button>
                     </div>
 
-                    <div className="h-px bg-white/8 my-1" />
+                    <div className="my-1.5 h-px bg-white/8" />
 
-                    {/* Danger section */}
-                    <div className="mt-2">
-                      <p className="px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.3em] text-slate-500">
-                        Danger
-                      </p>
+                    <div>
                       <button
                         onClick={() => {
                           if (!disableActions) {
@@ -454,7 +557,7 @@ export default function IndicatorCard({
                         }}
                         disabled={disableActions}
                         className={`
-                          w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm transition
+                          flex w-full items-center gap-2 rounded-[6px] px-2.5 py-2 text-left text-[11px] transition
                           ${
                             disableActions
                               ? "cursor-not-allowed text-slate-500"
@@ -463,7 +566,7 @@ export default function IndicatorCard({
                         `}
                       >
                         <Trash2 className="size-4" />
-                        Delete Indicator
+                        Delete
                       </button>
                     </div>
                   </PopoverPanel>
@@ -476,14 +579,14 @@ export default function IndicatorCard({
 
       {/* Failed state banner */}
       {statusKey === "failed" && (
-        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-rose-500/30 bg-rose-500/8 px-3 py-2 text-xs text-rose-100">
+        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-3 rounded-[6px] border border-rose-500/30 bg-rose-500/8 px-3 py-2 text-[11px] text-rose-100">
           <span>Indicator job failed. Keep for review or retry.</span>
           <div className="flex items-center gap-2">
             {canRetry && (
               <button
                 type="button"
                 onClick={() => onRetryCreate?.(indicator)}
-                className="rounded border border-amber-400/50 px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] text-amber-100 hover:bg-amber-500/10"
+                className="rounded-[7px] border border-amber-400/50 px-2.5 py-1 text-[9px] uppercase tracking-[0.16em] text-amber-100 hover:bg-amber-500/10"
               >
                 Retry
               </button>
@@ -492,7 +595,7 @@ export default function IndicatorCard({
               <button
                 type="button"
                 onClick={() => onRemoveLocal?.(indicator.id)}
-                className="rounded border border-white/20 px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] text-slate-100 hover:border-white/40"
+                className="rounded-[7px] border border-white/20 px-2.5 py-1 text-[9px] uppercase tracking-[0.16em] text-slate-100 hover:border-white/40"
               >
                 Remove
               </button>
@@ -503,12 +606,12 @@ export default function IndicatorCard({
 
       {/* Expanded params view */}
       {expanded && (
-        <div className="mt-3 rounded-lg border border-white/8 bg-[#0a0f1a]/60 p-3 text-xs">
+        <div className="mt-3 rounded-[6px] border border-white/8 bg-[#0a0f1a]/60 p-3 text-[11px]">
           <div className="grid gap-2 sm:grid-cols-2">
             {paramsList.map(({ key, value }) => (
               <div
                 key={key}
-                className="flex items-start gap-2 rounded border border-white/5 bg-white/5 px-2 py-1.5"
+                className="flex items-start gap-2 rounded-[7px] border border-white/5 bg-white/5 px-2 py-1.5"
               >
                 <span className="text-[10px] font-mono uppercase tracking-wide text-slate-500">{key}</span>
                 <span className="text-slate-200">{formatValue(value)}</span>
@@ -521,7 +624,7 @@ export default function IndicatorCard({
               <button
                 type="button"
                 onClick={copyId}
-                className="rounded border border-white/10 px-2 py-0.5 text-[9px] uppercase tracking-[0.18em] text-slate-300 transition hover:border-[color:var(--accent-alpha-40)]"
+                className="rounded-[7px] border border-white/10 px-2 py-0.5 text-[8px] uppercase tracking-[0.14em] text-slate-300 transition hover:border-[color:var(--accent-alpha-40)]"
               >
                 Copy
               </button>

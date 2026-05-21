@@ -6,11 +6,18 @@ import logging
 import queue
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from utils.log_context import with_log_context
 
 logger = logging.getLogger(__name__)
+
+
+def _missing_batch_writer(name: str):
+    def _raise(payloads: list[dict[str, Any]]) -> int:
+        raise RuntimeError(f"bot runtime persistence dependency is not configured: {name}")
+
+    return _raise
 
 
 class StepTracePersistenceBuffer:
@@ -20,13 +27,15 @@ class StepTracePersistenceBuffer:
         self,
         *,
         queue_max: int = 8192,
-        batch_size: int = 200,
-        flush_interval_s: float = 0.2,
+        batch_size: int = 512,
+        flush_interval_s: float = 0.5,
         overflow_policy: str = "drop_oldest",
+        record_batch: Optional[Callable[[list[dict[str, Any]]], int]] = None,
     ) -> None:
         self._queue_max = max(int(queue_max), 32)
         self._batch_size = max(int(batch_size), 1)
         self._flush_interval_s = max(float(flush_interval_s), 0.01)
+        self._record_batch = record_batch or _missing_batch_writer("record_bot_run_steps_batch")
         policy = str(overflow_policy or "drop_oldest").strip().lower()
         self._overflow_policy = policy if policy in {"drop_oldest", "drop_newest"} else "drop_oldest"
         self._queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=self._queue_max)
@@ -41,7 +50,12 @@ class StepTracePersistenceBuffer:
         self._persist_error_count = 0
 
     @classmethod
-    def from_config(cls, config: Dict[str, object]) -> "StepTracePersistenceBuffer":
+    def from_config(
+        cls,
+        config: Dict[str, object],
+        *,
+        record_batch: Optional[Callable[[list[dict[str, Any]]], int]] = None,
+    ) -> "StepTracePersistenceBuffer":
         def _int(value: object, default: int) -> int:
             try:
                 return int(value) if value is not None else int(default)
@@ -60,11 +74,11 @@ class StepTracePersistenceBuffer:
         )
         batch_size = _int(
             config.get("step_trace_batch_size") or config.get("BOT_RUNTIME_STEP_TRACE_BATCH_SIZE"),
-            200,
+            512,
         )
         flush_interval_ms = _float(
             config.get("step_trace_flush_interval_ms") or config.get("BOT_RUNTIME_STEP_TRACE_FLUSH_INTERVAL_MS"),
-            200.0,
+            500.0,
         )
         overflow_policy = str(
             config.get("step_trace_overflow_policy")
@@ -76,6 +90,7 @@ class StepTracePersistenceBuffer:
             batch_size=max(batch_size, 1),
             flush_interval_s=max(flush_interval_ms / 1000.0, 0.01),
             overflow_policy=overflow_policy,
+            record_batch=record_batch,
         )
 
     def _ensure_started(self) -> None:
@@ -172,9 +187,13 @@ class StepTracePersistenceBuffer:
                 continue
             batch.append(first)
             oldest_enqueued = float(first.get("enqueued_monotonic") or time.monotonic())
+            batch_deadline = time.monotonic() + self._flush_interval_s
             for _ in range(max(0, self._batch_size - 1)):
                 try:
-                    nxt = self._queue.get_nowait()
+                    remaining = max(batch_deadline - time.monotonic(), 0.0)
+                    if remaining <= 0.0:
+                        break
+                    nxt = self._queue.get(timeout=remaining)
                 except queue.Empty:
                     break
                 batch.append(nxt)
@@ -191,9 +210,7 @@ class StepTracePersistenceBuffer:
             persisted = 0
             if payloads:
                 try:
-                    from portal.backend.service.storage import storage
-
-                    persisted = int(storage.record_bot_run_steps_batch(payloads))
+                    persisted = int(self._record_batch(payloads))
                 except Exception as exc:  # noqa: BLE001
                     with self._metrics_lock:
                         self._persist_error_count += 1

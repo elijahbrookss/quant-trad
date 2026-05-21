@@ -5,17 +5,24 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import nullcontext
+from copy import deepcopy
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from engines.bot_runtime.core.domain import Candle, isoformat
-from engines.indicator_engine import SignalEvaluationInput, evaluate_rules_from_state_snapshots
-from engines.indicator_engine.overlay_runtime import project_and_normalize_entries
-from signals.runtime import emit_manifest_signals
+from engines.bot_runtime.core.domain import Candle, StrategySignal, isoformat
+from engines.bot_runtime.core.series_identity import canonical_series_key
+from engines.bot_runtime.live_market import LiveCandleStore, append_closed_live_candles_to_series
+from strategies.evaluator import (
+    MINIMAL_DECISION_ARTIFACT_FIELDS,
+    build_rejection_artifact,
+    classify_rejection_stage,
+    evaluate_strategy_bar,
+)
 from utils.log_context import with_log_context
 from utils.perf_log import perf_log, should_sample
 
 from ..components import SignalConsumption, consume_signals
+from ..components.overlay_delta import count_overlay_points
 from ..core import (
     INTRABAR_BASE_SECONDS,
     OVERLAY_SUMMARY_INTERVAL,
@@ -25,6 +32,36 @@ from ..core import (
 )
 
 logger = logging.getLogger(__name__)
+_OVERLAY_SUPPRESSION_LOG_EVERY = 25
+
+
+def _decision_order_pressure_context(summary: Mapping[str, Any] | None) -> Dict[str, Any]:
+    if not isinstance(summary, Mapping):
+        return {
+            "decision_order_wait_ms": 0.0,
+            "decision_order_wait_count": 0.0,
+            "decision_order_wait_poll_count": 0.0,
+            "decision_order_release_count": 0.0,
+            "decision_order_fail_count": 0.0,
+            "decision_order_blocking_participant_count": 0.0,
+            "decision_order_max_blocking_participant_count": 0.0,
+        }
+
+    def _float(key: str) -> float:
+        try:
+            return float(summary.get(key) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return {
+        "decision_order_wait_ms": _float("elapsed_wait_ms"),
+        "decision_order_wait_count": _float("wait_count"),
+        "decision_order_wait_poll_count": _float("wait_poll_count"),
+        "decision_order_release_count": _float("release_count"),
+        "decision_order_fail_count": _float("fail_count"),
+        "decision_order_blocking_participant_count": _float("blocking_participant_count"),
+        "decision_order_max_blocking_participant_count": _float("max_blocking_participant_count"),
+    }
 
 
 class RuntimeExecutionLoopMixin:
@@ -50,23 +87,46 @@ class RuntimeExecutionLoopMixin:
             self._chart_overlays = []
             self._overlay_summary_cache = {}
             self._last_stats = {}
+            self._aggregate_stats_cache = {}
+            self._aggregate_stats_cache_key = None
+            self._aggregate_trades_cache = []
+            self._aggregate_trades_cache_key = None
             self._next_bar_at = None
             self._logs.clear()
             self._warnings.clear()
             self._decision_events.clear()
             self._intrabar_manager.clear_cache()
             self._run_started_at = None
+            self._runtime_loop_started_at = None
+            self._runtime_loop_ended_at = None
+            self._runtime_loop_duration_seconds = None
+            self._runtime_flush_drain_duration_seconds = None
+            self._overlay_suppression_log_state = {}
+            self._start_context = None
             self._run_context = None
             self._runner = None
             self._push_series_cache = {}
-            self._push_logs_fingerprint = None
-            self._push_decisions_fingerprint = None
             self._log_revision = 0
             self._decision_revision = 0
-            self._push_logs_revision = -1
-            self._push_decisions_revision = -1
+            self._push_log_marker = None
+            self._push_decision_marker = None
             self._push_payload_size_probe_count = 0
-            self.state = {"status": "idle", "progress": 0.0, "paused": False}
+            self._warning_revision = 0
+            self._push_runtime_health_fingerprint = None
+            self._push_runtime_health_emitted_monotonic = 0.0
+            self._push_runtime_health_warning_revision = 0
+            self._push_runtime_health_status = None
+            self._report_artifact_bundle = None
+            self._live_duration_deadline_monotonic = None
+            self._live_duration_completed = False
+            self.state = {
+                "status": "idle",
+                "progress": 0.0,
+                "paused": False,
+                "mode": self.mode,
+                "playback_mode": self.playback_mode,
+                "execution_mode": self.execution_mode.value,
+            }
         self._stop.clear()
         self._pause_event.set()
         self._paused = False
@@ -78,7 +138,7 @@ class RuntimeExecutionLoopMixin:
         """Return True when the runtime finished and can be rerun."""
 
         status = str(self.state.get("status") or "").lower()
-        finished = status in {"completed", "stopped", "error"}
+        finished = status in {"completed", "stopped", "error", "degraded"}
         exhausted = bool(self._series_states) and all(
             state.done or state.bar_index >= state.total_bars for state in self._series_states
         )
@@ -122,11 +182,32 @@ class RuntimeExecutionLoopMixin:
         self._pause_event.set()
         self._paused = False
         self._run_started_at = datetime.now(timezone.utc)
+        self._live_duration_completed = False
+        self._live_duration_deadline_monotonic = (
+            time.monotonic() + float(self._live_duration_seconds)
+            if self._live_mode and float(self._live_duration_seconds or 0.0) > 0.0
+            else None
+        )
         self._run_context = self._build_run_context()
+        self._report_artifact_bundle = self._deps.build_run_artifact_bundle(
+            self.bot_id,
+            self._run_context.run_id,
+            self.config,
+            list(self._series),
+        )
+        if self._report_artifact_bundle is not None:
+            self._report_artifact_bundle.start(started_at=self._run_context.started_at)
         wallet_config = self.config.get("wallet_config") if isinstance(self.config.get("wallet_config"), Mapping) else {}
         balances = wallet_config.get("balances") if isinstance(wallet_config, Mapping) else {}
-        if isinstance(balances, Mapping):
+        if isinstance(balances, Mapping) and not self._wallet_initialization_is_container_owned():
             self._emit_wallet_initialized_event(balances)
+        elif self._wallet_initialization_is_container_owned():
+            logger.info(
+                with_log_context(
+                    "bot_runtime_wallet_initialized_worker_attach",
+                    self._runtime_log_context(owner="container"),
+                )
+            )
         logger.info(with_log_context("bot_runtime_run_context_ready", self._runtime_log_context()))
         with self._lock:
             self.state.update(
@@ -144,7 +225,14 @@ class RuntimeExecutionLoopMixin:
                 ),
             )
         )
-        self._log_event("start", message="Bot runtime started", mode=self.mode, run_type=self.run_type)
+        self._log_event(
+            "start",
+            message="Bot runtime started",
+            mode=self.mode,
+            playback_mode=self.playback_mode,
+            execution_mode=self.execution_mode.value,
+            run_type=self.run_type,
+        )
         self._push_update("start")
         self._run()
 
@@ -161,15 +249,27 @@ class RuntimeExecutionLoopMixin:
             except Exception:
                 logger.exception(with_log_context("bot_runtime_runtime_error_emit_failed", context))
             self._set_error_state(str(exc))
-            self._push_update("error")
-            self._persist_runtime_state("error")
+            try:
+                self._push_update("error")
+            except Exception:
+                logger.exception(with_log_context("bot_runtime_error_push_failed", context))
+            try:
+                self._flush_canonical_fact_appender("runtime_loop_failed", shutdown=True)
+            except Exception:
+                logger.exception(with_log_context("bot_runtime_canonical_fact_failed_drain_failed", context))
             self._flush_persistence_buffer("runtime_loop_failed")
             self._flush_step_trace_buffer("runtime_loop_failed", shutdown=True)
+            self._persist_runtime_state("error")
+            self._persist_run_artifact("error")
 
     def _execute_loop(self) -> None:
         self._require_prepared("execute_loop")
         status = "running"
         loop_started = datetime.now(timezone.utc)
+        self._runtime_loop_started_at = loop_started
+        self._runtime_loop_ended_at = None
+        self._runtime_loop_duration_seconds = None
+        self._runtime_flush_drain_duration_seconds = None
         self._set_phase("running", "bot_runtime_running")
         self._log_event(
             "running",
@@ -183,13 +283,23 @@ class RuntimeExecutionLoopMixin:
             self._runner.run()
         finally:
             self._stop_overlay_aggregator()
+        loop_ended = datetime.now(timezone.utc)
+        self._runtime_loop_ended_at = loop_ended
+        self._runtime_loop_duration_seconds = max((loop_ended - loop_started).total_seconds(), 0.0)
         runtime_status = str(self.state.get("status") or "").lower()
         if runtime_status == "error":
             status = "error"
+        elif runtime_status == "degraded":
+            status = "degraded"
+        elif bool(getattr(self, "_live_duration_completed", False)):
+            status = "completed"
         elif self._stop.is_set():
             status = "stopped"
         elif not self._live_mode:
             status = "completed"
+        terminal_close_count = 0
+        if status == "completed" and not self._live_mode:
+            terminal_close_count = self._terminalize_backtest_open_trades()
         self._next_bar_at = None
         self._record_step_trace(
             "run_loop",
@@ -199,10 +309,11 @@ class RuntimeExecutionLoopMixin:
             context={
                 "status": status,
                 "series_count": len(self._series_states),
+                "terminal_closes": terminal_close_count,
             },
         )
         self._log_event(status, message=f"Bot runtime {status}")
-        if status in {"completed", "stopped"}:
+        if status in {"completed", "stopped", "degraded"}:
             duration_seconds = None
             if self._run_started_at is not None:
                 duration_seconds = (datetime.now(timezone.utc) - self._run_started_at).total_seconds()
@@ -216,23 +327,311 @@ class RuntimeExecutionLoopMixin:
                 fees=summary.get("fees_paid"),
                 drawdown=drawdown,
                 duration_seconds=duration_seconds,
+                runtime_loop_duration_seconds=self._runtime_loop_duration_seconds,
             )
             logger.info(with_log_context("bot_run_end_summary", context))
+        self._record_decision_order_wait_diagnostics(status=status)
         # Update state with last candle from first series (backward compatibility)
         if self._series and self._series[0].candles:
             self._update_state(self._series[0].candles[-1], status=status)
         else:
             with self._lock:
                 self.state.update({"status": status})
-        self._push_update(status)
-        self._persist_runtime_state(status)
-        if status in {"completed", "stopped"}:
-            self._persist_run_artifact(status)
+        drain_started = datetime.now(timezone.utc)
+        self._flush_canonical_fact_appender("runtime_loop_before_terminal_status")
         self._flush_persistence_buffer("runtime_loop_complete")
+        self._flush_overlay_suppression_logs()
+        self._push_update(status)
+        self._flush_canonical_fact_appender("runtime_loop_terminal_status", shutdown=True)
         self._flush_step_trace_buffer("runtime_loop_complete", shutdown=True)
+        self._runtime_flush_drain_duration_seconds = max((datetime.now(timezone.utc) - drain_started).total_seconds(), 0.0)
+        self._persist_runtime_state(status)
+        self._persist_run_artifact(status)
+
+    def _record_decision_order_wait_diagnostics(self, *, status: str) -> None:
+        if self._run_context is None:
+            return
+        try:
+            coordinator = self._decision_order_coordinator()
+            top_waits = list(coordinator.top_wait_diagnostics())
+        except Exception as exc:  # pragma: no cover - diagnostic-only defensive path.
+            logger.warning(
+                with_log_context(
+                    "bot_runtime_decision_order_wait_diagnostic_snapshot_failed",
+                    self._runtime_log_context(status=status, error=str(exc)),
+                )
+            )
+            return
+        if not top_waits:
+            return
+        recorder = getattr(self._deps, "record_bot_runtime_diagnostic_event", None)
+        if not callable(recorder):
+            return
+        payload = {
+            "observed_at": _isoformat(datetime.now(timezone.utc)),
+            "component": "bot_runtime",
+            "event_name": "decision_order_top_waits",
+            "level": "INFO",
+            "bot_id": self.bot_id,
+            "run_id": self._run_context.run_id,
+            "worker_id": getattr(self._start_context, "worker_id", None) if self._start_context is not None else None,
+            "pipeline_stage": "decision_ordering",
+            "message_kind": "diagnostic",
+            "status": status,
+            "message": "Worker terminal snapshot of shared-wallet coordinator waits captured.",
+            "details": {
+                "materiality": "diagnostic",
+                "diagnostic_scope": "coordinator_wait_attribution",
+                "aggregation_level": "worker_terminal_snapshot",
+                "source_reason": "worker_terminal_status",
+                "top_n": len(top_waits),
+                "waits": top_waits,
+            },
+        }
+        try:
+            recorder(payload)
+        except Exception as exc:  # pragma: no cover - diagnostics must not fail the run.
+            logger.warning(
+                with_log_context(
+                    "bot_runtime_decision_order_wait_diagnostic_persist_failed",
+                    self._runtime_log_context(status=status, error=str(exc)),
+                )
+            )
+        try:
+            merged = coordinator.claim_merged_wait_diagnostics()
+        except Exception as exc:  # pragma: no cover - diagnostic-only defensive path.
+            logger.warning(
+                with_log_context(
+                    "bot_runtime_decision_order_wait_merged_snapshot_failed",
+                    self._runtime_log_context(status=status, error=str(exc)),
+                )
+            )
+            return
+        if not merged:
+            return
+        merged_payload = {
+            "observed_at": _isoformat(datetime.now(timezone.utc)),
+            "component": "bot_runtime",
+            "event_name": "decision_order_top_waits_merged",
+            "level": "INFO",
+            "bot_id": self.bot_id,
+            "run_id": self._run_context.run_id,
+            "worker_id": getattr(self._start_context, "worker_id", None) if self._start_context is not None else None,
+            "pipeline_stage": "decision_ordering",
+            "message_kind": "diagnostic",
+            "status": status,
+            "message": "Run-level merged shared-wallet coordinator waits captured.",
+            "details": dict(merged),
+        }
+        try:
+            recorder(merged_payload)
+        except Exception as exc:  # pragma: no cover - diagnostics must not fail the run.
+            logger.warning(
+                with_log_context(
+                    "bot_runtime_decision_order_wait_merged_diagnostic_persist_failed",
+                    self._runtime_log_context(status=status, error=str(exc)),
+                )
+            )
+
+    def _terminalize_backtest_open_trades(self) -> int:
+        closed_count = 0
+        for state in self._series_states:
+            series = state.series
+            engine = getattr(series, "risk_engine", None)
+            active_trade = getattr(engine, "active_trade", None) if engine is not None else None
+            if active_trade is None:
+                continue
+            candles = list(getattr(series, "candles", []) or [])
+            if not candles:
+                raise RuntimeError(
+                    "backtest_terminal_close_missing_candle "
+                    f"strategy_id={getattr(series, 'strategy_id', None)} "
+                    f"symbol={getattr(series, 'symbol', None)} "
+                    f"timeframe={getattr(series, 'timeframe', None)}"
+                )
+            total_bars = int(getattr(state, "total_bars", len(candles)) or len(candles))
+            terminal_index = min(max(total_bars - 1, 0), len(candles) - 1)
+            terminal_candle = candles[terminal_index]
+            started_at = datetime.now(timezone.utc)
+            events: List[Dict[str, Any]] = []
+            try:
+                events = engine.force_close_active_trade_at_backtest_end(
+                    terminal_candle,
+                    reason_code="BACKTEST_END",
+                )
+                exit_settlement = getattr(engine, "exit_settlement", None)
+                self._settlement_applier.apply(
+                    events,
+                    exit_settlement,
+                    execution_profile=getattr(series, "execution_profile", None),
+                )
+                for event in events:
+                    trade_time = self._trade_entry_time(series, event.get("trade_id"))
+                    self._log_event(
+                        event.get("type", "event"),
+                        series,
+                        terminal_candle,
+                        trade_id=event.get("trade_id"),
+                        leg=event.get("leg"),
+                        price=event.get("price"),
+                        event_time=event.get("time"),
+                        bar_index=terminal_index,
+                        contracts=event.get("contracts"),
+                        pnl=event.get("pnl"),
+                        net_pnl=event.get("net_pnl"),
+                        gross_pnl=event.get("gross_pnl"),
+                        fees_paid=event.get("fees_paid"),
+                        currency=event.get("currency"),
+                        trade_time=trade_time,
+                    )
+                    raw_subtype = event.get("type")
+                    event_ts = event.get("time")
+                    if raw_subtype and event_ts:
+                        event_subtype = str(raw_subtype)
+                        if event_subtype in {"backtest_end", "terminal_liquidation"}:
+                            self._emit_exit_filled_event(
+                                series=series,
+                                candle=terminal_candle,
+                                event=event,
+                            )
+                        if event_subtype == "close":
+                            self._persist_trade_close(series, event)
+                self._update_trade_overlay(series)
+                if getattr(engine, "active_trade", None) is not None:
+                    raise RuntimeError(
+                        "backtest_terminal_close_incomplete "
+                        f"trade_id={getattr(getattr(engine, 'active_trade', None), 'trade_id', None)}"
+                    )
+                if events:
+                    closed_count += sum(1 for event in events if str(event.get("type") or "") == "close")
+                    self._push_update(
+                        "backtest_terminal_close",
+                        series=series,
+                        candle=terminal_candle,
+                        replace_last=False,
+                    )
+                self._record_step_trace(
+                    "backtest_terminal_close",
+                    started_at=started_at,
+                    ended_at=datetime.now(timezone.utc),
+                    ok=True,
+                    strategy_id=getattr(series, "strategy_id", None),
+                    symbol=getattr(series, "symbol", None),
+                    timeframe=getattr(series, "timeframe", None),
+                    context={
+                        "bar_index": terminal_index,
+                        "bar_time": _isoformat(terminal_candle.time),
+                        "events": len(events),
+                        "closed_trades": sum(1 for event in events if str(event.get("type") or "") == "close"),
+                    },
+                )
+            except Exception as exc:
+                self._record_step_trace(
+                    "backtest_terminal_close",
+                    started_at=started_at,
+                    ended_at=datetime.now(timezone.utc),
+                    ok=False,
+                    strategy_id=getattr(series, "strategy_id", None),
+                    symbol=getattr(series, "symbol", None),
+                    timeframe=getattr(series, "timeframe", None),
+                    error=str(exc),
+                    context={
+                        "bar_index": terminal_index,
+                        "bar_time": _isoformat(terminal_candle.time),
+                        "events": len(events),
+                    },
+                )
+                raise
+        return closed_count
+
+    def _log_overlay_suppressed_warning(
+        self,
+        *,
+        series: Any,
+        indicator_id: Any,
+        warning_type: Any,
+        warning_context: Mapping[str, Any],
+    ) -> None:
+        series_key = canonical_series_key(
+            str(series.instrument.get("id") if isinstance(series.instrument, Mapping) else ""),
+            series.timeframe,
+        )
+        reasons = tuple(sorted(str(value) for value in warning_context.get("hard_breach_reasons", []) if str(value)))
+        key = (series_key, str(indicator_id or ""), reasons)
+        now = _isoformat(datetime.now(timezone.utc))
+        state = self._overlay_suppression_log_state.get(key)
+        if state is None:
+            state = {
+                "count": 0,
+                "last_logged_count": 0,
+                "first_seen_at": now,
+                "last_seen_at": now,
+                "max_overlay_payload_bytes": 0,
+                "max_overlay_points": 0,
+            }
+            self._overlay_suppression_log_state[key] = state
+        state["count"] = int(state.get("count") or 0) + 1
+        state["last_seen_at"] = now
+        state["max_overlay_payload_bytes"] = max(
+            int(state.get("max_overlay_payload_bytes") or 0),
+            int(warning_context.get("overlay_payload_bytes") or 0),
+        )
+        state["max_overlay_points"] = max(
+            int(state.get("max_overlay_points") or 0),
+            int(warning_context.get("overlay_points") or 0),
+        )
+        count = int(state["count"])
+        if count != 1 and count % _OVERLAY_SUPPRESSION_LOG_EVERY != 0:
+            return
+        suppressed_during_window = count - int(state.get("last_logged_count") or 0)
+        state["last_logged_count"] = count
+        logger.warning(
+            with_log_context(
+                "indicator_overlay_suppressed",
+                self._series_log_context(
+                    series,
+                    indicator_id=indicator_id,
+                    warning_type=warning_type,
+                    overlay_points=warning_context.get("overlay_points"),
+                    overlay_payload_bytes=warning_context.get("overlay_payload_bytes"),
+                    hard_breach_reasons=list(reasons),
+                    count=count,
+                    suppressed_during_window=suppressed_during_window,
+                    first_seen_at=state.get("first_seen_at"),
+                    last_seen_at=state.get("last_seen_at"),
+                ),
+            )
+        )
+
+    def _flush_overlay_suppression_logs(self) -> None:
+        for (series_key, indicator_id, reasons), state in sorted(self._overlay_suppression_log_state.items()):
+            count = int(state.get("count") or 0)
+            last_logged = int(state.get("last_logged_count") or 0)
+            if count <= 0 or count == last_logged:
+                continue
+            logger.warning(
+                with_log_context(
+                    "indicator_overlay_suppressed_summary",
+                    self._runtime_log_context(
+                        series_key=series_key,
+                        indicator_id=indicator_id,
+                        hard_breach_reasons=list(reasons),
+                        count=count,
+                        suppressed_during_window=count - last_logged,
+                        first_seen_at=state.get("first_seen_at"),
+                        last_seen_at=state.get("last_seen_at"),
+                        max_overlay_payload_bytes=state.get("max_overlay_payload_bytes"),
+                        max_overlay_points=state.get("max_overlay_points"),
+                    ),
+                )
+            )
+            state["last_logged_count"] = count
 
     def _step_series_state(self, state: SeriesExecutionState) -> None:
         if state.done:
+            self._decision_order_coordinator().mark_participant_complete(
+                self._decision_order_participant_payload(state.series, state)
+            )
             return
         if state.intrabar_active():
             self._step_intrabar(state)
@@ -329,7 +728,7 @@ class RuntimeExecutionLoopMixin:
                 try:
                     (
                         consumed_signals,
-                        direction,
+                        chosen_signal,
                         signals_pending,
                         signal_eval_metrics,
                         next_last_evaluated_epoch,
@@ -340,6 +739,8 @@ class RuntimeExecutionLoopMixin:
                         candle,
                         epoch,
                     )
+                    direction = chosen_signal.direction if chosen_signal is not None else None
+                    selected_decision = self._selected_decision_artifact_for_signal(state, chosen_signal)
                     overlays_update_ms = signal_eval_metrics.get("overlays_update_ms")
                     pending_signals_ops_ms = signal_eval_metrics.get("pending_signals_ops_ms")
                     indicators_count = signal_eval_metrics.get("indicators_count")
@@ -356,7 +757,7 @@ class RuntimeExecutionLoopMixin:
                     series_overlay_total_entries_count = signal_eval_metrics.get("series_overlay_total_entries_count")
                     series_overlay_regime_mode_rebuild = signal_eval_metrics.get("series_overlay_regime_mode_rebuild")
                     step_context["signals_pending"] = signals_pending
-                    self._record_signal_consumption(state, epoch, consumed_signals, direction)
+                    self._record_signal_consumption(state, epoch, consumed_signals, chosen_signal)
 
                     # Debug: Log signal consumption result
                     if direction is not None:
@@ -367,7 +768,12 @@ class RuntimeExecutionLoopMixin:
                             direction=direction,
                         )
                         logger.debug(with_log_context("signal_consumed", context))
-                        self._emit_signal_event(series=series, candle=candle, direction=direction)
+                        self._emit_signal_event(
+                            series=series,
+                            candle=candle,
+                            signal=chosen_signal,
+                            decision_artifact=selected_decision,
+                        )
                         signal_event_logged = True
                     self._record_step_trace(
                         "step_signal_eval",
@@ -480,31 +886,88 @@ class RuntimeExecutionLoopMixin:
             decision_flow_started_perf = time.perf_counter()
             blocking_trade = None
             new_trade = None
+            decision_order_ticket = None
+            decision_order_completed = False
+            decision_order_outcome = "none"
+            decision_order_pressure = _decision_order_pressure_context(None)
             try:
+                instrument_id = None
+                if isinstance(series.instrument, Mapping):
+                    instrument_id = series.instrument.get("id")
+                if direction is not None and series.risk_engine is not None:
+                    setattr(series.risk_engine, "last_signal_id", getattr(chosen_signal, "signal_id", None))
+                    setattr(series.risk_engine, "last_decision_id", getattr(chosen_signal, "decision_id", None))
+                    setattr(series.risk_engine, "strategy_id", getattr(series, "strategy_id", None))
+                    setattr(
+                        series.risk_engine,
+                        "run_id",
+                        self._run_context.run_id if self._run_context is not None else None,
+                    )
+                entry_request_id = None
+                if direction is not None and instrument_id and series.risk_engine is not None:
+                    request_id_builder = getattr(series.risk_engine, "_entry_request_id", None)
+                    if callable(request_id_builder):
+                        entry_request_id = request_id_builder(candle, direction)
+                decision_candidate = None
+                if direction is not None and instrument_id and isinstance(selected_decision, Mapping):
+                    decision_candidate = {
+                        "run_id": self._run_context.run_id if self._run_context is not None else None,
+                        "bot_id": self.bot_id,
+                        "bar_time": bar_time,
+                        "strategy_id": getattr(series, "strategy_id", None),
+                        "instrument_id": instrument_id,
+                        "symbol": getattr(series, "symbol", None),
+                        "timeframe": getattr(series, "timeframe", None),
+                        "signal_priority": selected_decision.get("priority"),
+                        "direction": direction,
+                        "side": "buy" if direction == "long" else "sell",
+                        "decision_id": getattr(chosen_signal, "decision_id", None),
+                        "entry_request_id": entry_request_id,
+                        "rule_id": getattr(chosen_signal, "rule_id", None),
+                        "event_key": getattr(chosen_signal, "event_key", None),
+                    }
+                if decision_candidate is not None:
+                    decision_order_ticket = self._decision_order_coordinator().arrive_and_wait_turn(
+                        participant=self._decision_order_participant_payload(series, state),
+                        bar={"bar_time": bar_time, "timeframe": getattr(series, "timeframe", None)},
+                        candidate=decision_candidate,
+                    )
+                    if decision_order_ticket is not None:
+                        decision_order_pressure = _decision_order_pressure_context(
+                            getattr(decision_order_ticket, "wait_summary", None)
+                        )
                 # Attempt to create trade from signal
                 if direction is not None:
-                    instrument_id = None
-                    if isinstance(series.instrument, Mapping):
-                        instrument_id = series.instrument.get("id")
                     if not instrument_id:
                         decision_events_logged += 1
+                        rejection_artifact = (
+                            build_rejection_artifact(
+                                decision_artifact=selected_decision,
+                                rejection_stage="execution_policy",
+                                rejection_code="DECISION_REJECTED_INSTRUMENT_MISSING",
+                                rejection_reason="Instrument id missing.",
+                                context={"blocked_instrument_id": None},
+                            )
+                            if isinstance(selected_decision, Mapping)
+                            else None
+                        )
+                        if rejection_artifact is not None:
+                            state.rejection_artifacts.append(deepcopy(rejection_artifact))
+                            if self._run_context is not None:
+                                self._run_context.rejection_artifacts.append(deepcopy(rejection_artifact))
                         self._emit_decision_event(
                             series=series,
                             candle=candle,
+                            signal=chosen_signal,
                             decision="rejected",
-                            direction=direction,
+                            decision_artifact=selected_decision,
+                            rejection_artifact=rejection_artifact,
                             signal_price=float(candle.close),
                             reason_code="DECISION_REJECTED_INSTRUMENT_MISSING",
                             message="Instrument id missing.",
                             trade_id=None,
-                            context={
-                                "signal_type": "strategy_signal",
-                                "signal_direction": direction,
-                                "signal_price": candle.close,
-                                "blocked_instrument_id": None,
-                                "instrument_id": None,
-                            },
                         )
+                        decision_order_outcome = "rejected"
                         direction = None
                     else:
                         trade_lock_wait_started = time.perf_counter()
@@ -527,14 +990,24 @@ class RuntimeExecutionLoopMixin:
                         self._emit_decision_event(
                             series=series,
                             candle=candle,
+                            signal=chosen_signal,
                             decision="accepted",
-                            direction=direction,
+                            decision_artifact=selected_decision,
+                            rejection_artifact=None,
                             signal_price=float(candle.close),
                             reason_code="DECISION_ACCEPTED",
                             message=None,
                             trade_id=new_trade.trade_id,
-                            context={"trade_time": _isoformat(new_trade.entry_time)},
+                            wallet_evidence=(
+                                {
+                                    **dict(getattr(new_trade, "wallet_fill_metadata", {}) or {}),
+                                    "position_commit_seq": int(getattr(new_trade, "position_commit_seq", 0) or 0),
+                                }
+                                if isinstance(getattr(new_trade, "wallet_fill_metadata", None), Mapping)
+                                else {"position_commit_seq": int(getattr(new_trade, "position_commit_seq", 0) or 0)}
+                            ),
                         )
+                        decision_order_outcome = "accepted"
                     else:
                         # Signal was rejected (no trade opened)
                         # Determine rejection reason
@@ -543,10 +1016,8 @@ class RuntimeExecutionLoopMixin:
                         blocking_trade_id: Optional[str] = None
                         rejection_code: Optional[str] = None
                         rejection_context: Dict[str, Any] = {
-                            "signal_type": "strategy_signal",
-                            "signal_direction": direction,
-                            "signal_price": candle.close,
                         }
+                        rejection_stage = "position_policy"
                         if blocking_trade is not None:
                             rejection_reason = "Active trade already open for instrument"
                             rejection_code = "DECISION_REJECTED_ACTIVE_TRADE"
@@ -561,11 +1032,11 @@ class RuntimeExecutionLoopMixin:
                             rejection_context.update(rejection_meta)
                         elif series.risk_engine.active_trade is None:
                             rejection_reason = series.risk_engine.last_rejection_reason or "Risk engine declined entry"
-                            rejection_code = "DECISION_REJECTED_RISK_ENGINE"
+                            rejection_code = str(rejection_reason or "DECISION_REJECTED_RISK_ENGINE").strip().upper()
+                            rejection_stage = classify_rejection_stage(rejection_code)
                             rejection_meta = series.risk_engine.last_rejection_detail
                             if isinstance(rejection_meta, Mapping):
                                 rejection_context.update(rejection_meta)
-                            rejection_context["risk_engine_reason"] = rejection_reason
                         resolved_trade_id, metadata_payload = self._normalise_rejection_metadata(
                             rejection_meta,
                             blocking_trade_id,
@@ -573,17 +1044,35 @@ class RuntimeExecutionLoopMixin:
 
                         decision_events_logged += 1
                         rejection_context.update(metadata_payload)
+                        rejection_artifact = (
+                            build_rejection_artifact(
+                                decision_artifact=selected_decision,
+                                rejection_stage=rejection_stage,
+                                rejection_code=rejection_code or "DECISION_REJECTED",
+                                rejection_reason=rejection_reason,
+                                context=rejection_context,
+                            )
+                            if isinstance(selected_decision, Mapping)
+                            else None
+                        )
+                        if rejection_artifact is not None:
+                            state.rejection_artifacts.append(deepcopy(rejection_artifact))
+                            if self._run_context is not None:
+                                self._run_context.rejection_artifacts.append(deepcopy(rejection_artifact))
                         self._emit_decision_event(
                             series=series,
                             candle=candle,
+                            signal=chosen_signal,
                             decision="rejected",
-                            direction=direction,
+                            decision_artifact=selected_decision,
+                            rejection_artifact=rejection_artifact,
                             signal_price=float(candle.close),
                             reason_code=rejection_code or "DECISION_REJECTED",
                             message=rejection_reason,
                             trade_id=resolved_trade_id,
-                            context=rejection_context,
+                            wallet_evidence=rejection_context,
                         )
+                        decision_order_outcome = "rejected"
 
                 if new_trade is not None:
                     entry_created = True
@@ -611,8 +1100,18 @@ class RuntimeExecutionLoopMixin:
                         trade=new_trade,
                         direction=str(direction or ""),
                     )
-                    self._persist_trade_entry(series, new_trade)
+                    self._persist_trade_entry(
+                        series,
+                        new_trade,
+                    )
                     self._update_trade_overlay(series)
+                if decision_order_ticket is not None and decision_order_ticket.has_candidate:
+                    self._decision_order_coordinator().complete_candidate(
+                        decision_order_ticket,
+                        outcome=decision_order_outcome,
+                    )
+                    decision_order_completed = True
+                    self._decision_order_coordinator().wait_until_complete(decision_order_ticket)
                 self._record_step_trace(
                     "step_decision_flow",
                     started_at=decision_flow_started,
@@ -628,9 +1127,29 @@ class RuntimeExecutionLoopMixin:
                         "entry_created": entry_created,
                         "trade_lock_wait_ms": trade_lock_wait_ms,
                         "trade_lock_hold_ms": trade_lock_hold_ms,
+                        **decision_order_pressure,
                     },
                 )
             except Exception as exc:
+                candidate_order_failed = (
+                    decision_order_ticket is not None
+                    and decision_order_ticket.has_candidate
+                ) or decision_candidate is not None
+                if candidate_order_failed and not decision_order_pressure.get("decision_order_release_count"):
+                    decision_order_pressure["decision_order_fail_count"] = 1.0
+                self._decision_order_coordinator().mark_participant_failed(
+                    self._decision_order_participant_payload(series, state),
+                    error=exc,
+                )
+                if (
+                    decision_order_ticket is not None
+                    and decision_order_ticket.has_candidate
+                    and not decision_order_completed
+                ):
+                    self._decision_order_coordinator().complete_candidate(
+                        decision_order_ticket,
+                        outcome="error",
+                    )
                 self._record_step_trace(
                     "step_decision_flow",
                     started_at=decision_flow_started,
@@ -647,6 +1166,7 @@ class RuntimeExecutionLoopMixin:
                         "entry_created": entry_created,
                         "trade_lock_wait_ms": trade_lock_wait_ms,
                         "trade_lock_hold_ms": trade_lock_hold_ms,
+                        **decision_order_pressure,
                     },
                 )
                 raise
@@ -693,7 +1213,11 @@ class RuntimeExecutionLoopMixin:
             settlement_started = datetime.now(timezone.utc)
             settlement_started_perf = time.perf_counter()
             try:
-                self._settlement_applier.apply(trade_events, exit_settlement)
+                self._settlement_applier.apply(
+                    trade_events,
+                    exit_settlement,
+                    execution_profile=getattr(series, "execution_profile", None),
+                )
                 self._record_step_trace(
                     "settlement_apply",
                     started_at=settlement_started,
@@ -745,15 +1269,15 @@ class RuntimeExecutionLoopMixin:
                     event_ts = event.get("time")
                     if raw_subtype and event_ts:
                         event_subtype = str(raw_subtype)
-                        if event_subtype in {"target", "stop", "close"}:
+                        if event_subtype in {"target", "stop", "backtest_end", "terminal_liquidation"}:
                             execution_events_logged += 1
                             self._emit_exit_filled_event(
                                 series=series,
                                 candle=candle,
                                 event=event,
                             )
-                            if event_subtype == "close":
-                                self._persist_trade_close(series, event)
+                        if event_subtype == "close":
+                            self._persist_trade_close(series, event)
                 self._update_trade_overlay(series)
                 state.last_evaluated_epoch = max(state.last_evaluated_epoch, next_last_evaluated_epoch)
                 state.last_consumed_epoch = max(state.last_consumed_epoch, next_last_consumed_epoch)
@@ -966,7 +1490,7 @@ class RuntimeExecutionLoopMixin:
         series: StrategySeries,
         candle: Candle,
         epoch: int,
-    ) -> Tuple[List[Dict[str, object]], Optional[str], int, Dict[str, Optional[float]], int, int]:
+    ) -> Tuple[List[StrategySignal], Optional[StrategySignal], int, Dict[str, Optional[float]], int, int]:
         if epoch <= state.last_evaluated_epoch:
             consume_started = time.perf_counter()
             consumed, chosen, updated_last = consume_signals(
@@ -1016,74 +1540,53 @@ class RuntimeExecutionLoopMixin:
             )
 
         indicator_started = time.perf_counter()
-        snapshots: Dict[str, Any] = {}
-        state_revisions_changed_count = 0
-        previous_candle: Optional[Candle] = None
-        if state.bar_index > 0 and state.bar_index - 1 < len(series.candles):
-            previous_candle = series.candles[state.bar_index - 1]
-
-        for indicator_id, runtime in state.indicator_state_runtime.items():
-            indicator_type = str(runtime.get("indicator_type") or "")
-            engine = runtime.get("engine")
-            engine_state = runtime.get("engine_state")
-            if engine is None or not isinstance(engine_state, MutableMapping):
-                raise RuntimeError(f"indicator_state_runtime_invalid: indicator_id={indicator_id}")
-            delta = engine.apply_bar(engine_state, candle)
-            snapshot = engine.snapshot(engine_state)
-
-            payload = dict(snapshot.payload)
-            runtime_state_storage = runtime.get("signal_runtime_storage")
-            if not isinstance(runtime_state_storage, MutableMapping):
-                runtime_state_storage = {}
-            runtime["signal_runtime_storage"] = runtime_state_storage
-            payload.setdefault("_indicator_id", indicator_id)
-            payload.setdefault("symbol", series.symbol)
-            payload.setdefault("chart_timeframe", series.timeframe)
-            payload.setdefault("source_timeframe", str(snapshot.source_timeframe or series.timeframe or ""))
-            payload["_runtime_state_storage"] = runtime_state_storage
-            plugin = runtime.get("plugin")
-            if plugin is None:
-                raise RuntimeError(f"indicator_plugin_runtime_missing: indicator_id={indicator_id}")
-            if getattr(plugin, "signal_emitter", None) is not None:
-                rule_payload = emit_manifest_signals(
-                    manifest=plugin,
-                    snapshot_payload=payload,
-                    candle=candle,
-                    previous_candle=previous_candle,
-                )
-            else:
-                rule_payload = {"signals": []}
-            updated_runtime_state_storage = payload.get("_runtime_state_storage")
-            if isinstance(updated_runtime_state_storage, MutableMapping):
-                runtime["signal_runtime_storage"] = updated_runtime_state_storage
-            enriched_payload = dict(payload)
-            enriched_payload.update(dict(rule_payload or {}))
-            snapshots[indicator_id] = type(snapshot)(
-                revision=snapshot.revision,
-                known_at=snapshot.known_at,
-                formed_at=snapshot.formed_at,
-                source_timeframe=snapshot.source_timeframe,
-                payload=enriched_payload,
-            )
-            if bool(delta.changed):
-                state_revisions_changed_count += 1
-
+        bar_time = _isoformat(candle.time)
+        if state.indicator_engine is None:
+            raise RuntimeError("indicator_runtime_missing: series indicator engine is not initialized")
+        frame = state.indicator_engine.step(
+            bar=candle,
+            bar_time=candle.time,
+            include_overlays=False,
+            include_details=False,
+        )
+        outputs = frame.outputs
+        state.indicator_outputs = outputs
+        self._record_indicator_frame_warnings(
+            frame=frame,
+            state=state,
+            candle=candle,
+            source="trading_signal_eval",
+            series=series,
+        )
+        if self._report_artifact_bundle is not None:
+            self._report_artifact_bundle.record_indicator_frame(state=state, candle=candle, frame=frame)
         indicator_state_update_ms = max((time.perf_counter() - indicator_started) * 1000.0, 0.0)
 
         signal_started = time.perf_counter()
-        rules = (series.meta or {}).get("rules") or {}
-        evaluated = evaluate_rules_from_state_snapshots(
-            signal_input=SignalEvaluationInput(snapshots=snapshots),
-            rules=rules,
-            current_epoch=epoch,
-            rule_evaluator=self._ensure_series_builder()._evaluate_rule_payload,
+        compiled_strategy = (series.meta or {}).get("compiled_strategy")
+        if compiled_strategy is None:
+            raise RuntimeError("strategy_runtime_missing: compiled strategy is not initialized")
+        decision_result = evaluate_strategy_bar(
+            compiled_strategy=compiled_strategy,
+            state=state.decision_evaluation_state,
+            outputs=outputs,
+            output_types=state.indicator_output_types,
+            instrument_id=str(series.instrument.get("id") if isinstance(series.instrument, Mapping) else ""),
+            symbol=str(series.symbol or ""),
+            timeframe=str(series.timeframe or ""),
+            bar_time=candle.time,
+            minimal_decision_details=True,
         )
+        for artifact in decision_result.artifacts:
+            state.decision_artifacts.append(self._copy_decision_artifact_for_runtime(artifact))
+            if self._run_context is not None:
+                self._run_context.decision_artifacts.append(self._copy_decision_artifact_for_runtime(artifact))
         signal_eval_ms = max((time.perf_counter() - signal_started) * 1000.0, 0.0)
 
-        previous_overlay_count = float(len(series.overlays or []))
-        previous_overlay_points = float(self._count_overlay_points(series.overlays or []))
-
-        projection_started = time.perf_counter()
+        previous_overlays = list(series.overlays or [])
+        previous_overlay_count = float(len(previous_overlays))
+        previous_overlay_points = float(count_overlay_points(previous_overlays))
+        overlay_projection_ms = 0.0
         overlay_projection_skipped_count = 0
         overlay_projection_projector_ms = 0.0
         overlay_projection_delta_ms = 0.0
@@ -1094,104 +1597,26 @@ class RuntimeExecutionLoopMixin:
         overlay_projection_ops_count = 0.0
         overlay_projection_normalize_cache_hits = 0.0
         overlay_projection_normalize_cache_misses = 0.0
-        for indicator_id, snapshot in snapshots.items():
-            runtime = state.indicator_state_runtime.get(indicator_id) or {}
-            indicator_type = str(runtime.get("indicator_type") or "")
-            plugin = runtime.get("plugin")
-            projector = getattr(plugin, "overlay_projector", None) if plugin is not None else None
-            if projector is None:
-                overlay_projection_skipped_count += 1
-                continue
-            projection_state = state.indicator_projection_runtime.setdefault(indicator_id, {"seq": 0, "revision": -1, "entries": {}})
-            indicator_meta = runtime.get("indicator_meta") if isinstance(runtime.get("indicator_meta"), Mapping) else {}
-            overlay_color = indicator_meta.get("color") if isinstance(indicator_meta, Mapping) else None
-
-            def _entry_adapter(_entry_key: str, overlay_entry: Dict[str, Any]) -> Dict[str, Any]:
-                adapted = dict(overlay_entry)
-                adapted.update(
-                    {
-                        "ind_id": indicator_id,
-                        "source": "indicator_state",
-                        "bot_id": self.bot_id,
-                        "strategy_id": series.strategy_id,
-                        "symbol": series.symbol,
-                        "timeframe": series.timeframe,
-                    }
-                )
-                if isinstance(overlay_color, str) and overlay_color.strip():
-                    adapted["color"] = overlay_color
-                return adapted
-
-            projection = project_and_normalize_entries(
-                indicator_type=indicator_type,
-                snapshot=snapshot,
-                projection_state=projection_state,
-                entry_projector=projector,
-                invalid_projection_error=(
-                    f"indicator_overlay_projection_invalid: indicator_type={indicator_type} indicator_id={indicator_id}"
-                ),
-                normalize_failed_error=lambda entry_key: (
-                    f"indicator_overlay_projection_normalize_failed: indicator_type={indicator_type} "
-                    f"indicator_id={indicator_id} entry_key={entry_key}"
-                ),
-                entry_adapter=_entry_adapter,
-            )
-            if not projection.delta.ops:
-                projection_state["seq"] = projection.delta.seq
-                projection_state["revision"] = snapshot.revision
-                projection_state["_normalize_cache"] = projection.normalize_cache
-                overlay_projection_projector_ms += float(projection.perf.get("projector_ms", 0.0) or 0.0)
-                overlay_projection_delta_ms += float(projection.perf.get("delta_ms", 0.0) or 0.0)
-                overlay_projection_normalize_ms += float(projection.perf.get("normalize_ms", 0.0) or 0.0)
-                overlay_projection_fingerprint_ms += float(projection.perf.get("fingerprint_ms", 0.0) or 0.0)
-                overlay_projection_entries_total += float(projection.perf.get("entries_total", 0.0) or 0.0)
-                overlay_projection_entries_changed += float(projection.perf.get("entries_changed", 0.0) or 0.0)
-                overlay_projection_ops_count += float(projection.perf.get("ops_count", 0.0) or 0.0)
-                overlay_projection_normalize_cache_hits += float(projection.perf.get("normalize_cache_hits", 0.0) or 0.0)
-                overlay_projection_normalize_cache_misses += float(projection.perf.get("normalize_cache_misses", 0.0) or 0.0)
-                overlay_projection_skipped_count += 1
-                continue
-            projection_state["seq"] = projection.delta.seq
-            projection_state["revision"] = snapshot.revision
-            projection_state["entries"] = projection.entries
-            projection_state["_normalize_cache"] = projection.normalize_cache
-            overlay_projection_projector_ms += float(projection.perf.get("projector_ms", 0.0) or 0.0)
-            overlay_projection_delta_ms += float(projection.perf.get("delta_ms", 0.0) or 0.0)
-            overlay_projection_normalize_ms += float(projection.perf.get("normalize_ms", 0.0) or 0.0)
-            overlay_projection_fingerprint_ms += float(projection.perf.get("fingerprint_ms", 0.0) or 0.0)
-            overlay_projection_entries_total += float(projection.perf.get("entries_total", 0.0) or 0.0)
-            overlay_projection_entries_changed += float(projection.perf.get("entries_changed", 0.0) or 0.0)
-            overlay_projection_ops_count += float(projection.perf.get("ops_count", 0.0) or 0.0)
-            overlay_projection_normalize_cache_hits += float(projection.perf.get("normalize_cache_hits", 0.0) or 0.0)
-            overlay_projection_normalize_cache_misses += float(projection.perf.get("normalize_cache_misses", 0.0) or 0.0)
-
-        overlay_projection_ms = max((time.perf_counter() - projection_started) * 1000.0, 0.0)
-        overlays = self._series_overlay_entries(state)
-        overlay_runtime_metrics = state.overlay_runtime_metrics if isinstance(state.overlay_runtime_metrics, Mapping) else {}
-        series_overlay_entries_ms = float(overlay_runtime_metrics.get("series_overlay_entries_ms") or 0.0)
-        series_overlay_indicator_entries_ms = float(
-            overlay_runtime_metrics.get("series_overlay_indicator_entries_ms") or 0.0
-        )
-        series_overlay_regime_build_ms = float(overlay_runtime_metrics.get("series_overlay_regime_build_ms") or 0.0)
-        series_overlay_indicator_entries_count = float(
-            overlay_runtime_metrics.get("series_overlay_indicator_entries_count") or 0.0
-        )
-        series_overlay_regime_entries_count = float(
-            overlay_runtime_metrics.get("series_overlay_regime_entries_count") or 0.0
-        )
-        series_overlay_total_entries_count = float(
-            overlay_runtime_metrics.get("series_overlay_total_entries_count") or 0.0
-        )
-        series_overlay_regime_mode_rebuild = float(
-            overlay_runtime_metrics.get("series_overlay_regime_mode_rebuild") or 0.0
-        )
+        series_overlay_entries_ms = 0.0
+        series_overlay_indicator_entries_ms = 0.0
+        series_overlay_regime_build_ms = 0.0
+        series_overlay_indicator_entries_count = 0.0
+        series_overlay_regime_entries_count = 0.0
+        series_overlay_total_entries_count = 0.0
+        series_overlay_regime_mode_rebuild = 0.0
         overlays_update_ms = overlay_projection_ms + series_overlay_entries_ms
-        overlays_changed_count, overlay_points_changed = self._overlay_change_metrics(series.overlays or [], overlays)
-        series.overlays = overlays
+        overlays_changed_count = 0.0
+        overlay_points_changed = 0.0
 
         append_started = time.perf_counter()
-        for signal in evaluated:
-            state.pending_signals.append(signal)
+        if decision_result.selected_artifact is not None:
+            state.pending_signals.append(
+                StrategySignal.from_decision_artifact(
+                    decision_result.selected_artifact,
+                    source_type="runtime",
+                    source_id=self._run_context.run_id if self._run_context is not None else None,
+                )
+            )
         pending_append_ms = max((time.perf_counter() - append_started) * 1000.0, 0.0)
 
         consume_started = time.perf_counter()
@@ -1208,7 +1633,7 @@ class RuntimeExecutionLoopMixin:
             "pending_signals_append_ms": pending_append_ms,
             "pending_signals_consume_ms": pending_consume_ms,
             "pending_signals_ops_ms": pending_ops_ms,
-            "signals_emitted_count": float(len(evaluated)),
+            "signals_emitted_count": 1.0 if decision_result.selected_artifact is not None else 0.0,
             "overlays_update_ms": overlays_update_ms,
             "indicator_state_update_ms": indicator_state_update_ms,
             "signal_eval_ms": signal_eval_ms,
@@ -1230,14 +1655,14 @@ class RuntimeExecutionLoopMixin:
             "series_overlay_regime_entries_count": series_overlay_regime_entries_count,
             "series_overlay_total_entries_count": series_overlay_total_entries_count,
             "series_overlay_regime_mode_rebuild": series_overlay_regime_mode_rebuild,
-            "state_revisions_changed_count": float(state_revisions_changed_count),
-            "indicators_count": float(len(state.indicator_state_runtime)),
+            "state_revisions_changed_count": float(len(outputs)),
+            "indicators_count": float(len(state.indicator_engine.order)),
             "overlays_changed_count": overlays_changed_count,
             "overlay_points_changed": overlay_points_changed,
             "overlay_count_before": previous_overlay_count,
-            "overlay_count_after": float(len(overlays)),
+            "overlay_count_after": previous_overlay_count,
             "overlay_points_before": previous_overlay_points,
-            "overlay_points_after": float(self._count_overlay_points(overlays)),
+            "overlay_points_after": previous_overlay_points,
         }
 
         next_last_evaluated = epoch
@@ -1247,16 +1672,87 @@ class RuntimeExecutionLoopMixin:
         self,
         state: SeriesExecutionState,
         epoch: int,
-        consumed_signals: List[Dict[str, object]],
-        chosen_direction: Optional[str],
+        consumed_signals: List[StrategySignal],
+        chosen_signal: Optional[StrategySignal],
     ) -> None:
         state.signal_consumptions.append(
             SignalConsumption(
                 epoch=epoch,
-                consumed_signals=list(consumed_signals),
-                chosen_direction=chosen_direction,
+                consumed_signals=[signal.to_dict() for signal in consumed_signals],
+                chosen_signal=chosen_signal.to_dict() if chosen_signal is not None else None,
             )
         )
+
+    @staticmethod
+    def _selected_decision_artifact_for_signal(
+        state: SeriesExecutionState,
+        signal: Optional[StrategySignal],
+    ) -> Optional[Dict[str, Any]]:
+        if signal is None:
+            return None
+        decision_id = str(signal.decision_id or "").strip()
+        if not decision_id:
+            raise RuntimeError(
+                "strategy_signal_missing_decision_id: cannot resolve selected decision artifact "
+                f"rule_id={signal.rule_id or '<missing>'}"
+            )
+        for artifact in reversed(state.decision_artifacts):
+            if str(artifact.get("decision_id") or "").strip() != decision_id:
+                continue
+            if str(artifact.get("evaluation_result") or "") != "matched_selected":
+                continue
+            return RuntimeExecutionLoopMixin._copy_decision_artifact_for_runtime(artifact)
+        raise RuntimeError(
+            "selected_decision_artifact_missing: queued signal has no matching decision artifact "
+            f"decision_id={decision_id} rule_id={signal.rule_id or '<missing>'} "
+            f"strategy_hash={signal.strategy_hash or '<missing>'}"
+        )
+
+    @staticmethod
+    def _copy_decision_artifact_for_runtime(artifact: Mapping[str, Any]) -> Dict[str, Any]:
+        copied: Dict[str, Any] = {}
+        for key, value in artifact.items():
+            if key not in MINIMAL_DECISION_ARTIFACT_FIELDS:
+                continue
+            if key in {"referenced_outputs", "observed_outputs", "output_filter_trace"} and isinstance(value, Mapping):
+                compact_value = RuntimeExecutionLoopMixin._copy_compact_artifact_tree(value)
+                if isinstance(compact_value, Mapping):
+                    copied[key] = dict(compact_value)
+            elif isinstance(value, Mapping):
+                copied[key] = {
+                    str(nested_key): nested_value
+                    for nested_key, nested_value in value.items()
+                    if RuntimeExecutionLoopMixin._artifact_value_is_compact(nested_value)
+                }
+            else:
+                copied[key] = value
+        return copied
+
+    @staticmethod
+    def _copy_compact_artifact_tree(value: Any) -> Any:
+        if RuntimeExecutionLoopMixin._artifact_value_is_compact(value):
+            return value
+        if isinstance(value, Mapping):
+            copied: Dict[str, Any] = {}
+            for nested_key, nested_value in value.items():
+                if str(nested_key) in {"debug", "details", "overlays", "overlay", "projection", "trigger", "raw"}:
+                    continue
+                compact_value = RuntimeExecutionLoopMixin._copy_compact_artifact_tree(nested_value)
+                if compact_value is not None:
+                    copied[str(nested_key)] = compact_value
+            return copied
+        if isinstance(value, (list, tuple)):
+            copied_items = [
+                compact_value
+                for item in value
+                if (compact_value := RuntimeExecutionLoopMixin._copy_compact_artifact_tree(item)) is not None
+            ]
+            return copied_items
+        return None
+
+    @staticmethod
+    def _artifact_value_is_compact(value: Any) -> bool:
+        return value is None or isinstance(value, (str, int, float, bool))
 
     def _compute_playback_interval(self, base_seconds: float = 1.0) -> float:
         return 0.0
@@ -1295,12 +1791,21 @@ class RuntimeExecutionLoopMixin:
             time.sleep(min(0.25, remaining))
 
     def _append_live_candles_if_needed(self) -> bool:
+        if self._live_duration_should_stop():
+            return False
         updated = False
+        live_store = self._live_candle_store if isinstance(self._live_candle_store, LiveCandleStore) else None
+        if live_store is not None:
+            live_store.raise_if_failed()
         end_iso = _isoformat(datetime.now(timezone.utc))
         with self._series_update_lock:
             for series in self._series:
                 last_time = series.candles[-1].time if series.candles else None
                 if last_time is None:
+                    continue
+                if live_store is not None:
+                    if self._append_series_live_candles(series, after=last_time):
+                        updated = True
                     continue
                 start_iso = _isoformat(last_time + timedelta(seconds=1))
                 if self._append_series_updates(series, start_iso, end_iso):
@@ -1319,11 +1824,28 @@ class RuntimeExecutionLoopMixin:
         return updated
 
     def _append_live_candles_for_state(self, state: SeriesExecutionState) -> bool:
+        if self._live_duration_should_stop():
+            return False
         end_iso = _isoformat(datetime.now(timezone.utc))
         series = state.series
         last_time = series.candles[-1].time if series.candles else None
         if last_time is None:
             return False
+        live_store = self._live_candle_store if isinstance(self._live_candle_store, LiveCandleStore) else None
+        if live_store is not None:
+            live_store.raise_if_failed()
+            with self._series_update_lock:
+                updated = self._append_series_live_candles(series, after=last_time)
+                if not updated:
+                    return False
+                state.total_bars = len(series.candles)
+                if state.done and state.bar_index < state.total_bars:
+                    state.done = False
+                self._total_bars = max(len(s.candles) for s in self._series) if self._series else 0
+            self._rebuild_overlay_cache()
+            self._log_event("live_refresh", message="Appended provider stream candles")
+            self._push_update("live_refresh")
+            return True
         start_iso = _isoformat(last_time + timedelta(seconds=1))
         with self._series_update_lock:
             updated = self._append_series_updates(series, start_iso, end_iso)
@@ -1336,6 +1858,42 @@ class RuntimeExecutionLoopMixin:
         self._rebuild_overlay_cache()
         self._log_event("live_refresh", message="Appended live candles")
         self._push_update("live_refresh")
+        return True
+
+    def _append_series_live_candles(self, series: StrategySeries, *, after: datetime | None) -> bool:
+        live_store = self._live_candle_store
+        if not isinstance(live_store, LiveCandleStore):
+            return False
+        new_candles = append_closed_live_candles_to_series(
+            store=live_store,
+            series=series,
+            after=after,
+        )
+        if not new_candles:
+            return False
+        series.candles.extend(new_candles)
+        series.window_end = _isoformat(new_candles[-1].time)
+        logger.info(
+            with_log_context(
+                "paper_live_candles_appended",
+                self._series_log_context(
+                    series,
+                    candles=len(new_candles),
+                    first_bar_time=_isoformat(new_candles[0].time),
+                    last_bar_time=_isoformat(new_candles[-1].time),
+                ),
+            )
+        )
+        return True
+
+    def _live_duration_should_stop(self) -> bool:
+        deadline = getattr(self, "_live_duration_deadline_monotonic", None)
+        if deadline is None:
+            return False
+        if time.monotonic() < float(deadline):
+            return False
+        self._live_duration_completed = True
+        self._stop.set()
         return True
 
     def _append_series_updates(self, series: StrategySeries, start_iso: str, end_iso: str) -> bool:
@@ -1380,7 +1938,23 @@ class RuntimeExecutionLoopMixin:
         self._log_event("stop", message="Bot stopped")
         self._push_update("stop")
 
+    def _trade_aggregate_cache_key(self) -> Tuple[Any, ...]:
+        members: List[Tuple[Any, ...]] = []
+        for series in self._series:
+            members.append(
+                (
+                    getattr(series, "strategy_id", None),
+                    getattr(series, "symbol", None),
+                    getattr(series, "timeframe", None),
+                    *self._trade_revision(series),
+                )
+            )
+        return tuple(members)
+
     def _aggregate_trades(self) -> List[Dict[str, Any]]:
+        cache_key = self._trade_aggregate_cache_key()
+        if self._aggregate_trades_cache_key == cache_key:
+            return self._aggregate_trades_cache
         trades: List[Dict[str, Any]] = []
         for series in self._series:
             for entry in series.risk_engine.serialise_trades():
@@ -1388,9 +1962,15 @@ class RuntimeExecutionLoopMixin:
                 payload.setdefault("strategy_id", series.strategy_id)
                 payload.setdefault("symbol", series.symbol)
                 trades.append(payload)
+        self._aggregate_trades_cache_key = cache_key
+        self._aggregate_trades_cache = trades
         return trades
 
     def _aggregate_stats(self) -> Dict[str, float]:
+        cache_key = self._trade_aggregate_cache_key()
+        if self._aggregate_stats_cache_key == cache_key and self._aggregate_stats_cache:
+            return dict(self._aggregate_stats_cache)
+
         summary = {
             "total_trades": 0,
             "completed_trades": 0,
@@ -1406,9 +1986,6 @@ class RuntimeExecutionLoopMixin:
         net = 0.0
         currency: Optional[str] = None
         multi_currency = False
-        win_pnls: List[float] = []
-        loss_pnls: List[float] = []
-        tolerance = 1e-8
 
         for series in self._series:
             stats = series.risk_engine.stats()
@@ -1427,15 +2004,18 @@ class RuntimeExecutionLoopMixin:
                 elif currency != series_currency:
                     multi_currency = True
 
-            # Collect individual trade PnLs for avg/largest calculations
-            for trade in series.risk_engine.trades:
-                if trade.is_active():
-                    continue
-                pnl = trade.net_pnl
-                if pnl > tolerance:
-                    win_pnls.append(pnl)
-                elif pnl < -tolerance:
-                    loss_pnls.append(pnl)
+        aggregated_trades = self._aggregate_trades()
+        tolerance = 1e-8
+        win_pnls = [
+            float(trade.get("net_pnl", 0.0) or 0.0)
+            for trade in aggregated_trades
+            if trade.get("closed_at") and float(trade.get("net_pnl", 0.0) or 0.0) > tolerance
+        ]
+        loss_pnls = [
+            float(trade.get("net_pnl", 0.0) or 0.0)
+            for trade in aggregated_trades
+            if trade.get("closed_at") and float(trade.get("net_pnl", 0.0) or 0.0) < -tolerance
+        ]
 
         total = summary.get("completed_trades") or (summary["wins"] + summary["losses"])
         summary["win_rate"] = round(summary["wins"] / total, 4) if total else 0.0
@@ -1453,16 +2033,22 @@ class RuntimeExecutionLoopMixin:
         summary["largest_loss"] = round(min(loss_pnls), 4) if loss_pnls else 0.0
 
         # Max drawdown
-        summary["max_drawdown"] = self._max_drawdown_from_trades()
+        summary["max_drawdown"] = self._max_drawdown_from_trades(aggregated_trades=aggregated_trades)
 
         if multi_currency:
             summary["quote_currency"] = "MULTI"
         elif currency:
             summary["quote_currency"] = currency
+        self._aggregate_stats_cache_key = cache_key
+        self._aggregate_stats_cache = dict(summary)
         return summary
 
-    def _max_drawdown_from_trades(self) -> float:
-        trades = self._aggregate_trades()
+    def _max_drawdown_from_trades(
+        self,
+        *,
+        aggregated_trades: Optional[Sequence[Mapping[str, Any]]] = None,
+    ) -> float:
+        trades = list(aggregated_trades) if aggregated_trades is not None else self._aggregate_trades()
         closed = []
         for trade in trades:
             closed_at = trade.get("closed_at")

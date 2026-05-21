@@ -21,6 +21,10 @@ const mockIndicator = {
     lookback_window: 50,
     threshold: 0.5,
   },
+  typed_outputs: [
+    { name: 'breakout', type: 'signal', enabled: true },
+    { name: 'retest', type: 'signal', enabled: false },
+  ],
   enabled: true,
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
@@ -70,6 +74,12 @@ describe('IndicatorCard', () => {
     it('does NOT display "Ready" status badge for stable indicators', () => {
       render(<IndicatorCard {...defaultProps} />);
       expect(screen.queryByText('Ready')).not.toBeInTheDocument();
+    });
+
+    it('shows enabled signal summary in collapsed view', () => {
+      render(<IndicatorCard {...defaultProps} />);
+      expect(screen.getByText('breakout')).toBeInTheDocument();
+      expect(screen.queryByText('retest')).not.toBeInTheDocument();
     });
 
     it('does NOT display "Awaiting first compute" text', () => {
@@ -135,6 +145,17 @@ describe('IndicatorCard', () => {
   });
 
   describe('Blocking Compute UX', () => {
+    it('hides Generate Signals when the indicator has no signal outputs', () => {
+      render(
+        <IndicatorCard
+          {...defaultProps}
+          indicator={{ ...mockIndicator, typed_outputs: [{ name: 'value_area', type: 'metric' }] }}
+          showSignalAction={false}
+        />
+      );
+      expect(screen.queryByText('Generate')).not.toBeInTheDocument();
+    });
+
     it('disables Generate Signals button during signal generation', () => {
       render(<IndicatorCard {...defaultProps} isGeneratingSignals={true} />);
       const generateButton = screen.getByRole('button', { name: /working/i });
@@ -152,8 +173,13 @@ describe('IndicatorCard', () => {
       fireEvent.click(screen.getByTitle('More actions'));
 
       // Delete should be disabled
-      const deleteButton = screen.getByText('Delete Indicator');
+      const deleteButton = screen.getByText('Delete');
       expect(deleteButton.closest('button')).toBeDisabled();
+    });
+
+    it('shows a direct edit action', () => {
+      render(<IndicatorCard {...defaultProps} />);
+      expect(screen.getByTitle('Edit indicator')).toBeInTheDocument();
     });
 
     it('keeps visibility toggle enabled during compute', () => {
@@ -165,40 +191,40 @@ describe('IndicatorCard', () => {
   });
 
   describe('Context Menu', () => {
-    it('has Runtime section with Recompute Overlays', () => {
+    it('shows a compact overflow action list', () => {
       render(<IndicatorCard {...defaultProps} />);
       fireEvent.click(screen.getByTitle('More actions'));
-      expect(screen.getByText('Runtime')).toBeInTheDocument();
-      expect(screen.getByText('Recompute Overlays')).toBeInTheDocument();
-    });
-
-    it('has Configuration section with Edit, Duplicate, Copy', () => {
-      render(<IndicatorCard {...defaultProps} />);
-      fireEvent.click(screen.getByTitle('More actions'));
-      expect(screen.getByText('Configuration')).toBeInTheDocument();
-      expect(screen.getByText('Edit Parameters')).toBeInTheDocument();
+      expect(screen.getByText('Recompute')).toBeInTheDocument();
       expect(screen.getByText('Duplicate')).toBeInTheDocument();
-      expect(screen.getByText('Copy Params JSON')).toBeInTheDocument();
+      expect(screen.getByText('Copy')).toBeInTheDocument();
+      expect(screen.getByText('Delete')).toBeInTheDocument();
     });
 
-    it('has Danger section with Delete', () => {
+    it('does not repeat Edit in the overflow menu', () => {
       render(<IndicatorCard {...defaultProps} />);
       fireEvent.click(screen.getByTitle('More actions'));
-      expect(screen.getByText('Danger')).toBeInTheDocument();
-      expect(screen.getByText('Delete Indicator')).toBeInTheDocument();
+      expect(screen.queryByText('Open Editor')).not.toBeInTheDocument();
+    });
+
+    it('does not show section headers in the overflow menu', () => {
+      render(<IndicatorCard {...defaultProps} />);
+      fireEvent.click(screen.getByTitle('More actions'));
+      expect(screen.queryByText('Runtime')).not.toBeInTheDocument();
+      expect(screen.queryByText('Configuration')).not.toBeInTheDocument();
+      expect(screen.queryByText('Danger')).not.toBeInTheDocument();
     });
 
     it('calls onDelete (opens modal) when Delete is clicked', () => {
       render(<IndicatorCard {...defaultProps} />);
       fireEvent.click(screen.getByTitle('More actions'));
-      fireEvent.click(screen.getByText('Delete Indicator'));
+      fireEvent.click(screen.getByText('Delete'));
       expect(defaultProps.onDelete).toHaveBeenCalledWith('test-indicator-1');
     });
 
-    it('calls onRecompute when Recompute Overlays is clicked', () => {
+    it('calls onRecompute when Recompute is clicked', () => {
       render(<IndicatorCard {...defaultProps} />);
       fireEvent.click(screen.getByTitle('More actions'));
-      fireEvent.click(screen.getByText('Recompute Overlays'));
+      fireEvent.click(screen.getByText('Recompute'));
       expect(defaultProps.onRecompute).toHaveBeenCalledWith('test-indicator-1');
     });
   });

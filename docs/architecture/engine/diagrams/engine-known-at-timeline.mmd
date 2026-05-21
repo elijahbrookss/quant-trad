@@ -1,0 +1,17 @@
+sequenceDiagram
+    participant Data as Ordered candles
+    participant Indicator as Indicator engine
+    participant Decision as Decision layer
+    participant Runtime as Bot runtime
+    participant Ledger as Event ledger
+    participant Views as BotLens / reports
+
+    Data->>Indicator: bar(t)
+    Indicator->>Indicator: apply_bar(t)
+    Indicator-->>Decision: snapshot outputs known_at=t
+    Decision-->>Runtime: decision artifact for t
+    Runtime->>Runtime: resolve execution effects
+    Runtime-->>Ledger: append runtime/domain events
+    Ledger-->>Views: rebuild projections and datasets
+
+    Note over Indicator,Runtime: No downstream layer may use an artifact before its known_at time.

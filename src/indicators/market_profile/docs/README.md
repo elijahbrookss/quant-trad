@@ -2,4 +2,4 @@
 
 This folder contains indicator-specific contracts and semantics for Market Profile.
 
-Platform-wide rules live in `docs/agents/`.
+Platform-wide rules live in `docs/contracts/`.

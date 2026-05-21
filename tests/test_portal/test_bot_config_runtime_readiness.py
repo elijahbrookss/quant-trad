@@ -42,7 +42,7 @@ def test_runtime_readiness_blocks_non_derivatives(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "portal.backend.service.bots.bot_runtime.strategy.strategy_loader.StrategyLoader.fetch_strategy",
+        "portal.backend.service.bots.strategy_loader.StrategyLoader.fetch_strategy",
         lambda _strategy_id: strategy,
     )
     monkeypatch.setattr(
@@ -64,7 +64,7 @@ def test_runtime_readiness_blocks_derivatives_missing_margin_rates(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "portal.backend.service.bots.bot_runtime.strategy.strategy_loader.StrategyLoader.fetch_strategy",
+        "portal.backend.service.bots.strategy_loader.StrategyLoader.fetch_strategy",
         lambda _strategy_id: strategy,
     )
     monkeypatch.setattr(
@@ -90,7 +90,7 @@ def test_runtime_readiness_accepts_derivatives_with_margin_rates(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "portal.backend.service.bots.bot_runtime.strategy.strategy_loader.StrategyLoader.fetch_strategy",
+        "portal.backend.service.bots.strategy_loader.StrategyLoader.fetch_strategy",
         lambda _strategy_id: strategy,
     )
     monkeypatch.setattr(

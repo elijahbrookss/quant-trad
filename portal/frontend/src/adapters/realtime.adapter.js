@@ -1,7 +1,8 @@
 import { createLogger } from '../utils/logger.js'
+import { API_ORIGIN } from '../config/appConfig.js'
 
 const log = createLogger('RealtimeAdapter')
-const API_BASE = import.meta.env.REACT_APP_API_BASE_URL || 'http://localhost:8000'
+const API_BASE = API_ORIGIN || 'http://localhost:8000'
 
 function normalizeBase(base = API_BASE) {
   return String(base || '').trim() || 'http://localhost:8000'
