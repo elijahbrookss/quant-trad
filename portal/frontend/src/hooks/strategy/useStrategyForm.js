@@ -290,14 +290,12 @@ const useStrategyForm = ({ open, initialValues, onSubmit, availableATMTemplates 
       setSymbolsInput(initialSlots.map((slot) => slot.symbol).filter(Boolean).join(', '))
       setRiskSettings((prev) => ({
         ...prev,
-        atrPeriod: initialValues.atm_template?.initial_stop?.atr_period ?? prev.atrPeriod,
-        atrMultiplier: initialValues.atm_template?.initial_stop?.atr_multiplier ?? prev.atrMultiplier,
         baseRiskPerTrade:
-          initialValues.base_risk_per_trade !== undefined
-            ? Math.max(MIN_BASE_RISK, initialValues.base_risk_per_trade || MIN_BASE_RISK)
+          initialValues.risk_config?.base_risk_per_trade !== undefined
+            ? Math.max(MIN_BASE_RISK, initialValues.risk_config?.base_risk_per_trade || MIN_BASE_RISK)
             : prev.baseRiskPerTrade,
         globalRiskMultiplier:
-          initialValues.global_risk_multiplier ?? initialValues.atm_template?.risk?.global_risk_multiplier ?? prev.globalRiskMultiplier,
+          initialValues.risk_config?.global_risk_multiplier ?? prev.globalRiskMultiplier,
       }))
     } else {
       setForm({
@@ -428,24 +426,7 @@ const useStrategyForm = ({ open, initialValues, onSubmit, availableATMTemplates 
         rawBaseRisk === '' ? '' : Math.max(MIN_BASE_RISK, Number(rawBaseRisk) || MIN_BASE_RISK)
     }
     setRiskSettings((prev) => {
-      const next = { ...prev, ...normalizedPatch }
-      setForm((current) => ({
-        ...current,
-        atm_template: cloneATMTemplate({
-          ...current.atm_template,
-          initial_stop: {
-            ...(current.atm_template?.initial_stop || {}),
-            mode: 'atr',
-            atr_period: next.atrPeriod ?? current.atm_template?.initial_stop?.atr_period ?? 14,
-            atr_multiplier: next.atrMultiplier ?? current.atm_template?.initial_stop?.atr_multiplier ?? 1.0,
-          },
-          risk: {
-            ...(current.atm_template?.risk || {}),
-            base_risk_per_trade: next.baseRiskPerTrade ?? current.atm_template?.risk?.base_risk_per_trade,
-          },
-        }),
-      }))
-      return next
+      return { ...prev, ...normalizedPatch }
     })
   }, [])
 
@@ -567,7 +548,7 @@ const useStrategyForm = ({ open, initialValues, onSubmit, availableATMTemplates 
         return payload
       })
       .filter(Boolean)
-    const riskOverrides = cleanedSlots.reduce((acc, slot) => {
+    const instrumentMultipliers = cleanedSlots.reduce((acc, slot) => {
       if (slot.risk_multiplier !== undefined && slot.risk_multiplier !== null) {
         acc[slot.symbol] = slot.risk_multiplier
       }
@@ -583,23 +564,14 @@ const useStrategyForm = ({ open, initialValues, onSubmit, availableATMTemplates 
       exchange: null,
       instrument_slots: cleanedSlots,
       atm_template_id: atmMode === 'existing' ? selectedATMTemplateId || null : null,
-      base_risk_per_trade: Number.isFinite(baseRiskValue) ? baseRiskValue : null,
-      global_risk_multiplier: Number.isFinite(globalRisk) ? globalRisk : null,
-      risk_overrides: riskOverrides,
+      risk_config: {
+        base_risk_per_trade: Number.isFinite(baseRiskValue) ? baseRiskValue : null,
+        global_risk_multiplier: Number.isFinite(globalRisk) ? globalRisk : null,
+        instrument_multipliers: instrumentMultipliers,
+      },
       atm_template: stripInstrumentTemplateFields(cloneATMTemplate({
         ...form.atm_template,
         name: templateName,
-        initial_stop: {
-          ...(form.atm_template?.initial_stop || {}),
-          mode: 'atr',
-          atr_period: riskSettings.atrPeriod ?? form.atm_template?.initial_stop?.atr_period ?? 14,
-          atr_multiplier: riskSettings.atrMultiplier ?? form.atm_template?.initial_stop?.atr_multiplier ?? 1.0,
-        },
-        risk: {
-          ...(form.atm_template?.risk || {}),
-          base_risk_per_trade: Number.isFinite(baseRiskValue) ? baseRiskValue : form.atm_template?.risk?.base_risk_per_trade,
-          global_risk_multiplier: Number.isFinite(globalRisk) ? globalRisk : form.atm_template?.risk?.global_risk_multiplier,
-        },
       })),
     }
     const savingStartedAt = Date.now()
@@ -709,7 +681,7 @@ const useStrategyForm = ({ open, initialValues, onSubmit, availableATMTemplates 
 
   const steps = [
     { id: 0, title: 'Basic setup', description: '' },
-    { id: 1, title: 'Risk & ATR', description: 'Define ATR-based R and per-symbol overrides.' },
+    { id: 1, title: 'Risk & sizing', description: 'Set capital risk and per-symbol sizing multipliers.' },
     { id: 2, title: 'ATM template', description: 'Stops, targets, stop adjustments, and trailing.' },
     { id: 3, title: 'Review', description: 'Confirm the saved strategy and jump back to edit.' },
   ]

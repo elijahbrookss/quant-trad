@@ -5,7 +5,6 @@ from matplotlib import patches
 from mplfinance.plotting import make_addplot
 
 from indicators.base import ComputeIndicator
-from indicators.config import DataContext
 
 def _to_unix_s(ts) -> int:
     ts = pd.Timestamp(ts)
@@ -46,31 +45,6 @@ class VWAPIndicator(ComputeIndicator):
         self.stddev_multipliers = stddev_multipliers
         self.reset_by = reset_by
         self._compute()
-
-    @classmethod
-    def from_context(
-        cls,
-        provider,
-        ctx: DataContext,
-        stddev_window: int = 20,
-        stddev_multipliers: list[float] = [1.0, 2.0],
-        reset_by: str = "D"
-    ):
-        """
-        Instantiate from a DataContext and data provider.
-        Raises ValueError if no OHLCV data is returned.
-        """
-        df = provider.get_ohlcv(ctx)
-        if df is None or df.empty:
-            raise ValueError(
-                f"Missing OHLCV for {ctx.symbol} from {ctx.start} to {ctx.end}"
-            )
-        return cls(
-            df=df,
-            stddev_window=stddev_window,
-            stddev_multipliers=stddev_multipliers,
-            reset_by=reset_by
-        )
 
     def _compute(self):
         """
@@ -218,27 +192,3 @@ class VWAPIndicator(ComputeIndicator):
         Convert legend_entries (label, color) tuples into matplotlib Patch handles.
         """
         return [patches.Patch(color=color, label=label) for label, color in sorted(legend_entries)]
-
-    def build_runtime_signal_payload(
-        self,
-        *,
-        indicator_id: Optional[str] = None,
-        params: Optional[Mapping[str, Any]] = None,
-        symbol: Optional[str] = None,
-        color: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Provide canonical runtime payload for strict signal execution path."""
-        payload_params = dict(params or {})
-        if not payload_params:
-            payload_params = {
-                "stddev_window": int(self.stddev_window),
-                "stddev_multipliers": list(self.stddev_multipliers),
-                "reset_by": str(self.reset_by),
-            }
-        return {
-            "_indicator_id": str(indicator_id or ""),
-            "symbol": str(symbol or ""),
-            "signals": [],
-            "profile_params": payload_params,
-            "overlay_color": str(color).strip() if isinstance(color, str) and color.strip() else None,
-        }

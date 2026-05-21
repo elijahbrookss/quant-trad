@@ -1,0 +1,26 @@
+flowchart TD
+    prepare["Prepare<br/>deps, strategy series, wallet"]
+    warmup["Warmup<br/>walk-forward indicator state"]
+    loop["Per-bar loop"]
+    indicators["Indicator snapshots"]
+    decisions["Decision layer"]
+    execution["Execution core<br/>FAST/FULL, fills, fees, margin"]
+    wallet["Wallet/capital boundary"]
+    events["Runtime/domain events"]
+    persistence["Persistence buffers"]
+    projections["Live projections"]
+    terminal["Terminal finalization"]
+
+    prepare --> warmup --> loop
+    loop --> indicators --> decisions --> execution
+    execution --> wallet
+    wallet --> events
+    execution --> events
+    events --> persistence
+    events --> projections
+    loop --> terminal
+
+    classDef hot fill:#191b28,stroke:#fb7185,color:#ffe4e6
+    classDef truth fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
+    class loop,indicators,decisions,execution,wallet hot
+    class prepare,warmup,events,persistence,projections,terminal truth

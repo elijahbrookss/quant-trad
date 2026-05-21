@@ -1,0 +1,283 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Observability budget dashboard. This view verifies diagnostics stay cheaper than runtime and shows DB write pressure caused by the exporter itself.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "title": "Runtime Hotpath Control",
+      "type": "link",
+      "url": "/d/qt-runtime-hotpath-control"
+    },
+    {
+      "title": "BotLens Transport Control",
+      "type": "link",
+      "url": "/d/qt-botlens-transport-control"
+    }
+  ],
+  "panels": [
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), CONCAT_WS(' / ', metric_name, NULLIF(storage_target, '')) AS metric, max(p95_value)::double precision AS value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE $__timeFilter(bucket_start) AND metric_name IN ('observability_export_db_ms','db_write_ms','db_write_round_trip_ms','db_write_payload_build_ms','persistence_wait_ms') AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' GROUP BY 1,2 ORDER BY 1;",
+          "refId": "A"
+        }
+      ],
+      "title": "Exporter And DB Write P95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), CONCAT_WS(' / ', metric_name, NULLIF(storage_target, '')) AS metric, sum(value_sum)::double precision AS value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE $__timeFilter(bucket_start) AND metric_name IN ('observability_raw_samples_seen','observability_rollup_rows_written','observability_export_errors','db_write_rows_total','db_write_attempted_rows_total') AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' GROUP BY 1,2 ORDER BY 1;",
+          "refId": "A"
+        }
+      ],
+      "title": "Sample, Row, And Error Volume",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), COALESCE(NULLIF(storage_target, ''), 'metric_rollups') AS metric, max(latest_value)::double precision AS value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE $__timeFilter(bucket_start) AND metric_name='observability_rollup_reduction_ratio' AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' GROUP BY 1,2 ORDER BY 1;",
+          "refId": "A"
+        }
+      ],
+      "title": "Rollup Reduction Ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "id": 4,
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT bucket_start AS time, component, metric_name, storage_target, pipeline_stage, message_kind, bot_id, run_id, ROUND(p95_value::numeric, 2)::double precision AS p95, ROUND(p99_value::numeric, 2)::double precision AS p99, ROUND(value_max::numeric, 2)::double precision AS max, sample_count FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE $__timeFilter(bucket_start) AND metric_name IN ('observability_export_db_ms','db_write_ms','db_write_round_trip_ms','db_write_payload_build_ms','persistence_wait_ms') AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' ORDER BY value_max DESC LIMIT 50;",
+          "refId": "A"
+        }
+      ],
+      "title": "Worst Storage Buckets",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "id": 5,
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT observed_at AS time, level, event_name, component, bot_id, run_id, storage_target, failure_mode, message, details FROM observability_events.botlens_backend_events_v1 WHERE $__timeFilter(observed_at) AND event_name IN ('observability_export_queue_overflow','db_write_slow','botlens_observability_metric_export_failed','botlens_observability_event_export_failed') AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' ORDER BY observed_at DESC LIMIT 100;",
+          "refId": "A"
+        }
+      ],
+      "title": "Observability Budget Incidents",
+      "type": "table"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": [
+    "quant-trad",
+    "observability",
+    "cost"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "definition": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT bot_id AS __text, bot_id AS __value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE bot_id IS NOT NULL ORDER BY 1;",
+        "hide": 0,
+        "includeAll": false,
+        "label": "bot_id",
+        "name": "bot_id",
+        "options": [],
+        "query": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT bot_id AS __text, bot_id AS __value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE bot_id IS NOT NULL ORDER BY 1;",
+        "refresh": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "definition": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT run_id AS __text, run_id AS __value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE run_id IS NOT NULL ORDER BY 1 DESC LIMIT 200;",
+        "hide": 0,
+        "includeAll": false,
+        "label": "run_id",
+        "name": "run_id",
+        "options": [],
+        "query": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT run_id AS __text, run_id AS __value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE run_id IS NOT NULL ORDER BY 1 DESC LIMIT 200;",
+        "refresh": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Observability Cost Control",
+  "uid": "qt-observability-cost-control",
+  "version": 1,
+  "weekStart": ""
+}

@@ -63,8 +63,12 @@ class DeterministicExecutionModel(ExecutionModel):
         order_type = intent.order_type
         if order_type == "market":
             fill_price = float(intent.requested_price or candle_close)
-            notional = fill_price * float(intent.qty)
-            fee_detail = self._fee_resolver.resolve(role="taker", notional=notional)
+            fee_detail = self._fee_resolver.resolve(
+                role="taker",
+                price=fill_price,
+                quantity=float(intent.qty),
+                contract_size=float(intent.contract_size),
+            )
             timestamp = _utc_now()
             return (
                 ExecutionOutcome(
@@ -116,8 +120,12 @@ class DeterministicExecutionModel(ExecutionModel):
                 validity_window=intent.limit_params.validity_window,
             ), None
 
-        notional = limit_price * float(intent.qty)
-        fee_detail = self._fee_resolver.resolve(role="maker", notional=notional)
+        fee_detail = self._fee_resolver.resolve(
+            role="maker",
+            price=limit_price,
+            quantity=float(intent.qty),
+            contract_size=float(intent.contract_size),
+        )
         timestamp = _utc_now()
         return (
             ExecutionOutcome(

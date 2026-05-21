@@ -1,30 +1,7 @@
-import { normalizeApiBase } from '../services/api.js';
+import { API_BASE_URL } from '../config/appConfig.js';
 import { createLogger } from '../utils/logger.js';
 
 const candleLogger = createLogger('CandleAdapter');
-
-function normalizeBase(url) {
-  if (!url) return '';
-  return url.endsWith('/') ? url.slice(0, -1) : url;
-}
-
-function resolveApiBase() {
-  const configured = normalizeBase(import.meta.env.VITE_API_BASE_URL);
-  if (configured) return configured;
-
-  if (typeof window !== 'undefined') {
-    const { protocol, hostname, port } = window.location;
-    if (port && Number(port) === 5173) {
-      return `${protocol}//${hostname}:8000`;
-    }
-    const basePort = port ? `:${port}` : '';
-    return `${protocol}//${hostname}${basePort}`;
-  }
-
-  return 'http://localhost:8000';
-}
-
-const API_BASE_URL = normalizeApiBase(resolveApiBase());
 
 /**
  * Adapter to fetch OHLCV candle data from backend API

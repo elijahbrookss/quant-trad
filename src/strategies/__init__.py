@@ -1,8 +1,10 @@
-"""Strategy evaluation helpers."""
+"""Strategy decision helpers."""
 
-from . import evaluator, markers
+from . import compiler, contracts, evaluator, template
 
 __all__ = [
+    "compiler",
+    "contracts",
     "evaluator",
-    "markers",
+    "template",
 ]

@@ -1,0 +1,27 @@
+flowchart TD
+    config["Operator/provider config"]
+    registry["Provider registry<br/>provider + venue metadata"]
+    factory["Provider factory<br/>adapter construction/cache"]
+    adapter["Provider adapter<br/>external API anti-corruption"]
+    credentials["Credential store"]
+    api["External provider API"]
+    persistence["Provider persistence/cache<br/>raw candles + closures"]
+    continuity["Continuity classifier<br/>sparse/gap summary"]
+    market["Market services<br/>candle/instrument APIs"]
+    runtime["Indicator + bot runtime"]
+
+    config --> registry
+    registry --> factory
+    factory --> adapter
+    credentials --> adapter
+    adapter <--> api
+    adapter --> persistence
+    persistence --> continuity
+    adapter --> continuity
+    continuity --> market
+    market --> runtime
+
+    classDef boundary fill:#13251d,stroke:#34d399,color:#dcfce7
+    classDef external fill:#1f2937,stroke:#94a3b8,color:#f8fafc
+    class registry,factory,adapter,credentials,persistence,continuity,market boundary
+    class api external

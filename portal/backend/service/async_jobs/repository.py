@@ -2,19 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
+from core.settings import get_settings
 from sqlalchemy import select, update
 
 from portal.backend.db import AsyncJobRecord, db
 
 
 logger = logging.getLogger(__name__)
+_ASYNC_SETTINGS = get_settings().async_jobs
 
 
 STATUS_QUEUED = "queued"
@@ -23,7 +24,7 @@ STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 STATUS_RETRY = "retry"
 TERMINAL_STATUSES = {STATUS_SUCCEEDED, STATUS_FAILED}
-DEFAULT_RUNNING_TIMEOUT_SECONDS = float(os.getenv("ASYNC_JOB_RUNNING_TIMEOUT_SECONDS", "1800"))
+DEFAULT_RUNNING_TIMEOUT_SECONDS = float(_ASYNC_SETTINGS.running_timeout_seconds)
 
 
 @dataclass(frozen=True)
@@ -58,13 +59,7 @@ def _partition_slot(partition_hash: int, partition_total: int) -> int:
 
 
 def _running_timeout_seconds() -> float:
-    raw = os.getenv("ASYNC_JOB_RUNNING_TIMEOUT_SECONDS")
-    if raw is None:
-        return max(0.0, float(DEFAULT_RUNNING_TIMEOUT_SECONDS))
-    try:
-        return max(0.0, float(raw))
-    except ValueError:
-        return max(0.0, float(DEFAULT_RUNNING_TIMEOUT_SECONDS))
+    return max(0.0, float(_ASYNC_SETTINGS.running_timeout_seconds))
 
 
 def _reclaim_stale_running_jobs(
@@ -243,6 +238,73 @@ def claim_next_job(
             partition_hash=int(record.partition_hash or 0),
         )
 
+
+def find_reusable_job(
+    *,
+    job_type: str,
+    partition_key: Optional[str],
+    request_fingerprint: str,
+    result_ttl_seconds: float,
+    limit: int = 32,
+) -> Optional[Dict[str, Any]]:
+    if not db.available:
+        raise RuntimeError("async_jobs_unavailable: database unavailable")
+    ttl_seconds = max(0.0, float(result_ttl_seconds))
+    wanted_type = str(job_type or "").strip()
+    wanted_fingerprint = str(request_fingerprint or "").strip()
+    if not wanted_type:
+        raise ValueError("job_type is required")
+    if not wanted_fingerprint:
+        raise ValueError("request_fingerprint is required")
+
+    now = _utcnow()
+    succeeded_after = now - timedelta(seconds=ttl_seconds) if ttl_seconds > 0 else None
+
+    with db.session() as session:
+        stmt = (
+            select(AsyncJobRecord)
+            .where(AsyncJobRecord.job_type == wanted_type)
+            .where(AsyncJobRecord.partition_key == partition_key)
+            .order_by(AsyncJobRecord.created_at.desc())
+            .limit(max(1, int(limit)))
+        )
+        records = list(session.execute(stmt).scalars().all())
+
+    for record in records:
+        payload = dict(record.payload or {})
+        if str(payload.get("request_fingerprint") or "").strip() != wanted_fingerprint:
+            continue
+        status = str(record.status or "").strip()
+        if status in {STATUS_QUEUED, STATUS_RUNNING, STATUS_RETRY}:
+            logger.info(
+                "async_job_reused_inflight | job_id=%s job_type=%s partition_key=%s status=%s",
+                record.id,
+                wanted_type,
+                partition_key,
+                status,
+            )
+            return {
+                "id": str(record.id),
+                "status": status,
+                "result": None,
+            }
+        if status == STATUS_SUCCEEDED:
+            finished_at = record.finished_at or record.updated_at or record.created_at
+            if ttl_seconds <= 0 or finished_at is None or finished_at < succeeded_after:
+                continue
+            logger.info(
+                "async_job_reused_result | job_id=%s job_type=%s partition_key=%s age_seconds=%s",
+                record.id,
+                wanted_type,
+                partition_key,
+                int((now - finished_at).total_seconds()) if finished_at is not None else None,
+            )
+            return {
+                "id": str(record.id),
+                "status": status,
+                "result": dict(record.result or {}) if isinstance(record.result, dict) else record.result,
+            }
+    return None
 
 
 def complete_job(job_id: str, result: Mapping[str, Any]) -> None:

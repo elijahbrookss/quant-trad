@@ -101,6 +101,7 @@ def test_coinbase_runtime_duplicate_signal_idempotency():
     first_consumed, chosen, last = consume_signals(signals, epoch=10, last_consumed_epoch=0)
     second_consumed, _, _ = consume_signals(signals, epoch=10, last_consumed_epoch=last)
 
-    assert chosen == "long"
+    assert chosen is not None
+    assert chosen.direction == "long"
     assert len(first_consumed) == 2
     assert second_consumed == []

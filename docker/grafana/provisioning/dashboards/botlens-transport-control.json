@@ -1,0 +1,314 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "BotLens transport dashboard for bounded live-state delivery: payload size, ingest split timing, projector queues, replay/reset pressure, and viewer fanout.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "title": "Runtime Hotpath Control",
+      "type": "link",
+      "url": "/d/qt-runtime-hotpath-control"
+    },
+    {
+      "title": "Observability Cost Control",
+      "type": "link",
+      "url": "/d/qt-observability-cost-control"
+    }
+  ],
+  "panels": [
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 14,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), CASE WHEN metric_name='ingest_receive_wait_ms' THEN 'ingest_receive_wait_ms' WHEN metric_name='ingest_json_decode_ms' THEN 'ingest_json_decode_ms' WHEN metric_name='ingest_route_ms' THEN 'ingest_route_ms' WHEN metric_name='telemetry_transport_send_ms' THEN 'telemetry_transport_send_ms' WHEN metric_name='telemetry_queue_wait_ms' THEN 'telemetry_queue_wait_ms' WHEN metric_name='symbol_fact_queue_wait_ms' THEN 'symbol_fact_queue_wait_ms' WHEN metric_name='symbol_projector_apply_ms' THEN 'symbol_projector_apply_ms' WHEN metric_name='fanout_delivery_ms' THEN 'fanout_delivery_ms' WHEN metric_name='viewer_broadcast_ms' THEN 'viewer_broadcast_ms' WHEN metric_name='viewer_send_ms' THEN 'viewer_send_ms' ELSE metric_name END AS metric, max(p95_value)::double precision AS value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE $__timeFilter(bucket_start) AND metric_name IN ('ingest_receive_wait_ms','ingest_json_decode_ms','ingest_route_ms','telemetry_transport_send_ms','telemetry_queue_wait_ms','symbol_fact_queue_wait_ms','symbol_projector_apply_ms','fanout_delivery_ms','viewer_broadcast_ms','viewer_send_ms') AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' AND (COALESCE(series_key, '') = '' OR COALESCE(series_key, '') ~ '${series_key:regex}') GROUP BY 1,2 ORDER BY 1;",
+          "refId": "A"
+        }
+      ],
+      "title": "Transport Stage P95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 10,
+        "x": 14,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), metric_name AS metric, max(value_max)::double precision AS value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE $__timeFilter(bucket_start) AND metric_name IN ('telemetry_payload_bytes','telemetry_transport_payload_bytes','viewer_payload_bytes','ingest_payload_bytes') AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' AND (COALESCE(series_key, '') = '' OR COALESCE(series_key, '') ~ '${series_key:regex}') GROUP BY 1,2 ORDER BY 1;",
+          "refId": "A"
+        }
+      ],
+      "title": "Payload Budget Max Bytes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), metric_name AS metric, sum(value_sum)::double precision AS value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE $__timeFilter(bucket_start) AND metric_name IN ('reset_required_total','replay_miss_total','replay_hit_total','viewer_send_fail_total','symbol_fact_dropped_total','telemetry_enqueue_drop_total','telemetry_transport_send_fail_total') AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' AND (COALESCE(series_key, '') = '' OR COALESCE(series_key, '') ~ '${series_key:regex}') GROUP BY 1,2 ORDER BY 1;",
+          "refId": "A"
+        }
+      ],
+      "title": "Replay, Reset, And Drops",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), CONCAT_WS(' / ', metric_name, NULLIF(queue_name, ''), NULLIF(series_key, '')) AS metric, max(value_max)::double precision AS value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE $__timeFilter(bucket_start) AND metric_name LIKE '%_utilization' AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' AND (COALESCE(series_key, '') = '' OR COALESCE(series_key, '') ~ '${series_key:regex}') GROUP BY 1,2 ORDER BY 1;",
+          "refId": "A"
+        }
+      ],
+      "title": "Queue Utilization Max",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "id": 5,
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT bucket_start AS time, metric_name, bot_id, run_id, series_key, queue_name, ROUND(p95_value::numeric, 2)::double precision AS p95, ROUND(p99_value::numeric, 2)::double precision AS p99, ROUND(value_max::numeric, 2)::double precision AS max, sample_count FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE $__timeFilter(bucket_start) AND metric_name IN ('ingest_receive_wait_ms','ingest_json_decode_ms','ingest_route_ms','telemetry_queue_wait_ms','telemetry_transport_send_ms','symbol_fact_queue_wait_ms','symbol_projector_apply_ms','fanout_delivery_ms','viewer_broadcast_ms','viewer_send_ms','telemetry_payload_bytes','viewer_payload_bytes','ingest_payload_bytes') AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' AND (COALESCE(series_key, '') = '' OR COALESCE(series_key, '') ~ '${series_key:regex}') ORDER BY value_max DESC LIMIT 50;",
+          "refId": "A"
+        }
+      ],
+      "title": "Worst Transport Buckets",
+      "type": "table"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": [
+    "quant-trad",
+    "botlens",
+    "transport"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "definition": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT bot_id AS __text, bot_id AS __value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE bot_id IS NOT NULL ORDER BY 1;",
+        "hide": 0,
+        "includeAll": false,
+        "label": "bot_id",
+        "name": "bot_id",
+        "options": [],
+        "query": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT bot_id AS __text, bot_id AS __value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE bot_id IS NOT NULL ORDER BY 1;",
+        "refresh": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "definition": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT run_id AS __text, run_id AS __value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE run_id IS NOT NULL ORDER BY 1 DESC LIMIT 200;",
+        "hide": 0,
+        "includeAll": false,
+        "label": "run_id",
+        "name": "run_id",
+        "options": [],
+        "query": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT run_id AS __text, run_id AS __value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE run_id IS NOT NULL ORDER BY 1 DESC LIMIT 200;",
+        "refresh": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "definition": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT series_key AS __text, series_key AS __value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE series_key IS NOT NULL ORDER BY 1;",
+        "hide": 0,
+        "includeAll": false,
+        "label": "series_key",
+        "name": "series_key",
+        "options": [],
+        "query": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT series_key AS __text, series_key AS __value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE series_key IS NOT NULL ORDER BY 1;",
+        "refresh": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "BotLens Transport Control",
+  "uid": "qt-botlens-transport-control",
+  "version": 1,
+  "weekStart": ""
+}

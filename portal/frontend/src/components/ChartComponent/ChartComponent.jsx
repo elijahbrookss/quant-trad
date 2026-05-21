@@ -12,6 +12,7 @@ import { useConnectionMonitor } from '../../hooks/useConnectionMonitor.js';
 import DropdownSelect from './DropdownSelect.jsx';
 import CredentialsModal from './CredentialsModal.jsx';
 import ChartSurface from './ChartSurface.jsx';
+import QuantLabSignalsRail from '../QuantLabSignalsRail.jsx';
 import { useLiveDataMode } from './hooks/useLiveDataMode.js';
 import { useProviderManagement } from './hooks/useProviderManagement.js';
 import { useWindowConfiguration, HISTORICAL_WINDOW_MODES, clampLookbackDays } from './hooks/useWindowConfiguration.js';
@@ -87,6 +88,28 @@ const parseTimeframeToSeconds = (rawTimeframe) => {
     return amount * 365 * 86400;
   }
   return null;
+};
+
+const findFirstAtLeast = (arr, value) => {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] < value) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+};
+
+const findNearestTimeIndex = (sortedTimes, candidate) => {
+  if (!Array.isArray(sortedTimes) || sortedTimes.length === 0) return null;
+  if (!Number.isFinite(candidate)) return null;
+  const idx = findFirstAtLeast(sortedTimes, candidate);
+  if (idx <= 0) return 0;
+  if (idx >= sortedTimes.length) return sortedTimes.length - 1;
+  const prev = sortedTimes[idx - 1];
+  const next = sortedTimes[idx];
+  return Math.abs(candidate - prev) <= Math.abs(next - candidate) ? idx - 1 : idx;
 };
 
 const buildTickMarkFormatter = (timeframeSeconds) => {
@@ -192,6 +215,9 @@ export const ChartComponent = ({ chartId }) => {
   // Context wiring.
   const { registerChart, updateChart, bumpRefresh } = useChartState();
   const chartState = useChartValue(chartId);
+  const activeSignalSelection = chartState?.activeSignalSelection && typeof chartState.activeSignalSelection === 'object'
+    ? chartState.activeSignalSelection
+    : null;
 
   // Load saved preferences on mount
   const savedPrefs = useMemo(() => loadChartPreferences(), []);
@@ -221,8 +247,10 @@ export const ChartComponent = ({ chartId }) => {
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
   const [chartStateNotice, setChartStateNotice] = useState({
     state: 'idle',
-    message: 'Preparing chart…',
+    message: 'Preparing chart',
   });
+  const [resolvedInstrument, setResolvedInstrument] = useState(null);
+  const [paneLegendEntries, setPaneLegendEntries] = useState({});
   const [isFullscreen, setIsFullscreen] = useState(false);
   const markChartState = useCallback((state, message = null) => {
     setChartStateNotice({ state, message });
@@ -232,11 +260,14 @@ export const ChartComponent = ({ chartId }) => {
   const instrumentKeyRef = useRef(null);
   const modeRef = useRef('historical');
   const dataLoadingRef = useRef(false);
+  const focusFrameRef = useRef(null);
+  const pendingFocusEpochRef = useRef(null);
   const dateRangeRef = useRef([
     new Date(Date.now() - DEFAULT_LOOKBACK_DAYS * DAY_MS),
     new Date(),
   ]);
   const lastOverlaysRef = useRef(null);
+  const candleTimesRef = useRef([]);
 
   // Window configuration hook
   const windowConfig = useWindowConfiguration({
@@ -437,6 +468,8 @@ export const ChartComponent = ({ chartId }) => {
     logger,
     setDataLoading,
     signalDetailsRef,
+    setPaneLegendEntries,
+    activeSignalSelection,
   });
 
   useEffect(() => {
@@ -456,6 +489,10 @@ export const ChartComponent = ({ chartId }) => {
   }, [dataLoading]);
 
   useEffect(() => {
+    candleTimesRef.current = Array.isArray(candleTimes) ? candleTimes : [];
+  }, [candleTimes]);
+
+  useEffect(() => {
     datasourceRef.current = datasource;
   }, [datasource]);
 
@@ -470,6 +507,103 @@ export const ChartComponent = ({ chartId }) => {
   useEffect(() => {
     venueRef.current = providerMgmt.venueId;
   }, [providerMgmt.venueId]);
+
+  const focusAtTime = useCallback((epoch, options = {}) => {
+    const chart = chartRef.current;
+    const scaleApi = chart?.timeScale?.();
+    const targetEpoch = Number(epoch);
+    if (!scaleApi || !Number.isFinite(targetEpoch)) return false;
+    const zoomMode = options?.zoomMode === 'signal' ? 'signal' : 'preserve';
+
+    debug('signal_focus_requested', {
+      targetEpoch,
+      zoomMode,
+      candleCount: candleTimesRef.current.length,
+    });
+
+    if (pendingFocusEpochRef.current === targetEpoch) {
+      return true;
+    }
+
+    pendingFocusEpochRef.current = targetEpoch;
+    if (focusFrameRef.current != null) {
+      return true;
+    }
+
+    focusFrameRef.current = window.requestAnimationFrame(() => {
+      focusFrameRef.current = null;
+      const scheduledEpoch = pendingFocusEpochRef.current;
+      pendingFocusEpochRef.current = null;
+      const scheduledChart = chartRef.current;
+      const scheduledScaleApi = scheduledChart?.timeScale?.();
+      if (!scheduledScaleApi || !Number.isFinite(scheduledEpoch)) return;
+
+      const seriesTimes = candleTimesRef.current;
+      const targetIndex = findNearestTimeIndex(seriesTimes, scheduledEpoch);
+      const currentRange = scheduledScaleApi.getVisibleRange?.();
+      const currentSpan = Number(currentRange?.to) - Number(currentRange?.from);
+      const currentLogicalRange = scheduledScaleApi.getVisibleLogicalRange?.();
+      const currentLogicalSpan = Number(currentLogicalRange?.to) - Number(currentLogicalRange?.from);
+      const timeframeSeconds = parseTimeframeToSeconds(intervalRef.current) || 3600;
+      const resolvedSpan = Number.isFinite(currentSpan) && currentSpan > 0
+        ? currentSpan
+        : timeframeSeconds * 48;
+      const snappedEpoch = Number.isFinite(targetIndex) ? seriesTimes[targetIndex] : scheduledEpoch;
+      debug('signal_focus_resolved', {
+        scheduledEpoch,
+        snappedEpoch,
+        targetIndex,
+        firstSeriesEpoch: seriesTimes[0] ?? null,
+        lastSeriesEpoch: seriesTimes.length ? seriesTimes[seriesTimes.length - 1] : null,
+        currentRangeFrom: currentRange?.from ?? null,
+        currentRangeTo: currentRange?.to ?? null,
+        currentLogicalFrom: currentLogicalRange?.from ?? null,
+        currentLogicalTo: currentLogicalRange?.to ?? null,
+        zoomMode,
+      });
+      if (Number.isFinite(targetIndex) && typeof scheduledScaleApi.setVisibleLogicalRange === 'function') {
+        const fallbackBars = Math.max(24, Math.round(resolvedSpan / timeframeSeconds));
+        const resolvedBars = Number.isFinite(currentLogicalSpan) && currentLogicalSpan > 0
+          ? currentLogicalSpan
+          : fallbackBars;
+        const targetBars = zoomMode === 'signal'
+          ? Math.max(24, Math.min(resolvedBars * 0.42, 72))
+          : resolvedBars;
+        const leftBars = Math.max(8, targetBars * 0.42);
+        const rightBars = Math.max(8, targetBars * 0.58);
+        scheduledScaleApi.setVisibleLogicalRange({
+          from: targetIndex - leftBars,
+          to: targetIndex + rightBars,
+        });
+      } else {
+        const targetSpan = zoomMode === 'signal'
+          ? Math.max(
+              timeframeSeconds * 24,
+              Math.min(resolvedSpan * 0.42, timeframeSeconds * 96),
+            )
+          : resolvedSpan;
+        const leftSpan = Math.max(timeframeSeconds * 8, targetSpan * 0.42);
+        const rightSpan = Math.max(timeframeSeconds * 8, targetSpan * 0.58);
+
+        scheduledScaleApi.setVisibleRange({
+          from: snappedEpoch - leftSpan,
+          to: snappedEpoch + rightSpan,
+        });
+      }
+      if (zoomMode !== 'signal') {
+        scheduledScaleApi.scrollToPosition?.(0, false);
+      }
+    });
+
+    return true;
+  }, [debug]);
+
+  useEffect(() => () => {
+    if (focusFrameRef.current != null) {
+      window.cancelAnimationFrame(focusFrameRef.current);
+      focusFrameRef.current = null;
+    }
+  }, []);
 
   const showWarning = useCallback((message) => {
     setRangeWarning(message);
@@ -513,10 +647,10 @@ export const ChartComponent = ({ chartId }) => {
     let loadOutcome = 'pending';
     if (!hasStreamingBaseline) {
       const loadingCopy = loaderReason === 'initial'
-        ? 'Preparing chart…'
+        ? 'Preparing chart'
         : behavior === 'append'
-          ? 'Fetching live candles…'
-          : 'Loading chart window…';
+          ? 'Fetching live candles'
+          : 'Loading chart window';
       markChartState('loading', loadingCopy);
     }
 
@@ -596,6 +730,9 @@ export const ChartComponent = ({ chartId }) => {
         });
         resp = result.candles;
         resolvedInstrumentId = result.instrumentId;
+        if (result.instrument) {
+          setResolvedInstrument(result.instrument);
+        }
         instrumentIdRef.current = resolvedInstrumentId;
         instrumentKeyRef.current = instrumentKey;
       } catch (resolveError) {
@@ -932,7 +1069,8 @@ export const ChartComponent = ({ chartId }) => {
 
     registerChart?.(chartId, {
       get chart() { return chartRef.current; },
-      get series() { return seriesRef.current; }
+      get series() { return seriesRef.current; },
+      focusAtTime,
     });
 
     void loadChartData({ loaderReason: 'initial' });
@@ -1052,6 +1190,11 @@ export const ChartComponent = ({ chartId }) => {
     syncOverlays(list);
   }, [chartState?.overlays, syncOverlays]);
 
+  useEffect(() => {
+    if (!chartState?.overlays) return;
+    syncOverlays(chartState.overlays || []);
+  }, [activeSignalSelection?.signalId, syncOverlays, chartState?.overlays]);
+
   // Apply handler.
   const handleApply = useCallback(async (overrides = {}, options = {}) => {
     const nextSymbol = overrides.symbol ?? symbol;
@@ -1108,6 +1251,7 @@ export const ChartComponent = ({ chartId }) => {
     if (isSeriesChange) {
       lastBarRef.current = null;
       barSpacingRef.current = null;
+      setResolvedInstrument(null);
       setCandleTimes([]);
       try {
         seriesRef.current?.setData?.([]);
@@ -1115,6 +1259,7 @@ export const ChartComponent = ({ chartId }) => {
         // ignore failures caused by interim series resets
       }
     }
+    setPaneLegendEntries({});
     syncOverlays([]); // clear overlays on apply
     updateChart?.(chartId, {
       symbol: nextSymbol,
@@ -1305,24 +1450,24 @@ export const ChartComponent = ({ chartId }) => {
   const busyState = chartState?.overlayLoading || chartState?.signalsLoading || dataLoading;
   const loaderActive = useBusyDelay(busyState, dataLoaderContext === 'symbol-change' ? 0 : 250);
   const loaderMessage = chartState?.signalsLoading
-    ? 'Generating signals…'
+    ? 'Generating signals'
     : chartState?.overlayLoading
-      ? 'Loading overlays…'
+      ? 'Loading overlays'
       : dataLoading
         ? dataLoaderContext === 'symbol-change'
-          ? 'Loading new instrument…'
+          ? 'Loading new instrument'
           : dataLoaderContext === 'initial'
-            ? 'Preparing chart…'
-            : 'Loading chart…'
+            ? 'Preparing chart'
+            : 'Loading chart'
         : mode === 'live'
-          ? 'Streaming latest data…'
-          : 'Loading chart…';
+          ? 'Streaming latest data'
+          : 'Loading chart';
 
-  const statusTextClass = statusStyles.text ?? 'text-slate-300';
+  const statusTextClass = 'text-slate-400';
 
   const lastRefreshCopy = useMemo(() => {
     if (dataLoading) {
-      return mode === 'live' ? 'Streaming latest data…' : 'Refreshing data…';
+      return mode === 'live' ? 'Streaming latest data' : 'Refreshing data';
     }
 
     if (!lastRefreshAt) {
@@ -1365,9 +1510,20 @@ export const ChartComponent = ({ chartId }) => {
   }, [providerMgmt.selectedVenueValue, providerMgmt.venueOptions]);
 
   const instrumentMeta = useMemo(() => {
-    const parts = [datasourceDisplay, venueDisplay].filter(Boolean);
+    const normalizedType = String(resolvedInstrument?.instrument_type || '').trim().toLowerCase();
+    const instrumentClass = normalizedType
+      ? (
+        ['future', 'futures', 'perp', 'perps', 'swap'].includes(normalizedType)
+          ? 'Derivative'
+          : normalizedType === 'spot'
+            ? 'Spot'
+            : normalizedType.charAt(0).toUpperCase() + normalizedType.slice(1)
+      )
+      : null;
+    const sourceLabel = venueDisplay || datasourceDisplay;
+    const parts = [sourceLabel, instrumentClass].filter(Boolean);
     return parts.join(' • ');
-  }, [datasourceDisplay, venueDisplay]);
+  }, [datasourceDisplay, venueDisplay, resolvedInstrument?.instrument_type]);
 
   const chartSurface = (
     <ChartSurface
@@ -1381,6 +1537,7 @@ export const ChartComponent = ({ chartId }) => {
       symbolDisplay={symbolDisplay}
       intervalDisplay={intervalDisplay}
       instrumentMeta={instrumentMeta}
+      paneLegendEntries={paneLegendEntries}
       chartStateNotice={chartStateNotice}
       windowSummary={windowConfig.windowSummary}
       palOpen={palOpen}
@@ -1395,30 +1552,30 @@ export const ChartComponent = ({ chartId }) => {
 
   return (
     <>
-      <div className="space-y-4">
+      <div className="space-y-2.5">
         {connectionNotice && (
-          <div className="flex items-start gap-3 rounded-[22px] border border-rose-500/40 bg-rose-500/10 px-5 py-4 text-sm text-rose-100 shadow-lg shadow-rose-900/40">
-            <span className="mt-0.5 text-lg">⚠️</span>
+          <div className="flex items-start gap-3 rounded-[10px] border border-rose-500/40 bg-rose-500/10 px-3.5 py-2.5 text-[11px] text-rose-100 shadow-lg shadow-rose-900/40">
+            <span className="mt-0.5 text-base">⚠️</span>
             <div>
               <p className="font-semibold tracking-tight">Connection issue</p>
-              <p className="text-xs text-rose-100/80">{connectionNotice}</p>
+              <p className="text-[9px] text-rose-100/80">{connectionNotice}</p>
             </div>
           </div>
         )}
 
         {rangeWarning && (
-          <div className="flex items-center gap-2 rounded-[22px] border border-amber-400/35 bg-amber-500/10 px-5 py-4 text-sm text-amber-100 shadow-lg shadow-amber-900/30">
-            <span className="text-lg">⚠️</span>
+          <div className="flex items-center gap-2 rounded-[10px] border border-amber-400/35 bg-amber-500/10 px-3.5 py-2.5 text-[11px] text-amber-100 shadow-lg shadow-amber-900/30">
+            <span className="text-base">⚠️</span>
             <span className="font-medium tracking-tight">{rangeWarning}</span>
           </div>
         )}
 
         {/* Trading UI control bar */}
-        <div className="rounded-3xl border border-white/8 bg-gradient-to-r from-[#0d111c]/95 via-[#0f1626]/95 to-[#0d111c]/95 shadow-[0_30px_120px_-80px_rgba(0,0,0,0.8)]">
-          <div className="flex flex-wrap items-end gap-4 border-b border-white/5 px-5 pb-4 pt-4">
-            <div className="flex flex-wrap items-end gap-4">
+        <div className="rounded-[6px] border border-white/8 bg-gradient-to-r from-[#0d111c]/95 via-[#0f1626]/95 to-[#0d111c]/95 shadow-[0_30px_120px_-80px_rgba(0,0,0,0.8)]">
+          <div className="flex flex-wrap items-end gap-3 border-b border-white/5 px-3.5 pb-2.5 pt-2.5">
+            <div className="flex flex-wrap items-end gap-3">
               <div className="flex flex-col gap-1">
-                <span className="text-[11px] uppercase tracking-[0.28em] text-slate-500">Symbol</span>
+                <span className="text-[9px] uppercase tracking-[0.2em] text-slate-500">Symbol</span>
                 <div className="relative">
                   <input
                     type="text"
@@ -1429,12 +1586,12 @@ export const ChartComponent = ({ chartId }) => {
                       if (e.key === 'Escape') handleSymbolInputChange(symbol || '');
                     }}
                     placeholder="CL, ES, BTC..."
-                    className="w-40 rounded-xl border border-white/10 bg-[#0a0f1a]/80 px-3 py-2 font-mono text-sm font-semibold uppercase tracking-[0.22em] text-slate-100 placeholder-slate-600 shadow-[0_10px_30px_rgba(0,0,0,0.35)] outline-none transition focus:border-[color:var(--accent-alpha-40)] focus:ring-2 focus:ring-[color:var(--accent-ring-strong)]"
+                    className="w-[14rem] rounded-[6px] border border-white/10 bg-[#0a0f1a]/80 px-3 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-100 placeholder-slate-600 shadow-[0_10px_30px_rgba(0,0,0,0.35)] outline-none transition focus:border-[color:var(--accent-alpha-40)] focus:ring-2 focus:ring-[color:var(--accent-ring-strong)]"
                   />
                   <button
                     type="button"
                     onClick={() => setPalOpen(true)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full bg-white/5 p-1.5 text-slate-400 transition hover:text-[color:var(--accent-text-soft)]"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded-[6px] bg-white/5 p-1 text-slate-400 transition hover:text-[color:var(--accent-text-soft)]"
                     title="Symbol palette"
                   >
                     <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1445,13 +1602,13 @@ export const ChartComponent = ({ chartId }) => {
               </div>
 
               <div className="flex flex-col gap-1">
-                <span className="text-[11px] uppercase tracking-[0.28em] text-slate-500">Timeframe</span>
-                <div className="flex items-center gap-1 rounded-2xl border border-white/10 bg-black/30 p-1">
+                <span className="text-[9px] uppercase tracking-[0.2em] text-slate-500">Timeframe</span>
+                <div className="flex items-center gap-1 rounded-[7px] border border-white/10 bg-black/30 p-1">
                   {['1m', '5m', '15m', '1h', '4h', '1d', '1w'].map((tf) => (
                     <button
                       key={tf}
                       onClick={() => setInterval(tf)}
-                      className={`rounded-xl px-3 py-1 text-xs font-semibold tracking-[0.22em] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
+                      className={`rounded-[6px] px-3 py-1 text-[10px] font-semibold tracking-[0.14em] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
                         interval === tf
                           ? 'bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)] shadow-inner ring-1 ring-[color:var(--accent-ring)]'
                           : 'text-slate-400 hover:text-slate-100 hover:bg-white/5'
@@ -1464,10 +1621,11 @@ export const ChartComponent = ({ chartId }) => {
               </div>
             </div>
 
-            <div className="ml-auto flex flex-wrap items-end gap-3">
-              <div className="w-48 min-w-[12rem]">
+            <div className="ml-auto flex flex-wrap items-center gap-6">
+              <div className="w-[17rem] min-w-[17rem]">
                 <DropdownSelect
                   label="Provider"
+                  labelMode="inline"
                   value={providerMgmt.providerId}
                   onChange={providerMgmt.handleProviderChange}
                   options={providerMgmt.providerOptions}
@@ -1475,9 +1633,10 @@ export const ChartComponent = ({ chartId }) => {
                   disabled={providerMgmt.providersLoading}
                 />
               </div>
-              <div className="w-48 min-w-[12rem]">
+              <div className="w-[17rem] min-w-[17rem]">
                 <DropdownSelect
                   label="Venue"
+                  labelMode="inline"
                   value={providerMgmt.selectedVenueValue}
                   onChange={providerMgmt.handleVenueChange}
                   options={providerMgmt.venueOptions}
@@ -1489,9 +1648,9 @@ export const ChartComponent = ({ chartId }) => {
           </div>
 
           {(providerMgmt.selectedVenueStatus.state !== 'available' || providerMgmt.selectedProviderStatus.state !== 'available') && (
-            <div className="flex items-center justify-between gap-3 border-b border-white/5 bg-black/20 px-5 py-3 text-sm text-slate-200">
+            <div className="flex items-center justify-between gap-3 border-b border-white/5 bg-black/20 px-3.5 py-2 text-[10px] text-slate-200">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="rounded-full bg-amber-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.24em] text-amber-200">Credentials</span>
+                <span className="rounded-[6px] bg-amber-500/10 px-2 py-1 text-[8px] font-semibold uppercase tracking-[0.18em] text-amber-200">Credentials</span>
                 <span>
                   {providerMgmt.selectedVenueStatus.state === 'invalid_credentials'
                     ? `Stored credentials for ${providerMgmt.selectedVenueValue || 'venue'} cannot be decrypted with the current key. Re-save API keys.`
@@ -1505,7 +1664,7 @@ export const ChartComponent = ({ chartId }) => {
               <button
                 type="button"
                 onClick={() => providerMgmt.openCredentialsModal(providerMgmt.providerId, providerMgmt.selectedVenueValue, providerMgmt.selectedVenueStatus.required?.length ? providerMgmt.selectedVenueStatus.required : providerMgmt.selectedProviderStatus.required)}
-                className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-40)] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.22em] text-[color:var(--accent-text-soft)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-10)]"
+                className="inline-flex items-center gap-2 rounded-[6px] border border-[color:var(--accent-alpha-40)] px-3 py-1.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-[color:var(--accent-text-soft)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-10)]"
               >
                 {providerMgmt.selectedVenueStatus.state === 'invalid_credentials' || providerMgmt.selectedProviderStatus.state === 'invalid_credentials'
                   ? 'Re-save API keys'
@@ -1514,12 +1673,12 @@ export const ChartComponent = ({ chartId }) => {
             </div>
           )}
 
-          <div className="flex flex-wrap items-center gap-4 px-5 py-3">
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="flex items-center gap-1 rounded-2xl border border-white/10 bg-[#0b111e]/80 p-1">
+          <div className="flex flex-wrap items-center gap-3.5 px-3.5 py-2.5">
+            <div className="flex flex-wrap items-center gap-3.5">
+              <div className="flex items-center gap-1.5 rounded-[7px] border border-white/10 bg-[#0b111e]/80 p-1">
                 <button
                   onClick={() => setMode('historical')}
-                  className={`rounded-xl px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.25em] transition ${
+                  className={`rounded-[6px] px-3.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] transition ${
                     mode === 'historical'
                       ? 'bg-white/10 text-slate-100 ring-1 ring-[color:var(--accent-ring)]'
                       : 'text-slate-500 hover:text-slate-200'
@@ -1530,7 +1689,7 @@ export const ChartComponent = ({ chartId }) => {
                 <button
                   onClick={() => setMode('live')}
                   disabled={!supportsLive}
-                  className={`rounded-xl px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.25em] transition ${
+                  className={`rounded-[6px] px-3.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] transition ${
                     mode === 'live'
                       ? 'bg-[color:var(--accent-alpha-25)] text-[color:var(--accent-text-strong)] ring-1 ring-[color:var(--accent-ring-strong)]'
                       : 'text-slate-500 hover:text-slate-200 disabled:opacity-30'
@@ -1541,11 +1700,11 @@ export const ChartComponent = ({ chartId }) => {
                 </button>
               </div>
 
-              <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-[#0b111e]/80 px-3 py-2">
-                <div className="flex items-center gap-1 rounded-xl border border-white/10 bg-black/30 p-1">
+              <div className="flex items-center gap-2.5 rounded-[7px] border border-white/10 bg-[#0b111e]/80 px-3.5 py-1.5">
+                <div className="flex items-center gap-1.5 rounded-[6px] border border-white/10 bg-black/30 p-1">
                   <button
                     onClick={() => windowConfig.handleHistoricalModeToggle(windowConfig.HISTORICAL_WINDOW_MODES.LOOKBACK)}
-                    className={`rounded-lg px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] transition ${
+                    className={`rounded-[6px] px-3.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] transition ${
                       windowConfig.isLookbackMode || liveMode
                         ? 'bg-[color:var(--accent-alpha-15)] text-[color:var(--accent-text-strong)] ring-1 ring-[color:var(--accent-ring)]'
                         : 'text-slate-400 hover:text-slate-100'
@@ -1556,7 +1715,7 @@ export const ChartComponent = ({ chartId }) => {
                   {!liveMode && (
                     <button
                       onClick={() => windowConfig.handleHistoricalModeToggle(windowConfig.HISTORICAL_WINDOW_MODES.RANGE)}
-                      className={`rounded-lg px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] transition ${
+                      className={`rounded-[6px] px-3.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] transition ${
                         windowConfig.isRangeMode && !liveMode
                           ? 'bg-white/10 text-slate-100 ring-1 ring-[color:var(--accent-ring)]'
                           : 'text-slate-400 hover:text-slate-100'
@@ -1566,17 +1725,17 @@ export const ChartComponent = ({ chartId }) => {
                     </button>
                   )}
                 </div>
-                <span className="text-xs font-semibold tracking-tight text-slate-200">{windowConfig.windowSummary}</span>
+                <span className="text-[11px] font-semibold tracking-tight text-slate-200">{windowConfig.windowSummary}</span>
               </div>
 
               {(liveMode || windowConfig.isLookbackMode) && (
-                <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-[#0b111e]/80 px-3 py-2">
-                  <span className="text-[11px] uppercase tracking-[0.25em] text-slate-500">Presets</span>
+                <div className="flex items-center gap-2 rounded-[7px] border border-white/10 bg-[#0b111e]/80 px-3.5 py-1.5">
+                  <span className="text-[9px] uppercase tracking-[0.18em] text-slate-500">Presets</span>
                   {windowConfig.quickLookbackPresets.slice(0, 5).map((preset) => (
                     <button
                       key={preset.label}
                       onClick={() => (liveMode ? windowConfig.handleLiveLookbackPresetSelect(preset.days) : windowConfig.handleHistoricalLookbackChange(preset.days))}
-                      className={`rounded-lg px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.22em] transition ${
+                      className={`rounded-[6px] px-3 py-1 text-[9px] font-semibold uppercase tracking-[0.16em] transition ${
                         (liveMode ? windowConfig.liveLookbackDays : windowConfig.historicalLookbackDays) === preset.days
                           ? 'bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)] ring-1 ring-[color:var(--accent-ring)]'
                           : 'text-slate-400 hover:text-slate-100'
@@ -1585,7 +1744,7 @@ export const ChartComponent = ({ chartId }) => {
                       {preset.label}
                     </button>
                   ))}
-                  <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-black/30 px-2 py-1">
+                  <div className="flex items-center gap-1 rounded-[6px] border border-white/10 bg-black/30 px-2.5 py-1">
                     <input
                       type="text"
                       inputMode="numeric"
@@ -1595,24 +1754,24 @@ export const ChartComponent = ({ chartId }) => {
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') (liveMode ? windowConfig.handleLiveLookbackCommit : windowConfig.handleHistoricalLookbackCommit)();
                       }}
-                      className="w-12 bg-transparent text-center text-xs font-semibold tracking-[0.22em] text-slate-100 outline-none placeholder-slate-600"
+                      className="w-12 bg-transparent text-center text-[11px] font-semibold tracking-[0.2em] text-slate-100 outline-none placeholder-slate-600"
                       placeholder="90"
                     />
-                    <span className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Days</span>
+                    <span className="text-[9px] uppercase tracking-[0.16em] text-slate-500">Days</span>
                   </div>
                 </div>
               )}
             </div>
 
-            <div className="ml-auto flex flex-wrap items-center gap-3">
-              <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-3 py-1.5 text-[11px] font-mono text-slate-400 shadow-inner">
-                <span className={`inline-block h-2 w-2 rounded-full ${dataLoading ? 'animate-pulse bg-amber-400' : 'bg-[color:var(--accent-base)]'}`} />
+            <div className="ml-auto flex flex-wrap items-center gap-2.5">
+              <div className="flex items-center gap-2 rounded-[6px] border border-white/10 bg-black/30 px-2.5 py-1 text-[9px] font-mono text-slate-400 shadow-inner">
+                <span className={`inline-block h-2 w-2 rounded-full ${dataLoading ? 'animate-pulse bg-slate-300' : 'bg-slate-500'}`} />
                 <span className={statusTextClass}>{lastRefreshCopy}</span>
               </div>
               <button
                 onClick={() => { void handleApply(); }}
                 disabled={providerBlocked}
-                className="inline-flex items-center gap-2 rounded-full bg-[color:var(--accent-alpha-25)] px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.25em] text-[color:var(--accent-text-bright)] shadow-[0_10px_40px_-12px_var(--accent-shadow-strong)] transition hover:bg-[color:var(--accent-alpha-30)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex items-center gap-2 rounded-[6px] bg-[color:var(--accent-alpha-25)] px-3 py-1.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-[color:var(--accent-text-bright)] shadow-[0_10px_40px_-12px_var(--accent-shadow-strong)] transition hover:bg-[color:var(--accent-alpha-30)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] disabled:cursor-not-allowed disabled:opacity-50"
                 title="Refresh data"
               >
                 <RotateCcw className="h-4 w-4" />
@@ -1622,7 +1781,7 @@ export const ChartComponent = ({ chartId }) => {
           </div>
 
           {windowConfig.isRangeMode && !liveMode && (
-            <div className="border-t border-white/5 bg-[#0b101b]/80 px-5 py-3">
+            <div className="border-t border-white/5 bg-[#0b101b]/80 px-3.5 py-2.5">
               <DateRangePickerComponent
                 dateRange={windowConfig.dateRange}
                 setDateRange={windowConfig.handleDateRangeSelection}
@@ -1633,12 +1792,17 @@ export const ChartComponent = ({ chartId }) => {
         </div>
 
         {connectionStatus === 'error' && connectionMessage ? (
-          <div className="px-5 py-2 text-xs bg-rose-500/10 border-b border-rose-500/30 text-rose-300">
+          <div className="px-3 py-2 text-[10px] bg-rose-500/10 border-b border-rose-500/30 text-rose-300">
             {connectionMessage}
           </div>
         ) : null}
 
-        {renderedChartSurface}
+        <div className="qt-workspace-grid">
+          <div className="min-w-0">
+            {renderedChartSurface}
+          </div>
+          <QuantLabSignalsRail chartId={chartId} />
+        </div>
       </div>
       <CredentialsModal
         isOpen={providerMgmt.credentialsModal.open}

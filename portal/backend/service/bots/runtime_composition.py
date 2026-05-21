@@ -6,15 +6,16 @@ behavior and avoid hidden deep imports for persistence and runtime control.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Protocol
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol
 
+from core.settings import get_settings
 from .bot_stream import BotStreamManager
-
-if TYPE_CHECKING:
-    from .bot_watchdog import BotWatchdog
+from .bot_watchdog import get_watchdog
+from .config_service import BotConfigService
+from .runtime_control_service import BotRuntimeControlService
+from ..storage import storage as storage_module
 
 
 class RuntimeMode(str, Enum):
@@ -25,20 +26,44 @@ class RuntimeMode(str, Enum):
     LIVE = "live"
 
 
+_BOT_RUNTIME_SETTINGS = get_settings().bot_runtime
+
+
 class BotStorageGateway(Protocol):
     """Storage boundary used by bot service/runtime control composition."""
 
     def upsert_bot(self, payload: Mapping[str, Any]) -> None: ...
-
-    def list_bot_runs(self, *, bot_id: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]: ...
-
-    def get_latest_bot_run_view_state(
+    def upsert_bot_run(self, payload: Mapping[str, Any]) -> Dict[str, Any]: ...
+    def get_bot_run(self, run_id: str) -> Optional[Dict[str, Any]]: ...
+    def get_report_materialization_status(self, run_id: str) -> Dict[str, Any]: ...
+    def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]: ...
+    def get_bot_run_lifecycle(self, run_id: str) -> Optional[Mapping[str, Any]]: ...
+    def get_bot_run_lease(self, run_id: str) -> Optional[Mapping[str, Any]]: ...
+    def acquire_bot_run_lease(
         self,
         *,
         bot_id: str,
-        run_id: Optional[str] = None,
-        series_key: Optional[str] = None,
-    ) -> Optional[Mapping[str, Any]]: ...
+        run_id: str,
+        runner_id: str,
+        lease_token: str,
+        ttl_seconds: float | int | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> Dict[str, Any]: ...
+    def release_bot_run_lease(
+        self,
+        *,
+        bot_id: str,
+        run_id: str,
+        runner_id: str | None = None,
+        lease_token: str | None = None,
+        status: str = "released",
+        metadata: Mapping[str, Any] | None = None,
+    ) -> Optional[Dict[str, Any]]: ...
+    def get_latest_bot_run_lifecycle(self, bot_id: str) -> Optional[Mapping[str, Any]]: ...
+    def record_bot_run_lifecycle_checkpoint(self, payload: Mapping[str, Any]) -> Dict[str, Any]: ...
+    def update_bot_runtime_status(self, *, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None: ...
+
+    def list_bot_runs(self, *, bot_id: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]: ...
 
 
 @dataclass(frozen=True)
@@ -67,36 +92,91 @@ def _normalize_mode(value: RuntimeMode | str | None) -> RuntimeMode:
 
 
 def _runtime_mode_from_env() -> RuntimeMode:
-    return _normalize_mode(os.getenv("BOT_RUNTIME_MODE", RuntimeMode.BACKTEST.value))
+    return _normalize_mode(_BOT_RUNTIME_SETTINGS.mode)
 
 
 def _build_storage_gateway() -> BotStorageGateway:
-    """Build the default storage gateway with lazy import-time wiring."""
-
-    from ..storage import storage as storage_module
+    """Build the default storage gateway."""
 
     class _Gateway:
         def upsert_bot(self, payload: Mapping[str, Any]) -> None:
             storage_module.upsert_bot(dict(payload))
+
+        def upsert_bot_run(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+            return storage_module.upsert_bot_run(dict(payload))
+
+        def get_bot_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+            return storage_module.get_bot_run(str(run_id))
+
+        def get_report_materialization_status(self, run_id: str) -> Dict[str, Any]:
+            return storage_module.get_report_materialization_status(str(run_id))
+
+        def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]:
+            return storage_module.get_latest_bot_runtime_run_id(str(bot_id))
+
+        def get_bot_run_lifecycle(self, run_id: str) -> Optional[Mapping[str, Any]]:
+            return storage_module.get_bot_run_lifecycle(str(run_id))
+
+        def get_bot_run_lease(self, run_id: str) -> Optional[Mapping[str, Any]]:
+            return storage_module.get_bot_run_lease(str(run_id))
+
+        def acquire_bot_run_lease(
+            self,
+            *,
+            bot_id: str,
+            run_id: str,
+            runner_id: str,
+            lease_token: str,
+            ttl_seconds: float | int | None = None,
+            metadata: Mapping[str, Any] | None = None,
+        ) -> Dict[str, Any]:
+            return storage_module.acquire_bot_run_lease(
+                bot_id=str(bot_id),
+                run_id=str(run_id),
+                runner_id=str(runner_id),
+                lease_token=str(lease_token),
+                ttl_seconds=ttl_seconds,
+                metadata=metadata,
+            )
+
+        def release_bot_run_lease(
+            self,
+            *,
+            bot_id: str,
+            run_id: str,
+            runner_id: str | None = None,
+            lease_token: str | None = None,
+            status: str = "released",
+            metadata: Mapping[str, Any] | None = None,
+        ) -> Optional[Dict[str, Any]]:
+            return storage_module.release_bot_run_lease(
+                bot_id=str(bot_id),
+                run_id=str(run_id),
+                runner_id=runner_id,
+                lease_token=lease_token,
+                status=status,
+                metadata=metadata,
+            )
+
+        def get_latest_bot_run_lifecycle(self, bot_id: str) -> Optional[Mapping[str, Any]]:
+            return storage_module.get_latest_bot_run_lifecycle(str(bot_id))
+
+        def record_bot_run_lifecycle_checkpoint(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+            return storage_module.record_bot_run_lifecycle_checkpoint(dict(payload))
+
+        def update_bot_runtime_status(self, *, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None:
+            storage_module.update_bot_runtime_status(
+                bot_id=str(bot_id),
+                run_id=str(run_id),
+                status=str(status),
+                telemetry_degraded=bool(telemetry_degraded),
+            )
 
         def list_bot_runs(self, *, bot_id: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
             rows = storage_module.list_bot_runs(bot_id=bot_id)
             if limit and int(limit) > 0:
                 return list(rows)[: int(limit)]
             return list(rows)
-
-        def get_latest_bot_run_view_state(
-            self,
-            *,
-            bot_id: str,
-            run_id: Optional[str] = None,
-            series_key: Optional[str] = None,
-        ) -> Optional[Mapping[str, Any]]:
-            return storage_module.get_latest_bot_run_view_state(
-                bot_id=bot_id,
-                run_id=run_id,
-                series_key=series_key,
-            )
 
     return _Gateway()
 
@@ -112,21 +192,15 @@ def _build_common_composition(
 ) -> RuntimeComposition:
     resolved_stream = stream_manager or BotStreamManager()
     if config_service is None:
-        from .config_service import BotConfigService
-
         resolved_config = BotConfigService()
     else:
         resolved_config = config_service
 
     resolved_storage = storage or _build_storage_gateway()
     if watchdog is None:
-        from .bot_watchdog import get_watchdog
-
         resolved_watchdog = get_watchdog()
     else:
         resolved_watchdog = watchdog
-
-    from .runtime_control_service import BotRuntimeControlService
 
     runtime_control = BotRuntimeControlService(
         resolved_config,

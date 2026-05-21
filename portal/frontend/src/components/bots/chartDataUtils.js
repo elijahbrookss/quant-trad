@@ -1,3 +1,5 @@
+import { BOTLENS_CONFIG } from '../../config/appConfig.js'
+
 export const toSec = (value) => {
   if (value == null) return value
   if (typeof value === 'number') {
@@ -16,7 +18,7 @@ export const toFiniteNumber = (value) => {
 }
 
 // Toggle verbose BotLens console diagnostics with VITE_BOTLENS_DEBUG=true
-export const BOTLENS_DEBUG = Boolean(import.meta?.env?.VITE_BOTLENS_DEBUG === 'true')
+export const BOTLENS_DEBUG = BOTLENS_CONFIG.debug
 
 export const coalesce = (...values) => {
   for (const value of values) {
@@ -25,28 +27,6 @@ export const coalesce = (...values) => {
     }
   }
   return undefined
-}
-
-export const normalizeCandles = (candles = []) => {
-  if (!Array.isArray(candles)) return []
-  const normalized = candles
-    .map((candle) => ({
-      time: toSec(candle?.time),
-      open: toFiniteNumber(candle?.open),
-      high: toFiniteNumber(candle?.high),
-      low: toFiniteNumber(candle?.low),
-      close: toFiniteNumber(candle?.close),
-    }))
-    .filter(
-      (entry) =>
-        Number.isFinite(entry.time) &&
-        Number.isFinite(entry.open) &&
-        Number.isFinite(entry.high) &&
-        Number.isFinite(entry.low) &&
-        Number.isFinite(entry.close),
-    )
-
-  return normalized.sort((a, b) => a.time - b.time)
 }
 
 export const buildCandleLookup = (candles = []) => {

@@ -13,7 +13,6 @@ PIP         := $(VENV)/bin/pip
 REQ         ?= requirements.txt
 DEV_REQ     ?= requirements-dev.txt
 REQS_HASH   := $(VENV)/.reqs.sha256
-CHANGELOG_MODEL ?= gpt-oss:20b
 
 UVICORN_APP ?= portal.backend.main:app
 UVICORN_OPTS?= --reload --host 0.0.0.0 --port 8000
@@ -25,6 +24,9 @@ COMPOSE_FILE ?= docker/docker-compose.yml
 COMPOSE_CMD  ?= docker compose -f $(COMPOSE_FILE)
 COMPOSE_BAKE ?= false
 export COMPOSE_BAKE
+
+BOTS_COMPOSE_FILE ?= docker/docker-compose.bots.yml
+BOTS_COMPOSE_CMD  ?= docker compose -f $(BOTS_COMPOSE_FILE)
 
 TSDB_PORT ?= 15432
 export TSDB_PORT
@@ -52,6 +54,44 @@ STACK_BUILD_FLAG := $(if $(filter 1 true yes on,$(BUILD)),--build,)
 
 PID_DIR     ?= .pids
 LOG_DIR     ?= logs
+LOG_TAIL    ?= 240
+
+MCP_NAME              ?= quant-trad
+MCP_API_URL           ?= http://127.0.0.1:8000
+MCP_COMMAND_TIMEOUT   ?= 7200
+MCP_QT_BIN            ?= $(abspath $(VENV)/bin/qt)
+MCP_LOG_ROOT          ?= $(abspath $(LOG_DIR))
+CODEX                 ?= codex
+
+DB_SERVICE      ?= tsdb
+BACKEND_SERVICE ?= backend
+BOT_SERVICE     ?= bot-runtime
+REPORT_EXPORT_DIR ?= $(LOG_DIR)/reports
+GOLDEN_OUT_DIR    ?= $(REPORT_EXPORT_DIR)/golden-repeatability
+LOCAL_PG_ENV = if [ -f secrets.env ]; then \
+	while IFS='=' read -r key value; do \
+		key="$${key%%[[:space:]]*}"; \
+		value="$${value%$$'\r'}"; \
+		case "$$key" in PG_DSN|POSTGRES_USER|POSTGRES_PASSWORD|POSTGRES_DB) \
+			if [ -z "$${!key:-}" ]; then \
+				export "$$key=$$value"; \
+			fi; \
+		esac; \
+	done < secrets.env; \
+	fi; \
+	export QT_LOGGING_LOKI_URL=""; \
+	export QT_LOGGING_DEBUG=false; \
+	export QT_LOGGING_LEVEL=WARNING; \
+	export MPLCONFIGDIR="$${MPLCONFIGDIR:-/tmp/matplotlib}"; \
+	mkdir -p "$$MPLCONFIGDIR"; \
+	if [ -z "$${PG_DSN:-}" ]; then \
+		: "$${POSTGRES_USER:?POSTGRES_USER or PG_DSN is required}"; \
+		: "$${POSTGRES_PASSWORD:?POSTGRES_PASSWORD or PG_DSN is required}"; \
+		: "$${POSTGRES_DB:?POSTGRES_DB or PG_DSN is required}"; \
+		export PG_DSN="postgresql+psycopg2://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@localhost:$(TSDB_PORT)/$${POSTGRES_DB}"; \
+	fi
+PYTEST_ENV = QT_LOGGING_LOKI_URL= QT_LOGGING_DEBUG=false QT_LOGGING_LEVEL=WARNING MPLCONFIGDIR=/tmp/matplotlib
+REPORT_API_TEST_TIMEOUT ?= 90s
 
 # Docs sync (Obsidian/Windows rsync friendly)
 SYNC_DOCS_SRC         ?= docs/
@@ -61,6 +101,12 @@ SYNC_DOCS_RSYNC_FLAGS ?= -az
 SYNC_DOCS_DELETE      ?= 0
 SYNC_DOCS_DELETE_FLAG := $(if $(filter 1 true yes on,$(SYNC_DOCS_DELETE)),--delete,)
 
+# Mermaid diagram rendering
+MERMAID_SRC         ?= docs/architecture
+MERMAID_CLI         ?= mmdc
+MERMAID_RENDER_ARGS ?=
+MERMAID_CLI_ARGS    ?=
+
 ## ============================== HELP ==================================== ##
 .PHONY: help
 help: ## Show this help
@@ -68,9 +114,9 @@ help: ## Show this help
 	/^[a-zA-Z0-9_.-]+:.*##/ {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 ## ========================== QUICK COMMANDS ============================== ##
-.PHONY: up down restart logs build rebuild ps sync-docs sync-logs
+.PHONY: up down restart logs build rebuild ps sync-docs architecture-svgs mermaid-svgs
 
-up: stack-up sync-docs ## Start stack (alias for stack-up, use STACK_PROFILES= to customize)
+up: stack-up mcp-ready sync-docs ## Start stack and show MCP readiness (use STACK_PROFILES= to customize)
 down: stack-down ## Stop and remove stack (alias for stack-down)
 restart: stack-restart ## Restart stack (alias for stack-restart, use BUILD=1 to rebuild)
 logs: stack-logs ## Tail logs (alias for stack-logs, use SERVICE= to filter)
@@ -112,7 +158,10 @@ sync-docs: ## Sync ./docs to external path via rsync (set SYNC_DOCS_DEST or OBSI
 	"$(SYNC_DOCS_RSYNC)" $(SYNC_DOCS_RSYNC_FLAGS) $(SYNC_DOCS_DELETE_FLAG) "$$src" "$$dest"; \
 	echo "✓ Docs synced"
 
-sync-logs: sync-docs ## Alias for docs sync (backward-compatible target name)
+architecture-svgs: mermaid-svgs ## Render docs/architecture .mmd files to sibling .svg files
+
+mermaid-svgs: ## Render .mmd files to sibling .svg files (MERMAID_SRC=path)
+	@$(PY) scripts/docs/render_mermaid_svgs.py --root "$(MERMAID_SRC)" --mmdc "$(MERMAID_CLI)" $(MERMAID_RENDER_ARGS) $(if $(strip $(MERMAID_CLI_ARGS)),-- $(MERMAID_CLI_ARGS),)
 
 ## ============================ BOOTSTRAP ================================= ##
 .PHONY: deps venv _deps_hash _ensure_python _ensure_dirs
@@ -145,14 +194,9 @@ _ensure_python:
 _ensure_dirs:
 	@mkdir -p $(PID_DIR) $(LOG_DIR)
 
-## ============================ COINBASE ============================ ##
-.PHONY: coinbase-jwt
-coinbase-jwt: ## Generate Coinbase JWT (reads secrets.env)
-	@$(PYTHON) scripts/coinbase_jwt.py --path /api/v3/brokerage/products
-
-
 ## ============================== DOCKER ================================== ##
-.PHONY: stack-up stack-stop stack-down stack-restart stack-logs stack-ps stack-build stack-rebuild fetch-ddl
+.PHONY: stack-up stack-stop stack-down stack-restart stack-logs stack-ps stack-build stack-rebuild \
+	bots-up bots-down bots-ps bots-logs
 
 stack-up: ## Start selected docker compose profiles (STACK_PROFILES=all|core|database|observability)
 	@echo "► Starting stack [$(STACK_PROFILE_DISPLAY)]"
@@ -201,92 +245,6 @@ stack-rebuild: ## Rebuild images (no cache) and restart selected profiles
 	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) build --no-cache
 	@$(MAKE) stack-up STACK_PROFILES=$(STACK_PROFILES)
 
-fetch-ddl: ## Copy TSDB schema DDL to clipboard
-	@COMPOSE_FILE="$(COMPOSE_FILE)" TSDB_SERVICE=tsdb bash scripts/fetch-tsdb-ddl.sh
-
-## =============================== QUALITY ================================ ##
-.PHONY: fmt lint typecheck test cov clean
-fmt: venv ## Format (if tools installed)
-	@echo "► Formatting (ruff/black if available)"
-	@$(PYTHON) -m black backend portal 2>/dev/null || true
-	@$(PYTHON) -m ruff check --fix backend portal 2>/dev/null || true
-
-lint: venv ## Lint
-	@echo "► Linting (ruff if available)"
-	@$(PYTHON) -m ruff check backend portal 2>/dev/null || true
-
-typecheck: venv ## Type-check
-	@echo "► Type-checking (mypy if available)"
-	@$(PYTHON) -m mypy backend 2>/dev/null || true
-
-test: venv ## Tests
-	@$(PYTHON) -m pytest -q
-
-cov: venv ## Tests + coverage
-	@$(PYTHON) -m pytest --maxfail=1 --disable-warnings -q --cov=backend --cov-report=term-missing
-
-clean: ## Remove caches/build artifacts
-	@find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-	@find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
-	@rm -rf .coverage htmlcov dist build $(PID_DIR) $(LOG_DIR) 2>/dev/null || true
-	@echo "✓ Cleaned"
-
-## ============================ GRAFANA =================================== ##
-.PHONY: grafana-backup grafana-restore grafana-list
-grafana-backup: ## Backup all Grafana dashboards to JSON files
-	@echo "► Backing up Grafana dashboards..."
-	@bash scripts/backup-grafana-dashboards.sh
-
-grafana-restore: ## Restart Grafana to reload provisioned dashboards
-	@echo "► Restarting Grafana to reload dashboards..."
-	@$(COMPOSE_CMD) --profile observability restart grafana
-	@echo "✓ Grafana restarted - dashboards will be provisioned from JSON files"
-
-grafana-list: ## List all current Grafana dashboards
-	@echo "► Current Grafana dashboards:"
-	@curl -s -u admin:admin http://localhost:3000/api/search?type=dash-db | jq -r '.[] | "  - \(.title) (uid: \(.uid))"' || echo "⚠ Could not connect to Grafana"
-
-## ============================= AUTOMATION ============================== ##
-.PHONY: changelog-pr
-changelog-pr: ## Generate changelog using the first open PR for the current branch (requires gh CLI)
-	@set -euo pipefail; \
-	command -v gh >/dev/null 2>&1 || { echo "✗ GitHub CLI (gh) is required"; exit 1; }; \
-	branch=$$(git branch --show-current); \
-	# Capture the first open PR for the current branch as TSV: number, title, head, base
-	pr_line=$$(gh pr list --state open --head "$$branch" --limit 1 --json number,title,headRefName,baseRefName --jq 'if length > 0 then [.[0].number, .[0].title, .[0].headRefName, .[0].baseRefName] | @tsv else "" end'); \
-	if [ -z "$$pr_line" ]; then echo "ℹ No open PR found for branch $$branch"; exit 1; fi; \
-	IFS=$$'\t' read -r pr_number pr_title head_ref base_ref <<<"$$pr_line"; \
-	diff_file=$${DIFF_FILE:-/tmp/changelog.diff}; \
-	model=$${CHANGELOG_MODEL:-$(CHANGELOG_MODEL)}; \
-	if [ -z "$$model" ]; then echo "✗ CHANGELOG_MODEL is empty"; exit 1; fi; \
-	release_name=$${RELEASE_NAME:-$$pr_title}; \
-	dry_flag=$${DRY_RUN:+--dry-run}; \
-	config_path=$${CHANGELOG_CONFIG:-scripts/automation/config/prompts.yaml}; \
-	echo "► Writing diff for $$base_ref..$$head_ref to $$diff_file"; \
-	git log  --pretty=format:'%h%n%s%n%b%n---' "$$base_ref..$$head_ref" > "$$diff_file"; \
-	if [ ! -s "$$diff_file" ]; then echo "⚠ Generated diff is empty"; exit 1; fi; \
-	echo "► Generating changelog for PR $$pr_number (head: $$head_ref, base: $$base_ref)"; \
-	PYTHONPATH=scripts $(PY) scripts/automation/llm_changelog.py --diff-file "$$diff_file" --branch "$$head_ref" --release-name "$$release_name" --model "$$model" --config "$$config_path" $$dry_flag
-
-.PHONY: changelog-pr-batch
-changelog-pr-batch: ## Generate changelog entries for merged PRs since BASE_BRANCH (requires gh CLI, e.g., BASE_BRANCH=develop)
-	@set -euo pipefail; \
-	if [ -z "$${BASE_BRANCH:-}" ]; then echo "✗ BASE_BRANCH is required (e.g., BASE_BRANCH=develop)"; exit 1; fi; \
-	scripts/automation/changelog_pr_batch.sh "$$BASE_BRANCH"
-
-.PHONY: branch-artifact
-branch-artifact: ## Build artifact with all commits and merged PRs for a branch (defaults to current branch)
-	@set -euo pipefail; \
-	branch=$${BRANCH:-$$(git branch --show-current)}; \
-	if [ -z "$$branch" ]; then echo "✗ Could not determine branch (not on a branch?)"; exit 1; fi; \
-	scripts/automation/branch_artifact_builder.sh "$$branch"
-
-
-BOTS_COMPOSE_FILE ?= docker/docker-compose.bots.yml
-BOTS_COMPOSE_CMD  ?= docker compose -f $(BOTS_COMPOSE_FILE)
-
-.PHONY: bots-up bots-down bots-ps bots-logs
-
 bots-up: ## Start isolated bot containers stack
 	@$(BOTS_COMPOSE_CMD) up -d
 
@@ -298,3 +256,209 @@ bots-ps: ## List isolated bot containers
 
 bots-logs: ## Tail isolated bot containers logs
 	@$(BOTS_COMPOSE_CMD) logs -f
+
+## ============================== MCP ===================================== ##
+.PHONY: mcp-ready mcp-smoke mcp-register-codex
+
+mcp-ready: ## Show MCP adapter status for Codex; stdio server is launched by the MCP host
+	@set -euo pipefail; \
+	echo ""; \
+	echo "► MCP adapter"; \
+	if [ ! -x "$(MCP_QT_BIN)" ]; then \
+		echo "  ! $(MCP_QT_BIN) not found; run make deps before MCP registration"; \
+		exit 0; \
+	fi; \
+	echo "  ✓ Command: $(MCP_QT_BIN) --api-url $(MCP_API_URL) --log-root $(MCP_LOG_ROOT) --no-audit-log mcp serve --command-timeout $(MCP_COMMAND_TIMEOUT)"; \
+	if command -v "$(CODEX)" >/dev/null 2>&1; then \
+		if "$(CODEX)" mcp get "$(MCP_NAME)" >/dev/null 2>&1; then \
+			echo "  ✓ Codex MCP alias configured: $(MCP_NAME)"; \
+		else \
+			echo "  ► Register once: make mcp-register-codex"; \
+		fi; \
+	else \
+		echo "  ! Codex CLI not found on PATH; register the command above in your MCP host"; \
+	fi
+
+mcp-smoke: venv ## Smoke test the stdio MCP server initialize handshake
+	@printf '{"jsonrpc":"2.0","id":1,"method":"initialize"}\n' | "$(MCP_QT_BIN)" --api-url "$(MCP_API_URL)" --log-root "$(MCP_LOG_ROOT)" --no-audit-log mcp serve --command-timeout 5
+
+mcp-register-codex: venv ## Register the Quant-Trad MCP stdio server with Codex CLI
+	@set -euo pipefail; \
+	command -v "$(CODEX)" >/dev/null 2>&1 || { echo "✗ $(CODEX) not found on PATH"; exit 1; }; \
+	if "$(CODEX)" mcp get "$(MCP_NAME)" >/dev/null 2>&1; then \
+		echo "✓ Codex MCP alias already configured: $(MCP_NAME)"; \
+		"$(CODEX)" mcp get "$(MCP_NAME)"; \
+	else \
+		"$(CODEX)" mcp add "$(MCP_NAME)" -- "$(MCP_QT_BIN)" --api-url "$(MCP_API_URL)" --log-root "$(MCP_LOG_ROOT)" --no-audit-log mcp serve --command-timeout "$(MCP_COMMAND_TIMEOUT)"; \
+		echo "✓ Codex MCP alias registered: $(MCP_NAME)"; \
+	fi
+
+## ============================ DEV / INFRA =============================== ##
+.PHONY: status logs-backend logs-bots backend-shell bot-shell dbshell db-query db-file \
+	forensic-run-ordering forensic-run-throughput forensic-run-event-summary forensic-run-storage-budget \
+	forensic-run-seq-gaps forensic-run-write-latency forensic-observability-storage-budget \
+	forensic-botlens-check forensic-wallet-diagnostics forensic-golden-compare \
+	test-reporting test-reporting-api test-botlens test-runtime validate-docs frontend-test frontend-build frontend-check \
+	git-status git-diff git-check check commit
+
+status: ## Show service status without docker compose ps sandbox friction
+	@echo "Core stack:"
+	@docker ps --filter "name=quant-trad" --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}'
+	@echo ""
+	@echo "Bot runtimes:"
+	@docker ps --filter "name=quant-trad-bots" --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}'
+
+logs-backend: ## Tail backend logs (LOG_TAIL=240)
+	@$(COMPOSE_CMD) --profile core logs --tail $(LOG_TAIL) -f $(BACKEND_SERVICE)
+
+logs-bots: ## Tail bot runtime logs (bot=<container> for a spawned runtime container)
+	@set -euo pipefail; \
+	if [ -n "$(strip $(bot))" ]; then \
+		docker logs --tail $(LOG_TAIL) -f "$(bot)"; \
+	else \
+		$(BOTS_COMPOSE_CMD) logs --tail $(LOG_TAIL) -f $(BOT_SERVICE); \
+	fi
+
+backend-shell: ## Open a shell in the backend service container
+	@$(COMPOSE_CMD) --profile core exec $(BACKEND_SERVICE) bash
+
+bot-shell: ## Open a shell in a bot runtime container (bot=<container> for spawned runtimes)
+	@set -euo pipefail; \
+	if [ -n "$(strip $(bot))" ]; then \
+		docker exec -it "$(bot)" bash; \
+	else \
+		$(BOTS_COMPOSE_CMD) exec $(BOT_SERVICE) bash; \
+	fi
+
+dbshell: ## Open psql inside the TimescaleDB container
+	@$(COMPOSE_CMD) --profile database exec $(DB_SERVICE) bash -lc 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
+
+db-query: ## Run one SQL statement against TimescaleDB (sql="select 1")
+	@set -euo pipefail; \
+	if [ -z "$(strip $(sql))" ]; then echo '✗ sql="..." is required'; exit 1; fi; \
+	$(COMPOSE_CMD) --profile database exec -T -e SQL="$(sql)" $(DB_SERVICE) bash -lc 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$SQL"'
+
+db-file: ## Run a SQL file against TimescaleDB (file=scripts/db/example.sql)
+	@set -euo pipefail; \
+	if [ -z "$(strip $(file))" ]; then echo "✗ file= is required"; exit 1; fi; \
+	test -f "$(file)" || { echo "✗ SQL file not found: $(file)"; exit 1; }; \
+	$(COMPOSE_CMD) --profile database exec -T $(DB_SERVICE) bash -lc 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < "$(file)"
+
+forensic-run-ordering: venv ## Forensic: check runtime event ordering health (run=<run_id>)
+	@set -euo pipefail; \
+	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
+	$(LOCAL_PG_ENV); \
+	$(PYTHON) scripts/reporting/check_run_ordering.py --run-id "$(run)"
+
+forensic-run-throughput: venv ## Forensic: summarize runtime event throughput by minute (run=<run_id>)
+	@set -euo pipefail; \
+	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
+	$(LOCAL_PG_ENV); \
+	$(PYTHON) scripts/reporting/runtime_event_diagnostics.py throughput --run-id "$(run)"
+
+forensic-run-event-summary: venv ## Forensic: summarize runtime event counts by type/name (run=<run_id>)
+	@set -euo pipefail; \
+	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
+	$(LOCAL_PG_ENV); \
+	$(PYTHON) scripts/reporting/runtime_event_diagnostics.py event-summary --run-id "$(run)"
+
+forensic-run-storage-budget: venv ## Forensic: estimate runtime event storage budget by tier (run=<optional_run_id>)
+	@set -euo pipefail; \
+	$(LOCAL_PG_ENV); \
+	$(PYTHON) scripts/reporting/runtime_event_diagnostics.py storage-budget $(if $(strip $(run)),--run-id "$(run)",)
+
+forensic-run-seq-gaps: venv ## Forensic: check runtime run_seq gaps and duplicates (run=<run_id>)
+	@set -euo pipefail; \
+	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
+	$(LOCAL_PG_ENV); \
+	$(PYTHON) scripts/reporting/runtime_event_diagnostics.py seq-gaps --run-id "$(run)" $(if $(strip $(limit)),--limit "$(limit)",)
+
+forensic-run-write-latency: venv ## Forensic: summarize runtime event DB write latency metrics (run=<run_id>)
+	@set -euo pipefail; \
+	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
+	$(LOCAL_PG_ENV); \
+	$(PYTHON) scripts/reporting/runtime_event_diagnostics.py write-latency --run-id "$(run)"
+
+forensic-observability-storage-budget: venv ## Forensic: summarize durable observability rollup storage budget (run=<optional_run_id>)
+	@set -euo pipefail; \
+	$(LOCAL_PG_ENV); \
+	$(PYTHON) scripts/reporting/runtime_event_diagnostics.py observability-storage-budget $(if $(strip $(run)),--run-id "$(run)",) $(if $(strip $(limit)),--limit "$(limit)",)
+
+forensic-botlens-check: venv ## Forensic: replay BotLens projection state from ledger (run=<run_id> symbol=<optional>)
+	@set -euo pipefail; \
+	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
+	$(LOCAL_PG_ENV); \
+	$(PYTHON) scripts/reporting/check_botlens_projection.py --run-id "$(run)" $(if $(strip $(symbol)),--symbol-key "$(symbol)",) $(if $(strip $(max_seq)),--max-seq "$(max_seq)",)
+
+forensic-wallet-diagnostics: venv ## Forensic: check wallet trace/replay diagnostics (run=<run_id> compare=<optional>)
+	@set -euo pipefail; \
+	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
+	$(LOCAL_PG_ENV); \
+	$(PYTHON) scripts/reporting/check_wallet_determinism.py --run-id "$(run)" $(if $(strip $(compare)),--compare-run-id "$(compare)",)
+
+forensic-golden-compare: venv _ensure_dirs ## Forensic: compare two completed runs as a golden candidate (left=<run_id> right=<run_id>)
+	@set -euo pipefail; \
+	if [ -z "$(strip $(left))" ] || [ -z "$(strip $(right))" ]; then echo "✗ left=<run_id> and right=<run_id> are required"; exit 1; fi; \
+	$(LOCAL_PG_ENV); \
+	$(PYTHON) scripts/reporting/golden_repeatability.py --left-run-id "$(left)" --right-run-id "$(right)" --out-dir "$(if $(strip $(out)),$(out),$(GOLDEN_OUT_DIR))" $(if $(filter 1 true yes on,$(check_prior)),--check-prior,) $(if $(filter 1 true yes on,$(allow_fail)),--no-fail,)
+
+test-reporting: venv ## Run focused reporting service tests
+	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/test_reports/test_report_artifacts.py tests/test_reports/test_report_metrics.py tests/test_portal/test_report_data.py tests/test_portal/test_report_artifact_bundle_workers.py tests/test_portal/test_report_export_bundle.py tests/test_portal/test_report_execution_mode_contract.py tests/test_portal/test_run_research_dataset.py
+
+test-reporting-api: venv ## Run report API route tests with a bounded timeout
+	@PYTHONPATH=$(PYTHONPATH) $(PYTEST_ENV) timeout $(REPORT_API_TEST_TIMEOUT) $(VENV_PYTHON) -m pytest -q tests/test_reports/test_report_contract_routes.py tests/test_reports/test_reports_endpoints.py
+
+test-botlens: venv ## Run focused BotLens and runtime projection tests
+	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/test_portal/test_botlens_*.py tests/test_portal/test_bot_run_diagnostics_projection.py tests/test_portal/test_runtime_events_repo.py tests/integration/runtime
+
+test-runtime: test-botlens ## Alias for focused BotLens/runtime tests
+
+validate-docs: venv ## Refresh architecture index and run docs contract validation
+	@$(PYTHON) scripts/docs/build_architecture_index.py
+	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_architecture_docs_index.py
+
+frontend-test: ## Run frontend unit tests
+	@$(NPM) --prefix $(FRONT_DIR) test
+
+frontend-build: ## Build frontend assets
+	@$(NPM) --prefix $(FRONT_DIR) run build
+
+frontend-check: frontend-test frontend-build ## Run frontend tests and build
+
+git-status: ## Show short git status
+	@git status --short
+
+git-diff: ## Show git diff summary and changed file status
+	@git diff --stat
+	@git diff --name-status
+
+git-check: ## Show status and run git diff whitespace checks
+	@git status --short
+	@git diff --check
+
+check: git-check validate-docs test-reporting test-botlens frontend-check ## Run standard developer/audit checks
+
+commit: ## Stage all repo changes and commit (msg="area: core change")
+	@set -euo pipefail; \
+	msg="$(msg)"; \
+	if [ -z "$$msg" ]; then echo '✗ msg="area: core change" is required'; exit 1; fi; \
+	if [[ "$$msg" == *$$'\n'* || "$$msg" == *$$'\r'* ]]; then echo "✗ commit message must be one line"; exit 1; fi; \
+	if [[ ! "$$msg" =~ ^[^:\ ]([^:]*)?:\ .+ ]]; then echo '✗ commit message must match "<area>: <core change>"'; exit 1; fi; \
+	if [ "$${#msg}" -gt 72 ]; then echo "✗ commit message is $${#msg} chars; keep it at 72 or less"; exit 1; fi; \
+	git diff --check; \
+	git add -A; \
+	if git diff --cached --quiet; then echo "✗ no changes staged for commit"; exit 1; fi; \
+	git diff --cached --check; \
+	git commit -m "$$msg"; \
+	echo "✓ commit $$(git rev-parse --short HEAD)"
+
+## =============================== QUALITY ================================ ##
+.PHONY: test clean
+test: venv ## Run the Python test suite
+	@$(PYTHON) -m pytest -q
+
+clean: ## Remove caches/build artifacts; keep audit logs
+	@find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+	@find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
+	@rm -rf .coverage htmlcov dist build $(PID_DIR) 2>/dev/null || true
+	@echo "✓ Cleaned"

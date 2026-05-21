@@ -2,7 +2,22 @@
 
 from __future__ import annotations
 
-from ._shared import *
+from typing import Any, Dict, List, Optional
+
+from ._shared import BotRunRecord, SQLAlchemyError, _json_safe, _parse_optional_timestamp, _utcnow, db, logger, select
+
+
+def _merge_symbols(existing: Any, incoming: Any) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for raw in list(existing or []) + list(incoming or []):
+        symbol = str(raw or "").strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        merged.append(symbol)
+    return merged
+
 
 def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Insert or update a bot run snapshot."""
@@ -30,17 +45,17 @@ def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
         record.exchange = payload.get("exchange") or record.exchange
         symbols = payload.get("symbols")
         if symbols is not None:
-            record.symbols = list(symbols)
+            record.symbols = _merge_symbols(record.symbols, symbols)
         record.backtest_start = _parse_optional_timestamp(payload.get("backtest_start")) or record.backtest_start
         record.backtest_end = _parse_optional_timestamp(payload.get("backtest_end")) or record.backtest_end
         record.started_at = _parse_optional_timestamp(payload.get("started_at")) or record.started_at
         record.ended_at = _parse_optional_timestamp(payload.get("ended_at")) or record.ended_at
         if payload.get("summary") is not None:
-            record.summary = dict(payload.get("summary") or {})
+            record.summary = dict(_json_safe(payload.get("summary") or {}))
         if payload.get("config_snapshot") is not None:
-            record.config_snapshot = dict(payload.get("config_snapshot") or {})
+            record.config_snapshot = dict(_json_safe(payload.get("config_snapshot") or {}))
         if payload.get("decision_ledger") is not None:
-            record.decision_ledger = list(payload.get("decision_ledger") or [])
+            record.decision_ledger = list(_json_safe(payload.get("decision_ledger") or []))
         record.updated_at = now
         if record.created_at is None:
             record.created_at = now
@@ -103,7 +118,4 @@ def list_bot_runs(
             exc,
         )
         raise
-
-
-
 

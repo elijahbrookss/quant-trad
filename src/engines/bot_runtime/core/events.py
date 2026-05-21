@@ -15,6 +15,10 @@ class ExitSettlementPayload(TypedDict, total=False):
     price: float
     fee: float
     notional: float
+    fee_rate: float
+    fee_type: str
+    fee_source: str
+    fee_version: Optional[str]
     trade_id: str
     leg_id: str
     position_direction: str
@@ -36,6 +40,12 @@ class TargetFillEvent(TypedDict, total=False):
     contracts: float
     ticks: float
     direction: str
+    notional: float
+    fee_paid: float
+    fee_rate: float
+    fee_type: str
+    fee_source: str
+    fee_version: Optional[str]
     settlement: ExitSettlementPayload
 
 
@@ -51,6 +61,35 @@ class StopFillEvent(TypedDict, total=False):
     pnl: float
     ticks: float
     direction: str
+    notional: float
+    fee_paid: float
+    fee_rate: float
+    fee_type: str
+    fee_source: str
+    fee_version: Optional[str]
+    settlement: ExitSettlementPayload
+
+
+class TerminalFillEvent(TypedDict, total=False):
+    type: Literal["backtest_end", "terminal_liquidation"]
+    trade_id: str
+    price: float
+    time: str
+    currency: str
+    leg: str
+    leg_id: str
+    contracts: float
+    pnl: float
+    ticks: float
+    direction: str
+    notional: float
+    fee_paid: float
+    fee_rate: float
+    fee_type: str
+    fee_source: str
+    fee_version: Optional[str]
+    reason_code: str
+    close_reason: str
     settlement: ExitSettlementPayload
 
 
@@ -65,9 +104,12 @@ class CloseEvent(TypedDict, total=False):
     contracts: float
     direction: str
     metrics: Dict[str, object]
+    reason_code: str
+    close_reason: str
+    exit_price: float
 
 
-ExitEvent = TargetFillEvent | StopFillEvent | CloseEvent
+ExitEvent = TargetFillEvent | StopFillEvent | TerminalFillEvent | CloseEvent
 
 
 __all__ = [
@@ -75,5 +117,6 @@ __all__ = [
     "ExitEvent",
     "ExitSettlementPayload",
     "StopFillEvent",
+    "TerminalFillEvent",
     "TargetFillEvent",
 ]

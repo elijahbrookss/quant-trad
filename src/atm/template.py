@@ -332,17 +332,6 @@ def normalise_template(
             result["initial_stop"]["atr_period"] = max(_coerce_int(initial_stop_config.get("atr_period"), 14) or 14, 1)
         if initial_stop_config.get("atr_multiplier") is not None:
             result["initial_stop"]["atr_multiplier"] = float(initial_stop_config.get("atr_multiplier") or 1.0)
-    # Schema v2: nested risk object
-    risk_config = payload.get("risk")
-    if isinstance(risk_config, Mapping):
-        if "risk" not in result or not isinstance(result["risk"], dict):
-            result["risk"] = {}
-
-        if risk_config.get("global_risk_multiplier") is not None:
-            result["risk"]["global_risk_multiplier"] = _coerce_float(risk_config.get("global_risk_multiplier"), 1.0) or 1.0
-        if risk_config.get("base_risk_per_trade") is not None:
-            result["risk"]["base_risk_per_trade"] = _coerce_float(risk_config.get("base_risk_per_trade"))
-
     entries = _extract_take_profits(payload)
     if entries:
         orders, total_contracts = _normalise_take_profits(entries, result.get("contracts"))

@@ -149,12 +149,12 @@ class CoinbaseProvider(BaseDataProvider):
     def _resolve_credentials(self) -> Tuple[str, str]:
         # DB-backed provider credentials are the only supported path.
         try:
-            stored = load_credentials("COINBASE", "COINBASE_DIRECT")
+            stored = load_credentials("COINBASE", "COINBASE_DIRECT", environment="paper")
         except Exception as exc:
             logger.error("coinbase_credentials_store_error | error=%s", exc)
             raise RuntimeError(
                 "Coinbase credentials unavailable from provider credential store. "
-                "Fix PROVIDER_CREDENTIAL_KEY and re-save COINBASE credentials."
+                "Fix QT_SECURITY_PROVIDER_CREDENTIAL_KEY and re-save COINBASE credentials."
             ) from exc
 
         if not stored:

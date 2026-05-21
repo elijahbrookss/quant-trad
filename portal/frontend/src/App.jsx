@@ -1,17 +1,32 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { ChartStateProvider, useChartState, useChartValue } from './contexts/ChartStateContext'
-import { ChartComponent } from './components/ChartComponent/ChartComponent'
-import { IndicatorSection } from './components/IndicatorTab.jsx'
-import StrategyTab from './components/StrategyTab.jsx'
-import { BotPanel } from './components/bots/BotPanel.jsx'
 import { createLogger } from './utils/logger.js'
-import { Bot, ChevronLeft, ChevronRight, FileText, FlaskConical, Layers, Menu, RefreshCw, Settings, X } from 'lucide-react'
+import { Bot, ChevronLeft, ChevronRight, FileText, FlaskConical, Layers, Menu, Network, RefreshCw, Settings, X } from 'lucide-react'
 import { pingApi } from './adapters/health.adapter.js'
-import { ReportsPage } from './components/reports/ReportsPage.jsx'
-import { GlobalSettingsModal } from './components/GlobalSettingsModal.jsx'
 import { usePortalSettings } from './contexts/PortalSettingsContext.jsx'
 import { useAccentColor } from './contexts/AccentColorContext.jsx'
+import { ParticleField } from './components/ui/ParticleField.jsx'
+
+const ChartComponent = lazy(() =>
+  import('./components/ChartComponent/ChartComponent').then((module) => ({ default: module.ChartComponent })),
+)
+const IndicatorSection = lazy(() =>
+  import('./components/IndicatorTab.jsx').then((module) => ({ default: module.IndicatorSection })),
+)
+const StrategyTab = lazy(() => import('./components/StrategyTab.jsx'))
+const BotPanel = lazy(() =>
+  import('./components/bots/BotPanel.jsx').then((module) => ({ default: module.BotPanel })),
+)
+const ReportsPage = lazy(() =>
+  import('./components/reports/ReportsPage.jsx').then((module) => ({ default: module.ReportsPage })),
+)
+const SystemDeck = lazy(() =>
+  import('./features/system-deck/SystemDeck.jsx').then((module) => ({ default: module.default })),
+)
+const GlobalSettingsModal = lazy(() =>
+  import('./components/GlobalSettingsModal.jsx').then((module) => ({ default: module.GlobalSettingsModal })),
+)
 
 const navItems = [
   {
@@ -46,6 +61,14 @@ const navItems = [
     to: '/reports',
     icon: FileText,
   },
+  {
+    id: 'system-deck',
+    label: 'Atlas',
+    description: 'Living 3D memory world for completed Quant-Trad activity.',
+    kicker: 'Atlas Lens',
+    to: '/system-deck',
+    icon: Network,
+  },
 ]
 
 function ApiStatusPill({ chartId }) {
@@ -67,7 +90,7 @@ function ApiStatusPill({ chartId }) {
         : 'bg-slate-700/40 text-slate-200 border-slate-600/50'
 
   return (
-    <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.3em] transition ${tone}`}>
+    <span className={`inline-flex items-center gap-2 rounded-[6px] border px-2.5 py-1 text-[9px] uppercase tracking-[0.2em] transition ${tone}`}>
       <span className="block h-2 w-2 rounded-full bg-current" />
       {label}
     </span>
@@ -76,15 +99,26 @@ function ApiStatusPill({ chartId }) {
 
 function SectionHeading({ title, description, kicker, actions }) {
   return (
-    <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
-      <div className="space-y-3">
+    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+      <div className="space-y-1.5">
         {kicker ? (
-          <span className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">{kicker}</span>
+          <span className="text-[8px] uppercase tracking-[0.26em] text-[color:var(--accent-text-kicker)]">{kicker}</span>
         ) : null}
-        <h2 className="text-3xl font-semibold tracking-tight text-slate-100">{title}</h2>
-        <p className="max-w-2xl text-sm text-slate-400">{description}</p>
+        <h2 className="text-[1.5rem] font-semibold tracking-tight text-slate-100">{title}</h2>
+        <p className="max-w-2xl text-[11px] text-slate-400">{description}</p>
       </div>
       {actions ? <div className="w-full max-w-sm">{actions}</div> : null}
+    </div>
+  )
+}
+
+function RouteSectionFallback({ title }) {
+  return (
+    <div className="rounded-[8px] border border-white/[0.08] bg-[#151924]/40 p-4 text-[12px] text-slate-500 backdrop-blur-sm">
+      <div className="flex items-center gap-2.5">
+        <span className="block h-1.5 w-1.5 rounded-full bg-[color:var(--accent-base)] opacity-50 animate-pulse" />
+        Loading {title.toLowerCase()}…
+      </div>
     </div>
   )
 }
@@ -98,9 +132,9 @@ function Sidebar({ collapsed, open, onClose, onToggleCollapse }) {
         aria-hidden={!open}
       />
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-72 flex-col border-r border-white/5 bg-[#151924]/95 px-3 py-6 backdrop-blur transition lg:static lg:z-auto ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-white/[0.06] bg-[#151924]/72 px-2.5 py-4 backdrop-blur-xl transition lg:static lg:z-auto ${
           open ? 'translate-x-0' : '-translate-x-full'
-        } ${collapsed ? 'lg:w-24' : 'lg:w-64'} lg:translate-x-0`}
+        } ${collapsed ? 'lg:w-[5.25rem]' : 'lg:w-64'} lg:translate-x-0`}
       >
         <div className={`${collapsed ? 'flex flex-col items-center gap-3' : 'flex items-center justify-between'}`}>
           <div className={`flex items-center gap-3 ${collapsed ? '' : ''}`}>
@@ -108,21 +142,21 @@ function Sidebar({ collapsed, open, onClose, onToggleCollapse }) {
               <button
                 type="button"
                 onClick={onToggleCollapse}
-                className="group relative inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-[color:var(--accent-alpha-12)] text-[color:var(--accent-text-soft)] transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-18)]"
+                className="group relative inline-flex h-10 w-10 items-center justify-center rounded-[8px] border border-white/10 bg-[color:var(--accent-alpha-12)] text-[color:var(--accent-text-soft)] transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-18)]"
                 aria-label="Expand sidebar"
               >
                 <span className="transition group-hover:opacity-0">QT</span>
-                <ChevronRight className="pointer-events-none absolute h-4 w-4 opacity-0 transition group-hover:opacity-100" />
+                <ChevronRight className="pointer-events-none absolute h-5 w-5 opacity-0 transition group-hover:opacity-100" />
               </button>
             ) : (
-              <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-[color:var(--accent-alpha-12)] text-[color:var(--accent-text-soft)]">
+              <span className="inline-flex h-10 w-10 items-center justify-center rounded-[8px] border border-white/10 bg-[color:var(--accent-alpha-12)] text-[color:var(--accent-text-soft)]">
                 QT
               </span>
             )}
             {!collapsed ? (
               <div className="space-y-1">
-                <div className="text-sm font-semibold text-slate-100">QuantTrad</div>
-                <div className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Portal</div>
+                <div className="text-[14px] font-semibold text-slate-100">QuantTrad</div>
+                <div className="text-[9px] uppercase tracking-[0.24em] text-slate-500">Portal</div>
               </div>
             ) : null}
           </div>
@@ -131,62 +165,67 @@ function Sidebar({ collapsed, open, onClose, onToggleCollapse }) {
               <button
                 type="button"
                 onClick={onToggleCollapse}
-                className="hidden h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)] lg:inline-flex"
+                className="hidden h-9 w-9 items-center justify-center rounded-[7px] border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)] lg:inline-flex"
                 aria-label="Collapse sidebar"
               >
-                <ChevronLeft className="size-4" />
+                <ChevronLeft className="size-5" />
               </button>
               <button
                 type="button"
                 onClick={onClose}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)] lg:hidden"
+                className="inline-flex h-9 w-9 items-center justify-center rounded-[7px] border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)] lg:hidden"
                 aria-label="Close sidebar"
               >
-                <X className="size-4" />
+                <X className="size-5" />
               </button>
             </div>
           ) : null}
         </div>
 
-        <nav className="mt-8 space-y-2 text-sm">
+        <nav className="mt-6 space-y-2.5 text-[12px]">
           {navItems.map((item) => {
             const Icon = item.icon
             return (
-              <NavLink
-                key={item.id}
-                to={item.to}
-                title={item.label}
-                className={({ isActive }) =>
-                  [
-                    'flex items-center gap-3 rounded-2xl border px-3 py-3 transition',
-                    collapsed ? 'justify-center lg:px-3' : '',
-                    isActive
-                      ? 'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)] shadow-[0_20px_40px_-24px_var(--accent-shadow-strong)]'
-                      : 'border-transparent text-slate-300 hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-10)] hover:text-[color:var(--accent-text-strong)]',
-                 ]
-                    .filter(Boolean)
-                    .join(' ')
-                }
-              >
-                <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/5 text-[color:var(--accent-text-soft)]">
-                  <Icon className="size-5" />
-                </span>
-                {!collapsed ? (
-                  <div className="min-w-0">
-                    <div className="font-semibold">{item.label}</div>
-                    <div className="text-[11px] text-slate-500">{item.kicker}</div>
+              <NavLink key={item.id} to={item.to} title={item.label}>
+                {({ isActive }) => (
+                  <div
+                    className={[
+                      'rounded-[8px] border transition',
+                      collapsed ? 'flex justify-center px-3.5 py-3' : 'grid grid-cols-[3.25rem_minmax(0,1fr)] items-center gap-3 px-3.5 py-3',
+                      isActive
+                        ? 'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)] shadow-[0_20px_40px_-24px_var(--accent-shadow-strong),inset_0_0_0_1px_var(--accent-alpha-15)]'
+                        : 'border-transparent text-slate-300 hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-10)] hover:text-[color:var(--accent-text-strong)]',
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
+                  >
+                    <span
+                      className={`flex h-11 w-11 items-center justify-center rounded-[7px] transition ${
+                        isActive
+                          ? 'bg-[color:var(--accent-alpha-25)] text-[color:var(--accent-text-bright)] shadow-[0_0_18px_-4px_var(--accent-shadow-soft)]'
+                          : 'bg-white/[0.05] text-[color:var(--accent-text-soft)]'
+                      }`}
+                    >
+                      <Icon className="size-[1.25rem]" />
+                    </span>
+                    {!collapsed ? (
+                      <div className="min-w-0 space-y-0.5">
+                        <div className="truncate text-[13px] font-semibold leading-none">{item.label}</div>
+                        <div className="truncate text-[8px] uppercase tracking-[0.14em] text-slate-500">{item.kicker}</div>
+                      </div>
+                    ) : null}
                   </div>
-                ) : null}
+                )}
               </NavLink>
             )
           })}
         </nav>
 
         {!collapsed ? (
-          <div className="mt-auto rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-slate-300">
-            <div className="uppercase tracking-[0.3em] text-slate-500">Flow</div>
-            <p className="mt-2 text-sm text-slate-200">QuantLab → Strategy → Bot</p>
-            <p className="mt-1 text-[11px] text-slate-500">Each lens stays isolated to preserve walk-forward integrity.</p>
+          <div className="mt-auto rounded-[8px] border border-[color:var(--accent-alpha-20)] bg-[color:var(--accent-alpha-05)] p-3.5 text-[10px]">
+            <div className="text-[8px] uppercase tracking-[0.26em] text-[color:var(--accent-text-kicker)]">Flow</div>
+            <p className="mt-2 text-[12px] text-slate-200">QuantLab → Strategy → Bot</p>
+            <p className="mt-1 text-[9px] text-slate-500">Each lens stays isolated to preserve walk-forward integrity.</p>
           </div>
         ) : null}
       </aside>
@@ -200,12 +239,18 @@ function AppShell({ chartId }) {
   const [checkingHealth, setCheckingHealth] = useState(false)
   const healthErrorRef = useRef(null)
   const mountedRef = useRef(true)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const { settings, updateSettings } = usePortalSettings()
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => Boolean(settings?.sidebarCollapsed ?? true))
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const { settings } = usePortalSettings()
   const { setAccentColor } = useAccentColor()
   const location = useLocation()
+  const isQuantLabRoute = location.pathname.startsWith('/quantlab')
+  const isAtlasRoute = location.pathname.startsWith('/system-deck')
+  const landingPage = settings?.landingPage || '/quantlab'
+  const densityClass = settings?.uiDensity === 'comfortable' ? 'app-density-comfortable' : 'app-density-compact'
+  const motionClass = settings?.motion === 'reduced' ? 'app-motion-reduced' : 'app-motion-full'
+  const showParticleField = settings?.particleField !== false && settings?.motion !== 'reduced'
 
   useEffect(() => {
     info('app_mounted')
@@ -285,6 +330,10 @@ function AppShell({ chartId }) {
   }, [location.pathname])
 
   useEffect(() => {
+    setSidebarCollapsed(Boolean(settings?.sidebarCollapsed ?? true))
+  }, [settings?.sidebarCollapsed])
+
+  useEffect(() => {
     if (settings?.accentColor) {
       setAccentColor(settings.accentColor)
     }
@@ -299,89 +348,98 @@ function AppShell({ chartId }) {
   }, [location.pathname])
 
   return (
-    <div className="min-h-screen bg-[#14171f] bg-[radial-gradient(circle_at_top,_var(--accent-gradient-spot)_0%,_rgba(20,23,31,1)_55%)] text-slate-100">
-      <div className="flex min-h-screen">
+    <div className={`${densityClass} ${motionClass} min-h-screen text-slate-100`}>
+      {showParticleField && <ParticleField />}
+      <div className="relative z-[1] flex min-h-screen">
         <Sidebar
           collapsed={sidebarCollapsed}
           open={sidebarOpen}
           onClose={() => setSidebarOpen(false)}
-          onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
+          onToggleCollapse={() => {
+            setSidebarCollapsed((prev) => {
+              const next = !prev
+              updateSettings({ sidebarCollapsed: next })
+              return next
+            })
+          }}
         />
 
         <div className="flex min-w-0 flex-1 flex-col">
-          <header className="sticky top-0 z-30 border-b border-white/5 bg-[#1c1f2b]/90 px-6 py-4 backdrop-blur lg:px-10">
+          <header className="app-shell-header sticky top-0 z-30 border-b border-white/[0.06] bg-[#1c1f2b]/65 backdrop-blur-lg">
             <div className="flex items-center gap-3">
               <button
                 type="button"
                 onClick={() => setSidebarOpen(true)}
-                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-200 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)] lg:hidden"
+                className="inline-flex h-9 w-9 items-center justify-center rounded-[7px] border border-white/10 bg-white/5 text-slate-200 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)] lg:hidden"
                 aria-label="Open sidebar"
               >
                 <Menu className="size-5" />
               </button>
               <div className="space-y-1">
-                <span className="text-[11px] uppercase tracking-[0.35em] text-slate-500">{currentNav?.kicker}</span>
-                <div className="text-lg font-semibold text-slate-100">{currentNav?.label}</div>
+                <span className="text-[8px] uppercase tracking-[0.26em] text-slate-500">{currentNav?.kicker}</span>
+                <div className="text-[13px] font-semibold text-slate-100">{currentNav?.label}</div>
               </div>
-              <div className="ml-auto hidden items-center gap-3 text-xs text-slate-400 md:flex">
+              <div className="ml-auto hidden items-center gap-3 text-[11px] text-slate-400 md:flex">
                 <button
                   type="button"
                   onClick={() => setSettingsOpen(true)}
-                  className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)]"
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-[7px] border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)]"
                   aria-label="Open global settings"
                 >
                   <Settings className="size-4" />
                 </button>
-                <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 uppercase tracking-[0.2em]">QuantTrad</span>
+                <span className="rounded-[8px] border border-white/10 bg-white/5 px-3 py-1 text-[10px] uppercase tracking-[0.16em]">QuantTrad</span>
               </div>
             </div>
           </header>
 
-          <main className="flex-1 px-6 py-10 lg:px-10">
-            <div className="mx-auto w-full max-w-[1600px] space-y-10">
+          <main className="app-shell-main flex-1">
+            <div className={`app-section-stack flex w-full flex-col ${isQuantLabRoute || isAtlasRoute ? 'max-w-none' : 'mx-auto max-w-[1600px]'}`}>
               <Routes>
-                <Route path="/" element={<Navigate to="/quantlab" replace />} />
+                <Route path="/" element={<Navigate to={landingPage} replace />} />
                 <Route
                   path="/quantlab"
                   element={
-                    <div className="space-y-6">
-                      <SectionHeading
-                        title="QuantLab"
-                        kicker="Research Lens"
-                        description="Visualize price action, overlays, and indicator signals in a focused, minimal workspace."
-                        actions={
-                          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300">
-                            <ApiStatusPill chartId={chartId} />
-                            <button
-                              type="button"
-                              onClick={runHealthCheck}
-                              className="inline-flex h-8 items-center gap-2 rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] px-3 text-[11px] font-semibold uppercase tracking-[0.25em] text-[color:var(--accent-text-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-20)] disabled:opacity-60"
-                              aria-label="Check API health"
-                              disabled={checkingHealth}
-                            >
-                              <RefreshCw className="size-4" />
-                              Health
-                            </button>
-                            <span className="text-[11px] tracking-[0.25em] text-slate-500">{lastHealthCheckLabel}</span>
-                            {healthMessage ? (
-                              <span className="text-[11px] text-rose-300/80">{healthMessage}</span>
-                            ) : null}
-                          </div>
-                        }
-                      />
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between gap-4">
+                        <p className="min-w-0 truncate text-[10px] text-slate-400">
+                          Visualize price action, overlays, and indicator signals in a focused, minimal workspace.
+                        </p>
+                        <div className="flex shrink-0 flex-wrap items-center gap-2 text-[10px] text-slate-300">
+                          <ApiStatusPill chartId={chartId} />
+                          <button
+                            type="button"
+                            onClick={runHealthCheck}
+                            className="inline-flex h-8 items-center gap-2 rounded-[6px] border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] px-3 text-[8px] font-semibold uppercase tracking-[0.14em] text-[color:var(--accent-text-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-20)] disabled:opacity-60"
+                            aria-label="Check API health"
+                            disabled={checkingHealth}
+                          >
+                            <RefreshCw className="size-4" />
+                            Health
+                          </button>
+                          <span className="text-[7px] tracking-[0.12em] text-slate-500">{lastHealthCheckLabel}</span>
+                          {healthMessage ? (
+                            <span className="text-[7px] text-rose-300/80">{healthMessage}</span>
+                          ) : null}
+                        </div>
+                      </div>
 
-                      <div className="space-y-6">
-                        <ChartComponent chartId={chartId} />
+                      <div className="space-y-3">
+                        <Suspense fallback={<RouteSectionFallback title="QuantLab chart" />}>
+                          <ChartComponent chartId={chartId} />
+                        </Suspense>
 
-                        <section className="rounded-3xl border border-white/10 bg-gradient-to-br from-[#0f1320]/95 via-[#0c101a]/95 to-[#0b0f18]/95 p-5 shadow-[0_40px_140px_-90px_rgba(0,0,0,0.85)]">
-                          <header className="flex items-center justify-between border-b border-white/5 pb-3">
+                        <section className="rounded-[8px] border border-white/[0.08] bg-gradient-to-br from-[#0f1320]/52 via-[#0c101a]/50 to-[#0b0f18]/48 p-3.5 shadow-[0_40px_140px_-90px_rgba(0,0,0,0.7)] backdrop-blur-xl">
+                          <header className="flex items-center justify-between border-b border-white/5 pb-2">
                             <div>
-                              <h3 className="text-sm font-semibold text-slate-100">Indicators</h3>
-                              <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Overlays and signals</p>
+                              <h3 className="text-[12px] font-semibold text-slate-100">Indicators</h3>
+                              <p className="text-[9px] uppercase tracking-[0.22em] text-slate-500">Overlays and signals</p>
                             </div>
                           </header>
-                          <div className="pt-3">
-                            <IndicatorSection chartId={chartId} />
+                          <div className="pt-2">
+                            <Suspense fallback={<RouteSectionFallback title="indicator panel" />}>
+                              <IndicatorSection chartId={chartId} />
+                            </Suspense>
                           </div>
                         </section>
                       </div>
@@ -391,21 +449,15 @@ function AppShell({ chartId }) {
                 <Route
                   path="/strategy"
                   element={
-                    <div className="space-y-10">
+                    <div className="space-y-5">
                       <SectionHeading
                         title="Strategy"
-                        kicker="Decision Lens"
                         description="Author decision logic, attach indicators, and preview rule outputs without execution realism."
-                        actions={
-                          <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-slate-300">
-                            <div className="uppercase tracking-[0.3em] text-slate-500">Focus</div>
-                            <p className="mt-2 text-sm text-slate-200">Signals, rules, and ATM templates.</p>
-                            <p className="mt-1 text-[11px] text-slate-500">Execution realism stays in Bot runs.</p>
-                          </div>
-                        }
                       />
-                      <section className="rounded-3xl border border-white/8 bg-[#1a1d27]/80 p-6 shadow-[0_40px_120px_-70px_rgba(0,0,0,0.85)]">
-                        <StrategyTab chartId={chartId} />
+                      <section className="rounded-[8px] border border-white/[0.08] bg-[#171b24]/42 p-3.5 backdrop-blur-lg">
+                        <Suspense fallback={<RouteSectionFallback title="strategy workspace" />}>
+                          <StrategyTab chartId={chartId} />
+                        </Suspense>
                       </section>
                     </div>
                   }
@@ -413,50 +465,56 @@ function AppShell({ chartId }) {
                 <Route
                   path="/bots"
                   element={
-                    <div className="space-y-10">
+                    <div className="space-y-5">
                       <SectionHeading
                         title="Bots"
-                        kicker="Execution Lens"
-                        description="Run walk-forward backtests, paper sims, or live runs with realistic execution constraints."
-                        actions={
-                          <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-slate-300">
-                            <div className="uppercase tracking-[0.3em] text-slate-500">Playback</div>
-                            <p className="mt-2 text-sm text-slate-200">Trade lifecycles, stops, and targets.</p>
-                            <p className="mt-1 text-[11px] text-slate-500">All runs respect walk-forward timing.</p>
-                          </div>
-                        }
+                        description="Run walk-forward bots, monitor runtime state, and investigate failures."
                       />
-                      <section className="rounded-3xl border border-white/8 bg-[#1a1d27]/80 p-6 shadow-[0_40px_120px_-70px_rgba(0,0,0,0.85)]">
-                        <BotPanel />
+                      <section className="rounded-[8px] border border-white/[0.08] bg-[#171b24]/42 p-3.5 backdrop-blur-lg">
+                        <Suspense fallback={<RouteSectionFallback title="bot panel" />}>
+                          <BotPanel />
+                        </Suspense>
                       </section>
                     </div>
                   }
                 />
                 <Route
-                  path="/reports"
+                  path="/reports/:routeRunId?"
                   element={
-                    <div className="space-y-10">
+                    <div className="space-y-8">
                       <SectionHeading
                         title="Reports"
                         kicker="Analysis Lens"
-                        description="Review completed backtests, compare outcomes, and export performance summaries."
+                        description="Review report artifacts, inspect ratios, and prepare future run-to-run comparisons."
                         actions={
-                          <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-slate-300">
-                            <div className="uppercase tracking-[0.3em] text-slate-500">Archive</div>
-                            <p className="mt-2 text-sm text-slate-200">Every completed run becomes a report.</p>
-                            <p className="mt-1 text-[11px] text-slate-500">Open a report to see charts and trade analytics.</p>
+                          <div className="rounded-2xl border border-white/10 bg-white/5 p-3.5 text-[11px] text-slate-300">
+                            <div className="uppercase tracking-[0.28em] text-slate-500">Archive</div>
+                            <p className="mt-2 text-[13px] text-slate-200">Reports own analytics and comparison workflows.</p>
+                            <p className="mt-1 text-[10px] text-slate-500">Unknown readiness means the backend has not exposed that state yet.</p>
                           </div>
                         }
                       />
-                      <ReportsPage />
+                      <Suspense fallback={<RouteSectionFallback title="reports" />}>
+                        <ReportsPage />
+                      </Suspense>
                     </div>
                   }
                 />
-                <Route path="*" element={<Navigate to="/quantlab" replace />} />
+                <Route
+                  path="/system-deck"
+                  element={
+                    <Suspense fallback={<RouteSectionFallback title="Atlas" />}>
+                      <SystemDeck />
+                    </Suspense>
+                  }
+                />
+                <Route path="*" element={<Navigate to={landingPage} replace />} />
               </Routes>
             </div>
           </main>
-          <GlobalSettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+          <Suspense fallback={null}>
+            <GlobalSettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+          </Suspense>
         </div>
       </div>
     </div>

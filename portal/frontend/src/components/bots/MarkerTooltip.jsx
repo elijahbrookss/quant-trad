@@ -1,7 +1,8 @@
 export const MarkerTooltip = ({ markerTooltip }) => {
   if (!markerTooltip?.entries?.length) return null
   const hasSignal = Array.isArray(markerTooltip?.kinds) && markerTooltip.kinds.includes('signal')
-  const heading = hasSignal ? 'Signal Diagnostics' : 'TP / SL breakdown'
+  const hasTrade = Array.isArray(markerTooltip?.kinds) && markerTooltip.kinds.some((kind) => ['entry', 'exit', 'target', 'stop', 'backtest_end'].includes(kind))
+  const heading = hasSignal ? 'Signal Diagnostics' : hasTrade ? 'Trade Diagnostics' : 'TP / SL breakdown'
   const lines = [...new Set(markerTooltip.entries)]
   return (
     <div

@@ -2,7 +2,85 @@
 
 from __future__ import annotations
 
-from ._shared import *
+from typing import Any, Dict, Iterable, List, Mapping, Optional
+
+from ._shared import (
+    BotRecord,
+    SQLAlchemyError,
+    _json_safe,
+    _parse_optional_timestamp,
+    _utcnow,
+    db,
+    logger,
+    select,
+)
+from ....service.bots.startup_lifecycle import build_failure_payload
+
+
+def _watchdog_reason_code(reason: str) -> str:
+    normalized = str(reason or "").strip().lower()
+    if normalized.startswith("startup_container_ambiguous:"):
+        return "startup_container_ambiguous"
+    if normalized.startswith("container_not_running:"):
+        return "container_not_running"
+    if normalized.startswith("stale_heartbeat:"):
+        return "stale_heartbeat"
+    if normalized.startswith("server_restart:"):
+        return "server_restart"
+    return "watchdog_orphaned"
+
+
+def _watchdog_recoverable(reason: str) -> bool:
+    normalized = str(reason or "").strip().lower()
+    return normalized.startswith("stale_heartbeat:") or normalized.startswith("startup_container_ambiguous:")
+
+
+def _row_value(row: Any, key: str) -> Any:
+    if isinstance(row, dict):
+        return row.get(key)
+    return getattr(row, key, None)
+
+
+def _watchdog_diagnostics_metadata(diagnostics: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    if not diagnostics:
+        return {}
+    payload = _json_safe(dict(diagnostics))
+    if not isinstance(payload, dict) or not payload:
+        return {}
+    return {"watchdog_diagnostics": payload}
+
+
+def _watchdog_terminal_metadata(
+    bot_id: str,
+    reason: str,
+    diagnostics: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    normalized = str(reason or "").strip().lower()
+    metadata: Dict[str, Any] = {
+        "terminal_actor": "watchdog_stop",
+        "terminal_reason_text": str(reason or "").strip() or "watchdog_orphaned",
+    }
+    if normalized.startswith("container_not_running:"):
+        try:
+            from ....service.bots.runner import DockerBotRunner
+
+            container = DockerBotRunner.inspect_bot_container(bot_id)
+        except Exception:
+            container = {}
+        container_status = str(container.get("status") or "").strip().lower()
+        metadata["container_status"] = container_status or None
+        metadata["container_exit_code"] = container.get("exit_code")
+        metadata["container_oom_killed"] = bool(container.get("oom_killed"))
+        metadata["container_error"] = container.get("error")
+        if bool(container.get("oom_killed")):
+            metadata["terminal_actor"] = "oom_kill"
+        elif container_status in {"exited", "dead"}:
+            metadata["terminal_actor"] = "process_exit"
+        elif container_status == "missing":
+            metadata["terminal_actor"] = "unknown"
+    metadata.update(_watchdog_diagnostics_metadata(diagnostics))
+    return metadata
+
 
 def load_bots() -> List[Dict[str, Any]]:
     """Return all persisted bot configurations."""
@@ -53,14 +131,37 @@ def upsert_bot(payload: Dict[str, Any]) -> None:
                     if candidate:
                         first_strategy = candidate
             record.strategy_id = first_strategy
+            if "strategy_variant_id" in payload:
+                variant_id = payload.get("strategy_variant_id")
+                record.strategy_variant_id = str(variant_id).strip() if variant_id else None
+            if "strategy_variant_name" in payload:
+                variant_name = payload.get("strategy_variant_name")
+                record.strategy_variant_name = str(variant_name).strip() if variant_name else None
+            if "atm_template_id" in payload:
+                atm_template_id = payload.get("atm_template_id")
+                record.atm_template_id = str(atm_template_id).strip() if atm_template_id else None
+            if "resolved_params" in payload:
+                record.resolved_params = dict(_json_safe(payload.get("resolved_params") or {}))
+            if "risk_config" in payload:
+                record.risk_config = dict(_json_safe(payload.get("risk_config") or {}))
             # datasource/exchange/timeframe are no longer stored on bots; derive from strategy at runtime
             record.mode = payload.get("mode") or record.mode
             record.run_type = payload.get("run_type") or record.run_type
             record.playback_speed = 0.0
             if "risk" in payload:
                 record.risk = dict(payload.get("risk") or {})
+            if "execution_mode" in payload:
+                risk_payload = dict(record.risk or {})
+                risk_payload["execution_mode"] = payload.get("execution_mode")
+                record.risk = risk_payload
+            if "execution_behavior" in payload:
+                risk_payload = dict(record.risk or {})
+                risk_payload["execution_behavior"] = payload.get("execution_behavior")
+                record.risk = risk_payload
             if "wallet_config" in payload:
                 record.wallet_config = dict(payload.get("wallet_config") or {})
+            if "market_data_stream_policy" in payload:
+                record.market_data_stream_policy = dict(_json_safe(payload.get("market_data_stream_policy") or {}))
             if "snapshot_interval_ms" in payload:
                 record.snapshot_interval_ms = int(payload.get("snapshot_interval_ms") or 0)
             if "bot_env" in payload:
@@ -113,7 +214,11 @@ def update_bot_heartbeat(bot_id: str, runner_id: str) -> None:
         logger.warning("bot_heartbeat_failed | id=%s | error=%s", bot_id, exc)
 
 
-def mark_bot_crashed(bot_id: str, reason: str = "orphaned") -> bool:
+def mark_bot_crashed(
+    bot_id: str,
+    reason: str = "orphaned",
+    diagnostics: Optional[Mapping[str, Any]] = None,
+) -> bool:
     """Mark a bot as crashed and clear its runner ownership (BotWatchdog).
 
     Returns True if the bot was updated, False otherwise.
@@ -121,23 +226,118 @@ def mark_bot_crashed(bot_id: str, reason: str = "orphaned") -> bool:
 
     if not db.available:
         return False
+    latest_run_id = ""
     try:
+        from ....service.bots.startup_lifecycle import BotLifecyclePhase, BotLifecycleStatus, LifecycleOwner
+        from .lifecycle import get_latest_bot_run_lifecycle, record_bot_run_lifecycle_checkpoint
+
         with db.session() as session:
             record = session.get(BotRecord, bot_id)
             if record is None:
                 return False
             previous_runner = record.runner_id
-            record.status = "crashed"
+            latest_lifecycle = get_latest_bot_run_lifecycle(bot_id)
+            latest_run_id = str(_row_value(latest_lifecycle, "run_id") or "").strip()
+            latest_phase = str(_row_value(latest_lifecycle, "phase") or "").strip().lower()
+            latest_status = str(_row_value(latest_lifecycle, "status") or "").strip().lower()
+            if latest_phase in {
+                BotLifecyclePhase.COMPLETED.value,
+                BotLifecyclePhase.STOPPED.value,
+                BotLifecyclePhase.STARTUP_FAILED.value,
+                BotLifecyclePhase.CRASHED.value,
+            } or latest_status in {
+                BotLifecycleStatus.COMPLETED.value,
+                BotLifecycleStatus.STOPPED.value,
+                BotLifecycleStatus.STARTUP_FAILED.value,
+                BotLifecycleStatus.CRASHED.value,
+            }:
+                logger.info(
+                    "bot_mark_crashed_skipped_terminal | id=%s | reason=%s | phase=%s | status=%s",
+                    bot_id,
+                    reason,
+                    latest_phase or None,
+                    latest_status or None,
+                )
+                return False
+            if not latest_run_id:
+                logger.error(
+                    "bot_mark_crashed_missing_run_context | id=%s | reason=%s | previous_runner=%s",
+                    bot_id,
+                    reason,
+                    previous_runner,
+                )
+                return False
+            recoverable_watchdog_condition = _watchdog_recoverable(reason)
             record.runner_id = None
             record.heartbeat_at = None
             record.updated_at = _utcnow()
-            logger.info(
-                "bot_marked_crashed | id=%s | reason=%s | previous_runner=%s",
-                bot_id,
-                reason,
-                previous_runner,
+            if recoverable_watchdog_condition:
+                logger.warning(
+                    "bot_watchdog_recoverable_condition_recorded | id=%s | reason=%s | previous_runner=%s",
+                    bot_id,
+                    reason,
+                    previous_runner,
+                )
+            else:
+                logger.info(
+                    "bot_marked_crashed | id=%s | reason=%s | previous_runner=%s",
+                    bot_id,
+                    reason,
+                    previous_runner,
+                )
+        if latest_run_id:
+            recoverable_watchdog_condition = _watchdog_recoverable(reason)
+            terminal_metadata = (
+                {
+                    "watchdog_condition": _watchdog_reason_code(reason),
+                    "watchdog_classification": "recoverable",
+                    "recoverable": True,
+                    "watchdog_reason_text": str(reason or "").strip() or "stale_heartbeat",
+                }
+                if recoverable_watchdog_condition
+                else _watchdog_terminal_metadata(bot_id, reason, diagnostics)
             )
-            return True
+            if recoverable_watchdog_condition:
+                terminal_metadata.update(_watchdog_diagnostics_metadata(diagnostics))
+            phase = (
+                BotLifecyclePhase.DEGRADED.value
+                if recoverable_watchdog_condition
+                else BotLifecyclePhase.CRASHED.value
+            )
+            status = (
+                BotLifecycleStatus.DEGRADED.value
+                if recoverable_watchdog_condition
+                else BotLifecycleStatus.CRASHED.value
+            )
+            reason_code = _watchdog_reason_code(reason)
+            message = (
+                f"Recoverable watchdog condition observed: {reason}"
+                if recoverable_watchdog_condition
+                else f"Bot marked crashed by watchdog: {reason}"
+            )
+            failure_type = f"watchdog_{reason_code}" if recoverable_watchdog_condition else "watchdog_crash"
+            record_bot_run_lifecycle_checkpoint(
+                {
+                    "bot_id": bot_id,
+                    "run_id": latest_run_id,
+                    "phase": phase,
+                    "status": status,
+                    "owner": LifecycleOwner.WATCHDOG.value,
+                    "message": message,
+                    "metadata": terminal_metadata,
+                    "failure": build_failure_payload(
+                        phase=phase,
+                        message=message,
+                        type=failure_type,
+                        reason_code=reason_code,
+                        owner=LifecycleOwner.WATCHDOG.value,
+                    )
+                    | {"recoverable": recoverable_watchdog_condition}
+                    | {"reason": reason}
+                    | terminal_metadata,
+                }
+            )
+        return True
     except SQLAlchemyError as exc:
         logger.warning("bot_mark_crashed_failed | id=%s | error=%s", bot_id, exc)
         return False
@@ -164,7 +364,7 @@ def find_orphaned_bots(
         with db.session() as session:
             cutoff = _utcnow() - timedelta(seconds=stale_threshold_seconds)
             query = select(BotRecord).where(
-                BotRecord.status.in_(["running", "paused", "starting"])
+                BotRecord.status.in_(["running", "paused", "starting", "degraded", "telemetry_degraded"])
             )
             if runner_id:
                 query = query.where(BotRecord.runner_id == runner_id)
@@ -228,7 +428,3 @@ def delete_bot(bot_id: str) -> None:
                 session.delete(record)
     except SQLAlchemyError as exc:
         logger.warning("bot_delete_failed | id=%s | error=%s", bot_id, exc)
-
-
-
-

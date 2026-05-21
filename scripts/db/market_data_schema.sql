@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS portal_candle_closures (
     timeframe_seconds INTEGER NOT NULL,
     start_ts TIMESTAMPTZ NOT NULL,
     end_ts TIMESTAMPTZ NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ DEFAULT now(),
     PRIMARY KEY (instrument_id, timeframe_seconds, start_ts, end_ts),
     CHECK (timeframe_seconds > 0),

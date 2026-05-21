@@ -32,6 +32,8 @@ export function InstrumentDetailsPanel({
   onRefresh,
 }) {
   const hasMetadata = metadata && Object.keys(metadata).length > 0
+  const runtimeReady = metadata?.runtime_ready
+  const runtimeMessage = metadata?.runtime_message
   return (
     <div className="space-y-3 rounded-xl border border-white/5 bg-black/30 p-4 text-sm text-slate-200">
       <div className="flex items-center justify-between">
@@ -54,6 +56,11 @@ export function InstrumentDetailsPanel({
         ) : null}
       </div>
       {status.error ? <p className="text-xs text-rose-300">{status.error}</p> : null}
+      {runtimeReady === false && runtimeMessage ? (
+        <div className="rounded-lg border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-100">
+          Research-ready only. {runtimeMessage}
+        </div>
+      ) : null}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
         {fieldLabels.map((field) => (
           <div key={field.key} className="rounded-lg border border-white/5 bg-white/5 px-3 py-2">

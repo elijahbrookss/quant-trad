@@ -280,51 +280,8 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
               <div className="space-y-4 rounded-2xl border border-white/10 bg-black/30 p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Stop Distance (1R Definition)</p>
-                    <p className="text-xs text-slate-500">Defines how wide your stop is.</p>
-                  </div>
-                  <div className="text-[11px] text-slate-400">Risk drives sizing; keep position sizing off in the next step.</div>
-                </div>
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div>
-                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR period</label>
-                    <input
-                      className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                      type="number"
-                      min={1}
-                      value={riskSettings.atrPeriod ?? 14}
-                      onChange={(event) => updateRiskSettings({ atrPeriod: Math.max(1, Number(event.target.value) || 14) })}
-                    />
-                    <p className="mt-1 text-[11px] text-slate-500">Rolling ATR length used to define 1R.</p>
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.3em] text-slate-500">
-                      <span>ATR multiplier</span>
-                      <span
-                        className="text-[11px] text-slate-500"
-                        title="Scales ATR to set stop distance. Example: ATR 10 × 1.5 → 15pt stop."
-                      >
-                        ⓘ
-                      </span>
-                    </div>
-                    <input
-                      className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                      type="number"
-                      step="0.1"
-                      min={0}
-                      value={riskSettings.atrMultiplier ?? 1}
-                      onChange={(event) => updateRiskSettings({ atrMultiplier: Number(event.target.value) || 1 })}
-                    />
-                    <p className="mt-1 text-[11px] text-slate-500">Scales ATR to set your stop distance (1R).</p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-4 rounded-2xl border border-white/10 bg-black/30 p-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Position Sizing</p>
-                    <p className="text-xs text-slate-500">Controls how much money you risk per trade.</p>
+                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Risk & Sizing</p>
+                    <p className="text-xs text-slate-500">Controls capital risk per trade independently from ATM behavior.</p>
                   </div>
                 </div>
 
@@ -519,7 +476,6 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
                     onChange={handleATMTemplateChange}
                     errors={atmErrors}
                     hidePositionSizing
-                    hideRiskSettings
                     collapsible
                   />
                 )}
@@ -575,25 +531,17 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
               <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
                 <div className="flex items-start justify-between">
                   <div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Risk & ATR</p>
-                    <p className="text-xs text-slate-500">Sizing inputs carried into your ATM template.</p>
+                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Risk & sizing</p>
+                    <p className="text-xs text-slate-500">Capital allocation separated from ATM behavior.</p>
                   </div>
                   <ActionButton type="button" variant="subtle" onClick={() => setCurrentStep(1)}>
                     ✎ Edit
                   </ActionButton>
                 </div>
-                <div className="mt-3 grid gap-3 md:grid-cols-4">
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
                   <div>
                     <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Base risk per trade</p>
                     <p className="text-base text-white">{formatCurrency(riskSettings.baseRiskPerTrade || 0)}</p>
-                  </div>
-                  <div>
-                    <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR period</p>
-                    <p className="text-base text-white">{riskSettings.atrPeriod}</p>
-                  </div>
-                  <div>
-                    <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR multiplier (1R)</p>
-                    <p className="text-base text-white">{riskSettings.atrMultiplier}</p>
                   </div>
                   <div>
                     <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Global risk multiplier</p>

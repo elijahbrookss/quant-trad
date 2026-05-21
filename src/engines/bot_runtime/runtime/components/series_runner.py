@@ -41,6 +41,7 @@ class SeriesRunnerContext:
         default=lambda *_args, **_kwargs: None
     )
     degrade_series_on_error: bool = False
+    live_idle_interval_seconds: Callable[[], float] = field(default=lambda: 0.5)
 
 
 class SeriesRunner(Protocol):
@@ -74,6 +75,9 @@ class InlineSeriesRunner:
                 if next_at:
                     interval = max((next_at - now).total_seconds(), 0)
                     self._ctx.pace(interval, True)
+                    continue
+                if self._ctx.live_mode:
+                    self._ctx.pace(self._ctx.live_idle_interval_seconds(), True)
                     continue
                 break
             for state in due_states:
@@ -142,6 +146,9 @@ class ThreadedSeriesRunner:
             if state.done or state.bar_index >= state.total_bars:
                 if self._ctx.live_mode and self._ctx.append_live_candles_for_state(state):
                     continue
+                if self._ctx.live_mode:
+                    time.sleep(max(min(self._ctx.live_idle_interval_seconds(), 1.0), 0.05))
+                    continue
                 self._ctx.log_debug(
                     "series_worker_done",
                     state,
@@ -203,6 +210,9 @@ class PoolSeriesRunner:
                     if next_at:
                         interval = max((next_at - now).total_seconds(), 0)
                         self._ctx.pace(interval, True)
+                        continue
+                    if self._ctx.live_mode:
+                        self._ctx.pace(self._ctx.live_idle_interval_seconds(), True)
                         continue
                     break
                 futures = [executor.submit(_safe_step, self._ctx, state) for state in due_states]

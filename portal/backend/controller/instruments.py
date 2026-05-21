@@ -44,6 +44,10 @@ class InstrumentResponse(InstrumentPayload):
     id: str
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    research_ready: Optional[bool] = None
+    runtime_ready: Optional[bool] = None
+    runtime_message: Optional[str] = None
+    runtime_policy: Optional[str] = None
 
 
 class InstrumentResolveRequest(BaseModel):
@@ -59,7 +63,7 @@ class InstrumentResolveRequest(BaseModel):
 async def list_instruments() -> List[Dict[str, Any]]:
     """Return all stored instruments."""
 
-    return instrument_service.list_instruments()
+    return [instrument_service.instrument_api_payload(record) for record in instrument_service.list_instruments()]
 
 
 @router.get("/health")
@@ -85,7 +89,7 @@ async def resolve_instrument(request: InstrumentResolveRequest) -> Dict[str, Any
         raise HTTPException(400, error)
     if not record:
         raise HTTPException(404, "Instrument could not be resolved.")
-    return record
+    return instrument_service.instrument_api_payload(record)
 
 
 @router.post("/", response_model=InstrumentResponse, status_code=201)
@@ -93,7 +97,7 @@ async def create_instrument(payload: InstrumentPayload) -> Dict[str, Any]:
     """Create a new instrument definition."""
 
     try:
-        return instrument_service.create_instrument(**payload.dict())
+        return instrument_service.instrument_api_payload(instrument_service.create_instrument(**payload.dict()))
     except ValueError as exc:  # pragma: no cover - FastAPI plumbing
         raise HTTPException(400, str(exc)) from exc
 
@@ -103,7 +107,7 @@ async def get_instrument(instrument_id: str) -> Dict[str, Any]:
     """Return a single instrument."""
 
     try:
-        return instrument_service.get_instrument_record(instrument_id)
+        return instrument_service.instrument_api_payload(instrument_service.get_instrument_record(instrument_id))
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
 
@@ -113,7 +117,9 @@ async def update_instrument(instrument_id: str, payload: InstrumentPayload) -> D
     """Update an existing instrument."""
 
     try:
-        return instrument_service.update_instrument(instrument_id, **payload.dict())
+        return instrument_service.instrument_api_payload(
+            instrument_service.update_instrument(instrument_id, **payload.dict())
+        )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:

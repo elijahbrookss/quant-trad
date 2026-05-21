@@ -22,6 +22,7 @@ from enum import Enum
 from typing import Any, Dict, Mapping, Optional, Protocol, Tuple
 
 from utils.log_context import build_log_context, with_log_context
+from .fees import executed_fee, executed_notional
 
 logger = logging.getLogger(__name__)
 
@@ -73,20 +74,72 @@ class MarginRates:
 
 @dataclass(frozen=True)
 class MarginRequirement:
-    """Calculated margin requirement for a trade."""
+    """Canonical collateral and fee-buffer requirement for an order attempt."""
 
-    required_margin: float  # The margin/collateral required
-    margin_rate: float  # The rate used (for debugging/logging)
-    notional: float  # The notional value of the position
-    fee_buffer: float  # Fees included in requirement
-    safety_buffer: float  # Optional safety margin
-    calculation_method: str  # FUTURES_MARGIN_INTRADAY, FUTURES_MARGIN_OVERNIGHT, SPOT_CASH_SHORT_COVER
-    session_type: str  # Which session was used
+    required_margin: float  # Base margin/collateral before safety.
+    margin_rate: float  # The rate used (for debugging/logging).
+    notional: float  # The notional value of the position.
+    fee_buffer: float  # Total fee buffer included in admission/reservation.
+    safety_buffer: float  # Safety margin applied by the margin model.
+    calculation_method: str  # FUTURES_MARGIN_INTRADAY, FUTURES_MARGIN_OVERNIGHT, SPOT_CASH_SHORT_COVER.
+    session_type: str  # Which session was used.
+    instrument_id: Optional[str] = None
+    symbol: Optional[str] = None
+    side: Optional[str] = None
+    direction: Optional[str] = None
+    quantity: float = 0.0
+    price: float = 0.0
+    contract_size: float = 1.0
+    initial_margin: Optional[float] = None
+    maintenance_margin: Optional[float] = None
+    estimated_entry_fee: float = 0.0
+    estimated_exit_fee: float = 0.0
+    fee_model_version: Optional[str] = None
+    margin_model_version: str = "margin_requirement_v1"
 
     @property
     def total_required(self) -> float:
-        """Total cash required for the trade."""
+        """Total funds required to admit/reserve the order."""
         return self.required_margin + self.fee_buffer + self.safety_buffer
+
+    @property
+    def collateral_to_lock(self) -> float:
+        """Collateral that remains locked after an entry fill settles."""
+        return self.required_margin + self.safety_buffer
+
+    @property
+    def total_required_collateral(self) -> float:
+        """Backward-compatible name for total admission requirement."""
+        return self.total_required
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize the requirement for diagnostics and reservation metadata."""
+        return {
+            "instrument_id": self.instrument_id,
+            "symbol": self.symbol,
+            "side": self.side,
+            "direction": self.direction,
+            "quantity": self.quantity,
+            "price": self.price,
+            "notional": self.notional,
+            "contract_size": self.contract_size,
+            "initial_margin": (
+                self.initial_margin if self.initial_margin is not None else self.required_margin
+            ),
+            "maintenance_margin": self.maintenance_margin,
+            "required_margin": self.required_margin,
+            "safety_buffer": self.safety_buffer,
+            "collateral_to_lock": self.collateral_to_lock,
+            "estimated_entry_fee": self.estimated_entry_fee,
+            "estimated_exit_fee": self.estimated_exit_fee,
+            "fee_buffer": self.fee_buffer,
+            "total_required_collateral": self.total_required_collateral,
+            "margin_rate": self.margin_rate,
+            "calculation_method": self.calculation_method,
+            "session_type": self.session_type,
+            "fee_model_version": self.fee_model_version,
+            "margin_model_version": self.margin_model_version,
+        }
 
 
 class MarginCalculator(Protocol):
@@ -306,6 +359,141 @@ def _align_min_to_step(min_qty: Optional[float], step: Optional[float]) -> Optio
     return math.ceil(min_qty / step) * step
 
 
+def _profile_instrument_raw(execution_profile: Optional[Any]) -> Optional[Mapping[str, Any]]:
+    instrument_contract = getattr(execution_profile, "instrument", None)
+    raw = getattr(instrument_contract, "raw", None)
+    return raw if isinstance(raw, Mapping) else None
+
+
+def _profile_instrument_value(execution_profile: Optional[Any], field_name: str) -> Optional[Any]:
+    instrument_contract = getattr(execution_profile, "instrument", None)
+    if instrument_contract is None:
+        return None
+    return getattr(instrument_contract, field_name, None)
+
+
+def _resolve_requirement_instrument(
+    instrument: Optional[Mapping[str, Any]],
+    execution_profile: Optional[Any],
+) -> Mapping[str, Any]:
+    if isinstance(instrument, Mapping) and instrument:
+        return instrument
+    profile_raw = _profile_instrument_raw(execution_profile)
+    if profile_raw:
+        return profile_raw
+    raise ValueError("instrument metadata missing for margin requirement")
+
+
+def _normalize_margin_direction(*, side: Optional[str], direction: Optional[str]) -> str:
+    text = str(direction or "").strip().lower()
+    if text in {"long", "short"}:
+        return text
+    side_text = str(side or "").strip().lower()
+    if side_text in {"buy", "long"}:
+        return "long"
+    if side_text in {"sell", "short"}:
+        return "short"
+    raise ValueError(f"cannot resolve margin direction from side={side!r} direction={direction!r}")
+
+
+def calculate_margin_requirement(
+    *,
+    notional: float,
+    entry_fee: float,
+    side: Optional[str] = None,
+    direction: Optional[str] = None,
+    quantity: float = 0.0,
+    price: float = 0.0,
+    contract_size: float = 1.0,
+    instrument: Optional[Mapping[str, Any]] = None,
+    execution_profile: Optional[Any] = None,
+    estimated_exit_fee: Optional[float] = None,
+    include_exit_fee_buffer: bool = True,
+    safety_multiplier: float = 1.05,
+    margin_session: Optional[MarginSessionType] = None,
+    apply_safety_to_full_notional: bool = False,
+    fee_model_version: Optional[str] = None,
+) -> MarginRequirement:
+    """Build the canonical margin/collateral requirement used across runtime paths."""
+
+    resolved_instrument = _resolve_requirement_instrument(instrument, execution_profile)
+    resolved_direction = _normalize_margin_direction(side=side, direction=direction)
+    session = margin_session or MarginSessionType.OVERNIGHT
+    entry_fee_value = max(float(entry_fee or 0.0), 0.0)
+    exit_fee_value = (
+        max(float(estimated_exit_fee or 0.0), 0.0)
+        if include_exit_fee_buffer
+        else 0.0
+    )
+    if estimated_exit_fee is None and include_exit_fee_buffer:
+        exit_fee_value = entry_fee_value
+    fee_buffer = entry_fee_value + exit_fee_value
+    safe_multiplier = max(float(safety_multiplier or 1.0), 1.0)
+
+    calc_type = getattr(execution_profile, "margin_calc_type", None) if execution_profile is not None else None
+    if calc_type not in {"margin", "full_notional"}:
+        _calculator, calc_type = create_margin_calculator(resolved_instrument, safety_multiplier=1.0)
+
+    resolved_session = (
+        MarginSessionType.INTRADAY
+        if session == MarginSessionType.INTRADAY
+        else MarginSessionType.OVERNIGHT
+    )
+
+    if calc_type == "margin":
+        rates = getattr(execution_profile, "margin_rates", None) if execution_profile is not None else None
+        if rates is None:
+            rates = extract_margin_rates(resolved_instrument)
+        if rates is None:
+            raise ValueError("Margin calculator created but no rates found")
+        margin_rate = rates.get_rate(resolved_direction, resolved_session)
+        if margin_rate is None or margin_rate <= 0:
+            raise ValueError(f"No valid margin rate for {resolved_direction}/{session}")
+        required_margin = float(notional) * float(margin_rate)
+        calculation_method = f"FUTURES_MARGIN_{resolved_session.value.upper()}"
+        safety_basis = required_margin + fee_buffer
+        safety_buffer = safety_basis * (safe_multiplier - 1.0)
+    else:
+        margin_rate = 1.0
+        required_margin = float(notional)
+        calculation_method = "SPOT_CASH_SHORT_COVER"
+        safety_basis = required_margin + fee_buffer
+        safety_buffer = safety_basis * (safe_multiplier - 1.0) if apply_safety_to_full_notional else 0.0
+
+    symbol = str(
+        resolved_instrument.get("symbol")
+        or _profile_instrument_value(execution_profile, "symbol")
+        or ""
+    ).strip() or None
+    instrument_id = str(
+        resolved_instrument.get("id")
+        or resolved_instrument.get("instrument_id")
+        or _profile_instrument_value(execution_profile, "instrument_id")
+        or ""
+    ).strip() or None
+    return MarginRequirement(
+        required_margin=float(required_margin),
+        margin_rate=float(margin_rate),
+        notional=float(notional),
+        fee_buffer=float(fee_buffer),
+        safety_buffer=float(safety_buffer),
+        calculation_method=calculation_method,
+        session_type=resolved_session.value if calc_type == "margin" else "n/a",
+        instrument_id=instrument_id,
+        symbol=symbol,
+        side=str(side or "").strip().lower() or None,
+        direction=resolved_direction,
+        quantity=float(quantity or 0.0),
+        price=float(price or 0.0),
+        contract_size=float(contract_size or 1.0),
+        initial_margin=float(required_margin),
+        maintenance_margin=None,
+        estimated_entry_fee=float(entry_fee_value),
+        estimated_exit_fee=float(exit_fee_value),
+        fee_model_version=fee_model_version,
+    )
+
+
 def calculate_max_qty_by_margin(
     *,
     available_collateral: float,
@@ -358,18 +546,45 @@ def calculate_max_qty_by_margin(
     session = margin_session or MarginSessionType.OVERNIGHT
     min_order_size_aligned = _align_min_to_step(min_order_size, qty_step)
 
-    notional_per_contract = price * contract_size
+    notional_per_contract = executed_notional(
+        price=price,
+        quantity=1.0,
+        contract_size=contract_size,
+    )
     if notional_per_contract <= 0:
         raise ValueError(f"Invalid notional_per_contract: {notional_per_contract}")
 
     # Round-trip fees: entry + exit (worst case taker on both)
-    fee_per_contract = notional_per_contract * fee_rate * 2
+    fee_per_contract = (
+        executed_fee(
+            price=price,
+            quantity=1.0,
+            contract_size=contract_size,
+            fee_rate=fee_rate,
+        )
+        * 2.0
+    )
 
-    # Resolve margin model from compiled profile when available.
-    calculator = getattr(execution_profile, "margin_calculator", None) if execution_profile is not None else None
+    requirement = calculate_margin_requirement(
+        notional=notional_per_contract,
+        entry_fee=fee_per_contract / 2.0,
+        side="buy" if str(direction).lower() == "long" else "sell",
+        direction=direction,
+        quantity=1.0,
+        price=price,
+        contract_size=contract_size,
+        instrument=instrument,
+        execution_profile=execution_profile,
+        estimated_exit_fee=fee_per_contract / 2.0,
+        include_exit_fee_buffer=True,
+        safety_multiplier=safety_multiplier,
+        margin_session=session,
+        apply_safety_to_full_notional=True,
+    )
+
     calc_type = getattr(execution_profile, "margin_calc_type", None) if execution_profile is not None else None
-    if calculator is None or calc_type not in {"margin", "full_notional"}:
-        calculator, calc_type = create_margin_calculator(instrument, safety_multiplier=1.0)
+    if calc_type not in {"margin", "full_notional"}:
+        _calculator, calc_type = create_margin_calculator(instrument, safety_multiplier=1.0)
 
     if calc_type == "margin":
         # Futures/derivatives: use exchange margin rate
@@ -403,12 +618,8 @@ def calculate_max_qty_by_margin(
         )
         logger.info(with_log_context("margin_rate_selected", context))
 
-        # Base margin per contract (before safety)
-        margin_per_contract = notional_per_contract * margin_rate
-
-        # Total cost = (margin + round-trip fees) * safety
-        base_cost = margin_per_contract + fee_per_contract
-        cost_per_contract = base_cost * safety_multiplier
+        margin_per_contract = requirement.required_margin
+        cost_per_contract = requirement.total_required
 
         max_qty = available_collateral / cost_per_contract if cost_per_contract > 0 else 0.0
         max_qty = _floor_to_step(max_qty, qty_step)
@@ -420,17 +631,14 @@ def calculate_max_qty_by_margin(
             available_collateral=available_collateral,
             cost_per_contract=cost_per_contract,
             margin_per_contract=margin_per_contract,
-            fee_per_contract=fee_per_contract,
-            margin_rate=margin_rate,
-            calculation_method=f"FUTURES_MARGIN_{resolved_session.value.upper()}",
+            fee_per_contract=requirement.fee_buffer,
+            margin_rate=requirement.margin_rate,
+            calculation_method=requirement.calculation_method,
         )
     else:
         # Spot: full notional required as "margin"
-        margin_per_contract = notional_per_contract  # 100% margin
-
-        # Total cost = (full notional + round-trip fees) * safety
-        base_cost = margin_per_contract + fee_per_contract
-        cost_per_contract = base_cost * safety_multiplier
+        margin_per_contract = requirement.required_margin
+        cost_per_contract = requirement.total_required
 
         max_qty = available_collateral / cost_per_contract if cost_per_contract > 0 else 0.0
         max_qty = _floor_to_step(max_qty, qty_step)
@@ -442,9 +650,9 @@ def calculate_max_qty_by_margin(
             available_collateral=available_collateral,
             cost_per_contract=cost_per_contract,
             margin_per_contract=margin_per_contract,
-            fee_per_contract=fee_per_contract,
-            margin_rate=1.0,
-            calculation_method="SPOT_CASH_SHORT_COVER",
+            fee_per_contract=requirement.fee_buffer,
+            margin_rate=requirement.margin_rate,
+            calculation_method=requirement.calculation_method,
         )
 
 
@@ -518,5 +726,6 @@ __all__ = [
     "extract_margin_rates",
     "resolve_instrument_type",
     "create_margin_calculator",
+    "calculate_margin_requirement",
     "calculate_max_qty_by_margin",
 ]

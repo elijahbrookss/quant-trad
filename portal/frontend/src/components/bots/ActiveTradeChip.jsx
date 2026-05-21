@@ -106,7 +106,7 @@ export function ActiveTradeChip({ chip, trade, currentPrice, latestBarTime, visi
 
   return (
     <div
-      className={`group relative overflow-hidden rounded-lg border transition-all duration-300 ${stateColors.border} ${stateColors.bg} ${
+      className={`group relative overflow-hidden rounded-[3px] border transition-all duration-300 ${stateColors.border} ${stateColors.bg} ${
         visible ? 'opacity-100' : 'opacity-50'
       } ${isActiveSymbol ? 'ring-1 ring-white/20' : ''}`}
       onMouseEnter={() => onHover?.(true)}
@@ -125,11 +125,11 @@ export function ActiveTradeChip({ chip, trade, currentPrice, latestBarTime, visi
             <span className="text-sm font-medium text-slate-100 truncate" title={chip.symbol}>
               {truncateSymbol(chip.symbol)}
             </span>
-            <span className={`flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase bg-slate-700/50 text-slate-300`}>
+            <span className="qt-mono flex shrink-0 items-center gap-0.5 rounded-[3px] border border-white/10 bg-slate-900/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-300">
               {isShort ? <TrendingDown className="size-3" /> : <TrendingUp className="size-3" />}
               {chip.directionLabel}
             </span>
-            <span className="shrink-0 rounded bg-slate-800/60 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-slate-400">
+            <span className="qt-mono shrink-0 rounded-[3px] border border-white/10 bg-slate-950/70 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-slate-400">
               {chip.sizeLabel}
             </span>
           </div>

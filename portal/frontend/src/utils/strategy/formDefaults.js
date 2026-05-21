@@ -13,16 +13,14 @@ const STRATEGY_FORM_DEFAULT = {
 const RULE_FORM_DEFAULT = {
   name: '',
   description: '',
-  action: 'buy',
-  match: 'all',
-  conditions: [
-    {
-      indicator_id: '',
-      rule_id: '',
-      signal_type: '',
-      direction: '',
-    },
-  ],
+  intent: 'enter_long',
+  priority: 0,
+  trigger: {
+    indicator_id: '',
+    output_name: '',
+    event_key: '',
+  },
+  guards: [],
   enabled: true,
 }
 
@@ -51,8 +49,6 @@ const MIN_RISK_MULTIPLIER = 0.01
 const MIN_BASE_RISK = 1
 
 const RISK_DEFAULTS = Object.freeze({
-  atrPeriod: 14,
-  atrMultiplier: 1,
   baseRiskPerTrade: '',
   globalRiskMultiplier: 1,
 })

@@ -1,0 +1,19 @@
+flowchart LR
+    decision["Selected entry decision"]
+    ordering["Deterministic entry ordering"]
+    reserve["Wallet reservation"]
+    fill["Entry fill"]
+    update["Trade updates"]
+    close["Exit/terminal close"]
+    settle["Settlement + release"]
+    events["Wallet/runtime events"]
+
+    decision --> ordering
+    ordering --> reserve
+    reserve --> fill
+    fill --> update
+    update --> close
+    close --> settle
+    reserve --> events
+    fill --> events
+    settle --> events

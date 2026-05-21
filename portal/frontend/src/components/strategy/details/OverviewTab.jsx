@@ -6,6 +6,7 @@ import { symbolsFromInstrumentSlots } from '../../../utils/instrumentSymbols.js'
  * Overview tab showing strategy information, risk configuration, and statistics.
  */
 export const OverviewTab = ({ strategy, ruleCount, indicatorCount, atmTargets }) => {
+  const riskConfig = strategy?.risk_config && typeof strategy.risk_config === 'object' ? strategy.risk_config : {}
   return (
     <div className="space-y-4">
       {/* Strategy Information */}
@@ -48,13 +49,13 @@ export const OverviewTab = ({ strategy, ruleCount, indicatorCount, atmTargets })
           <div>
             <dt className="text-xs uppercase tracking-[0.3em] text-slate-500">Base Risk per Trade</dt>
             <dd className="mt-1 text-white">
-              {strategy.base_risk_per_trade != null ? formatCurrency(strategy.base_risk_per_trade) : '—'}
+              {riskConfig.base_risk_per_trade != null ? formatCurrency(riskConfig.base_risk_per_trade) : '—'}
             </dd>
           </div>
           <div>
             <dt className="text-xs uppercase tracking-[0.3em] text-slate-500">Global Risk Multiplier</dt>
             <dd className="mt-1 text-white">
-              {strategy.global_risk_multiplier != null ? `${formatNumber(strategy.global_risk_multiplier)}x` : '—'}
+              {riskConfig.global_risk_multiplier != null ? `${formatNumber(riskConfig.global_risk_multiplier)}x` : '—'}
             </dd>
           </div>
         </dl>

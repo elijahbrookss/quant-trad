@@ -13,6 +13,13 @@ from utils.perf_log import get_obs_enabled, get_obs_slow_ms, perf_log
 logger = logging.getLogger(__name__)
 
 
+def _missing_sink(name: str) -> Callable[..., Any]:
+    def _raise(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError(f"bot runtime persistence dependency is not configured: {name}")
+
+    return _raise
+
+
 class TradePersistenceBuffer:
     """Batch storage writes for trade entries and events."""
 
@@ -21,6 +28,8 @@ class TradePersistenceBuffer:
         *,
         max_batch_size: int = 200,
         flush_interval_s: float = 2.0,
+        record_trade: Optional[Callable[[Dict[str, Any]], None]] = None,
+        record_trade_event: Optional[Callable[[Dict[str, Any]], None]] = None,
         time_fn: Callable[[], float] = time.monotonic,
         log_context_fn: Optional[Callable[..., Dict[str, object]]] = None,
         obs_enabled: bool = True,
@@ -28,6 +37,8 @@ class TradePersistenceBuffer:
     ) -> None:
         self._max_batch_size = max(int(max_batch_size), 1)
         self._flush_interval_s = max(float(flush_interval_s), 0.0)
+        self._record_trade = record_trade or _missing_sink("record_trade")
+        self._record_trade_event = record_trade_event or _missing_sink("record_trade_event")
         self._time_fn = time_fn
         self._log_context_fn = log_context_fn
         self._obs_enabled = obs_enabled
@@ -41,7 +52,10 @@ class TradePersistenceBuffer:
     def from_config(
         cls,
         config: Dict[str, object],
+        *,
         log_context_fn: Optional[Callable[..., Dict[str, object]]] = None,
+        record_trade: Optional[Callable[[Dict[str, Any]], None]] = None,
+        record_trade_event: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> "TradePersistenceBuffer":
         max_batch = config.get("persistence_batch_size")
         flush_interval = config.get("persistence_flush_interval_s")
@@ -50,6 +64,8 @@ class TradePersistenceBuffer:
         return cls(
             max_batch_size=max_batch if isinstance(max_batch, int) and max_batch > 0 else 200,
             flush_interval_s=float(flush_interval) if isinstance(flush_interval, (int, float)) else 2.0,
+            record_trade=record_trade,
+            record_trade_event=record_trade_event,
             log_context_fn=log_context_fn,
             obs_enabled=obs_enabled,
             obs_slow_ms=obs_slow_ms,
@@ -97,7 +113,6 @@ class TradePersistenceBuffer:
         self._entries = []
         self._events = []
         self._last_flush = self._time_fn()
-        from portal.backend.service.storage import storage
 
         normalized_reason = self._normalize_reason(reason)
         base_context = self._log_context_fn() if self._log_context_fn else {}
@@ -112,9 +127,9 @@ class TradePersistenceBuffer:
             flush_reason=normalized_reason,
         ):
             for entry in entries:
-                storage.record_bot_trade(entry)
+                self._record_trade(entry)
             for event in events:
-                storage.record_bot_trade_event(event)
+                self._record_trade_event(event)
         if self._log_context_fn:
             context = self._log_context_fn(
                 reason=normalized_reason,

@@ -1,4 +1,15 @@
 import { createLogger } from '../utils/logger.js';
+import {
+  getIndicatorSignalColor,
+  getPaletteOverlayColor,
+} from '../utils/indicatorColors.js';
+import { enabledSignalOutputNames } from '../utils/indicatorOutputs.js';
+import { normalizeIndicatorArtifactResponse } from './indicatorArtifacts.js';
+import {
+  rebuildIndicatorArtifactsFromCache,
+  seedIndicatorArtifactSliceCache,
+  writeIndicatorArtifactSliceCache,
+} from './indicatorOverlaySlices.js';
 
 const signalsLogger = createLogger('IndicatorSignals');
 
@@ -11,40 +22,73 @@ export const hexToRgba = (hex, a = 0.18) => {
   return `rgba(${n[0]},${n[1]},${n[2]},${a})`;
 };
 
-export const applyIndicatorColors = (overlays = [], colors = {}) =>
-  (overlays || []).map(ov => {
+const normalizeColor = (value) => (
+  typeof value === 'string' && value.trim() ? value.trim() : null
+);
+
+const buildIndicatorMetaMap = (indicators = []) => {
+  if (!Array.isArray(indicators)) return {};
+  return indicators.reduce((acc, indicator) => {
+    if (!indicator?.id) return acc;
+    acc[indicator.id] = indicator;
+    return acc;
+  }, {});
+};
+
+export const applyIndicatorColors = (overlays = [], colors = {}, indicators = []) => {
+  const indicatorsById = Array.isArray(indicators) ? buildIndicatorMetaMap(indicators) : (indicators || {});
+  return (overlays || []).map(ov => {
     if (!ov || !ov.ind_id || !ov.payload) return ov;
-    const color = colors[ov.ind_id] || ov.color;
+    const indicator = indicatorsById?.[ov.ind_id] || null;
+    const colorPolicy = ov?.ui?.color_policy;
+    const paletteOverlayColor = normalizeColor(getPaletteOverlayColor(indicator, ov?.type));
+    const signalColor = ov?.source === 'signal'
+      ? normalizeColor(getIndicatorSignalColor(indicator))
+      : null;
+    const lockedOverlayColor = colorPolicy === 'overlay' ? normalizeColor(ov?.ui?.color) || normalizeColor(ov?.color) : null;
+    const color = signalColor || paletteOverlayColor || lockedOverlayColor || colors[ov.ind_id] || ov.color;
     if (!color) return ov;
+    const forceExplicitColor = Boolean(signalColor || paletteOverlayColor);
 
     const price_lines = Array.isArray(ov.payload.price_lines)
-      ? ov.payload.price_lines.map(pl => (pl ? { ...pl, color } : pl))
+      ? ov.payload.price_lines.map(pl => (pl ? { ...pl, color: forceExplicitColor ? color : (pl.color || color) } : pl))
       : ov.payload.price_lines;
 
     const markers = Array.isArray(ov.payload.markers)
-      ? ov.payload.markers.map(m => (m ? { ...m, color } : m))
+      ? ov.payload.markers.map(m => (m ? { ...m, color: forceExplicitColor ? color : (m.color || color) } : m))
       : ov.payload.markers;
 
     const boxes = Array.isArray(ov.payload.boxes)
       ? ov.payload.boxes.map(b => {
           if (!b) return b;
-          return { ...b, color: hexToRgba(color, 0.1), border: { color: hexToRgba(color, 0.7), width: 1 } };
+          return {
+            ...b,
+            color: forceExplicitColor ? hexToRgba(color, 0.1) : (b.color || hexToRgba(color, 0.1)),
+            border: forceExplicitColor
+              ? { ...(b.border || {}), color: hexToRgba(color, 0.7), width: b?.border?.width || 1 }
+              : (b.border || { color: hexToRgba(color, 0.7), width: 1 }),
+          };
         })
       : ov.payload.boxes;
 
     const tintHex = hexToRgba(color, 0.7);
 
     const segments = Array.isArray(ov.payload.segments)
-      ? ov.payload.segments.map(s => (s ? { ...s, color: tintHex } : s))
+      ? ov.payload.segments.map(s => (s ? { ...s, color: forceExplicitColor ? tintHex : (s.color || tintHex) } : s))
       : ov.payload.segments;
 
     const polylines = Array.isArray(ov.payload.polylines)
-      ? ov.payload.polylines.map(l => (l ? { ...l, color: tintHex } : l))
+      ? ov.payload.polylines.map(l => (l ? { ...l, color: forceExplicitColor ? tintHex : (l.color || tintHex) } : l))
       : ov.payload.polylines;
 
     return {
       ...ov,
       color,
+      ui: {
+        ...(ov.ui || {}),
+        color,
+        color_policy: colorPolicy || 'indicator',
+      },
       payload: {
         ...ov.payload,
         price_lines,
@@ -55,17 +99,27 @@ export const applyIndicatorColors = (overlays = [], colors = {}) =>
       },
     };
   });
+};
 
-const normalizeSignalOverlays = (value) => {
-  if (Array.isArray(value)) return value;
-  if (!value || typeof value !== 'object') return [];
-  if (Array.isArray(value.entries)) return value.entries;
-  if (Array.isArray(value.items)) return value.items;
-  if (value.payload && typeof value.payload === 'object') {
-    if (Array.isArray(value.payload.entries)) return value.payload.entries;
-    if (Array.isArray(value.payload.items)) return value.payload.items;
+const buildVisibleArtifactSets = (indicators = [], visibilityByIndicator = {}, activeInspection = null) => {
+  const visibleIndicatorIds = new Set(
+    (indicators || [])
+      .filter((entry) => entry?.enabled !== false && visibilityByIndicator?.[entry.id] !== false)
+      .map((entry) => entry?.id)
+      .filter(Boolean)
+  );
+  const inspectionIndicatorId = activeInspection?.indicatorId;
+  const indicatorIds = new Set(visibleIndicatorIds);
+  const inspectionIds = new Set();
+  if (inspectionIndicatorId && visibleIndicatorIds.has(inspectionIndicatorId)) {
+    indicatorIds.delete(inspectionIndicatorId);
+    inspectionIds.add(inspectionIndicatorId);
   }
-  return [];
+  return {
+    indicator: indicatorIds,
+    signal: visibleIndicatorIds,
+    inspection: inspectionIds,
+  };
 };
 
 export async function runSignalGeneration({
@@ -74,12 +128,10 @@ export async function runSignalGeneration({
   chartState,
   startISO,
   endISO,
-  indColors,
   getChart,
   updateChart,
   setError,
   signalsAdapter,
-  colorizer = applyIndicatorColors,
 }) {
   if (!indicator) {
     signalsLogger.warn('signal_generation_skipped_indicator_missing', { chartId });
@@ -87,12 +139,12 @@ export async function runSignalGeneration({
     return false;
   }
 
-  if (!chartState || !chartState.symbol || !chartState.interval) {
+  if (!chartState || !chartState.symbol || !chartState.interval || !chartState.instrument_id) {
     signalsLogger.warn('signal_generation_skipped_chart_inputs', {
       chartId,
       hasChartState: Boolean(chartState),
     });
-    setError?.('Cannot generate signals: missing chart symbol or interval.');
+    setError?.('Cannot generate signals: missing chart instrument or interval.');
     return false;
   }
 
@@ -109,6 +161,7 @@ export async function runSignalGeneration({
     interval: chartState.interval,
     datasource: chartState.datasource,
     exchange: chartState.exchange,
+    instrument_id: chartState.instrument_id,
   });
 
   const loadingState = getChart(chartId) || {};
@@ -125,31 +178,13 @@ export async function runSignalGeneration({
   });
 
   try {
-    const confirmationBars = chartState?.signalsConfig?.pivotBreakoutConfirmationBars
-      ?? indicator?.params?.pivot_breakout_confirmation_bars
-      ?? indicator?.params?.pivot_breakout_config?.confirmation_bars;
-
-    const config = {};
-    if (confirmationBars != null) {
-      config.pivot_breakout_confirmation_bars = confirmationBars;
-    }
-
-    const enabledRules = chartState?.signalsConfig?.enabledRules?.[indicator.id];
-    if (Array.isArray(enabledRules) && enabledRules.length) {
-      config.enabled_rules = enabledRules;
-    }
-    // Signals tab expects overlay artifacts for visual inspection.
-    config.include_overlays = true;
-
-    scopedLogger.debug('signal_generation_request', { config });
-
     const requestPayload = {
       start: startISO,
       end: endISO,
       interval: chartState.interval,
       symbol: chartState.symbol,
-      config,
     };
+    scopedLogger.debug('signal_generation_request', { requestPayload });
 
     if (chartState.datasource) {
       requestPayload.datasource = chartState.datasource;
@@ -157,28 +192,62 @@ export async function runSignalGeneration({
     if (chartState.exchange) {
       requestPayload.exchange = chartState.exchange;
     }
+    if (chartState.instrument_id) {
+      requestPayload.instrument_id = chartState.instrument_id;
+    }
+    if (Array.isArray(indicator?.typed_outputs)) {
+      requestPayload.config = {
+        enabled_signal_outputs: enabledSignalOutputNames(indicator),
+      };
+    }
 
     const response = await signalsAdapter(indicator.id, requestPayload);
+    if (!response?.machine || !Array.isArray(response.machine.signals)) {
+      throw new Error('Indicator signal response is missing machine.signals.');
+    }
+    if (!response?.ui || !Array.isArray(response.ui.overlays)) {
+      throw new Error('Indicator signal response is missing ui.overlays.');
+    }
 
-    const rawSignals = Array.isArray(response?.signals) ? response.signals : [];
-    const signalOverlays = normalizeSignalOverlays(response?.overlays);
-
-    const annotatedSignals = signalOverlays.map(ov => ({
-      ...ov,
-      ind_id: indicator.id,
-      source: 'signals',
-    }));
-
-    const current = (getChart(chartId)?.overlays || []).filter(Boolean);
-    const withoutOldSignals = current.filter(ov => !(ov?.ind_id === indicator.id && ov?.source === 'signals'));
-    const merged = [...withoutOldSignals, ...annotatedSignals];
-
-    const colored = colorizer(merged, indColors);
-
-    const prevSignals = getChart(chartId)?.signalResults || {};
+    const rawSignals = response.machine.signals;
+    const signalOverlays = normalizeIndicatorArtifactResponse(
+      indicator,
+      { overlays: response.ui.overlays },
+      { defaultSource: 'signal' },
+    );
+    const latestState = getChart(chartId) || {};
+    const retainBySource = buildVisibleArtifactSets(
+      Array.isArray(latestState?.indicators) ? latestState.indicators : [],
+      latestState?.indicatorVisibilityById && typeof latestState.indicatorVisibilityById === 'object'
+        ? latestState.indicatorVisibilityById
+        : {},
+      latestState?.activeSignalInspection || null,
+    );
+    const nextSliceCache = writeIndicatorArtifactSliceCache(
+      seedIndicatorArtifactSliceCache(latestState?.indicatorArtifactSlices || {}, latestState?.overlays || []),
+      {
+        indicatorId: indicator.id,
+        source: 'signal',
+        nextSlice: signalOverlays,
+      },
+    );
+    const indicatorList = Array.isArray(latestState?.indicators) ? latestState.indicators : [];
+    const indicatorColors = indicatorList.reduce((acc, entry) => {
+      if (!entry?.id) return acc;
+      const color = normalizeColor(entry?.color);
+      if (color) acc[entry.id] = color;
+      return acc;
+    }, {});
+    const nextOverlays = applyIndicatorColors(
+      rebuildIndicatorArtifactsFromCache(nextSliceCache, retainBySource),
+      indicatorColors,
+      indicatorList,
+    );
+    const prevSignals = latestState?.signalEventsByIndicator || {};
     updateChart(chartId, {
-      overlays: colored,
-      signalResults: { ...prevSignals, [indicator.id]: rawSignals },
+      overlays: nextOverlays,
+      indicatorArtifactSlices: nextSliceCache,
+      signalEventsByIndicator: { ...prevSignals, [indicator.id]: rawSignals },
     });
 
     scopedLogger.info('signal_generation_complete', {

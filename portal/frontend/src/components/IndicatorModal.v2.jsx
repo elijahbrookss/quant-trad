@@ -1,36 +1,44 @@
 import { Dialog, DialogPanel, DialogTitle, Switch } from '@headlessui/react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
-import { fetchIndicatorTypes, fetchIndicatorType } from '../adapters/indicator.adapter.js'
+import { fetchIndicatorTypes, fetchIndicatorType, fetchIndicators } from '../adapters/indicator.adapter.js'
+import { createLogger } from '../utils/logger.js'
+import { buildSignalOutputEnabledMap, buildSignalOutputPrefs, getIndicatorOutputsByType } from '../utils/indicatorOutputs.js'
 import DropdownSelect from './ChartComponent/DropdownSelect.jsx'
 
 const EMPTY_META = {
-  required_params: [],
-  default_params: {},
-  field_types: {},
-  ui_descriptions: {},
-  ui_order: [],
-  ui_enums: {},
-  signal_rules: [],
+  type: '',
+  version: '',
+  label: '',
+  description: '',
+  params: [],
+  outputs: [],
+  overlays: [],
+  dependencies: [],
 }
 
-const NUMBER_FIELDS = new Set(['int', 'float', 'number'])
-const RUNTIME_CONTEXT_KEYS = new Set([
-  'symbol',
-  'interval',
-  'start',
-  'end',
-  'timeframe',
-  'datasource',
-  'exchange',
-  'provider_id',
-  'venue_id',
-  'instrument_id',
-  'bot_id',
-  'strategy_id',
-  'bot_mode',
-  'run_id',
-])
+const NUMBER_FIELDS = new Set(['int', 'float'])
+const LIST_FIELDS = new Set(['int_list', 'float_list', 'string_list'])
+const SECTION_SCROLL_THRESHOLD = 8
+
+const toOptionEntry = (entry) => {
+  if (entry && typeof entry === 'object' && 'value' in entry) {
+    return {
+      value: entry.value,
+      label: entry.label ?? String(entry.value),
+      description: entry.description ?? '',
+      badge: entry.badge ?? undefined,
+      disabled: Boolean(entry.disabled),
+    }
+  }
+  return {
+    value: entry,
+    label: String(entry),
+    description: '',
+    badge: undefined,
+    disabled: false,
+  }
+}
 
 const toInt = (value) => {
   if (typeof value === 'number') {
@@ -76,6 +84,37 @@ const toIntList = (value) => {
   return single === null ? [] : [single]
 }
 
+const toFloatList = (value) => {
+  if (Array.isArray(value)) {
+    return value.map(toFloat).filter((item) => item !== null)
+  }
+  if (typeof value === 'string') {
+    return value
+      .split(/[\s,;]+/)
+      .filter(Boolean)
+      .map(toFloat)
+      .filter((item) => item !== null)
+  }
+  if (value == null) {
+    return []
+  }
+  const single = toFloat(value)
+  return single === null ? [] : [single]
+}
+
+const toStringList = (value) => {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean)
+  }
+  if (typeof value === 'string') {
+    return value.split(/[\n,;]+/).map((item) => item.trim()).filter(Boolean)
+  }
+  if (value == null) {
+    return []
+  }
+  return [String(value).trim()].filter(Boolean)
+}
+
 const listToString = (value) => {
   if (Array.isArray(value)) {
     return value.join(', ')
@@ -86,62 +125,84 @@ const listToString = (value) => {
   return String(value)
 }
 
+const editableParams = (meta) => (
+  Array.isArray(meta.params) ? meta.params.filter((param) => param?.editable !== false) : []
+)
+
 const normaliseString = (value) => {
   if (value == null) return ''
   return String(value)
 }
 
-const buildFieldOrder = (meta, params) => {
-  const required = Array.isArray(meta.required_params) ? meta.required_params : []
-  const defaults = Object.keys(meta.default_params || {})
-  const current = Object.keys(params || {})
-  const explicit = Array.isArray(meta.ui_order) ? meta.ui_order : []
-
-  const ordered = [...explicit, ...required, ...defaults, ...current]
-  return Array.from(new Set(ordered))
+const formatIndicatorType = (type) => {
+  if (!type) return 'Custom'
+  return String(type)
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+    .join(' ')
 }
 
-const deriveIntListKeys = (meta) => {
-  const keys = new Set()
-  const fieldTypes = meta.field_types || {}
-  Object.entries(fieldTypes).forEach(([key, value]) => {
-    const lower = String(value || '').toLowerCase()
-    if (lower.includes('list') && lower.includes('int')) {
-      keys.add(key)
-    }
-  })
-  Object.entries(meta.default_params || {}).forEach(([key, value]) => {
-    if (Array.isArray(value) && value.every((entry) => Number.isFinite(entry))) {
-      keys.add(key)
-    }
-  })
-  return keys
-}
+const compatibleIndicatorsForDependency = (dependency, indicators, currentIndicatorId) => (
+  Array.isArray(indicators)
+    ? indicators.filter((indicator) => (
+        indicator?.id &&
+        indicator.id !== currentIndicatorId &&
+        String(indicator?.type || '').trim() === String(dependency?.indicator_type || '').trim()
+      ))
+    : []
+)
 
-const prepareInitialParams = (meta, initialParams) => {
-  const intListKeys = deriveIntListKeys(meta)
-  const merged = { ...meta.default_params, ...(initialParams || {}) }
-  const output = {}
+const prepareInitialDependencies = (meta, initialDependencies, availableIndicators, currentIndicatorId) => {
+  const definitions = Array.isArray(meta?.dependencies) ? meta.dependencies : []
+  const existingBindings = Array.isArray(initialDependencies) ? initialDependencies : []
+  const prepared = {}
 
-  for (const key of buildFieldOrder(meta, merged)) {
-    if (intListKeys.has(key)) {
-      output[key] = listToString(merged[key])
+  for (const dependency of definitions) {
+    const outputName = String(dependency?.output_name || '').trim()
+    if (!outputName) continue
+    const existing = existingBindings.find((item) => (
+      String(item?.output_name || '').trim() === outputName &&
+      String(item?.indicator_id || '').trim()
+    ))
+    if (existing) {
+      prepared[outputName] = String(existing.indicator_id).trim()
       continue
     }
-
-    const fieldType = String(meta.field_types?.[key] || '').toLowerCase()
-    if (fieldType === 'bool') {
-      output[key] = Boolean(merged[key])
-    } else if (NUMBER_FIELDS.has(fieldType)) {
-      output[key] = normaliseString(merged[key] ?? '')
-    } else {
-      output[key] = normaliseString(merged[key] ?? '')
+    const candidates = compatibleIndicatorsForDependency(
+      dependency,
+      availableIndicators,
+      currentIndicatorId,
+    )
+    if (candidates.length === 1) {
+      prepared[outputName] = String(candidates[0].id)
     }
   }
 
-  for (const key of meta.required_params || []) {
-    if (!(key in output)) {
-      output[key] = ''
+  return prepared
+}
+
+const prepareInitialParams = (meta, initialParams) => {
+  const definitions = editableParams(meta)
+  const output = {}
+
+  for (const param of definitions) {
+    const key = param.key
+    const fieldType = String(param.type || '').toLowerCase()
+    const hasDefault = Boolean(param.has_default)
+    const rawValue = initialParams?.[key] ?? (hasDefault ? param.default : undefined)
+
+    if (LIST_FIELDS.has(fieldType)) {
+      output[key] = listToString(rawValue)
+      continue
+    }
+
+    if (fieldType === 'bool') {
+      output[key] = Boolean(rawValue)
+    } else if (NUMBER_FIELDS.has(fieldType)) {
+      output[key] = normaliseString(rawValue ?? '')
+    } else {
+      output[key] = normaliseString(rawValue ?? '')
     }
   }
 
@@ -149,22 +210,34 @@ const prepareInitialParams = (meta, initialParams) => {
 }
 
 const convertParamsForSave = (meta, params) => {
-  const intListKeys = deriveIntListKeys(meta)
+  const definitions = editableParams(meta)
   const prepared = {}
 
-  for (const [key, raw] of Object.entries(params || {})) {
-    const fieldType = String(meta.field_types?.[key] || '').toLowerCase()
-
-    if (intListKeys.has(key)) {
-      const values = toIntList(raw)
-      if (values.length) {
-        prepared[key] = values
-      }
-      continue
-    }
+  for (const param of definitions) {
+    const key = param.key
+    const raw = params?.[key]
+    const fieldType = String(param.type || '').toLowerCase()
 
     if (fieldType === 'bool') {
       prepared[key] = Boolean(raw)
+      continue
+    }
+
+    if (fieldType === 'int_list') {
+      const values = toIntList(raw)
+      if (values.length) prepared[key] = values
+      continue
+    }
+
+    if (fieldType === 'float_list') {
+      const values = toFloatList(raw)
+      if (values.length) prepared[key] = values
+      continue
+    }
+
+    if (fieldType === 'string_list') {
+      const values = toStringList(raw)
+      if (values.length) prepared[key] = values
       continue
     }
 
@@ -186,20 +259,30 @@ const convertParamsForSave = (meta, params) => {
 }
 
 export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSave }) {
+  const logger = useMemo(
+    () => createLogger('IndicatorModal', { indicatorId: initial?.id || null }),
+    [initial?.id],
+  )
+  const { debug } = logger
   const [types, setTypes] = useState([])
+  const [availableIndicators, setAvailableIndicators] = useState([])
   const [typeId, setTypeId] = useState(initial?.type || '')
   const [name, setName] = useState(initial?.name || '')
   const [params, setParams] = useState({})
+  const [dependencyBindings, setDependencyBindings] = useState({})
+  const [signalOutputEnabled, setSignalOutputEnabled] = useState({})
   const [meta, setMeta] = useState(EMPTY_META)
   const [metaError, setMetaError] = useState(null)
-  const [availableSignalRules, setAvailableSignalRules] = useState([])
-  const [selectedSignalRules, setSelectedSignalRules] = useState([])
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const dependencyInitKeyRef = useRef('')
 
   useEffect(() => {
     if (!isOpen) return
-    fetchIndicatorTypes()
-      .then((payload) => setTypes(Array.isArray(payload) ? payload : []))
+    Promise.all([fetchIndicatorTypes(), fetchIndicators()])
+      .then(([typePayload, indicatorPayload]) => {
+        setTypes(Array.isArray(typePayload) ? typePayload : [])
+        setAvailableIndicators(Array.isArray(indicatorPayload) ? indicatorPayload : [])
+      })
       .catch((err) => setMetaError(err?.message || 'Failed to load indicator types'))
   }, [isOpen])
 
@@ -210,10 +293,10 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     setMeta(EMPTY_META)
     setMetaError(null)
     setParams(initial?.params || {})
+    setDependencyBindings({})
+    setSignalOutputEnabled({})
     setShowAdvanced(false)
-    const existingRules = Array.isArray(initial?.signalRules) ? [...initial.signalRules] : []
-    setSelectedSignalRules(existingRules)
-    setAvailableSignalRules([])
+    dependencyInitKeyRef.current = ''
   }, [initial, isOpen])
 
   useEffect(() => {
@@ -227,19 +310,15 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
         setMeta(nextMeta)
         const preparedParams = prepareInitialParams(nextMeta, initial?.params)
         setParams(preparedParams)
+        setSignalOutputEnabled(
+          buildSignalOutputEnabledMap({
+            outputs: nextMeta.outputs,
+            typed_outputs: initial?.type === typeId ? initial?.typed_outputs : undefined,
+            output_prefs: initial?.type === typeId ? initial?.output_prefs : undefined,
+          }),
+        )
         setShowAdvanced(false)
 
-        const rules = Array.isArray(nextMeta.signal_rules) ? nextMeta.signal_rules : []
-        setAvailableSignalRules(rules)
-
-        if (initial?.signalRules?.length) {
-          const filtered = initial.signalRules.filter((ruleId) => rules.some((rule) => rule.id === ruleId))
-          setSelectedSignalRules(filtered)
-        } else if (rules.length) {
-          setSelectedSignalRules(rules.map((rule) => rule.id))
-        } else {
-          setSelectedSignalRules([])
-        }
       })
       .catch((err) => {
         if (cancelled) return
@@ -249,31 +328,55 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     return () => {
       cancelled = true
     }
-  }, [initial?.params, initial?.signalRules, isOpen, typeId])
+  }, [
+    initial?.dependencies,
+    initial?.id,
+    initial?.output_prefs,
+    initial?.params,
+    initial?.typed_outputs,
+    initial?.type,
+    isOpen,
+    typeId,
+  ])
 
-  const fieldOrder = useMemo(() => buildFieldOrder(meta, params), [meta, params])
-  const intListKeys = useMemo(() => deriveIntListKeys(meta), [meta])
-
-  const { coreKeys, optionalKeys, requiredKeys } = useMemo(() => {
-    if (!fieldOrder.length) return { coreKeys: [], optionalKeys: [], requiredKeys: [] }
-
-    const requiredList = Array.isArray(meta.required_params) ? meta.required_params : []
-    const preferredList = Array.isArray(meta.ui_basic_keys) ? meta.ui_basic_keys : []
-    const filteredOrder = fieldOrder.filter((key) => !RUNTIME_CONTEXT_KEYS.has(key))
-
-    const requiredOnly = filteredOrder.filter((key) => requiredList.includes(key))
-    const preferredOnly = filteredOrder.filter((key) => preferredList.includes(key) && !requiredOnly.includes(key))
-
-    const fallbackPrimary = filteredOrder.slice(
-      0,
-      Math.min(filteredOrder.length, Math.max(requiredOnly.length || 2, 4)),
+  useEffect(() => {
+    if (!isOpen || !typeId || !meta?.type) return
+    const initKey = [
+      String(initial?.id || ''),
+      String(typeId || ''),
+      JSON.stringify(initial?.dependencies || []),
+    ].join('|')
+    if (dependencyInitKeyRef.current === initKey) return
+    dependencyInitKeyRef.current = initKey
+    setDependencyBindings(
+      prepareInitialDependencies(
+        meta,
+        initial?.dependencies,
+        availableIndicators,
+        initial?.id,
+      ),
     )
+  }, [
+    availableIndicators,
+    initial?.dependencies,
+    initial?.id,
+    isOpen,
+    meta,
+    typeId,
+  ])
 
-    const core = Array.from(new Set([...requiredOnly, ...preferredOnly, ...fallbackPrimary]))
-    const optional = filteredOrder.filter((key) => !core.includes(key))
-
-    return { coreKeys: core, optionalKeys: optional, requiredKeys: requiredOnly }
-  }, [fieldOrder, meta])
+  const fields = useMemo(() => editableParams(meta), [meta])
+  const { coreFields, optionalFields, requiredKeys } = useMemo(() => {
+    if (!fields.length) return { coreFields: [], optionalFields: [], requiredKeys: [] }
+    const requiredOnly = fields.filter((field) => field?.required)
+    const core = fields.filter((field) => !field?.advanced)
+    const optional = fields.filter((field) => field?.advanced)
+    return {
+      coreFields: core,
+      optionalFields: optional,
+      requiredKeys: requiredOnly.map((field) => field.key),
+    }
+  }, [fields])
 
   const handleParamChange = (key) => (input) => {
     let value = input
@@ -287,32 +390,21 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     setParams((prev) => ({ ...prev, [key]: Boolean(value) }))
   }
 
-  const toggleSignalRule = (ruleId) => {
-    setSelectedSignalRules((prev) => {
-      const next = new Set(prev)
-      if (next.has(ruleId)) {
-        next.delete(ruleId)
-      } else {
-        next.add(ruleId)
-      }
-      return Array.from(next)
-    })
-  }
-
-  const allRulesSelected = availableSignalRules.length > 0 && selectedSignalRules.length === availableSignalRules.length
-
-  const renderField = (key) => {
-    const fieldType = String(meta.field_types?.[key] || '').toLowerCase()
-    const isRequired = Array.isArray(meta.required_params) && meta.required_params.includes(key)
-    const description = meta.ui_descriptions?.[key]
+  const renderField = (param) => {
+    const key = param.key
+    const fieldType = String(param.type || '').toLowerCase()
+    const isRequired = Boolean(param.required)
+    const description = param.description
     const value = params[key] ?? (fieldType === 'bool' ? false : '')
-    const enumValues = Array.isArray(meta.ui_enums?.[key]) ? meta.ui_enums[key] : null
+    const enumValues = Array.isArray(param.options) && param.options.length
+      ? param.options.map(toOptionEntry)
+      : null
 
     return (
       <div key={key} className="space-y-2 rounded-lg border border-white/10 bg-slate-800/60 px-4 py-3 shadow-sm">
         <div className="flex items-start justify-between gap-3">
           <label className="text-sm font-semibold text-white">
-            {key}
+            {param.label || key}
             {isRequired && <span className="ml-1 text-rose-300">*</span>}
           </label>
         </div>
@@ -333,15 +425,15 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
           <DropdownSelect
             value={value}
             onChange={handleParamChange(key)}
-            options={enumValues.map((entry) => ({ value: entry, label: String(entry) }))}
+            options={enumValues}
             className="w-full"
           />
-        ) : intListKeys.has(key) ? (
+        ) : LIST_FIELDS.has(fieldType) ? (
           <input
             className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
             value={value}
             onChange={handleParamChange(key)}
-            placeholder="e.g. 5, 10, 20"
+            placeholder={fieldType === 'string_list' ? 'e.g. one, two, three' : 'e.g. 5, 10, 20'}
           />
         ) : NUMBER_FIELDS.has(fieldType) ? (
           <input
@@ -362,6 +454,25 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     )
   }
 
+  const dependencyFields = useMemo(
+    () => (Array.isArray(meta.dependencies) ? meta.dependencies : []),
+    [meta.dependencies],
+  )
+  const signalOutputs = useMemo(() => getIndicatorOutputsByType(meta, 'signal'), [meta])
+  const dependencySectionScrollable = dependencyFields.length > SECTION_SCROLL_THRESHOLD
+  const signalSectionScrollable = signalOutputs.length > SECTION_SCROLL_THRESHOLD
+
+  const handleDependencyChange = (outputName) => (indicatorId) => {
+    setDependencyBindings((prev) => ({ ...prev, [outputName]: indicatorId }))
+  }
+
+  const handleSignalOutputToggle = (outputName) => (enabled) => {
+    setSignalOutputEnabled((prev) => ({
+      ...prev,
+      [outputName]: Boolean(enabled),
+    }))
+  }
+
   const handleSubmit = () => {
     if (!typeId) {
       setMetaError('Please select an indicator type.')
@@ -371,13 +482,37 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
       setMetaError('Please provide an indicator name.')
       return
     }
-    if (availableSignalRules.length > 0 && selectedSignalRules.length === 0) {
-      setMetaError('Enable at least one signal rule to generate signals.')
+    const preparedDependencies = dependencyFields.map((dependency) => {
+      const outputName = String(dependency?.output_name || '').trim()
+      return {
+        indicator_id: String(dependencyBindings?.[outputName] || '').trim(),
+        indicator_type: String(dependency?.indicator_type || '').trim(),
+        output_name: outputName,
+      }
+    })
+    const missingDependency = preparedDependencies.find((dependency) => !dependency.indicator_id)
+    if (missingDependency) {
+      setMetaError(
+        `Please select a ${missingDependency.indicator_type} dependency for ${missingDependency.output_name}.`,
+      )
       return
     }
-
     const preparedParams = convertParamsForSave(meta, params)
-    onSave({ id: initial?.id, type: typeId, name: name.trim(), params: preparedParams, signalRules: selectedSignalRules })
+    const outputPrefs = buildSignalOutputPrefs(meta, signalOutputEnabled)
+    debug('indicator_modal_submit', {
+      indicatorId: initial?.id || null,
+      typeId,
+      signalOutputEnabled,
+      outputPrefs,
+    })
+    onSave({
+      id: initial?.id,
+      type: typeId,
+      name: name.trim(),
+      params: preparedParams,
+      dependencies: preparedDependencies,
+      output_prefs: outputPrefs,
+    })
   }
 
   if (!isOpen) return null
@@ -385,23 +520,24 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
   return (
     <Dialog open={isOpen} onClose={onClose} className="relative z-50">
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" aria-hidden="true" />
-      <div className="fixed inset-0 flex items-center justify-center p-6">
-        <DialogPanel className="flex w-full max-w-4xl max-h-[92vh] flex-col overflow-hidden rounded-xl border border-white/10 bg-[#0c111d] text-slate-100 shadow-2xl">
-          <header className="border-b border-white/10 bg-white/5 px-6 py-4">
-            <DialogTitle className="text-lg font-semibold text-white">
-              {initial?.id ? 'Edit indicator' : 'Create indicator'}
-            </DialogTitle>
-            <p className="mt-1 text-sm text-slate-400">
-              Configure the core parameters and choose which signal rules should run for this indicator. Required fields are marked with *.
-            </p>
-          </header>
+      <div className="fixed inset-0 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6">
+        <div className="flex min-h-full items-start justify-center sm:items-center">
+          <DialogPanel className="flex w-full max-w-[88rem] min-h-[min(72vh,44rem)] max-h-[min(94vh,72rem)] flex-col overflow-hidden rounded-[24px] border border-white/10 bg-[#0c111d] text-slate-100 shadow-2xl">
+            <header className="shrink-0 border-b border-white/10 bg-white/5 px-6 py-4 sm:px-7">
+              <DialogTitle className="text-lg font-semibold text-white">
+                {initial?.id ? 'Edit indicator' : 'Create indicator'}
+              </DialogTitle>
+              <p className="mt-1 text-sm text-slate-400">
+                Configure indicator parameters. Required fields are marked with *.
+              </p>
+            </header>
 
-          <div className="flex-1 space-y-6 overflow-y-auto px-6 py-6">
-            {(metaError || error) && (
-              <div className="rounded-md border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200 shadow-sm">
-                {metaError || error}
-              </div>
-            )}
+            <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-6 py-6 sm:px-7">
+              {(metaError || error) && (
+                <div className="rounded-md border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200 shadow-sm">
+                  {metaError || error}
+                </div>
+              )}
 
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1">
@@ -432,7 +568,7 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
 
             {typeId ? (
               <div className="space-y-5">
-                {fieldOrder.length ? (
+                {fields.length ? (
                   <div className="space-y-5">
                     <div className="space-y-3 rounded-lg border border-white/12 bg-slate-900/60 p-4">
                       <div className="flex items-start justify-between">
@@ -451,20 +587,20 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
                         )}
                       </div>
 
-                      {coreKeys.length > 0 ? (
-                        <div className="grid gap-3 md:grid-cols-2">{coreKeys.map(renderField)}</div>
+                      {coreFields.length > 0 ? (
+                        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{coreFields.map(renderField)}</div>
                       ) : (
                         <p className="text-sm text-slate-400">No configurable parameters for this indicator.</p>
                       )}
                     </div>
 
-                    {optionalKeys.length > 0 && (
+                    {optionalFields.length > 0 && (
                       <div className="space-y-3 rounded-lg border border-dashed border-white/12 bg-slate-900/40 p-4">
                         <div className="flex items-center justify-between">
                           <div>
                             <h4 className="text-sm font-semibold text-white">Additional parameters</h4>
                             <p className="text-xs text-slate-400">
-                              {optionalKeys.length} optional setting{optionalKeys.length > 1 ? 's' : ''} kept separate for clarity.
+                              {optionalFields.length} optional setting{optionalFields.length > 1 ? 's' : ''} kept separate for clarity.
                             </p>
                           </div>
                           <button
@@ -477,7 +613,7 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
                         </div>
 
                         {showAdvanced && (
-                          <div className="grid gap-3 md:grid-cols-2">{optionalKeys.map(renderField)}</div>
+                          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{optionalFields.map(renderField)}</div>
                         )}
                       </div>
                     )}
@@ -488,76 +624,135 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
                   </p>
                 )}
 
-                {availableSignalRules.length > 0 && (
-                  <div className="space-y-3 rounded-lg border border-white/10 bg-slate-900/60 p-4">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <h4 className="text-sm font-semibold text-white">Signal rules</h4>
-                        <p className="text-xs text-slate-400">Toggle the detections you want to run for this indicator.</p>
-                      </div>
-                      <button
-                        type="button"
-                        className="rounded-md border border-white/10 px-3 py-1 text-xs font-medium text-slate-200 transition hover:border-[color:var(--accent-alpha-40)] hover:text-white"
-                        onClick={() => setSelectedSignalRules(allRulesSelected ? [] : availableSignalRules.map((rule) => rule.id))}
-                      >
-                        {allRulesSelected ? 'Clear' : 'Enable all'}
-                      </button>
+                {dependencyFields.length > 0 && (
+                  <div className="space-y-3 rounded-lg border border-white/12 bg-slate-900/60 p-4">
+                    <div>
+                      <h4 className="text-sm font-semibold text-white">Indicator dependencies</h4>
+                      <p className="text-xs text-slate-400">
+                        Dependent indicators must bind to a specific upstream indicator instance.
+                      </p>
                     </div>
-
-                    <div className="divide-y divide-white/10 rounded-md border border-white/10 bg-black/20">
-                      {availableSignalRules.map((rule, idx) => {
-                        const checked = selectedSignalRules.includes(rule.id)
-                        return (
-                          <label
-                            key={rule.id}
-                            className={`flex items-start justify-between gap-3 px-3 py-3 text-sm transition ${
-                              checked
-                                ? 'bg-[color:var(--accent-alpha-10)] text-white'
-                                : 'text-slate-200 hover:bg-white/5 hover:text-white'
-                            } ${idx === 0 ? 'rounded-t-md' : ''} ${idx === availableSignalRules.length - 1 ? 'rounded-b-md' : ''}`}
-                          >
-                            <div className="space-y-1">
-                              <span className="font-medium">{rule.label || rule.id}</span>
-                              {rule.description && <p className="text-xs text-slate-300/80 leading-relaxed">{rule.description}</p>}
-                            </div>
-                            <Switch
-                              checked={checked}
-                              onChange={() => toggleSignalRule(rule.id)}
-                              className={`${checked ? 'bg-[color:var(--accent-alpha-80)]' : 'bg-slate-600/60'} relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition`}
+                    <div className={dependencySectionScrollable ? 'max-h-[min(30vh,24rem)] overflow-y-auto pr-1' : ''}>
+                      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                        {dependencyFields.map((dependency) => {
+                          const outputName = String(dependency?.output_name || '').trim()
+                          const candidates = compatibleIndicatorsForDependency(
+                            dependency,
+                            availableIndicators,
+                            initial?.id,
+                          )
+                          const value = dependencyBindings?.[outputName] || ''
+                          return (
+                            <div
+                              key={`${dependency.indicator_type}.${outputName}`}
+                              className="space-y-2 rounded-lg border border-white/10 bg-slate-800/60 px-4 py-3 shadow-sm"
                             >
-                              <span className={`${checked ? 'translate-x-6' : 'translate-x-1'} inline-block h-4 w-4 transform rounded-full bg-white transition`} />
-                            </Switch>
-                          </label>
-                        )
-                      })}
+                              <div className="flex items-start justify-between gap-3">
+                                <label className="text-sm font-semibold text-white">
+                                  {dependency.label || `${formatIndicatorType(dependency.indicator_type)} Dependency`}
+                                  <span className="ml-1 text-rose-300">*</span>
+                                </label>
+                              </div>
+                              {dependency.description && (
+                                <p className="text-xs text-slate-300/80">{dependency.description}</p>
+                              )}
+                              {candidates.length ? (
+                                <DropdownSelect
+                                  value={value}
+                                  onChange={handleDependencyChange(outputName)}
+                                  placeholder={`Select ${formatIndicatorType(dependency.indicator_type)}…`}
+                                  options={candidates.map((indicator) => ({
+                                    value: indicator.id,
+                                    label: indicator.name || indicator.id,
+                                    description: `${formatIndicatorType(indicator.type)} · ${indicator.id}`,
+                                  }))}
+                                  className="w-full"
+                                />
+                              ) : (
+                                <p className="text-sm text-amber-200">
+                                  No compatible {formatIndicatorType(dependency.indicator_type)} indicators are available.
+                                </p>
+                              )}
+                            </div>
+                          )
+                        })}
+                      </div>
                     </div>
                   </div>
                 )}
+
+                {signalOutputs.length > 0 && (
+                  <div className="space-y-3 rounded-lg border border-white/12 bg-slate-900/60 p-4">
+                    <div>
+                      <h4 className="text-sm font-semibold text-white">Signal outputs</h4>
+                      <p className="text-xs text-slate-400">
+                        Signal outputs auto-discover from the indicator manifest. Disable them here to hide them from authoring and preview surfaces only. Bot runtime still evaluates whatever signals your strategy rules reference.
+                      </p>
+                    </div>
+                    <div className={signalSectionScrollable ? 'max-h-[min(30vh,24rem)] overflow-y-auto pr-1' : ''}>
+                      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                        {signalOutputs.map((output) => {
+                          const outputName = String(output?.name || '').trim()
+                          const enabled = signalOutputEnabled[outputName] !== false
+                          return (
+                            <div
+                              key={outputName}
+                              className="space-y-2 rounded-lg border border-white/10 bg-slate-800/60 px-4 py-3 shadow-sm"
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <label className="text-sm font-semibold text-white">
+                                    {output.label || outputName}
+                                  </label>
+                                  <p className="text-xs text-slate-400">{outputName}</p>
+                                </div>
+                                <Switch
+                                  checked={enabled}
+                                  onChange={handleSignalOutputToggle(outputName)}
+                                  className={`${enabled ? 'bg-emerald-500/70' : 'bg-slate-600/60'} relative inline-flex h-6 w-11 items-center rounded-full transition`}
+                                >
+                                  <span className={`${enabled ? 'translate-x-6' : 'translate-x-1'} inline-block h-4 w-4 transform rounded-full bg-white transition`} />
+                                </Switch>
+                              </div>
+                              <p className="text-xs text-slate-300/80">
+                                {enabled
+                                  ? 'Available in indicator signal previews and rule creation.'
+                                  : 'Hidden from indicator signal previews and new rule creation.'}
+                              </p>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
               </div>
             ) : (
               <p className="rounded-lg border border-dashed border-white/10 bg-slate-900/50 p-4 text-sm text-slate-400">
-                Select an indicator type to configure its parameters and signal rules.
+                Select an indicator type to configure its parameters.
               </p>
             )}
-          </div>
+            </div>
 
-          <footer className="flex items-center justify-end gap-3 border-t border-white/10 bg-white/5 px-6 py-4">
-            <button
-              type="button"
-              className="rounded-md border border-white/10 bg-transparent px-3 py-2 text-sm text-slate-200 transition hover:bg-white/10"
-              onClick={onClose}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="rounded-md bg-[color:var(--accent-alpha-40)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] transition hover:bg-[color:var(--accent-alpha-60)]"
-              onClick={handleSubmit}
-            >
-              Save indicator
-            </button>
-          </footer>
-        </DialogPanel>
+            <footer className="shrink-0 flex items-center justify-end gap-3 border-t border-white/10 bg-white/5 px-6 py-4 sm:px-7">
+              <button
+                type="button"
+                className="rounded-md border border-white/10 bg-transparent px-3 py-2 text-sm text-slate-200 transition hover:bg-white/10"
+                onClick={onClose}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded-md bg-[color:var(--accent-alpha-40)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] transition hover:bg-[color:var(--accent-alpha-60)]"
+                onClick={handleSubmit}
+              >
+                Save indicator
+              </button>
+            </footer>
+          </DialogPanel>
+        </div>
       </div>
     </Dialog>
   )
