@@ -129,6 +129,12 @@ Transport-only derived facts may be persisted by ingest, but repeated stable
 event ids should be filtered before DB access and still remain protected by
 storage uniqueness.
 
+Runtime lifecycle and bootstrap/control messages use the telemetry control lane.
+The control lane is still projection input, not execution truth, but shutdown
+must attempt a bounded flush before ordinary live/debug telemetry is abandoned.
+If that flush cannot prove delivery, the runtime emits WARN-level diagnostics
+and may attempt a bounded direct websocket fallback.
+
 Paper market streams may emit `provisional_candle_updated` facts from provider
 ticker/candle updates. These facts travel through the existing
 `botlens_runtime_facts` telemetry path and are retained as Tier 4 live

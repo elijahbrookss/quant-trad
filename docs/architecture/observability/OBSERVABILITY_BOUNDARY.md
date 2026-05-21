@@ -126,6 +126,8 @@ complete database pressure signal.
 - fallback and degrade events,
 - runner clock-gap diagnostics,
 - Docker container lifecycle diagnostics for Quant-Trad containers,
+- control-plane telemetry flush status for runtime lifecycle and bootstrap
+  messages,
 - storage write timing,
 - projection failures,
 - continuity summaries,
@@ -151,6 +153,13 @@ complete database pressure signal.
 - Runtime fallbacks should emit WARN-level or metric diagnostics with enough context to investigate.
 - Runner clock gaps and Docker lifecycle events explain operational liveness;
   they must not become strategy, wallet, order, trade, or report truth.
+- Runtime lifecycle and bootstrap messages use the telemetry control lane. Close
+  may drop ordinary projection/debug telemetry, but it must attempt a bounded
+  control-lane flush and emit `telemetry_control_flush_timeout` if delivery
+  cannot be proven.
+- Container telemetry transports must avoid sync websocket background clients;
+  websocket open/send/close belongs to the async telemetry worker or the bounded
+  direct fallback path.
 - Dashboard gaps should point back to missing instrumentation or storage, not hidden execution semantics.
 
 ## Invariants

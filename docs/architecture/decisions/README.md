@@ -44,3 +44,4 @@ respect.
 | [0023](0023-persist-watchdog-degradation-diagnostics.md) | Persist watchdog degradation diagnostics | Accepted |
 | [0024](0024-use-provider-credential-references.md) | Use provider credential references | Accepted |
 | [0025](0025-use-per-run-leases.md) | Use per-run leases | Accepted |
+| [0026](0026-use-control-plane-telemetry-flush.md) | Use control-plane telemetry flush | Accepted |
