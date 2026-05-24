@@ -1,5 +1,4 @@
 import inspect
-import os
 import math
 import datetime as dt
 from typing import Optional, Tuple, Union, Dict, Any
@@ -9,8 +8,12 @@ import pandas as pd
 import ccxt
 
 from core.logger import logger
-from data_providers.registry import _REGISTRY
+from core.settings import get_settings
+from data_providers.registry import _REGISTRY, venue_for_exchange_slug
+from data_providers.services.credential_store import load_credentials
 from .base import BaseDataProvider, InstrumentMetadata, InstrumentType
+
+_CCXT_SETTINGS = get_settings().providers.ccxt
 
 
 class CCXTProvider(BaseDataProvider):
@@ -271,18 +274,33 @@ class CCXTProvider(BaseDataProvider):
             raise ValueError(f"Symbol '{symbol}' not found on {self._exchange_id}")
 
     def _sandbox_flag(self) -> bool:
-        flag = os.getenv("CCXT_SANDBOX_MODE", "false").strip().lower()
-        return flag in {"1", "true", "yes", "on"}
+        return _CCXT_SETTINGS.sandbox_mode
 
     def _resolve_credentials(self) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        upper = self._exchange_id.upper()
-        prefix = f"CCXT_{upper}_"
-
-        api_key = os.getenv(prefix + "API_KEY") or os.getenv("CCXT_API_KEY")
-        secret = os.getenv(prefix + "API_SECRET") or os.getenv("CCXT_API_SECRET") or os.getenv("CCXT_SECRET")
-        password = os.getenv(prefix + "API_PASSWORD") or os.getenv("CCXT_PASSWORD")
-
-        return api_key, secret, password
+        venue_id = venue_for_exchange_slug(self._exchange_id) or self._exchange_id.upper()
+        try:
+            stored = load_credentials(
+                "CCXT",
+                venue_id,
+                environment="paper",
+                mark_used=True,
+                warn_missing=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "ccxt_optional_credentials_unavailable | exchange=%s venue=%s error=%s",
+                self._exchange_id,
+                venue_id,
+                exc,
+            )
+            return None, None, None
+        if not stored:
+            return None, None, None
+        return (
+            str(stored.get("CCXT_API_KEY") or "").strip() or None,
+            str(stored.get("CCXT_SECRET") or stored.get("CCXT_API_SECRET") or "").strip() or None,
+            str(stored.get("CCXT_PASSWORD") or "").strip() or None,
+        )
 
     def _build_exchange(self):
         if not hasattr(ccxt, self._exchange_id):
@@ -308,15 +326,9 @@ class CCXTProvider(BaseDataProvider):
         return exchange
 
     def _resolve_ohlcv_limit(self) -> int:
-        env_value = os.getenv("CCXT_OHLCV_LIMIT")
-        if env_value is not None:
-            try:
-                return max(1, int(env_value))
-            except ValueError:
-                logger.warning(
-                    "Invalid CCXT_OHLCV_LIMIT value '%s'; falling back to default.",
-                    env_value,
-                )
+        configured_limit = _CCXT_SETTINGS.ohlcv_limit
+        if configured_limit is not None:
+            return max(1, int(configured_limit))
 
         candidates = []
         for attr in ("limit", "maxLimit", "defaultLimit"):

@@ -1,4 +1,5 @@
-from typing import List, Tuple
+import json
+from typing import Any, List, Mapping, Tuple
 
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -8,8 +9,6 @@ from core.logger import logger
 from indicators.config import DataContext
 from data_providers.config.runtime import PersistenceConfig
 from data_providers.utils.ohlcv import interval_to_timedelta
-
-from ..market.stats_queue import enqueue_stats_job
 
 class DataPersistenceService:
     """Handle storage, schema management, and closure bookkeeping for OHLCV data."""
@@ -31,7 +30,7 @@ class DataPersistenceService:
         return self._engine is not None
 
     def ensure_schema(self):
-        """Create candle, stats, derivatives, and closure tables if they are missing."""
+        """Create candle, derivatives, and closure tables if they are missing."""
 
         if not self._engine:
             logger.warning(
@@ -65,52 +64,6 @@ class DataPersistenceService:
             CHECK (trade_count IS NULL OR trade_count >= 0)
         );
         """
-        ddl_stats = f"""
-        CREATE TABLE IF NOT EXISTS {self._config.candle_stats_table} (
-            instrument_id TEXT NOT NULL,
-            timeframe_seconds INTEGER NOT NULL,
-            candle_time TIMESTAMPTZ NOT NULL,
-            stats_version TEXT NOT NULL,
-            computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            stats JSONB NOT NULL,
-            PRIMARY KEY (instrument_id, timeframe_seconds, candle_time, stats_version),
-            FOREIGN KEY (instrument_id, timeframe_seconds, candle_time)
-                REFERENCES {self._config.candles_raw_table} (instrument_id, timeframe_seconds, candle_time)
-                ON DELETE CASCADE,
-            CHECK (jsonb_typeof(stats) = 'object')
-        );
-        """
-        ddl_regime = f"""
-        CREATE TABLE IF NOT EXISTS {self._config.regime_stats_table} (
-            instrument_id TEXT NOT NULL,
-            timeframe_seconds INTEGER NOT NULL,
-            candle_time TIMESTAMPTZ NOT NULL,
-            regime_version TEXT NOT NULL,
-            computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            regime JSONB NOT NULL,
-            PRIMARY KEY (instrument_id, timeframe_seconds, candle_time, regime_version),
-            FOREIGN KEY (instrument_id, timeframe_seconds, candle_time)
-                REFERENCES {self._config.candles_raw_table} (instrument_id, timeframe_seconds, candle_time)
-                ON DELETE CASCADE,
-            CHECK (jsonb_typeof(regime) = 'object')
-        );
-        """
-        ddl_regime_blocks = f"""
-        CREATE TABLE IF NOT EXISTS {self._config.regime_blocks_table} (
-            block_id TEXT NOT NULL,
-            instrument_id TEXT NOT NULL,
-            timeframe_seconds INTEGER NOT NULL,
-            start_ts TIMESTAMPTZ NOT NULL,
-            end_ts TIMESTAMPTZ NOT NULL,
-            regime_version TEXT NOT NULL,
-            computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            block JSONB NOT NULL,
-            PRIMARY KEY (block_id),
-            CHECK (timeframe_seconds > 0),
-            CHECK (end_ts >= start_ts),
-            CHECK (jsonb_typeof(block) = 'object')
-        );
-        """
         ddl_derivatives = f"""
         CREATE TABLE IF NOT EXISTS {self._config.derivatives_state_table} (
             instrument_id TEXT NOT NULL,
@@ -137,6 +90,7 @@ class DataPersistenceService:
             timeframe_seconds INTEGER NOT NULL,
             start_ts TIMESTAMPTZ NOT NULL,
             end_ts TIMESTAMPTZ NOT NULL,
+            metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
             created_at TIMESTAMPTZ DEFAULT now(),
             PRIMARY KEY (instrument_id, timeframe_seconds, start_ts, end_ts),
             CHECK (timeframe_seconds > 0),
@@ -147,26 +101,6 @@ class DataPersistenceService:
             f"""
             CREATE INDEX IF NOT EXISTS idx_candles_raw_instrument_tf_time
             ON {self._config.candles_raw_table} (instrument_id, timeframe_seconds, candle_time DESC);
-            """,
-            f"""
-            CREATE INDEX IF NOT EXISTS idx_candle_stats_instrument_tf_time
-            ON {self._config.candle_stats_table} (instrument_id, timeframe_seconds, candle_time DESC);
-            """,
-            f"""
-            CREATE INDEX IF NOT EXISTS idx_regime_stats_instrument_tf_time
-            ON {self._config.regime_stats_table} (instrument_id, timeframe_seconds, candle_time DESC);
-            """,
-            f"""
-            CREATE INDEX IF NOT EXISTS idx_regime_stats_instrument_tf_version_time
-            ON {self._config.regime_stats_table} (instrument_id, timeframe_seconds, regime_version, candle_time DESC);
-            """,
-            f"""
-            CREATE INDEX IF NOT EXISTS idx_regime_blocks_instrument_tf_start
-            ON {self._config.regime_blocks_table} (instrument_id, timeframe_seconds, start_ts DESC);
-            """,
-            f"""
-            CREATE INDEX IF NOT EXISTS idx_regime_blocks_instrument_tf_version_start
-            ON {self._config.regime_blocks_table} (instrument_id, timeframe_seconds, regime_version, start_ts DESC);
             """,
             f"""
             CREATE INDEX IF NOT EXISTS idx_derivatives_state_instrument_time
@@ -185,31 +119,22 @@ class DataPersistenceService:
         try:
             with self._engine.begin() as conn:
                 conn.execute(text(ddl_create))
-                conn.execute(text(ddl_stats))
-                conn.execute(text(ddl_regime))
-                conn.execute(text(ddl_regime_blocks))
                 conn.execute(text(ddl_derivatives))
                 conn.execute(text(ddl_closures))
                 for ddl in ddl_indexes:
                     conn.execute(text(ddl))
             if not self._schema_logged:
                 logger.info(
-                    "schema_ensured | raw=%s stats=%s regime=%s regime_blocks=%s derivatives=%s closures=%s",
+                    "schema_ensured | raw=%s derivatives=%s closures=%s",
                     self._config.candles_raw_table,
-                    self._config.candle_stats_table,
-                    self._config.regime_stats_table,
-                    self._config.regime_blocks_table,
                     self._config.derivatives_state_table,
                     self._config.closures_table,
                 )
                 self._schema_logged = True
         except SQLAlchemyError as e:
             logger.exception(
-                "Failed to ensure schema for raw=%s stats=%s regime=%s regime_blocks=%s derivatives=%s closures=%s: %s",
+                "Failed to ensure schema for raw=%s derivatives=%s closures=%s: %s",
                 self._config.candles_raw_table,
-                self._config.candle_stats_table,
-                self._config.regime_stats_table,
-                self._config.regime_blocks_table,
                 self._config.derivatives_state_table,
                 self._config.closures_table,
                 e,
@@ -361,12 +286,89 @@ class DataPersistenceService:
 
         return closures
 
+    def load_closure_evidence_ranges(
+        self,
+        ctx: DataContext,
+        datasource: str,
+        requested_start: pd.Timestamp,
+        requested_end: pd.Timestamp,
+    ) -> List[Mapping[str, Any]]:
+        """Retrieve cached closure windows with provider-agnostic evidence metadata."""
+
+        if not self._engine:
+            return []
+
+        self.ensure_schema()
+
+        instrument_id, timeframe_seconds = self._resolve_context(ctx)
+        query = text(
+            f"""
+            SELECT start_ts, end_ts, metadata
+            FROM {self._config.closures_table}
+            WHERE instrument_id = :instrument_id
+              AND timeframe_seconds = :timeframe_seconds
+              AND NOT (end_ts <= :request_start OR start_ts >= :request_end)
+            ORDER BY start_ts
+            """
+        )
+
+        try:
+            with self._engine.begin() as conn:
+                rows = conn.execute(
+                    query,
+                    {
+                        "instrument_id": instrument_id,
+                        "timeframe_seconds": timeframe_seconds,
+                        "request_start": requested_start,
+                        "request_end": requested_end,
+                    },
+                ).fetchall()
+        except ProgrammingError as exc:
+            message = str(exc).lower()
+            if "does not exist" in message or "metadata" in message:
+                logger.warning(
+                    "Closure evidence unavailable for table '%s'. Apply the candle closure evidence migration.",
+                    self._config.closures_table,
+                )
+            else:
+                logger.exception(
+                    "Failed to load closure evidence ranges for %s [%s]: %s",
+                    ctx.symbol,
+                    ctx.interval,
+                    exc,
+                )
+            return [
+                {"start": start, "end": end, "metadata": {}}
+                for start, end in self.load_closure_ranges(ctx, datasource, requested_start, requested_end)
+            ]
+        except SQLAlchemyError as exc:
+            logger.exception(
+                "Failed to load closure evidence ranges for %s [%s]: %s",
+                ctx.symbol,
+                ctx.interval,
+                exc,
+            )
+            return []
+
+        evidence: List[Mapping[str, Any]] = []
+        for row in rows:
+            metadata = row[2] if len(row) > 2 else {}
+            evidence.append(
+                {
+                    "start": pd.to_datetime(row[0], utc=True),
+                    "end": pd.to_datetime(row[1], utc=True),
+                    "metadata": metadata if isinstance(metadata, Mapping) else {},
+                }
+            )
+        return evidence
+
     def record_closure_range(
         self,
         ctx: DataContext,
         datasource: str,
         start: pd.Timestamp,
         end: pd.Timestamp,
+        metadata: Mapping[str, Any] | None = None,
     ):
         """Persist a window indicating upstream returned no data."""
 
@@ -381,7 +383,7 @@ class DataPersistenceService:
 
         overlap_query = text(
             f"""
-            SELECT start_ts, end_ts FROM {self._config.closures_table}
+            SELECT start_ts, end_ts, metadata FROM {self._config.closures_table}
             WHERE instrument_id = :instrument_id
               AND timeframe_seconds = :timeframe_seconds
               AND NOT (end_ts <= :start_ts OR start_ts >= :end_ts)
@@ -400,17 +402,19 @@ class DataPersistenceService:
         insert_query = text(
             f"""
             INSERT INTO {self._config.closures_table}
-                (instrument_id, timeframe_seconds, start_ts, end_ts)
-            VALUES (:instrument_id, :timeframe_seconds, :start_ts, :end_ts)
+                (instrument_id, timeframe_seconds, start_ts, end_ts, metadata)
+            VALUES (:instrument_id, :timeframe_seconds, :start_ts, :end_ts, CAST(:metadata AS jsonb))
             ON CONFLICT (instrument_id, timeframe_seconds, start_ts, end_ts) DO NOTHING
             """
         )
 
+        evidence_metadata = dict(metadata or {})
         params = {
             "instrument_id": instrument_id,
             "timeframe_seconds": timeframe_seconds,
             "start_ts": start_ts,
             "end_ts": end_ts,
+            "metadata": json.dumps(evidence_metadata, sort_keys=True),
         }
 
         try:
@@ -419,6 +423,16 @@ class DataPersistenceService:
                 if rows:
                     start_ts = min(start_ts, *(pd.to_datetime(row[0], utc=True) for row in rows))
                     end_ts = max(end_ts, *(pd.to_datetime(row[1], utc=True) for row in rows))
+                    merged_sources = [
+                        row[2]
+                        for row in rows
+                        if len(row) > 2 and isinstance(row[2], Mapping) and row[2]
+                    ]
+                    if merged_sources:
+                        evidence_metadata = {
+                            **evidence_metadata,
+                            "merged_closure_evidence": merged_sources[:8],
+                        }
                     conn.execute(
                         delete_query,
                         {
@@ -434,6 +448,7 @@ class DataPersistenceService:
                         **params,
                         "start_ts": start_ts,
                         "end_ts": end_ts,
+                        "metadata": json.dumps(evidence_metadata, sort_keys=True),
                     },
                 )
 
@@ -446,6 +461,12 @@ class DataPersistenceService:
                 )
         except ProgrammingError as exc:
             message = str(exc).lower()
+            if "metadata" in message:
+                logger.warning(
+                    "Closure table '%s' is missing metadata column. Apply candle closure evidence migration.",
+                    self._config.closures_table,
+                )
+                return
             if "does not exist" in message:
                 logger.warning(
                     "Closure table '%s' missing during record; ensuring schema and retrying once.",
@@ -453,7 +474,7 @@ class DataPersistenceService:
                 )
                 self.ensure_schema()
                 try:
-                    self.record_closure_range(ctx, datasource, start, end)
+                    self.record_closure_range(ctx, datasource, start, end, metadata=metadata)
                 except Exception:
                     logger.exception(
                         "Retry failed while recording closure for %s [%s].",
@@ -547,12 +568,6 @@ class DataPersistenceService:
                 timeframe_seconds,
                 candle_time.min().isoformat(),
                 candle_time.max().isoformat(),
-            )
-            enqueue_stats_job(
-                instrument_id=instrument_id,
-                timeframe_seconds=timeframe_seconds,
-                time_min=candle_time.min(),
-                time_max=candle_time.max(),
             )
             return len(prepared)
 

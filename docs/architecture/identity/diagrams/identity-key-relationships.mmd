@@ -1,0 +1,37 @@
+flowchart TD
+    strategy["Strategy definition<br/>strategy_id"]
+    compiled["Compiled material identity<br/>strategy_hash"]
+    bot["Bot configuration<br/>bot_id"]
+    run["Runtime execution<br/>run_id"]
+    instrument["Instrument binding<br/>instrument_id"]
+    series["Series identity<br/>series_key = symbol/timeframe"]
+    bar["Known-at evaluation point<br/>bar_time"]
+    decision["Decision artifact<br/>decision_id"]
+    signal["Signal provenance<br/>signal_id"]
+    trade["Trade lifecycle<br/>trade_id"]
+    event["Runtime event<br/>event_id + seq + correlation_id + root_id"]
+    botlens["BotLens projections"]
+    reports["RunResearchDataset / reports"]
+    logs["Logs / metrics / diagnostics"]
+
+    strategy --> compiled
+    bot --> run
+    compiled --> run
+    run --> instrument
+    instrument --> series
+    series --> bar
+    bar --> decision
+    decision --> signal
+    decision --> trade
+    signal --> event
+    decision --> event
+    trade --> event
+    run --> event
+    event --> botlens
+    event --> reports
+    event --> logs
+
+    classDef identity fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
+    classDef projection fill:#111827,stroke:#a78bfa,color:#ede9fe
+    class strategy,compiled,bot,run,instrument,series,bar,decision,signal,trade,event identity
+    class botlens,reports,logs projection

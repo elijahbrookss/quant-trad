@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Iterable, Mapping, Optional
 
+from engines.bot_runtime.core.execution_profile import SeriesExecutionProfile
 from engines.bot_runtime.core.exit_settlement import ExitSettlement, ExitSettlementContext
 from utils.log_context import build_log_context
 from utils.perf_log import get_obs_enabled, get_obs_slow_ms, perf_log
@@ -19,12 +20,21 @@ class SettlementApplier:
         self._obs_enabled = obs_enabled if obs_enabled is not None else get_obs_enabled()
         self._obs_slow_ms = obs_slow_ms if obs_slow_ms is not None else get_obs_slow_ms()
 
-    def apply(self, events: Iterable[Mapping[str, Any]], exit_settlement: Optional[ExitSettlement]) -> None:
+    def apply(
+        self,
+        events: Iterable[Mapping[str, Any]],
+        exit_settlement: Optional[ExitSettlement],
+        *,
+        execution_profile: Optional[SeriesExecutionProfile] = None,
+    ) -> None:
         if not exit_settlement:
             return
         for event in events:
             settlement = event.get("settlement")
             if not isinstance(settlement, Mapping):
+                continue
+            existing_metadata = event.get("wallet_fill_metadata")
+            if isinstance(existing_metadata, Mapping) and existing_metadata:
                 continue
             base_context = build_log_context(trade_id=settlement.get("trade_id"))
             context = ExitSettlementContext(
@@ -48,6 +58,7 @@ class SettlementApplier:
                 realized_pnl=float(settlement.get("realized_pnl") or 0.0),
                 allow_short_borrow=bool(settlement.get("allow_short_borrow")),
                 instrument=dict(settlement.get("instrument") or {}),
+                execution_profile=execution_profile,
             )
             with perf_log(
                 "bot_runtime_settlement_apply",

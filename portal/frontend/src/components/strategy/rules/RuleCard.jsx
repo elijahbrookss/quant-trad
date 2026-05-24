@@ -5,8 +5,8 @@ import { MoreVertical, Pencil, CopyPlus, Trash2, ChevronDown, ChevronRight } fro
 export const RuleCard = ({
   rule,
   summary,
-  conditionCount,
-  filterCount,
+  triggerCount,
+  guardCount,
   expanded,
   onToggleExpand,
   onEdit,
@@ -14,20 +14,19 @@ export const RuleCard = ({
   onDuplicate,
   children,
 }) => {
-  const isBuy = rule.action === 'buy'
-  const accentColor = isBuy ? 'emerald' : 'rose'
+  const isLong = rule.intent !== 'enter_short'
 
   return (
     <div
       className={`
         group relative overflow-hidden rounded-xl border transition-all
-        ${rule.enabled ? 'border-white/10 bg-white/[0.03]' : 'border-white/5 bg-white/[0.01] opacity-60'}
+        border-white/10 bg-white/[0.03]
         hover:border-white/15 hover:bg-white/[0.04]
       `}
     >
       {/* Left accent bar */}
       <div
-        className={`absolute left-0 top-0 h-full w-1 ${isBuy ? 'bg-emerald-500' : 'bg-rose-500'}`}
+        className={`absolute left-0 top-0 h-full w-1 ${isLong ? 'bg-emerald-500' : 'bg-rose-500'}`}
         aria-hidden="true"
       />
 
@@ -36,12 +35,12 @@ export const RuleCard = ({
         {/* Action badge */}
         <span
           className={`mt-0.5 inline-flex shrink-0 items-center rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.15em] ${
-            isBuy
+            isLong
               ? 'bg-emerald-500/15 text-emerald-300'
               : 'bg-rose-500/15 text-rose-300'
           }`}
         >
-          {rule.action?.toUpperCase() || 'ACTION'}
+          {isLong ? 'LONG' : 'SHORT'}
         </span>
 
         {/* Content area - clickable to expand */}
@@ -56,11 +55,6 @@ export const RuleCard = ({
                 <span className="truncate text-sm font-semibold text-white">
                   {rule.name}
                 </span>
-                {!rule.enabled && (
-                  <span className="shrink-0 rounded bg-slate-700/50 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-slate-400">
-                    Off
-                  </span>
-                )}
               </div>
               <p className="mt-0.5 truncate text-xs text-slate-400">{summary}</p>
             </div>
@@ -76,10 +70,10 @@ export const RuleCard = ({
           {/* Metadata badges */}
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <span className="inline-flex items-center rounded bg-white/5 px-2 py-0.5 text-[10px] text-slate-400">
-              {conditionCount} condition{conditionCount === 1 ? '' : 's'}
+              {triggerCount} trigger{triggerCount === 1 ? '' : 's'}
             </span>
             <span className="inline-flex items-center rounded bg-white/5 px-2 py-0.5 text-[10px] text-slate-400">
-              {filterCount} gate{filterCount === 1 ? '' : 's'}
+              {guardCount} guard{guardCount === 1 ? '' : 's'}
             </span>
           </div>
         </button>

@@ -6,8 +6,9 @@ import pytest
 
 pytest.importorskip("pandas")
 
-from engines.bot_runtime.core.domain import Candle, isoformat
-from portal.backend.service.bots.bot_runtime.strategy.series_builder import SeriesBuilder, StrategySeries
+from engines.bot_runtime.core.domain import Candle, StrategySignal, isoformat
+from engines.bot_runtime.deps import BotRuntimeDeps
+from engines.bot_runtime.strategy.series_builder import SeriesBuilder, StrategySeries
 
 
 def _candle_at(ts: datetime, value: float = 100.0) -> Candle:
@@ -21,11 +22,34 @@ def _candle_at(ts: datetime, value: float = 100.0) -> Candle:
     )
 
 
+def _builder_deps() -> BotRuntimeDeps:
+    return BotRuntimeDeps(
+        fetch_strategy=lambda _strategy_id: None,
+        fetch_ohlcv=lambda *args, **kwargs: None,
+        resolve_instrument=lambda _datasource, _exchange, _symbol: None,
+        strategy_evaluate=lambda *args, **kwargs: {},
+        strategy_run_preview=lambda *args, **kwargs: {},
+        indicator_get_instance_meta=lambda *args, **kwargs: {},
+        indicator_build_runtime_graph=lambda *args, **kwargs: ({}, []),
+        indicator_build_runtime_instance=lambda *args, **kwargs: None,
+        indicator_runtime_input_plan_for_instance=lambda *args, **kwargs: {},
+        build_indicator_context=lambda *_args, **_kwargs: None,
+        record_bot_runtime_event=lambda _payload: None,
+        record_bot_runtime_events_batch=lambda _payloads: 0,
+        record_bot_trade=lambda _payload: None,
+        record_bot_trade_event=lambda _payload: None,
+        record_bot_run_steps_batch=lambda _payloads: 0,
+        update_bot_run_artifact=lambda _run_id, _payload: None,
+        build_run_artifact_bundle=lambda _bot_id, _run_id, _config, _series: None,
+    )
+
+
 def test_incremental_eval_emits_only_current_epoch_and_newer_than_cursor():
     builder = SeriesBuilder(
         bot_id="bot-1",
         config={"incremental_signal_lookback_bars": 10},
         run_type="backtest",
+        deps=_builder_deps(),
     )
     now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
     series = StrategySeries(
@@ -43,19 +67,29 @@ def test_incremental_eval_emits_only_current_epoch_and_newer_than_cursor():
     def _fake_evaluate(*args, **kwargs):
         _ = args, kwargs
         return {
-            "chart_markers": {
-                "buy": [
-                    {"time": isoformat(now - timedelta(minutes=1))},
-                    {"time": isoformat(now)},
-                ],
-                "sell": [],
-            },
-            "perf": {"indicator_eval_ms": 3.5, "rule_eval_ms": 2.0},
+            "decision_artifacts": [
+                {
+                    "decision_id": "d-1",
+                    "rule_id": "rule-1",
+                    "bar_epoch": int((now - timedelta(minutes=1)).timestamp()),
+                    "evaluation_result": "matched_selected",
+                    "emitted_intent": "enter_long",
+                    "trigger": {"event_key": "breakout_long"},
+                },
+                {
+                    "decision_id": "d-2",
+                    "rule_id": "rule-1",
+                    "bar_epoch": int(now.timestamp()),
+                    "evaluation_result": "matched_selected",
+                    "emitted_intent": "enter_long",
+                    "trigger": {"event_key": "breakout_long"},
+                },
+            ],
+            "overlays": [],
+            "perf": {"candle_fetch_ms": 3.5, "preview_replay_ms": 2.0},
         }
 
     builder._evaluate_strategy = _fake_evaluate  # type: ignore[assignment]
-    builder._indicator_overlay_entries = lambda *a, **k: []  # type: ignore[assignment]
-    builder._build_regime_overlays = lambda **k: []  # type: ignore[assignment]
 
     signals, overlays, metrics = builder.evaluate_incremental_for_bar(
         series=series,
@@ -71,8 +105,8 @@ def test_incremental_eval_emits_only_current_epoch_and_newer_than_cursor():
     assert overlays == []
     assert metrics["epochs_evaluated_this_tick"] == 1.0
     assert metrics["signals_emitted_count"] == 1.0
-    assert metrics["indicator_eval_ms"] == 3.5
-    assert metrics["rule_eval_ms"] == 2.0
+    assert metrics["candle_fetch_ms"] == 3.5
+    assert metrics["preview_replay_ms"] == 2.0
 
 
 def test_incremental_eval_uses_bounded_lookback_window():
@@ -80,6 +114,7 @@ def test_incremental_eval_uses_bounded_lookback_window():
         bot_id="bot-1",
         config={"incremental_signal_lookback_bars": 5},
         run_type="backtest",
+        deps=_builder_deps(),
     )
     now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
     series = StrategySeries(
@@ -99,11 +134,9 @@ def test_incremental_eval_uses_bounded_lookback_window():
         observed["start_iso"] = start_iso
         observed["end_iso"] = end_iso
         _ = timeframe, instrument_id, strategy, include_walk_forward_markers
-        return {"chart_markers": {"buy": [], "sell": []}, "perf": {}}
+        return {"decision_artifacts": [], "overlays": [], "perf": {}}
 
     builder._evaluate_strategy = _fake_evaluate  # type: ignore[assignment]
-    builder._indicator_overlay_entries = lambda *a, **k: []  # type: ignore[assignment]
-    builder._build_regime_overlays = lambda **k: []  # type: ignore[assignment]
 
     builder.evaluate_incremental_for_bar(
         series=series,
@@ -117,32 +150,39 @@ def test_incremental_eval_uses_bounded_lookback_window():
     assert observed["end_iso"] == isoformat(now)
 
 
-def test_build_signals_from_markers_preserves_signal_time_without_shift() -> None:
+def test_build_signals_from_decision_artifacts_preserves_signal_time_without_shift() -> None:
     ts = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
-    markers = {
-        "buy": [
-            {
-                "time": int(ts.timestamp()),
-                "known_at": int((ts - timedelta(minutes=1)).timestamp()),
-            }
-        ],
-        "sell": [],
-    }
-    out = SeriesBuilder._build_signals_from_markers(markers)
+    artifacts = [
+        {
+            "decision_id": "d-1",
+            "rule_id": "rule-1",
+            "strategy_hash": "hash-1",
+            "bar_epoch": int(ts.timestamp()),
+            "evaluation_result": "matched_selected",
+            "emitted_intent": "enter_long",
+            "trigger": {"event_key": "breakout_long"},
+        }
+    ]
+    out = SeriesBuilder._build_signals_from_decision_artifacts(artifacts)
     assert len(out) == 1
     assert out[0].epoch == int(ts.timestamp())
+    assert out[0].direction == "long"
+    assert out[0].signal_id == StrategySignal.build_signal_id(decision_id="d-1")
+    assert out[0].strategy_hash == "hash-1"
+    assert out[0].decision_id == "d-1"
+    assert out[0].rule_id == "rule-1"
 
-
-def test_build_signals_from_markers_raises_when_known_at_after_signal_time() -> None:
+def test_build_signals_from_decision_artifacts_ignores_non_selected_entries() -> None:
     ts = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
-    markers = {
-        "buy": [
-            {
-                "time": int(ts.timestamp()),
-                "known_at": int((ts + timedelta(minutes=1)).timestamp()),
-            }
-        ],
-        "sell": [],
-    }
-    with pytest.raises(RuntimeError, match="known_at"):
-        SeriesBuilder._build_signals_from_markers(markers)
+    artifacts = [
+        {
+            "decision_id": "d-1",
+            "rule_id": "rule-1",
+            "bar_epoch": int(ts.timestamp()),
+            "evaluation_result": "matched_suppressed",
+            "emitted_intent": "enter_long",
+            "trigger": {"event_key": "breakout_long"},
+        }
+    ]
+    out = SeriesBuilder._build_signals_from_decision_artifacts(artifacts)
+    assert len(out) == 0

@@ -1,0 +1,26 @@
+flowchart LR
+    runs["portal_bot_runs<br/>metadata + config snapshot"]
+    trades["portal_bot_trades<br/>trade lifecycle"]
+    events["portal_bot_run_events<br/>decisions, execution, fallbacks"]
+    steps["portal_bot_run_step_rollups_v1<br/>profiler rollups when present"]
+    dataset["RunResearchDataset v1<br/>canonical research data product"]
+    reports["Report view<br/>summary + detail"]
+    compare["Compare view<br/>safe_to_compare"]
+    diagnostics["ReportDiagnostics<br/>normalized health context"]
+    notes["Narrative summary<br/>bounded insights"]
+    exports["Download/export bundle"]
+
+    runs --> dataset
+    trades --> dataset
+    events --> dataset
+    steps --> dataset
+    dataset --> reports
+    dataset --> compare
+    dataset --> diagnostics
+    dataset --> notes
+    dataset --> exports
+
+    classDef truth fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
+    classDef view fill:#111827,stroke:#a78bfa,color:#ede9fe
+    class runs,trades,events,steps,dataset truth
+    class reports,compare,diagnostics,notes,exports view

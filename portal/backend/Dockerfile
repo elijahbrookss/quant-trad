@@ -14,6 +14,7 @@ RUN apt-get update \
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
+COPY config/ /app/config
 COPY src/ /app/src
 COPY portal/ /app/portal
 

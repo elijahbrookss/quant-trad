@@ -36,3 +36,20 @@ def test_build_runtime_signal_payload_injects_merge_defaults_for_partial_params(
     assert "min_merge_sessions" in params
     assert params["days_back"] == 30
     assert payload["profile_chart_timeframe"] == "1h"
+
+
+def test_build_runtime_source_facts_returns_projected_profiles_without_overlay_fields() -> None:
+    indicator = MarketProfileIndicator(_sample_df(), bin_size=0.5)
+
+    payload = indicator.build_runtime_source_facts(
+        params={"days_back": 30},
+        symbol="BIP-TEST",
+        chart_timeframe="1h",
+    )
+
+    assert "profiles" in payload
+    assert "profile_params" in payload
+    assert "_indicator_id" not in payload
+    assert "overlay_color" not in payload
+    assert payload["profile_source_timeframe"] == "30m"
+    assert payload["profile_chart_timeframe"] == "1h"

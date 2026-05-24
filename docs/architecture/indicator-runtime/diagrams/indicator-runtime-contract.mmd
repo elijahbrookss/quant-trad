@@ -1,0 +1,20 @@
+sequenceDiagram
+    participant Engine as IndicatorExecutionEngine
+    participant Deps as Dependency outputs
+    participant Indicator as Indicator instance
+    participant Decision as Decision layer
+    participant Projection as BotLens / chart / debug
+
+    Engine->>Deps: resolve OutputRef inputs
+    Engine->>Indicator: apply_bar(bar, inputs)
+    Indicator-->>Engine: mutate private state
+    Engine->>Indicator: snapshot()
+    Indicator-->>Engine: RuntimeOutput entries
+    Engine->>Indicator: overlay_snapshot() when requested
+    Indicator-->>Engine: RuntimeOverlay entries
+    Engine->>Indicator: detail_snapshot() when requested
+    Indicator-->>Engine: RuntimeDetail entries
+    Engine->>Decision: typed outputs only
+    Engine->>Projection: overlays/details as projections
+
+    Note over Decision,Projection: Projection surfaces are not strategy inputs.

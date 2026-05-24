@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Protocol, Tuple
+from typing import Any, Dict, Optional, Protocol, Tuple
 
 from utils.log_context import build_log_context, merge_log_context, with_log_context
+from .execution_profile import SeriesExecutionProfile
+from .wallet import wallet_can_apply_exit
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,7 @@ class ExitSettlementContext:
     realized_pnl: float
     allow_short_borrow: bool
     instrument: dict
+    execution_profile: Optional[SeriesExecutionProfile] = None
 
 
 class ExitSettlement(Protocol):
@@ -50,21 +53,30 @@ class ExitSettlementService:
         if not self._wallet_gateway:
             return True, {}
         correlation_id = f"trade:{context.trade_id}"
-        allowed, reason, payload = self._wallet_gateway.can_apply(
-            side=context.side,
-            base_currency=context.base_currency,
-            quote_currency=context.quote_currency,
-            qty=context.qty,
-            qty_raw=context.qty,
-            qty_final=context.qty,
-            notional=context.notional,
-            fee=context.fee,
-            short_requires_borrow=context.allow_short_borrow,
-            instrument=context.instrument,
-            reserve=False,
-            correlation_id=correlation_id,
-            trade_id=context.trade_id,
-        )
+        if context.accounting_mode == "margin":
+            allowed, reason, payload = wallet_can_apply_exit(
+                state=self._wallet_gateway.project(),
+                trade_id=context.trade_id,
+                qty=context.qty,
+                quote_currency=context.quote_currency,
+            )
+        else:
+            allowed, reason, payload = self._wallet_gateway.can_apply(
+                side=context.side,
+                base_currency=context.base_currency,
+                quote_currency=context.quote_currency,
+                qty=context.qty,
+                qty_raw=context.qty,
+                qty_final=context.qty,
+                notional=context.notional,
+                fee=context.fee,
+                short_requires_borrow=context.allow_short_borrow,
+                instrument=context.instrument,
+                execution_profile=context.execution_profile,
+                reserve=False,
+                correlation_id=correlation_id,
+                trade_id=context.trade_id,
+            )
         if not allowed:
             self._wallet_gateway.reject(reason, payload, trade_id=context.trade_id, leg_id=context.leg_id)
             context_log = merge_log_context(
@@ -94,6 +106,8 @@ class ExitSettlementService:
                     margin_leg=payload.get("margin_leg"),
                     margin_rate_source_path=payload.get("margin_rate_source_path"),
                     shortfall=payload.get("shortfall"),
+                    open_qty=payload.get("open_qty"),
+                    locked_margin=payload.get("locked_margin"),
                 ),
             )
             if force:

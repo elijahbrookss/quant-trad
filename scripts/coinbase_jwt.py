@@ -9,27 +9,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 
 from coinbase import jwt_generator
 from dotenv import load_dotenv
 
-
-def _load_secret() -> str:
-    secret_file = os.getenv("COINBASE_API_SECRET_FILE")
-    if secret_file:
-        secret_file = os.path.abspath(os.path.expanduser(secret_file))
-        if not os.path.isfile(secret_file):
-            raise FileNotFoundError(f"COINBASE_API_SECRET_FILE not found: {secret_file}")
-        with open(secret_file, "r") as handle:
-            return handle.read()
-    secret = os.getenv("COINBASE_API_SECRET")
-    if not secret:
-        raise ValueError("COINBASE_API_SECRET or COINBASE_API_SECRET_FILE is required")
-    if "\\n" in secret:
-        secret = secret.replace("\\n", "\n")
-    return secret
+from data_providers.services.credential_store import load_credentials
 
 
 def main() -> int:
@@ -44,17 +29,34 @@ def main() -> int:
     parser.add_argument(
         "--env-file",
         default="secrets.env",
-        help="Path to env file (default: secrets.env)",
+        help="Path to env file for PG_DSN/QT_SECURITY_PROVIDER_CREDENTIAL_KEY (default: secrets.env)",
     )
+    parser.add_argument("--provider", default="COINBASE")
+    parser.add_argument("--venue", default="COINBASE_DIRECT")
+    parser.add_argument("--credential-ref")
+    parser.add_argument("--environment", default="paper")
     args = parser.parse_args()
 
     load_dotenv(args.env_file)
 
-    api_key = os.getenv("COINBASE_API_KEY")
-    if not api_key:
-        raise ValueError("COINBASE_API_KEY is required")
+    stored = load_credentials(
+        args.provider,
+        args.venue,
+        credential_ref=args.credential_ref,
+        environment=args.environment,
+    )
+    if not stored:
+        raise ValueError("Coinbase credentials were not found in the provider credential store")
 
-    api_secret = _load_secret()
+    api_key = str(stored.get("COINBASE_API_KEY") or "").strip()
+    if not api_key:
+        raise ValueError("Stored Coinbase credentials are missing COINBASE_API_KEY")
+
+    api_secret = str(stored.get("COINBASE_API_SECRET") or "")
+    if not api_secret:
+        raise ValueError("Stored Coinbase credentials are missing COINBASE_API_SECRET")
+    if "\\n" in api_secret:
+        api_secret = api_secret.replace("\\n", "\n")
     uri = jwt_generator.format_jwt_uri(args.method.upper(), args.path)
     token = jwt_generator.build_rest_jwt(uri, api_key, api_secret)
     print(token)

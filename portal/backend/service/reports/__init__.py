@@ -1,5 +1,15 @@
 """Report service package."""
 
-from .report_service import compare_reports, get_report, list_reports, record_run_report
+from __future__ import annotations
 
-__all__ = ["compare_reports", "get_report", "list_reports", "record_run_report"]
+from typing import Any
+
+__all__ = ["build_run_research_dataset"]
+
+
+def __getattr__(name: str) -> Any:
+    if name == "build_run_research_dataset":
+        from . import run_research_dataset
+
+        return getattr(run_research_dataset, name)
+    raise AttributeError(name)

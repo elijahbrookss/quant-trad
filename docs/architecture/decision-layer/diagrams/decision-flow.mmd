@@ -1,0 +1,20 @@
+flowchart LR
+    outputs["Typed indicator outputs<br/>signal / context / metric"]
+    history["Bounded output history"]
+    compiled["Compiled strategy"]
+    evaluator["Rule evaluator<br/>triggers + guards"]
+    artifact["Decision artifact<br/>accepted/rejected candidate"]
+    runtime["Execution runtime<br/>position/wallet/risk policy"]
+    events["Runtime events<br/>decision + trade lifecycle"]
+
+    outputs --> evaluator
+    history --> evaluator
+    compiled --> evaluator
+    evaluator --> artifact
+    artifact --> runtime
+    runtime --> events
+
+    classDef truth fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
+    classDef decision fill:#2a1f0f,stroke:#fbbf24,color:#fef3c7
+    class outputs,history,compiled,evaluator truth
+    class artifact,runtime,events decision

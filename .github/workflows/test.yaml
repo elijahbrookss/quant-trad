@@ -7,12 +7,8 @@ on:
     branches: [develop, test, main]
 
 jobs:
-  targeted-suites:
+  pr-suite:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: [core, provider, web]
 
     steps:
       - name: Checkout repository
@@ -28,5 +24,5 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run ${{ matrix.suite }} suite
-        run: ./scripts/ci/run_test_suite.sh "${{ matrix.suite }}"
+      - name: Run PR suite
+        run: ./scripts/ci/run_test_suite.sh pr

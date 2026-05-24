@@ -1,0 +1,19 @@
+flowchart LR
+    emitters["Runtime / projectors / storage / transport"]
+    sink["In-memory observability sink"]
+    exporter["Observability exporter"]
+    metrics["observability_metrics.*"]
+    events["observability_events.*"]
+    dashboards["Grafana / Loki / operator inspection"]
+
+    emitters --> sink
+    sink --> exporter
+    exporter --> metrics
+    exporter --> events
+    metrics --> dashboards
+    events --> dashboards
+
+    classDef hot fill:#191b28,stroke:#fb7185,color:#ffe4e6
+    classDef durable fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
+    class emitters,sink hot
+    class exporter,metrics,events,dashboards durable

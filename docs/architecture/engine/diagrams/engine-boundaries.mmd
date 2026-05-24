@@ -1,0 +1,23 @@
+flowchart LR
+    data["Provider data<br/>candles + metadata"]
+    indicator["Indicator engine<br/>typed output timeline"]
+    decision["Decision layer<br/>rules, guards, signals"]
+    runtime["Bot runtime engine<br/>execution semantics"]
+    ledger["Runtime/domain events<br/>durable truth"]
+    projection["Projections<br/>BotLens, reports, UI"]
+
+    data --> indicator
+    indicator --> decision
+    decision --> runtime
+    runtime --> ledger
+    ledger --> projection
+
+    indicator -. overlays/details .-> projection
+    runtime -. live snapshots .-> projection
+
+    classDef source fill:#13251d,stroke:#34d399,color:#dcfce7
+    classDef truth fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
+    classDef view fill:#111827,stroke:#a78bfa,color:#ede9fe
+    class data source
+    class indicator,decision,runtime,ledger truth
+    class projection view

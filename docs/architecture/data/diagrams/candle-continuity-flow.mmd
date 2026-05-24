@@ -1,0 +1,20 @@
+flowchart LR
+    request["Requested window<br/>symbol/timeframe/start/end"]
+    candles["Provider/cache candles"]
+    normalize["Normalize + order"]
+    detect["Detect gaps, duplicates,<br/>out-of-order, missing OHLCV"]
+    classify["Classify gaps<br/>expected/provider/ingestion/runtime/projection/unknown"]
+    summary["Continuity summary<br/>bounded diagnostic payload"]
+    consumers["Runtime diagnostics<br/>BotLens<br/>RunResearchDataset"]
+
+    request --> normalize
+    candles --> normalize
+    normalize --> detect
+    detect --> classify
+    classify --> summary
+    summary --> consumers
+
+    classDef truth fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
+    classDef diagnostic fill:#111827,stroke:#a78bfa,color:#ede9fe
+    class request,candles,normalize truth
+    class detect,classify,summary,consumers diagnostic

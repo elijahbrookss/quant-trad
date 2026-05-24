@@ -1,5 +1,21 @@
 const toSec = t => (typeof t === 'number' && t > 2e10 ? Math.floor(t / 1000) : t);
 
+export const buildPolylineSeriesData = (lines = []) => {
+  const byTime = new Map();
+  for (const line of lines || []) {
+    for (const point of line?.points || []) {
+      const time = toSec(point?.time);
+      const price = Number(point?.price);
+      if (!Number.isFinite(time) || !Number.isFinite(price)) continue;
+      const current = byTime.get(time) || { time, low: price, high: price, value: price, originalData: {} };
+      current.low = Math.min(current.low, price);
+      current.high = Math.max(current.high, price);
+      current.value = price;
+      byTime.set(time, current);
+    }
+  }
+  return [...byTime.values()].sort((a, b) => a.time - b.time);
+};
 
 export function createPolylinePaneView(timeScaleApi) {
   let lines = []; // [{ points:[{time,price}], color, lineWidth, lineStyle, role?, band?, side?, shade? }]
@@ -118,8 +134,16 @@ export function createPolylinePaneView(timeScaleApi) {
   return {
     renderer: () => renderer,
     update: () => {},
-    priceValueBuilder: () => [NaN, NaN, NaN],
-    isWhitespace: () => false,
+    priceValueBuilder: (plotRow) => {
+      const high = Number(plotRow?.high);
+      const low = Number(plotRow?.low);
+      const value = Number(plotRow?.value);
+      if (!Number.isFinite(high) || !Number.isFinite(low) || !Number.isFinite(value)) {
+        return [NaN, NaN, NaN];
+      }
+      return [high, low, value];
+    },
+    isWhitespace: (plotRow) => !Number.isFinite(Number(plotRow?.value)),
     defaultOptions() { return { priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false }; },
     destroy: () => {},
     setPolylines(arr) { lines = Array.isArray(arr) ? arr : []; },

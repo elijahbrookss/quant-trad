@@ -1,7 +1,9 @@
 quant-env/
 classes/__pycache__/
 __pycache__/
+**/__pycache__/
 *.pyc
+*.egg-info/
 artifacts/
 .venv/
 secrets.env
@@ -16,3 +18,8 @@ coverage.xml
 docker/ibkr-gateway/ibgateway-installer.sh
 .claude/
 .vscode/
+
+# Codex prompts
+docs/codex/
+.codex/
+.codex

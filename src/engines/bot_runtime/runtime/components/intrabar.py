@@ -4,6 +4,7 @@ import logging
 import os
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
@@ -14,6 +15,18 @@ from utils.perf_log import get_obs_enabled, get_obs_step_sample_rate, should_sam
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class IntrabarSequence:
+    """1m candles covering one strategy bar plus completeness diagnostics."""
+
+    candles: List[Candle]
+    interval: Optional[str]
+    complete: bool
+    fallback_reason: Optional[str] = None
+    expected_count: int = 0
+    actual_count: int = 0
+
+
 class IntrabarManager:
     """Manage cached intrabar candles and snapshots for the bot runtime."""
 
@@ -21,7 +34,7 @@ class IntrabarManager:
         self,
         bot_id: str,
         *,
-        fetcher: Optional[Callable[..., Any]] = None,
+        fetcher: Callable[..., Any],
         build_candles: Callable[[Any, Optional[str]], List[Candle]],
         timeframe_seconds: Callable[[Optional[str]], Optional[float]],
         strategy_key_fn: Callable[[Any], str],
@@ -29,7 +42,7 @@ class IntrabarManager:
         obs_sample_rate: Optional[float] = None,
     ) -> None:
         self.bot_id = bot_id
-        self._fetcher = fetcher if fetcher is not None else self._default_fetcher
+        self._fetcher = fetcher
         self._build_candles = build_candles
         self._timeframe_seconds = timeframe_seconds
         self._strategy_key = strategy_key_fn
@@ -44,29 +57,36 @@ class IntrabarManager:
         self._snapshots: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
 
-    @staticmethod
-    def _default_fetcher(*args: Any, **kwargs: Any) -> Any:
-        from portal.backend.service.market.candle_service import fetch_ohlcv
-
-        return fetch_ohlcv(*args, **kwargs)
-
     @property
     def snapshots(self) -> Dict[str, Dict[str, Any]]:
         with self._lock:
             return dict(self._snapshots)
 
     def intrabar_candles(self, series: Any, candle: Candle) -> List[Candle]:
+        return self.intrabar_sequence(series, candle).candles
+
+    def intrabar_sequence(self, series: Any, candle: Candle) -> IntrabarSequence:
         engine = getattr(series, "risk_engine", None)
         if engine is None or engine.active_trade is None:
-            return []
+            return IntrabarSequence(candles=[], interval=None, complete=True)
         interval = self._intrabar_interval_for(series.timeframe)
         if not interval:
-            return []
+            return IntrabarSequence(
+                candles=[],
+                interval=None,
+                complete=False,
+                fallback_reason="intrabar_interval_not_available",
+            )
         start = candle.start_time
         duration = self._timeframe_seconds(series.timeframe) or 0
         end = candle.end or (start + timedelta(seconds=max(int(duration), 0)))
         if start is None or end is None or end <= start:
-            return []
+            return IntrabarSequence(
+                candles=[],
+                interval=interval,
+                complete=False,
+                fallback_reason="invalid_strategy_bar_window",
+            )
         key = self._intrabar_cache_key(series, start, interval)
         cache_key_summary = f"{getattr(series, 'symbol', '')}:{getattr(series, 'timeframe', '')}:{interval}:{start.date().isoformat()}"
         should_log = self._obs_enabled and should_sample(self._obs_sample_rate)
@@ -101,32 +121,46 @@ class IntrabarManager:
                 )
             )
         if cached is not None:
-            return cached
-        fetch_started = time.perf_counter() if should_log else 0.0
-        sub_candles = self._fetch_intrabar_candles(series, start, end, interval)
-        with self._lock:
-            self._cache[key] = sub_candles
-        if should_log:
-            fetch_ms = (time.perf_counter() - fetch_started) * 1000.0
-            set_context = merge_log_context(
-                series_log_context(series),
-                build_log_context(
-                    bot_id=self.bot_id,
-                    cache_name="intrabar_candles",
-                    cache_scope="runtime",
-                    cache_key_summary=cache_key_summary,
-                    time_taken_ms=fetch_ms,
-                    pid=os.getpid(),
-                    thread_name=threading.current_thread().name,
-                ),
-            )
-            logger.debug(
-                with_log_context(
-                    "cache.set",
-                    merge_log_context(set_context, build_log_context(event="cache.set")),
+            sub_candles = cached
+        else:
+            fetch_started = time.perf_counter() if should_log else 0.0
+            sub_candles = self._fetch_intrabar_candles(series, start, end, interval)
+            with self._lock:
+                self._cache[key] = sub_candles
+            if should_log:
+                fetch_ms = (time.perf_counter() - fetch_started) * 1000.0
+                set_context = merge_log_context(
+                    series_log_context(series),
+                    build_log_context(
+                        bot_id=self.bot_id,
+                        cache_name="intrabar_candles",
+                        cache_scope="runtime",
+                        cache_key_summary=cache_key_summary,
+                        time_taken_ms=fetch_ms,
+                        pid=os.getpid(),
+                        thread_name=threading.current_thread().name,
+                    ),
                 )
-            )
-        return sub_candles
+                logger.debug(
+                    with_log_context(
+                        "cache.set",
+                        merge_log_context(set_context, build_log_context(event="cache.set")),
+                    )
+                )
+        complete, fallback_reason, expected_count = self._assess_completeness(
+            sub_candles,
+            start=start,
+            end=end,
+            interval_seconds=60,
+        )
+        return IntrabarSequence(
+            candles=sub_candles,
+            interval=interval,
+            complete=complete,
+            fallback_reason=fallback_reason,
+            expected_count=expected_count,
+            actual_count=len(sub_candles),
+        )
 
     def update_snapshot(self, series: Any, candle: Candle, minute_bar: Candle) -> Dict[str, Any]:
         snapshot = self._update_intrabar_snapshot(series, candle, minute_bar)
@@ -167,6 +201,39 @@ class IntrabarManager:
         epoch = int(start.timestamp())
         strategy_key = self._strategy_key(series)
         return f"{strategy_key}:{getattr(series, 'symbol', '')}:{getattr(series, 'timeframe', '')}:{interval}:{epoch}"
+
+    def _assess_completeness(
+        self,
+        candles: List[Candle],
+        *,
+        start: datetime,
+        end: datetime,
+        interval_seconds: int,
+    ) -> tuple[bool, Optional[str], int]:
+        start_utc = self._as_utc(start)
+        end_utc = self._as_utc(end)
+        expected_count = int(max((end_utc - start_utc).total_seconds(), 0) // interval_seconds)
+        if expected_count <= 0:
+            return False, "invalid_intrabar_expected_count", expected_count
+        if not candles:
+            return False, "intrabar_missing", expected_count
+        if len(candles) != expected_count:
+            return False, "intrabar_incomplete_count", expected_count
+
+        expected_epochs = {
+            int((start_utc + timedelta(seconds=interval_seconds * idx)).timestamp())
+            for idx in range(expected_count)
+        }
+        actual_epochs = {int(self._as_utc(candle.start_time).timestamp()) for candle in candles}
+        if actual_epochs != expected_epochs:
+            return False, "intrabar_incomplete_sequence", expected_count
+        return True, None, expected_count
+
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     def _fetch_intrabar_candles(
         self,

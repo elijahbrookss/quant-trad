@@ -2,7 +2,51 @@
 
 from __future__ import annotations
 
-from ._shared import *
+from typing import Any, Dict, List, Optional
+
+from ._shared import (
+    ATMTemplateRecord,
+    BotRecord,
+    InstrumentRecord,
+    SQLAlchemyError,
+    StrategyIndicatorLink,
+    StrategyInstrumentLink,
+    StrategyRecord,
+    StrategyRuleRecord,
+    StrategyVariantRecord,
+    _json_safe,
+    _utcnow,
+    db,
+    logger,
+    normalise_template,
+    select,
+    text,
+    uuid,
+)
+
+
+def _normalize_variant_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a storage-safe strategy variant payload."""
+
+    strategy_id = str(payload.get("strategy_id") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    output_filters = payload.get("output_filters") or []
+    if not strategy_id:
+        raise ValueError("strategy_id is required for strategy variants")
+    if not name:
+        raise ValueError("name is required for strategy variants")
+    if not isinstance(output_filters, list):
+        raise ValueError("output_filters must be a list")
+    description = payload.get("description")
+    return {
+        "id": str(payload.get("id") or uuid.uuid4()),
+        "strategy_id": strategy_id,
+        "name": name,
+        "description": str(description).strip() if description else None,
+        "output_filters": list(_json_safe(output_filters)),
+        "is_default": bool(payload.get("is_default", False)),
+    }
+
 
 def load_strategies() -> List[Dict[str, Any]]:
     """Return strategies plus indicators and rules."""
@@ -41,24 +85,142 @@ def load_strategies() -> List[Dict[str, Any]]:
                     StrategyRuleRecord.strategy_id == strategy_id
                 )
             ).scalars().all()
-            strategy_filters = session.execute(
-                select(StrategyFilterRecord).where(
-                    StrategyFilterRecord.strategy_id == strategy_id
-                )
-            ).scalars().all()
-            rule_ids = [rule.id for rule in rules]
-            rule_filters: List[RuleFilterRecord] = []
-            if rule_ids:
-                rule_filters = session.execute(
-                    select(RuleFilterRecord).where(RuleFilterRecord.rule_id.in_(rule_ids))
-                ).scalars().all()
             record["indicator_links"] = [link.to_dict() for link in links]
             record["instrument_links"] = [link.to_dict() for link in inst_links]
             record["rules_raw"] = [rule.to_dict() for rule in rules]
-            record["strategy_filters_raw"] = [flt.to_dict() for flt in strategy_filters]
-            record["rule_filters_raw"] = [flt.to_dict() for flt in rule_filters]
             payload.append(record)
         return payload
+
+
+def list_strategy_variants(strategy_id: str) -> List[Dict[str, Any]]:
+    """Return all persisted variants for a strategy."""
+
+    if not db.available:
+        return []
+    with db.session() as session:
+        rows = session.execute(
+            select(StrategyVariantRecord).where(
+                StrategyVariantRecord.strategy_id == strategy_id
+            )
+        ).scalars().all()
+        ordered = sorted(
+            (row.to_dict() for row in rows),
+            key=lambda item: (
+                0 if item.get("is_default") else 1,
+                str(item.get("name") or ""),
+                str(item.get("id") or ""),
+            ),
+        )
+        return ordered
+
+
+def get_strategy_variant(variant_id: str) -> Optional[Dict[str, Any]]:
+    """Return a single strategy variant by id."""
+
+    if not db.available or not variant_id:
+        return None
+    with db.session() as session:
+        record = session.get(StrategyVariantRecord, variant_id)
+        return record.to_dict() if record else None
+
+
+def ensure_default_strategy_variant(strategy_id: str) -> Dict[str, Any]:
+    """Ensure a strategy has one default saved variant."""
+
+    if not db.available:
+        now = _utcnow().isoformat() + "Z"
+        return {
+            "id": str(uuid.uuid4()),
+            "strategy_id": strategy_id,
+            "name": "default",
+            "description": None,
+            "output_filters": [],
+            "is_default": True,
+            "created_at": now,
+            "updated_at": now,
+        }
+    with db.session() as session:
+        rows = session.execute(
+            select(StrategyVariantRecord).where(
+                StrategyVariantRecord.strategy_id == strategy_id
+            )
+        ).scalars().all()
+        for row in rows:
+            if row.is_default:
+                return row.to_dict()
+
+        default_row = next(
+            (row for row in rows if str(row.name or "").strip().lower() == "default"),
+            None,
+        )
+        now = _utcnow()
+        if default_row is None:
+            default_row = StrategyVariantRecord(
+                id=str(uuid.uuid4()),
+                strategy_id=strategy_id,
+                name="default",
+                description=None,
+                output_filters=[],
+                is_default=True,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(default_row)
+        else:
+            default_row.is_default = True
+            default_row.updated_at = now
+        return default_row.to_dict()
+
+
+def upsert_strategy_variant(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Create or update a persisted strategy variant."""
+
+    normalized = _normalize_variant_payload(payload)
+    if not db.available:
+        return normalized
+    with db.session() as session:
+        record = session.get(StrategyVariantRecord, normalized["id"])
+        now = _utcnow()
+        if record is None:
+            record = StrategyVariantRecord(
+                id=normalized["id"],
+                strategy_id=normalized["strategy_id"],
+                created_at=now,
+            )
+            session.add(record)
+        if normalized["is_default"]:
+            siblings = session.execute(
+                select(StrategyVariantRecord).where(
+                    StrategyVariantRecord.strategy_id == normalized["strategy_id"]
+                )
+            ).scalars().all()
+            for sibling in siblings:
+                if sibling.id != normalized["id"] and sibling.is_default:
+                    sibling.is_default = False
+                    sibling.updated_at = now
+        record.strategy_id = normalized["strategy_id"]
+        record.name = normalized["name"]
+        record.description = normalized["description"]
+        record.output_filters = normalized["output_filters"]
+        record.is_default = normalized["is_default"]
+        record.updated_at = now
+        if record.created_at is None:
+            record.created_at = now
+        return record.to_dict()
+
+
+def delete_strategy_variant(variant_id: str) -> None:
+    """Delete a persisted non-default strategy variant."""
+
+    if not db.available:
+        return
+    with db.session() as session:
+        record = session.get(StrategyVariantRecord, variant_id)
+        if record is None:
+            return
+        if record.is_default:
+            raise ValueError("Default strategy variant cannot be deleted")
+        session.delete(record)
 
 
 def upsert_strategy(payload: Dict[str, Any]) -> None:
@@ -85,9 +247,7 @@ def upsert_strategy(payload: Dict[str, Any]) -> None:
             record.exchange = payload.get("exchange")
             # indicator attachments are persisted in portal_strategy_indicators
             record.atm_template_id = payload.get("atm_template_id")
-            record.base_risk_per_trade = payload.get("base_risk_per_trade")
-            record.global_risk_multiplier = payload.get("global_risk_multiplier")
-            record.risk_overrides = payload.get("risk_overrides") or {}
+            record.risk_config = payload.get("risk_config") or {}
             record.updated_at = now
             if record.created_at is None:
                 record.created_at = now
@@ -102,6 +262,24 @@ def delete_strategy(strategy_id: str) -> None:
         return
     try:
         with db.session() as session:
+            dependent_bots = session.execute(
+                select(BotRecord.id, BotRecord.name).where(BotRecord.strategy_id == strategy_id)
+            ).all()
+            if dependent_bots:
+                bot_refs = [
+                    f"{str(bot_id)}({str(bot_name or bot_id)})"
+                    for bot_id, bot_name in dependent_bots
+                ]
+                joined = ", ".join(bot_refs)
+                logger.error(
+                    "strategy_delete_blocked_by_bots | strategy_id=%s | bot_ids=%s",
+                    strategy_id,
+                    ",".join(str(bot_id) for bot_id, _bot_name in dependent_bots),
+                )
+                raise ValueError(
+                    f"Cannot delete strategy {strategy_id}: dependent bots exist. "
+                    f"Delete or reassign these bots first: {joined}"
+                )
             record = session.get(StrategyRecord, strategy_id)
             if record:
                 session.delete(record)
@@ -113,9 +291,6 @@ def delete_strategy(strategy_id: str) -> None:
             ).delete(synchronize_session=False)
             session.query(StrategyRuleRecord).filter(
                 StrategyRuleRecord.strategy_id == strategy_id
-            ).delete(synchronize_session=False)
-            session.query(StrategyFilterRecord).filter(
-                StrategyFilterRecord.strategy_id == strategy_id
             ).delete(synchronize_session=False)
     except SQLAlchemyError as exc:
         logger.warning("strategy_delete_failed | id=%s | error=%s", strategy_id, exc)
@@ -299,7 +474,7 @@ def upsert_strategy_rule(payload: Dict[str, Any]) -> None:
             record.match = payload.get("match") or record.match
             record.description = payload.get("description")
             record.enabled = bool(payload.get("enabled", True))
-            record.conditions = list(payload.get("conditions") or [])
+            record.conditions = dict(_json_safe(payload.get("conditions") or {}))
             record.updated_at = now
             if record.created_at is None:
                 record.created_at = now
@@ -319,133 +494,3 @@ def delete_strategy_rule(rule_id: str) -> None:
                 session.delete(record)
     except SQLAlchemyError as exc:
         logger.warning("strategy_rule_delete_failed | id=%s | error=%s", rule_id, exc)
-
-
-def list_strategy_filters(strategy_id: str) -> List[Dict[str, Any]]:
-    """Return global filters for a strategy."""
-
-    if not db.available or not strategy_id:
-        return []
-    with db.session() as session:
-        filters = session.execute(
-            select(StrategyFilterRecord).where(StrategyFilterRecord.strategy_id == strategy_id)
-        ).scalars().all()
-        return [flt.to_dict() for flt in filters]
-
-
-def list_rule_filters(rule_id: str) -> List[Dict[str, Any]]:
-    """Return filters attached to a rule."""
-
-    if not db.available or not rule_id:
-        return []
-    with db.session() as session:
-        filters = session.execute(
-            select(RuleFilterRecord).where(RuleFilterRecord.rule_id == rule_id)
-        ).scalars().all()
-        return [flt.to_dict() for flt in filters]
-
-
-def upsert_strategy_filter(payload: Dict[str, Any]) -> None:
-    """Persist a strategy-wide filter definition."""
-
-    if not db.available:
-        return
-    filter_id = payload.get("id")
-    strategy_id = payload.get("strategy_id")
-    if not filter_id or not strategy_id:
-        raise ValueError("Strategy filter id and strategy_id are required")
-    try:
-        with db.session() as session:
-            record = session.get(StrategyFilterRecord, filter_id)
-            now = _utcnow()
-            if record is None:
-                record = StrategyFilterRecord(
-                    id=str(filter_id),
-                    strategy_id=str(strategy_id),
-                    scope=str(payload.get("scope") or "GLOBAL"),
-                    created_at=now,
-                    updated_at=now,
-                )
-                session.add(record)
-            record.name = payload.get("name") or record.name
-            record.description = payload.get("description")
-            record.enabled = bool(payload.get("enabled", True))
-            record.scope = str(payload.get("scope") or record.scope or "GLOBAL")
-            record.dsl = dict(payload.get("dsl") or {})
-            record.updated_at = now
-    except SQLAlchemyError as exc:
-        logger.warning(
-            "strategy_filter_persist_failed | strategy=%s | filter=%s | error=%s",
-            strategy_id,
-            filter_id,
-            exc,
-        )
-
-
-def upsert_rule_filter(payload: Dict[str, Any]) -> None:
-    """Persist a rule-scoped filter definition."""
-
-    if not db.available:
-        return
-    filter_id = payload.get("id")
-    rule_id = payload.get("rule_id")
-    if not filter_id or not rule_id:
-        raise ValueError("Rule filter id and rule_id are required")
-    try:
-        with db.session() as session:
-            record = session.get(RuleFilterRecord, filter_id)
-            now = _utcnow()
-            if record is None:
-                record = RuleFilterRecord(
-                    id=str(filter_id),
-                    rule_id=str(rule_id),
-                    scope=str(payload.get("scope") or "RULE"),
-                    created_at=now,
-                    updated_at=now,
-                )
-                session.add(record)
-            record.name = payload.get("name") or record.name
-            record.description = payload.get("description")
-            record.enabled = bool(payload.get("enabled", True))
-            record.scope = str(payload.get("scope") or record.scope or "RULE")
-            record.dsl = dict(payload.get("dsl") or {})
-            record.updated_at = now
-    except SQLAlchemyError as exc:
-        logger.warning(
-            "rule_filter_persist_failed | rule=%s | filter=%s | error=%s",
-            rule_id,
-            filter_id,
-            exc,
-        )
-
-
-def delete_strategy_filter(filter_id: str) -> None:
-    """Delete a strategy-wide filter."""
-
-    if not db.available or not filter_id:
-        return
-    try:
-        with db.session() as session:
-            record = session.get(StrategyFilterRecord, filter_id)
-            if record:
-                session.delete(record)
-    except SQLAlchemyError as exc:
-        logger.warning("strategy_filter_delete_failed | filter=%s | error=%s", filter_id, exc)
-
-
-def delete_rule_filter(filter_id: str) -> None:
-    """Delete a rule-scoped filter."""
-
-    if not db.available or not filter_id:
-        return
-    try:
-        with db.session() as session:
-            record = session.get(RuleFilterRecord, filter_id)
-            if record:
-                session.delete(record)
-    except SQLAlchemyError as exc:
-        logger.warning("rule_filter_delete_failed | filter=%s | error=%s", filter_id, exc)
-
-
-
-

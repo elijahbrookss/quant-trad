@@ -52,8 +52,8 @@ def _as_list(value: str | list[str] | None) -> list[str]:
 
 def main() -> int:
     entries: list[dict[str, object]] = []
-    for path in sorted(ARCH_DIR.glob("*.md")):
-        if path.name == INDEX_PATH.name:
+    for path in sorted(ARCH_DIR.rglob("*.md")):
+        if path == INDEX_PATH or path.name == "README.md":
             continue
         meta = _parse_frontmatter(path)
         if not meta:
@@ -80,7 +80,7 @@ def main() -> int:
     lines.append("| Component | Subsystem | Layer | Status | Doc |")
     lines.append("|---|---|---|---|---|")
     for entry in sorted(entries, key=lambda item: (str(item["subsystem"]), str(item["component"]))):
-        path = Path(entry["path"]).relative_to(ROOT)
+        path = Path(entry["path"]).relative_to(ARCH_DIR)
         lines.append(
             f"| {entry['component']} | {entry['subsystem']} | {entry['layer']} | {entry['status']} | [{path.name}]({path.as_posix()}) |"
         )
@@ -91,7 +91,7 @@ def main() -> int:
     lines.append("| Code Path | Component | Doc |")
     lines.append("|---|---|---|")
     for entry in sorted(entries, key=lambda item: str(item["component"])):
-        path = Path(entry["path"]).relative_to(ROOT)
+        path = Path(entry["path"]).relative_to(ARCH_DIR)
         for code_path in entry["code_paths"]:
             lines.append(f"| `{code_path}` | {entry['component']} | [{path.name}]({path.as_posix()}) |")
 

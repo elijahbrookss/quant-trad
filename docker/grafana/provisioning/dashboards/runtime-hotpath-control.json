@@ -1,0 +1,386 @@
+{
+  "uid": "qt-runtime-hotpath-control",
+  "title": "Runtime Hotpath Control",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "timezone": "browser",
+  "tags": [
+    "runtime",
+    "profiler",
+    "rollups"
+  ],
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "bot_id",
+        "type": "query",
+        "label": "Bot",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "query": "SELECT DISTINCT bot_id AS __value, bot_id AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE bot_id <> '' ORDER BY 1;",
+        "definition": "SELECT DISTINCT bot_id AS __value, bot_id AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE bot_id <> '' ORDER BY 1;",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      },
+      {
+        "name": "run_id",
+        "type": "query",
+        "label": "Run",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "query": "SELECT DISTINCT run_id AS __value, run_id AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') ORDER BY 1 DESC LIMIT 1000;",
+        "definition": "SELECT DISTINCT run_id AS __value, run_id AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') ORDER BY 1 DESC LIMIT 1000;",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      },
+      {
+        "name": "symbol",
+        "type": "query",
+        "label": "Symbol",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "query": "SELECT DISTINCT symbol AS __value, symbol AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE symbol <> '' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
+        "definition": "SELECT DISTINCT symbol AS __value, symbol AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE symbol <> '' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      },
+      {
+        "name": "step_name",
+        "type": "query",
+        "label": "Step",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "query": "SELECT DISTINCT step_name AS __value, step_name AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
+        "definition": "SELECT DISTINCT step_name AS __value, step_name AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      },
+      {
+        "name": "metric_name",
+        "type": "query",
+        "label": "Metric",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "query": "SELECT DISTINCT metric_name AS __value, metric_name AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
+        "definition": "SELECT DISTINCT metric_name AS __value, metric_name AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Step Duration p95",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), step_name AS metric, max(p95_value)::double precision AS value FROM public.portal_bot_run_step_rollups_v1 WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') AND metric_name='duration_ms' GROUP BY 1,2 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Per-Bar Load Factors p95",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), metric_name AS metric, max(p95_value)::double precision AS value FROM public.portal_bot_run_step_rollups_v1 WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') AND metric_name <> 'duration_ms' GROUP BY 1,2 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Sample Volume",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), step_name AS metric, sum(sample_count)::double precision AS value FROM public.portal_bot_run_step_rollups_v1 WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') GROUP BY 1,2 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Write / Queue Pressure",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), metric_name AS metric, max(p95_value)::double precision AS value FROM public.portal_bot_run_step_rollups_v1 WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') AND metric_name IN ('canonical_append_ms','canonical_fact_persist_batch_ms','canonical_fact_persist_lag_ms','canonical_fact_queue_depth','step_trace_persist_batch_ms','step_trace_persist_lag_ms','step_trace_queue_depth','step_trace_dropped_count') GROUP BY 1,2 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Top Rollup Buckets",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT bucket_start AS time, run_id, step_name, metric_name, NULLIF(symbol, '') AS symbol, sample_count, round(p95_value::numeric, 2)::double precision AS p95_value, round(value_max::numeric, 2)::double precision AS max_value FROM public.portal_bot_run_step_rollups_v1 WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') ORDER BY value_max DESC, p95_value DESC LIMIT 100;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Step Totals",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT step_name, metric_name, NULLIF(symbol, '') AS symbol, sum(sample_count) AS samples, round((sum(value_sum) / NULLIF(sum(sample_count), 0))::numeric, 2)::double precision AS avg_value, round(max(p95_value)::numeric, 2)::double precision AS p95_value, round(max(value_max)::numeric, 2)::double precision AS max_value, sum(error_count) AS errors FROM public.portal_bot_run_step_rollups_v1 WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') GROUP BY step_name, metric_name, symbol ORDER BY max_value DESC NULLS LAST, samples DESC LIMIT 200;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}

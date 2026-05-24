@@ -1,0 +1,32 @@
+flowchart LR
+    provider["Provider adapters<br/>source candles + metadata"]
+    cache["Candle/cache boundary<br/>sparse source truth"]
+    indicator["Indicator runtime<br/>initialize -> apply_bar -> snapshot"]
+    strategy["Strategy evaluator<br/>typed outputs -> decision artifacts"]
+    runtime["Bot runtime<br/>ordering, fills, fees, margin, wallet, settlement"]
+    events["Domain event ledger<br/>runtime truth + hot fields"]
+    projections["Read models / projections<br/>BotLens, lifecycle, diagnostics"]
+    reports["RunResearchDataset<br/>reports, compare, export"]
+    ui["Frontend / BotLens<br/>inspection, not execution truth"]
+    observability["Observability<br/>logs, metrics, Grafana, Loki"]
+
+    provider --> cache
+    cache --> indicator
+    indicator --> strategy
+    strategy --> runtime
+    runtime --> events
+    runtime --> observability
+    events --> projections
+    events --> reports
+    projections --> ui
+    reports --> ui
+    observability --> ui
+
+    ui -. commands/config .-> runtime
+
+    classDef truth fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
+    classDef view fill:#111827,stroke:#a78bfa,color:#ede9fe
+    classDef source fill:#13251d,stroke:#34d399,color:#dcfce7
+    class provider,cache source
+    class indicator,strategy,runtime,events truth
+    class projections,reports,ui,observability view
