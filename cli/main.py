@@ -14,9 +14,11 @@ from .audit import CliAuditLog, experiment_dir, report_export_dir, safe_path_par
 from .experiments.data_preflight import data_preflight_requires_proceed, run_plan_data_preflight
 from .experiments.doctor import doctor_experiment
 from .experiments.event_log import read_events
+from .experiments.instrument_matrix import prepare_instrument_matrix_experiment
 from .experiments.plan_loader import load_plan, plan_preview
 from .experiments.runner import ExperimentRunner
 from .experiments.state_store import ExperimentStateStore, find_experiment_dir
+from .experiments.summarize import summarize_experiment, write_experiment_summary
 
 
 TERMINAL_STATUSES = {
@@ -424,7 +426,7 @@ def _bot_write_payload(args: argparse.Namespace, *, require_name: bool = False) 
         "backtest_start": "backtest_start",
         "backtest_end": "backtest_end",
         "snapshot_interval_ms": "snapshot_interval_ms",
-        "instrument_type": "instrument_type",
+        "execution_semantics": "execution_semantics",
     }
     for arg_name, payload_name in fields.items():
         value = getattr(args, arg_name, None)
@@ -595,6 +597,149 @@ def _cmd_variants_delete(args: argparse.Namespace) -> int:
     return 0
 
 
+def _indicator_payload_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    payload = _read_json_object_arg(getattr(args, "payload_json", None), label="--payload-json")
+    if getattr(args, "type", None) is not None:
+        payload["type"] = args.type
+    if getattr(args, "name", None) is not None:
+        payload["name"] = args.name
+    if getattr(args, "params_json", None) is not None:
+        payload["params"] = _read_json_object_arg(args.params_json, label="--params-json")
+    params = _key_value_map(getattr(args, "param", None))
+    if params:
+        payload.setdefault("params", {})
+        if not isinstance(payload["params"], dict):
+            raise ValueError("indicator params must be a JSON object")
+        payload["params"].update(params)
+    if getattr(args, "dependencies_json", None) is not None:
+        raw_dependencies = sys.stdin.read() if args.dependencies_json == "-" else (
+            args.dependencies_json
+            if str(args.dependencies_json).strip().startswith("[")
+            else Path(args.dependencies_json).expanduser().read_text(encoding="utf-8")
+        )
+        try:
+            dependencies = json.loads(raw_dependencies)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid JSON array for --dependencies-json: {exc}") from exc
+        if not isinstance(dependencies, list):
+            raise ValueError("--dependencies-json must be a JSON array")
+        payload["dependencies"] = dependencies
+    if getattr(args, "output_prefs_json", None) is not None:
+        payload["output_prefs"] = _read_json_object_arg(args.output_prefs_json, label="--output-prefs-json")
+    for key in ("color", "color_palette"):
+        value = getattr(args, key, None)
+        if value is not None:
+            payload[key] = value
+    if "type" not in payload or not str(payload.get("type") or "").strip():
+        raise ValueError("indicator type is required")
+    payload.setdefault("params", {})
+    if not isinstance(payload.get("params"), dict):
+        raise ValueError("indicator params must be a JSON object")
+    return payload
+
+
+def _cmd_indicators_types(args: argparse.Namespace) -> int:
+    _print_json({"schema_version": "qt_indicator_types.v1", "items": _client(args).request_json("GET", "/api/indicators/types")})
+    return 0
+
+
+def _cmd_indicators_type(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/indicators/types/{args.type_id}"))
+    return 0
+
+
+def _cmd_indicators_list(args: argparse.Namespace) -> int:
+    _print_json({"schema_version": "qt_indicators_list.v1", "items": _client(args).request_json("GET", "/api/indicators/")})
+    return 0
+
+
+def _cmd_indicators_get(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/indicators/{args.indicator_id}"))
+    return 0
+
+
+def _cmd_indicators_strategies(args: argparse.Namespace) -> int:
+    _print_json(
+        {
+            "schema_version": "qt_indicator_strategies.v1",
+            "indicator_id": args.indicator_id,
+            "items": _client(args).request_json("GET", f"/api/indicators/{args.indicator_id}/strategies"),
+        }
+    )
+    return 0
+
+
+def _cmd_indicators_validate_config(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("POST", "/api/indicators/validate-config", payload=_indicator_payload_from_args(args)))
+    return 0
+
+
+def _cmd_indicators_create(args: argparse.Namespace) -> int:
+    payload = _indicator_payload_from_args(args)
+    normalized = _client(args).request_json("POST", "/api/indicators/validate-config", payload=payload)
+    if not bool(args.apply):
+        _print_json(
+            {
+                "schema_version": "qt_planned_mutation.v1",
+                "operation": "create_indicator",
+                "apply": False,
+                "payload": payload,
+                "normalized": normalized,
+            }
+        )
+        return 0
+    if not bool(args.confirm):
+        raise ValueError("create indicator requires --confirm when --apply is set")
+    _print_json(_client(args).request_json("POST", "/api/indicators/", payload=payload))
+    return 0
+
+
+def _indicator_window_payload(args: argparse.Namespace) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "start": args.start,
+        "end": args.end,
+        "interval": args.interval,
+    }
+    for key in ("symbol", "datasource", "exchange", "instrument_id"):
+        value = getattr(args, key, None)
+        if value is not None:
+            payload[key] = value
+    return payload
+
+
+def _cmd_indicators_validate_runtime(args: argparse.Namespace) -> int:
+    payload = _indicator_window_payload(args)
+    payload["require_ready_by_end"] = bool(args.require_ready_by_end)
+    if args.min_ready_bars is not None:
+        payload["min_ready_bars"] = args.min_ready_bars
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/indicators/{args.indicator_id}/runtime-validation",
+            payload=payload,
+        )
+    )
+    return 0
+
+
+def _cmd_indicators_overlays(args: argparse.Namespace) -> int:
+    payload = _indicator_window_payload(args)
+    for key in ("visibility_epoch", "cursor_epoch", "cursor_time"):
+        value = getattr(args, key, None)
+        if value is not None:
+            payload[key] = value
+    _print_json(_client(args).request_json("POST", f"/api/indicators/{args.indicator_id}/overlays", payload=payload))
+    return 0
+
+
+def _cmd_indicators_signals(args: argparse.Namespace) -> int:
+    payload = _indicator_window_payload(args)
+    if getattr(args, "config_json", None):
+        payload["config"] = _read_json_object_arg(args.config_json, label="--config-json")
+    _print_json(_client(args).request_json("POST", f"/api/indicators/{args.indicator_id}/signals", payload=payload))
+    return 0
+
+
 def _cmd_reports_list(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
@@ -628,10 +773,17 @@ def _cmd_report_get(args: argparse.Namespace) -> int:
         "operational-health": f"/api/reports/{args.run_id}/operational-health",
         "run-report": f"/api/reports/{args.run_id}/run-report",
         "run-report-status": f"/api/reports/{args.run_id}/run-report/status",
+        "instruments": f"/api/reports/{args.run_id}/instruments",
+        "symbol-summary": f"/api/reports/{args.run_id}/symbol-summary",
     }
     params: dict[str, Any] = {}
     if args.report_section == "run-report":
-        params = {"build": args.build, "force_rebuild": args.force_rebuild}
+        if bool(args.build or args.force_rebuild):
+            _ensure_run_report_materialized(
+                _client(args),
+                args.run_id,
+                force_rebuild=bool(args.force_rebuild),
+            )
     _print_json(_client(args).request_json("GET", paths[args.report_section], params=params))
     return 0
 
@@ -671,6 +823,120 @@ def _cmd_reports_compare(args: argparse.Namespace) -> int:
                 "include_golden": not args.no_golden,
                 "require_golden": args.require_golden,
             },
+        )
+    )
+    return 0
+
+
+def _cmd_reports_page(args: argparse.Namespace) -> int:
+    section = str(args.report_page_section)
+    path = f"/api/reports/{args.run_id}/{section}"
+    params: dict[str, Any] = {
+        "limit": args.limit,
+        "offset": args.offset,
+        "symbol": getattr(args, "symbol", None),
+        "instrumentId": getattr(args, "instrument_id", None),
+    }
+    if section == "decisions":
+        params["state"] = args.state
+    _print_json(_client(args).request_json("GET", path, params=params))
+    return 0
+
+
+def _cmd_reports_candle_catalog(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/reports/{args.run_id}/candles/catalog"))
+    return 0
+
+
+def _cmd_reports_candles(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/reports/{args.run_id}/candles",
+            params={
+                "instrument_id": args.instrument_id,
+                "timeframe": args.timeframe,
+                "start": args.start,
+                "end": args.end,
+                "limit": args.limit,
+                "offset": args.offset,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_coverage(args: argparse.Namespace) -> int:
+    payload = {
+        "instrument_id": args.instrument_id,
+        "symbol": args.symbol,
+        "datasource": args.datasource,
+        "exchange": args.exchange,
+        "start": args.start,
+        "end": args.end,
+        "timeframe": args.timeframe,
+    }
+    if not payload["instrument_id"] and not payload["symbol"]:
+        raise ValueError("--instrument-id or --symbol is required")
+    result = _client(args).request_json("POST", "/api/candles/coverage", payload=payload)
+    _print_json(result)
+    status = str(result.get("status") or "").lower()
+    if status in {"ok", "info"}:
+        return 0
+    if status == "warning" and not bool(args.fail_on_warning):
+        return 0
+    return 1
+
+
+def _cmd_instruments_list(args: argparse.Namespace) -> int:
+    payload = _client(args).request_json("GET", "/api/instruments/")
+    items = list(payload or [])
+    if args.datasource:
+        items = [row for row in items if str(row.get("datasource") or "").lower() == str(args.datasource).lower()]
+    if args.exchange:
+        items = [row for row in items if str(row.get("exchange") or "").lower() == str(args.exchange).lower()]
+    if args.symbol:
+        needle = str(args.symbol).upper()
+        items = [row for row in items if needle in str(row.get("symbol") or "").upper()]
+    _print_json({"schema_version": "qt_instruments_list.v1", "items": items, "total": len(items)})
+    return 0
+
+
+def _cmd_instruments_get(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/instruments/{args.instrument_id}"))
+    return 0
+
+
+def _cmd_instruments_resolve(args: argparse.Namespace) -> int:
+    payload = {
+        "symbol": args.symbol,
+        "datasource": args.datasource,
+        "exchange": args.exchange,
+        "provider_id": args.provider,
+        "venue_id": args.venue,
+        "force_refresh": args.force_refresh,
+    }
+    _print_json(_client(args).request_json("POST", "/api/instruments/resolve", payload=payload))
+    return 0
+
+
+def _cmd_instruments_profile(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/instruments/{args.instrument_id}/runtime-profile",
+            params={"execution_semantics": args.execution_semantics},
+        )
+    )
+    return 0
+
+
+def _cmd_instruments_health(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/instruments/health",
+            params={"datasource": args.datasource, "exchange": args.exchange},
         )
     )
     return 0
@@ -997,6 +1263,20 @@ def _cmd_experiments_run_plan(args: argparse.Namespace) -> int:
     return 0 if state.get("status") == "COMPLETED" else 1
 
 
+def _cmd_experiments_prepare_instrument_matrix(args: argparse.Namespace) -> int:
+    request = _read_json_object_arg(args.request_json, label="--request-json")
+    payload = prepare_instrument_matrix_experiment(
+        client=_client(args),
+        request=request,
+        log_root=_experiment_root(args),
+        out_path=args.out,
+        apply=bool(args.apply),
+        confirm=bool(args.confirm),
+    )
+    _print_json(payload)
+    return 0
+
+
 def _cmd_experiments_resume(args: argparse.Namespace) -> int:
     runner = ExperimentRunner(client=_client(args), log_root=_experiment_root(args))
     store, plan, state = runner.resume(args.ref)
@@ -1059,6 +1339,16 @@ def _cmd_experiments_doctor(args: argparse.Namespace) -> int:
     return 0 if payload.get("status") == "ok" else 1
 
 
+def _cmd_experiments_summarize(args: argparse.Namespace) -> int:
+    payload = summarize_experiment(_experiment_root(args), args.ref)
+    if args.out:
+        path = Path(args.out).expanduser()
+        payload = {**payload, "paths": {**dict(payload.get("paths") or {}), "summary": str(path)}}
+        write_experiment_summary(path, payload)
+    _print_json(payload)
+    return 0
+
+
 def _cmd_experiments_collect(args: argparse.Namespace) -> int:
     record = _load_experiment_record(args, args.ref, bot_id=args.bot_id)
     code, result = _collect_experiment(args, _client(args), record)
@@ -1118,7 +1408,7 @@ def build_parser() -> argparse.ArgumentParser:
     bots_create.add_argument("--backtest-start")
     bots_create.add_argument("--backtest-end")
     bots_create.add_argument("--snapshot-interval-ms", type=int)
-    bots_create.add_argument("--instrument-type")
+    bots_create.add_argument("--execution-semantics", choices=["spot", "derivative", "proxy_derivative"])
     bots_create.add_argument("--wallet-json", help="wallet_config JSON object path, inline object, or '-'.")
     bots_create.add_argument(
         "--market-data-stream-policy-json",
@@ -1147,7 +1437,7 @@ def build_parser() -> argparse.ArgumentParser:
     bots_update.add_argument("--backtest-start")
     bots_update.add_argument("--backtest-end")
     bots_update.add_argument("--snapshot-interval-ms", type=int)
-    bots_update.add_argument("--instrument-type")
+    bots_update.add_argument("--execution-semantics", choices=["spot", "derivative", "proxy_derivative"])
     bots_update.add_argument("--wallet-json", help="wallet_config JSON object path, inline object, or '-'.")
     bots_update.add_argument(
         "--market-data-stream-policy-json",
@@ -1264,6 +1554,74 @@ def build_parser() -> argparse.ArgumentParser:
     variants_delete.add_argument("variant_id")
     variants_delete.set_defaults(func=_cmd_variants_delete)
 
+    indicators = subparsers.add_parser("indicators", help="Indicator catalog, config, and runtime validation commands.")
+    indicators_sub = indicators.add_subparsers(dest="indicators_command", required=True)
+    indicators_types = indicators_sub.add_parser("types", help="List registered indicator types.")
+    indicators_types.set_defaults(func=_cmd_indicators_types)
+    indicators_type = indicators_sub.add_parser("type", help="Fetch one indicator type manifest.")
+    indicators_type.add_argument("type_id")
+    indicators_type.set_defaults(func=_cmd_indicators_type)
+    indicators_list = indicators_sub.add_parser("list", help="List persisted indicator instances.")
+    indicators_list.set_defaults(func=_cmd_indicators_list)
+    indicators_get = indicators_sub.add_parser("get", help="Fetch one indicator instance.")
+    indicators_get.add_argument("indicator_id")
+    indicators_get.set_defaults(func=_cmd_indicators_get)
+    indicators_strategies = indicators_sub.add_parser("strategies", help="List strategies that reference an indicator.")
+    indicators_strategies.add_argument("indicator_id")
+    indicators_strategies.set_defaults(func=_cmd_indicators_strategies)
+
+    def add_indicator_payload_args(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--payload-json", help="JSON object path, inline object, or '-' for the full indicator payload.")
+        command.add_argument("--type")
+        command.add_argument("--name")
+        command.add_argument("--params-json", help="Indicator params JSON object path, inline object, or '-'.")
+        command.add_argument("--param", action="append", default=[], help="Indicator param as key=value. JSON scalar values are accepted.")
+        command.add_argument("--dependencies-json", help="Indicator dependencies JSON array path, inline array, or '-'.")
+        command.add_argument("--output-prefs-json", help="Indicator output_prefs JSON object path, inline object, or '-'.")
+        command.add_argument("--color")
+        command.add_argument("--color-palette", dest="color_palette")
+
+    indicators_validate_config = indicators_sub.add_parser(
+        "validate-config",
+        help="Validate and normalize an indicator config without persisting it.",
+    )
+    add_indicator_payload_args(indicators_validate_config)
+    indicators_validate_config.set_defaults(func=_cmd_indicators_validate_config)
+    indicators_create = indicators_sub.add_parser("create", help="Plan or apply indicator creation.")
+    add_indicator_payload_args(indicators_create)
+    indicators_create.add_argument("--apply", action="store_true")
+    indicators_create.add_argument("--confirm", action="store_true")
+    indicators_create.set_defaults(func=_cmd_indicators_create)
+
+    def add_indicator_window_args(command: argparse.ArgumentParser) -> None:
+        command.add_argument("indicator_id")
+        command.add_argument("--start", required=True)
+        command.add_argument("--end", required=True)
+        command.add_argument("--interval", required=True)
+        command.add_argument("--instrument-id")
+        command.add_argument("--symbol")
+        command.add_argument("--datasource")
+        command.add_argument("--exchange")
+
+    indicators_validate_runtime = indicators_sub.add_parser(
+        "validate-runtime",
+        help="Replay a persisted indicator over a market window and validate typed outputs.",
+    )
+    add_indicator_window_args(indicators_validate_runtime)
+    indicators_validate_runtime.add_argument("--require-ready-by-end", action="store_true")
+    indicators_validate_runtime.add_argument("--min-ready-bars", type=int)
+    indicators_validate_runtime.set_defaults(func=_cmd_indicators_validate_runtime)
+    indicators_overlays = indicators_sub.add_parser("overlays", help="Compute indicator overlays for a window.")
+    add_indicator_window_args(indicators_overlays)
+    indicators_overlays.add_argument("--visibility-epoch", type=int)
+    indicators_overlays.add_argument("--cursor-epoch", type=int)
+    indicators_overlays.add_argument("--cursor-time")
+    indicators_overlays.set_defaults(func=_cmd_indicators_overlays)
+    indicators_signals = indicators_sub.add_parser("signals", help="Compute indicator signals for a window.")
+    add_indicator_window_args(indicators_signals)
+    indicators_signals.add_argument("--config-json", help="Signal config JSON object path, inline object, or '-'.")
+    indicators_signals.set_defaults(func=_cmd_indicators_signals)
+
     reports = subparsers.add_parser("reports", help="Report, export, and comparison commands.")
     reports_sub = reports.add_subparsers(dest="reports_command", required=True)
     reports_list = reports_sub.add_parser("list", help="List completed report summaries.")
@@ -1288,11 +1646,14 @@ def build_parser() -> argparse.ArgumentParser:
         "operational-health",
         "run-report",
         "run-report-status",
+        "instruments",
+        "symbol-summary",
     ):
         command = reports_sub.add_parser(section, help=f"Fetch report {section}.")
         command.add_argument("run_id")
         if section == "run-report":
-            command.add_argument("--no-build", dest="build", action="store_false", default=True)
+            command.add_argument("--build", dest="build", action="store_true", default=False)
+            command.add_argument("--no-build", dest="build", action="store_false")
             command.add_argument("--force-rebuild", action="store_true")
         command.set_defaults(func=_cmd_report_get, report_section=section)
     manifest = reports_sub.add_parser("manifest", help="Fetch report export manifest.")
@@ -1312,6 +1673,68 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--no-golden", action="store_true")
     compare.add_argument("--require-golden", action="store_true")
     compare.set_defaults(func=_cmd_reports_compare)
+    for section in ("trades", "decisions", "signals"):
+        page = reports_sub.add_parser(section, help=f"Fetch report {section}.")
+        page.add_argument("run_id")
+        page.add_argument("--limit", type=int, default=100)
+        page.add_argument("--offset", type=int, default=0)
+        page.add_argument("--symbol")
+        page.add_argument("--instrument-id")
+        if section == "decisions":
+            page.add_argument("--state", choices=["accepted", "rejected"])
+        page.set_defaults(func=_cmd_reports_page, report_page_section=section)
+    candle_catalog = reports_sub.add_parser("candle-catalog", help="Fetch the report candle catalog.")
+    candle_catalog.add_argument("run_id")
+    candle_catalog.set_defaults(func=_cmd_reports_candle_catalog)
+    candles = reports_sub.add_parser("candles", help="Fetch bounded report candles.")
+    candles.add_argument("run_id")
+    candles.add_argument("--instrument-id", required=True)
+    candles.add_argument("--timeframe", required=True)
+    candles.add_argument("--start", required=True)
+    candles.add_argument("--end", required=True)
+    candles.add_argument("--limit", type=int, default=1000)
+    candles.add_argument("--offset", type=int, default=0)
+    candles.set_defaults(func=_cmd_reports_candles)
+
+    data = subparsers.add_parser("data", help="Market data coverage and availability commands.")
+    data_sub = data.add_subparsers(dest="data_command", required=True)
+    data_coverage = data_sub.add_parser("coverage", help="Check candle coverage for a canonical instrument/window.")
+    data_coverage.add_argument("--instrument-id")
+    data_coverage.add_argument("--symbol")
+    data_coverage.add_argument("--datasource")
+    data_coverage.add_argument("--exchange")
+    data_coverage.add_argument("--start", required=True)
+    data_coverage.add_argument("--end", required=True)
+    data_coverage.add_argument("--timeframe", required=True)
+    data_coverage.add_argument("--fail-on-warning", action="store_true")
+    data_coverage.set_defaults(func=_cmd_data_coverage)
+
+    instruments = subparsers.add_parser("instruments", help="Instrument metadata and runtime profiles.")
+    instruments_sub = instruments.add_subparsers(dest="instruments_command", required=True)
+    instruments_list = instruments_sub.add_parser("list", help="List canonical instruments.")
+    instruments_list.add_argument("--datasource")
+    instruments_list.add_argument("--exchange")
+    instruments_list.add_argument("--symbol")
+    instruments_list.set_defaults(func=_cmd_instruments_list)
+    instruments_get = instruments_sub.add_parser("get", help="Fetch one canonical instrument.")
+    instruments_get.add_argument("instrument_id")
+    instruments_get.set_defaults(func=_cmd_instruments_get)
+    instruments_resolve = instruments_sub.add_parser("resolve", help="Validate and persist an instrument through the provider layer.")
+    instruments_resolve.add_argument("--symbol", required=True)
+    instruments_resolve.add_argument("--datasource")
+    instruments_resolve.add_argument("--exchange")
+    instruments_resolve.add_argument("--provider")
+    instruments_resolve.add_argument("--venue")
+    instruments_resolve.add_argument("--force-refresh", action="store_true")
+    instruments_resolve.set_defaults(func=_cmd_instruments_resolve)
+    instruments_profile = instruments_sub.add_parser("profile", help="Compile an instrument runtime execution profile.")
+    instruments_profile.add_argument("instrument_id")
+    instruments_profile.add_argument("--execution-semantics", choices=["spot", "derivative", "proxy_derivative"])
+    instruments_profile.set_defaults(func=_cmd_instruments_profile)
+    instruments_health = instruments_sub.add_parser("health", help="Check stored instrument metadata readiness.")
+    instruments_health.add_argument("--datasource")
+    instruments_health.add_argument("--exchange")
+    instruments_health.set_defaults(func=_cmd_instruments_health)
 
     providers = subparsers.add_parser("providers", help="Provider metadata and stream checks.")
     providers_sub = providers.add_subparsers(dest="providers_command", required=True)
@@ -1368,6 +1791,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     experiments = subparsers.add_parser("experiments", help="Small API-composed research workflows.")
     experiments_sub = experiments.add_subparsers(dest="experiments_command", required=True)
+    prepare_matrix = experiments_sub.add_parser(
+        "prepare-instrument-matrix",
+        help="Prepare solo strategy/bot cases and an experiment plan for instrument comparisons.",
+    )
+    prepare_matrix.add_argument(
+        "--request-json",
+        required=True,
+        help="instrument_matrix_experiment_request.v1 JSON object as a path, inline object, or '-' for stdin.",
+    )
+    prepare_matrix.add_argument("--out", help="Plan path to write when --apply is set. Defaults under logs/experiments/plans.")
+    prepare_matrix.add_argument("--apply", action="store_true", help="Create strategies/bots and write the experiment plan.")
+    prepare_matrix.add_argument("--confirm", action="store_true", help="Required with --apply.")
+    prepare_matrix.set_defaults(func=_cmd_experiments_prepare_instrument_matrix)
     validate_plan = experiments_sub.add_parser("validate-plan", help="Validate and preview a sequential experiment plan.")
     validate_plan.add_argument("plan", help="YAML or JSON experiment plan path, or '-' for stdin.")
     validate_plan.add_argument("--skip-data-preflight", action="store_true", help="Skip backend candle coverage checks.")
@@ -1416,6 +1852,10 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = experiments_sub.add_parser("doctor", help="Check local plan-based experiment state and artifact refs.")
     doctor.add_argument("ref", help="Experiment id, state path, or experiment directory.")
     doctor.set_defaults(func=_cmd_experiments_doctor)
+    summarize = experiments_sub.add_parser("summarize", help="Summarize local plan-based experiment artifacts.")
+    summarize.add_argument("ref", help="Experiment id, state path, or experiment directory.")
+    summarize.add_argument("--out", help="Optional path to write the compact experiment_summary.v1 artifact.")
+    summarize.set_defaults(func=_cmd_experiments_summarize)
     collect = experiments_sub.add_parser("collect", help="Collect report export and optional comparison for a tracked experiment.")
     collect.add_argument("ref", help="Experiment record path, experiment id, request id, or run id.")
     collect.add_argument("--bot-id", help="Required when ref is a raw run id with no local experiment record.")
