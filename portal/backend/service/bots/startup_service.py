@@ -67,7 +67,7 @@ def _bot_run_config_snapshot(bot: Mapping[str, Any]) -> Dict[str, Any]:
         "backtest_end",
         "snapshot_interval_ms",
         "bot_env",
-        "instrument_type",
+        "execution_semantics",
         "duration_seconds",
     )
     snapshot: Dict[str, Any] = {}

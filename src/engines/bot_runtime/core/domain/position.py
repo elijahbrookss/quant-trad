@@ -203,8 +203,23 @@ class LadderPosition:
                         reason=rejection.reason,
                         price=round(leg.target_price, 4),
                         direction=self.direction,
+                        instrument_type=(
+                            self.execution_profile.instrument.instrument_type
+                            if self.execution_profile is not None
+                            else None
+                        ),
+                        source_instrument_type=(
+                            self.execution_profile.instrument.source_instrument_type
+                            if self.execution_profile is not None
+                            else None
+                        ),
+                        execution_semantics=(
+                            self.execution_profile.instrument.execution_semantics
+                            if self.execution_profile is not None
+                            else None
+                        ),
                     )
-                    logger.warning(with_log_context("spot_exit_rejected", context))
+                    logger.warning(with_log_context("exit_rejected", context))
                     events.append(
                         {
                             "type": "execution_rejected",

@@ -36,7 +36,7 @@ from .models import (
     Leg,
 )
 from .position import LadderPosition, SameBarResolutionPolicy
-from .time_utils import coalesce_numeric, coerce_float, isoformat
+from .time_utils import coerce_float, isoformat
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,6 @@ class LadderRiskEngine:
             self.instrument,
             template=self.template,
             risk_config=self.risk_config,
-            runtime_requires_derivatives=False,
         )
         self._runtime_log_context = build_log_context(
             strategy_id=self.template.get("strategy_id"),
@@ -84,24 +83,21 @@ class LadderRiskEngine:
             instrument_type=(
                 self.execution_profile.instrument.instrument_type if self.execution_profile is not None else None
             ),
+            source_instrument_type=(
+                self.execution_profile.instrument.source_instrument_type if self.execution_profile is not None else None
+            ),
+            execution_semantics=(
+                self.execution_profile.instrument.execution_semantics if self.execution_profile is not None else None
+            ),
         )
 
         # Always validate - same for all modes (backtest, sim_trade, paper, live)
         self._validate_template(self.template)
         self._validate_instrument(self.instrument)
 
-        # Resolve tick_size (required)
-        config_tick = coerce_float(provided_template.get("tick_size"))
-        instrument_tick = coerce_float(self.instrument.get("tick_size"))
-        profile_tick = (
-            self.execution_profile.constraints.tick_size
-            if self.execution_profile is not None
-            else None
-        )
-        tick_size = coalesce_numeric(config_tick, instrument_tick, profile_tick, default=0.0)
-        if tick_size == 0:
-            raise ValueError("tick_size required from either template or instrument configuration")
-        self.tick_size = tick_size
+        self.tick_size = float(self.execution_profile.constraints.tick_size)
+        if self.tick_size == 0:
+            raise ValueError("tick_size required from compiled execution profile")
 
         self.stop_ticks = max(int(self.template.get("stop_ticks") or 0), 0)
 
@@ -117,35 +113,12 @@ class LadderRiskEngine:
         self.execution_mode = str(self.template.get("execution_mode") or "market").lower()
         self.limit_maker_config: Dict[str, Any] = dict(self.template.get("limit_maker") or {})
 
-        # Resolve contract_size (config > instrument > 1.0)
-        config_contract = coerce_float(self.template.get("contract_size"))
-        instrument_contract = coerce_float(self.instrument.get("contract_size"))
-        profile_contract = (
-            self.execution_profile.constraints.contract_size
-            if self.execution_profile is not None
-            else None
-        )
-        self.contract_size = coalesce_numeric(config_contract, instrument_contract, profile_contract, default=0.0)
+        self.contract_size = float(self.execution_profile.constraints.contract_size)
         if self.contract_size in (None, 0):
-            raise ValueError("contract_size required from either template or instrument configuration")
-        # Resolve tick_value (config > instrument > calculated from tick_size * contract_size)
-        config_tick_value = coerce_float(self.template.get("tick_value"))
-        instrument_tick_value = coerce_float(self.instrument.get("tick_value"))
-        calculated_tick_value = self.tick_size * self.contract_size
-        profile_tick_value = (
-            self.execution_profile.constraints.tick_value
-            if self.execution_profile is not None
-            else None
-        )
-        self.tick_value = coalesce_numeric(
-            config_tick_value,
-            instrument_tick_value,
-            profile_tick_value,
-            calculated_tick_value,
-            default=0.0,
-        )
+            raise ValueError("contract_size required from compiled execution profile")
+        self.tick_value = float(self.execution_profile.constraints.tick_value)
         if self.tick_value in (None, 0):
-            raise ValueError("tick_value required from either template or instrument configuration")
+            raise ValueError("tick_value required from compiled execution profile")
 
         risk_mode = str(initial_stop_config.get("mode") or "atr").lower()
         self.risk_unit_mode = risk_mode if risk_mode in {"atr", "ticks"} else "atr"
@@ -183,29 +156,15 @@ class LadderRiskEngine:
 
         self.orders = self._orders_from_template()
         self.targets = [int(order.get("ticks") or 0) for order in self.orders]
-        # Resolve quote currency
-        quote_value = (
-            self.template.get("quote_currency")
-            or self.instrument.get("quote_currency")
-            or self.execution_profile.instrument.quote_currency
-            or "USD"
-        )
-        self.quote_currency = str(quote_value).upper()
-
-        # Resolve fee rates (config > instrument > 0.0, allow_zero since 0% fees are valid)
-        config_maker = coerce_float(self.template.get("maker_fee_rate"))
-        instrument_maker = coerce_float(self.instrument.get("maker_fee_rate"))
-        self.maker_fee = coalesce_numeric(config_maker, instrument_maker, default=0.0, allow_zero=True)
-
-        config_taker = coerce_float(self.template.get("taker_fee_rate"))
-        instrument_taker = coerce_float(self.instrument.get("taker_fee_rate"))
-        self.taker_fee = coalesce_numeric(config_taker, instrument_taker, default=0.0, allow_zero=True)
+        self.quote_currency = str(self.execution_profile.instrument.quote_currency or "USD").upper()
+        self.maker_fee = float(self.execution_profile.fees.maker_fee_rate)
+        self.taker_fee = float(self.execution_profile.fees.taker_fee_rate)
         self.execution_intent_model: ExecutionModel = DeterministicExecutionModel(
             FeeResolver(
                 FeeSchedule(
                     maker_rate=float(self.maker_fee or 0.0),
                     taker_rate=float(self.taker_fee or 0.0),
-                    source="template_or_instrument",
+                    source=self.execution_profile.fees.source,
                 )
             )
         )
@@ -336,12 +295,6 @@ class LadderRiskEngine:
         """Validate that instrument configuration is complete."""
         if not instrument:
             raise ValueError("Instrument configuration is required. Cannot proceed without instrument metadata.")
-
-        if not instrument.get("tick_size"):
-            raise ValueError(
-                "Instrument configuration must include tick_size. "
-                "This is required for accurate position sizing and PnL calculation."
-            )
 
     def _orders_from_template(self) -> List[Dict[str, Any]]:
         orders: List[Dict[str, Any]] = []
@@ -1548,11 +1501,10 @@ class LadderRiskEngine:
         }
 
     def _resolve_base_quote(self) -> Tuple[str, str]:
-        base = self.instrument.get("base_currency")
-        quote = self.instrument.get("quote_currency")
-        if self.execution_profile is not None:
-            base = base or self.execution_profile.instrument.base_currency
-            quote = quote or self.execution_profile.instrument.quote_currency
+        base = self.execution_profile.instrument.base_currency if self.execution_profile is not None else None
+        quote = self.execution_profile.instrument.quote_currency if self.execution_profile is not None else None
+        base = base or self.instrument.get("base_currency")
+        quote = quote or self.instrument.get("quote_currency")
         symbol = str(self.instrument.get("symbol") or "")
         if not base or not quote:
             context = self.runtime_log_context(
