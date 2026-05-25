@@ -1504,7 +1504,7 @@ def _durable_context_payload(
         warning_types = sorted(
             {
                 str(entry).strip().lower()
-                for entry in context.get("warning_types", [])
+                for entry in (context.get("warning_types") or [])
                 if str(entry).strip()
             }
         ) or sorted(

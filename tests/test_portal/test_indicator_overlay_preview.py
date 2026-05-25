@@ -10,6 +10,7 @@ import pandas as pd
 
 from engines.bot_runtime.core.domain import Candle
 from indicators.market_profile.compute.engine import MarketProfileIndicator
+from indicators.market_profile.overlays import market_profile_overlay_transformer  # noqa: F401
 from portal.backend.service.indicators.indicator_service import api as indicator_api
 from portal.backend.service.indicators.indicator_service.api import _collect_runtime_overlays
 from indicators.market_profile.runtime.typed_indicator import TypedMarketProfileIndicator
@@ -56,8 +57,9 @@ def test_collect_runtime_overlays_transforms_market_profile_payload_at_current_e
     )
 
     assert len(overlays) == 1
-    payload = overlays[0]["payload"]
-    assert payload["overlay_id"] == "ind.value_area"
+    overlay = overlays[0]
+    assert overlay["overlay_id"] == "ind.value_area"
+    payload = overlay["payload"]
     assert len(payload["boxes"]) == 1
     assert payload["boxes"][0]["x1"] == 100
     assert payload["boxes"][0]["x2"] == 200
@@ -103,33 +105,24 @@ def test_market_profile_runtime_indicator_emits_signal_output_without_overlay_ma
     overlays = indicator.overlay_snapshot()
 
     assert outputs["balance_breakout"].ready is True
-    assert outputs["balance_breakout"].value["events"] == [
-        {
-            "key": "balance_breakout_long",
-            "direction": "long",
-            "metadata": {
-                "trigger_price": 104.0,
-                "reference": {
-                    "kind": "price_level",
-                    "family": "value_area",
-                    "name": "VAH",
-                    "label": "VAH",
-                    "price": 101.0,
-                    "precision": 2,
-                    "source": "market_profile",
-                    "key": "2025-01-01T00:00:00+00:00:2025-01-01T02:00:00+00:00:1",
-                    "context": {
-                        "profile_key": "2025-01-01T00:00:00+00:00:2025-01-01T02:00:00+00:00:1",
-                        "active_value_area": {
-                            "vah": 101.0,
-                            "val": 99.0,
-                            "poc": 100.0,
-                        },
-                    },
-                },
-            },
-        }
-    ]
+    events = outputs["balance_breakout"].value["events"]
+    assert len(events) == 1
+    event = events[0]
+    assert event["key"] == "balance_breakout_long"
+    assert event["direction"] == "long"
+    assert event["known_at"] == int(candles[-1].time.timestamp())
+    assert event["metadata"]["trigger_price"] == 104.0
+    assert event["metadata"]["distance_from_reference"] == 3.0
+    reference = event["metadata"]["reference"]
+    assert reference["kind"] == "price_level"
+    assert reference["family"] == "value_area"
+    assert reference["name"] == "VAH"
+    assert reference["price"] == 101.0
+    assert reference["context"]["active_value_area"] == {
+        "vah": 101.0,
+        "val": 99.0,
+        "poc": 100.0,
+    }
     assert "value_area" in overlays
     assert set(overlays.keys()) == {"value_area"}
     assert overlays["value_area"].value["payload"]["markers"] == []
@@ -144,17 +137,17 @@ def test_market_profile_runtime_indicator_waits_until_projected_strategy_bar_clo
             "symbol": "ES",
             "profiles": [
                 {
-                    "start": 1735725600,  # 2026-01-01 10:00 UTC
-                    "end": 1735729200,    # 2026-01-01 11:00 UTC projected strategy boundary
-                    "source_start": 1735725600,
-                    "source_end": 1735727400,  # 2026-01-01 10:30 UTC source-session end
+                    "start": 1767261600,  # 2026-01-01 10:00 UTC
+                    "end": 1767265200,    # 2026-01-01 11:00 UTC projected strategy boundary
+                    "source_start": 1767261600,
+                    "source_end": 1767263400,  # 2026-01-01 10:30 UTC source-session end
                     "VAH": 101.0,
                     "VAL": 99.0,
                     "POC": 100.0,
                     "session_count": 1,
                     "precision": 2,
-                    "formed_at": 1735727400,
-                    "known_at": 1735729200,
+                    "formed_at": 1767263400,
+                    "known_at": 1767265200,
                 }
             ],
             "profile_params": {
