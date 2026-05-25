@@ -14,7 +14,6 @@ from ...market import instrument_service
 from ...risk.atm import normalise_template
 from ...indicators.indicator_service import get_instance_meta
 from ...strategy_variant_resolution import EffectiveStrategyConfig, materialize_output_filters, resolve_strategy_variant
-from engines.bot_runtime.core.execution_profile import compile_runtime_profile_or_error
 from risk import normalise_risk_config
 from strategies.contracts import CompiledStrategySpec, DecisionRuleSpec
 from strategies.compiler import compile_strategy, normalize_rule_intent
@@ -23,9 +22,6 @@ from .typed_preview import evaluate_strategy_preview
 
 
 logger = logging.getLogger(__name__)
-_RUNTIME_ALLOWED_DERIVATIVE_TYPES = {"future", "futures", "perp", "perps"}
-
-
 def _utcnow() -> datetime:
     """Return a naive UTC timestamp for metadata fields."""
 
@@ -99,10 +95,14 @@ class InstrumentSlot:
         if isinstance(value, InstrumentSlot):
             return value
         if isinstance(value, Mapping):
+            metadata = dict(value.get("metadata") or {})
+            for field_name in ("instrument_id", "datasource", "exchange", "provider_id", "venue_id"):
+                if value.get(field_name) is not None and not metadata.get(field_name):
+                    metadata[field_name] = value.get(field_name)
             return InstrumentSlot(
                 symbol=str(value.get("symbol") or "").strip(),
                 risk_multiplier=float(value["risk_multiplier"]) if value.get("risk_multiplier") is not None else None,
-                metadata=dict(value.get("metadata") or {}),
+                metadata=metadata,
             )
         return InstrumentSlot(symbol=str(value or "").strip())
 
@@ -731,11 +731,23 @@ class StrategyRegistry:
 
         record.instrument_messages = []
         for slot in record.instruments:
-            instrument_rec, error = instrument_service.validate_instrument(
-                record.datasource,
-                record.exchange,
-                slot.symbol,
-            )
+            metadata = slot.metadata if isinstance(slot.metadata, dict) else {}
+            instrument_rec = None
+            error = None
+            inst_id = str(metadata.get("instrument_id") or "").strip()
+            if inst_id:
+                try:
+                    instrument_rec = instrument_service.get_instrument_record(inst_id)
+                except Exception as exc:
+                    error = f"Instrument {inst_id} was not found: {exc}"
+            if instrument_rec is None:
+                slot_datasource = metadata.get("datasource") or record.datasource
+                slot_exchange = metadata.get("exchange") or record.exchange
+                instrument_rec, error = instrument_service.validate_instrument(
+                    slot_datasource,
+                    slot_exchange,
+                    slot.symbol,
+                )
             if instrument_rec:
                 inst_id = str(instrument_rec.get("id") or "").strip()
                 if inst_id:
@@ -746,10 +758,7 @@ class StrategyRegistry:
                     }
                 symbol = slot.symbol
                 try:
-                    compile_runtime_profile_or_error(
-                        instrument_rec,
-                        allowed_derivative_types=_RUNTIME_ALLOWED_DERIVATIVE_TYPES,
-                    )
+                    instrument_service.instrument_runtime_profile(instrument_rec)
                 except ValueError as exc:
                     record.instrument_messages.append(
                         {
@@ -922,39 +931,45 @@ class StrategyRegistry:
         try:
             # Resolve previous instrument ids
             def _resolve_slot_id(slot: InstrumentSlot, datasource: Optional[str], exchange: Optional[str]) -> Optional[str]:
-                if isinstance(slot.metadata, dict) and slot.metadata.get("instrument_id"):
-                    return str(slot.metadata.get("instrument_id"))
+                metadata = slot.metadata if isinstance(slot.metadata, dict) else {}
+                if metadata.get("instrument_id"):
+                    return str(metadata.get("instrument_id"))
+                slot_datasource = metadata.get("datasource") or datasource
+                slot_exchange = metadata.get("exchange") or exchange
                 try:
-                    rec = instrument_service.resolve_instrument(datasource, exchange, slot.symbol)
+                    rec = instrument_service.resolve_instrument(slot_datasource, slot_exchange, slot.symbol)
                     return rec.get("id") if rec else None
                 except Exception as exc:
                     logger.warning(
-                        "strategy_instrument_resolution_failed | strategy_id=%s symbol=%s datasource=%s exchange=%s error=%s",
-                        strategy_id,
-                        slot.symbol,
-                        datasource,
-                        exchange,
-                        exc,
-                    )
+                            "strategy_instrument_resolution_failed | strategy_id=%s symbol=%s datasource=%s exchange=%s error=%s",
+                            strategy_id,
+                            slot.symbol,
+                            slot_datasource,
+                            slot_exchange,
+                            exc,
+                        )
                     return None
 
             old_ids = {i for i in (_resolve_slot_id(s, old_datasource, old_exchange) for s in old_slots) if i}
             new_ids = set()
             for slot in record.instruments:
                 inst_id = None
-                if isinstance(slot.metadata, dict) and slot.metadata.get("instrument_id"):
-                    inst_id = str(slot.metadata.get("instrument_id"))
+                metadata = slot.metadata if isinstance(slot.metadata, dict) else {}
+                if metadata.get("instrument_id"):
+                    inst_id = str(metadata.get("instrument_id"))
                 else:
+                    slot_datasource = metadata.get("datasource") or record.datasource
+                    slot_exchange = metadata.get("exchange") or record.exchange
                     try:
-                        rec = instrument_service.resolve_instrument(record.datasource, record.exchange, slot.symbol)
+                        rec = instrument_service.resolve_instrument(slot_datasource, slot_exchange, slot.symbol)
                         inst_id = rec.get("id") if rec else None
                     except Exception as exc:
                         logger.warning(
                             "strategy_instrument_resolution_failed | strategy_id=%s symbol=%s datasource=%s exchange=%s error=%s",
                             strategy_id,
                             slot.symbol,
-                            record.datasource,
-                            record.exchange,
+                            slot_datasource,
+                            slot_exchange,
                             exc,
                         )
                         inst_id = None

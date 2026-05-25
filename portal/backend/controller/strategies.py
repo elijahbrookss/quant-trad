@@ -34,6 +34,54 @@ def _apply_market_aliases(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def _slot_payload(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    if hasattr(raw, "dict"):
+        return raw.dict(exclude_unset=True)
+    return {"symbol": str(raw or "").strip()}
+
+
+def _resolve_slot_instrument(payload: Dict[str, Any], slot_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    metadata = dict(slot_payload.get("metadata") or {})
+    inst_id = str(slot_payload.get("instrument_id") or metadata.get("instrument_id") or "").strip()
+    if inst_id:
+        return instrument_service.get_instrument_record(inst_id)
+
+    symbol = str(slot_payload.get("symbol") or "").strip()
+    if not symbol:
+        return None
+    provider_id = slot_payload.get("provider_id") or metadata.get("provider_id")
+    venue_id = slot_payload.get("venue_id") or metadata.get("venue_id")
+    translated_provider = None
+    translated_exchange = None
+    if provider_id or venue_id:
+        translated_provider, translated_exchange = provider_service.translate_market(provider_id, venue_id)
+    datasource = (
+        slot_payload.get("datasource")
+        or metadata.get("datasource")
+        or translated_provider
+        or payload.get("datasource")
+    )
+    exchange = (
+        slot_payload.get("exchange")
+        or metadata.get("exchange")
+        or translated_exchange
+        or payload.get("exchange")
+    )
+    inst_rec = instrument_service.resolve_instrument(datasource, exchange, symbol)
+    if inst_rec:
+        return inst_rec
+    enriched, _err = instrument_service.validate_instrument(
+        datasource,
+        exchange,
+        symbol,
+        provider_id=provider_id,
+        venue_id=venue_id,
+    )
+    return enriched
+
+
 def _attach_market_aliases(record: Dict[str, Any]) -> Dict[str, Any]:
     """Add provider/venue hints to strategy responses."""
 
@@ -119,6 +167,12 @@ class InstrumentSlotIn(BaseModel):
 
     symbol: str
     risk_multiplier: Optional[float] = Field(default=None)
+    instrument_id: Optional[str] = None
+    datasource: Optional[str] = None
+    exchange: Optional[str] = None
+    provider_id: Optional[str] = None
+    venue_id: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class StrategyOut(BaseModel):
@@ -299,21 +353,18 @@ async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
         # Resolve or create instruments for each provided slot and embed instrument_id in metadata
         resolved_slots = []
         for raw in slots:
-            symbol = (raw.get("symbol") if isinstance(raw, dict) else getattr(raw, "symbol", None))
+            slot_payload = _slot_payload(raw)
+            symbol = slot_payload.get("symbol")
             if not symbol:
                 continue
             symbol = str(symbol).strip()
             inst_rec = None
             try:
-                inst_rec = instrument_service.resolve_instrument(payload.get("datasource"), payload.get("exchange"), symbol)
+                inst_rec = _resolve_slot_instrument(payload, slot_payload)
             except Exception:
-                inst_rec = None
-            if not inst_rec:
-                try:
-                    inst_rec, err = instrument_service.validate_instrument(payload.get("datasource"), payload.get("exchange"), symbol)
-                except Exception:
-                    inst_rec = None
-            if not inst_rec:
+                metadata = dict(slot_payload.get("metadata") or {})
+                if slot_payload.get("instrument_id") or metadata.get("instrument_id"):
+                    raise
                 inst_rec = None
 
             # If we persisted a minimal instrument (or found one without tick metadata),
@@ -321,8 +372,10 @@ async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
             # on the next page. This is non-blocking: if enrichment fails, we continue.
             if inst_rec:
                 try:
+                    enrich_datasource = inst_rec.get("datasource") or slot_payload.get("datasource") or payload.get("datasource")
+                    enrich_exchange = inst_rec.get("exchange") or slot_payload.get("exchange") or payload.get("exchange")
                     enriched, err = instrument_service.validate_instrument(
-                        payload.get("datasource"), payload.get("exchange"), symbol
+                        enrich_datasource, enrich_exchange, symbol
                     )
                     if enriched and enriched.get("id") == inst_rec.get("id"):
                         inst_rec = enriched
@@ -330,9 +383,10 @@ async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
                     # don't block strategy creation on enrichment failures
                     pass
 
-            slot_payload = dict(raw) if isinstance(raw, dict) else {"symbol": symbol}
             if inst_rec and isinstance(slot_payload, dict):
                 slot_payload.setdefault("metadata", {})["instrument_id"] = inst_rec.get("id")
+                slot_payload["metadata"].setdefault("datasource", inst_rec.get("datasource"))
+                slot_payload["metadata"].setdefault("exchange", inst_rec.get("exchange"))
             resolved_slots.append(slot_payload)
 
         record = strategy_service.create_strategy(

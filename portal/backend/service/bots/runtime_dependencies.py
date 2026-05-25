@@ -14,8 +14,8 @@ from ..indicators.indicator_service import (
     get_instance_meta,
     runtime_input_plan_for_instance,
 )
-from ..market.candle_service import fetch_ohlcv
-from ..market.instrument_service import resolve_instrument
+from ..market.candle_service import fetch_ohlcv, fetch_ohlcv_by_instrument
+from ..market.instrument_service import get_instrument_record, resolve_instrument
 from ..reports.artifacts import build_run_artifact_bundle
 from ..storage.storage import (
     record_bot_run_steps_batch,
@@ -111,6 +111,8 @@ def build_bot_runtime_deps() -> BotRuntimeDeps:
     return BotRuntimeDeps(
         fetch_strategy=StrategyLoader.fetch_strategy,
         fetch_ohlcv=fetch_ohlcv,
+        fetch_ohlcv_by_instrument=fetch_ohlcv_by_instrument,
+        get_instrument_record=get_instrument_record,
         resolve_instrument=resolve_instrument,
         strategy_evaluate=run_strategy_preview,
         strategy_run_preview=run_strategy_preview,

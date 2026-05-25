@@ -21,7 +21,12 @@ from engines.bot_runtime.core.domain import (
     timeframe_duration,
 )
 from engines.bot_runtime.adapters import BacktestAdapter, LiveAdapter, PaperAdapter
-from engines.bot_runtime.core.execution_profile import compile_series_execution_profile, SeriesExecutionProfile
+from engines.bot_runtime.core.execution_profile import (
+    SeriesExecutionProfile,
+    compile_series_execution_profile,
+    normalize_execution_semantics,
+    normalize_runtime_instrument_type,
+)
 from atm import merge_templates
 from risk import normalise_risk_config
 from strategies.compiler import compile_strategy
@@ -157,23 +162,12 @@ class SeriesBuilderConstructionMixin:
         strategy: Strategy,
         instrument: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Merge ATM template with instrument fields (if not overridden)."""
+        """Return the strategy-owned ATM template.
+
+        Execution metadata is compiled into ``SeriesExecutionProfile`` and must
+        not be copied into this strategy template.
+        """
         atm_template = merge_templates(strategy.atm_template)
-        template_meta = atm_template.get("_meta") if isinstance(atm_template.get("_meta"), dict) else {}
-
-        def _apply_instrument_field(field: str) -> None:
-            """Always apply instrument field to template to avoid stale overrides."""
-            if not instrument:
-                return
-            value = instrument.get(field)
-            if value is None:
-                atm_template.pop(field, None)
-                template_meta.pop(f"{field}_override", None)
-                return
-            atm_template[field] = value
-            template_meta.pop(f"{field}_override", None)
-
-        # Apply instrument fields to template
         for field_name in (
             "tick_size",
             "tick_value",
@@ -181,13 +175,27 @@ class SeriesBuilderConstructionMixin:
             "maker_fee_rate",
             "taker_fee_rate",
             "quote_currency",
+            "proxy_derivative_margin_rates",
+            "proxy_derivative_instrument_fields",
+            "proxy_derivative_maker_fee_rate",
+            "proxy_derivative_taker_fee_rate",
         ):
-            _apply_instrument_field(field_name)
-
-        if template_meta:
-            atm_template["_meta"] = template_meta
-
+            atm_template.pop(field_name, None)
+            meta = atm_template.get("_meta") if isinstance(atm_template.get("_meta"), dict) else {}
+            meta.pop(f"{field_name}_override", None)
+            if meta:
+                atm_template["_meta"] = meta
+            else:
+                atm_template.pop("_meta", None)
         return atm_template
+
+    @staticmethod
+    def _has_proxy_derivative_reference(instrument: Mapping[str, Any]) -> bool:
+        metadata = instrument.get("metadata") if isinstance(instrument.get("metadata"), Mapping) else {}
+        fields = metadata.get("instrument_fields") if isinstance(metadata.get("instrument_fields"), Mapping) else {}
+        execution_fields = fields.get("proxy_derivative_instrument_fields")
+        margin_rates = fields.get("proxy_derivative_margin_rates")
+        return isinstance(execution_fields, Mapping) and bool(execution_fields) and isinstance(margin_rates, Mapping) and bool(margin_rates)
 
     @staticmethod
     def _build_risk_config_for_instrument(strategy: Strategy, symbol: str, multiplier: float) -> Dict[str, Any]:
@@ -200,6 +208,60 @@ class SeriesBuilderConstructionMixin:
             risk_config.pop("instrument_risk_multiplier", None)
         risk_config["instrument_symbol"] = symbol
         return risk_config
+
+    def _execution_semantics_for_instrument(self, instrument: Mapping[str, Any]) -> Optional[str]:
+        """Resolve the runtime execution model for a source instrument."""
+
+        instrument_type = normalize_runtime_instrument_type(instrument.get("instrument_type"))
+        configured = self.config.get("execution_semantics")
+        if configured:
+            execution_semantics = normalize_execution_semantics(configured, instrument_type=instrument_type)
+            if execution_semantics == "proxy_derivative" and self.run_type != "backtest":
+                raise RuntimeError("proxy_derivative execution is currently supported for backtest runs only")
+            return execution_semantics
+
+        risk = self.config.get("risk")
+        if isinstance(risk, Mapping) and risk.get("execution_semantics"):
+            execution_semantics = normalize_execution_semantics(risk.get("execution_semantics"), instrument_type=instrument_type)
+            if execution_semantics == "proxy_derivative" and self.run_type != "backtest":
+                raise RuntimeError("proxy_derivative execution is currently supported for backtest runs only")
+            return execution_semantics
+
+        if self.run_type == "backtest" and instrument_type == "spot" and self._has_proxy_derivative_reference(instrument):
+            return "proxy_derivative"
+        return normalize_execution_semantics(None, instrument_type=instrument_type)
+
+    def _instrument_for_link(self, strategy: Strategy, instrument_link: Any) -> Optional[Dict[str, Any]]:
+        """Resolve the canonical instrument for a strategy link."""
+
+        snapshot = dict(getattr(instrument_link, "instrument_snapshot", {}) or {})
+        instrument_id = str(getattr(instrument_link, "instrument_id", "") or snapshot.get("id") or "").strip()
+        if instrument_id:
+            get_instrument_record = getattr(self._deps, "get_instrument_record", None)
+            if get_instrument_record is not None:
+                try:
+                    record = get_instrument_record(instrument_id)
+                    if record:
+                        return {**snapshot, **dict(record)}
+                except Exception:
+                    logger.warning(
+                        with_log_context(
+                            "series_instrument_lookup_failed",
+                            self._strategy_log_context(
+                                strategy,
+                                instrument_id=instrument_id,
+                                symbol=snapshot.get("symbol"),
+                            ),
+                        )
+                    )
+            if snapshot:
+                snapshot.setdefault("id", instrument_id)
+                return snapshot
+
+        symbol = str(snapshot.get("symbol") or getattr(instrument_link, "symbol", "") or "").strip()
+        if not symbol:
+            return None
+        return self._instrument_for(strategy.datasource, strategy.exchange, symbol)
 
     def _build_series_for_strategy(self, strategy: Strategy) -> List[StrategySeries]:
         """Build series for all instruments in a strategy.
@@ -313,17 +375,20 @@ class SeriesBuilderConstructionMixin:
         Returns:
             StrategySeries ready for runtime execution
         """
-        # Step 1: Resolve strategy metadata from instrument link
-        symbol = instrument_link.symbol
-        if not symbol:
-            raise RuntimeError(f"Instrument link for strategy {strategy.id} missing symbol")
+        # Step 1: Resolve strategy metadata from the canonical instrument link.
         instrument_id = instrument_link.instrument_id
         if not instrument_id:
             raise RuntimeError(f"Instrument link for strategy {strategy.id} missing instrument_id")
+        instrument = self._instrument_for_link(strategy, instrument_link)
+        if instrument and instrument.get("instrument_snapshot"):
+            instrument = instrument.get("instrument_snapshot")
+        symbol = str((instrument or {}).get("symbol") or instrument_link.symbol or "").strip()
+        if not symbol:
+            raise RuntimeError(f"Instrument link for strategy {strategy.id} missing symbol")
 
         timeframe = strategy.timeframe
-        datasource = strategy.datasource
-        exchange = strategy.exchange
+        datasource = (instrument or {}).get("datasource") or strategy.datasource
+        exchange = (instrument or {}).get("exchange") or strategy.exchange
 
         # Extract risk multiplier for this instrument
         risk_multiplier = instrument_link.risk_multiplier or 1.0
@@ -345,6 +410,7 @@ class SeriesBuilderConstructionMixin:
                 datasource=datasource,
                 exchange=exchange,
                 strategy_id=strategy.id,
+                instrument_id=instrument_id,
                 backtest_start_iso=start_iso,
                 backtest_end_iso=end_iso,
                 warmup_bars=warmup_bars,
@@ -354,7 +420,14 @@ class SeriesBuilderConstructionMixin:
             window_start_iso = start_iso
             # Paper/live placeholders still use the same event-driven runtime semantics.
             df = self._fetch_ohlcv_data(
-                symbol, start_iso, end_iso, timeframe, datasource, exchange, strategy.id
+                symbol,
+                start_iso,
+                end_iso,
+                timeframe,
+                datasource,
+                exchange,
+                strategy.id,
+                instrument_id=instrument_id,
             )
             candles = self._build_candles(df, timeframe)
             candle_gap_classification = df.attrs.get("gap_classification") if hasattr(df, "attrs") else None
@@ -366,11 +439,6 @@ class SeriesBuilderConstructionMixin:
             raise RuntimeError(f"No valid candles could be built for strategy {strategy.id}")
         if self._log_candle_sequence:
             self._log_candle_sequence("build_series", strategy.id, candles)
-
-        # Step 4: Resolve instrument and build ATM template
-        instrument = self._instrument_for(datasource, exchange, symbol)
-        if instrument and instrument.get("instrument_snapshot"):
-            instrument = instrument.get("instrument_snapshot")
 
         instrument_context = self._strategy_log_context(
             strategy,
@@ -391,16 +459,21 @@ class SeriesBuilderConstructionMixin:
             logger.info(with_log_context("risk_multiplier_applied", context))
 
         # Step 5: Create risk engine and assemble series
+        execution_semantics = self._execution_semantics_for_instrument(instrument or {})
         execution_profile = compile_series_execution_profile(
             instrument or {},
             template=atm_template,
             risk_config=risk_config,
-            runtime_requires_derivatives=False,
+            require_margin_accounting=execution_semantics in {"derivative", "proxy_derivative"},
+            execution_semantics=execution_semantics,
         )
         profile_context = self._strategy_log_context(
             strategy,
             symbol=symbol,
             instrument_type=execution_profile.instrument.instrument_type,
+            source_instrument_type=execution_profile.instrument.source_instrument_type,
+            execution_semantics=execution_profile.instrument.execution_semantics,
+            research_market_role=execution_profile.instrument.research_market_role,
             accounting_mode=execution_profile.accounting_mode,
             supports_margin=execution_profile.capabilities.supports_margin,
             supports_short=execution_profile.capabilities.supports_short,
@@ -423,7 +496,7 @@ class SeriesBuilderConstructionMixin:
             datasource=datasource,
             exchange=exchange,
             symbol=symbol,
-            instrument_id=instrument.get("id") if isinstance(instrument, dict) else None,
+            instrument_id=(instrument.get("id") if isinstance(instrument, dict) else None) or instrument_id,
         )
         self._attach_execution_adapter(risk_engine, execution_profile)
         strategy_rules, strategy_params = strategy.compilation_inputs()
@@ -442,6 +515,9 @@ class SeriesBuilderConstructionMixin:
         series_meta["compiled_strategy"] = compiled_strategy
         if instrument:
             series_meta["instrument"] = instrument
+            series_meta["execution_semantics"] = execution_profile.instrument.execution_semantics
+            series_meta["source_instrument_type"] = execution_profile.instrument.source_instrument_type
+            series_meta["research_market_role"] = execution_profile.instrument.research_market_role
         series_meta["atm_template"] = atm_template
         series_meta["risk_config"] = deepcopy(risk_config)
         if candle_gap_classification:
@@ -509,6 +585,7 @@ class SeriesBuilderConstructionMixin:
         backtest_start_iso: str,
         backtest_end_iso: str,
         warmup_bars: int = 100,
+        instrument_id: Optional[str] = None,
     ) -> Tuple[List[Candle], int, str, Optional[Any]]:
         import pandas as pd
 
@@ -537,6 +614,7 @@ class SeriesBuilderConstructionMixin:
                 datasource=datasource,
                 exchange=exchange,
                 strategy_id=strategy_id,
+                instrument_id=instrument_id,
             )
             warmup_candles = [
                 candle for candle in self._build_candles(warmup_df, timeframe)
@@ -558,6 +636,7 @@ class SeriesBuilderConstructionMixin:
             datasource=datasource,
             exchange=exchange,
             strategy_id=strategy_id,
+            instrument_id=instrument_id,
         )
         replay_candles = [
             candle for candle in self._build_candles(replay_df, timeframe)
@@ -833,14 +912,15 @@ class SeriesBuilderConstructionMixin:
         execution_profile: SeriesExecutionProfile,
     ) -> None:
         short_requires_borrow = execution_profile.capabilities.short_requires_borrow
+        constraints = execution_profile.constraints
 
         adapter = self._adapter_for_run_type(
             short_requires_borrow=bool(short_requires_borrow),
-            tick_size=risk_engine.tick_size,
-            qty_step=risk_engine.qty_step,
-            min_qty=risk_engine.min_qty,
-            min_notional=risk_engine.min_notional,
-            contract_size=risk_engine.contract_size,
+            tick_size=constraints.tick_size,
+            qty_step=constraints.qty_step,
+            min_qty=constraints.min_order_size,
+            min_notional=constraints.min_notional,
+            contract_size=constraints.contract_size,
         )
         risk_engine.attach_execution_adapter(adapter)
 
