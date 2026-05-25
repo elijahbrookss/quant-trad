@@ -343,14 +343,23 @@ async def build_run_report_materialization(
 )
 async def get_run_report(
     run_id: str,
-    build: bool = Query(True, description="Enqueue materialization for terminal runs when no ready artifact exists."),
-    force_rebuild: bool = Query(False, description="Force a new materialized report build."),
+    build: bool = Query(False, description="Deprecated. Report reads are side-effect free; use POST /run-report/build."),
+    force_rebuild: bool = Query(False, description="Deprecated on GET. Use POST /run-report/build?force_rebuild=true."),
 ) -> Any:
     """Return a materialized Run Report DTO v2 contract for a terminal run."""
 
     context = build_log_context(run_id=run_id, build=build, force_rebuild=force_rebuild)
     logger.info(with_log_context("run_report_v2_request", context))
     try:
+        if build or force_rebuild:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "report_build_requires_post",
+                    "message": "GET /run-report is read-only. Use POST /run-report/build to build or force rebuild.",
+                    "run_id": run_id,
+                },
+            )
         if not force_rebuild:
             materialized = await _run_report_task(_materialized_run_report, run_id)
             if materialized is not None:
@@ -362,21 +371,7 @@ async def get_run_report(
             run_id,
             require_terminal=True,
         )
-        if not build and not force_rebuild:
-            return JSONResponse(status_code=202, content=status_payload)
-
-        status_payload = await _run_report_task(
-            _ensure_report_materialization,
-            run_id,
-            force=force_rebuild,
-            async_build=True,
-        )
         status = dict(status_payload.get("report_status") or {})
-        if status.get("can_view") and not force_rebuild:
-            materialized = await _run_report_task(_materialized_run_report, run_id)
-            if materialized is not None:
-                logger.info(with_log_context("run_report_v2_materialized_success", context))
-                return RunReportDTO.model_validate(materialized)
         if status.get("status") == "failed":
             raise HTTPException(
                 status_code=409,

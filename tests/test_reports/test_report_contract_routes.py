@@ -292,7 +292,7 @@ def test_run_report_route_blocks_active_runs(monkeypatch: pytest.MonkeyPatch) ->
     assert response.json()["detail"]["code"] == "run_not_terminal"
 
 
-def test_run_report_route_returns_building_status(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_report_route_returns_status_without_building(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(reports_controller, "_materialized_run_report", lambda _run_id: None)
     monkeypatch.setattr(
         reports_controller,
@@ -304,22 +304,27 @@ def test_run_report_route_returns_building_status(monkeypatch: pytest.MonkeyPatc
             "report_status": {"status": "not_started", "contract_version": "run_report_v2", "can_view": False, "can_build": True, "can_retry": False},
         },
     )
-    monkeypatch.setattr(
-        reports_controller,
-        "_ensure_report_materialization",
-        lambda run_id, **_kwargs: {
-            "contract_version": "run_report_v2",
-            "schema_version": "run_report_materialization_status.v1",
-            "run_id": run_id,
-            "report_status": {"status": "building", "contract_version": "run_report_v2", "can_view": False, "can_build": False, "can_retry": False},
-        },
-    )
+
+    def _unexpected_build(*_args: object, **_kwargs: object) -> dict:
+        raise AssertionError("GET /run-report must not enqueue materialization")
+
+    monkeypatch.setattr(reports_controller, "_ensure_report_materialization", _unexpected_build)
 
     client = TestClient(app)
     response = client.get("/api/reports/run-queued/run-report")
 
     assert response.status_code == 202
-    assert response.json()["report_status"]["status"] == "building"
+    assert response.json()["report_status"]["status"] == "not_started"
+
+
+def test_run_report_get_rejects_build_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(reports_controller, "_materialized_run_report", lambda _run_id: None)
+
+    client = TestClient(app)
+    response = client.get("/api/reports/run-queued/run-report?build=true")
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "report_build_requires_post"
 
 
 def test_report_export_contract_uses_manifest_and_zip(monkeypatch: pytest.MonkeyPatch) -> None:
