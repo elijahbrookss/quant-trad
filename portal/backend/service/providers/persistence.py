@@ -1,3 +1,4 @@
+import hashlib
 import json
 from typing import Any, List, Mapping, Tuple
 
@@ -28,6 +29,84 @@ class DataPersistenceService:
     @property
     def engine_available(self) -> bool:
         return self._engine is not None
+
+    @staticmethod
+    def _advisory_lock_key(
+        *,
+        datasource: str,
+        instrument_id: str,
+        timeframe_seconds: int,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ) -> int:
+        payload = "|".join(
+            [
+                str(datasource or "").upper(),
+                str(instrument_id or ""),
+                str(int(timeframe_seconds)),
+                pd.to_datetime(start, utc=True).isoformat(),
+                pd.to_datetime(end, utc=True).isoformat(),
+            ]
+        )
+        digest = hashlib.blake2b(payload.encode("utf-8"), digest_size=8).digest()
+        value = int.from_bytes(digest, byteorder="big", signed=False)
+        if value >= 2**63:
+            value -= 2**64
+        return value
+
+    def acquire_ingest_lock(
+        self,
+        ctx: DataContext,
+        datasource: str,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ) -> Any | None:
+        """Acquire a series/window advisory lock before provider ingestion."""
+
+        if not self._engine or pd.to_datetime(end, utc=True) <= pd.to_datetime(start, utc=True):
+            return None
+
+        self.ensure_schema()
+
+        conn = None
+        try:
+            instrument_id, timeframe_seconds = self._resolve_context(ctx)
+            lock_key = self._advisory_lock_key(
+                datasource=datasource,
+                instrument_id=instrument_id,
+                timeframe_seconds=timeframe_seconds,
+                start=pd.to_datetime(start, utc=True),
+                end=pd.to_datetime(end, utc=True),
+            )
+            conn = self._engine.connect()
+            conn.execute(text("SELECT pg_advisory_lock(:lock_key)"), {"lock_key": lock_key})
+            logger.debug(
+                "candle_ingest_lock_acquired | datasource=%s instrument_id=%s timeframe_seconds=%s start=%s end=%s",
+                datasource,
+                instrument_id,
+                timeframe_seconds,
+                pd.to_datetime(start, utc=True).isoformat(),
+                pd.to_datetime(end, utc=True).isoformat(),
+            )
+            return conn, lock_key
+        except SQLAlchemyError as exc:
+            logger.warning("candle_ingest_lock_acquire_failed | error=%s", exc)
+            if conn is not None:
+                conn.close()
+            return None
+
+    def release_ingest_lock(self, handle: Any | None) -> None:
+        """Release a lock returned by acquire_ingest_lock."""
+
+        if not handle:
+            return
+        conn, lock_key = handle
+        try:
+            conn.execute(text("SELECT pg_advisory_unlock(:lock_key)"), {"lock_key": lock_key})
+        except SQLAlchemyError as exc:
+            logger.warning("candle_ingest_lock_release_failed | error=%s", exc)
+        finally:
+            conn.close()
 
     def ensure_schema(self):
         """Create candle, derivatives, and closure tables if they are missing."""

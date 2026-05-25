@@ -47,3 +47,33 @@ def test_ccxt_provider_continues_pagination_when_exchange_caps(monkeypatch):
     assert frame["timestamp"].iloc[0] == pd.Timestamp(start)
     assert frame["timestamp"].iloc[-1] == pd.Timestamp(end)
     assert frame["timestamp"].is_monotonic_increasing
+
+
+def test_ccxt_provider_retries_transient_rate_limit(monkeypatch):
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    end = start + timedelta(hours=1)
+    candle = [int(start.timestamp() * 1000), 100, 101, 99, 100.5, 1000]
+
+    class FlakyExchange:
+        rateLimit = 1
+
+        def __init__(self, _config):
+            self.fetch_calls = 0
+
+        def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None):
+            self.fetch_calls += 1
+            if self.fetch_calls == 1:
+                raise RuntimeError("429 Too Many Requests")
+            return [candle]
+
+    sleeps = []
+    monkeypatch.setattr(ccxt_module, "ccxt", types.SimpleNamespace(binanceus=FlakyExchange))
+    monkeypatch.setattr(ccxt_module.time, "sleep", lambda value: sleeps.append(value))
+
+    provider = ccxt_module.CCXTProvider("binanceus")
+    frame = provider.fetch_from_api("BTC/USDT", start, end, "1h")
+
+    assert provider._exchange.fetch_calls >= 2
+    assert sleeps
+    assert len(frame) == 1
+    assert frame["timestamp"].iloc[0] == pd.Timestamp(start)
