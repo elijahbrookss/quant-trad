@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from datetime import datetime
 
@@ -48,6 +48,7 @@ class InstrumentResponse(InstrumentPayload):
     runtime_ready: Optional[bool] = None
     runtime_message: Optional[str] = None
     runtime_policy: Optional[str] = None
+    execution_semantics: Optional[str] = None
 
 
 class InstrumentResolveRequest(BaseModel):
@@ -99,6 +100,25 @@ async def create_instrument(payload: InstrumentPayload) -> Dict[str, Any]:
     try:
         return instrument_service.instrument_api_payload(instrument_service.create_instrument(**payload.dict()))
     except ValueError as exc:  # pragma: no cover - FastAPI plumbing
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/{instrument_id}/runtime-profile")
+async def get_instrument_runtime_profile(
+    instrument_id: str,
+    execution_semantics: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    """Return the compiled runtime execution profile for an instrument."""
+
+    try:
+        record = instrument_service.get_instrument_record(instrument_id)
+        return instrument_service.instrument_runtime_profile(
+            record,
+            execution_semantics=execution_semantics,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
 

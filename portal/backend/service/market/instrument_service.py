@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from data_providers.providers.factory import get_provider
-from engines.bot_runtime.core.execution_profile import compile_runtime_profile_or_error
+from data_providers.registry import normalize_provider_id, normalize_venue_id
+from engines.bot_runtime.core.execution_profile import (
+    compile_series_execution_profile,
+    normalize_execution_semantics,
+    normalize_runtime_instrument_type,
+)
 
 from ..providers import persistence_bootstrap  # noqa: F401
 
@@ -21,10 +27,6 @@ from ..storage.storage import (
 
 
 logger = logging.getLogger(__name__)
-
-_RUNTIME_ALLOWED_DERIVATIVE_TYPES = {"future", "futures", "perp", "perps"}
-
-
 
 def _coerce_float(value: Optional[object]) -> Optional[float]:
     try:
@@ -110,6 +112,173 @@ def list_instruments() -> List[Dict[str, Any]]:
     return load_instruments()
 
 
+def _instrument_fields(record: Mapping[str, Any]) -> Dict[str, Any]:
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
+    fields = metadata.get("instrument_fields") if isinstance(metadata.get("instrument_fields"), Mapping) else {}
+    return dict(fields)
+
+
+def _has_margin_rates(value: Any) -> bool:
+    if not isinstance(value, Mapping) or not value:
+        return False
+    for session in ("intraday", "overnight"):
+        rates = value.get(session)
+        if isinstance(rates, Mapping):
+            for key in ("long_margin_rate", "short_margin_rate"):
+                if rates.get(key) not in (None, ""):
+                    return True
+    return False
+
+
+_PROXY_DERIVATIVE_EXECUTION_FIELD_KEYS = (
+    "tick_size",
+    "contract_size",
+    "tick_value",
+    "min_order_size",
+    "min_qty",
+    "max_order_size",
+    "max_qty",
+    "qty_step",
+    "step_size",
+    "min_notional",
+    "min_cost",
+    "precision",
+    "maker_fee_rate",
+    "taker_fee_rate",
+    "can_short",
+    "short_requires_borrow",
+    "has_funding",
+    "expiry_ts",
+)
+
+
+def _proxy_derivative_execution_fields(candidate: Mapping[str, Any], fields: Mapping[str, Any]) -> Dict[str, Any]:
+    execution_fields: Dict[str, Any] = {}
+    for key in _PROXY_DERIVATIVE_EXECUTION_FIELD_KEYS:
+        if key in fields:
+            execution_fields[key] = deepcopy(fields.get(key))
+            continue
+        if key in candidate:
+            execution_fields[key] = deepcopy(candidate.get(key))
+    return execution_fields
+
+
+def _proxy_derivative_reference(record: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    fields = _instrument_fields(record)
+    base = str(fields.get("base_currency") or record.get("base_currency") or "").strip().upper()
+    quote = str(fields.get("quote_currency") or record.get("quote_currency") or "").strip().upper()
+    if not base or not quote:
+        return None
+
+    current_id = str(record.get("id") or "").strip()
+    candidates: List[Tuple[int, Dict[str, Any], Mapping[str, Any], Dict[str, Any]]] = []
+    for candidate in load_instruments():
+        if current_id and str(candidate.get("id") or "").strip() == current_id:
+            continue
+        candidate_type = normalize_runtime_instrument_type(candidate.get("instrument_type"))
+        if candidate_type not in {"future", "perp", "swap"}:
+            continue
+        candidate_fields = _instrument_fields(candidate)
+        candidate_base = str(candidate_fields.get("base_currency") or candidate.get("base_currency") or "").strip().upper()
+        candidate_quote = str(candidate_fields.get("quote_currency") or candidate.get("quote_currency") or "").strip().upper()
+        if candidate_base != base:
+            continue
+        if candidate_quote != quote:
+            continue
+        margin_rates = candidate_fields.get("margin_rates") or candidate.get("margin_rates")
+        if not _has_margin_rates(margin_rates):
+            continue
+
+        score = 0
+        if str(candidate.get("datasource") or "").strip().upper() == "COINBASE":
+            score += 10
+        if str(candidate.get("exchange") or "").strip().lower() == "coinbase_direct":
+            score += 5
+        if "P-" in str(candidate.get("symbol") or "").upper():
+            score += 1
+        candidates.append((score, candidate, margin_rates, candidate_fields))
+
+    if not candidates:
+        return None
+    _score, candidate, margin_rates, candidate_fields = sorted(
+        candidates,
+        key=lambda item: (item[0], str(item[1].get("symbol") or "")),
+        reverse=True,
+    )[0]
+    return {
+        "instrument_id": candidate.get("id"),
+        "symbol": candidate.get("symbol"),
+        "datasource": candidate.get("datasource"),
+        "exchange": candidate.get("exchange"),
+        "instrument_type": normalize_runtime_instrument_type(candidate.get("instrument_type")) or candidate.get("instrument_type"),
+        "margin_rates": deepcopy(margin_rates),
+        "maker_fee_rate": candidate_fields.get("maker_fee_rate"),
+        "taker_fee_rate": candidate_fields.get("taker_fee_rate"),
+        "execution_fields": _proxy_derivative_execution_fields(candidate, candidate_fields),
+    }
+
+
+def _with_proxy_derivative_reference(record: Mapping[str, Any]) -> Dict[str, Any]:
+    payload = dict(record)
+    if normalize_runtime_instrument_type(payload.get("instrument_type")) != "spot":
+        return payload
+
+    metadata = dict(payload.get("metadata") or {})
+    fields = dict(metadata.get("instrument_fields") or {})
+    if _has_margin_rates(fields.get("proxy_derivative_margin_rates")):
+        return payload
+
+    reference = _proxy_derivative_reference(payload)
+    if not reference:
+        return payload
+
+    fields["proxy_derivative_margin_rates"] = deepcopy(reference["margin_rates"])
+    if isinstance(reference.get("execution_fields"), Mapping) and reference.get("execution_fields"):
+        fields["proxy_derivative_instrument_fields"] = deepcopy(reference["execution_fields"])
+    if reference.get("maker_fee_rate") is not None:
+        fields["proxy_derivative_maker_fee_rate"] = reference.get("maker_fee_rate")
+    if reference.get("taker_fee_rate") is not None:
+        fields["proxy_derivative_taker_fee_rate"] = reference.get("taker_fee_rate")
+    metadata["instrument_fields"] = fields
+    metadata["proxy_derivative_reference"] = {
+        key: value
+        for key, value in reference.items()
+        if key not in {"margin_rates", "maker_fee_rate", "taker_fee_rate", "execution_fields"}
+    }
+    payload["metadata"] = metadata
+    return payload
+
+
+def _has_proxy_derivative_reference(record: Mapping[str, Any]) -> bool:
+    fields = _instrument_fields(record)
+    margin_rates = record.get("proxy_derivative_margin_rates") or fields.get("proxy_derivative_margin_rates")
+    execution_fields = record.get("proxy_derivative_instrument_fields") or fields.get("proxy_derivative_instrument_fields")
+    return isinstance(margin_rates, Mapping) and bool(margin_rates) and isinstance(execution_fields, Mapping) and bool(execution_fields)
+
+
+def _execution_semantics_for_record(
+    record: Mapping[str, Any],
+    *,
+    requested: Optional[object] = None,
+) -> str:
+    instrument_type = normalize_runtime_instrument_type(record.get("instrument_type"))
+    if requested not in (None, ""):
+        return normalize_execution_semantics(requested, instrument_type=instrument_type)
+    if instrument_type == "spot" and _has_proxy_derivative_reference(record):
+        return "proxy_derivative"
+    return normalize_execution_semantics(None, instrument_type=instrument_type)
+
+
+def _runtime_policy_from_execution_semantics(execution_semantics: str) -> str:
+    if execution_semantics == "proxy_derivative":
+        return "proxy_derivative_v1"
+    if execution_semantics == "derivative":
+        return "derivatives_v1"
+    if execution_semantics == "spot":
+        return "spot_v1"
+    return "unknown"
+
+
 def instrument_health_report(
     datasource: Optional[str] = None,
     exchange: Optional[str] = None,
@@ -122,7 +291,7 @@ def instrument_health_report(
             continue
         if exchange and str(record.get("exchange") or "").upper() != str(exchange).upper():
             continue
-        instrument_type = str(record.get("instrument_type") or "").lower()
+        instrument_type = normalize_runtime_instrument_type(record.get("instrument_type"))
         if instrument_type != "spot":
             continue
         issues = _spot_issues_from_record(record)
@@ -150,7 +319,7 @@ def get_instrument_record(instrument_id: str) -> Dict[str, Any]:
     record = get_instrument(instrument_id)
     if not record:
         raise KeyError(f"Instrument {instrument_id} was not found")
-    return record
+    return _with_proxy_derivative_reference(record)
 
 
 def create_instrument(**payload: object) -> Dict[str, Any]:
@@ -296,7 +465,8 @@ def delete_instrument_record(instrument_id: str) -> None:
 def resolve_instrument(datasource: Optional[str], exchange: Optional[str], symbol: str) -> Optional[Dict[str, Any]]:
     """Return the best matching instrument for the provided identifiers."""
 
-    return find_instrument(datasource, exchange, symbol)
+    record = find_instrument(datasource, exchange, symbol)
+    return _with_proxy_derivative_reference(record) if record else None
 
 
 def require_instrument_id(datasource: Optional[str], exchange: Optional[str], symbol: Optional[str]) -> str:
@@ -378,15 +548,16 @@ def _tick_from_market(market: Mapping[str, Any]) -> Optional[float]:
 
 def _spot_issues_from_record(record: Mapping[str, Any]) -> List[str]:
     issues: List[str] = []
-    if not record.get("tick_size"):
+    fields = _instrument_fields(record)
+    if not (record.get("tick_size") or fields.get("tick_size")):
         issues.append("missing_tick_size")
-    if not record.get("min_order_size"):
+    if not (record.get("min_order_size") or fields.get("min_order_size") or fields.get("min_qty")):
         issues.append("missing_min_qty")
-    if not record.get("quote_currency"):
+    if not (record.get("quote_currency") or fields.get("quote_currency")):
         issues.append("missing_quote_currency")
-    if record.get("maker_fee_rate") is None:
+    if record.get("maker_fee_rate") is None and fields.get("maker_fee_rate") is None:
         issues.append("missing_maker_fee")
-    if record.get("taker_fee_rate") is None:
+    if record.get("taker_fee_rate") is None and fields.get("taker_fee_rate") is None:
         issues.append("missing_taker_fee")
 
     metadata = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
@@ -438,6 +609,8 @@ def validate_instrument(
 
     datasource_id = (datasource or provider_id or "").strip()
     exchange_id = (exchange or venue_id or "").strip()
+    canonical_provider_id = normalize_provider_id(provider_id or datasource)
+    canonical_venue_id = normalize_venue_id(venue_id or exchange)
 
     try:
         provider = get_provider(datasource_id, venue=exchange_id or venue_id, exchange=exchange_id)
@@ -487,11 +660,12 @@ def validate_instrument(
     metadata_payload = metadata.as_dict()
     payload = {
         "symbol": normalized_symbol,
-        "datasource": getattr(provider, "get_datasource", lambda: datasource_id)(),
-        "exchange": exchange_id or venue_id,
+        "datasource": canonical_provider_id or getattr(provider, "get_datasource", lambda: datasource_id)(),
+        "exchange": canonical_venue_id or exchange_id or venue_id,
         "instrument_type": resolved_type,
         "metadata": metadata_payload,
     }
+    payload = _with_proxy_derivative_reference(payload)
 
     missing = _missing_behavior_fields(payload)
     if missing:
@@ -538,6 +712,29 @@ def resolve_or_create_instrument(
     return record, None
 
 
+def instrument_runtime_profile(
+    record: Mapping[str, Any],
+    *,
+    execution_semantics: Optional[object] = None,
+) -> Dict[str, Any]:
+    """Compile and return the canonical runtime execution profile for an instrument."""
+
+    payload = _with_proxy_derivative_reference(record)
+    resolved_execution_semantics = _execution_semantics_for_record(payload, requested=execution_semantics)
+    profile = compile_series_execution_profile(
+        payload,
+        require_margin_accounting=resolved_execution_semantics in {"derivative", "proxy_derivative"},
+        execution_semantics=resolved_execution_semantics,
+    )
+    return {
+        "schema_version": "instrument_runtime_profile.v1",
+        "instrument_id": payload.get("id"),
+        "symbol": payload.get("symbol"),
+        "runtime_policy": _runtime_policy_from_execution_semantics(profile.instrument.execution_semantics),
+        "profile": profile.to_dict(),
+    }
+
+
 def instrument_runtime_status(record: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     """Return research/runtime readiness derived from canonical instrument metadata."""
 
@@ -546,33 +743,37 @@ def instrument_runtime_status(record: Optional[Mapping[str, Any]]) -> Dict[str, 
             "research_ready": False,
             "runtime_ready": False,
             "runtime_message": "Instrument metadata is unavailable.",
-            "runtime_policy": "derivatives_v1",
+            "runtime_policy": "unknown",
         }
 
+    payload = _with_proxy_derivative_reference(record)
+    execution_semantics = _execution_semantics_for_record(payload)
     try:
-        compile_runtime_profile_or_error(
-            record,
-            allowed_derivative_types=_RUNTIME_ALLOWED_DERIVATIVE_TYPES,
-        )
+        profile_payload = instrument_runtime_profile(payload, execution_semantics=execution_semantics)
+        profile = profile_payload["profile"]
     except ValueError as exc:
         return {
             "research_ready": True,
             "runtime_ready": False,
             "runtime_message": str(exc),
-            "runtime_policy": "derivatives_v1",
+            "runtime_policy": _runtime_policy_from_execution_semantics(execution_semantics),
+            "execution_semantics": execution_semantics,
         }
 
     return {
         "research_ready": True,
         "runtime_ready": True,
         "runtime_message": None,
-        "runtime_policy": "derivatives_v1",
+        "runtime_policy": _runtime_policy_from_execution_semantics(
+            str(profile.get("instrument", {}).get("execution_semantics") or execution_semantics)
+        ),
+        "execution_semantics": profile.get("instrument", {}).get("execution_semantics") or execution_semantics,
     }
 
 
 def instrument_api_payload(record: Mapping[str, Any]) -> Dict[str, Any]:
     """Return an API-safe instrument payload annotated with research/runtime status."""
 
-    payload = dict(record)
-    payload.update(instrument_runtime_status(record))
+    payload = _with_proxy_derivative_reference(record)
+    payload.update(instrument_runtime_status(payload))
     return payload
