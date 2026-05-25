@@ -71,15 +71,112 @@ def test_step_rollups_keep_only_budgeted_context_metrics():
         "strategy_eval_ms",
         "overlay_projection_ms",
         "payload_bytes",
-        "botlens_fact_stream_overlays_payload_bytes",
-        "decision_order_wait_ms",
-        "decision_order_release_count",
-        "canonical_fact_count",
-        "live_fact_count",
     } <= metric_names
+    assert "botlens_fact_stream_overlays_payload_bytes" not in metric_names
+    assert "decision_order_wait_ms" not in metric_names
+    assert "decision_order_release_count" not in metric_names
+    assert "canonical_fact_count" not in metric_names
+    assert "live_fact_count" not in metric_names
     assert "botlens_live_overlays_payload_bytes" not in metric_names
     assert "consumed_signals_count" not in metric_names
     assert "one_off_internal_wait_ms" not in metric_names
+
+
+def test_record_bot_run_steps_batch_accepts_precomputed_rollups(monkeypatch: pytest.MonkeyPatch):
+    captured: list[list[dict]] = []
+
+    def _fake_upsert(_session, rollups):
+        captured.append([dict(row) for row in rollups])
+        return len(rollups)
+
+    fake_db = _FakeDb([None])
+    monkeypatch.setattr(runtime_events, "db", fake_db)
+    monkeypatch.setattr(runtime_events, "_upsert_step_rollups", _fake_upsert)
+
+    result = runtime_events.record_bot_run_steps_batch(
+        [
+            {
+                "_step_trace_rollup_v1": True,
+                "bucket_start": "2026-03-01T00:00:00Z",
+                "bucket_seconds": 60,
+                "first_seen": "2026-03-01T00:00:00Z",
+                "last_seen": "2026-03-01T00:00:05Z",
+                "run_id": "run-1",
+                "bot_id": "bot-1",
+                "step_name": "step_push_update",
+                "metric_name": "duration_ms",
+                "strategy_id": "",
+                "symbol": "",
+                "timeframe": "",
+                "status": "ok",
+                "sample_count": 7,
+                "value_sum": 70.0,
+                "value_min": 1.0,
+                "value_max": 20.0,
+                "latest_value": 10.0,
+                "p95_value": 20.0,
+                "p99_value": 20.0,
+                "histogram_bounds": [0.0, 10.0, 20.0],
+                "histogram_counts": [0, 6, 1],
+                "raw_sample_count": 7,
+                "error_count": 0,
+                "created_at": "2026-03-01T00:00:05Z",
+                "updated_at": "2026-03-01T00:00:05Z",
+            }
+        ]
+    )
+
+    assert result == 1
+    assert captured[0][0]["sample_count"] == 7
+    assert captured[0][0]["metric_name"] == "duration_ms"
+
+
+def test_step_rollup_upsert_uses_precomputed_percentiles_not_db_histogram_helpers():
+    class _CaptureSession:
+        def __init__(self) -> None:
+            self.statements = []
+
+        def execute(self, statement, _params=None):
+            self.statements.append(statement)
+
+    session = _CaptureSession()
+
+    result = runtime_events._upsert_step_rollups(
+        session,
+        [
+            {
+                "bucket_start": datetime(2026, 3, 1, tzinfo=timezone.utc),
+                "bucket_seconds": 60,
+                "first_seen": datetime(2026, 3, 1, tzinfo=timezone.utc),
+                "last_seen": datetime(2026, 3, 1, 0, 0, 5, tzinfo=timezone.utc),
+                "run_id": "run-1",
+                "bot_id": "bot-1",
+                "step_name": "step_push_update",
+                "metric_name": "duration_ms",
+                "strategy_id": "",
+                "symbol": "",
+                "timeframe": "",
+                "status": "ok",
+                "sample_count": 7,
+                "value_sum": 70.0,
+                "value_min": 1.0,
+                "value_max": 20.0,
+                "latest_value": 10.0,
+                "p95_value": 20.0,
+                "p99_value": 20.0,
+                "histogram_bounds": [0.0, 10.0, 20.0],
+                "histogram_counts": [0, 6, 1],
+                "raw_sample_count": 7,
+                "error_count": 0,
+                "created_at": datetime(2026, 3, 1, 0, 0, 5, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 3, 1, 0, 0, 5, tzinfo=timezone.utc),
+            }
+        ],
+    )
+
+    assert result == 1
+    compiled = str(session.statements[0].compile(dialect=postgresql.dialect()))
+    assert "quanttrad_jsonb_histogram" not in compiled
 
 
 class _FakeScalarResult:
