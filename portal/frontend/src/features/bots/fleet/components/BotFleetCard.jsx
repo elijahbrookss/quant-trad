@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, Copy, Eye, FileText, LoaderCircle, Play, RotateCw, Square, Trash2 } from 'lucide-react'
+import { AlertTriangle, Check, Copy, Eye, FileText, LoaderCircle, Play, RotateCw, Settings, Square, Trash2 } from 'lucide-react'
 import { memo, useEffect, useMemo, useState } from 'react'
 import { buildBotCardViewModel } from '../buildBotFleetViewModel.js'
 import { ErrorCard } from '../../../../components/ui/ErrorCard.jsx'
@@ -13,6 +13,7 @@ export const BotFleetCard = memo(function BotFleetCard({
   onDelete,
   onOpenLens,
   onOpenDiagnostics,
+  onOpenConfig,
   onViewReport,
   pendingStart,
   pendingStop,
@@ -46,6 +47,7 @@ export const BotFleetCard = memo(function BotFleetCard({
                 <h4 className="min-w-0 flex-1 truncate text-[14px] font-semibold tracking-[0.01em] text-slate-50">
                   {bot.name}
                 </h4>
+                <ConfigIconButton bot={bot} onOpenConfig={onOpenConfig} />
               </div>
               <p title={view.headerMetaText} className="mt-1.5 truncate text-[11px] leading-4 text-slate-400">
                 {view.headerMetaText}
@@ -216,6 +218,20 @@ function handleAction(actionKey, { bot, onOpenLens, onOpenDiagnostics, onViewRep
   if (actionKey === 'delete') {
     onDelete?.(bot.id)
   }
+}
+
+function ConfigIconButton({ bot, onOpenConfig }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onOpenConfig?.(bot)}
+      title="View bot config"
+      aria-label={`View config for ${bot?.name || 'bot'}`}
+      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[3px] border border-white/8 bg-black/20 text-slate-500 transition hover:border-white/14 hover:bg-black/35 hover:text-slate-100"
+    >
+      <Settings className="size-3.5" />
+    </button>
+  )
 }
 
 function MetadataField({ label, value, rawValue, title, mono = false, copyable = false, missing = false }) {
@@ -520,6 +536,7 @@ export const LiveMonitorRow = memo(function LiveMonitorRow({
   onDelete,
   onOpenLens,
   onOpenDiagnostics,
+  onOpenConfig,
   onViewReport,
 }) {
   const view = useMemo(
@@ -559,6 +576,7 @@ export const LiveMonitorRow = memo(function LiveMonitorRow({
         ) : null}
         {heartbeatRow ? <HeartbeatIndicator state={heartbeatRow.value} /> : null}
         <div className="flex items-center gap-1">
+          <ConfigIconButton bot={bot} onOpenConfig={onOpenConfig} />
           {[...mainActions, ...dangerActions].map((action) => (
             <ActionButton
               key={action.key}
@@ -591,6 +609,7 @@ export const BacktestRunCard = memo(function BacktestRunCard({
   onDelete,
   onOpenLens,
   onOpenDiagnostics,
+  onOpenConfig,
   onViewReport,
 }) {
   const primaryBot = bots[0]
@@ -633,6 +652,7 @@ export const BacktestRunCard = memo(function BacktestRunCard({
               {activityItem && activityItem.value !== '—' ? (
                 <span className="shrink-0 text-[11px] text-slate-500">{activityItem.value}</span>
               ) : null}
+              <ConfigIconButton bot={primaryBot} onOpenConfig={onOpenConfig} />
             </div>
             <p className="mt-1 truncate text-[11px] leading-4 text-slate-400">{backtestMeta}</p>
             {view.statusDetail && display.statusKey === 'starting' ? (
