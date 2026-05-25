@@ -18,6 +18,7 @@ from .lifecycle import (
     get_bot_run_lifecycle,
     get_latest_bot_run_lifecycle,
     list_bot_run_lifecycle_events,
+    list_latest_bot_run_lifecycles,
     record_bot_run_lifecycle_checkpoint,
 )
 from .indicators import (
@@ -47,11 +48,12 @@ from .report_materializations import (
     claim_report_materialization_build,
     get_materialized_run_report,
     get_report_materialization_status,
+    list_report_materialization_statuses,
     mark_report_materialization_failed,
     reset_report_materialization,
     store_materialized_run_report,
 )
-from .runs import get_bot_run, list_bot_runs, upsert_bot_run
+from .runs import get_bot_run, list_bot_runs, list_bot_runs_by_ids, list_latest_bot_runs_by_bot_ids, upsert_bot_run
 from .run_leases import (
     BotRunLeaseConflict,
     BotRunLeaseLost,
@@ -138,6 +140,7 @@ __all__ = [
     "get_report_materialization_status",
     "list_bot_run_lifecycle_events",
     "list_bot_run_steps_for_run",
+    "list_bot_runs_by_ids",
     "list_bot_runs",
     "list_bot_runtime_events",
     "list_candles_for_series",
@@ -145,6 +148,9 @@ __all__ = [
     "list_bot_trades_for_run",
     "list_observability_events",
     "list_observability_metric_rollups",
+    "list_latest_bot_run_lifecycles",
+    "list_latest_bot_runs_by_bot_ids",
+    "list_report_materialization_statuses",
     "list_strategy_variants",
     "list_strategy_instrument_links",
     "list_strategy_instrument_symbols",

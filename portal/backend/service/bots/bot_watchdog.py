@@ -436,7 +436,7 @@ class BotWatchdog:
         """Verify running bot rows still map to live docker containers."""
 
         failed: List[str] = []
-        for bot in load_bots():
+        for bot in load_bots(include_artifacts=True):
             status = str(bot.get("status") or "").lower()
             if status not in {
                 "starting",

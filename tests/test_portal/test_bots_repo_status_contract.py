@@ -47,6 +47,91 @@ class _FakeDb:
         yield self.session_handle
 
 
+class _FakeLoadResult:
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def mappings(self):
+        return self
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return list(self._rows)
+
+
+class _FakeLoadSession:
+    def __init__(self, rows):
+        self.rows = list(rows)
+
+    def execute(self, _stmt):
+        return _FakeLoadResult(self.rows)
+
+
+class _FakeLoadDb:
+    available = True
+
+    def __init__(self, rows):
+        self.session_handle = _FakeLoadSession(rows)
+
+    @contextmanager
+    def session(self):
+        yield self.session_handle
+
+
+class _ArtifactBotRow:
+    strategy_id = "strategy-1"
+
+    def __init__(self):
+        self.include_artifact_args = []
+
+    def to_dict(self, *, include_artifact=True):
+        self.include_artifact_args.append(include_artifact)
+        payload = {
+            "id": "bot-1",
+            "name": "Bot 1",
+            "strategy_id": self.strategy_id,
+        }
+        if include_artifact:
+            payload["last_run_artifact"] = {"large": "payload"}
+        return payload
+
+
+def test_load_bots_omits_last_run_artifact_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_db = _FakeLoadDb(
+        [
+            {
+                "id": "bot-1",
+                "name": "Bot 1",
+                "strategy_id": "strategy-1",
+                "status": "running",
+                "risk": {"execution_mode": "full"},
+                "last_run_artifact": {"large": "payload"},
+            }
+        ]
+    )
+    monkeypatch.setattr(bots, "db", fake_db)
+
+    result = bots.load_bots()
+
+    assert result[0]["id"] == "bot-1"
+    assert result[0]["strategy_ids"] == ["strategy-1"]
+    assert result[0]["execution_mode"] == "full"
+    assert "last_run_artifact" not in result[0]
+
+
+def test_load_bots_can_opt_into_last_run_artifact(monkeypatch: pytest.MonkeyPatch) -> None:
+    row = _ArtifactBotRow()
+    fake_db = _FakeLoadDb([row])
+    monkeypatch.setattr(bots, "db", fake_db)
+
+    result = bots.load_bots(include_artifacts=True)
+
+    assert result[0]["last_run_artifact"] == {"large": "payload"}
+    assert row.include_artifact_args == [True]
+
+
 def test_mark_bot_crashed_skips_terminal_completed_run(monkeypatch: pytest.MonkeyPatch) -> None:
     bot_row = SimpleNamespace(
         runner_id="runner-1",

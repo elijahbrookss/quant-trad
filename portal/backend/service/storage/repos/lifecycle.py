@@ -466,6 +466,65 @@ def get_latest_bot_run_lifecycle(bot_id: str) -> Optional[Dict[str, Any]]:
         return row.to_dict() if row else None
 
 
+def list_latest_bot_run_lifecycles(
+    bot_ids: List[str],
+    *,
+    run_ids_by_bot: Mapping[str, str] | None = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Return latest lifecycle rows keyed by bot id for fleet projection reads."""
+
+    normalized = [str(bot_id or "").strip() for bot_id in bot_ids]
+    wanted = [bot_id for bot_id in dict.fromkeys(normalized) if bot_id]
+    if not wanted or not db.available:
+        return {}
+
+    result: Dict[str, Dict[str, Any]] = {}
+    run_ids = [
+        str(run_id or "").strip()
+        for run_id in dict.fromkeys((run_ids_by_bot or {}).values())
+        if str(run_id or "").strip()
+    ]
+    with db.session() as session:
+        if run_ids:
+            rows = (
+                session.execute(
+                    select(BotRunLifecycleRecord)
+                    .where(BotRunLifecycleRecord.run_id.in_(run_ids))
+                    .order_by(
+                        BotRunLifecycleRecord.checkpoint_at.desc(),
+                        BotRunLifecycleRecord.updated_at.desc(),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for row in rows:
+                bot_id = str(row.bot_id or "").strip()
+                if bot_id and bot_id not in result:
+                    result[bot_id] = row.to_dict()
+
+        missing = [bot_id for bot_id in wanted if bot_id not in result]
+        if missing:
+            rows = (
+                session.execute(
+                    select(BotRunLifecycleRecord)
+                    .where(BotRunLifecycleRecord.bot_id.in_(missing))
+                    .order_by(
+                        BotRunLifecycleRecord.bot_id.asc(),
+                        BotRunLifecycleRecord.checkpoint_at.desc(),
+                        BotRunLifecycleRecord.updated_at.desc(),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for row in rows:
+                bot_id = str(row.bot_id or "").strip()
+                if bot_id and bot_id not in result:
+                    result[bot_id] = row.to_dict()
+    return result
+
+
 def list_bot_run_lifecycle_events(run_id: str) -> List[Dict[str, Any]]:
     canonical = _list_canonical_lifecycle_rows(run_id)
     if canonical:
@@ -477,5 +536,6 @@ __all__ = [
     "get_bot_run_lifecycle",
     "get_latest_bot_run_lifecycle",
     "list_bot_run_lifecycle_events",
+    "list_latest_bot_run_lifecycles",
     "record_bot_run_lifecycle_checkpoint",
 ]

@@ -12,6 +12,7 @@ from ._shared import (
     _utcnow,
     db,
     logger,
+    select,
     text,
 )
 
@@ -82,6 +83,41 @@ def get_report_materialization_status(
             status["can_retry"] = False
             return status
         return _record_status(record, normalized_run_id, contract_version=contract_version)
+
+
+def list_report_materialization_statuses(
+    run_ids: list[str],
+    *,
+    contract_version: str = REPORT_CONTRACT_VERSION,
+) -> Dict[str, Dict[str, Any]]:
+    """Return materialization states keyed by run id."""
+
+    normalized = [str(run_id or "").strip() for run_id in run_ids]
+    wanted = [run_id for run_id in dict.fromkeys(normalized) if run_id]
+    if not wanted:
+        return {}
+    if not db.available:
+        raise RuntimeError("Database not available for report materialization status")
+    with db.session() as session:
+        rows = (
+            session.execute(select(ReportMaterializationRecord).where(ReportMaterializationRecord.run_id.in_(wanted)))
+            .scalars()
+            .all()
+        )
+    statuses = {run_id: _empty_status(run_id, contract_version=contract_version) for run_id in wanted}
+    for record in rows:
+        run_id = str(record.run_id or "")
+        if record.contract_version != contract_version:
+            status = record.to_dict()
+            status["status"] = REPORT_STATUS_STALE
+            status["stale_reason"] = "contract_version_changed"
+            status["can_view"] = False
+            status["can_build"] = True
+            status["can_retry"] = False
+            statuses[run_id] = status
+        else:
+            statuses[run_id] = _record_status(record, run_id, contract_version=contract_version)
+    return statuses
 
 
 def get_materialized_run_report(
@@ -269,6 +305,7 @@ __all__ = [
     "claim_report_materialization_build",
     "get_materialized_run_report",
     "get_report_materialization_status",
+    "list_report_materialization_statuses",
     "mark_report_materialization_failed",
     "reset_report_materialization",
     "store_materialized_run_report",

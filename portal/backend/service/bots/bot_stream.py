@@ -22,6 +22,12 @@ class BotStreamManager:
         self._subscribers: Dict[str, Queue] = {}
         self._lock = Lock()
 
+    def has_subscribers(self) -> bool:
+        """Return whether any client is listening for bot stream events."""
+
+        with self._lock:
+            return bool(self._subscribers)
+
     def broadcast(self, event: str, payload: Mapping[str, object]) -> None:
         """Fan out *payload* to all subscribers, tagging it with *event*."""
 

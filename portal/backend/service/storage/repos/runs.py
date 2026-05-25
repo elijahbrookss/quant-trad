@@ -74,6 +74,52 @@ def get_bot_run(run_id: str) -> Optional[Dict[str, Any]]:
         return record.to_dict() if record else None
 
 
+def list_bot_runs_by_ids(run_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Return run snapshots keyed by run id."""
+
+    normalized = [str(run_id or "").strip() for run_id in run_ids]
+    wanted = [run_id for run_id in dict.fromkeys(normalized) if run_id]
+    if not wanted or not db.available:
+        return {}
+    with db.session() as session:
+        rows = (
+            session.execute(select(BotRunRecord).where(BotRunRecord.run_id.in_(wanted)))
+            .scalars()
+            .all()
+        )
+        return {str(row.run_id): row.to_dict() for row in rows}
+
+
+def list_latest_bot_runs_by_bot_ids(bot_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Return the latest BotRunRecord for each bot id."""
+
+    normalized = [str(bot_id or "").strip() for bot_id in bot_ids]
+    wanted = [bot_id for bot_id in dict.fromkeys(normalized) if bot_id]
+    if not wanted or not db.available:
+        return {}
+    with db.session() as session:
+        rows = (
+            session.execute(
+                select(BotRunRecord)
+                .where(BotRunRecord.bot_id.in_(wanted))
+                .order_by(
+                    BotRunRecord.bot_id.asc(),
+                    BotRunRecord.started_at.desc().nullslast(),
+                    BotRunRecord.updated_at.desc().nullslast(),
+                    BotRunRecord.created_at.desc().nullslast(),
+                )
+            )
+            .scalars()
+            .all()
+        )
+    latest: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        bot_id = str(row.bot_id or "")
+        if bot_id and bot_id not in latest:
+            latest[bot_id] = row.to_dict()
+    return latest
+
+
 
 
 def list_bot_runs(
@@ -118,4 +164,3 @@ def list_bot_runs(
             exc,
         )
         raise
-

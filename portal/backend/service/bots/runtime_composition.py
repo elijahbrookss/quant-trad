@@ -35,7 +35,10 @@ class BotStorageGateway(Protocol):
     def upsert_bot(self, payload: Mapping[str, Any]) -> None: ...
     def upsert_bot_run(self, payload: Mapping[str, Any]) -> Dict[str, Any]: ...
     def get_bot_run(self, run_id: str) -> Optional[Dict[str, Any]]: ...
+    def list_bot_runs_by_ids(self, run_ids: List[str]) -> Dict[str, Dict[str, Any]]: ...
+    def list_latest_bot_runs_by_bot_ids(self, bot_ids: List[str]) -> Dict[str, Dict[str, Any]]: ...
     def get_report_materialization_status(self, run_id: str) -> Dict[str, Any]: ...
+    def list_report_materialization_statuses(self, run_ids: List[str]) -> Dict[str, Dict[str, Any]]: ...
     def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]: ...
     def get_bot_run_lifecycle(self, run_id: str) -> Optional[Mapping[str, Any]]: ...
     def get_bot_run_lease(self, run_id: str) -> Optional[Mapping[str, Any]]: ...
@@ -60,6 +63,12 @@ class BotStorageGateway(Protocol):
         metadata: Mapping[str, Any] | None = None,
     ) -> Optional[Dict[str, Any]]: ...
     def get_latest_bot_run_lifecycle(self, bot_id: str) -> Optional[Mapping[str, Any]]: ...
+    def list_latest_bot_run_lifecycles(
+        self,
+        bot_ids: List[str],
+        *,
+        run_ids_by_bot: Mapping[str, str] | None = None,
+    ) -> Dict[str, Dict[str, Any]]: ...
     def record_bot_run_lifecycle_checkpoint(self, payload: Mapping[str, Any]) -> Dict[str, Any]: ...
     def update_bot_runtime_status(self, *, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None: ...
 
@@ -108,8 +117,17 @@ def _build_storage_gateway() -> BotStorageGateway:
         def get_bot_run(self, run_id: str) -> Optional[Dict[str, Any]]:
             return storage_module.get_bot_run(str(run_id))
 
+        def list_bot_runs_by_ids(self, run_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+            return storage_module.list_bot_runs_by_ids([str(run_id) for run_id in run_ids])
+
+        def list_latest_bot_runs_by_bot_ids(self, bot_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+            return storage_module.list_latest_bot_runs_by_bot_ids([str(bot_id) for bot_id in bot_ids])
+
         def get_report_materialization_status(self, run_id: str) -> Dict[str, Any]:
             return storage_module.get_report_materialization_status(str(run_id))
+
+        def list_report_materialization_statuses(self, run_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+            return storage_module.list_report_materialization_statuses([str(run_id) for run_id in run_ids])
 
         def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]:
             return storage_module.get_latest_bot_runtime_run_id(str(bot_id))
@@ -160,6 +178,17 @@ def _build_storage_gateway() -> BotStorageGateway:
 
         def get_latest_bot_run_lifecycle(self, bot_id: str) -> Optional[Mapping[str, Any]]:
             return storage_module.get_latest_bot_run_lifecycle(str(bot_id))
+
+        def list_latest_bot_run_lifecycles(
+            self,
+            bot_ids: List[str],
+            *,
+            run_ids_by_bot: Mapping[str, str] | None = None,
+        ) -> Dict[str, Dict[str, Any]]:
+            return storage_module.list_latest_bot_run_lifecycles(
+                [str(bot_id) for bot_id in bot_ids],
+                run_ids_by_bot={str(key): str(value) for key, value in dict(run_ids_by_bot or {}).items()},
+            )
 
         def record_bot_run_lifecycle_checkpoint(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
             return storage_module.record_bot_run_lifecycle_checkpoint(dict(payload))

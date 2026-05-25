@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -9,6 +10,17 @@ from portal.backend.service.bots.botlens_contract import BRIDGE_BOOTSTRAP_KIND, 
 from portal.backend.service.bots.botlens_intake_router import IntakeRouter
 from portal.backend.service.bots.botlens_mailbox import RunMailbox, SymbolMailbox
 import portal.backend.service.bots.botlens_intake_router as intake_mod
+
+
+def _iso_candle_time(candle_time: int) -> str:
+    value = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=int(candle_time))
+    return value.isoformat().replace("+00:00", "Z")
+
+
+async def _drain_router_persistence(router: IntakeRouter) -> None:
+    tasks = tuple(getattr(router, "_persist_tasks", ()))
+    if tasks:
+        await asyncio.gather(*tasks)
 
 
 class _FakeRegistry:
@@ -86,8 +98,10 @@ def _facts_payload(*, run_seq: int, candle_time: int) -> dict[str, Any]:
                     "trade_id": f"trade-{run_seq}",
                     "status": "open",
                     "direction": "long",
-                    "opened_at": f"2026-01-01T00:0{candle_time}:00Z",
-                    "bar_time": f"2026-01-01T00:0{candle_time}:00Z",
+                    "opened_at": _iso_candle_time(candle_time),
+                    "bar_time": _iso_candle_time(candle_time),
+                    "position_commit_seq": run_seq,
+                    "position_commit_seq_status": "position_scoped",
                 },
             },
         ],
@@ -119,6 +133,7 @@ def test_intake_router_persists_only_budgeted_transport_rows_and_skips_canonical
         monkeypatch.setattr(router, "_persist_rows", _persist_rows)
 
         await router.route(_facts_payload(run_seq=2, candle_time=2))
+        await _drain_router_persistence(router)
 
         mailbox = await registry.ensure_symbol(
             run_id="run-1",
@@ -208,6 +223,7 @@ def test_intake_router_treats_source_persisted_wallet_facts_as_canonical(
         )
 
         await router.route(payload)
+        await _drain_router_persistence(router)
 
         assert len(persisted_batches) == 1
         assert set(persisted_batches[0]["event_names"]) == {
@@ -236,6 +252,7 @@ def test_intake_router_filters_repeated_derived_event_ids_before_db_write(
         payload = _facts_payload(run_seq=2, candle_time=2)
         await router.route(payload)
         await router.route(payload)
+        await _drain_router_persistence(router)
 
         assert len(persisted_batches) == 1
         assert len(persisted_batches[0]) == 1
@@ -287,7 +304,9 @@ def test_intake_router_routes_continuity_instrumented_bootstrap_and_facts_withou
         )
 
         await router.route(bootstrap_payload)
+        await _drain_router_persistence(router)
         await router.route(facts_payload)
+        await _drain_router_persistence(router)
 
         mailbox = await registry.ensure_symbol(
             run_id="run-1",

@@ -16,6 +16,34 @@ from ._shared import (
 )
 from ....service.bots.startup_lifecycle import build_failure_payload
 
+_BOT_LIST_COLUMNS = (
+    BotRecord.id,
+    BotRecord.name,
+    BotRecord.strategy_id,
+    BotRecord.strategy_variant_id,
+    BotRecord.strategy_variant_name,
+    BotRecord.atm_template_id,
+    BotRecord.resolved_params,
+    BotRecord.risk_config,
+    BotRecord.mode,
+    BotRecord.run_type,
+    BotRecord.playback_speed,
+    BotRecord.backtest_start,
+    BotRecord.backtest_end,
+    BotRecord.risk,
+    BotRecord.wallet_config,
+    BotRecord.market_data_stream_policy,
+    BotRecord.snapshot_interval_ms,
+    BotRecord.bot_env,
+    BotRecord.status,
+    BotRecord.last_run_at,
+    BotRecord.last_stats,
+    BotRecord.runner_id,
+    BotRecord.heartbeat_at,
+    BotRecord.created_at,
+    BotRecord.updated_at,
+)
+
 
 def _watchdog_reason_code(reason: str) -> str:
     normalized = str(reason or "").strip().lower()
@@ -82,19 +110,72 @@ def _watchdog_terminal_metadata(
     return metadata
 
 
-def load_bots() -> List[Dict[str, Any]]:
+def _iso_timestamp(value: Any) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat() + "Z" if hasattr(value, "isoformat") else str(value)
+
+
+def _bot_mapping_to_dict(row: Mapping[str, Any]) -> Dict[str, Any]:
+    risk_payload = dict(row.get("risk") or {})
+    execution_mode = str(risk_payload.get("execution_mode") or "fast").strip().lower()
+    if execution_mode not in {"fast", "full"}:
+        execution_mode = "fast"
+    execution_behavior = str(risk_payload.get("execution_behavior") or "simulated").strip().lower().replace("_", "-")
+    if execution_behavior not in {"simulated", "observe-only"}:
+        execution_behavior = "simulated"
+    return {
+        "id": row.get("id"),
+        "name": row.get("name"),
+        "strategy_id": row.get("strategy_id"),
+        "strategy_variant_id": row.get("strategy_variant_id"),
+        "strategy_variant_name": row.get("strategy_variant_name"),
+        "atm_template_id": row.get("atm_template_id"),
+        "resolved_params": dict(row.get("resolved_params") or {}),
+        "risk_config": dict(row.get("risk_config") or {}),
+        "mode": row.get("mode"),
+        "execution_mode": execution_mode,
+        "execution_behavior": execution_behavior,
+        "run_type": row.get("run_type"),
+        "playback_speed": float(row.get("playback_speed") if row.get("playback_speed") is not None else 0.0),
+        "backtest_start": _iso_timestamp(row.get("backtest_start")),
+        "backtest_end": _iso_timestamp(row.get("backtest_end")),
+        "risk": risk_payload,
+        "wallet_config": dict(row.get("wallet_config") or {}),
+        "market_data_stream_policy": dict(row.get("market_data_stream_policy") or {}),
+        "snapshot_interval_ms": int(row.get("snapshot_interval_ms") or 0),
+        "bot_env": dict(row.get("bot_env") or {}),
+        "status": row.get("status"),
+        "last_run_at": _iso_timestamp(row.get("last_run_at")),
+        "last_stats": dict(row.get("last_stats") or {}),
+        "runner_id": row.get("runner_id"),
+        "heartbeat_at": _iso_timestamp(row.get("heartbeat_at")),
+        "created_at": _iso_timestamp(row.get("created_at")),
+        "updated_at": _iso_timestamp(row.get("updated_at")),
+    }
+
+
+def load_bots(*, include_artifacts: bool = False) -> List[Dict[str, Any]]:
     """Return all persisted bot configurations."""
 
     if not db.available:
         return []
     with db.session() as session:
-        rows = session.execute(select(BotRecord)).scalars().all()
+        if include_artifacts:
+            rows = session.execute(select(BotRecord)).scalars().all()
+        else:
+            rows = session.execute(select(*_BOT_LIST_COLUMNS)).mappings().all()
         if not rows:
             return []
         payload: List[Dict[str, Any]] = []
         for row in rows:
-            record = row.to_dict()
-            record["strategy_ids"] = [row.strategy_id] if row.strategy_id else []
+            if include_artifacts:
+                record = row.to_dict(include_artifact=True)
+                strategy_id = row.strategy_id
+            else:
+                record = _bot_mapping_to_dict(row)
+                strategy_id = row.get("strategy_id")
+            record["strategy_ids"] = [strategy_id] if strategy_id else []
             payload.append(record)
         return payload
 

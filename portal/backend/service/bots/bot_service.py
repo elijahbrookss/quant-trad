@@ -48,6 +48,11 @@ def _broadcast_bot_stream(event: str, payload: Dict[str, Any]) -> None:
     _composition().stream_manager.broadcast(event, payload)
 
 
+def _bot_stream_has_subscribers() -> bool:
+    checker = getattr(_composition().stream_manager, "has_subscribers", None)
+    return bool(checker()) if callable(checker) else True
+
+
 def _load_projection_inputs(
     bot: Mapping[str, Any],
 ) -> tuple[
@@ -72,6 +77,62 @@ def _load_projection_inputs(
             logger.warning("bot_report_materialization_status_unavailable | bot_id=%s | run_id=%s | error=%s", bot_id, run_id, exc)
     run_snapshot = _telemetry_hub().get_run_snapshot(run_id=run_id) if run_id else None
     return run, lifecycle, run_snapshot
+
+
+def _load_projection_inputs_batch(
+    bots: List[Mapping[str, Any]],
+) -> Dict[str, tuple[Optional[Mapping[str, Any]], Optional[Mapping[str, Any]], Any]]:
+    storage = _composition().storage
+    bot_ids = [str(bot.get("id") or "").strip() for bot in bots if str(bot.get("id") or "").strip()]
+    if not bot_ids:
+        return {}
+
+    latest_runs_loader = getattr(storage, "list_latest_bot_runs_by_bot_ids", None)
+    lifecycle_loader = getattr(storage, "list_latest_bot_run_lifecycles", None)
+    runs_by_id_loader = getattr(storage, "list_bot_runs_by_ids", None)
+    report_status_loader = getattr(storage, "list_report_materialization_statuses", None)
+    if not (
+        callable(latest_runs_loader)
+        and callable(lifecycle_loader)
+        and callable(runs_by_id_loader)
+        and callable(report_status_loader)
+    ):
+        return {str(bot.get("id") or ""): _load_projection_inputs(bot) for bot in bots}
+
+    latest_runs_by_bot = dict(latest_runs_loader(bot_ids) or {})
+    run_ids_by_bot = {
+        bot_id: str((run or {}).get("run_id") or "").strip()
+        for bot_id, run in dict(latest_runs_by_bot or {}).items()
+        if str((run or {}).get("run_id") or "").strip()
+    }
+    lifecycles_by_bot = dict(lifecycle_loader(bot_ids, run_ids_by_bot=run_ids_by_bot) or {})
+    selected_run_ids = set(run_ids_by_bot.values())
+    for lifecycle in dict(lifecycles_by_bot or {}).values():
+        run_id = str((lifecycle or {}).get("run_id") or "").strip()
+        if run_id:
+            selected_run_ids.add(run_id)
+
+    runs_by_id = dict(runs_by_id_loader(sorted(selected_run_ids)) or {})
+    report_statuses = dict(report_status_loader(sorted(selected_run_ids)) or {})
+    telemetry_hub = _telemetry_hub()
+
+    result: Dict[str, tuple[Optional[Mapping[str, Any]], Optional[Mapping[str, Any]], Any]] = {}
+    for bot_id in bot_ids:
+        lifecycle = dict(lifecycles_by_bot.get(bot_id) or {}) or None
+        run_id = (
+            str((lifecycle or {}).get("run_id") or "").strip()
+            or str((latest_runs_by_bot.get(bot_id) or {}).get("run_id") or "").strip()
+        )
+        run = dict(runs_by_id.get(run_id) or latest_runs_by_bot.get(bot_id) or {}) if run_id else {}
+        if run and run_id:
+            try:
+                report_status = dict(report_statuses.get(run_id) or storage.get_report_materialization_status(run_id))
+                run = {**run, "report_materialization": report_status, "report_status": report_status.get("status")}
+            except Exception as exc:  # noqa: BLE001 - bot cards must still render if report status is unavailable.
+                logger.warning("bot_report_materialization_status_unavailable | bot_id=%s | run_id=%s | error=%s", bot_id, run_id, exc)
+        run_snapshot = telemetry_hub.get_run_snapshot(run_id=run_id) if run_id else None
+        result[bot_id] = (run or None, lifecycle, run_snapshot)
+    return result
 
 
 def _container_state_for_bot(bot: Mapping[str, Any], lifecycle: Mapping[str, Any] | None, *, inspect_container: bool) -> Dict[str, Any]:
@@ -120,8 +181,28 @@ def _project_bot(bot: Mapping[str, Any], *, inspect_container: bool = True) -> D
     )
 
 
+def _project_bots(bots: List[Mapping[str, Any]], *, inspect_container: bool = True) -> List[Dict[str, Any]]:
+    inputs_by_bot = _load_projection_inputs_batch(bots)
+    projected: List[Dict[str, Any]] = []
+    for bot in bots:
+        bot_id = str(bot.get("id") or "").strip()
+        run, lifecycle, run_snapshot = inputs_by_bot.get(bot_id, (None, None, None))
+        container_state = _container_state_for_bot(bot, lifecycle, inspect_container=inspect_container)
+        projected.append(
+            project_bot_state(
+                bot,
+                run=run,
+                lifecycle=lifecycle,
+                run_snapshot=run_snapshot,
+                container_state=container_state,
+                heartbeat_stale_ms=_BOT_RUNTIME_SETTINGS.status_heartbeat_stale_ms,
+            )
+        )
+    return projected
+
+
 def list_bots() -> List[Dict[str, object]]:
-    return [_project_bot(bot) for bot in _composition().config_service.list_bots()]
+    return _project_bots(_composition().config_service.list_bots())
 
 
 def _as_mapping(value: Any) -> Mapping[str, Any]:
@@ -261,7 +342,7 @@ def _bot_run_context(bot: Mapping[str, Any]) -> Dict[str, Any]:
             "atm_template_id": bot.get("atm_template_id"),
             "risk_config": bot.get("risk_config") or {},
             "wallet_config": bot.get("wallet_config") or {},
-            "instrument_type": bot.get("instrument_type"),
+            "execution_semantics": bot.get("execution_semantics"),
         },
         "active_run": {
             "run_id": active_run_id,
@@ -356,6 +437,9 @@ def start_bot_run_context(
 
 
 def publish_projected_bot(bot_id: str, *, inspect_container: bool = True) -> None:
+    if not _bot_stream_has_subscribers():
+        logger.debug("bot_stream_projection_skipped_no_subscribers | bot_id=%s", bot_id)
+        return
     try:
         bot = _composition().config_service.get_bot(bot_id)
     except KeyError:
