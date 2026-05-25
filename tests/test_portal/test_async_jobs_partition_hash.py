@@ -4,6 +4,7 @@ import pytest
 
 pytest.importorskip("sqlalchemy")
 
+from portal.backend.service.async_jobs import repository
 from portal.backend.service.async_jobs.repository import _partition_hash, _partition_slot
 
 
@@ -32,3 +33,11 @@ def test_partition_slot_matches_positive_hashes() -> None:
     assert _partition_slot(1229646920, 3) == 2
     assert _partition_slot(0, 3) == 0
     assert _partition_slot(5, 3) == 2
+
+
+def test_stale_running_reclaim_is_throttled_by_job_type() -> None:
+    repository._RECLAIM_LAST_MONOTONIC_BY_JOB_TYPES.clear()
+
+    assert repository._should_reclaim_stale_running_jobs(["signals", "overlays"], now_monotonic=100.0) is True
+    assert repository._should_reclaim_stale_running_jobs(["overlays", "signals"], now_monotonic=101.0) is False
+    assert repository._should_reclaim_stale_running_jobs(["signals", "overlays"], now_monotonic=131.0) is True

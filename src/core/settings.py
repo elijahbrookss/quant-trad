@@ -61,10 +61,12 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_WAIT_TIMEOUT_SECONDS", ("async_jobs", "quantlab_job_wait_timeout_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_POLL_INTERVAL_SECONDS", ("async_jobs", "quantlab_job_poll_interval_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_RESULT_CACHE_TTL_SECONDS", ("async_jobs", "quantlab_result_cache_ttl_seconds")),
+    ("QT_ASYNC_JOBS_RECLAIM_INTERVAL_SECONDS", ("async_jobs", "reclaim_interval_seconds")),
     ("QT_WORKERS_INDICATORS_PROCESSES", ("workers", "indicators", "processes")),
     ("QT_WORKERS_INDICATORS_INDEX", ("workers", "indicators", "index")),
     ("QT_WORKERS_INDICATORS_TOTAL", ("workers", "indicators", "total")),
     ("QT_WORKERS_INDICATORS_IDLE_SLEEP_SECONDS", ("workers", "indicators", "idle_sleep_seconds")),
+    ("QT_WORKERS_INDICATORS_IDLE_SLEEP_MAX_SECONDS", ("workers", "indicators", "idle_sleep_max_seconds")),
     ("QT_WORKERS_INDICATORS_DB_WAIT_TIMEOUT_SECONDS", ("workers", "indicators", "db_wait_timeout_seconds")),
     ("QT_BOT_RUNTIME_MODE", ("bot_runtime", "mode")),
     ("QT_BOT_RUNTIME_TARGET", ("bot_runtime", "target")),
@@ -168,6 +170,14 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_REPORTS_ARTIFACTS_INCLUDE_OVERLAYS", ("reports", "artifacts", "include_overlays")),
     ("QT_REPORTS_ARTIFACTS_CAPTURE_BACKTEST", ("reports", "artifacts", "capture_backtest")),
     ("QT_REPORTS_ARTIFACTS_CAPTURE_LIVE", ("reports", "artifacts", "capture_live")),
+    (
+        "QT_REPORTS_MATERIALIZATION_TERMINAL_AUTO_ENQUEUE_ENABLED",
+        ("reports", "materialization", "terminal_auto_enqueue_enabled"),
+    ),
+    (
+        "QT_REPORTS_MATERIALIZATION_TERMINAL_AUTO_ENQUEUE_DELAY_SECONDS",
+        ("reports", "materialization", "terminal_auto_enqueue_delay_seconds"),
+    ),
 ]
 
 
@@ -424,6 +434,7 @@ class AsyncJobSettings:
     quantlab_job_wait_timeout_seconds: float
     quantlab_job_poll_interval_seconds: float
     quantlab_result_cache_ttl_seconds: float
+    reclaim_interval_seconds: float
 
 
 @dataclass(frozen=True)
@@ -432,6 +443,7 @@ class WorkerGroupSettings:
     index: int
     total: int
     idle_sleep_seconds: float
+    idle_sleep_max_seconds: float
     db_wait_timeout_seconds: float
 
 
@@ -622,8 +634,15 @@ class ReportArtifactSettings:
 
 
 @dataclass(frozen=True)
+class ReportMaterializationSettings:
+    terminal_auto_enqueue_enabled: bool
+    terminal_auto_enqueue_delay_seconds: float
+
+
+@dataclass(frozen=True)
 class ReportSettings:
     artifacts: ReportArtifactSettings
+    materialization: ReportMaterializationSettings
 
 
 @dataclass(frozen=True)
@@ -670,6 +689,7 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
     frontend_botlens_payload = _coerce_mapping(frontend_payload.get("botlens"))
     reports_payload = _coerce_mapping(payload.get("reports"))
     report_artifacts_payload = _coerce_mapping(reports_payload.get("artifacts"))
+    report_materialization_payload = _coerce_mapping(reports_payload.get("materialization"))
 
     default_origins = [
         "http://localhost",
@@ -757,6 +777,9 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             quantlab_result_cache_ttl_seconds=_coerce_float(
                 async_jobs_payload.get("quantlab_result_cache_ttl_seconds"), 300.0, minimum=0.0
             ),
+            reclaim_interval_seconds=_coerce_float(
+                async_jobs_payload.get("reclaim_interval_seconds"), 30.0, minimum=0.0
+            ),
         ),
         workers=WorkersSettings(
             indicators=WorkerGroupSettings(
@@ -765,6 +788,9 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                 total=_coerce_int(indicator_workers_payload.get("total"), 1, minimum=1),
                 idle_sleep_seconds=_coerce_float(
                     indicator_workers_payload.get("idle_sleep_seconds"), 0.2, minimum=0.05
+                ),
+                idle_sleep_max_seconds=_coerce_float(
+                    indicator_workers_payload.get("idle_sleep_max_seconds"), 1.5, minimum=0.05
                 ),
                 db_wait_timeout_seconds=_coerce_float(
                     indicator_workers_payload.get("db_wait_timeout_seconds"), 120.0, minimum=0.5
@@ -848,7 +874,7 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             step_trace=StepTraceSettings(
                 queue_max=_coerce_int(step_trace_payload.get("queue_max"), 8192, minimum=1),
                 batch_size=_coerce_int(step_trace_payload.get("batch_size"), 512, minimum=1),
-                flush_interval_ms=_coerce_int(step_trace_payload.get("flush_interval_ms"), 500, minimum=1),
+                flush_interval_ms=_coerce_int(step_trace_payload.get("flush_interval_ms"), 5000, minimum=1),
                 overflow_policy=_coerce_str(step_trace_payload.get("overflow_policy"), "drop_oldest"),
             ),
             telemetry=TelemetrySettings(
@@ -1003,6 +1029,14 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                 capture_backtest=_coerce_bool(report_artifacts_payload.get("capture_backtest"), True),
                 capture_live=_coerce_bool(report_artifacts_payload.get("capture_live"), False),
             ),
+            materialization=ReportMaterializationSettings(
+                terminal_auto_enqueue_enabled=_coerce_bool(
+                    report_materialization_payload.get("terminal_auto_enqueue_enabled"), False
+                ),
+                terminal_auto_enqueue_delay_seconds=_coerce_float(
+                    report_materialization_payload.get("terminal_auto_enqueue_delay_seconds"), 0.0, minimum=0.0
+                ),
+            ),
         ),
     )
 
@@ -1048,6 +1082,7 @@ __all__ = [
     "ObservabilitySettings",
     "ProviderRuntimeSettings",
     "ReportArtifactSettings",
+    "ReportMaterializationSettings",
     "ReportSettings",
     "SecuritySettings",
     "TelemetrySettings",

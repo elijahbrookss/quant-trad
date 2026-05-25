@@ -119,7 +119,9 @@ def main() -> int:
     signal.signal(signal.SIGINT, _on_signal)
 
     worker_id, partition_index, partition_total = _worker_identity()
-    idle_sleep = _INDICATOR_WORKER_SETTINGS.idle_sleep_seconds
+    idle_sleep = float(_INDICATOR_WORKER_SETTINGS.idle_sleep_seconds)
+    idle_sleep_max = max(float(_INDICATOR_WORKER_SETTINGS.idle_sleep_max_seconds), idle_sleep)
+    current_idle_sleep = idle_sleep
     db_wait_timeout = _INDICATOR_WORKER_SETTINGS.db_wait_timeout_seconds
 
     if not wait_for_database_ready(timeout_seconds=db_wait_timeout, poll_interval_seconds=0.5):
@@ -151,12 +153,15 @@ def main() -> int:
             )
         except RuntimeError as exc:
             logger.warning("indicator_worker_claim_retry | worker_id=%s error=%s", worker_id, exc)
-            time.sleep(max(0.05, idle_sleep))
+            time.sleep(max(0.05, current_idle_sleep))
+            current_idle_sleep = min(idle_sleep_max, current_idle_sleep * 2)
             continue
         if job is None:
-            time.sleep(max(0.05, idle_sleep))
+            time.sleep(max(0.05, current_idle_sleep))
+            current_idle_sleep = min(idle_sleep_max, current_idle_sleep * 2)
             continue
 
+        current_idle_sleep = idle_sleep
         started = time.monotonic()
         logger.info(
             "indicator_worker_job_started | worker_id=%s job_id=%s job_type=%s indicator_id=%s instrument_id=%s symbol=%s interval=%s timeframe_seconds=%s start=%s end=%s datasource=%s exchange=%s cursor_epoch=%s",

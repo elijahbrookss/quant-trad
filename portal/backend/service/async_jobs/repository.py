@@ -25,6 +25,7 @@ STATUS_FAILED = "failed"
 STATUS_RETRY = "retry"
 TERMINAL_STATUSES = {STATUS_SUCCEEDED, STATUS_FAILED}
 DEFAULT_RUNNING_TIMEOUT_SECONDS = float(_ASYNC_SETTINGS.running_timeout_seconds)
+_RECLAIM_LAST_MONOTONIC_BY_JOB_TYPES: Dict[tuple[str, ...], float] = {}
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,22 @@ def _partition_slot(partition_hash: int, partition_total: int) -> int:
 
 def _running_timeout_seconds() -> float:
     return max(0.0, float(_ASYNC_SETTINGS.running_timeout_seconds))
+
+
+def _reclaim_interval_seconds() -> float:
+    return max(0.0, float(_ASYNC_SETTINGS.reclaim_interval_seconds))
+
+
+def _should_reclaim_stale_running_jobs(job_types: Sequence[str], *, now_monotonic: float) -> bool:
+    interval = _reclaim_interval_seconds()
+    if interval <= 0:
+        return True
+    key = tuple(sorted(set(str(job_type) for job_type in job_types)))
+    last = _RECLAIM_LAST_MONOTONIC_BY_JOB_TYPES.get(key)
+    if last is not None and now_monotonic - last < interval:
+        return False
+    _RECLAIM_LAST_MONOTONIC_BY_JOB_TYPES[key] = now_monotonic
+    return True
 
 
 def _reclaim_stale_running_jobs(
@@ -201,7 +218,8 @@ def claim_next_job(
 
     now = _utcnow()
     with db.session() as session:
-        _reclaim_stale_running_jobs(session=session, job_types=wanted, now=now)
+        if _should_reclaim_stale_running_jobs(wanted, now_monotonic=time.monotonic()):
+            _reclaim_stale_running_jobs(session=session, job_types=wanted, now=now)
         stmt = (
             select(AsyncJobRecord)
             .where(AsyncJobRecord.status.in_([STATUS_QUEUED, STATUS_RETRY]))

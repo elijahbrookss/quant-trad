@@ -20,11 +20,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from collections.abc import Mapping
 from typing import Any, Dict
+
+from core.settings import get_settings
 
 from ..observability import BackendObserver
 from ..storage.storage import record_bot_runtime_events_batch
@@ -64,6 +67,54 @@ _PERSIST_BATCH_MAX_ROWS = 512
 _PERSIST_BATCH_MAX_DELAY_MS = 25
 _PERSIST_IDEMPOTENCE_MAX_EVENT_IDS = 50_000
 _TERMINAL_LIFECYCLE_STATES = frozenset({"completed", "stopped", "cancelled", "canceled", "error", "failed", "crashed", "startup_failed"})
+
+
+def _enqueue_terminal_report_materialization(
+    *,
+    run_id: str,
+    bot_id: str,
+    terminal_status: str,
+) -> None:
+    settings = get_settings().reports.materialization
+    if not settings.terminal_auto_enqueue_enabled:
+        logger.info(
+            "report_materialization_terminal_auto_enqueue_skipped | run_id=%s | bot_id=%s | reason=disabled",
+            run_id,
+            bot_id,
+        )
+        return
+
+    def _enqueue() -> None:
+        try:
+            from ..reports.materialization import enqueue_report_materialization_for_terminal_run
+
+            enqueue_report_materialization_for_terminal_run(
+                run_id,
+                terminal_status=terminal_status,
+                source_reason="botlens_terminal_lifecycle",
+            )
+        except Exception as exc:  # noqa: BLE001 - report materialization must not alter lifecycle truth.
+            logger.warning(
+                "report_materialization_terminal_enqueue_failed | run_id=%s | bot_id=%s | error=%s",
+                run_id,
+                bot_id,
+                exc,
+            )
+
+    delay_seconds = max(float(settings.terminal_auto_enqueue_delay_seconds or 0.0), 0.0)
+    if delay_seconds <= 0:
+        _enqueue()
+        return
+
+    timer = threading.Timer(delay_seconds, _enqueue)
+    timer.daemon = True
+    timer.start()
+    logger.info(
+        "report_materialization_terminal_auto_enqueue_scheduled | run_id=%s | bot_id=%s | delay_seconds=%s",
+        run_id,
+        bot_id,
+        delay_seconds,
+    )
 
 
 def _ingest_source_reason(*, kind: str, payload: Mapping[str, Any]) -> str:
@@ -844,21 +895,11 @@ class IntakeRouter:
                 bot_id=bot_id,
                 reason=str(payload.get("status") or payload.get("phase") or "terminal").strip().lower(),
             )
-            try:
-                from ..reports.materialization import enqueue_report_materialization_for_terminal_run
-
-                enqueue_report_materialization_for_terminal_run(
-                    run_id,
-                    terminal_status=str(payload.get("status") or payload.get("phase") or "terminal").strip().lower(),
-                    source_reason="botlens_terminal_lifecycle",
-                )
-            except Exception as exc:  # noqa: BLE001 - report materialization must not alter lifecycle truth.
-                logger.warning(
-                    "report_materialization_terminal_enqueue_failed | run_id=%s | bot_id=%s | error=%s",
-                    run_id,
-                    bot_id,
-                    exc,
-                )
+            _enqueue_terminal_report_materialization(
+                run_id=run_id,
+                bot_id=bot_id,
+                terminal_status=str(payload.get("status") or payload.get("phase") or "terminal").strip().lower(),
+            )
 
 
 __all__ = ["IntakeRouter"]
