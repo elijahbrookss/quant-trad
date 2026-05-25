@@ -189,6 +189,79 @@ def test_market_profile_runtime_indicator_waits_until_projected_strategy_bar_clo
     assert indicator.snapshot()["value_area_metrics"].ready is True
 
 
+def test_market_profile_runtime_indicator_exposes_source_continuity_diagnostics() -> None:
+    indicator = TypedMarketProfileIndicator(
+        indicator_id="mp-1",
+        version="v1",
+        params={"bin_size": 1.0, "price_precision": 2},
+        source_facts={
+            "symbol": "ES",
+            "profiles": [
+                {
+                    "start": 1735689600,
+                    "end": 1735696800,
+                    "VAH": 101.0,
+                    "VAL": 99.0,
+                    "POC": 100.0,
+                    "session_count": 1,
+                    "precision": 2,
+                    "formed_at": 1735696800,
+                    "known_at": 1735696800,
+                }
+            ],
+            "profile_params": {
+                "use_merged_value_areas": False,
+                "extend_value_area_to_chart_end": True,
+            },
+            "source_candle_continuity": {
+                "schema_version": "indicator_source_candle_continuity.v1",
+                "timeframe": "30m",
+                "status": "warning",
+                "severity": "warning",
+                "acceptability": "acceptable_with_caveat",
+                "continuity": {
+                    "final_status": "defect",
+                    "detected_gap_count": 1,
+                    "defect_gap_count": 1,
+                    "missing_candle_estimate": 2,
+                    "gaps": [
+                        {
+                            "previous_ts": "2025-11-28T21:30:00Z",
+                            "current_ts": "2025-11-28T23:00:00Z",
+                            "classification": "provider_missing_data",
+                        }
+                    ],
+                },
+            },
+        },
+    )
+
+    indicator.apply_bar(
+        Candle(
+            time=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=1.0,
+        ),
+        {},
+    )
+
+    diagnostics = indicator.runtime_diagnostics()
+    overlays = indicator.overlay_snapshot()
+
+    assert diagnostics["source_candle_continuity"]["acceptability"] == "acceptable_with_caveat"
+    transform_summary = overlays["value_area"].value["payload"]["summary"]["transform_summary"]
+    assert transform_summary["source_candle_continuity"]["continuity"]["gaps"] == [
+        {
+            "previous_ts": "2025-11-28T21:30:00Z",
+            "current_ts": "2025-11-28T23:00:00Z",
+            "classification": "provider_missing_data",
+        }
+    ]
+
+
 def test_market_profile_to_lightweight_profiles_include_known_at_for_preview_transform():
     index = pd.date_range("2026-01-01T00:00:00Z", periods=96, freq="30min")
     frame = pd.DataFrame(

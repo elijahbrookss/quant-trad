@@ -37,6 +37,32 @@ class IndicatorInstanceCreator:
         color_palette: Optional[str] = None,
         output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
+        payload = self.validate(
+            type_str,
+            name,
+            params,
+            dependencies,
+            color,
+            color_palette,
+            output_prefs,
+            indicator_id=str(uuid.uuid4()),
+        )
+        self._ctx.repository.upsert(payload)
+        refreshed = self._ctx.repository.get(payload["id"])
+        return build_meta_from_record(refreshed, ctx=self._ctx) if refreshed else payload
+
+    def validate(
+        self,
+        type_str: str,
+        name: Optional[str],
+        params: Dict[str, Any],
+        dependencies: Optional[Sequence[Dict[str, Any]]] = None,
+        color: Optional[str] = None,
+        color_palette: Optional[str] = None,
+        output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
+        *,
+        indicator_id: str = "",
+    ) -> Dict[str, Any]:
         definition = self._resolve_type(type_str)
         params_copy = dict(params or {})
         datasource, exchange = pull_datasource_exchange(params_copy, ctx=self._ctx)
@@ -54,12 +80,12 @@ class IndicatorInstanceCreator:
             output_prefs=output_prefs,
         )
         logger.info(
-            "event=indicator_create_output_prefs_resolved indicator_type=%s output_prefs=%s",
+            "event=indicator_config_output_prefs_resolved indicator_type=%s output_prefs=%s",
             type_str,
             resolved_output_prefs,
         )
         meta = {
-            "id": str(uuid.uuid4()),
+            "id": str(indicator_id or "").strip(),
             "type": type_str,
             "params": resolved_params,
             "dependencies": resolved_dependencies,
@@ -74,9 +100,7 @@ class IndicatorInstanceCreator:
         if exchange:
             meta["exchange"] = exchange
         payload = ensure_color(meta, ctx=self._ctx)
-        self._ctx.repository.upsert(payload)
-        refreshed = self._ctx.repository.get(payload["id"])
-        return build_meta_from_record(refreshed, ctx=self._ctx) if refreshed else payload
+        return build_meta_from_record(payload, ctx=self._ctx)
 
     @staticmethod
     def _resolve_type(type_str: str):

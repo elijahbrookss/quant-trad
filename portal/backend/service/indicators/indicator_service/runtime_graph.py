@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import inspect
 import logging
 from time import perf_counter
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from indicators.config import IndicatorExecutionContext
+from indicators.runtime.source_diagnostics import build_source_candle_continuity_payload
 from indicators.registry import get_indicator_manifest
 
 from ...market import candle_service
@@ -14,6 +16,61 @@ from .context import IndicatorServiceContext, _context
 from .utils import build_meta_from_record, load_indicator_record
 
 logger = logging.getLogger(__name__)
+
+
+def collect_runtime_indicator_diagnostics(indicators: Sequence[Any]) -> list[Dict[str, Any]]:
+    diagnostics: list[Dict[str, Any]] = []
+    for indicator in indicators:
+        payload: dict[str, Any] = {}
+        stored = getattr(indicator, "_qt_runtime_diagnostics", None)
+        if isinstance(stored, Mapping):
+            payload.update(dict(stored))
+        getter = getattr(indicator, "runtime_diagnostics", None)
+        if callable(getter):
+            exposed = getter()
+            if isinstance(exposed, Mapping):
+                payload.update(dict(exposed))
+        if not payload:
+            continue
+        runtime_spec = getattr(indicator, "runtime_spec", None)
+        diagnostics.append(
+            {
+                "indicator_id": str(
+                    getattr(runtime_spec, "instance_id", None)
+                    or getattr(indicator, "_indicator_id", "")
+                    or ""
+                ),
+                "indicator_type": str(
+                    getattr(runtime_spec, "manifest_type", None)
+                    or getattr(indicator, "NAME", "")
+                    or ""
+                ),
+                **dict(payload),
+            }
+        )
+    return diagnostics
+
+
+def _source_facts_builder_accepts_diagnostics(builder: Any) -> bool:
+    try:
+        signature = inspect.signature(builder)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == "source_diagnostics":
+            return True
+    return False
+
+
+def _attach_runtime_diagnostics(indicator: Any, diagnostics: Mapping[str, Any] | None) -> None:
+    if not isinstance(diagnostics, Mapping) or not diagnostics:
+        return
+    try:
+        setattr(indicator, "_qt_runtime_diagnostics", dict(diagnostics))
+    except Exception:
+        return
 
 
 def build_runtime_indicator_instance(
@@ -41,6 +98,7 @@ def build_runtime_indicator_instance(
     source_fact_duration_ms = 0.0
     source_rows = 0
     source_facts = None
+    source_diagnostics: dict[str, Any] = {}
     request_builder = getattr(indicator_cls, "build_runtime_data_request", None)
     if callable(request_builder):
         if execution_context is None:
@@ -73,14 +131,25 @@ def build_runtime_indicator_instance(
                 source_rows = int(len(source_frame.index))
             else:
                 source_rows = int(getattr(source_frame, "rows", 0) or 0)
+            source_diagnostics = {
+                "source_candle_continuity": build_source_candle_continuity_payload(
+                    source_frame,
+                    timeframe=str(getattr(data_request, "interval", "") or ""),
+                    requested_start=getattr(data_request, "start", None),
+                    requested_end=getattr(data_request, "end", None),
+                )
+            }
             source_facts_builder = getattr(indicator_cls, "build_runtime_source_facts", None)
             if callable(source_facts_builder):
                 source_facts_started_at = perf_counter()
-                source_facts = source_facts_builder(
-                    resolved_params=resolved_params,
-                    execution_context=execution_context,
-                    source_frame=source_frame,
-                )
+                source_facts_kwargs: dict[str, Any] = {
+                    "resolved_params": resolved_params,
+                    "execution_context": execution_context,
+                    "source_frame": source_frame,
+                }
+                if _source_facts_builder_accepts_diagnostics(source_facts_builder):
+                    source_facts_kwargs["source_diagnostics"] = source_diagnostics
+                source_facts = source_facts_builder(**source_facts_kwargs)
                 source_fact_duration_ms = (perf_counter() - source_facts_started_at) * 1000.0
     build_started_at = perf_counter()
     indicator = builder(
@@ -91,6 +160,7 @@ def build_runtime_indicator_instance(
         execution_context=execution_context,
         source_facts=source_facts,
     )
+    _attach_runtime_diagnostics(indicator, source_diagnostics)
     build_duration_ms = (perf_counter() - build_started_at) * 1000.0
     logger.info(
         "event=indicator_runtime_instance_built indicator_id=%s indicator_type=%s symbol=%s timeframe=%s duration_total_ms=%.3f duration_resolve_ms=%.3f duration_request_ms=%.3f duration_fetch_ms=%.3f duration_source_facts_ms=%.3f duration_build_ms=%.3f source_rows=%s has_source_facts=%s",
@@ -186,6 +256,7 @@ def build_runtime_indicator_graph(
 
 
 __all__ = [
+    "collect_runtime_indicator_diagnostics",
     "build_runtime_indicator_graph",
     "build_runtime_indicator_instance",
     "collect_runtime_indicator_metas",

@@ -33,6 +33,8 @@ from portal.backend.service.indicators.indicator_service import (
     list_types,
     set_instance_enabled,
     update_instance,
+    validate_instance_config,
+    validate_runtime_for_instance,
 )
 from portal.backend.service.indicators.indicator_service.runtime_contract import (
     assert_engine_signal_runtime_path,
@@ -254,6 +256,18 @@ class SignalRequest(BaseModel):
     config: Dict[str, Any] = Field(default_factory=dict)
 
 
+class RuntimeValidationRequest(BaseModel):
+    start: str
+    end: str
+    interval: str
+    symbol: Optional[str] = None
+    datasource: Optional[str] = None
+    exchange: Optional[str] = None
+    instrument_id: Optional[str] = None
+    require_ready_by_end: bool = False
+    min_ready_bars: Optional[int] = Field(default=None, ge=0)
+
+
 class IndicatorDuplicateRequest(BaseModel):
     name: Optional[str] = None
 
@@ -288,6 +302,14 @@ async def get_indicator_type(type_id: str):
     except KeyError as e:
         raise HTTPException(404, str(e))
 
+
+@router.get("/types/{type_id}")
+async def get_indicator_type_alias(type_id: str):
+    try:
+        return get_type_details(type_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
 # ===== Instances =====
 @router.get("/", response_model=List[IndicatorInstanceOut])
 async def list_instances():
@@ -310,6 +332,26 @@ async def create(body: IndicatorInstanceIn):
         raise HTTPException(400, str(e))
     except RuntimeError as e:
         raise HTTPException(500, str(e))
+
+
+@router.post("/validate-config", response_model=IndicatorReadOut)
+async def validate_config(body: IndicatorInstanceIn):
+    try:
+        meta = validate_instance_config(
+            body.type,
+            body.name,
+            dict(body.params),
+            dependencies=list(body.dependencies or []),
+            color=body.color,
+            color_palette=body.color_palette,
+            output_prefs=dict(body.output_prefs or {}),
+        )
+        return _indicator_read(meta)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+
 
 @router.put("/{inst_id}", response_model=IndicatorReadOut)
 async def update(inst_id: str, body: IndicatorInstanceIn):
@@ -373,6 +415,105 @@ async def get_indicator_strategies(inst_id: str):
     return list_indicator_strategies(inst_id)
 
 
+@router.post("/{inst_id}/runtime-validation")
+async def validate_runtime(inst_id: str, req: RuntimeValidationRequest):
+    t0 = perf_counter()
+    try:
+        logger.info(
+            "event=indicator_runtime_validation_request_started indicator_id=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s require_ready_by_end=%s min_ready_bars=%s",
+            inst_id,
+            req.start,
+            req.end,
+            req.interval,
+            req.symbol,
+            req.datasource,
+            req.exchange,
+            req.instrument_id,
+            req.require_ready_by_end,
+            req.min_ready_bars,
+        )
+        payload = validate_runtime_for_instance(
+            inst_id,
+            req.start,
+            req.end,
+            req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+            require_ready_by_end=req.require_ready_by_end,
+            min_ready_bars=req.min_ready_bars,
+        )
+        logger.info(
+            "event=indicator_runtime_validation_request_finished indicator_id=%s status_code=200 duration_ms=%.3f status=%s bars=%s",
+            inst_id,
+            (perf_counter() - t0) * 1000.0,
+            payload.get("status"),
+            payload.get("bars_evaluated"),
+        )
+        return payload
+    except KeyError:
+        _raise_indicator_http_error(
+            event="indicator_runtime_validation_request_failed",
+            status_code=404,
+            detail="Indicator not found",
+            inst_id=inst_id,
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+            duration_ms=(perf_counter() - t0) * 1000.0,
+        )
+    except LookupError as e:
+        _raise_indicator_http_error(
+            event="indicator_runtime_validation_request_failed",
+            status_code=404,
+            detail=str(e),
+            inst_id=inst_id,
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+            duration_ms=(perf_counter() - t0) * 1000.0,
+        )
+    except ValueError as e:
+        _raise_indicator_http_error(
+            event="indicator_runtime_validation_request_failed",
+            status_code=400,
+            detail=str(e),
+            inst_id=inst_id,
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+            duration_ms=(perf_counter() - t0) * 1000.0,
+        )
+    except RuntimeError as e:
+        _raise_indicator_http_error(
+            event="indicator_runtime_validation_request_failed",
+            status_code=500,
+            detail=str(e),
+            inst_id=inst_id,
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
+            instrument_id=req.instrument_id,
+            duration_ms=(perf_counter() - t0) * 1000.0,
+        )
+
+
 @router.delete("/{inst_id}", status_code=204, response_class=Response)
 async def delete(inst_id: str) -> Response:
     try:
@@ -417,14 +558,6 @@ async def bulk_delete(body: IndicatorBulkDeleteRequest):
         raise HTTPException(404, "Indicator not found")
     except RuntimeError as e:
         raise HTTPException(409, str(e))
-
-
-@router.get("/types/{type_id}")
-async def get_indicator_type_alias(type_id: str):
-    try:
-        return get_type_details(type_id)
-    except KeyError as e:
-        raise HTTPException(404, str(e))
 
 # ===== Overlays by UUID =====
 @router.post("/{inst_id}/overlays")

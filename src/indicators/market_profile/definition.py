@@ -87,6 +87,7 @@ class MarketProfileIndicator:
         resolved_params: Mapping[str, Any],
         execution_context: IndicatorExecutionContext,
         source_frame: Any,
+        source_diagnostics: Any = None,
     ) -> Any:
         from .compute.engine import MarketProfileIndicator as ComputeMarketProfileIndicator
 
@@ -108,6 +109,11 @@ class MarketProfileIndicator:
             params=dict(resolved_params),
             symbol=execution_context.symbol,
             chart_timeframe=execution_context.interval,
+            source_candle_continuity=(
+                source_diagnostics.get("source_candle_continuity")
+                if isinstance(source_diagnostics, Mapping)
+                else None
+            ),
         )
 
 

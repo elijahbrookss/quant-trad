@@ -14,6 +14,7 @@ import pandas as pd
 from core.logger import logger
 from data_providers.utils.ohlcv import interval_to_timedelta
 from indicators.base import ComputeIndicator
+from indicators.runtime.source_diagnostics import build_source_candle_continuity_payload
 
 from .models import Profile, ValueArea
 from ..manifest import (
@@ -88,7 +89,10 @@ class MarketProfileIndicator(ComputeIndicator):
             bot_id: Optional bot identifier for logging context
             strategy_id: Optional strategy identifier for logging context
         """
+        source_attrs = dict(getattr(df, "attrs", {}) or {}) if df is not None else {}
         super().__init__(df)
+        if source_attrs:
+            self.df.attrs.update(source_attrs)
 
         # Determine bin size
         self.bin_size, self._bin_size_locked = select_bin_size(df, bin_size)
@@ -332,6 +336,7 @@ class MarketProfileIndicator(ComputeIndicator):
         params: Optional[Mapping[str, Any]] = None,
         symbol: Optional[str] = None,
         chart_timeframe: Optional[str] = None,
+        source_candle_continuity: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Return immutable runtime source facts for walk-forward execution."""
         profile_params = dict(params or {})
@@ -361,6 +366,14 @@ class MarketProfileIndicator(ComputeIndicator):
             "profile_chart_timeframe": resolved_chart_timeframe,
             "profile_source_timeframe": "30m",
             "profile_boundary_semantics": "strategy_timeframe_projection",
+            "source_candle_continuity": (
+                dict(source_candle_continuity)
+                if isinstance(source_candle_continuity, Mapping)
+                else build_source_candle_continuity_payload(
+                    self.df,
+                    timeframe="30m",
+                )
+            ),
         }
 
     def build_runtime_signal_payload(

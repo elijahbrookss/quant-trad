@@ -77,6 +77,13 @@ class TypedMarketProfileIndicator(Indicator):
         self._profile_params = dict(source_facts.get("profile_params") or {})
         self._profiles_payload = list(source_facts.get("profiles") or [])
         self._symbol = str(source_facts.get("symbol") or "")
+        source_continuity = source_facts.get("source_candle_continuity")
+        self._source_candle_continuity = (
+            dict(source_continuity)
+            if isinstance(source_continuity, Mapping)
+            else {}
+        )
+        self._source_continuity_warning_logged = False
         self._extend_to_end = bool(self._profile_params.get("extend_value_area_to_chart_end"))
         self._profile_resolver = IncrementalRuntimeProfileResolver(
             profiles_payload=self._profiles_payload,
@@ -142,6 +149,11 @@ class TypedMarketProfileIndicator(Indicator):
             current_epoch=current_epoch,
         )
         self._current_transform_summary = dict(transform_summary or {})
+        if self._source_candle_continuity:
+            self._current_transform_summary["source_candle_continuity"] = (
+                self._source_continuity_context()
+            )
+            self._log_source_continuity_warning_once()
         if not effective_profiles:
             self._reset_outputs(bar.time)
             return
@@ -212,6 +224,53 @@ class TypedMarketProfileIndicator(Indicator):
                     bar_state.val,
                     bar_state.poc,
                 )
+
+    def _source_continuity_context(self) -> dict[str, Any]:
+        payload = dict(self._source_candle_continuity or {})
+        continuity = dict(payload.get("continuity") or {})
+        gaps = continuity.get("gaps")
+        if isinstance(gaps, list):
+            continuity["gaps"] = [dict(gap) for gap in gaps[:3] if isinstance(gap, Mapping)]
+        payload["continuity"] = continuity
+        return payload
+
+    def _source_continuity_needs_warning(self) -> bool:
+        if not self._source_candle_continuity:
+            return False
+        status = str(self._source_candle_continuity.get("status") or "").lower()
+        severity = str(self._source_candle_continuity.get("severity") or "").lower()
+        return status not in {"", "ok"} or severity not in {"", "ok", "info"}
+
+    def _log_source_continuity_warning_once(self) -> None:
+        if self._source_continuity_warning_logged:
+            return
+        if not self._source_continuity_needs_warning():
+            return
+        self._source_continuity_warning_logged = True
+        continuity = dict(self._source_candle_continuity.get("continuity") or {})
+        gaps = continuity.get("gaps")
+        first_gap = gaps[0] if isinstance(gaps, list) and gaps else None
+        log.warning(
+            "event=market_profile_source_continuity_caveat indicator_id=%s symbol=%s status=%s severity=%s acceptability=%s timeframe=%s final_status=%s detected_gap_count=%s defect_gap_count=%s missing_candle_estimate=%s first_gap=%s",
+            self._indicator_id,
+            self._symbol or None,
+            self._source_candle_continuity.get("status"),
+            self._source_candle_continuity.get("severity"),
+            self._source_candle_continuity.get("acceptability"),
+            self._source_candle_continuity.get("timeframe"),
+            continuity.get("final_status"),
+            continuity.get("detected_gap_count"),
+            continuity.get("defect_gap_count"),
+            continuity.get("missing_candle_estimate"),
+            first_gap,
+        )
+
+    def runtime_diagnostics(self) -> Mapping[str, Any]:
+        if not self._source_candle_continuity:
+            return {}
+        return {
+            "source_candle_continuity": self._source_continuity_context(),
+        }
 
     def _build_overlay(
         self,

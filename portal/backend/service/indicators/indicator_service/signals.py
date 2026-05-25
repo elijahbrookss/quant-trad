@@ -21,7 +21,10 @@ from overlays.schema import build_overlay
 
 from ...market import candle_service, instrument_service
 from .context import IndicatorServiceContext, _context
-from .runtime_graph import build_runtime_indicator_graph
+from .runtime_graph import (
+    build_runtime_indicator_graph,
+    collect_runtime_indicator_diagnostics,
+)
 from .runtime_contract import SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT
 from .utils import ensure_color
 
@@ -213,6 +216,7 @@ class IndicatorSignalExecutor:
             ctx=self._ctx,
             preloaded_metas={inst_id: meta},
         )
+        diagnostics = collect_runtime_indicator_diagnostics(indicators)
 
         df = self._load_candles(
             execution_context=execution_context,
@@ -287,6 +291,9 @@ class IndicatorSignalExecutor:
         }
         payload["ui"] = {
             "overlays": signal_overlays,
+        }
+        payload["diagnostics"] = {
+            "indicators": diagnostics,
         }
         logger.info(
             "event=indicator_signal_execute_complete indicator_id=%s indicator_type=%s symbol=%s timeframe=%s source_timeframe=%s bars=%s signals=%s signal_overlays=%s duration_total_ms=%.3f",
