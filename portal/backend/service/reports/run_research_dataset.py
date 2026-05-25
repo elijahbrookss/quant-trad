@@ -85,6 +85,7 @@ class RunResearchMetadata:
     completed_at: Optional[str]
     symbols: List[str]
     instrument_ids: List[str]
+    instrument_semantics: List[Dict[str, Any]]
     timeframe: Optional[str]
     timeframes: List[str]
     datasource: Optional[str]
@@ -568,6 +569,67 @@ def _metadata_instrument_ids(run: Mapping[str, Any]) -> List[str]:
                 ]
             )
     return _unique_text(values)
+
+
+def _metadata_instrument_semantics(run: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    config = _mapping(run.get("config_snapshot"))
+    readiness = _mapping(config.get("runtime_readiness"))
+    profiles = readiness.get("profiles") if isinstance(readiness.get("profiles"), list) else []
+    rows: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for profile in profiles:
+        if not isinstance(profile, Mapping):
+            continue
+        symbol = _clean_text(profile.get("symbol"))
+        instrument_id = _clean_text(profile.get("instrument_id"))
+        key = (instrument_id or "", symbol or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        instrument_type = _clean_text(profile.get("instrument_type") or profile.get("source_instrument_type"))
+        rows.append(
+            {
+                "instrument_id": instrument_id,
+                "symbol": symbol,
+                "instrument_type": instrument_type,
+                "source_instrument_type": _clean_text(profile.get("source_instrument_type")) or instrument_type,
+                "execution_semantics": _clean_text(profile.get("execution_semantics")),
+                "research_market_role": _clean_text(profile.get("research_market_role")),
+                "accounting_mode": _clean_text(profile.get("accounting_mode")),
+                "margin_calc_type": _clean_text(profile.get("margin_calc_type")),
+            }
+        )
+    if rows:
+        return rows
+
+    for strategy in config.get("strategies") or []:
+        if not isinstance(strategy, Mapping):
+            continue
+        for instrument in strategy.get("instruments") or []:
+            if not isinstance(instrument, Mapping):
+                continue
+            snapshot = _mapping(instrument.get("instrument_snapshot")) or instrument
+            symbol = _clean_text(snapshot.get("symbol"))
+            instrument_id = _clean_text(instrument.get("instrument_id") or snapshot.get("id"))
+            key = (instrument_id or "", symbol or "")
+            if key in seen:
+                continue
+            seen.add(key)
+            instrument_type = _clean_text(snapshot.get("instrument_type"))
+            rows.append(
+                {
+                    "instrument_id": instrument_id,
+                    "symbol": symbol,
+                    "instrument_type": instrument_type,
+                    "source_instrument_type": instrument_type,
+                    "execution_semantics": None,
+                    "research_market_role": None,
+                    "accounting_mode": None,
+                    "margin_calc_type": None,
+                }
+            )
+    return rows
 
 
 def _metadata_timeframes(run: Mapping[str, Any]) -> List[str]:
@@ -4357,6 +4419,7 @@ def _report_semantic_fingerprint(
             "simulated_window": metadata.simulated_window,
             "symbols": metadata.symbols,
             "instrument_ids": metadata.instrument_ids,
+            "instrument_semantics": metadata.instrument_semantics,
             "timeframes": metadata.timeframes,
         },
         "summary": {
@@ -4500,6 +4563,7 @@ def _report_operational_fingerprint(
             "simulated_window": metadata.simulated_window,
             "symbols": metadata.symbols,
             "instrument_ids": metadata.instrument_ids,
+            "instrument_semantics": metadata.instrument_semantics,
             "timeframes": metadata.timeframes,
         },
         "summary": {
@@ -4809,6 +4873,7 @@ def _metadata(run: Mapping[str, Any]) -> RunResearchMetadata:
         completed_at=run.get("completed_at") or run.get("ended_at"),
         symbols=_metadata_symbols(run),
         instrument_ids=_metadata_instrument_ids(run),
+        instrument_semantics=_metadata_instrument_semantics(run),
         timeframe=str(run.get("timeframe") or config.get("timeframe") or "").strip() or None,
         timeframes=timeframes,
         datasource=datasource,
@@ -4869,6 +4934,7 @@ def _readiness(
 
 def _finalize_readiness(
     *,
+    metadata: RunResearchMetadata,
     run: Mapping[str, Any],
     events: Sequence[Mapping[str, Any]],
     observability_events: Sequence[Mapping[str, Any]],
@@ -4947,6 +5013,21 @@ def _finalize_readiness(
         if str(caveat).endswith("_unavailable"):
             unavailable_sections.append("indicator_context" if "indicator" in str(caveat) else "market_state")
         caveats.append(str(caveat))
+    semantic_rows = [row for row in metadata.instrument_semantics if isinstance(row, Mapping)]
+    source_types = {
+        str(row.get("source_instrument_type") or row.get("instrument_type") or "").strip()
+        for row in semantic_rows
+        if str(row.get("source_instrument_type") or row.get("instrument_type") or "").strip()
+    }
+    execution_semantics = {
+        str(row.get("execution_semantics") or "").strip()
+        for row in semantic_rows
+        if str(row.get("execution_semantics") or "").strip()
+    }
+    if len(source_types) > 1:
+        caveats.append("mixed_instrument_types")
+    if "proxy_derivative" in execution_semantics:
+        caveats.append("proxy_derivative_market_data_present")
     for caveat in candle_catalog.get("caveats") or []:
         degraded_sections.append("candle_catalog")
         caveats.append(str(caveat))
@@ -5065,6 +5146,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         summary=summary,
     )
     readiness = _finalize_readiness(
+        metadata=metadata,
         run=run,
         events=events,
         observability_events=observability_events,

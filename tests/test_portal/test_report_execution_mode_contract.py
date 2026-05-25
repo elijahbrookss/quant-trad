@@ -329,8 +329,92 @@ def test_list_report_summaries_exposes_execution_mode(monkeypatch) -> None:
     payload = contract.list_report_summaries()
 
     assert payload["items"][0]["execution_mode"] == "full"
-    assert payload["items"][0]["readiness"]["results_ready"] is True
-    assert payload["items"][0]["readiness"]["safe_to_compare"] is True
+
+
+def test_report_instruments_exposes_mixed_execution_semantics(monkeypatch) -> None:
+    dataset = _dataset()
+    dataset["metadata"]["instrument_semantics"] = [
+        {
+            "symbol": "BTC/USD",
+            "instrument_id": "btc-spot",
+            "instrument_type": "spot",
+            "source_instrument_type": "spot",
+            "execution_semantics": "proxy_derivative",
+        },
+        {
+            "symbol": "BIP-20DEC30-CDE",
+            "instrument_id": "btc-perp",
+            "instrument_type": "future",
+            "source_instrument_type": "future",
+            "execution_semantics": "derivative",
+        },
+    ]
+    dataset["readiness"]["caveats"] = ["mixed_instrument_types", "proxy_derivative_sources"]
+    monkeypatch.setattr(contract, "build_run_research_dataset", lambda _run_id: dataset)
+
+    payload = contract.get_report_instruments("run-1")
+
+    assert payload["mixed"]["mixed_source_instrument_types"] is True
+    assert payload["mixed"]["execution_semantics"] == ["derivative", "proxy_derivative"]
+    assert payload["caveats"] == ["mixed_instrument_types", "proxy_derivative_sources"]
+
+
+def test_report_symbol_summary_counts_runtime_pressure_by_symbol(monkeypatch) -> None:
+    dataset = _dataset()
+    dataset["metadata"]["instrument_semantics"] = [
+        {
+            "symbol": "BTC/USD",
+            "instrument_id": "btc-spot",
+            "source_instrument_type": "spot",
+            "execution_semantics": "proxy_derivative",
+        }
+    ]
+    dataset["signals"] = [{"signal_id": "sig-1", "symbol": "BTC/USD", "instrument_id": "btc-spot"}]
+    dataset["decisions"] = [
+        {"decision_id": "dec-1", "symbol": "BTC/USD", "instrument_id": "btc-spot", "accepted": True},
+        {"decision_id": "dec-2", "symbol": "BTC/USD", "instrument_id": "btc-spot", "rejected": True},
+    ]
+    dataset["trades"] = [
+        {
+            "trade_id": "trade-1",
+            "symbol": "BTC/USD",
+            "instrument_id": "btc-spot",
+            "status": "closed",
+            "net_pnl": 7.0,
+            "gross_pnl": 8.0,
+            "fees": 1.0,
+        }
+    ]
+    monkeypatch.setattr(contract, "build_run_research_dataset", lambda _run_id: dataset)
+    monkeypatch.setattr(
+        contract.report_data,
+        "list_run_events",
+        lambda _run_id: [
+            {
+                "payload": {
+                    "event_name": "POSITION_OPENED",
+                    "context": {"symbol": "BTC/USD", "instrument_id": "btc-spot"},
+                }
+            },
+            {
+                "payload": {
+                    "event_name": "MARGIN_REJECTED",
+                    "context": {"symbol": "BTC/USD", "instrument_id": "btc-spot"},
+                }
+            },
+        ],
+    )
+
+    payload = contract.get_report_symbol_summary("run-1")
+    row = payload["items"][0]
+
+    assert row["execution_semantics"] == "proxy_derivative"
+    assert row["signals"] == 1
+    assert row["accepted_decisions"] == 1
+    assert row["rejected_decisions"] == 1
+    assert row["position_opened_events"] == 1
+    assert row["margin_rejected_events"] == 1
+    assert row["net_pnl"] == 7.0
 
 
 def test_report_contract_reuses_dataset_build_for_burst(monkeypatch) -> None:

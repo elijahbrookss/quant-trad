@@ -297,6 +297,186 @@ def get_run_report_summary(run_id: str) -> Dict[str, Any]:
     }
 
 
+def get_report_instruments(run_id: str) -> Dict[str, Any]:
+    """Return run-scoped instrument semantics without loading full report rows."""
+
+    dataset = _dataset(run_id)
+    metadata = _mapping(dataset.get("metadata"))
+    readiness = _mapping(dataset.get("readiness"))
+    rows = [dict(row) for row in metadata.get("instrument_semantics") or [] if isinstance(row, Mapping)]
+    source_types = sorted(
+        {
+            str(row.get("source_instrument_type") or row.get("instrument_type") or "").strip()
+            for row in rows
+            if str(row.get("source_instrument_type") or row.get("instrument_type") or "").strip()
+        }
+    )
+    execution_semantics = sorted(
+        {
+            str(row.get("execution_semantics") or "").strip()
+            for row in rows
+            if str(row.get("execution_semantics") or "").strip()
+        }
+    )
+    return {
+        "schema_version": "report_instruments.v1",
+        "run_id": run_id,
+        "items": rows,
+        "mixed": {
+            "source_instrument_types": source_types,
+            "execution_semantics": execution_semantics,
+            "mixed_source_instrument_types": len(source_types) > 1,
+            "mixed_execution_semantics": len(execution_semantics) > 1,
+        },
+        "caveats": list(readiness.get("caveats") or []),
+    }
+
+
+def _row_payload(row: Mapping[str, Any]) -> Dict[str, Any]:
+    payload = row.get("payload")
+    return dict(payload) if isinstance(payload, Mapping) else {}
+
+
+def _event_context(row: Mapping[str, Any]) -> Dict[str, Any]:
+    payload = _row_payload(row)
+    context = payload.get("context")
+    return dict(context) if isinstance(context, Mapping) else {}
+
+
+def _event_name_key(row: Mapping[str, Any]) -> str:
+    payload = _row_payload(row)
+    return str(payload.get("event_name") or row.get("event_name") or "").strip().lower()
+
+
+def _identity_from_row(row: Mapping[str, Any]) -> Tuple[str, str]:
+    context = _mapping(row.get("context")) or _event_context(row) or _mapping(row.get("decision_context"))
+    symbol = str(row.get("symbol") or context.get("symbol") or "").strip()
+    instrument_id = str(row.get("instrument_id") or context.get("instrument_id") or "").strip()
+    if not symbol and not instrument_id:
+        symbol = "UNKNOWN"
+    return symbol, instrument_id
+
+
+def _summary_bucket(
+    buckets: Dict[Tuple[str, str], Dict[str, Any]],
+    *,
+    symbol: str,
+    instrument_id: str,
+    semantics_by_identity: Mapping[Tuple[str, str], Dict[str, Any]],
+) -> Dict[str, Any]:
+    key = (symbol, instrument_id)
+    if key not in buckets:
+        semantics = semantics_by_identity.get(key) or semantics_by_identity.get((symbol, "")) or semantics_by_identity.get(("", instrument_id)) or {}
+        buckets[key] = {
+            "symbol": symbol or None,
+            "instrument_id": instrument_id or None,
+            "source_instrument_type": semantics.get("source_instrument_type") or semantics.get("instrument_type"),
+            "execution_semantics": semantics.get("execution_semantics"),
+            "signals": 0,
+            "decisions": 0,
+            "accepted_decisions": 0,
+            "rejected_decisions": 0,
+            "trades": 0,
+            "closed_trades": 0,
+            "position_opened_events": 0,
+            "margin_rejected_events": 0,
+            "net_pnl": 0.0,
+            "gross_pnl": 0.0,
+            "fees": 0.0,
+        }
+    return buckets[key]
+
+
+def get_report_symbol_summary(run_id: str) -> Dict[str, Any]:
+    """Return compact per-symbol execution trace and performance counts."""
+
+    dataset = _dataset(run_id)
+    metadata = _mapping(dataset.get("metadata"))
+    instrument_rows = [
+        dict(row)
+        for row in metadata.get("instrument_semantics") or []
+        if isinstance(row, Mapping)
+    ]
+    semantics_by_identity: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for row in instrument_rows:
+        symbol = str(row.get("symbol") or "").strip()
+        instrument_id = str(row.get("instrument_id") or "").strip()
+        if symbol or instrument_id:
+            semantics_by_identity[(symbol, instrument_id)] = row
+            if symbol:
+                semantics_by_identity[(symbol, "")] = row
+            if instrument_id:
+                semantics_by_identity[("", instrument_id)] = row
+
+    buckets: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for row in dataset.get("signals") or []:
+        if not isinstance(row, Mapping):
+            continue
+        symbol, instrument_id = _identity_from_row(row)
+        _summary_bucket(buckets, symbol=symbol, instrument_id=instrument_id, semantics_by_identity=semantics_by_identity)["signals"] += 1
+
+    for row in dataset.get("decisions") or []:
+        if not isinstance(row, Mapping):
+            continue
+        symbol, instrument_id = _identity_from_row(row)
+        bucket = _summary_bucket(buckets, symbol=symbol, instrument_id=instrument_id, semantics_by_identity=semantics_by_identity)
+        bucket["decisions"] += 1
+        if bool(row.get("accepted")):
+            bucket["accepted_decisions"] += 1
+        if bool(row.get("rejected")):
+            bucket["rejected_decisions"] += 1
+
+    for row in dataset.get("trades") or []:
+        if not isinstance(row, Mapping):
+            continue
+        symbol, instrument_id = _identity_from_row(row)
+        bucket = _summary_bucket(buckets, symbol=symbol, instrument_id=instrument_id, semantics_by_identity=semantics_by_identity)
+        bucket["trades"] += 1
+        if row.get("exit_time") or str(row.get("status") or "").strip().lower() in {"closed", "completed", "complete"}:
+            bucket["closed_trades"] += 1
+        bucket["net_pnl"] += float(_safe_float(row.get("net_pnl")) or 0.0)
+        bucket["gross_pnl"] += float(_safe_float(row.get("gross_pnl")) or _safe_float(row.get("pnl")) or 0.0)
+        bucket["fees"] += float(_safe_float(row.get("fees")) or _safe_float(row.get("fee")) or 0.0)
+
+    for row in report_data.list_run_events(run_id):
+        if not isinstance(row, Mapping):
+            continue
+        name = _event_name_key(row)
+        if name not in {"position_opened", "margin_rejected"}:
+            continue
+        symbol, instrument_id = _identity_from_row(row)
+        bucket = _summary_bucket(buckets, symbol=symbol, instrument_id=instrument_id, semantics_by_identity=semantics_by_identity)
+        if name == "position_opened":
+            bucket["position_opened_events"] += 1
+        elif name == "margin_rejected":
+            bucket["margin_rejected_events"] += 1
+
+    items = sorted(
+        buckets.values(),
+        key=lambda row: (str(row.get("symbol") or ""), str(row.get("instrument_id") or "")),
+    )
+    totals = {
+        "signals": sum(int(row.get("signals") or 0) for row in items),
+        "decisions": sum(int(row.get("decisions") or 0) for row in items),
+        "accepted_decisions": sum(int(row.get("accepted_decisions") or 0) for row in items),
+        "rejected_decisions": sum(int(row.get("rejected_decisions") or 0) for row in items),
+        "trades": sum(int(row.get("trades") or 0) for row in items),
+        "closed_trades": sum(int(row.get("closed_trades") or 0) for row in items),
+        "position_opened_events": sum(int(row.get("position_opened_events") or 0) for row in items),
+        "margin_rejected_events": sum(int(row.get("margin_rejected_events") or 0) for row in items),
+        "net_pnl": sum(float(row.get("net_pnl") or 0.0) for row in items),
+        "gross_pnl": sum(float(row.get("gross_pnl") or 0.0) for row in items),
+        "fees": sum(float(row.get("fees") or 0.0) for row in items),
+    }
+    return {
+        "schema_version": "report_symbol_summary.v1",
+        "run_id": run_id,
+        "items": items,
+        "totals": totals,
+        "instrument_semantics": instrument_rows,
+    }
+
+
 def _metric_subset(summary: Mapping[str, Any], portfolio: Mapping[str, Any]) -> Dict[str, Any]:
     keys = (
         "net_pnl",

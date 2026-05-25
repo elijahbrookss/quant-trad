@@ -19,12 +19,14 @@ from ..service.reports.contract import (
     get_decision_candle_window as _get_decision_candle_window,
     get_metric_explanation as _get_metric_explanation,
     get_operational_health as _get_operational_health,
+    get_report_instruments as _get_report_instruments,
     get_report_diagnostics as _get_report_diagnostics,
     get_report_metrics as _get_report_metrics,
     get_report_readiness as _get_report_readiness,
     get_report_sections as _get_report_sections,
     get_run_report_summary as _get_run_report_summary,
     get_run_research_summary as _get_run_research_summary,
+    get_report_symbol_summary as _get_report_symbol_summary,
     get_run_research_dataset as _get_run_research_dataset,
     get_signal_dataset as _get_signal_dataset,
     get_signal_candle_window as _get_signal_candle_window,
@@ -422,6 +424,42 @@ async def get_report_sections(run_id: str) -> ReportSectionsResponse:
     except Exception as exc:  # noqa: BLE001 - convert to API error
         logger.error(with_log_context("report_sections_failed", context), exc_info=exc)
         raise HTTPException(500, "Report sections build failed") from exc
+
+
+@router.get("/{run_id}/instruments")
+async def get_report_instruments(run_id: str) -> Dict[str, Any]:
+    """Return run-scoped instrument source and execution semantics."""
+
+    context = build_log_context(run_id=run_id)
+    logger.info(with_log_context("report_instruments_request", context))
+    try:
+        payload = await _run_report_task(_get_report_instruments, run_id)
+        logger.info(with_log_context("report_instruments_success", context | {"rows": len(payload.get("items") or [])}))
+        return payload
+    except KeyError as exc:
+        logger.warning(with_log_context("report_instruments_missing", context))
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - convert to API error
+        logger.error(with_log_context("report_instruments_failed", context), exc_info=exc)
+        raise HTTPException(500, "Report instruments build failed") from exc
+
+
+@router.get("/{run_id}/symbol-summary")
+async def get_report_symbol_summary(run_id: str) -> Dict[str, Any]:
+    """Return per-symbol signal/decision/trade/rejection counts for CLI research."""
+
+    context = build_log_context(run_id=run_id)
+    logger.info(with_log_context("report_symbol_summary_request", context))
+    try:
+        payload = await _run_report_task(_get_report_symbol_summary, run_id)
+        logger.info(with_log_context("report_symbol_summary_success", context | {"rows": len(payload.get("items") or [])}))
+        return payload
+    except KeyError as exc:
+        logger.warning(with_log_context("report_symbol_summary_missing", context))
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - convert to API error
+        logger.error(with_log_context("report_symbol_summary_failed", context), exc_info=exc)
+        raise HTTPException(500, "Report symbol summary build failed") from exc
 
 
 @router.get("/{run_id}/trades", response_model=DatasetPageResponse)
