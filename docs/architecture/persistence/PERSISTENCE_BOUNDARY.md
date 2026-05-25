@@ -166,6 +166,13 @@ ledger stores `run_seq` both as a typed hot column and in payload context; the
 allocator table is the hot-path source of truth, not a JSON `MAX(run_seq)` scan
 over `portal_bot_run_events`.
 
+Lifecycle checkpoint reads use the canonical runtime-event `run_seq` as their
+visible lifecycle `seq`. The legacy `portal_bot_run_lifecycle_events` table is a
+compatibility mirror: it reuses the canonical lifecycle event id and canonical
+`run_seq` when available. If a legacy-only write must allocate a fallback `seq`,
+that allocation happens under the same per-run transaction lock as the insert;
+it must not precompute `MAX(seq) + 1` in a separate transaction.
+
 Runtime fact transport and durable persistence must not compete to write the
 same event id. Source-owned canonical facts, including wallet ledger facts, are
 projection inputs when they arrive through the live BotLens transport; they are
