@@ -14,6 +14,49 @@ All derived outputs should follow one timeline:
 8. publish canonical decision artifacts from the same bar result
 9. build downstream read models and downstream rejection artifacts from the same bar result
 
+## Instrument Source vs Execution Semantics
+
+`instrument_type` is canonical source metadata from the instrument record.
+Runtime must not rewrite a spot source into a derivative instrument to make a
+backtest convenient.
+
+Bot runtime may bind a source instrument to an explicit execution semantic:
+
+- `spot`: source data and execution/accounting are spot-like.
+- `derivative`: source data and execution/accounting are derivative-like.
+- `proxy_derivative`: source data is spot, while the backtest runtime applies
+  derivative-style execution semantics for research.
+
+Proxy-derivative runs must preserve source metadata in startup readiness,
+runtime/report metadata, and comparison inputs so mixed source types remain
+visible. A spot source used as `proxy_derivative` may take derivative-style long
+and short decisions, but reports must still identify the source instrument as
+spot market data.
+
+Proxy-derivative admission requires explicit derivative execution evidence:
+`proxy_derivative_margin_rates` and `proxy_derivative_instrument_fields` on the
+source instrument, usually attached from a validated derivative reference by the
+instrument service. Runtime must fail loud when those fields are missing. It
+must not silently treat a spot source as full-notional cash spot, invent default
+margin rates, or apply spot quantity constraints to a derivative proxy run.
+
+The compiled `SeriesExecutionProfile` is the runtime authority for execution
+fields. `LadderRiskEngine`, wallet reservation diagnostics, execution adapters,
+and series metadata must consume tick size, contract size, tick value, fees,
+amount constraints, quote currency, collateral mode, and margin calculator from
+that profile. ATM templates are strategy/risk templates only and must not patch
+or override missing execution metadata.
+
+When a strategy contains instruments from more than one provider or venue,
+runtime data routing must follow each strategy-instrument link's canonical
+instrument record. Strategy-level datasource/exchange fields are defaults, not
+authority over linked instruments.
+
+Backtest replay admission must reject candle frames carrying
+`ingestion_failure` gap evidence. Provider sparse-data evidence may flow into
+continuity diagnostics and reports, but a failed provider call is not a valid
+shortened market window.
+
 ## Artifact Contract
 
 Indicators are computation units with internal state.

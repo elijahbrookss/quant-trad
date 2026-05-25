@@ -45,3 +45,4 @@ respect.
 | [0024](0024-use-provider-credential-references.md) | Use provider credential references | Accepted |
 | [0025](0025-use-per-run-leases.md) | Use per-run leases | Accepted |
 | [0026](0026-use-control-plane-telemetry-flush.md) | Use control-plane telemetry flush | Accepted |
+| [0027](0027-use-execution-profiles-as-runtime-instrument-authority.md) | Use execution profiles as runtime instrument authority | Accepted |
