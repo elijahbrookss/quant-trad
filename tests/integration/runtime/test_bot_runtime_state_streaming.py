@@ -111,3 +111,36 @@ def test_overlay_delta_uses_overlay_id_and_ignores_reorder_without_content_chang
         "market_profile.breakout_markers",
     ]
     assert second is None
+
+
+def test_overlay_delta_patches_stable_overlay_payload_changes() -> None:
+    from portal.backend.service.bots.botlens_state import apply_overlay_delta
+
+    runtime = _DummyRuntime()
+    cache: dict[str, object] = {}
+    first_overlay = {
+        "overlay_id": "market_profile.value_area",
+        **build_overlay(
+            "strategy_signal",
+            {"markers": [{"time": 1, "price": 100.0, "shape": "circle", "color": "#10b981"}]},
+        ),
+    }
+    second_overlay = {
+        **first_overlay,
+        "payload": {
+            "markers": [
+                {"time": 1, "price": 100.0, "shape": "circle", "color": "#10b981"},
+                {"time": 2, "price": 101.0, "shape": "circle", "color": "#f87171"},
+            ]
+        },
+    }
+
+    first = runtime._build_overlay_delta(cache, [first_overlay])
+    second = runtime._build_overlay_delta(cache, [second_overlay])
+
+    assert isinstance(first, dict)
+    assert isinstance(second, dict)
+    assert first["ops"][0]["op"] == "upsert"
+    assert second["ops"][0]["op"] == "patch"
+    projected = apply_overlay_delta([first["ops"][0]["overlay"]], second)
+    assert projected[0]["payload"]["markers"] == second_overlay["payload"]["markers"]

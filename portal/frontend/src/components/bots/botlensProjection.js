@@ -252,6 +252,37 @@ export function applyOverlayDelta(overlays = [], overlayDelta = {}) {
       overlayMap.delete(key)
       return
     }
+    if (opName === 'patch') {
+      const existing = overlayMap.get(key)
+      const patch = op.payload_patch && typeof op.payload_patch === 'object' ? op.payload_patch : null
+      if (!existing || !patch) return
+      const payload = existing.payload && typeof existing.payload === 'object'
+        ? { ...existing.payload }
+        : {}
+      if (Array.isArray(patch.remove)) {
+        patch.remove.forEach((removeKey) => {
+          delete payload[String(removeKey || '')]
+        })
+      }
+      if (patch.replace && typeof patch.replace === 'object') {
+        Object.entries(patch.replace).forEach(([replaceKey, replaceValue]) => {
+          payload[String(replaceKey)] = replaceValue
+        })
+      }
+      const nextOverlay = {
+        ...existing,
+        payload,
+        ...(patch.payload_summary && typeof patch.payload_summary === 'object'
+          ? { payload_summary: { ...patch.payload_summary } }
+          : {}),
+        overlay_id: key,
+      }
+      overlayMap.set(key, {
+        ...nextOverlay,
+        overlay_revision: stableOverlayRevision({ ...nextOverlay, overlay_id: key }),
+      })
+      return
+    }
     if (opName !== 'upsert' || !op.overlay || typeof op.overlay !== 'object') return
     overlayMap.set(key, {
       ...op.overlay,

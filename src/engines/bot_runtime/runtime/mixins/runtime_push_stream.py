@@ -198,18 +198,19 @@ class RuntimePushStreamMixin:
         *,
         batch_kind: str,
         dispatch: bool = True,
+        live_payload: Optional[Mapping[str, Any]] = None,
     ) -> Any:
         run_id = self._canonical_run_id()
         start_context = self._canonical_start_context()
         appender = getattr(self, "_canonical_fact_appender", None)
         if appender is None:
             raise RuntimeError("bot runtime canonical fact appender is not configured")
-        return appender.append_fact_batch(
-            bot_id=self.bot_id,
-            run_id=run_id,
-            batch_kind=batch_kind,
-            payload=payload,
-            context={
+        append_kwargs = {
+            "bot_id": self.bot_id,
+            "run_id": run_id,
+            "batch_kind": batch_kind,
+            "payload": payload,
+            "context": {
                 "worker_id": (
                     getattr(start_context, "worker_id", None)
                     if start_context is not None
@@ -218,8 +219,99 @@ class RuntimePushStreamMixin:
                 "source_emitter": "bot_runtime",
                 "source_reason": "producer",
             },
-            dispatch=dispatch,
-        )
+            "dispatch": dispatch,
+        }
+        if live_payload is not None:
+            append_kwargs["live_payload"] = live_payload
+        return appender.append_fact_batch(**append_kwargs)
+
+    @staticmethod
+    def _compact_log_for_live_transport(entry: Mapping[str, Any]) -> Dict[str, Any]:
+        log = dict(entry or {})
+        compacted: Dict[str, Any] = {}
+        for key in (
+            "id",
+            "event_id",
+            "event",
+            "level",
+            "message",
+            "timestamp",
+            "created_at",
+            "strategy_id",
+            "symbol",
+            "timeframe",
+            "bar_time",
+            "chart_time",
+            "component",
+            "owner",
+            "diagnostic_code",
+        ):
+            value = log.get(key)
+            if value not in (None, "", [], {}, ()):
+                compacted[key] = value
+        context = log.get("context") if isinstance(log.get("context"), AbcMapping) else {}
+        compact_context = {
+            key: context.get(key)
+            for key in (
+                "component",
+                "operation",
+                "status",
+                "failure_mode",
+                "reason_code",
+                "diagnostic_code",
+                "request_id",
+                "trace_id",
+            )
+            if context.get(key) not in (None, "", [], {}, ())
+        }
+        if compact_context:
+            compacted["context"] = compact_context
+        return compacted
+
+    @staticmethod
+    def _compact_wallet_event_for_live_transport(entry: Mapping[str, Any]) -> Dict[str, Any]:
+        wallet_event = dict(entry or {})
+        compacted: Dict[str, Any] = {}
+        for key, value in wallet_event.items():
+            if key in {"wallet_before", "wallet_after", "wallet_delta", "margin_requirement"}:
+                continue
+            if value not in (None, "", [], {}, ()):
+                compacted[key] = value
+        before = wallet_event.get("wallet_before") if isinstance(wallet_event.get("wallet_before"), AbcMapping) else {}
+        after = wallet_event.get("wallet_after") if isinstance(wallet_event.get("wallet_after"), AbcMapping) else {}
+        if before or after:
+            compacted["wallet_snapshot_summary"] = {
+                "before_positions": len(before.get("margin_positions") or {}) if isinstance(before.get("margin_positions"), AbcMapping) else 0,
+                "after_positions": len(after.get("margin_positions") or {}) if isinstance(after.get("margin_positions"), AbcMapping) else 0,
+                "before_balance_currencies": sorted(str(key) for key in (before.get("balances") or {}).keys())
+                if isinstance(before.get("balances"), AbcMapping)
+                else [],
+                "after_balance_currencies": sorted(str(key) for key in (after.get("balances") or {}).keys())
+                if isinstance(after.get("balances"), AbcMapping)
+                else [],
+            }
+        return compacted
+
+    @classmethod
+    def _compact_fact_for_live_transport(cls, fact: Mapping[str, Any]) -> Dict[str, Any]:
+        compacted = dict(fact or {})
+        fact_type = str(compacted.get("fact_type") or "").strip().lower()
+        if fact_type == BOTLENS_FACT_LOG_EMITTED and isinstance(compacted.get("log"), AbcMapping):
+            compacted["log"] = cls._compact_log_for_live_transport(compacted["log"])
+        elif fact_type == BOTLENS_FACT_WALLET_EVENT and isinstance(compacted.get("wallet_event"), AbcMapping):
+            compacted["wallet_event"] = cls._compact_wallet_event_for_live_transport(compacted["wallet_event"])
+        return compacted
+
+    @classmethod
+    def _botlens_live_transport_payload(cls, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        root = dict(payload or {})
+        facts = root.get("facts") if isinstance(root.get("facts"), list) else []
+        root["facts"] = [
+            cls._compact_fact_for_live_transport(fact)
+            for fact in facts
+            if isinstance(fact, AbcMapping)
+        ]
+        return root
 
     def subscribe(self, *, overflow_policy: str = "fail") -> Tuple[str, Queue]:
         channel: Queue = Queue(maxsize=256)
@@ -2399,7 +2491,12 @@ class RuntimePushStreamMixin:
             limit=int(getattr(self, "_botlens_fact_stream_log_fact_limit", BOTLENS_FACT_STREAM_LOG_FACT_LIMIT))
         ):
             if isinstance(entry, AbcMapping):
-                facts.append({"fact_type": BOTLENS_FACT_LOG_EMITTED, "log": dict(entry)})
+                facts.append(
+                    {
+                        "fact_type": BOTLENS_FACT_LOG_EMITTED,
+                        "log": self._compact_log_for_live_transport(entry),
+                    }
+                )
         for entry in self.decision_events(
             limit=int(
                 getattr(
@@ -2411,7 +2508,11 @@ class RuntimePushStreamMixin:
         ):
             if isinstance(entry, AbcMapping):
                 facts.append({"fact_type": BOTLENS_FACT_DECISION_EMITTED, "decision": dict(entry)})
-        facts.extend(self._wallet_facts())
+        facts.extend(
+            self._compact_fact_for_live_transport(fact)
+            for fact in self._wallet_facts()
+            if isinstance(fact, AbcMapping)
+        )
         observed_at = _isoformat(datetime.now(timezone.utc))
         last_candle_time = None
         candles = selected_series.get("candles") if isinstance(selected_series.get("candles"), list) else []
@@ -2704,11 +2805,12 @@ class RuntimePushStreamMixin:
                         }
             )
             build_state_ms = max((time.perf_counter() - build_started) * 1000.0, 0.0)
-            overlay_count, overlay_points = self._overlay_payload_metrics(payload)
+            live_transport_payload = self._botlens_live_transport_payload(payload)
+            overlay_count, overlay_points = self._overlay_payload_metrics(live_transport_payload)
             should_probe_payload_bytes = bool(self._obs_enabled and self._should_probe_payload_size())
             payload_context.update(
                 self._botlens_fact_stream_surface_metrics(
-                    payload,
+                    live_transport_payload,
                     include_bytes=should_probe_payload_bytes,
                 )
             )
@@ -2736,7 +2838,7 @@ class RuntimePushStreamMixin:
                 if should_probe_payload_bytes:
                     serialize_started = time.perf_counter()
                     try:
-                        payload_context["payload_bytes"] = self._payload_size_bytes(payload)
+                        payload_context["payload_bytes"] = self._payload_size_bytes(live_transport_payload)
                     except Exception:
                         payload_context["payload_bytes"] = None
                     finally:
@@ -2744,7 +2846,7 @@ class RuntimePushStreamMixin:
                         payload_context["serialize_ms"] = serialize_ms
                         payload_context["delta_serialize_ms"] = serialize_ms
             append_outcome = None
-            live_fact_count = len(payload.get("facts") or [])
+            live_fact_count = len(live_transport_payload.get("facts") or [])
             canonical_facts = canonical_fact_payload(payload).get("facts")
             payload_context["live_fact_count"] = live_fact_count
             payload_context["canonical_fact_count"] = (
@@ -2756,6 +2858,7 @@ class RuntimePushStreamMixin:
                     payload,
                     batch_kind=BOTLENS_RUNTIME_FACTS_KIND,
                     dispatch=False,
+                    live_payload=live_transport_payload,
                 )
                 canonical_append_ms = max((time.perf_counter() - append_started) * 1000.0, 0.0)
                 payload_context["canonical_append_ms"] = canonical_append_ms

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -103,6 +104,20 @@ def _queue_owner(*, key: str, depth_metric: str, utilization_metric: str, oldest
     )
 
 
+def _iso_candle_time(candle_time: int) -> str:
+    value = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=int(candle_time))
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _intake_payload(payload: dict) -> dict:
+    payload = json.loads(json.dumps(payload))
+    for fact in payload.get("facts") or []:
+        candle = fact.get("candle") if isinstance(fact, dict) else None
+        if isinstance(candle, dict) and isinstance(candle.get("time"), int):
+            candle["time"] = _iso_candle_time(int(candle["time"]))
+    return payload
+
+
 def _facts_batch(
     *,
     candle_time: int,
@@ -145,7 +160,17 @@ def _facts_batch(
         {
             "fact_type": "trade_opened",
             "series_key": symbol_key,
-            "trade": {"trade_id": "trade-1", "symbol_key": symbol_key, "symbol": symbol},
+            "trade": {
+                "trade_id": "trade-1",
+                "symbol_key": symbol_key,
+                "symbol": symbol,
+                "status": "open",
+                "direction": "long",
+                "opened_at": _iso_candle_time(candle_time),
+                "bar_time": _iso_candle_time(candle_time),
+                "position_commit_seq": 1,
+                "position_commit_seq_status": "position_scoped",
+            },
         },
     ]
     if isinstance(overlay_delta, dict):
@@ -213,7 +238,7 @@ def _projection_batch(payload: dict) -> Any:
     for fact in payload.get("facts") or []:
         candle = fact.get("candle") if isinstance(fact, dict) else None
         if isinstance(candle, dict) and isinstance(candle.get("time"), int):
-            candle["time"] = f"2026-01-01T00:{int(candle['time']):02d}:00Z"
+            candle["time"] = _iso_candle_time(int(candle["time"]))
         trade = fact.get("trade") if isinstance(fact, dict) else None
         if isinstance(trade, dict) and not (trade.get("entry_time") or trade.get("opened_at")):
             trade["entry_time"] = str(payload.get("event_time") or "2026-01-01T00:00:00Z")
@@ -1018,7 +1043,7 @@ class TestIntakeRouter:
             registry = ProjectorRegistry(run_stream=run_stream)
             router = IntakeRouter(registry=registry)
 
-            payload = _bootstrap_payload()
+            payload = _intake_payload(_bootstrap_payload())
             await router.route(payload)
 
             mailbox = await registry.ensure_symbol(
@@ -1035,7 +1060,7 @@ class TestIntakeRouter:
             registry = ProjectorRegistry(run_stream=run_stream)
             router = IntakeRouter(registry=registry)
 
-            payload = _facts_payload()
+            payload = _intake_payload(_facts_payload())
             await router.route(payload)
 
             mailbox = await registry.ensure_symbol(
@@ -1058,11 +1083,12 @@ class TestIntakeRouter:
                 "run_id": "run-1",
                 "phase": "live",
                 "status": "running",
+                "checkpoint_at": "2026-01-01T00:01:00Z",
             }
             await router.route(payload)
 
             mailbox = await registry.ensure_run(run_id="run-1", bot_id="bot-1")
-            assert mailbox.lifecycle_channel.qsize() == 1
+            assert mailbox.lifecycle_queue.qsize() == 1
 
         asyncio.run(scenario())
 
@@ -1245,8 +1271,8 @@ class TestHubIntegration:
 
             await hub.add_run_viewer(run_id="run-1", ws=ws, selected_symbol_key="instrument-btc|1m")
 
-            await hub.ingest(_bootstrap_payload(candle_time=1, run_seq=1))
-            await hub.ingest(_facts_payload(candle_time=2, run_seq=2))
+            await hub.ingest(_intake_payload(_bootstrap_payload(candle_time=1, run_seq=1)))
+            await hub.ingest(_intake_payload(_facts_payload(candle_time=2, run_seq=2)))
 
             # Give background tasks and thread pool operations time to complete.
             # asyncio.sleep(0) yields to other tasks but doesn't wait for threads;
@@ -1256,7 +1282,7 @@ class TestHubIntegration:
             symbol_snapshot = hub.get_symbol_snapshot(run_id="run-1", symbol_key="instrument-btc|1m")
             run_snapshot = hub.get_run_snapshot(run_id="run-1")
             assert symbol_snapshot is not None
-            assert symbol_snapshot.candles.candles[-1]["time"] == 2
+            assert symbol_snapshot.candles.candles[-1]["time"] == _iso_candle_time(2)
             assert run_snapshot is not None
             assert "instrument-btc|1m" in run_snapshot.symbol_catalog.entries
             assert events
@@ -1278,11 +1304,11 @@ class TestHubIntegration:
             ws = FakeWebSocket()
 
             await hub.add_run_viewer(run_id="run-1", ws=ws, selected_symbol_key="instrument-btc|1m")
-            await hub.ingest(_bootstrap_payload(candle_time=1, run_seq=1))
-            await hub.ingest(_facts_payload(
+            await hub.ingest(_intake_payload(_bootstrap_payload(candle_time=1, run_seq=1)))
+            await hub.ingest(_intake_payload(_facts_payload(
                 candle_time=2, run_seq=2,
                 log_entries=[{"id": "log-1", "message": "test"}],
-            ))
+            )))
 
             await asyncio.sleep(0.15)
 
@@ -1301,8 +1327,8 @@ class TestHubIntegration:
             from portal.backend.service.bots.telemetry_stream import BotTelemetryHub
             hub = BotTelemetryHub()
 
-            await hub.ingest(_bootstrap_payload(run_id="run-A", candle_time=10, run_seq=100))
-            await hub.ingest(_bootstrap_payload(run_id="run-B", candle_time=20, run_seq=200))
+            await hub.ingest(_intake_payload(_bootstrap_payload(run_id="run-A", candle_time=10, run_seq=100)))
+            await hub.ingest(_intake_payload(_bootstrap_payload(run_id="run-B", candle_time=20, run_seq=200)))
 
             await asyncio.sleep(0.15)
 
@@ -1310,8 +1336,8 @@ class TestHubIntegration:
             run_b_snapshot = hub.get_symbol_snapshot(run_id="run-B", symbol_key="instrument-btc|1m")
             assert run_a_snapshot is not None
             assert run_b_snapshot is not None
-            assert run_a_snapshot.candles.candles[-1]["time"] == 10
-            assert run_b_snapshot.candles.candles[-1]["time"] == 20
+            assert run_a_snapshot.candles.candles[-1]["time"] == _iso_candle_time(10)
+            assert run_b_snapshot.candles.candles[-1]["time"] == _iso_candle_time(20)
 
         asyncio.run(scenario())
 
@@ -1328,17 +1354,17 @@ class TestHubIntegration:
             # Three bootstraps in quick succession — only latest (candle=99) matters.
             for seq, candle_time in [(1, 10), (2, 20), (3, 99)]:
                 await hub.ingest(
-                    _bootstrap_payload(
+                    _intake_payload(_bootstrap_payload(
                         candle_time=candle_time,
                         run_seq=seq,
                         bridge_session_id=f"session-{seq}",
-                    )
+                    ))
                 )
 
             await asyncio.sleep(0.15)
 
             symbol_snapshot = hub.get_symbol_snapshot(run_id="run-1", symbol_key="instrument-btc|1m")
             assert symbol_snapshot is not None
-            assert symbol_snapshot.candles.candles[-1]["time"] == 99
+            assert symbol_snapshot.candles.candles[-1]["time"] == _iso_candle_time(99)
 
         asyncio.run(scenario())

@@ -340,6 +340,29 @@ def _durable_overlay_entry(key: Any, overlay: Any) -> Dict[str, Any]:
     }
 
 
+def _durable_overlay_payload_patch(value: Any) -> Dict[str, Any]:
+    mapping = _mapping(value)
+    replace = mapping.get("replace") if isinstance(mapping.get("replace"), Mapping) else {}
+    durable_replace = _durable_overlay_payload(replace)
+    remove_values = mapping.get("remove") if isinstance(mapping.get("remove"), list) else []
+    remove = [
+        str(entry).strip()
+        for entry in remove_values
+        if str(entry).strip()
+    ]
+    summary = _mapping(mapping.get("payload_summary"))
+    durable = {
+        "replace": durable_replace or None,
+        "remove": remove or None,
+        "payload_summary": summary or None,
+    }
+    return {
+        entry_key: entry_value
+        for entry_key, entry_value in durable.items()
+        if entry_value not in (None, "", {}, [])
+    }
+
+
 def _durable_overlay_delta(value: Any) -> Dict[str, Any]:
     payload = _mapping(value)
     overlay_commit_seq, base_overlay_commit_seq, overlay_commit_seq_status = _overlay_delta_clock(payload)
@@ -359,6 +382,11 @@ def _durable_overlay_delta(value: Any) -> Dict[str, Any]:
             if overlay_summary:
                 durable_op["overlay"] = overlay_summary
                 point_count += int(_mapping(overlay_summary.get("payload_summary")).get("point_count") or 0)
+        elif op_name == "patch":
+            patch_summary = _durable_overlay_payload_patch(op.get("payload_patch"))
+            if patch_summary:
+                durable_op["payload_patch"] = patch_summary
+                point_count += int(_mapping(patch_summary.get("payload_summary")).get("point_count") or 0)
         durable_ops.append(durable_op)
         op_counts[op_name] = op_counts.get(op_name, 0) + 1
     durable = {

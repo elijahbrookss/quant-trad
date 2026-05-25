@@ -30,6 +30,17 @@ _OVERLAY_UI_TRANSPORT_KEYS = frozenset(
         "pane",
     }
 )
+_OVERLAY_TRANSPORT_STATIC_EXCLUDE = frozenset(
+    {
+        "payload",
+        "payload_summary",
+        "indicator_commit_seq",
+        "indicator_commit_seq_status",
+        "overlay_commit_seq",
+        "base_overlay_commit_seq",
+        "overlay_commit_seq_status",
+    }
+)
 
 
 def overlay_points_for_payload(payload: Mapping[str, Any]) -> int:
@@ -153,6 +164,50 @@ def overlay_payload_summary(payload: Any) -> Dict[str, Any]:
     return summary
 
 
+def _json_size(value: Any) -> int:
+    try:
+        return len(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        return len(str(value).encode("utf-8"))
+
+
+def _overlay_static_payload(overlay: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        str(key): value
+        for key, value in dict(overlay or {}).items()
+        if str(key) not in _OVERLAY_TRANSPORT_STATIC_EXCLUDE
+    }
+
+
+def _overlay_payload_patch(
+    previous_payload: Any,
+    next_payload: Any,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(previous_payload, Mapping) or not isinstance(next_payload, Mapping):
+        return None
+    replace: Dict[str, Any] = {}
+    remove: list[str] = []
+    previous_keys = {str(key) for key in previous_payload.keys()}
+    next_keys = {str(key) for key in next_payload.keys()}
+    for key in sorted(previous_keys - next_keys):
+        remove.append(key)
+    for raw_key, value in next_payload.items():
+        key = str(raw_key)
+        if previous_payload.get(raw_key) != value and previous_payload.get(key) != value:
+            replace[key] = value
+    if not replace and not remove:
+        return None
+    patch: Dict[str, Any] = {}
+    if replace:
+        patch["replace"] = replace
+    if remove:
+        patch["remove"] = remove
+    summary = overlay_payload_summary(next_payload)
+    if summary:
+        patch["payload_summary"] = summary
+    return patch
+
+
 def compact_overlay_for_transport(
     overlay: Mapping[str, Any],
     *,
@@ -255,7 +310,20 @@ def build_overlay_delta(
         ops.append({"op": "remove", "key": key})
     for key in next_order:
         if previous_fingerprints.get(key) != next_fingerprints.get(key):
-            ops.append({"op": "upsert", "key": key, "overlay": next_entries[key]})
+            previous_overlay = previous_entries.get(key)
+            next_overlay = next_entries[key]
+            patch = None
+            if (
+                isinstance(previous_overlay, Mapping)
+                and _overlay_static_payload(previous_overlay) == _overlay_static_payload(next_overlay)
+            ):
+                patch = _overlay_payload_patch(previous_overlay.get("payload"), next_overlay.get("payload"))
+            if isinstance(patch, Mapping):
+                patch_op = {"op": "patch", "key": key, "payload_patch": dict(patch)}
+                if _json_size(patch_op) < _json_size({"op": "upsert", "key": key, "overlay": next_overlay}):
+                    ops.append(patch_op)
+                    continue
+            ops.append({"op": "upsert", "key": key, "overlay": next_overlay})
 
     cache["overlay_entries"] = next_entries
     cache["overlay_fingerprints"] = next_fingerprints

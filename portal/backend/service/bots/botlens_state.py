@@ -766,6 +766,28 @@ def apply_overlay_delta(overlays: Any, delta: Any) -> Tuple[Dict[str, Any], ...]
         if op_name == "remove":
             overlay_map.pop(key, None)
             continue
+        if op_name == "patch":
+            existing = overlay_map.get(key)
+            patch = op.get("payload_patch") if isinstance(op.get("payload_patch"), Mapping) else {}
+            if not isinstance(existing, Mapping) or not patch:
+                continue
+            normalized = dict(existing)
+            payload = dict(normalized.get("payload") or {}) if isinstance(normalized.get("payload"), Mapping) else {}
+            for remove_key in patch.get("remove") if isinstance(patch.get("remove"), list) else []:
+                payload.pop(str(remove_key), None)
+            replace = patch.get("replace") if isinstance(patch.get("replace"), Mapping) else {}
+            for replace_key, replace_value in replace.items():
+                payload[str(replace_key)] = replace_value
+            normalized["payload"] = payload
+            payload_summary = patch.get("payload_summary") if isinstance(patch.get("payload_summary"), Mapping) else None
+            if payload_summary is not None:
+                normalized["payload_summary"] = dict(payload_summary)
+            normalized["overlay_id"] = key
+            normalized["overlay_revision"] = overlay_revision(
+                {entry_key: entry_value for entry_key, entry_value in normalized.items() if entry_key != "overlay_revision"}
+            )
+            overlay_map[key] = normalized
+            continue
         if op_name != "upsert":
             continue
         overlay = op.get("overlay")

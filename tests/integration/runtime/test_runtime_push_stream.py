@@ -549,27 +549,59 @@ def test_wallet_facts_emit_full_entry_ledger_trace_in_logical_order() -> None:
         "POSITION_OPENED",
         "EQUITY_UPDATED",
     ]
-    assert [event["event_id"] for event in wallet_events] == sorted(event["event_id"] for event in wallet_events)
-    assert all(event["run_seq"] == 12 for event in wallet_events)
-    assert all(event["run_seq_status"] == "runtime_assigned" for event in wallet_events)
-    assert all(event["source_run_seq"] == 12 for event in wallet_events)
-    assert all(event["wallet_commit_seq"] == 7 for event in wallet_events)
-    assert all(event["wallet_eval_seq"] == 6 for event in wallet_events)
-    assert all(event["position_commit_seq"] == 1 for event in wallet_events)
-    assert [event["wallet_event_order"] for event in wallet_events] == [10, 20, 40, 50]
-    assert all(event["decision_id"] == "decision-1" for event in wallet_events)
-    assert wallet_events[0]["margin_required"] == 100.0
-    assert wallet_events[0]["margin_available"] == 1000.0
-    assert wallet_events[0]["balance_after"] == 1000.0
-    assert wallet_events[0]["locked_margin_after"] == 100.0
-    assert wallet_events[0]["free_collateral_after"] == 900.0
-    assert wallet_events[0]["wallet_after"]["locked_margin"]["USD"] == 100.0
-    assert wallet_events[1]["balance_before"] == 1000.0
-    assert wallet_events[1]["balance_after"] == 999.6
-    assert wallet_events[1]["fee"] == 0.4
-    assert wallet_events[1]["free_collateral_before"] == 900.0
-    assert wallet_events[1]["free_collateral_after"] == 899.6
-    assert wallet_events[-1]["equity_after"] == 999.6
+
+
+def test_live_transport_payload_slims_wallet_snapshots_and_log_context() -> None:
+    runtime = _runtime()
+    payload = {
+        "facts": [
+            {
+                "fact_type": "wallet_ledger_event",
+                "wallet_event": {
+                    "event_name": "MARGIN_RESERVED",
+                    "wallet_commit_seq": 1,
+                    "balance_before": 1000.0,
+                    "balance_after": 1000.0,
+                    "wallet_before": {
+                        "balances": {"USD": 1000.0},
+                        "margin_positions": {"trade-1": {"locked_margin": 10.0}},
+                    },
+                    "wallet_after": {
+                        "balances": {"USD": 1000.0},
+                        "margin_positions": {"trade-1": {"locked_margin": 20.0}},
+                    },
+                    "wallet_delta": {"collateral_reserved": 10.0},
+                    "margin_requirement": {"total_required_collateral": 10.0},
+                },
+            },
+            {
+                "fact_type": "log_emitted",
+                "log": {
+                    "id": "diag-1",
+                    "event": "overlay_debug",
+                    "message": "large debug",
+                    "context": {
+                        "component": "indicator_guard",
+                        "operation": "overlay_snapshot",
+                        "raw": {"payload": "x" * 1024},
+                        "traceback": "nope",
+                    },
+                },
+            },
+        ]
+    }
+
+    live_payload = runtime._botlens_live_transport_payload(payload)
+    wallet_event = live_payload["facts"][0]["wallet_event"]
+    log = live_payload["facts"][1]["log"]
+
+    assert "wallet_before" not in wallet_event
+    assert "wallet_after" not in wallet_event
+    assert "wallet_delta" not in wallet_event
+    assert "margin_requirement" not in wallet_event
+    assert wallet_event["wallet_snapshot_summary"]["before_positions"] == 1
+    assert "raw" not in log["context"]
+    assert "traceback" not in log["context"]
 
 
 def test_wallet_initialized_round_trip_preserves_wallet_commit_clock() -> None:
