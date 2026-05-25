@@ -15,6 +15,7 @@ from cli.experiments.contracts import normalize_plan
 from cli.experiments.event_log import read_events
 from cli.experiments.plan_loader import plan_preview
 from cli.experiments.state_store import ExperimentStateStore, find_experiment_dir
+from cli.experiments.summarize import summarize_experiment
 
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
@@ -69,17 +70,20 @@ class QtCommandRunner:
         payload: dict[str, Any]
         if stdout:
             try:
-                decoded = json.loads(stdout.splitlines()[-1])
-            except json.JSONDecodeError as exc:
-                raise McpError(
-                    "qt command returned non-JSON output",
-                    data={
-                        "args": args,
-                        "exit_code": completed.returncode,
-                        "stdout": stdout[-4000:],
-                        "stderr": stderr[-4000:],
-                    },
-                ) from exc
+                decoded = json.loads(stdout)
+            except json.JSONDecodeError:
+                try:
+                    decoded = json.loads(stdout.splitlines()[-1])
+                except json.JSONDecodeError as exc:
+                    raise McpError(
+                        "qt command returned non-JSON output",
+                        data={
+                            "args": args,
+                            "exit_code": completed.returncode,
+                            "stdout": stdout[-4000:],
+                            "stderr": stderr[-4000:],
+                        },
+                    ) from exc
             if not isinstance(decoded, dict):
                 raise McpError(
                     "qt command returned a non-object JSON payload",
@@ -226,6 +230,29 @@ class QuantTradMcpServer:
             return _ensure_object(client.request_json("GET", f"/api/strategies/{parts[1]}"), f"GET strategy {parts[1]}")
         if len(parts) == 3 and parts[0] == "strategies" and parts[2] == "variants":
             return _ensure_object(client.request_json("GET", f"/api/strategies/{parts[1]}/variants"), f"GET strategy {parts[1]} variants")
+        if parts == ["indicators"]:
+            return {"items": client.request_json("GET", "/api/indicators/")}
+        if parts == ["indicators", "types"]:
+            return {"items": client.request_json("GET", "/api/indicators/types")}
+        if len(parts) == 3 and parts[0] == "indicators" and parts[1] == "types":
+            return _ensure_object(client.request_json("GET", f"/api/indicators/types/{parts[2]}"), f"GET indicator type {parts[2]}")
+        if len(parts) == 2 and parts[0] == "indicators":
+            return _ensure_object(client.request_json("GET", f"/api/indicators/{parts[1]}"), f"GET indicator {parts[1]}")
+        if len(parts) == 3 and parts[0] == "indicators" and parts[2] == "strategies":
+            return {"items": client.request_json("GET", f"/api/indicators/{parts[1]}/strategies")}
+        if parts == ["instruments"]:
+            return {"items": client.request_json("GET", "/api/instruments/")}
+        if len(parts) == 2 and parts[0] == "instruments":
+            return _ensure_object(client.request_json("GET", f"/api/instruments/{parts[1]}"), f"GET instrument {parts[1]}")
+        if len(parts) == 3 and parts[0] == "instruments" and parts[2] == "runtime-profile":
+            return _ensure_object(
+                client.request_json(
+                    "GET",
+                    f"/api/instruments/{parts[1]}/runtime-profile",
+                    params={"execution_semantics": _query_str(query, "execution_semantics", None)},
+                ),
+                f"GET instrument runtime profile {parts[1]}",
+            )
         if parts == ["providers"]:
             return _ensure_object(client.request_json("GET", "/api/providers/"), "GET /api/providers/")
         if parts == ["reports"]:
@@ -252,6 +279,8 @@ class QuantTradMcpServer:
             return self._read_report_resource(client, parts[1], parts[2])
         if len(parts) == 3 and parts[0] == "experiments" and parts[2] == "state":
             return self._read_experiment_state(parts[1])
+        if len(parts) == 3 and parts[0] == "experiments" and parts[2] == "summary":
+            return summarize_experiment(self.log_root, parts[1])
         if len(parts) == 3 and parts[0] == "experiments" and parts[2] == "events":
             return self._read_experiment_events(parts[1], tail=_query_int(query, "tail", 100), event_type=_query_str(query, "type", None), status=_query_str(query, "status", None))
         raise McpError(f"unsupported resource URI: {uri}", code=-32602)
@@ -325,6 +354,154 @@ class QuantTradMcpServer:
     def _tool_list_strategy_variants(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return self.read_resource(f"quanttrad://strategies/{_required_str(arguments, 'strategy_id')}/variants")
 
+    def _tool_list_indicator_types(self, _arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._command_runner.run(["indicators", "types"], timeout_seconds=300.0)
+
+    def _tool_get_indicator_type(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._command_runner.run(
+            ["indicators", "type", _required_str(arguments, "type_id")],
+            timeout_seconds=300.0,
+        )
+
+    def _tool_list_indicators(self, _arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._command_runner.run(["indicators", "list"], timeout_seconds=300.0)
+
+    def _tool_get_indicator(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._command_runner.run(
+            ["indicators", "get", _required_str(arguments, "indicator_id")],
+            timeout_seconds=300.0,
+        )
+
+    def _tool_list_indicator_strategies(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._command_runner.run(
+            ["indicators", "strategies", _required_str(arguments, "indicator_id")],
+            timeout_seconds=300.0,
+        )
+
+    def _indicator_payload_from_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        payload = {
+            "type": _required_str(arguments, "type"),
+            "params": _required_object(arguments, "params"),
+        }
+        for key in ("name", "color", "color_palette"):
+            value = _optional_str(arguments, key)
+            if value is not None:
+                payload[key] = value
+        if arguments.get("dependencies") is not None:
+            dependencies = arguments.get("dependencies")
+            if not isinstance(dependencies, list):
+                raise McpError("dependencies must be an array", code=-32602)
+            payload["dependencies"] = dependencies
+        if arguments.get("output_prefs") is not None:
+            output_prefs = arguments.get("output_prefs")
+            if not isinstance(output_prefs, dict):
+                raise McpError("output_prefs must be an object", code=-32602)
+            payload["output_prefs"] = output_prefs
+        return payload
+
+    def _tool_validate_indicator_config(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        payload = self._indicator_payload_from_arguments(arguments)
+        return self._command_runner.run(
+            ["indicators", "validate-config", "--payload-json", json.dumps(payload, sort_keys=True)],
+            timeout_seconds=300.0,
+        )
+
+    def _tool_create_indicator(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        payload = self._indicator_payload_from_arguments(arguments)
+        args = ["indicators", "create", "--payload-json", json.dumps(payload, sort_keys=True)]
+        if not _optional_bool(arguments, "apply", False):
+            return self._command_runner.run(args, timeout_seconds=300.0)
+        _require_confirm(arguments, "create_indicator mutates indicator configuration")
+        return self._command_runner.run([*args, "--apply", "--confirm"], timeout_seconds=300.0)
+
+    def _tool_validate_indicator_runtime(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        indicator_id = _required_str(arguments, "indicator_id")
+        payload: dict[str, Any] = {
+            "start": _required_str(arguments, "start"),
+            "end": _required_str(arguments, "end"),
+            "interval": _required_str(arguments, "interval"),
+            "require_ready_by_end": _optional_bool(arguments, "require_ready_by_end", False),
+        }
+        for key in ("symbol", "datasource", "exchange", "instrument_id"):
+            value = _optional_str(arguments, key)
+            if value is not None:
+                payload[key] = value
+        if arguments.get("min_ready_bars") is not None:
+            payload["min_ready_bars"] = _optional_int(arguments, "min_ready_bars")
+        args = [
+            "indicators",
+            "validate-runtime",
+            indicator_id,
+            "--start",
+            str(payload["start"]),
+            "--end",
+            str(payload["end"]),
+            "--interval",
+            str(payload["interval"]),
+        ]
+        for key, flag in (
+            ("instrument_id", "--instrument-id"),
+            ("symbol", "--symbol"),
+            ("datasource", "--datasource"),
+            ("exchange", "--exchange"),
+        ):
+            if payload.get(key) is not None:
+                args.extend([flag, str(payload[key])])
+        if payload.get("require_ready_by_end"):
+            args.append("--require-ready-by-end")
+        if payload.get("min_ready_bars") is not None:
+            args.extend(["--min-ready-bars", str(payload["min_ready_bars"])])
+        return self._command_runner.run(args, timeout_seconds=_optional_float(arguments, "timeout_seconds", 300.0))
+
+    def _tool_check_data_coverage(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        args = [
+            "data",
+            "coverage",
+            "--start",
+            _required_str(arguments, "start"),
+            "--end",
+            _required_str(arguments, "end"),
+            "--timeframe",
+            _required_str(arguments, "timeframe"),
+        ]
+        for key, flag in (
+            ("instrument_id", "--instrument-id"),
+            ("symbol", "--symbol"),
+            ("datasource", "--datasource"),
+            ("exchange", "--exchange"),
+        ):
+            value = _optional_str(arguments, key)
+            if value is not None:
+                args.extend([flag, value])
+        if _optional_bool(arguments, "fail_on_warning", False):
+            args.append("--fail-on-warning")
+        return self._command_runner.run(args, timeout_seconds=_optional_float(arguments, "timeout_seconds", 300.0))
+
+    def _tool_list_instruments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        args = ["instruments", "list"]
+        for key, flag in (
+            ("datasource", "--datasource"),
+            ("exchange", "--exchange"),
+            ("symbol", "--symbol"),
+        ):
+            value = _optional_str(arguments, key)
+            if value is not None:
+                args.extend([flag, value])
+        return self._command_runner.run(args, timeout_seconds=_optional_float(arguments, "timeout_seconds", 300.0))
+
+    def _tool_get_instrument(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._command_runner.run(
+            ["instruments", "get", _required_str(arguments, "instrument_id")],
+            timeout_seconds=_optional_float(arguments, "timeout_seconds", 300.0),
+        )
+
+    def _tool_get_instrument_runtime_profile(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        args = ["instruments", "profile", _required_str(arguments, "instrument_id")]
+        execution_semantics = _optional_str(arguments, "execution_semantics")
+        if execution_semantics is not None:
+            args.extend(["--execution-semantics", execution_semantics])
+        return self._command_runner.run(args, timeout_seconds=_optional_float(arguments, "timeout_seconds", 300.0))
+
     def _tool_list_reports(self, arguments: dict[str, Any]) -> dict[str, Any]:
         params = {
             "type": str(arguments.get("type") or "backtest"),
@@ -397,6 +574,27 @@ class QuantTradMcpServer:
             args.append("--proceed-with-data-warnings")
         return self._command_runner.run(args, timeout_seconds=_optional_float(arguments, "timeout_seconds", self.command_timeout_seconds))
 
+    def _tool_prepare_instrument_matrix_experiment(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        request = _required_object(arguments, "request")
+        apply = _optional_bool(arguments, "apply", False)
+        if apply:
+            _require_confirm(
+                arguments,
+                "prepare_instrument_matrix_experiment creates solo strategies/bots and writes an experiment plan",
+            )
+        args = [
+            "experiments",
+            "prepare-instrument-matrix",
+            "--request-json",
+            json.dumps(request, sort_keys=True),
+        ]
+        out_path = _optional_str(arguments, "out_path")
+        if out_path:
+            args.extend(["--out", out_path])
+        if apply:
+            args.extend(["--apply", "--confirm"])
+        return self._command_runner.run(args, timeout_seconds=_optional_float(arguments, "timeout_seconds", 600.0))
+
     def _tool_resume_experiment(self, arguments: dict[str, Any]) -> dict[str, Any]:
         _require_confirm(arguments, "resume_experiment may continue unfinished bot runs")
         return self._command_runner.run(
@@ -425,6 +623,12 @@ class QuantTradMcpServer:
             ["experiments", "doctor", _required_str(arguments, "ref")],
             timeout_seconds=_optional_float(arguments, "timeout_seconds", 300.0),
         )
+
+    def _tool_summarize_experiment(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        args = ["experiments", "summarize", _required_str(arguments, "ref")]
+        if _optional_str(arguments, "out_path"):
+            args.extend(["--out", _required_str(arguments, "out_path")])
+        return self._command_runner.run(args, timeout_seconds=_optional_float(arguments, "timeout_seconds", 300.0))
 
     def _tool_collect_experiment(self, arguments: dict[str, Any]) -> dict[str, Any]:
         if _optional_bool(arguments, "wait", False) or _optional_bool(arguments, "export", False) or _optional_str(arguments, "compare_to"):
@@ -608,6 +812,9 @@ class QuantTradMcpServer:
             _resource("quanttrad://health", "Backend health"),
             _resource("quanttrad://bots", "Bot run contexts"),
             _resource("quanttrad://strategies", "Strategies"),
+            _resource("quanttrad://indicators", "Indicator instances"),
+            _resource("quanttrad://indicators/types", "Indicator type catalog"),
+            _resource("quanttrad://instruments", "Canonical instruments"),
             _resource("quanttrad://providers", "Providers"),
             _resource("quanttrad://reports", "Recent completed reports"),
         ]
@@ -619,6 +826,11 @@ class QuantTradMcpServer:
             _template("quanttrad://bots/{bot_id}/active-run", "Bot active run"),
             _template("quanttrad://strategies/{strategy_id}", "Strategy detail"),
             _template("quanttrad://strategies/{strategy_id}/variants", "Strategy variants"),
+            _template("quanttrad://indicators/types/{type_id}", "Indicator type detail"),
+            _template("quanttrad://indicators/{indicator_id}", "Indicator detail"),
+            _template("quanttrad://indicators/{indicator_id}/strategies", "Indicator strategy usage"),
+            _template("quanttrad://instruments/{instrument_id}", "Canonical instrument detail"),
+            _template("quanttrad://instruments/{instrument_id}/runtime-profile?execution_semantics={execution_semantics}", "Instrument runtime execution profile"),
             _template("quanttrad://reports/{run_id}/dataset", "Report dataset"),
             _template("quanttrad://reports/{run_id}/readiness", "Report readiness"),
             _template("quanttrad://reports/{run_id}/summary", "Report research summary"),
@@ -627,6 +839,7 @@ class QuantTradMcpServer:
             _template("quanttrad://reports/{run_id}/operational-health", "Report operational health"),
             _template("quanttrad://reports/{run_id}/run-report-status", "Run report materialization status"),
             _template("quanttrad://experiments/{experiment_id}/state", "Local experiment suite state"),
+            _template("quanttrad://experiments/{experiment_id}/summary", "Local experiment suite summary"),
             _template("quanttrad://experiments/{experiment_id}/events?tail={tail}", "Local experiment event log"),
         ]
 
@@ -671,6 +884,134 @@ class QuantTradMcpServer:
                 "description": "List variants for a strategy.",
                 "inputSchema": _object_schema({"strategy_id": _string_schema()}, required=["strategy_id"]),
                 "handler": self._tool_list_strategy_variants,
+            },
+            "list_indicator_types": {
+                "description": "List registered indicator types.",
+                "inputSchema": _object_schema(),
+                "handler": self._tool_list_indicator_types,
+            },
+            "get_indicator_type": {
+                "description": "Read one indicator type manifest and capability contract.",
+                "inputSchema": _object_schema({"type_id": _string_schema()}, required=["type_id"]),
+                "handler": self._tool_get_indicator_type,
+            },
+            "list_indicators": {
+                "description": "List persisted indicator instances.",
+                "inputSchema": _object_schema(),
+                "handler": self._tool_list_indicators,
+            },
+            "get_indicator": {
+                "description": "Read one indicator instance with manifest, outputs, and capabilities.",
+                "inputSchema": _object_schema({"indicator_id": _string_schema()}, required=["indicator_id"]),
+                "handler": self._tool_get_indicator,
+            },
+            "list_indicator_strategies": {
+                "description": "List strategies that reference an indicator instance.",
+                "inputSchema": _object_schema({"indicator_id": _string_schema()}, required=["indicator_id"]),
+                "handler": self._tool_list_indicator_strategies,
+            },
+            "validate_indicator_config": {
+                "description": "Validate and normalize an indicator instance config without persisting it.",
+                "inputSchema": _object_schema(
+                    {
+                        "type": _string_schema(),
+                        "name": _string_schema(),
+                        "params": _free_object_schema(),
+                        "dependencies": {"type": "array", "items": _free_object_schema()},
+                        "output_prefs": _free_object_schema(),
+                        "color": _string_schema(),
+                        "color_palette": _string_schema(),
+                    },
+                    required=["type", "params"],
+                ),
+                "handler": self._tool_validate_indicator_config,
+            },
+            "create_indicator": {
+                "description": "Plan or apply creation of an indicator instance. Defaults to a dry planned mutation; apply requires apply=true and confirm=true.",
+                "inputSchema": _object_schema(
+                    {
+                        "type": _string_schema(),
+                        "name": _string_schema(),
+                        "params": _free_object_schema(),
+                        "dependencies": {"type": "array", "items": _free_object_schema()},
+                        "output_prefs": _free_object_schema(),
+                        "color": _string_schema(),
+                        "color_palette": _string_schema(),
+                        "apply": _boolean_schema(default=False),
+                        "confirm": _boolean_schema(default=False),
+                    },
+                    required=["type", "params"],
+                ),
+                "handler": self._tool_create_indicator,
+            },
+            "validate_indicator_runtime": {
+                "description": "Replay a persisted indicator over a market window and summarize typed-output presence/readiness for every bar.",
+                "inputSchema": _object_schema(
+                    {
+                        "indicator_id": _string_schema(),
+                        "start": _string_schema(),
+                        "end": _string_schema(),
+                        "interval": _string_schema(),
+                        "symbol": _string_schema(),
+                        "datasource": _string_schema(),
+                        "exchange": _string_schema(),
+                        "instrument_id": _string_schema(),
+                        "require_ready_by_end": _boolean_schema(default=False),
+                        "min_ready_bars": _integer_schema(),
+                    },
+                    required=["indicator_id", "start", "end", "interval"],
+                ),
+                "handler": self._tool_validate_indicator_runtime,
+            },
+            "check_data_coverage": {
+                "description": "Run qt data coverage for a canonical instrument/window before experiments or indicator validation.",
+                "inputSchema": _object_schema(
+                    {
+                        "instrument_id": _string_schema(),
+                        "symbol": _string_schema(),
+                        "datasource": _string_schema(),
+                        "exchange": _string_schema(),
+                        "start": _string_schema(),
+                        "end": _string_schema(),
+                        "timeframe": _string_schema(),
+                        "fail_on_warning": _boolean_schema(default=False),
+                        "timeout_seconds": _number_schema(default=300.0),
+                    },
+                    required=["start", "end", "timeframe"],
+                ),
+                "handler": self._tool_check_data_coverage,
+            },
+            "list_instruments": {
+                "description": "List canonical instruments through qt instruments list, with optional datasource/exchange/symbol filters.",
+                "inputSchema": _object_schema(
+                    {
+                        "datasource": _string_schema(),
+                        "exchange": _string_schema(),
+                        "symbol": _string_schema(),
+                        "timeout_seconds": _number_schema(default=300.0),
+                    }
+                ),
+                "handler": self._tool_list_instruments,
+            },
+            "get_instrument": {
+                "description": "Fetch one canonical instrument through qt instruments get.",
+                "inputSchema": _object_schema(
+                    {"instrument_id": _string_schema(), "timeout_seconds": _number_schema(default=300.0)},
+                    required=["instrument_id"],
+                ),
+                "handler": self._tool_get_instrument,
+            },
+            "get_instrument_runtime_profile": {
+                "description": "Compile one instrument runtime execution profile through qt instruments profile.",
+                "inputSchema": _object_schema(
+                    {
+                        "instrument_id": _string_schema(),
+                        "execution_semantics": {"type": "string", "enum": ["spot", "derivative", "proxy_derivative"]},
+                        "timeout_seconds": _number_schema(default=300.0),
+                    },
+                    required=["instrument_id"],
+                ),
+                "handler": self._tool_get_instrument_runtime_profile,
             },
             "list_reports": {
                 "description": "List completed report summaries.",
@@ -753,6 +1094,20 @@ class QuantTradMcpServer:
                 ),
                 "handler": self._tool_run_experiment_plan,
             },
+            "prepare_instrument_matrix_experiment": {
+                "description": "Prepare solo strategy/bot cases and a normal experiment plan for spot-proxy vs derivative instrument comparisons. Applying creates backend strategies/bots and writes a plan; apply requires apply=true and confirm=true.",
+                "inputSchema": _object_schema(
+                    {
+                        "request": _free_object_schema(),
+                        "out_path": _string_schema(),
+                        "apply": _boolean_schema(default=False),
+                        "confirm": _boolean_schema(default=False),
+                        "timeout_seconds": _number_schema(default=600.0),
+                    },
+                    required=["request"],
+                ),
+                "handler": self._tool_prepare_instrument_matrix_experiment,
+            },
             "resume_experiment": {
                 "description": "Resume a plan-based experiment from local state. Requires confirm=true.",
                 "inputSchema": _object_schema({"ref": _string_schema(), "confirm": _boolean_schema(default=False), "timeout_seconds": _number_schema(default=7200.0)}, required=["ref"]),
@@ -772,6 +1127,14 @@ class QuantTradMcpServer:
                 "description": "Check local plan-based experiment state and artifact refs.",
                 "inputSchema": _object_schema({"ref": _string_schema(), "timeout_seconds": _number_schema(default=300.0)}, required=["ref"]),
                 "handler": self._tool_doctor_experiment,
+            },
+            "summarize_experiment": {
+                "description": "Summarize local plan-based experiment artifacts into compact experiment_summary.v1.",
+                "inputSchema": _object_schema(
+                    {"ref": _string_schema(), "out_path": _string_schema(), "timeout_seconds": _number_schema(default=300.0)},
+                    required=["ref"],
+                ),
+                "handler": self._tool_summarize_experiment,
             },
             "collect_experiment": {
                 "description": "Collect status, optional report export, and optional comparison for a tracked experiment.",
