@@ -53,6 +53,35 @@ Runtime emits:
 - lifecycle checkpoints,
 - runtime diagnostics and fallback events.
 
+Runtime separates source identity from execution modeling:
+
+- `instrument_type` comes from the canonical instrument record and describes the
+  market-data source.
+- `execution_semantics` describes how the bot runtime models orders, shorts,
+  wallet effects, and margin for that run.
+- `SeriesExecutionProfile` is the single runtime authority for tick size,
+  contract size, tick value, fees, amount constraints, quote currency,
+  collateral model, and margin calculator.
+- `LadderRiskEngine` consumes those values from the compiled profile, not from
+  bot config, ATM templates, or ad hoc instrument dictionary lookups.
+- `proxy_derivative` is a backtest research binding where a spot source remains
+  labeled as spot while runtime applies derivative-style execution semantics.
+- Startup readiness and reports must carry both source instrument type and
+  execution semantics so mixed spot/perp research windows are explicit.
+- Proxy-derivative execution must compile from explicit derivative evidence
+  such as `proxy_derivative_margin_rates`,
+  `proxy_derivative_instrument_fields`, or a validated derivative reference.
+  Missing evidence is an admission failure; runtime must not silently fall back
+  to spot full-notional accounting or spot quantity constraints.
+- ATM templates are strategy/risk templates. They must not be used to patch
+  missing instrument execution fields for runtime admission.
+- Series construction routes candles through the linked instrument identity.
+  Strategy-level provider fields are fallback defaults, not a reason to fetch a
+  spot proxy from the derivative venue.
+- Series construction must fail on provider `ingestion_failure` candle evidence.
+  It may carry sparse-source classifications into diagnostics, but it must not
+  accept a truncated replay as a completed backtest window.
+
 ## Diagram Walkthrough: Runtime Hot Path
 
 [runtime-hot-path.mmd](diagrams/runtime-hot-path.mmd) shows one run:

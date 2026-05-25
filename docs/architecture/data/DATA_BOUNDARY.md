@@ -101,6 +101,10 @@ The data boundary should not manufacture alternate execution truth. If source da
 - Unsupported provider/venue/symbol combinations fail with provider context.
 - Provider fetch defects become explicit warnings or errors.
 - Provider sparse responses and fetch exceptions attach provider-agnostic missing-range evidence to continuity classifications. Empty or out-of-window successful responses may be closure-backed; failed calls remain ingestion/fetch defects and should not be treated as known market closures.
+- Provider adapters may retry transient transport failures such as exchange rate
+  limits, but unresolved failed calls must remain `ingestion_failure` evidence.
+  A downstream replay consumer that requires complete candles must fail rather
+  than treating the partial frame as a valid market window.
 - Missing required instrument metadata fails before execution uses the instrument.
 - Unknown candle gaps remain unknown and are surfaced to BotLens/reports.
 
@@ -110,6 +114,20 @@ The data boundary should not manufacture alternate execution truth. If source da
 - Provider-specific behavior stops at the adapter boundary.
 - Candle continuity is diagnostic truth, not a strategy decision.
 - Instrument metadata must be validated before execution depends on tick size, contract size, fees, shorting, or margin.
+- Instrument `instrument_type` is source metadata owned by the instrument record.
+  Runtime execution semantics such as `proxy_derivative` are run bindings and
+  must not mutate the canonical instrument type.
+- A spot instrument may carry a `proxy_derivative_reference`,
+  `proxy_derivative_margin_rates`, and `proxy_derivative_instrument_fields`
+  derived from a validated derivative sibling. Those fields are execution
+  evidence for a research binding; they do not change the source instrument
+  type or candle provider identity.
+- Strategy instrument links preserve canonical instrument identity. If linked
+  instruments have different providers/venues, candle fetches must use the
+  linked instrument record rather than assuming the strategy-level provider.
+- CCXT-backed instruments must persist provider identity as `datasource=CCXT`
+  and venue identity in `exchange`, even when the venue is Coinbase. Do not
+  collapse that into Coinbase Direct provider identity.
 - Provider credentials flow through credential refs; bot config and runtime config must not transport provider API keys.
 
 ## Related Docs

@@ -16,8 +16,11 @@ code_paths:
   - portal/backend/service/observability_exporter.py
   - portal/backend/service/bots/runner_observability.py
   - portal/backend/service/bots/container_runtime_telemetry.py
+  - portal/backend/service/bots/botlens_intake_router.py
   - portal/backend/service/bots/botlens_candle_continuity.py
   - portal/backend/service/bots/botlens_run_stream.py
+  - src/engines/bot_runtime/runtime/components/step_trace_buffer.py
+  - src/engines/bot_runtime/runtime/components/step_trace_rollup.py
   - src/engines/bot_runtime/runtime/components/overlay_delta.py
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
   - portal/backend/service/storage/repos/observability.py
@@ -160,6 +163,19 @@ complete database pressure signal.
 - Container telemetry transports must avoid sync websocket background clients;
   websocket open/send/close belongs to the async telemetry worker or the bounded
   direct fallback path.
+- Runtime fact transport may coalesce superseded non-material
+  `botlens_runtime_facts` messages by run/series while preserving control-lane
+  and material trade, wallet, and decision fact delivery. Coalescing is a live
+  projection pressure valve only; canonical fact persistence remains the source
+  of durable truth.
+- Runtime step traces are aggregated in memory into compact profiler rollups
+  before persistence. The hot path records timing samples, but the writer ships
+  mergeable bucket rows instead of one payload per bar. Shutdown drains pending
+  rollups; persist failures remain visible diagnostics.
+- BotLens ingest routes projection batches before waiting on diagnostic durable
+  writes. Persistence runs in bounded background batches and emits explicit
+  errors on failure so API websocket receive loops are not held hostage by
+  ordinary projection/debug storage pressure.
 - Dashboard gaps should point back to missing instrumentation or storage, not hidden execution semantics.
 
 ## Invariants

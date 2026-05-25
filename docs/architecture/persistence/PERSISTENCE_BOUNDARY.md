@@ -20,6 +20,8 @@ code_paths:
   - portal/backend/service/bots/botlens_domain_events.py
   - portal/backend/service/bots/botlens_canonical_facts.py
   - portal/backend/service/bots/botlens_event_retention.py
+  - src/engines/bot_runtime/runtime/components/step_trace_buffer.py
+  - src/engines/bot_runtime/runtime/components/step_trace_rollup.py
   - src/engines/bot_runtime/runtime/components/overlay_delta.py
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
   - docs/architecture/persistence/diagrams/runtime-event-ledger-flow.mmd
@@ -90,6 +92,9 @@ Active schema surfaces are justified by role:
   rollups intentionally use an allowlist of latency, queue pressure, payload
   size, and execution timing fields; arbitrary `_ms` or `_count` debug context
   must not become durable storage by suffix match.
+  Runtime aggregates these samples in memory and persists compact rollup rows
+  at a slower cadence; the storage repository still accepts raw step payloads
+  for compatibility and folds both forms into the same table contract.
 - Removed from active contract: `portal_bot_run_snapshots` and
   `portal_bot_run_view_state`. They were legacy projection/cache payload stores,
   not canonical truth.

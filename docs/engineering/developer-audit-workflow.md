@@ -31,8 +31,18 @@ Common agent/tool workflow commands:
 - `qt bots start <bot_id> --request-id <request_id>`
 - `qt runs wait <bot_id> <run_id>`
 - `qt reports summary <run_id>`
+- `qt reports instruments <run_id>`
+- `qt reports symbol-summary <run_id>`
+- `qt reports trades <run_id> --symbol <symbol>`
+- `qt reports decisions <run_id> --state rejected`
 - `qt reports export <run_id>`
 - `qt reports compare <baseline_run_id> <variant_run_id>`
+- `qt indicators types`
+- `qt indicators validate-config --type <type> --params-json '<json>'`
+- `qt indicators validate-runtime <indicator_id> --instrument-id <instrument_id> --start <iso> --end <iso> --interval <timeframe>`
+- `qt data coverage --instrument-id <instrument_id> --start <iso> --end <iso> --timeframe <timeframe>`
+- `qt instruments list`
+- `qt instruments profile <instrument_id> --execution-semantics proxy_derivative`
 - `qt experiments validate-plan <plan>`
 - `qt experiments run-plan <plan> --experiment-id <experiment_id>`
 - `qt experiments resume <experiment_id>`

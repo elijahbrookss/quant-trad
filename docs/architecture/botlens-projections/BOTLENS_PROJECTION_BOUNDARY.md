@@ -17,6 +17,7 @@ code_paths:
   - portal/backend/service/bots/botlens_canonical_facts.py
   - portal/backend/service/bots/botlens_domain_events.py
   - portal/backend/service/bots/botlens_event_retention.py
+  - portal/backend/service/bots/botlens_intake_router.py
   - portal/backend/service/bots/botlens_projector_registry.py
   - portal/backend/service/bots/botlens_run_projector.py
   - portal/backend/service/bots/botlens_symbol_projector.py
@@ -165,9 +166,12 @@ The fact stream is also source-compacted before it reaches backend projectors.
 full runtime snapshot or aggregate stats blob. `series_state_observed` carries
 routing identity only. `series_stats_updated` carries the compact reportable
 summary, not risk-engine debug curves. `overlay_ops_emitted` carries bounded
-render overlays with payload summaries and overlay clocks, not unbounded
-indicator history. This compaction is invariant across viewer state and is the
-normal runtime contract, not a live-UI optimization.
+render overlays with overlay clocks, not unbounded indicator history. Wallet
+ledger and diagnostic facts keep full canonical payloads on the producer-side
+canonical append path, while the live transport payload drops repeated wallet
+snapshots and raw diagnostic context that projectors do not need for the hot
+view. This compaction is invariant across viewer state and is the normal
+runtime contract, not a live-UI optimization.
 
 The live websocket stream is a bounded viewport transport, not a full
 replicated runtime database. Bootstrap snapshots send the latest configured
@@ -193,6 +197,10 @@ transport operations only. It is separate from the selected-symbol websocket
 `base_seq` replay cursor and separate from the durable run `run_seq` spine.
 Overlay entries may carry source `indicator_commit_seq` for provenance, but
 that provenance must not force unchanged overlay geometry to emit a new delta.
+When overlay identity and metadata are stable, runtime may emit `patch`
+operations that replace or remove changed top-level render payload sections
+instead of resending the full overlay entry. A full `upsert` remains the
+bootstrap, new-overlay, metadata-change, and rebase operation.
 Selected-symbol snapshots must include the current `overlay_commit_seq` and
 status beside the bounded overlay payload so a reconnect or symbol handoff seeds
 the frontend overlay cursor from the exact snapshot state. The next overlay

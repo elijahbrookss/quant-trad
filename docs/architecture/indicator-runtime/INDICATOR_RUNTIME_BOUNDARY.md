@@ -9,10 +9,13 @@ tags:
   - runtime
   - typed-outputs
   - overlays
+  - research-validation
   - known-at
 code_paths:
   - src/engines/indicator_engine
   - src/indicators
+  - portal/backend/controller/indicators.py
+  - portal/backend/service/indicators/indicator_service/runtime_validation.py
   - docs/architecture/indicator-runtime/diagrams/indicator-runtime-contract.mmd
   - docs/architecture/indicator-runtime/diagrams/indicator-surfaces.mmd
 ---
@@ -83,6 +86,31 @@ All three can derive from the same indicator-owned state, but only typed outputs
 - `RuntimeOverlay` values for visual inspection.
 - `RuntimeDetail` values for debug inspection.
 - Guard metrics and warnings when output/projection payloads are expensive or invalid.
+- Runtime diagnostics for source-fact quality, including indicator-owned candle
+  continuity caveats that should be visible to research tools without becoming
+  strategy inputs.
+
+## Runtime Validation Surface
+
+The backend indicator runtime validation endpoint is the research-facing proof
+surface for agent-visible indicators. It builds the same runtime graph as normal
+indicator execution and advances the engine one candle at a time through:
+
+```text
+initialize -> apply_bar -> snapshot
+```
+
+For each bar, validation requires every declared typed output to be present in
+the engine frame. Readiness is measured separately: warmup windows may produce
+`ready=false`, but missing outputs are invalid. The validation result summarizes
+per-output presence, first/last readiness, ready bar counts, signal event
+counts, observed metric/context fields, commit sequence provenance, guard
+warnings, source-fact diagnostics, and optional assertions such as `require_ready_by_end` or
+`min_ready_bars`.
+
+This surface is intentionally a validator, not an alternate runtime. It must not
+reconstruct indicator state from overlays, details, mutable internals, or MCP
+payloads.
 
 ## State And Lifecycle
 
@@ -112,6 +140,8 @@ or unordered mapping iteration.
 - Dependency outputs are read through declared refs.
 - Signal, context, and metric outputs are typed contracts, not arbitrary blobs.
 - Overlays and details are projections.
+- Runtime validation must validate declared output presence on every bar and
+  report readiness separately from presence.
 - Indicator commit sequence is engine-owned; indicator implementations must not
   fabricate or persist alternate clocks.
 - Indicator-specific docs should exist only when an indicator family has architecture behavior beyond ordinary authoring guidance.

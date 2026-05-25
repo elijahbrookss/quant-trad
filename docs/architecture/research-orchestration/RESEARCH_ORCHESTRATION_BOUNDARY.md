@@ -8,6 +8,7 @@ tags:
   - cli
   - mcp
   - experiments
+  - indicators
   - agent
   - reporting
   - api
@@ -18,8 +19,10 @@ code_paths:
   - pyproject.toml
   - Makefile
   - portal/backend/controller/bots.py
+  - portal/backend/controller/indicators.py
   - portal/backend/controller/reports.py
   - portal/backend/service/bots/bot_service.py
+  - portal/backend/service/indicators/indicator_service
   - portal/backend/service/reports/contract.py
   - portal/backend/service/reports/comparison.py
   - docs/engineering/developer-audit-workflow.md
@@ -52,6 +55,11 @@ The boundary may:
 
 - call bot control API routes,
 - call bot/window data preflight routes,
+- call direct instrument/window candle coverage routes,
+- call canonical instrument read/profile routes when an experiment needs to
+  bind source instruments to explicit execution semantics,
+- call indicator catalog, config validation, create, and runtime validation API
+  routes,
 - call report readiness, materialization, export, and comparison API routes,
 - compose API calls into small workflows,
 - print structured JSON for automation,
@@ -106,7 +114,8 @@ Plan-based experiment suites use a richer but still local layout:
 - `runs/<window_id>__<variant_id>.json` records run ids and compact artifact refs.
 - `artifacts/reports/` stores report export zips for the suite.
 - `artifacts/comparisons/` stores compact comparison summaries.
-- `artifacts/summaries/` stores research summaries and pass gate results.
+- `artifacts/summaries/` stores research summaries, pass gate results, data
+  preflight, and optional suite summaries.
 - `notifications.json` records terminal notification attempts.
 
 Plan validation includes a data preflight when the backend is reachable. The
@@ -115,6 +124,24 @@ window and returns provider, exchange, symbol, timeframe, requested range,
 available range, missing ranges, and candle continuity status. These checks use
 the shared candle continuity summary model, but they are pre-run coverage
 evidence rather than post-run report truth.
+
+`qt data coverage` exposes the same `candle_coverage_preflight.v1` check for a
+single explicit instrument/window before a bot or experiment plan exists.
+
+`qt experiments summarize` reads the local suite artifacts and emits
+`experiment_summary.v1`: suite status, compact run metrics, readiness caveats,
+section row counts, comparison deltas, pass gate status, and data preflight
+continuity. It is an operator/agent read model over already-written artifacts;
+it does not rebuild report truth or inspect runtime internals.
+
+`qt experiments prepare-instrument-matrix` prepares solo strategy and bot cases
+from a source bot/strategy plus explicit instrument groups. It may dry-run the
+planned strategy/bot mutations, or with `--apply --confirm` create one
+single-instrument strategy and bot per case, validate each instrument runtime
+profile, and write a normal `experiment_plan.v1`. The command is an
+orchestration helper only: the resulting bots still own runtime execution, and
+the existing plan runner still starts runs, exports reports, materializes report
+truth, and compares completed runs.
 
 `validate-plan` reports data warnings without failing. `run-plan` performs the
 same validation internally and requires explicit acknowledgement before starting
@@ -146,6 +173,11 @@ for:
 - strategy listing, detail inspection, compilation, and preview,
 - strategy variant listing, creation, update, and deletion through output
   filters,
+- indicator type/instance inspection, config validation, planned creation, and
+  runtime validation through `qt indicators ...`,
+- instrument listing, detail inspection, and runtime profile compilation through
+  `qt instruments ...`,
+- direct candle coverage inspection through `qt data coverage`,
 - run lifecycle waiting through compact run status API state,
 - report listing, readiness, compact research summary, diagnostics,
   materialization status/build, export, and materialized report comparison
@@ -155,6 +187,10 @@ for:
 - `experiments run-bot` as a one-shot wrapper over the same start/collect flow.
 - `experiments validate-plan`, `run-plan`, `resume`, `watch`, `events`, and
   `doctor` for sequential, file-backed experiment suites.
+- `experiments summarize` for compact suite-level read models over local
+  experiment artifacts.
+- `experiments prepare-instrument-matrix` for creating solo bot/strategy cases
+  and a plan for truthful spot-proxy versus derivative comparisons.
 
 The experiment layer is intentionally file-backed and small. It proves the
 automation seam without introducing a separate experiment database, scheduler,
@@ -165,16 +201,25 @@ or variant generation system.
 `qt mcp serve` starts the stdio MCP server for agent hosts. The server exposes:
 
 - read-only `quanttrad://` resources for health, bots, strategies, providers,
-  reports, report sections, and local experiment state/events,
+  indicators, reports, report sections, and local experiment state/events,
 - read tools for the same API-backed inspection routes,
+- indicator config validation, runtime validation, and data coverage tools that
+  delegate to the matching `qt indicators ...` and `qt data coverage` commands,
+- instrument tools that delegate to the matching `qt instruments ...` commands,
 - experiment tools that delegate to `qt experiments ...`,
 - controlled mutation tools for starting/stopping runs, updating bot backtest
-  windows, setting bot strategy variants, and creating/updating strategy
-  variants.
+  windows, setting bot strategy variants, creating/updating strategy variants,
+  and creating manifest-backed indicator instances.
 
 Run-starting and write tools require explicit confirmation. Tools with useful
 previews default to planned mutations and require both `apply=true` and
 `confirm=true` before calling backend write routes.
+
+Indicator creation follows that same preview-first contract. MCP can validate
+and create configured instances from registered indicator types; it does not
+author or load new Python indicator implementations. Runtime validation uses
+the backend indicator engine timeline and checks every declared output on every
+bar before summarizing readiness.
 
 ## Plan-Based Experiment Contracts
 
@@ -186,10 +231,12 @@ The sequential suite contracts are artifact-reference based:
 - `experiment_event.v1`
 - `pass_gate_result.v1`
 - `comparison_result_ref.v1`
+- `experiment_summary.v1`
 - `notification_policy.v1`
 - `experiment_data_preflight.v1`
 - `bot_data_preflight.v1`
 - `candle_coverage_preflight.v1`
+- `instrument_matrix_experiment_request.v1`
 
 These contracts intentionally avoid embedding full report DTOs. Reports,
 research summaries, materialized `RunReportDTO v2`, and comparison semantics are
@@ -215,8 +262,12 @@ returns unsupported/failed rather than inventing a metric.
   operate workflows through `qt`.
 - MCP clients operate through `qt mcp serve`; MCP must stay a protocol adapter
   over `qt` and backend contracts.
-- Plan-based experiments must stay sequential until real pressure justifies
-  concurrency.
+- Indicator research workflows must treat backend indicator config validation
+  and runtime validation as the truth surface for agent-visible indicator
+  readiness.
+- Plan-based experiments default to sequential execution. Bounded run-step
+  parallelism belongs in the runner's `run_policy`, not in MCP-only workflow
+  behavior.
 - Data preflight warnings must be surfaced with provider/symbol/window context
   before a run starts.
 - Pass gate evaluation must be deterministic and explain which source fields
@@ -230,6 +281,6 @@ returns unsupported/failed rather than inventing a metric.
 
 - CLI authentication is not modeled because the local backend currently has no
   auth boundary.
-- Detached/background orchestration is intentionally deferred until foreground
-  plan execution proves insufficient.
+- Detached/background orchestration and bounded parallel run execution are
+  deferred until foreground plan execution proves insufficient.
 - Email/SMS notification sinks are deferred; the current sinks are console/file.
