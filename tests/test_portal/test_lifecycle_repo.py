@@ -70,6 +70,7 @@ def test_record_bot_run_lifecycle_checkpoint_persists_canonical_rows_and_returns
     assert captured["context"]["pipeline_stage"] == "botlens_canonical_lifecycle_append"
     assert captured["context"]["message_kind"] == "botlens_lifecycle_event"
     assert captured["context"]["source_reason"] == "producer"
+    assert captured["rows"][0]["seq"] == 1
     assert [row["payload"]["event_name"] for row in captured["rows"]] == ["RUN_PHASE_REPORTED"]
 
 

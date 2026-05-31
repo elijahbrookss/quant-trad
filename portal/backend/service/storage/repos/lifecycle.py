@@ -410,6 +410,7 @@ def record_bot_run_lifecycle_checkpoint(
     source_seq = int(payload.get("seq") or payload.get("run_seq") or 0)
     if source_seq < 0:
         source_seq = 0
+    projection_seq = source_seq if source_seq > 0 else 1
 
     _run_ready_requires_prior_lifecycle(run_id=run_id, phase=phase, status=status)
 
@@ -443,7 +444,7 @@ def record_bot_run_lifecycle_checkpoint(
         symbol_key=None,
         payload=canonical_payload,
         events=tuple(events),
-        seq=int(source_seq),
+        seq=int(projection_seq),
     )
     rows = runtime_event_rows_from_batch(batch=batch)
     if rows:
