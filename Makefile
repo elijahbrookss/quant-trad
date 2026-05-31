@@ -311,7 +311,7 @@ mcp-register-codex: venv ## Register the Quant-Trad MCP stdio server with Codex 
 	forensic-run-seq-gaps forensic-run-write-latency forensic-observability-storage-budget \
 	forensic-botlens-check forensic-wallet-diagnostics forensic-golden-compare \
 	test-reporting test-reporting-api test-botlens test-runtime validate-docs frontend-test frontend-build frontend-check \
-	git-status git-diff git-check check commit
+	git-status git-diff git-check check
 
 status: ## Show service status without docker compose ps sandbox friction
 	@echo "Core stack:"
@@ -449,20 +449,6 @@ git-check: ## Show status and run git diff whitespace checks
 	@git diff --check
 
 check: git-check validate-docs test-reporting test-botlens frontend-check ## Run standard developer/audit checks
-
-commit: ## Stage all repo changes and commit (msg="area: core change")
-	@set -euo pipefail; \
-	msg="$(msg)"; \
-	if [ -z "$$msg" ]; then echo '✗ msg="area: core change" is required'; exit 1; fi; \
-	if [[ "$$msg" == *$$'\n'* || "$$msg" == *$$'\r'* ]]; then echo "✗ commit message must be one line"; exit 1; fi; \
-	if [[ ! "$$msg" =~ ^[^:\ ]([^:]*)?:\ .+ ]]; then echo '✗ commit message must match "<area>: <core change>"'; exit 1; fi; \
-	if [ "$${#msg}" -gt 72 ]; then echo "✗ commit message is $${#msg} chars; keep it at 72 or less"; exit 1; fi; \
-	git diff --check; \
-	git add -A; \
-	if git diff --cached --quiet; then echo "✗ no changes staged for commit"; exit 1; fi; \
-	git diff --cached --check; \
-	git commit -m "$$msg"; \
-	echo "✓ commit $$(git rev-parse --short HEAD)"
 
 ## =============================== QUALITY ================================ ##
 .PHONY: test clean
