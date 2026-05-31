@@ -119,7 +119,10 @@ def test_typed_outputs_with_prefs_marks_only_signal_outputs() -> None:
     assert normalized == {"balance_breakout": {"enabled": False}}
     assert by_name["balance_breakout"]["enabled"] is False
     assert by_name["value_area_metrics"]["type"] == "metric"
+    assert by_name["confirmed_breakout_metrics"]["type"] == "metric"
+    assert "distance_from_reference_pct" in by_name["confirmed_breakout_metrics"]["fields"]
     assert "enabled" not in by_name["value_area_metrics"]
+    assert "enabled" not in by_name["confirmed_breakout_metrics"]
 
 
 def test_delete_is_blocked_when_other_indicators_depend_on_target() -> None:

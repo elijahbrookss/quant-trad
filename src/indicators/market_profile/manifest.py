@@ -179,6 +179,20 @@ MANIFEST = IndicatorManifest(
             fields=("poc", "vah", "val", "value_area_width"),
         ),
         IndicatorOutput(
+            name="confirmed_breakout_metrics",
+            type="metric",
+            label="Confirmed Breakout Metrics",
+            fields=(
+                "distance_from_reference",
+                "distance_from_reference_abs",
+                "distance_from_reference_pct",
+                "trigger_price",
+                "reference_price",
+                "outside_bars_observed",
+                "confirmation_bars_required",
+            ),
+        ),
+        IndicatorOutput(
             name="value_location",
             type="context",
             label="Value Location",

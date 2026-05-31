@@ -113,6 +113,7 @@ def test_market_profile_runtime_indicator_emits_signal_output_without_overlay_ma
     assert event["known_at"] == int(candles[-1].time.timestamp())
     assert event["metadata"]["trigger_price"] == 104.0
     assert event["metadata"]["distance_from_reference"] == 3.0
+    assert outputs["confirmed_breakout_metrics"].ready is False
     reference = event["metadata"]["reference"]
     assert reference["kind"] == "price_level"
     assert reference["family"] == "value_area"
@@ -126,6 +127,89 @@ def test_market_profile_runtime_indicator_emits_signal_output_without_overlay_ma
     assert "value_area" in overlays
     assert set(overlays.keys()) == {"value_area"}
     assert overlays["value_area"].value["payload"]["markers"] == []
+
+
+def test_market_profile_runtime_indicator_exposes_confirmed_breakout_metrics():
+    indicator = TypedMarketProfileIndicator(
+        indicator_id="mp-1",
+        version="v1",
+        params={"bin_size": 1.0, "price_precision": 2},
+        source_facts={
+            "symbol": "ES",
+            "profiles": [
+                {
+                    "start": 1735689600,
+                    "end": 1735696800,
+                    "VAH": 101.0,
+                    "VAL": 99.0,
+                    "POC": 100.0,
+                    "session_count": 1,
+                    "precision": 2,
+                    "formed_at": 1735696800,
+                    "known_at": 1735696800,
+                }
+            ],
+            "profile_params": {
+                "use_merged_value_areas": False,
+                "extend_value_area_to_chart_end": True,
+            },
+        },
+    )
+
+    candles = [
+        Candle(
+            time=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=1.0,
+        ),
+        Candle(
+            time=datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=1.0,
+        ),
+        Candle(
+            time=datetime(2026, 1, 1, 2, 0, tzinfo=timezone.utc),
+            open=103.0,
+            high=104.0,
+            low=103.0,
+            close=104.0,
+            volume=1.0,
+        ),
+        Candle(
+            time=datetime(2026, 1, 1, 3, 0, tzinfo=timezone.utc),
+            open=104.0,
+            high=104.2,
+            low=103.0,
+            close=103.5,
+            volume=1.0,
+        ),
+    ]
+
+    for candle in candles:
+        indicator.apply_bar(candle, {})
+
+    outputs = indicator.snapshot()
+    confirmed = outputs["confirmed_balance_breakout"].value["events"][0]
+    metrics = outputs["confirmed_breakout_metrics"]
+
+    assert confirmed["key"] == "confirmed_balance_breakout_long"
+    assert metrics.ready is True
+    assert metrics.bar_time == candles[-1].time
+    assert metrics.value == {
+        "distance_from_reference": 2.5,
+        "distance_from_reference_abs": 2.5,
+        "distance_from_reference_pct": 2.5 / 101.0,
+        "trigger_price": 103.5,
+        "reference_price": 101.0,
+        "outside_bars_observed": 2.0,
+        "confirmation_bars_required": 2.0,
+    }
 
 
 def test_market_profile_runtime_indicator_waits_until_projected_strategy_bar_close() -> None:
