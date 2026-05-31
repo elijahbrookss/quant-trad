@@ -10,7 +10,7 @@ This page covers a local stack run. It does not replace the platform contracts o
 
 ## Local Secrets
 
-Create the local secrets file:
+Create the one local operator env file:
 
 ```bash
 cp secrets.env.example secrets.env
@@ -22,6 +22,7 @@ Fill the local values required by the stack:
 POSTGRES_DB=quanttrad
 POSTGRES_USER=quanttrad
 POSTGRES_PASSWORD=<local-db-password>
+PG_DSN=postgresql+psycopg2://quanttrad:<local-db-password>@localhost:15432/quanttrad
 PGADMIN_DEFAULT_PASSWORD=<local-pgadmin-password>
 ```
 
@@ -37,8 +38,9 @@ Generate one with:
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Provider credentials and operator overrides belong in `secrets.env` or the
-encrypted provider credential store, not in tracked defaults.
+Provider credentials belong in the encrypted provider credential store, not in
+tracked defaults. `secrets.env` should hold only local database values,
+credential-store encryption, and deliberate operator overrides.
 
 ## Start Core Services
 
@@ -88,6 +90,7 @@ COINBASE_API_SECRET
 ## Useful Commands
 
 ```bash
+make deps
 make help
 make ps
 make logs SERVICE=backend
@@ -102,11 +105,17 @@ Use `qt` for normal bot, provider, report, and experiment workflows. Use
 
 ## Configuration Notes
 
-- `.env`: tracked local defaults for Python tooling and tests.
-- `.env.test`: Docker test defaults.
-- `secrets.env`: private credentials and operator overrides.
-- `portal/frontend/.env`: frontend Vite defaults.
+- `secrets.env`: the one local operator env file.
+- `secrets.env.example`: the critical-path template for local DB plus Coinbase credential storage.
+- `.env` / `.env.test`: ignored scratch only; do not rely on them for normal operation.
+- `portal/frontend/.env`: optional ignored Vite override for frontend-only local debugging.
+- `portal/frontend/.env.example`: optional frontend override examples; Docker compose injects the normal frontend values.
 - `PG_DSN`: the single runtime persistence DSN.
+
+The root `pyproject.toml` owns the monolithic Python package surface. `make deps`
+uses `uv pip` when `uv` is installed and falls back to `pip`; Docker images also
+use pinned `uv` for faster dependency layers. The project is not adopting a
+`uv.lock` workflow yet.
 
 ## Docs Sync
 
