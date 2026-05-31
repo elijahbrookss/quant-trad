@@ -25,4 +25,3 @@ ollama
 pyjwt
 cryptography
 coinbase-advanced-py
-coinbase-advanced-py

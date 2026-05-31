@@ -10,6 +10,7 @@ VENV        ?= .venv
 VENV_PYTHON := $(VENV)/bin/python
 PYTHON      := PYTHONPATH=$(PYTHONPATH) $(VENV_PYTHON)
 PIP         := $(VENV)/bin/pip
+UV          ?= uv
 REQ         ?= requirements.txt
 DEV_REQ     ?= requirements-dev.txt
 REQS_HASH   := $(VENV)/.reqs.sha256
@@ -169,13 +170,24 @@ mermaid-svgs: ## Render .mmd files to sibling .svg files (MERMAID_SRC=path)
 deps: _ensure_python _deps_hash ## Install Python dependencies
 	@if [ ! -x "$(VENV_PYTHON)" ]; then \
 		echo "► Creating venv at $(VENV)"; \
-		$(PY) -m venv $(VENV); \
+		if command -v "$(UV)" >/dev/null 2>&1; then \
+			$(UV) venv --python "$(PY)" "$(VENV)"; \
+		else \
+			$(PY) -m venv $(VENV); \
+		fi; \
 	fi
 	@if [ "$$(cat $(REQS_HASH).new)" != "$$(cat $(REQS_HASH) 2>/dev/null || echo _none_)" ]; then \
 		echo "► Installing Python deps..."; \
-		$(PIP) install --upgrade pip setuptools wheel; \
-		[ -f "$(REQ)" ] && $(PIP) install -r $(REQ) || true; \
-		[ -f "$(DEV_REQ)" ] && $(PIP) install -r $(DEV_REQ) || true; \
+		if command -v "$(UV)" >/dev/null 2>&1; then \
+			[ -f "$(REQ)" ] && $(UV) pip install --python "$(VENV_PYTHON)" -r "$(REQ)" || true; \
+			[ -f "$(DEV_REQ)" ] && $(UV) pip install --python "$(VENV_PYTHON)" -r "$(DEV_REQ)" || true; \
+			$(UV) pip install --python "$(VENV_PYTHON)" -e .; \
+		else \
+			$(PIP) install --upgrade pip setuptools wheel; \
+			[ -f "$(REQ)" ] && $(PIP) install -r $(REQ) || true; \
+			[ -f "$(DEV_REQ)" ] && $(PIP) install -r $(DEV_REQ) || true; \
+			$(PIP) install -e .; \
+		fi; \
 		mv -f $(REQS_HASH).new $(REQS_HASH); \
 	else \
 		echo "✓ Dependencies unchanged"; \
@@ -185,7 +197,7 @@ deps: _ensure_python _deps_hash ## Install Python dependencies
 venv: deps ## Ensure virtualenv and Python dependencies
 
 _deps_hash:
-	@{ cat $(REQ) 2>/dev/null || true; echo; cat $(DEV_REQ) 2>/dev/null || true; } \
+	@{ cat pyproject.toml 2>/dev/null || true; echo; cat $(REQ) 2>/dev/null || true; echo; cat $(DEV_REQ) 2>/dev/null || true; } \
 	| sha256sum | awk '{print $$1}' > $(REQS_HASH).new
 
 _ensure_python:

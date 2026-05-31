@@ -78,8 +78,7 @@ Workflow jobs should continue to call the suite script and avoid duplicating pyt
 To mimic the current GitHub job locally:
 
 1. Install dependencies:
-   - `python -m pip install --upgrade pip`
-   - `pip install -r requirements.txt`
+   - `make deps`
 2. Run targeted suites exactly as CI does:
    - `./scripts/ci/run_test_suite.sh pr`
 
@@ -118,7 +117,7 @@ It proves the selected fast suites passed on a clean runner host. That is still 
 Before attempting local CI reproduction, run:
 
 - `bash -n scripts/ci/run_test_suite.sh`
-- `python -m pip --version`
+- `make deps`
 
 Before optional container reproduction, also run:
 

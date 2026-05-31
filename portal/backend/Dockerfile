@@ -7,12 +7,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+COPY --from=ghcr.io/astral-sh/uv:0.11.17 /uv /uvx /bin/
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential libpq-dev docker.io \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -r /tmp/requirements.txt
 
 COPY config/ /app/config
 COPY src/ /app/src
