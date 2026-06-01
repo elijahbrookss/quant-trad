@@ -29,6 +29,8 @@ from .botlens_state import (
 
 logger = logging.getLogger(__name__)
 _OBSERVER = BackendObserver(component="botlens_symbol_projector", event_logger=logger)
+_SYMBOL_FACT_DRAIN_MAX_ENVELOPES = 64
+_SYMBOL_FACT_DRAIN_MAX_MS = 8.0
 
 
 @dataclass(frozen=True)
@@ -180,24 +182,9 @@ class SymbolProjector:
 
                 if event_task in done:
                     try:
-                        envelope = event_task.result()
-                        batch = envelope.payload if isinstance(envelope, QueueEnvelope) else envelope
-                        queue_wait_ms = (
-                            max((time.monotonic() - envelope.enqueued_monotonic) * 1000.0, 0.0)
-                            if isinstance(envelope, QueueEnvelope)
-                            else 0.0
-                        )
-                        _OBSERVER.observe(
-                            "symbol_fact_queue_wait_ms",
-                            queue_wait_ms,
-                            bot_id=self._bot_id,
-                            run_id=self._run_id,
-                            series_key=self._symbol_key,
-                            queue_name="symbol_fact_queue",
-                            message_kind="facts",
-                        )
-                        self._mailbox._emit_fact_gauges()
-                        await self._apply_batch(batch)
+                        envelopes = self._drain_ready_fact_envelopes(event_task.result())
+                        self._observe_fact_drain(envelopes)
+                        await self._apply_fact_envelopes(envelopes)
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
@@ -304,6 +291,91 @@ class SymbolProjector:
         await self._apply_projected_batch(batch, message_kind="bootstrap")
 
     async def _apply_batch(self, batch: ProjectionBatch) -> None:
+        await self._apply_fact_batches((batch,))
+
+    async def _apply_facts(self, batch: ProjectionBatch) -> None:
+        await self._apply_batch(batch)
+
+    def _drain_ready_fact_envelopes(self, first: Any) -> Tuple[Any, ...]:
+        envelopes = [first]
+        drain_started = time.perf_counter()
+        while len(envelopes) < _SYMBOL_FACT_DRAIN_MAX_ENVELOPES:
+            elapsed_ms = max((time.perf_counter() - drain_started) * 1000.0, 0.0)
+            if elapsed_ms >= _SYMBOL_FACT_DRAIN_MAX_MS:
+                break
+            try:
+                envelopes.append(self._mailbox.event_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return tuple(envelopes)
+
+    def _observe_fact_drain(self, envelopes: Tuple[Any, ...]) -> None:
+        oldest_wait_ms = 0.0
+        event_count = 0
+        for envelope in envelopes:
+            batch = envelope.payload if isinstance(envelope, QueueEnvelope) else envelope
+            event_count += len(getattr(batch, "events", ()) or ())
+            queue_wait_ms = (
+                max((time.monotonic() - envelope.enqueued_monotonic) * 1000.0, 0.0)
+                if isinstance(envelope, QueueEnvelope)
+                else 0.0
+            )
+            oldest_wait_ms = max(oldest_wait_ms, queue_wait_ms)
+            _OBSERVER.observe(
+                "symbol_fact_queue_wait_ms",
+                queue_wait_ms,
+                bot_id=self._bot_id,
+                run_id=self._run_id,
+                series_key=self._symbol_key,
+                queue_name="symbol_fact_queue",
+                message_kind="facts",
+            )
+        _OBSERVER.observe(
+            "symbol_fact_drain_envelope_count",
+            float(len(envelopes)),
+            bot_id=self._bot_id,
+            run_id=self._run_id,
+            series_key=self._symbol_key,
+            queue_name="symbol_fact_queue",
+            message_kind="facts",
+        )
+        _OBSERVER.observe(
+            "symbol_fact_drain_event_count",
+            float(event_count),
+            bot_id=self._bot_id,
+            run_id=self._run_id,
+            series_key=self._symbol_key,
+            queue_name="symbol_fact_queue",
+            message_kind="facts",
+        )
+        if len(envelopes) > 1:
+            _OBSERVER.observe(
+                "symbol_fact_drain_oldest_wait_ms",
+                oldest_wait_ms,
+                bot_id=self._bot_id,
+                run_id=self._run_id,
+                series_key=self._symbol_key,
+                queue_name="symbol_fact_queue",
+                message_kind="facts",
+            )
+        self._mailbox._emit_fact_gauges()
+
+    async def _apply_fact_envelopes(self, envelopes: Tuple[Any, ...]) -> None:
+        batches = tuple(
+            envelope.payload if isinstance(envelope, QueueEnvelope) else envelope
+            for envelope in envelopes
+            if envelope is not None
+        )
+        await self._apply_fact_batches(batches)
+
+    async def _apply_fact_batches(self, batches: Tuple[ProjectionBatch, ...]) -> None:
+        accepted: list[ProjectionBatch] = []
+        for batch in batches:
+            if self._accept_fact_batch(batch):
+                accepted.append(batch)
+        await self._apply_projected_batches(tuple(accepted), message_kind="facts")
+
+    def _accept_fact_batch(self, batch: ProjectionBatch) -> bool:
         if self._current_session_id and batch.bridge_session_id and batch.bridge_session_id != self._current_session_id:
             _OBSERVER.increment(
                 "symbol_projector_stale_session_reject_total",
@@ -312,34 +384,50 @@ class SymbolProjector:
                 series_key=self._symbol_key,
                 message_kind="facts",
             )
-            return
+            return False
         if not self._current_session_id and batch.bridge_session_id:
             self._current_session_id = batch.bridge_session_id
-        await self._apply_projected_batch(batch, message_kind="facts")
-
-    async def _apply_facts(self, batch: ProjectionBatch) -> None:
-        await self._apply_batch(batch)
+        return True
 
     async def _apply_projected_batch(self, batch: ProjectionBatch, *, message_kind: str) -> None:
+        await self._apply_projected_batches((batch,), message_kind=message_kind)
+
+    async def _apply_projected_batches(self, batches: Tuple[ProjectionBatch, ...], *, message_kind: str) -> None:
         started = time.perf_counter()
-        if not batch.events:
+        applied_batches = 0
+        applied_events = 0
+        collected_deltas: list[SymbolConcernDelta] = []
+        latest_batch: ProjectionBatch | None = None
+        runtime_payload: dict[str, Any] = {}
+        for batch in batches:
+            if not batch.events:
+                continue
+            events = tuple(
+                event for event in batch.events
+                if str(getattr(event, "event_id", "") or "").strip() not in self._seen_event_ids
+            )
+            if not events:
+                continue
+            projected_batch = replace(batch, events=events)
+            next_state, deltas = apply_symbol_batch(self._state, batch=projected_batch)
+            self._state = next_state
+            self._seen_event_ids.update(
+                str(getattr(event, "event_id", "") or "").strip()
+                for event in events
+                if str(getattr(event, "event_id", "") or "").strip()
+            )
+            applied_batches += 1
+            applied_events += len(events)
+            collected_deltas.extend(deltas)
+            latest_batch = projected_batch
+            next_runtime_payload = self._runtime_payload_from_batch(projected_batch)
+            if next_runtime_payload:
+                runtime_payload = next_runtime_payload
+        if latest_batch is None:
             return
-        events = tuple(
-            event for event in batch.events
-            if str(getattr(event, "event_id", "") or "").strip() not in self._seen_event_ids
-        )
-        if not events:
-            return
-        batch = replace(batch, events=events)
-        next_state, deltas = apply_symbol_batch(self._state, batch=batch)
-        self._state = next_state
-        self._seen_event_ids.update(
-            str(getattr(event, "event_id", "") or "").strip()
-            for event in events
-            if str(getattr(event, "event_id", "") or "").strip()
-        )
         _OBSERVER.increment(
             f"symbol_projector_{'bootstrap' if message_kind == 'bootstrap' else 'fact'}_apply_total",
+            value=float(applied_batches),
             bot_id=self._bot_id,
             run_id=self._run_id,
             series_key=self._symbol_key,
@@ -347,14 +435,18 @@ class SymbolProjector:
         )
         _OBSERVER.observe(
             "symbol_projector_batch_size",
-            float(len(batch.events)),
+            float(applied_events),
             bot_id=self._bot_id,
             run_id=self._run_id,
             series_key=self._symbol_key,
             message_kind=message_kind,
         )
-        await self._emit_run_notification(batch=batch, deltas=deltas)
-        await self._emit_deltas(deltas=deltas)
+        await self._emit_run_notification(
+            batch=latest_batch,
+            deltas=tuple(collected_deltas),
+            runtime_payload=runtime_payload,
+        )
+        await self._emit_deltas(deltas=tuple(collected_deltas))
         elapsed_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
         _OBSERVER.observe(
             "symbol_projector_apply_ms",
@@ -366,7 +458,7 @@ class SymbolProjector:
         )
         _OBSERVER.observe(
             "symbol_projector_delta_count",
-            float(len(deltas)),
+            float(len(collected_deltas)),
             bot_id=self._bot_id,
             run_id=self._run_id,
             series_key=self._symbol_key,
@@ -375,7 +467,7 @@ class SymbolProjector:
         _OBSERVER.maybe_gauge(
             key=f"symbol_projector_projected_seq:{self._run_id}:{self._symbol_key}",
             name="symbol_projector_projected_seq",
-            value=float(max(int(self._state.seq), int(batch.seq or 0))),
+            value=float(max(int(self._state.seq), int(latest_batch.seq or 0))),
             bot_id=self._bot_id,
             run_id=self._run_id,
             series_key=self._symbol_key,
@@ -387,6 +479,7 @@ class SymbolProjector:
         *,
         batch: ProjectionBatch,
         deltas: Tuple[SymbolConcernDelta, ...],
+        runtime_payload: dict[str, Any] | None = None,
     ) -> None:
         trade_upserts: list[dict[str, Any]] = []
         trade_removals: list[str] = []
@@ -404,8 +497,12 @@ class SymbolProjector:
                 if str(entry).strip()
             )
 
-        runtime_payload = self._runtime_payload_from_batch(batch)
-        if not deltas and not runtime_payload:
+        effective_runtime_payload = (
+            dict(runtime_payload)
+            if isinstance(runtime_payload, Mapping)
+            else self._runtime_payload_from_batch(batch)
+        )
+        if not deltas and not effective_runtime_payload:
             return
 
         notification = SymbolSummaryNotification(
@@ -418,7 +515,7 @@ class SymbolProjector:
             symbol_summary=self._symbol_summary_payload(),
             trade_upserts=tuple(trade_upserts),
             trade_removals=tuple(trade_removals),
-            runtime=runtime_payload,
+            runtime=effective_runtime_payload,
         )
         try:
             if _coalesce_pending_run_notification(self._run_notifications, notification):

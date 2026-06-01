@@ -74,7 +74,7 @@ class _FakeWatchdog:
     def unregister_bot(self, _bot_id: str):
         return None
 
-    def scan_stale_heartbeats(self):
+    def scan_expired_run_leases(self):
         return []
 
     def verify_container_ownership(self):

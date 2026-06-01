@@ -109,11 +109,7 @@ const TRACE_CANDIDATES = [
   { path: ['runtime', 'wallet_curve'], source: 'wallet', label: 'Wallet', valueKeys: ['value', 'balance', 'wallet'] },
   { path: ['runtime', 'stats', 'equity_curve'], source: 'equity', label: 'Equity', valueKeys: ['value', 'equity'] },
   { path: ['runtime', 'equity_curve'], source: 'equity', label: 'Equity', valueKeys: ['value', 'equity'] },
-  { path: ['last_run_artifact', 'charts', 'equity_curve'], source: 'equity', label: 'Equity', valueKeys: ['value', 'equity'] },
-  { path: ['last_run_artifact', 'equity_curve'], source: 'equity', label: 'Equity', valueKeys: ['value', 'equity'] },
   { path: ['runtime', 'net_pnl_series'], source: 'net_pnl', label: 'Net P&L', valueKeys: ['value', 'net_pnl', 'pnl'] },
-  { path: ['last_run_artifact', 'charts', 'net_pnl_curve'], source: 'net_pnl', label: 'Net P&L', valueKeys: ['value', 'net_pnl', 'pnl'] },
-  { path: ['last_run_artifact', 'net_pnl_curve'], source: 'net_pnl', label: 'Net P&L', valueKeys: ['value', 'net_pnl', 'pnl'] },
 ]
 
 export function getBotPerformanceTrace(bot, { statusKey = 'stopped' } = {}) {
@@ -123,7 +119,7 @@ export function getBotPerformanceTrace(bot, { statusKey = 'stopped' } = {}) {
       return {
         ...trace,
         quoteCurrency:
-          String(bot?.runtime?.stats?.quote_currency || bot?.last_stats?.quote_currency || '').trim() || null,
+          String(bot?.runtime?.stats?.quote_currency || '').trim() || null,
       }
     }
   }

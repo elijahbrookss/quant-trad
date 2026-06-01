@@ -9,7 +9,6 @@ function buildBot(overrides = {}) {
     runtime: {
       stats: {},
     },
-    last_run_artifact: {},
     ...overrides,
   }
 }
@@ -37,27 +36,6 @@ test('uses runtime wallet balance trace when the fleet payload exposes it', () =
   assert.equal(trace.quoteCurrency, 'USD')
   assert.equal(trace.points.length, 3)
   assert.equal(trace.latestValue, 1008.25)
-})
-
-test('falls back to run artifact equity curve when runtime trace is absent', () => {
-  const trace = getBotPerformanceTrace(
-    buildBot({
-      last_run_artifact: {
-        charts: {
-          equity_curve: [
-            { time: '2026-04-06T12:00:00Z', value: 5000 },
-            { time: '2026-04-06T12:03:00Z', value: 5088 },
-          ],
-        },
-      },
-    }),
-    { statusKey: 'completed' },
-  )
-
-  assert.equal(trace.kind, 'series')
-  assert.equal(trace.source, 'equity')
-  assert.equal(trace.label, 'Equity')
-  assert.equal(trace.latestValue, 5088)
 })
 
 test('uses compact runtime stats equity curve when fleet payload exposes it', () => {

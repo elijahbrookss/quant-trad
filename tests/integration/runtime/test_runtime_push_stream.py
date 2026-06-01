@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 from queue import Empty
 from types import SimpleNamespace
@@ -21,7 +22,11 @@ from engines.bot_runtime.core.runtime_events import (
 )
 from engines.bot_runtime.runtime.mixins.runtime_events import RuntimeEventsMixin
 from engines.bot_runtime.runtime.mixins.runtime_push_stream import RuntimePushStreamMixin
-from engines.bot_runtime.runtime.components.canonical_facts import CanonicalFactAppender, LiveFactsBroadcastConsumer
+from engines.bot_runtime.runtime.components.canonical_facts import (
+    CanonicalFactAppender,
+    CanonicalFactProjectionDispatcher,
+    LiveFactsBroadcastConsumer,
+)
 from portal.backend.service.bots.botlens_domain_events import (
     build_botlens_domain_events_from_fact_batch,
     serialize_botlens_domain_event,
@@ -1555,6 +1560,58 @@ def test_push_update_keeps_overlay_facts_off_the_first_live_bar_and_emits_after_
 
     second_fact_types = [fact["fact_type"] for fact in runtime.broadcast_payloads[1]["facts"]]
     assert "overlay_ops_emitted" in second_fact_types
+
+
+def test_push_update_queues_botlens_projection_dispatch_off_bar_path() -> None:
+    runtime = _PushRuntime()
+    broadcast_started = threading.Event()
+    broadcast_release = threading.Event()
+
+    def _blocking_broadcast(event, payload=None):
+        broadcast_started.set()
+        if not broadcast_release.wait(timeout=2.0):
+            raise RuntimeError("test broadcast was not released")
+        runtime.broadcast_payloads.append({"transport_event": event, **dict(payload or {})})
+        return (1, 0)
+
+    runtime._canonical_fact_appender = CanonicalFactAppender(
+        allocate_seq=runtime._allocate_test_canonical_seq,
+        append_batch=lambda **_kwargs: {"inserted_rows": 1},
+        projection_dispatcher=CanonicalFactProjectionDispatcher(
+            consumers=(LiveFactsBroadcastConsumer(_blocking_broadcast),),
+            queue_max=4,
+            flush_interval_s=0.001,
+            drain_timeout_s=2.0,
+        ),
+    )
+    series = SimpleNamespace(
+        instrument={"id": "instrument-bip"},
+        timeframe="1h",
+        strategy_id="strategy-1",
+        symbol="BIP-20DEC30-CDE",
+        datasource="COINBASE",
+        exchange="coinbase_direct",
+        overlays=[],
+        trade_overlay=None,
+        candles=[{"time": 1}, {"time": 2}],
+        risk_engine=SimpleNamespace(trade_revision=0, serialise_trades=lambda: [], stats=lambda: {}),
+    )
+    runtime._series = [series]
+    candle = SimpleNamespace(
+        to_dict=lambda: {"time": 2, "open": 1.5, "high": 2.5, "low": 1.0, "close": 2.0},
+    )
+
+    result = runtime._push_update("bar", series=series, candle=candle)
+
+    assert result["subscriber_count"] == 1.0
+    assert result["dropped_messages"] == 0.0
+    assert broadcast_started.wait(timeout=1.0)
+    assert runtime.broadcast_payloads == []
+
+    broadcast_release.set()
+    runtime._canonical_fact_appender.flush(reason="test", shutdown=True, timeout_s=2.0)
+
+    assert runtime.broadcast_payloads[0]["transport_event"] == "facts"
 
 
 def test_push_update_defers_visual_overlay_refresh_until_refresh_interval() -> None:

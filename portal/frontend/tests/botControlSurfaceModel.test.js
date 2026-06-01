@@ -262,7 +262,7 @@ test('completed bot rows keep completion timing in metadata instead of repeating
         reason: 'run_completed',
         updated_at: '2026-04-06T12:04:55Z',
       },
-      last_run_artifact: {
+      run: {
         started_at: '2026-04-06T11:59:55Z',
         ended_at: '2026-04-06T12:04:55Z',
       },

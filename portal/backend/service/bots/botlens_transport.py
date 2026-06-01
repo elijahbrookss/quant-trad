@@ -70,6 +70,8 @@ def _runtime_payload(health_state: Mapping[str, Any] | None) -> Dict[str, Any]:
     }
     if warning_types:
         payload["warning_types"] = warning_types
+    if isinstance(source.get("warning_summary"), Mapping) and source.get("warning_summary"):
+        payload["warning_summary"] = dict(source.get("warning_summary"))
     highest_warning_severity = str(source.get("highest_warning_severity") or "").strip().lower() or None
     if highest_warning_severity:
         payload["highest_warning_severity"] = highest_warning_severity
@@ -94,6 +96,18 @@ def _runtime_payload(health_state: Mapping[str, Any] | None) -> Dict[str, Any]:
             dict(entry) for entry in source.get("recent_transitions", []) if isinstance(entry, Mapping)
         ]
     return payload
+
+
+def _symbol_warning_summary_payload(
+    *,
+    health_state: Mapping[str, Any] | None,
+    symbol_key: str,
+) -> Dict[str, Any]:
+    health = health_state if isinstance(health_state, Mapping) else {}
+    summary = health.get("warning_summary") if isinstance(health.get("warning_summary"), Mapping) else {}
+    by_symbol = summary.get("by_symbol") if isinstance(summary.get("by_symbol"), Mapping) else {}
+    symbol_summary = by_symbol.get(symbol_key) if isinstance(by_symbol.get(symbol_key), Mapping) else {}
+    return dict(symbol_summary) if symbol_summary else {"symbol_key": symbol_key, "count": 0, "event_count": 0}
 
 
 def _symbol_identity_payload(state: SymbolProjectionSnapshot) -> Dict[str, Any]:
@@ -182,6 +196,7 @@ def _run_catalog_entry_payload(
     timeframe = str(identity.get("timeframe") or "").strip().lower()
     open_trade_list = [dict(entry) for entry in open_trades if isinstance(entry, Mapping)]
     readiness = dict(identity.get("readiness") or {}) if isinstance(identity.get("readiness"), Mapping) else {}
+    warning_summary = _symbol_warning_summary_payload(health_state=health_state, symbol_key=symbol_key)
     return {
         "symbol_key": symbol_key,
         "identity": {
@@ -206,6 +221,7 @@ def _run_catalog_entry_payload(
             "count": len(open_trade_list),
         },
         "stats": dict(identity.get("stats") or {}) if isinstance(identity.get("stats"), Mapping) else {},
+        "warning_summary": warning_summary,
         "readiness": {
             "catalog_discovered": True,
             "snapshot_ready": bool(readiness.get("snapshot_ready")),
@@ -226,6 +242,7 @@ def _live_symbol_summary_payload(
     timeframe = str(identity.get("timeframe") or "").strip().lower()
     open_trade_list = [dict(entry) for entry in open_trades if isinstance(entry, Mapping)]
     readiness = dict(identity.get("readiness") or {}) if isinstance(identity.get("readiness"), Mapping) else {}
+    warning_summary = _symbol_warning_summary_payload(health_state=health_state, symbol_key=symbol_key)
     return {
         "symbol_key": symbol_key,
         "instrument_id": identity.get("instrument_id"),
@@ -244,6 +261,7 @@ def _live_symbol_summary_payload(
         "last_trade_at": identity.get("last_trade_at"),
         "last_activity_at": identity.get("last_activity_at"),
         "stats": dict(identity.get("stats") or {}) if isinstance(identity.get("stats"), Mapping) else {},
+        "warning_summary": warning_summary,
         "readiness": {
             "catalog_discovered": True,
             "snapshot_ready": bool(readiness.get("snapshot_ready")),

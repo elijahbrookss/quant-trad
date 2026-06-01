@@ -14,10 +14,13 @@ from .strategy_loader import StrategyLoader
 from .startup_validation import validate_wallet_config as normalize_wallet_config
 from .execution_behavior import execution_behavior_from_bot, normalize_execution_behavior
 from .market_data_stream_policy import normalize_market_data_stream_policy
+from .startup_lifecycle import is_active_run_state
 from ..market import instrument_service
 from ..storage.storage import (
     delete_bot,
+    get_bot as get_bot_record,
     get_atm_template,
+    get_latest_bot_run_lifecycle,
     get_strategy_variant,
     list_strategy_variants,
     load_bots,
@@ -89,15 +92,15 @@ class BotConfigService:
         return bots
 
     def get_bot(self, bot_id: str) -> Dict[str, object]:
-        for bot in load_bots():
-            if bot["id"] == bot_id:
-                bot["execution_semantics"] = self.execution_semantics_from_bot(bot)
-                bot["market_data_stream_policy"] = normalize_market_data_stream_policy(
-                    bot.get("market_data_stream_policy")
-                    if isinstance(bot.get("market_data_stream_policy"), Mapping)
-                    else None
-                )
-                return bot
+        bot = get_bot_record(bot_id)
+        if bot:
+            bot["execution_semantics"] = self.execution_semantics_from_bot(bot)
+            bot["market_data_stream_policy"] = normalize_market_data_stream_policy(
+                bot.get("market_data_stream_policy")
+                if isinstance(bot.get("market_data_stream_policy"), Mapping)
+                else None
+            )
+            return bot
         raise KeyError(f"Bot {bot_id} was not found")
 
     def create_bot(self, name: str, **payload: object) -> Dict[str, object]:
@@ -169,8 +172,6 @@ class BotConfigService:
             "market_data_stream_policy": market_data_stream_policy,
             "snapshot_interval_ms": int(payload.get("snapshot_interval_ms") or 0),
             "bot_env": self.validate_bot_env(payload.get("bot_env") if isinstance(payload.get("bot_env"), Mapping) else {}),
-            "status": "idle",
-            "last_stats": {},
         }
         if int(record.get("snapshot_interval_ms") or 0) <= 0:
             raise ValueError("snapshot_interval_ms is required and must be > 0")
@@ -180,10 +181,10 @@ class BotConfigService:
         return record
 
     def update_bot(self, bot_id: str, **payload: object) -> Dict[str, object]:
-        bots = {bot["id"]: bot for bot in load_bots()}
-        if bot_id not in bots:
+        existing = get_bot_record(bot_id)
+        if not existing:
             raise KeyError(f"Bot {bot_id} was not found")
-        record = bots[bot_id]
+        record = dict(existing)
 
         if "strategy_id" in payload and payload["strategy_id"] is not None:
             record["strategy_id"] = self.validate_strategy_id(payload.get("strategy_id"))
@@ -249,7 +250,11 @@ class BotConfigService:
         if "bot_env" in payload:
             next_env = self.validate_bot_env(payload.get("bot_env") if isinstance(payload.get("bot_env"), Mapping) else {})
             current_env = dict(record.get("bot_env") or {})
-            if str(record.get("status") or "").lower() == "running" and next_env != current_env:
+            lifecycle = get_latest_bot_run_lifecycle(bot_id)
+            if is_active_run_state(
+                status=(lifecycle or {}).get("status"),
+                phase=(lifecycle or {}).get("phase"),
+            ) and next_env != current_env:
                 raise ValueError("Bot env settings changed. Stop and restart the bot to apply new env vars.")
             record["bot_env"] = next_env
         strategy_id = self.validate_strategy_id(record.get("strategy_id"))

@@ -33,7 +33,6 @@ class _FakeConfigService:
                 "wallet_config": {"balances": {"USDC": 100.0}},
                 "snapshot_interval_ms": 1000,
                 "run_type": "backtest",
-                "status": "idle",
             }
         ]
 
@@ -80,14 +79,10 @@ class _FakeStreamManager:
 
 class _FakeStorage:
     def __init__(self) -> None:
-        self.bots = []
         self.runs = {}
         self.lifecycle = {}
         self.leases = {}
         self.released_leases = []
-
-    def upsert_bot(self, payload):
-        self.bots.append(dict(payload))
 
     def upsert_bot_run(self, payload):
         row = dict(payload)
@@ -152,12 +147,9 @@ class _FakeStorage:
         return row
 
     def update_bot_runtime_status(self, *, bot_id, run_id, status, telemetry_degraded=False):
-        _ = telemetry_degraded
+        _ = bot_id, telemetry_degraded
         if str(run_id) in self.runs:
             self.runs[str(run_id)]["status"] = status
-        for bot in self.bots:
-            if str(bot.get("id")) == str(bot_id):
-                bot["status"] = status
 
 
 class _RecordingRunner:
@@ -186,7 +178,7 @@ class _FakeWatchdog:
     def unregister_bot(self, _bot_id: str):
         return None
 
-    def scan_stale_heartbeats(self):
+    def scan_expired_run_leases(self):
         return []
 
     def verify_container_ownership(self):
@@ -232,8 +224,6 @@ def test_start_bot_persists_startup_failed_when_runner_fails():
     assert storage.runs, "expected run row to exist before launch failure"
     run = next(iter(storage.runs.values()))
     assert run["status"] == "startup_failed"
-    assert storage.bots[-1]["status"] == "startup_failed"
-    assert storage.bots[-1]["runner_id"] is None
     assert storage.lifecycle["bot-1"][-1]["phase"] == "startup_failed"
     assert "container boot failed" in storage.lifecycle["bot-1"][-1]["message"]
     assert stream.messages[-1][0] == "bot"
@@ -277,9 +267,6 @@ def test_start_bot_same_request_id_returns_existing_run(monkeypatch):
 
 def test_start_observe_only_paper_run_uses_docker_runner_with_effective_snapshot():
     config = _FakeConfigService()
-    config._bots[0]["status"] = "failed"
-    config._bots[0]["runner_id"] = "stale-runner"
-    config._bots[0]["last_run_artifact"] = {"runtime_event_stream": ["stale-heavy-artifact"]}
     stream = _FakeStreamManager()
     storage = _FakeStorage()
     runner = _RecordingRunner()
@@ -333,8 +320,6 @@ def test_start_observe_only_paper_run_uses_docker_runner_with_effective_snapshot
         ]
         == 120.0
     )
-    assert storage.bots[-1]["runner_id"] == "runner-test"
-
 
 def test_start_bot_passes_run_lease_to_runner():
     config = _FakeConfigService()

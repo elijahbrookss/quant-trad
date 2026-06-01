@@ -115,7 +115,7 @@ function describeReason(reason, telemetry) {
     case 'runner_stale':
       return {
         label: 'Runner stale',
-        detail: 'The backend lost fresh watchdog heartbeats for this bot.',
+        detail: 'The run lease expired or stopped renewing for this bot.',
       }
     case 'container_missing':
       return {
@@ -158,7 +158,7 @@ function describeReason(reason, telemetry) {
 export function describeBotLifecycle(bot) {
   const lifecycle = bot?.lifecycle || {}
   const runtime = bot?.runtime || {}
-  const heartbeat = lifecycle?.heartbeat || {}
+  const lease = lifecycle?.lease || {}
   const telemetry = lifecycle?.telemetry || {}
   const container = lifecycle?.container || {}
   const failure = lifecycle?.failure || {}
@@ -219,10 +219,10 @@ export function describeBotLifecycle(bot) {
     metadata: lifecycle?.metadata && typeof lifecycle.metadata === 'object' ? lifecycle.metadata : {},
     crashSummary: String(lifecycle?.crash_summary || '').trim() || null,
     telemetry,
-    heartbeat,
+    lease,
     container,
     live: Boolean(lifecycle?.live),
-    heartbeatState: String(heartbeat?.state || 'inactive'),
+    leaseState: String(lease?.state || 'inactive'),
     containerStatus: String(container?.status || 'missing'),
     updatedAt: lifecycle?.updated_at || lifecycle?.checkpoint_at || runtime?.last_snapshot_at || runtime?.known_at || null,
   }
@@ -293,11 +293,9 @@ function startupSeriesTotal(seriesProgress) {
   return total > 0 ? total : 0
 }
 
-function normalizeFailureMessage(bot, lifecycle) {
-  const artifactError = bot?.last_run_artifact?.error
+function normalizeFailureMessage(lifecycle) {
   return firstNonEmpty([
     lifecycle?.failure?.message,
-    typeof artifactError === 'string' ? artifactError : artifactError?.message,
   ])
 }
 
@@ -311,7 +309,7 @@ function extractBotCardFacts(bot, lifecycle, pendingStart) {
   const runtimePhase = String(bot?.runtime?.phase || '').trim().toLowerCase()
   const reason = String(lifecycle?.reason || '').trim().toLowerCase()
   const containerStatus = String(lifecycle?.containerStatus || lifecycle?.container?.status || 'missing').trim().toLowerCase()
-  const heartbeatState = String(lifecycle?.heartbeatState || lifecycle?.heartbeat?.state || 'inactive').trim().toLowerCase()
+  const leaseState = String(lifecycle?.leaseState || lifecycle?.lease?.state || 'inactive').trim().toLowerCase()
   const telemetrySeq = Number(lifecycle?.telemetry?.seq || 0)
   const warningCount = Math.max(
     Number(lifecycle?.telemetry?.warning_count || 0) || 0,
@@ -327,12 +325,12 @@ function extractBotCardFacts(bot, lifecycle, pendingStart) {
       run?.report_status ||
       'unknown',
   ).trim().toLowerCase()
-  const failureMessage = normalizeFailureMessage(bot, lifecycle)
+  const failureMessage = normalizeFailureMessage(lifecycle)
   const crashSummary = String(lifecycle?.crashSummary || '').trim()
-  const startedAt = run?.started_at || bot?.last_run_artifact?.started_at || bot?.last_run_at || null
+  const startedAt = run?.started_at || bot?.runtime?.started_at || null
   const endedAt =
     run?.ended_at ||
-    bot?.last_run_artifact?.ended_at ||
+    bot?.runtime?.ended_at ||
     lifecycle?.container?.finished_at ||
     null
   const statuses = [rawLifecycleStatus, rawRunStatus, rawBotStatus].filter(Boolean)
@@ -361,7 +359,7 @@ function extractBotCardFacts(bot, lifecycle, pendingStart) {
       phase === 'crashed' ||
       FAILURE_REASONS.has(reason) ||
       ['exited', 'dead'].includes(containerStatus) ||
-      (heartbeatState === 'stale' && Boolean(projectedRunId || runtimeRunId))
+      (leaseState === 'stale' && Boolean(projectedRunId || runtimeRunId))
     )
   const healthyEvidence =
     runningSignal ||
@@ -386,7 +384,7 @@ function extractBotCardFacts(bot, lifecycle, pendingStart) {
     runtimePhase,
     reason,
     containerStatus,
-    heartbeatState,
+    leaseState,
     warningCount,
     reportStatus,
     runId,
@@ -484,7 +482,7 @@ function getFailureDetail(statusKey, facts) {
     return facts.crashSummary
   }
   if (facts.reason === 'runner_stale') {
-    return statusKey === 'failed_start' ? 'Startup heartbeat timed out' : 'Runtime heartbeat lost'
+    return statusKey === 'failed_start' ? 'Startup lease expired' : 'Runtime lease expired'
   }
   if (facts.reason === 'container_missing') {
     return statusKey === 'failed_start'
@@ -499,11 +497,11 @@ function getFailureDetail(statusKey, facts) {
   return statusKey === 'failed_start' ? 'Execution bootstrap failed' : 'Runtime exited unexpectedly'
 }
 
-function getCardStatusDetail(bot, lifecycle, facts, statusKey, nowEpochMs) {
+function getCardStatusDetail(lifecycle, facts, statusKey, nowEpochMs) {
   const activeDuration = formatElapsedDuration(facts.startedAt, null, nowEpochMs)
   const completedDuration = formatElapsedDuration(
-    bot?.last_run_artifact?.started_at || facts.startedAt,
-    bot?.last_run_artifact?.ended_at || facts.endedAt,
+    facts.startedAt,
+    facts.endedAt,
     nowEpochMs,
   )
 
@@ -675,11 +673,11 @@ export function getBotCardDisplayState(bot, { nowEpochMs = Date.now(), pendingSt
           ? 'Degraded'
         : statusKey.charAt(0).toUpperCase() + statusKey.slice(1),
     tone,
-    detail: getCardStatusDetail(bot, lifecycle, facts, statusKey, nowEpochMs),
+    detail: getCardStatusDetail(lifecycle, facts, statusKey, nowEpochMs),
     warningCount: facts.warningCount,
     runId: facts.runId,
     containerStatus: facts.containerStatus,
-    heartbeatState: facts.heartbeatState,
+    leaseState: facts.leaseState,
     startedAt: facts.startedAt,
     endedAt: facts.endedAt,
     isTerminal: ['failed_start', 'crashed', 'stopped', 'completed', 'canceled'].includes(statusKey),

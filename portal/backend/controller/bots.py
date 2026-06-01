@@ -151,9 +151,6 @@ class BotResponse(BotBase):
 
     id: str
     status: str
-    last_run_at: Optional[str] = None
-    last_stats: Dict[str, Any] = Field(default_factory=dict)
-    last_run_artifact: Dict[str, Any] = Field(default_factory=dict)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     runtime: Optional[Dict[str, Any]] = None

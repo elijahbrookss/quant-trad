@@ -19,9 +19,6 @@ class _FakeConfigService:
                 "wallet_config": {"balances": {"USDC": 100.0}},
                 "snapshot_interval_ms": 1000,
                 "run_type": "backtest",
-                "status": "running",
-                "runner_id": "runner-1",
-                "heartbeat_at": "2026-04-09T04:21:43Z",
             }
         ]
 
@@ -56,6 +53,14 @@ class _FakeStorage:
             "checkpoint_at": "2026-04-09T04:21:43Z",
             "updated_at": "2026-04-09T04:21:43Z",
         }
+        self.lease = {
+            "run_id": "run-1",
+            "bot_id": "bot-1",
+            "runner_id": "runner-1",
+            "status": "active",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "released_at": None,
+        }
 
     def get_latest_bot_run_lifecycle(self, bot_id: str):
         return dict(self.lifecycle) if str(bot_id) == "bot-1" else None
@@ -68,6 +73,9 @@ class _FakeStorage:
 
     def get_bot_run(self, run_id: str):
         return dict(self.run) if str(run_id) == "run-1" else None
+
+    def get_bot_run_lease(self, run_id: str):
+        return dict(self.lease) if str(run_id) == "run-1" else None
 
     def get_report_materialization_status(self, run_id: str):
         return {"run_id": run_id, "status": "not_started", "can_view": False}
@@ -169,17 +177,11 @@ def test_list_bots_uses_batched_projection_reads(monkeypatch):
                     "id": "bot-1",
                     "name": "Bot 1",
                     "strategy_id": "strategy-1",
-                    "status": "running",
-                    "runner_id": None,
-                    "heartbeat_at": None,
                 },
                 {
                     "id": "bot-2",
                     "name": "Bot 2",
                     "strategy_id": "strategy-1",
-                    "status": "completed",
-                    "runner_id": None,
-                    "heartbeat_at": None,
                 },
             ]
 
@@ -228,6 +230,19 @@ def test_list_bots_uses_batched_projection_reads(monkeypatch):
                     "bot_id": f"bot-{run_id[-1]}",
                     "status": "completed",
                     "summary": {},
+                }
+                for run_id in run_ids
+            }
+
+        def list_bot_run_leases_by_run_ids(self, run_ids):
+            return {
+                run_id: {
+                    "run_id": run_id,
+                    "bot_id": f"bot-{run_id[-1]}",
+                    "runner_id": "runner-1",
+                    "status": "released",
+                    "expires_at": "2026-04-09T04:22:43Z",
+                    "released_at": "2026-04-09T04:22:44Z",
                 }
                 for run_id in run_ids
             }

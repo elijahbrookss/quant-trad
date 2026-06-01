@@ -132,6 +132,7 @@ _SOURCE_BUDGETED_METRIC_COMPONENTS: dict[str, tuple[str, ...]] = {
         "live_transport_",
         "run_notification_coalesced_total",
         "run_notification_enqueued_total",
+        "symbol_fact_drain_",
         "symbol_projector_apply_ms",
         "symbol_fact_queue_wait_ms",
     ),

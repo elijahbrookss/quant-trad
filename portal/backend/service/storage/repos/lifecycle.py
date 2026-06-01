@@ -320,10 +320,6 @@ def _sync_legacy_lifecycle_tables(
                 current.updated_at = now
 
             bot_row = session.get(BotRecord, bot_id)
-            if bot_row is not None:
-                bot_row.status = status
-                bot_row.updated_at = now
-                rows_written += 1
 
             run_row = session.get(BotRunRecord, run_id)
             if run_row is None:

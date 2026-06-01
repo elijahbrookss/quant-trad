@@ -136,7 +136,6 @@ function extractBackendError(apiRun) {
     ['error'],
     ['failure'],
     ['lifecycle', 'failure'],
-    ['last_run_artifact', 'error'],
   ]
 
   for (const path of candidates) {
@@ -218,17 +217,12 @@ export function mapRunToViewModel(apiRun = {}, options = {}) {
       apiRun.net_pnl,
       readPath(apiRun, ['runtime', 'stats', 'net_pnl']),
       readPath(apiRun, ['run', 'summary', 'net_pnl']),
-      readPath(apiRun, ['last_stats', 'net_pnl']),
-      readPath(apiRun, ['last_run_artifact', 'summary', 'net_pnl']),
-      readPath(apiRun, ['last_run_artifact', 'stats', 'net_pnl']),
     ]),
     totalTrades: firstFiniteNumber([
       readPath(apiRun, ['runtime', 'total_trades']),
       readPath(apiRun, ['runtime', 'stats', 'total_trades']),
       apiRun.total_trades,
       readPath(apiRun, ['run', 'summary', 'total_trades']),
-      readPath(apiRun, ['last_stats', 'total_trades']),
-      readPath(apiRun, ['last_run_artifact', 'summary', 'total_trades']),
     ]),
     openTrades: firstFiniteNumber([
       readPath(apiRun, ['runtime', 'open_trade_count']),

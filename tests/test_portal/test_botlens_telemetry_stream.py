@@ -564,6 +564,34 @@ class TestSymbolProjectorFacts:
 
         asyncio.run(scenario())
 
+    def test_fact_drain_applies_multiple_batches_with_one_downstream_emit(self) -> None:
+        async def scenario() -> None:
+            projector, notifications, fanout = _make_symbol_projector()
+            await projector._load_initial_state()
+            await projector._apply_bootstrap(_projection_batch(_bootstrap_payload(candle_time=1, run_seq=1)))
+            while not notifications.empty():
+                notifications.get_nowait()
+            while not fanout.empty():
+                fanout.get_nowait()
+
+            await projector._apply_fact_batches(
+                (
+                    _projection_batch(_facts_payload(candle_time=2, run_seq=2)),
+                    _projection_batch(_facts_payload(candle_time=3, run_seq=3)),
+                )
+            )
+
+            snapshot = projector.get_snapshot()
+            assert snapshot.candles.candles[-1]["time"] == _epoch_candle_time(3)
+            assert notifications.qsize() == 1
+            assert fanout.qsize() == 1
+            fanout_item = fanout.get_nowait()
+            assert isinstance(fanout_item, FanoutEnvelope)
+            assert isinstance(fanout_item.item, FanoutSymbolDeltaBatch)
+            assert sum(1 for delta in fanout_item.item.deltas if type(delta).__name__ == "CandleDelta") == 2
+
+        asyncio.run(scenario())
+
 
 class TestSymbolProjectorDrainStale:
     def test_drain_stale_session_keeps_fresh_facts(self) -> None:

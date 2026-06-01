@@ -45,6 +45,7 @@ from utils.perf_log import get_obs_enabled, get_obs_slow_ms, get_obs_step_sample
 from ..components import (
     CanonicalFactAppender,
     CanonicalFactPersistenceBuffer,
+    CanonicalFactProjectionDispatcher,
     ChartStateBuilder,
     InMemoryEventSink,
     InlineSeriesRunner,
@@ -284,11 +285,15 @@ class RuntimeSetupPrepareMixin:
                 append_batch=self._deps.append_botlens_canonical_fact_batch,
                 append_batches=self._deps.append_botlens_canonical_fact_batches,
             )
+        canonical_fact_projection_dispatcher = CanonicalFactProjectionDispatcher.from_config(
+            self.config,
+            consumers=(LiveFactsBroadcastConsumer(self._broadcast),),
+        )
         self._canonical_fact_appender = CanonicalFactAppender(
             allocate_seq=self._allocate_canonical_fact_seq,
             append_batch=self._deps.append_botlens_canonical_fact_batch,
             persistence_buffer=canonical_fact_buffer,
-            consumers=(LiveFactsBroadcastConsumer(self._broadcast),),
+            projection_dispatcher=canonical_fact_projection_dispatcher,
         )
         self._push_runtime_health_fingerprint: Optional[str] = None
         self._push_runtime_health_emitted_monotonic: float = 0.0
@@ -1793,7 +1798,6 @@ class RuntimeSetupPrepareMixin:
         finalize_total_ms = max((time.perf_counter() - finalize_started_perf) * 1000.0, 0.0)
         known_ms = (update_state_ms or 0.0) + (push_update_ms or 0.0)
         finalize_residual_ms = max(finalize_total_ms - known_ms, 0.0)
-        step_trace_metrics = self._step_trace_metrics()
         return {
             "finalize_residual_ms": finalize_residual_ms,
             "persist_ms": persist_ms,
@@ -1804,11 +1808,6 @@ class RuntimeSetupPrepareMixin:
             "stream_emit_ms": push_metrics.get("stream_emit_ms"),
             "subscribers_count": push_metrics.get("subscribers_count"),
             "overlay_points_changed": push_metrics.get("overlay_points"),
-            "step_trace_queue_depth": step_trace_metrics.get("step_trace_queue_depth"),
-            "step_trace_dropped_count": step_trace_metrics.get("step_trace_dropped_count"),
-            "step_trace_persist_lag_ms": step_trace_metrics.get("step_trace_persist_lag_ms"),
-            "step_trace_persist_batch_ms": step_trace_metrics.get("step_trace_persist_batch_ms"),
-            "step_trace_persist_error_count": step_trace_metrics.get("step_trace_persist_error_count"),
         }
 
     def _primary_state_candle(self) -> Optional[Candle]:

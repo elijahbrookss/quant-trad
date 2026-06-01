@@ -32,7 +32,6 @@ from .startup_lifecycle import (
 )
 from .startup_service import BotStartupOrchestrator
 from ..storage import storage as storage_module
-from ..storage.storage import upsert_bot
 
 logger = logging.getLogger(__name__)
 _BOT_RUNTIME_SETTINGS = get_settings().bot_runtime
@@ -41,7 +40,6 @@ _START_LOCKS_GUARD = threading.Lock()
 
 
 class BotControlStorage(Protocol):
-    def upsert_bot(self, payload: Dict[str, Any]) -> None: ...
     def upsert_bot_run(self, payload: Dict[str, Any]) -> Dict[str, Any]: ...
     def get_bot_run(self, run_id: str) -> Optional[Dict[str, Any]]: ...
     def list_bot_runs(self, *, bot_id: Optional[str] = None) -> list[Dict[str, Any]]: ...
@@ -73,10 +71,6 @@ class BotControlStorage(Protocol):
     def update_bot_runtime_status(self, *, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None: ...
 
 
-def _default_upsert_bot(payload: Dict[str, Any]) -> None:
-    upsert_bot(dict(payload))
-
-
 def _lock_for_bot(bot_id: str) -> threading.Lock:
     normalized = str(bot_id or "").strip()
     with _START_LOCKS_GUARD:
@@ -98,11 +92,6 @@ def _utc_iso() -> str:
 def _start_config_projection(bot: Mapping[str, Any]) -> Dict[str, Any]:
     excluded = {
         "status",
-        "last_run_at",
-        "last_stats",
-        "last_run_artifact",
-        "runner_id",
-        "heartbeat_at",
         "created_at",
         "updated_at",
     }
@@ -220,9 +209,6 @@ class BotRuntimeControlService:
             return self._storage
 
         class _DefaultStorage:
-            def upsert_bot(self, payload: Dict[str, Any]) -> None:
-                storage_module.upsert_bot(dict(payload))
-
             def upsert_bot_run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
                 return storage_module.upsert_bot_run(dict(payload))
 
@@ -295,12 +281,6 @@ class BotRuntimeControlService:
 
         return _DefaultStorage()
 
-    def _upsert_bot(self, payload: Dict[str, Any]) -> None:
-        if self._storage is not None:
-            self._storage.upsert_bot(payload)
-            return
-        _default_upsert_bot(payload)
-
     def _watchdog_instance(self):
         return self._watchdog if self._watchdog is not None else get_watchdog()
 
@@ -346,12 +326,8 @@ class BotRuntimeControlService:
             return default_state
         lifecycle_status = str((lifecycle or {}).get("status") or "").strip().lower()
         lifecycle_metadata = lifecycle.get("metadata") if isinstance(lifecycle, dict) else {}
-        persisted_status = str(bot.get("status") or "").strip().lower()
         should_inspect = bool(
-            bot.get("runner_id")
-            or bot.get("heartbeat_at")
-            or is_active_run_state(status=lifecycle_status, phase=(lifecycle or {}).get("phase"))
-            or is_active_run_state(status=persisted_status)
+            is_active_run_state(status=lifecycle_status, phase=(lifecycle or {}).get("phase"))
             or bool((lifecycle_metadata or {}).get("preserve_container"))
         )
         if not should_inspect:
@@ -371,15 +347,16 @@ class BotRuntimeControlService:
             or storage.get_latest_bot_runtime_run_id(bot_id)
         )
         run = storage.get_bot_run(run_id) if run_id else None
+        lease = storage.get_bot_run_lease(run_id) if run_id else None
         run_snapshot = self._telemetry_hub().get_run_snapshot(run_id=run_id) if run_id else None
         container_state = self._container_state_for_bot(bot, lifecycle, inspect_container=inspect_container)
         return project_bot_state(
             bot,
             run=run,
             lifecycle=lifecycle,
+            lease=lease,
             run_snapshot=run_snapshot,
             container_state=container_state,
-            heartbeat_stale_ms=_BOT_RUNTIME_SETTINGS.status_heartbeat_stale_ms,
         )
 
     def _project_all_bots_from_storage(self) -> list[Dict[str, Any]]:
@@ -816,11 +793,6 @@ class BotRuntimeControlService:
                 exc,
             )
 
-        bot = self._config.get_bot(bot_id)
-        payload = dict(bot)
-        payload["status"] = BotLifecycleStatus.CANCELED.value
-        payload["runner_id"] = None
-        self._upsert_bot(payload)
         reason_text = (
             "Bot cancel completed; container preserved for debugging."
             if preserve_container
@@ -865,9 +837,9 @@ class BotRuntimeControlService:
 
     def watchdog_status(self) -> Dict[str, Any]:
         watchdog = self._watchdog_instance()
-        stale = watchdog.scan_stale_heartbeats()
+        expired_leases = watchdog.scan_expired_run_leases()
         containers = watchdog.verify_container_ownership()
         status = watchdog.status()
-        status["stale_marked_failed"] = stale
+        status["expired_lease_marked_failed"] = expired_leases
         status["container_marked_failed"] = containers
         return status

@@ -2310,7 +2310,7 @@ def _is_recoverable_watchdog_failure(row: Mapping[str, Any]) -> bool:
     component = str(failure.get("owner") or failure.get("component") or failure.get("source") or "").strip().lower()
     reason = str(failure.get("reason") or failure.get("message") or "").strip().lower()
     recoverable = failure.get("recoverable") is True or str(failure.get("recoverable") or "").strip().lower() == "true"
-    recoverable_reason = reason_code in {"stale_heartbeat", "startup_container_ambiguous"}
+    recoverable_reason = reason_code in {"stale_run_lease", "startup_container_ambiguous"}
     return bool(
         recoverable
         and recoverable_reason
@@ -2884,7 +2884,7 @@ def _report_diagnostics(
         diagnostic_code = (
             "recoverable_watchdog_startup_ambiguity"
             if reason_code == "startup_container_ambiguous"
-            else "recoverable_watchdog_stale_heartbeat"
+            else "recoverable_watchdog_stale_run_lease"
         )
         items.append(
             _diagnostic(

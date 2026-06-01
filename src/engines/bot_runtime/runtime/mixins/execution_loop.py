@@ -1350,11 +1350,6 @@ class RuntimeExecutionLoopMixin:
                             "delta_serialize_ms": finalize_metrics.get("delta_serialize_ms"),
                             "stream_emit_ms": finalize_metrics.get("stream_emit_ms"),
                             "subscribers_count": finalize_metrics.get("subscribers_count"),
-                            "step_trace_queue_depth": finalize_metrics.get("step_trace_queue_depth"),
-                            "step_trace_dropped_count": finalize_metrics.get("step_trace_dropped_count"),
-                            "step_trace_persist_lag_ms": finalize_metrics.get("step_trace_persist_lag_ms"),
-                            "step_trace_persist_batch_ms": finalize_metrics.get("step_trace_persist_batch_ms"),
-                            "step_trace_persist_error_count": finalize_metrics.get("step_trace_persist_error_count"),
                         },
                     )
                 except Exception as exc:
@@ -1379,11 +1374,6 @@ class RuntimeExecutionLoopMixin:
                             "delta_serialize_ms": None,
                             "stream_emit_ms": None,
                             "subscribers_count": None,
-                            "step_trace_queue_depth": None,
-                            "step_trace_dropped_count": None,
-                            "step_trace_persist_lag_ms": None,
-                            "step_trace_persist_batch_ms": None,
-                            "step_trace_persist_error_count": None,
                         },
                     )
                     raise
@@ -1419,12 +1409,6 @@ class RuntimeExecutionLoopMixin:
             step_context["series_overlay_regime_mode_rebuild"] = series_overlay_regime_mode_rebuild
             step_context["trades_touched_count"] = trades_touched_count
             step_context["subscribers_count"] = subscribers_count
-            if not state.intrabar_active():
-                step_context["step_trace_queue_depth"] = finalize_metrics.get("step_trace_queue_depth")
-                step_context["step_trace_dropped_count"] = finalize_metrics.get("step_trace_dropped_count")
-                step_context["step_trace_persist_lag_ms"] = finalize_metrics.get("step_trace_persist_lag_ms")
-                step_context["step_trace_persist_batch_ms"] = finalize_metrics.get("step_trace_persist_batch_ms")
-                step_context["step_trace_persist_error_count"] = finalize_metrics.get("step_trace_persist_error_count")
             step_context["execution_decision_flow_ms"] = decision_flow_ms
             step_context["execution_prime_ms"] = execution_prime_ms
             step_context["execution_settlement_ms"] = settlement_ms
@@ -1470,7 +1454,6 @@ class RuntimeExecutionLoopMixin:
             step_context["series_overlay_regime_mode_rebuild"] = series_overlay_regime_mode_rebuild
             step_context["trades_touched_count"] = trades_touched_count
             step_context["subscribers_count"] = subscribers_count
-            step_context.update(self._step_trace_metrics())
             self._record_step_trace(
                 "step_series_state",
                 started_at=step_started,

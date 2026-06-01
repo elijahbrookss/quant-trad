@@ -9,6 +9,7 @@ pytest.importorskip("sqlalchemy")
 
 from portal.backend.service.storage.repos import bots
 from portal.backend.service.storage.repos import lifecycle as lifecycle_repo
+from portal.backend.service.storage.repos import run_leases as run_lease_repo
 
 
 class _FakeScalarResult:
@@ -80,25 +81,7 @@ class _FakeLoadDb:
         yield self.session_handle
 
 
-class _ArtifactBotRow:
-    strategy_id = "strategy-1"
-
-    def __init__(self):
-        self.include_artifact_args = []
-
-    def to_dict(self, *, include_artifact=True):
-        self.include_artifact_args.append(include_artifact)
-        payload = {
-            "id": "bot-1",
-            "name": "Bot 1",
-            "strategy_id": self.strategy_id,
-        }
-        if include_artifact:
-            payload["last_run_artifact"] = {"large": "payload"}
-        return payload
-
-
-def test_load_bots_omits_last_run_artifact_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_bots_returns_definition_only_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_db = _FakeLoadDb(
         [
             {
@@ -118,26 +101,18 @@ def test_load_bots_omits_last_run_artifact_by_default(monkeypatch: pytest.Monkey
     assert result[0]["id"] == "bot-1"
     assert result[0]["strategy_ids"] == ["strategy-1"]
     assert result[0]["execution_mode"] == "full"
+    assert "status" not in result[0]
     assert "last_run_artifact" not in result[0]
+    assert "runner_id" not in result[0]
 
 
-def test_load_bots_can_opt_into_last_run_artifact(monkeypatch: pytest.MonkeyPatch) -> None:
-    row = _ArtifactBotRow()
-    fake_db = _FakeLoadDb([row])
-    monkeypatch.setattr(bots, "db", fake_db)
-
-    result = bots.load_bots(include_artifacts=True)
-
-    assert result[0]["last_run_artifact"] == {"large": "payload"}
-    assert row.include_artifact_args == [True]
+def test_upsert_bot_rejects_runtime_fields() -> None:
+    with pytest.raises(ValueError, match="portal_bots is definition-only"):
+        bots.upsert_bot({"id": "bot-1", "name": "Bot 1", "last_run_artifact": {"large": "payload"}})
 
 
 def test_mark_bot_crashed_skips_terminal_completed_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    bot_row = SimpleNamespace(
-        runner_id="runner-1",
-        heartbeat_at="2026-04-17T13:44:00Z",
-        updated_at=None,
-    )
+    bot_row = SimpleNamespace(updated_at=None)
     fake_db = _FakeDb(
         bot_row=bot_row,
         latest_lifecycle=SimpleNamespace(
@@ -148,6 +123,7 @@ def test_mark_bot_crashed_skips_terminal_completed_run(monkeypatch: pytest.Monke
             updated_at="2026-04-17T13:45:00Z",
         ),
     )
+    monkeypatch.setattr(run_lease_repo, "get_bot_run_lease", lambda _run_id: None)
     recorded = []
 
     monkeypatch.setattr(bots, "db", fake_db)
@@ -161,21 +137,16 @@ def test_mark_bot_crashed_skips_terminal_completed_run(monkeypatch: pytest.Monke
     result = bots.mark_bot_crashed("bot-1", "container_not_running:quant-trad-bots-bot-1")
 
     assert result is False
-    assert bot_row.runner_id == "runner-1"
-    assert bot_row.heartbeat_at == "2026-04-17T13:44:00Z"
     assert recorded == []
 
 
 def test_mark_bot_crashed_rejects_missing_run_context(monkeypatch: pytest.MonkeyPatch) -> None:
-    bot_row = SimpleNamespace(
-        runner_id="runner-1",
-        heartbeat_at="2026-04-17T13:44:00Z",
-        updated_at=None,
-    )
+    bot_row = SimpleNamespace(updated_at=None)
     fake_db = _FakeDb(
         bot_row=bot_row,
         latest_lifecycle=None,
     )
+    monkeypatch.setattr(run_lease_repo, "get_bot_run_lease", lambda _run_id: None)
     recorded = []
 
     monkeypatch.setattr(bots, "db", fake_db)
@@ -189,19 +160,13 @@ def test_mark_bot_crashed_rejects_missing_run_context(monkeypatch: pytest.Monkey
     result = bots.mark_bot_crashed("bot-1", "container_not_running:quant-trad-bots-bot-1")
 
     assert result is False
-    assert bot_row.runner_id == "runner-1"
-    assert bot_row.heartbeat_at == "2026-04-17T13:44:00Z"
     assert recorded == []
 
 
-def test_mark_bot_crashed_classifies_stale_heartbeat_as_recoverable_lifecycle_degradation(
+def test_mark_bot_crashed_classifies_stale_run_lease_as_recoverable_lifecycle_degradation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bot_row = SimpleNamespace(
-        runner_id="runner-1",
-        heartbeat_at="2026-04-17T13:44:00Z",
-        updated_at=None,
-    )
+    bot_row = SimpleNamespace(updated_at=None)
     fake_db = _FakeDb(
         bot_row=bot_row,
         latest_lifecycle=SimpleNamespace(
@@ -211,6 +176,11 @@ def test_mark_bot_crashed_classifies_stale_heartbeat_as_recoverable_lifecycle_de
             checkpoint_at="2026-04-17T13:43:00Z",
             updated_at="2026-04-17T13:43:00Z",
         ),
+    )
+    monkeypatch.setattr(
+        run_lease_repo,
+        "get_bot_run_lease",
+        lambda _run_id: {"runner_id": "backend.quanttrad"},
     )
     recorded = []
 
@@ -224,21 +194,19 @@ def test_mark_bot_crashed_classifies_stale_heartbeat_as_recoverable_lifecycle_de
 
     result = bots.mark_bot_crashed(
         "bot-1",
-        "stale_heartbeat:prev=backend.quanttrad",
+        "stale_run_lease:prev=backend.quanttrad",
         diagnostics={
-            "stale_age_seconds": 125.0,
+            "lease_expired_age_seconds": 125.0,
             "runner_clock_gap": {"gap_seconds": 3672.0, "detected_at": "2026-05-19T07:57:54Z"},
         },
     )
 
     assert result is True
-    assert bot_row.runner_id is None
-    assert bot_row.heartbeat_at is None
     assert len(recorded) == 1
     assert recorded[0]["phase"] == "degraded"
     assert recorded[0]["status"] == "degraded"
     assert recorded[0]["metadata"]["watchdog_classification"] == "recoverable"
-    assert recorded[0]["metadata"]["watchdog_diagnostics"]["stale_age_seconds"] == 125.0
+    assert recorded[0]["metadata"]["watchdog_diagnostics"]["lease_expired_age_seconds"] == 125.0
     assert recorded[0]["metadata"]["watchdog_diagnostics"]["runner_clock_gap"]["gap_seconds"] == 3672.0
-    assert recorded[0]["failure"]["reason_code"] == "stale_heartbeat"
+    assert recorded[0]["failure"]["reason_code"] == "stale_run_lease"
     assert recorded[0]["failure"]["recoverable"] is True

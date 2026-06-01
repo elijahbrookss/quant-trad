@@ -42,6 +42,7 @@ class BotStorageGateway(Protocol):
     def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]: ...
     def get_bot_run_lifecycle(self, run_id: str) -> Optional[Mapping[str, Any]]: ...
     def get_bot_run_lease(self, run_id: str) -> Optional[Mapping[str, Any]]: ...
+    def list_bot_run_leases_by_run_ids(self, run_ids: List[str]) -> Dict[str, Dict[str, Any]]: ...
     def acquire_bot_run_lease(
         self,
         *,
@@ -137,6 +138,9 @@ def _build_storage_gateway() -> BotStorageGateway:
 
         def get_bot_run_lease(self, run_id: str) -> Optional[Mapping[str, Any]]:
             return storage_module.get_bot_run_lease(str(run_id))
+
+        def list_bot_run_leases_by_run_ids(self, run_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+            return storage_module.list_bot_run_leases_by_run_ids([str(run_id) for run_id in run_ids])
 
         def acquire_bot_run_lease(
             self,

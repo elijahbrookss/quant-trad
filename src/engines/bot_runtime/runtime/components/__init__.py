@@ -1,4 +1,9 @@
-from .canonical_facts import CanonicalFactAppender, CanonicalFactPersistenceBuffer, LiveFactsBroadcastConsumer
+from .canonical_facts import (
+    CanonicalFactAppender,
+    CanonicalFactPersistenceBuffer,
+    CanonicalFactProjectionDispatcher,
+    LiveFactsBroadcastConsumer,
+)
 from .chart_state import ChartStateBuilder
 from .event_sink import InMemoryEventSink, RuntimeEventSink
 from .entry_decision_ordering import (
@@ -27,6 +32,7 @@ from .step_trace_buffer import StepTracePersistenceBuffer
 __all__ = [
     "CanonicalFactAppender",
     "CanonicalFactPersistenceBuffer",
+    "CanonicalFactProjectionDispatcher",
     "LiveFactsBroadcastConsumer",
     "ChartStateBuilder",
     "InMemoryEventSink",

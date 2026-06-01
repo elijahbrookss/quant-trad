@@ -129,6 +129,12 @@ class CanonicalFactPersistItem:
         }
 
 
+@dataclass(frozen=True)
+class CanonicalFactProjectionItem:
+    batch: CommittedCanonicalFactBatch
+    enqueued_monotonic: float = 0.0
+
+
 class CanonicalFactPersistenceBuffer:
     """Bounded async writer for canonical facts.
 
@@ -408,6 +414,312 @@ class CanonicalFactPersistenceBuffer:
             )
 
 
+def _consume_committed_batch(
+    consumers: Sequence[CanonicalFactConsumer],
+    batch: CommittedCanonicalFactBatch,
+) -> Tuple[PostAppendConsumerResult, ...]:
+    consumer_results = []
+    for consumer in consumers:
+        consumer_name = consumer.__class__.__name__
+        try:
+            result = consumer.consume(batch)
+            consumer_results.append(PostAppendConsumerResult(consumer_name=consumer_name, result=result))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "bot_runtime_post_append_consumer_failed | consumer=%s | bot_id=%s | run_id=%s | seq=%s | batch_kind=%s | error=%s",
+                consumer_name,
+                batch.bot_id,
+                batch.run_id,
+                batch.seq,
+                batch.batch_kind,
+                exc,
+            )
+            consumer_results.append(PostAppendConsumerResult(consumer_name=consumer_name, error=str(exc)))
+    return tuple(consumer_results)
+
+
+class CanonicalFactProjectionDispatcher:
+    """Bounded async dispatcher for committed BotLens projection batches."""
+
+    def __init__(
+        self,
+        *,
+        consumers: Sequence[CanonicalFactConsumer],
+        queue_max: int = 16_384,
+        flush_interval_s: float = 0.025,
+        drain_timeout_s: float = 60.0,
+    ) -> None:
+        self._consumers = tuple(consumers)
+        self._queue_max = max(int(queue_max), 1)
+        self._flush_interval_s = max(float(flush_interval_s), 0.001)
+        self._drain_timeout_s = max(float(drain_timeout_s), 0.1)
+        self._queue: "queue.Queue[CanonicalFactProjectionItem]" = queue.Queue(maxsize=self._queue_max)
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._start_lock = threading.Lock()
+        self._metrics_lock = threading.Lock()
+        self._error_lock = threading.Lock()
+        self._first_error: Optional[BaseException] = None
+        self._queued_count = 0
+        self._dispatched_count = 0
+        self._dispatch_error_count = 0
+        self._overflow_count = 0
+        self._dropped_count = 0
+        self._drain_timeout_count = 0
+        self._degraded = False
+        self._dispatch_lag_ms = 0.0
+        self._dispatch_batch_ms = 0.0
+        self._latest_subscriber_count: Optional[int] = None
+        self._latest_dropped_messages: Optional[int] = None
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Mapping[str, object],
+        *,
+        consumers: Sequence[CanonicalFactConsumer],
+    ) -> "CanonicalFactProjectionDispatcher":
+        def _int(value: object, default: int) -> int:
+            try:
+                return int(value) if value is not None else int(default)
+            except (TypeError, ValueError):
+                return int(default)
+
+        def _float(value: object, default: float) -> float:
+            try:
+                return float(value) if value is not None else float(default)
+            except (TypeError, ValueError):
+                return float(default)
+
+        queue_max = _int(
+            config.get("canonical_fact_projection_queue_max")
+            or config.get("BOT_RUNTIME_CANONICAL_FACT_PROJECTION_QUEUE_MAX"),
+            16_384,
+        )
+        flush_interval_ms = _float(
+            config.get("canonical_fact_projection_flush_interval_ms")
+            or config.get("BOT_RUNTIME_CANONICAL_FACT_PROJECTION_FLUSH_INTERVAL_MS"),
+            25.0,
+        )
+        drain_timeout_s = _float(
+            config.get("canonical_fact_projection_drain_timeout_s")
+            or config.get("BOT_RUNTIME_CANONICAL_FACT_PROJECTION_DRAIN_TIMEOUT_S"),
+            60.0,
+        )
+        return cls(
+            consumers=consumers,
+            queue_max=queue_max,
+            flush_interval_s=max(flush_interval_ms / 1000.0, 0.001),
+            drain_timeout_s=drain_timeout_s,
+        )
+
+    def dispatch(self, batch: CommittedCanonicalFactBatch) -> Tuple[PostAppendConsumerResult, ...]:
+        if not self._consumers:
+            return ()
+        self._raise_if_failed()
+        self._ensure_started()
+        item = CanonicalFactProjectionItem(batch=batch, enqueued_monotonic=time.monotonic())
+        try:
+            self._queue.put_nowait(item)
+            queued = True
+        except queue.Full:
+            with self._metrics_lock:
+                self._overflow_count += 1
+                self._degraded = True
+            queued = False
+            dropped_oldest = False
+            try:
+                self._queue.get_nowait()
+                self._queue.task_done()
+                dropped_oldest = True
+                with self._metrics_lock:
+                    self._dropped_count += 1
+                self._queue.put_nowait(item)
+                queued = True
+            except queue.Empty:
+                try:
+                    self._queue.put_nowait(item)
+                    queued = True
+                except queue.Full:
+                    queued = False
+            except queue.Full:
+                queued = False
+            logger.warning(
+                "bot_canonical_fact_projection_degraded | reason=queue_overflow | bot_id=%s | run_id=%s | seq=%s | queue_depth=%s | queue_max=%s | dropped_oldest=%s | queued=%s",
+                batch.bot_id,
+                batch.run_id,
+                batch.seq,
+                self._queue.qsize(),
+                self._queue_max,
+                dropped_oldest,
+                queued,
+            )
+        with self._metrics_lock:
+            if queued:
+                self._queued_count += 1
+        return (
+            PostAppendConsumerResult(
+                consumer_name=self.__class__.__name__,
+                result={
+                    "queued": queued,
+                    "queue_depth": self._queue.qsize(),
+                    "degraded": not queued or self._degraded,
+                    "overflow_policy": "drop_oldest" if self._degraded else None,
+                },
+            ),
+        )
+
+    def flush(self, *, reason: str, shutdown: bool = False, timeout_s: float | None = None) -> None:
+        if not self._thread and self._queue.empty():
+            self._raise_if_failed()
+            return
+        self._ensure_started()
+        wait_timeout = self._drain_timeout_s if timeout_s is None else max(float(timeout_s), 0.1)
+        deadline = time.monotonic() + wait_timeout
+        deferred_error: Optional[BaseException] = None
+        while time.monotonic() < deadline:
+            try:
+                self._raise_if_failed()
+            except Exception as exc:  # noqa: BLE001
+                deferred_error = exc
+                break
+            if self._queue.unfinished_tasks <= 0 and self._queue.empty():
+                break
+            time.sleep(0.01)
+        if deferred_error is None and (self._queue.unfinished_tasks > 0 or not self._queue.empty()):
+            with self._metrics_lock:
+                self._drain_timeout_count += 1
+                self._degraded = True
+            logger.warning(
+                "bot_canonical_fact_projection_degraded | reason=drain_timeout | flush_reason=%s | queue_depth=%s | unfinished=%s",
+                reason,
+                self._queue.qsize(),
+                self._queue.unfinished_tasks,
+            )
+        if shutdown:
+            self._stop.set()
+            thread = self._thread
+            if thread and thread.is_alive():
+                thread.join(timeout=wait_timeout)
+            if thread and thread.is_alive():
+                logger.warning(
+                    "bot_canonical_fact_projection_degraded | reason=shutdown_timeout | flush_reason=%s | queue_depth=%s | unfinished=%s",
+                    reason,
+                    self._queue.qsize(),
+                    self._queue.unfinished_tasks,
+                )
+        if deferred_error is not None:
+            raise deferred_error
+        self._raise_if_failed()
+        logger.debug(
+            "bot_canonical_fact_projection_flush | reason=%s | shutdown=%s | queue_depth=%s | unfinished=%s",
+            reason,
+            shutdown,
+            self._queue.qsize(),
+            self._queue.unfinished_tasks,
+        )
+
+    def metrics_snapshot(self) -> Dict[str, float]:
+        with self._metrics_lock:
+            return {
+                "projection_queue_depth": float(self._queue.qsize()),
+                "projection_queued_count": float(self._queued_count),
+                "projection_dispatched_count": float(self._dispatched_count),
+                "projection_dispatch_lag_ms": float(self._dispatch_lag_ms),
+                "projection_dispatch_batch_ms": float(self._dispatch_batch_ms),
+                "projection_dispatch_error_count": float(self._dispatch_error_count),
+                "projection_overflow_count": float(self._overflow_count),
+                "projection_dropped_count": float(self._dropped_count),
+                "projection_drain_timeout_count": float(self._drain_timeout_count),
+                "projection_degraded": 1.0 if self._degraded else 0.0,
+                "projection_latest_subscriber_count": float(self._latest_subscriber_count or 0),
+                "projection_latest_dropped_messages": float(self._latest_dropped_messages or 0),
+            }
+
+    def _ensure_started(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        with self._start_lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._stop.clear()
+            thread = threading.Thread(
+                target=self._worker_loop,
+                name="bot-canonical-fact-projection",
+                daemon=True,
+            )
+            thread.start()
+            self._thread = thread
+
+    def _set_error(self, exc: BaseException) -> None:
+        with self._error_lock:
+            if self._first_error is None:
+                self._first_error = exc
+
+    def _raise_if_failed(self) -> None:
+        with self._error_lock:
+            first_error = self._first_error
+        if first_error is not None:
+            raise RuntimeError(f"canonical fact projection failed: {first_error}") from first_error
+
+    def _record_consumer_metrics(self, consumer_results: Sequence[PostAppendConsumerResult]) -> None:
+        error_count = 0
+        latest_subscriber_count = None
+        latest_dropped_messages = None
+        for result in consumer_results:
+            if result.error:
+                error_count += 1
+                continue
+            if result.consumer_name != "LiveFactsBroadcastConsumer":
+                continue
+            value = result.result
+            if (
+                isinstance(value, tuple)
+                and len(value) == 2
+                and all(isinstance(entry, int) for entry in value)
+            ):
+                latest_subscriber_count = int(value[0])
+                latest_dropped_messages = int(value[1])
+        with self._metrics_lock:
+            self._dispatch_error_count += error_count
+            if latest_subscriber_count is not None:
+                self._latest_subscriber_count = latest_subscriber_count
+            if latest_dropped_messages is not None:
+                self._latest_dropped_messages = latest_dropped_messages
+
+    def _worker_loop(self) -> None:
+        while not self._stop.is_set() or not self._queue.empty():
+            try:
+                item = self._queue.get(timeout=self._flush_interval_s)
+            except queue.Empty:
+                continue
+
+            dispatch_started = time.perf_counter()
+            results: Tuple[PostAppendConsumerResult, ...] = ()
+            try:
+                results = _consume_committed_batch(self._consumers, item.batch)
+                self._record_consumer_metrics(results)
+            finally:
+                self._queue.task_done()
+
+            dispatch_batch_ms = max((time.perf_counter() - dispatch_started) * 1000.0, 0.0)
+            dispatch_lag_ms = max((time.monotonic() - item.enqueued_monotonic) * 1000.0, 0.0)
+            with self._metrics_lock:
+                self._dispatched_count += 1
+                self._dispatch_batch_ms = dispatch_batch_ms
+                self._dispatch_lag_ms = dispatch_lag_ms
+            logger.debug(
+                "bot_canonical_fact_projection_dispatched | run_id=%s | seq=%s | batch_kind=%s | dispatch_batch_ms=%.3f | dispatch_lag_ms=%.3f | queue_depth=%s | consumer_results=%s",
+                item.batch.run_id,
+                item.batch.seq,
+                item.batch.batch_kind,
+                dispatch_batch_ms,
+                dispatch_lag_ms,
+                self._queue.qsize(),
+                len(results),
+            )
+
+
 class CanonicalFactAppender:
     def __init__(
         self,
@@ -415,11 +727,13 @@ class CanonicalFactAppender:
         allocate_seq: Callable[[], int],
         append_batch: Optional[Callable[..., Mapping[str, Any]]] = None,
         persistence_buffer: Optional[CanonicalFactPersistenceBuffer] = None,
+        projection_dispatcher: Optional[CanonicalFactProjectionDispatcher] = None,
         consumers: Sequence[CanonicalFactConsumer] = (),
     ) -> None:
         self._allocate_seq = allocate_seq
         self._append_batch = append_batch
         self._persistence_buffer = persistence_buffer
+        self._projection_dispatcher = projection_dispatcher
         self._consumers = tuple(consumers)
 
     def append_fact_batch(
@@ -502,13 +816,28 @@ class CanonicalFactAppender:
         return CanonicalFactAppendOutcome(batch=batch, consumer_results=self.dispatch(batch))
 
     def flush(self, *, reason: str, shutdown: bool = False, timeout_s: float | None = None) -> None:
-        if self._persistence_buffer is None:
-            return
-        self._persistence_buffer.flush(reason=reason, shutdown=shutdown, timeout_s=timeout_s)
+        deferred_error: Optional[BaseException] = None
+        if self._persistence_buffer is not None:
+            try:
+                self._persistence_buffer.flush(reason=reason, shutdown=shutdown, timeout_s=timeout_s)
+            except Exception as exc:  # noqa: BLE001
+                deferred_error = exc
+        if self._projection_dispatcher is not None:
+            try:
+                self._projection_dispatcher.flush(reason=reason, shutdown=shutdown, timeout_s=timeout_s)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "bot_canonical_fact_projection_flush_degraded | reason=%s | shutdown=%s | error=%s",
+                    reason,
+                    shutdown,
+                    exc,
+                )
+        if deferred_error is not None:
+            raise deferred_error
 
     def metrics_snapshot(self) -> Dict[str, float]:
         if self._persistence_buffer is None:
-            return {
+            metrics = {
                 "queue_depth": 0.0,
                 "queued_count": 0.0,
                 "persisted_row_count": 0.0,
@@ -518,29 +847,35 @@ class CanonicalFactAppender:
                 "persist_error_count": 0.0,
                 "overflow_count": 0.0,
             }
-        return self._persistence_buffer.metrics_snapshot()
+        else:
+            metrics = self._persistence_buffer.metrics_snapshot()
+        if self._projection_dispatcher is None:
+            metrics.update(
+                {
+                    "projection_queue_depth": 0.0,
+                    "projection_queued_count": 0.0,
+                    "projection_dispatched_count": 0.0,
+                    "projection_dispatch_lag_ms": 0.0,
+                    "projection_dispatch_batch_ms": 0.0,
+                    "projection_dispatch_error_count": 0.0,
+                    "projection_overflow_count": 0.0,
+                    "projection_dropped_count": 0.0,
+                    "projection_drain_timeout_count": 0.0,
+                    "projection_degraded": 0.0,
+                    "projection_latest_subscriber_count": 0.0,
+                    "projection_latest_dropped_messages": 0.0,
+                }
+            )
+        else:
+            metrics.update(self._projection_dispatcher.metrics_snapshot())
+        return metrics
 
     def dispatch(self, batch: CommittedCanonicalFactBatch) -> Tuple[PostAppendConsumerResult, ...]:
+        if self._projection_dispatcher is not None:
+            return self._projection_dispatcher.dispatch(batch)
         if not self._consumers:
             return ()
-        consumer_results = []
-        for consumer in self._consumers:
-            consumer_name = consumer.__class__.__name__
-            try:
-                result = consumer.consume(batch)
-                consumer_results.append(PostAppendConsumerResult(consumer_name=consumer_name, result=result))
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "bot_runtime_post_append_consumer_failed | consumer=%s | bot_id=%s | run_id=%s | seq=%s | batch_kind=%s | error=%s",
-                    consumer_name,
-                    batch.bot_id,
-                    batch.run_id,
-                    batch.seq,
-                    batch.batch_kind,
-                    exc,
-                )
-                consumer_results.append(PostAppendConsumerResult(consumer_name=consumer_name, error=str(exc)))
-        return tuple(consumer_results)
+        return _consume_committed_batch(self._consumers, batch)
 
 
 __all__ = [
@@ -548,6 +883,7 @@ __all__ = [
     "CanonicalFactAppender",
     "CanonicalFactConsumer",
     "CanonicalFactPersistenceBuffer",
+    "CanonicalFactProjectionDispatcher",
     "CommittedCanonicalFactBatch",
     "LiveFactsBroadcastConsumer",
     "PostAppendConsumerResult",

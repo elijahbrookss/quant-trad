@@ -170,7 +170,7 @@ test('surfaces completed runs as Completed with rerun and lens actions', () => {
       runtime: {
         status: 'completed',
       },
-      last_run_artifact: {
+      run: {
         started_at: '2026-04-06T12:00:00Z',
         ended_at: '2026-04-06T12:03:30Z',
       },
@@ -353,8 +353,8 @@ test('maps watchdog/container crash after healthy runtime to Crashed', () => {
         status: 'running',
         phase: 'live',
         reason: 'runner_stale',
-        message: 'Backend lost heartbeat.',
-        heartbeat: { state: 'stale' },
+        message: 'Run lease expired.',
+        lease: { state: 'stale' },
         telemetry: { seq: 42 },
       },
       runtime: {
@@ -366,7 +366,7 @@ test('maps watchdog/container crash after healthy runtime to Crashed', () => {
   )
 
   assert.equal(state.displayStatus, 'Crashed')
-  assert.equal(state.detail, 'Runtime heartbeat lost')
+  assert.equal(state.detail, 'Runtime lease expired')
   assert.deepEqual(
     state.allowedActions.map((action) => action.label),
     ['Restart', 'Report Unavailable', 'View Diagnostics', 'Delete'],
@@ -393,15 +393,15 @@ test('keeps terminal completion over stale lifecycle crash residue after refresh
         status: 'running',
         phase: 'live',
         reason: 'runner_stale',
-        message: 'Backend lost heartbeat.',
-        heartbeat: { state: 'stale' },
+        message: 'Run lease expired.',
+        lease: { state: 'stale' },
         telemetry: { run_id: 'run-complete-1' },
       },
       runtime: {
         status: 'completed',
         run_id: 'run-complete-1',
       },
-      last_run_artifact: {
+      run: {
         started_at: '2026-04-06T12:00:00Z',
         ended_at: '2026-04-06T12:03:30Z',
       },

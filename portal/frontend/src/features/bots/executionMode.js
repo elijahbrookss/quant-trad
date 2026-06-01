@@ -38,7 +38,6 @@ export function resolveExecutionMode(source = {}) {
     readPath(source, ['run', 'execution_mode']),
     readPath(source, ['run_config', 'execution_mode']),
     readPath(source, ['config_snapshot', 'execution_mode']),
-    readPath(source, ['last_run_artifact', 'execution_mode']),
     readPath(source, ['runtime', 'execution_mode']),
     readPath(source, ['runtime_metadata', 'execution_mode']),
     readPath(source, ['run', 'config_snapshot', 'execution_mode']),

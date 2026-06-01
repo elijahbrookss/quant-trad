@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-"""ORM models backing the portal persistence layer."""
-
-from datetime import datetime
 from datetime import datetime
 from typing import Any, Dict
 
@@ -39,6 +36,21 @@ REQUIRED_BOT_RUN_EVENT_INDEXES = frozenset(
         "ix_portal_bot_run_events_bot_run_root_seq_id",
         "ix_portal_bot_run_events_bot_run_bar_time_seq_id",
         "uq_portal_bot_run_events_run_seq",
+    }
+)
+
+REQUIRED_BOT_RUN_LIFECYCLE_INDEXES = frozenset(
+    {
+        "ix_portal_bot_run_lifecycle_bot_checkpoint_updated",
+    }
+)
+
+REQUIRED_BOT_RUN_LEASE_INDEXES = frozenset(
+    {
+        "ix_portal_bot_run_leases_bot_status_expires",
+        "ix_portal_bot_run_leases_runner_status",
+        "ix_portal_bot_run_leases_runner_status_expires",
+        "ix_portal_bot_run_leases_status_expires",
     }
 )
 
@@ -397,7 +409,7 @@ class InstrumentRecord(Base):
 
 
 class BotRecord(Base):
-    """Database row describing a persisted bot configuration."""
+    """Database row describing a persisted bot definition."""
 
     __tablename__ = "portal_bots"
 
@@ -419,17 +431,10 @@ class BotRecord(Base):
     market_data_stream_policy = Column(JSON, nullable=False, default=dict)
     snapshot_interval_ms = Column(Integer, nullable=False, default=250)
     bot_env = Column(JSON, nullable=False, default=dict)
-    status = Column(String(32), nullable=False, default="idle")
-    last_run_at = Column(DateTime, nullable=True)
-    last_stats = Column(JSON, nullable=False, default=dict)
-    last_run_artifact = Column(JSON, nullable=True)
-    # Heartbeat fields for orphan detection (BotWatchdog)
-    runner_id = Column(String(128), nullable=True)
-    heartbeat_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
-    def to_dict(self, *, include_artifact: bool = True) -> Dict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         """Return the bot configuration in API-friendly form."""
 
         risk_payload = dict(self.risk or {})
@@ -460,16 +465,9 @@ class BotRecord(Base):
             "market_data_stream_policy": dict(self.market_data_stream_policy or {}),
             "snapshot_interval_ms": int(self.snapshot_interval_ms or 0),
             "bot_env": dict(self.bot_env or {}),
-            "status": self.status,
-            "last_run_at": (self.last_run_at.isoformat() + "Z") if self.last_run_at else None,
-            "last_stats": dict(self.last_stats or {}),
-            "runner_id": self.runner_id,
-            "heartbeat_at": (self.heartbeat_at.isoformat() + "Z") if self.heartbeat_at else None,
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
-        if include_artifact:
-            payload["last_run_artifact"] = dict(self.last_run_artifact or {})
         return payload
 
 class BotTradeRecord(Base):
@@ -688,6 +686,9 @@ class BotRunLifecycleRecord(Base):
     """Current durable lifecycle state for one bot run."""
 
     __tablename__ = "portal_bot_run_lifecycle"
+    __table_args__ = (
+        Index("ix_portal_bot_run_lifecycle_bot_checkpoint_updated", "bot_id", "checkpoint_at", "updated_at"),
+    )
 
     run_id = Column(String(64), ForeignKey("portal_bot_runs.run_id", ondelete="CASCADE"), primary_key=True)
     bot_id = Column(String(64), ForeignKey("portal_bots.id", ondelete="CASCADE"), nullable=False)
@@ -765,6 +766,8 @@ class BotRunLeaseRecord(Base):
     __table_args__ = (
         Index("ix_portal_bot_run_leases_bot_status_expires", "bot_id", "status", "expires_at"),
         Index("ix_portal_bot_run_leases_runner_status", "runner_id", "status"),
+        Index("ix_portal_bot_run_leases_runner_status_expires", "runner_id", "status", "expires_at"),
+        Index("ix_portal_bot_run_leases_status_expires", "status", "expires_at"),
     )
 
     run_id = Column(String(64), ForeignKey("portal_bot_runs.run_id", ondelete="CASCADE"), primary_key=True)

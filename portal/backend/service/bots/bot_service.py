@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Dict, List, Mapping
-
-from core.settings import get_settings
 
 from ..market import candle_service
 from .bot_state_projection import project_bot_state
@@ -16,8 +14,6 @@ from .runtime_composition import get_runtime_composition
 from .startup_lifecycle import is_active_run_state, is_terminal_run_state
 
 logger = logging.getLogger(__name__)
-_BOT_RUNTIME_SETTINGS = get_settings().bot_runtime
-
 
 _WATCHDOG_CALLBACK_SET = False
 
@@ -58,6 +54,7 @@ def _load_projection_inputs(
 ) -> tuple[
     Optional[Mapping[str, Any]],
     Optional[Mapping[str, Any]],
+    Optional[Mapping[str, Any]],
     Any,
 ]:
     bot_id = str(bot.get("id") or "").strip()
@@ -76,12 +73,13 @@ def _load_projection_inputs(
         except Exception as exc:  # noqa: BLE001 - bot cards must still render if report status is unavailable.
             logger.warning("bot_report_materialization_status_unavailable | bot_id=%s | run_id=%s | error=%s", bot_id, run_id, exc)
     run_snapshot = _telemetry_hub().get_run_snapshot(run_id=run_id) if run_id else None
-    return run, lifecycle, run_snapshot
+    lease = _composition().storage.get_bot_run_lease(run_id) if run_id else None
+    return run, lifecycle, lease, run_snapshot
 
 
 def _load_projection_inputs_batch(
     bots: List[Mapping[str, Any]],
-) -> Dict[str, tuple[Optional[Mapping[str, Any]], Optional[Mapping[str, Any]], Any]]:
+) -> Dict[str, tuple[Optional[Mapping[str, Any]], Optional[Mapping[str, Any]], Optional[Mapping[str, Any]], Any]]:
     storage = _composition().storage
     bot_ids = [str(bot.get("id") or "").strip() for bot in bots if str(bot.get("id") or "").strip()]
     if not bot_ids:
@@ -90,11 +88,13 @@ def _load_projection_inputs_batch(
     latest_runs_loader = getattr(storage, "list_latest_bot_runs_by_bot_ids", None)
     lifecycle_loader = getattr(storage, "list_latest_bot_run_lifecycles", None)
     runs_by_id_loader = getattr(storage, "list_bot_runs_by_ids", None)
+    leases_by_id_loader = getattr(storage, "list_bot_run_leases_by_run_ids", None)
     report_status_loader = getattr(storage, "list_report_materialization_statuses", None)
     if not (
         callable(latest_runs_loader)
         and callable(lifecycle_loader)
         and callable(runs_by_id_loader)
+        and callable(leases_by_id_loader)
         and callable(report_status_loader)
     ):
         return {str(bot.get("id") or ""): _load_projection_inputs(bot) for bot in bots}
@@ -113,10 +113,14 @@ def _load_projection_inputs_batch(
             selected_run_ids.add(run_id)
 
     runs_by_id = dict(runs_by_id_loader(sorted(selected_run_ids)) or {})
+    leases_by_id = dict(leases_by_id_loader(sorted(selected_run_ids)) or {})
     report_statuses = dict(report_status_loader(sorted(selected_run_ids)) or {})
     telemetry_hub = _telemetry_hub()
 
-    result: Dict[str, tuple[Optional[Mapping[str, Any]], Optional[Mapping[str, Any]], Any]] = {}
+    result: Dict[
+        str,
+        tuple[Optional[Mapping[str, Any]], Optional[Mapping[str, Any]], Optional[Mapping[str, Any]], Any],
+    ] = {}
     for bot_id in bot_ids:
         lifecycle = dict(lifecycles_by_bot.get(bot_id) or {}) or None
         run_id = (
@@ -131,7 +135,8 @@ def _load_projection_inputs_batch(
             except Exception as exc:  # noqa: BLE001 - bot cards must still render if report status is unavailable.
                 logger.warning("bot_report_materialization_status_unavailable | bot_id=%s | run_id=%s | error=%s", bot_id, run_id, exc)
         run_snapshot = telemetry_hub.get_run_snapshot(run_id=run_id) if run_id else None
-        result[bot_id] = (run or None, lifecycle, run_snapshot)
+        lease = dict(leases_by_id.get(run_id) or {}) if run_id else {}
+        result[bot_id] = (run or None, lifecycle, lease or None, run_snapshot)
     return result
 
 
@@ -151,12 +156,8 @@ def _container_state_for_bot(bot: Mapping[str, Any], lifecycle: Mapping[str, Any
         return default_state
     lifecycle_metadata = lifecycle.get("metadata") if isinstance(lifecycle, Mapping) else {}
     lifecycle_status = str((lifecycle or {}).get("status") or "").strip().lower()
-    persisted_status = str(bot.get("status") or "").strip().lower()
     should_inspect = bool(
-        bot.get("runner_id")
-        or bot.get("heartbeat_at")
-        or lifecycle_status in {"starting", "running", "degraded", "telemetry_degraded"}
-        or persisted_status in {"starting", "running", "degraded", "telemetry_degraded"}
+        lifecycle_status in {"starting", "running", "degraded", "telemetry_degraded"}
         or bool((lifecycle_metadata or {}).get("preserve_container"))
     )
     if not should_inspect:
@@ -169,15 +170,15 @@ def _container_state_for_bot(bot: Mapping[str, Any], lifecycle: Mapping[str, Any
 
 
 def _project_bot(bot: Mapping[str, Any], *, inspect_container: bool = True) -> Dict[str, Any]:
-    run, lifecycle, run_snapshot = _load_projection_inputs(bot)
+    run, lifecycle, lease, run_snapshot = _load_projection_inputs(bot)
     container_state = _container_state_for_bot(bot, lifecycle, inspect_container=inspect_container)
     return project_bot_state(
         bot,
         run=run,
         lifecycle=lifecycle,
+        lease=lease,
         run_snapshot=run_snapshot,
         container_state=container_state,
-        heartbeat_stale_ms=_BOT_RUNTIME_SETTINGS.status_heartbeat_stale_ms,
     )
 
 
@@ -186,16 +187,16 @@ def _project_bots(bots: List[Mapping[str, Any]], *, inspect_container: bool = Tr
     projected: List[Dict[str, Any]] = []
     for bot in bots:
         bot_id = str(bot.get("id") or "").strip()
-        run, lifecycle, run_snapshot = inputs_by_bot.get(bot_id, (None, None, None))
+        run, lifecycle, lease, run_snapshot = inputs_by_bot.get(bot_id, (None, None, None, None))
         container_state = _container_state_for_bot(bot, lifecycle, inspect_container=inspect_container)
         projected.append(
             project_bot_state(
                 bot,
                 run=run,
                 lifecycle=lifecycle,
+                lease=lease,
                 run_snapshot=run_snapshot,
                 container_state=container_state,
-                heartbeat_stale_ms=_BOT_RUNTIME_SETTINGS.status_heartbeat_stale_ms,
             )
         )
     return projected
@@ -294,7 +295,7 @@ def _bot_run_context(bot: Mapping[str, Any]) -> Dict[str, Any]:
     latest_run = _latest_run_for_bot(bot_id, lifecycle_map) if bot_id else {}
     latest_run_map = _as_mapping(latest_run)
     latest_run_id = _clean_text(latest_run_map.get("run_id")) or _clean_text(lifecycle_map.get("run_id"))
-    status = _clean_text(lifecycle_map.get("status")) or _clean_text(latest_run_map.get("status")) or _clean_text(bot.get("status")) or "unknown"
+    status = _clean_text(lifecycle_map.get("status")) or _clean_text(latest_run_map.get("status")) or "unknown"
     phase = _clean_text(lifecycle_map.get("phase"))
     active_run_id = latest_run_id if is_active_run_state(status=status, phase=phase) else None
     strategy_snapshot = _run_strategy_snapshot(latest_run_map)
@@ -633,20 +634,21 @@ def watchdog_status() -> Dict[str, Any]:
 
 def runtime_capacity() -> Dict[str, Any]:
     host_cpu_cores = max(1, int(os.cpu_count() or 1))
-    active_statuses = {"running", "starting", "degraded", "telemetry_degraded"}
     workers_in_use = 0
     workers_requested = 0
     running_bots = 0
     telemetry_unavailable_bots = 0
 
     for bot in _composition().config_service.list_bots():
-        status = str(bot.get("status") or "").strip().lower()
-        if status not in active_statuses:
-            continue
-        running_bots += 1
         runtime_payload: Mapping[str, Any] = {}
         bot_id = str(bot.get("id") or "")
         lifecycle = _composition().storage.get_latest_bot_run_lifecycle(bot_id)
+        if not is_active_run_state(
+            status=(lifecycle or {}).get("status"),
+            phase=(lifecycle or {}).get("phase"),
+        ):
+            continue
+        running_bots += 1
         run_id = (
             str((lifecycle or {}).get("run_id") or "").strip()
             or _composition().storage.get_latest_bot_runtime_run_id(bot_id)
@@ -682,7 +684,7 @@ def runtime_capacity() -> Dict[str, Any]:
         "estimate_incomplete": telemetry_unavailable_bots > 0,
         "over_capacity_workers": max(0, workers_in_use - host_cpu_cores),
         "in_use_pct": in_use_pct,
-        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "updated_at": datetime.now(UTC).replace(tzinfo=None).isoformat() + "Z",
     }
 
 

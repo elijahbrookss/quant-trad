@@ -59,6 +59,10 @@ def test_step_rollups_keep_only_budgeted_context_metrics():
             "live_fact_count": 7,
             "botlens_live_overlays_payload_bytes": 2048,
             "consumed_signals_count": 2,
+            "canonical_fact_queue_depth": 12,
+            "canonical_fact_persist_lag_ms": 45.5,
+            "step_trace_queue_depth": 6,
+            "step_trace_persist_lag_ms": 33.0,
             "one_off_internal_wait_ms": 999.0,
         },
     }
@@ -79,6 +83,10 @@ def test_step_rollups_keep_only_budgeted_context_metrics():
     assert "live_fact_count" not in metric_names
     assert "botlens_live_overlays_payload_bytes" not in metric_names
     assert "consumed_signals_count" not in metric_names
+    assert "canonical_fact_queue_depth" not in metric_names
+    assert "canonical_fact_persist_lag_ms" not in metric_names
+    assert "step_trace_queue_depth" not in metric_names
+    assert "step_trace_persist_lag_ms" not in metric_names
     assert "one_off_internal_wait_ms" not in metric_names
 
 

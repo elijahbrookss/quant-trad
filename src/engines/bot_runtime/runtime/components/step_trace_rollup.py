@@ -15,12 +15,6 @@ STEP_CONTEXT_METRIC_EXACT = frozenset(
     {
         "build_state_ms",
         "canonical_append_ms",
-        "canonical_fact_overflow_count",
-        "canonical_fact_persist_batch_ms",
-        "canonical_fact_persist_error_count",
-        "canonical_fact_persist_lag_ms",
-        "canonical_fact_queue_depth",
-        "canonical_fact_queued_count",
         "candle_update_ms",
         "db_commit_ms",
         "delta_build_ms",
@@ -51,17 +45,11 @@ STEP_CONTEXT_METRIC_EXACT = frozenset(
         "series_overlay_entries_ms",
         "signal_eval_ms",
         "stats_update_ms",
-        "step_trace_dropped_count",
-        "step_trace_persist_batch_ms",
-        "step_trace_persist_error_count",
-        "step_trace_persist_lag_ms",
-        "step_trace_queue_depth",
         "strategy_eval_ms",
         "stream_emit_ms",
         "trace_persist_ms",
         "trade_lock_hold_ms",
         "trade_lock_wait_ms",
-        "worker_count",
     }
 )
 STEP_CONTEXT_METRIC_SUFFIXES: tuple[str, ...] = ()

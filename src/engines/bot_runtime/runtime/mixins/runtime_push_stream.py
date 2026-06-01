@@ -192,6 +192,20 @@ class RuntimePushStreamMixin:
                 return int(value[0]), int(value[1])
         return None, None
 
+    @staticmethod
+    def _projection_enqueue_metrics_from_consumer_results(consumer_results: Sequence[Any]) -> Dict[str, Any]:
+        for result in consumer_results:
+            consumer_name = str(getattr(result, "consumer_name", "") or "")
+            if consumer_name != "CanonicalFactProjectionDispatcher" or getattr(result, "error", None):
+                continue
+            value = getattr(result, "result", None)
+            if isinstance(value, AbcMapping):
+                return {
+                    "projection_dispatch_queued": bool(value.get("queued")),
+                    "projection_dispatch_queue_depth": value.get("queue_depth"),
+                }
+        return {}
+
     def commit_botlens_fact_payload(
         self,
         payload: Mapping[str, Any],
@@ -2559,6 +2573,8 @@ class RuntimePushStreamMixin:
             "stream_emit_ms": None,
             "dispatch_ms": None,
             "queue_wait_ms": None,
+            "projection_dispatch_queued": None,
+            "projection_dispatch_queue_depth": None,
             "subscriber_count": None,
             "subscribers_count": None,
             "dropped_messages": None,
@@ -2870,7 +2886,13 @@ class RuntimePushStreamMixin:
                 dispatch_ms = max((time.perf_counter() - dispatch_started) * 1000.0, 0.0)
                 enqueue_ms = dispatch_ms
                 payload = append_outcome.batch.live_payload
-                subscriber_count, dropped_messages = self._broadcast_metrics_from_consumer_results(consumer_results)
+                payload_context.update(self._projection_enqueue_metrics_from_consumer_results(consumer_results))
+                dispatched_subscribers, dispatched_drops = self._broadcast_metrics_from_consumer_results(
+                    consumer_results
+                )
+                if dispatched_subscribers is not None:
+                    subscriber_count = dispatched_subscribers
+                dropped_messages = dispatched_drops if dispatched_drops is not None else 0
             else:
                 payload_context["noncanonical_facts_skipped"] = len(payload.get("facts") or [])
                 subscriber_count, dropped_messages = 0, 0

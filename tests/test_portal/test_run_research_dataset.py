@@ -1347,7 +1347,7 @@ def test_lifecycle_failure_and_completion_blocks_golden_candidate(monkeypatch: p
             "RUN_FAILED",
             {
                 "bar_time": None,
-                "failure": {"reason_code": "stale_heartbeat"},
+                "failure": {"reason_code": "stale_run_lease"},
                 "status": "crashed",
             },
         ),
@@ -1387,7 +1387,7 @@ def test_unclassified_fault_and_completion_blocks_golden_candidate(monkeypatch: 
     assert "lifecycle_contradiction" in dataset["diagnostics"]["summary"]["blocking_codes"]
 
 
-def test_recoverable_watchdog_stale_heartbeat_degrades_without_lifecycle_contradiction(
+def test_recoverable_watchdog_stale_run_lease_degrades_without_lifecycle_contradiction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events = [
@@ -1396,14 +1396,14 @@ def test_recoverable_watchdog_stale_heartbeat_degrades_without_lifecycle_contrad
             "FAULT_RECORDED",
             {
                 "bar_time": None,
-                "fault_code": "stale_heartbeat",
+                "fault_code": "stale_run_lease",
                 "severity": "WARN",
-                "message": "Recoverable watchdog stale heartbeat observed: stale_heartbeat:prev=backend.quanttrad",
+                "message": "Recoverable watchdog stale run lease observed: stale_run_lease:prev=backend.quanttrad",
                 "source": "lifecycle",
                 "component": "watchdog",
-                "failure_type": "watchdog_stale_heartbeat",
-                "reason_code": "stale_heartbeat",
-                "reason": "stale_heartbeat:prev=backend.quanttrad",
+                "failure_type": "watchdog_stale_run_lease",
+                "reason_code": "stale_run_lease",
+                "reason": "stale_run_lease:prev=backend.quanttrad",
                 "recoverable": True,
             },
         ),
@@ -1414,8 +1414,8 @@ def test_recoverable_watchdog_stale_heartbeat_degrades_without_lifecycle_contrad
     dataset = _build(monkeypatch, events=events)
 
     codes = {item["code"]: item for item in dataset["diagnostics"]["items"]}
-    assert "recoverable_watchdog_stale_heartbeat" in codes
-    assert codes["recoverable_watchdog_stale_heartbeat"]["readiness_impact"] == "degrades_diagnostics"
+    assert "recoverable_watchdog_stale_run_lease" in codes
+    assert codes["recoverable_watchdog_stale_run_lease"]["readiness_impact"] == "degrades_diagnostics"
     assert "lifecycle_contradiction" not in dataset["readiness"]["golden_blocking_reasons"]
     assert "lifecycle_contradiction" not in dataset["diagnostics"]["summary"]["blocking_codes"]
 

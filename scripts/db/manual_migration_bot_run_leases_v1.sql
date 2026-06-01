@@ -24,3 +24,9 @@ CREATE INDEX IF NOT EXISTS ix_portal_bot_run_leases_bot_status_expires
 
 CREATE INDEX IF NOT EXISTS ix_portal_bot_run_leases_runner_status
     ON portal_bot_run_leases (runner_id, status);
+
+CREATE INDEX IF NOT EXISTS ix_portal_bot_run_leases_runner_status_expires
+    ON portal_bot_run_leases (runner_id, status, expires_at);
+
+CREATE INDEX IF NOT EXISTS ix_portal_bot_run_leases_status_expires
+    ON portal_bot_run_leases (status, expires_at);

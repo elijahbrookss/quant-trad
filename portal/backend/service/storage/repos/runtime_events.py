@@ -61,12 +61,6 @@ _STEP_CONTEXT_METRIC_EXACT = frozenset(
     {
         "build_state_ms",
         "canonical_append_ms",
-        "canonical_fact_overflow_count",
-        "canonical_fact_persist_batch_ms",
-        "canonical_fact_persist_error_count",
-        "canonical_fact_persist_lag_ms",
-        "canonical_fact_queue_depth",
-        "canonical_fact_queued_count",
         "candle_update_ms",
         "db_commit_ms",
         "delta_build_ms",
@@ -97,17 +91,11 @@ _STEP_CONTEXT_METRIC_EXACT = frozenset(
         "series_overlay_entries_ms",
         "signal_eval_ms",
         "stats_update_ms",
-        "step_trace_dropped_count",
-        "step_trace_persist_batch_ms",
-        "step_trace_persist_error_count",
-        "step_trace_persist_lag_ms",
-        "step_trace_queue_depth",
         "strategy_eval_ms",
         "stream_emit_ms",
         "trace_persist_ms",
         "trade_lock_hold_ms",
         "trade_lock_wait_ms",
-        "worker_count",
     }
 )
 _STEP_CONTEXT_METRIC_SUFFIXES: tuple[str, ...] = ()
@@ -1733,7 +1721,6 @@ def update_bot_runtime_status(*, bot_id: str, run_id: str, status: str, telemetr
     started = time.perf_counter()
     payloads = {
         "portal_bot_runs": payload_size_bytes({"status": status, "telemetry_degraded": telemetry_degraded}),
-        "portal_bots": payload_size_bytes({"status": status}),
     }
 
     def _write() -> StorageWriteOutcome:
@@ -1741,8 +1728,6 @@ def update_bot_runtime_status(*, bot_id: str, run_id: str, status: str, telemetr
             bot = session.get(BotRecord, bot_id)
             if bot is None:
                 raise KeyError(f"Bot {bot_id} was not found")
-            bot.status = status
-            bot.updated_at = _utcnow()
             run = session.get(BotRunRecord, run_id)
             if run is None:
                 run = BotRunRecord(
@@ -1773,7 +1758,7 @@ def update_bot_runtime_status(*, bot_id: str, run_id: str, status: str, telemetr
                 run.ended_at = _utcnow()
         return StorageWriteOutcome(
             result=None,
-            rows_written=2,
+            rows_written=1,
             payload_bytes=sum(payloads.values()),
         )
 
@@ -1791,15 +1776,5 @@ def update_bot_runtime_status(*, bot_id: str, run_id: str, status: str, telemetr
             result=None,
             rows_written=1,
             payload_bytes=payloads["portal_bot_runs"],
-        ),
-    )
-    _observe_db_write_outcome(
-        storage_target="portal_bots",
-        context={"run_id": run_id, "bot_id": bot_id, "status": status},
-        started=started,
-        outcome=StorageWriteOutcome(
-            result=None,
-            rows_written=1,
-            payload_bytes=payloads["portal_bots"],
         ),
     )

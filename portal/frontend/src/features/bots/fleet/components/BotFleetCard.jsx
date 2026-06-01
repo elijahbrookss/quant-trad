@@ -395,7 +395,7 @@ function PerformanceTracePanel({ trace, rows = [] }) {
     : trend === 'danger'
       ? 'text-rose-200'
       : 'text-slate-300'
-  const compactRows = rows.filter((row) => ['mode', 'heartbeat', 'container'].includes(row.key)).slice(0, 3)
+  const compactRows = rows.filter((row) => ['mode', 'lease', 'container'].includes(row.key)).slice(0, 3)
 
   return (
     <div className="space-y-2">
@@ -546,7 +546,7 @@ export const LiveMonitorRow = memo(function LiveMonitorRow({
   const display = view.display
   const pnlStat = view.metricStats.find((s) => s.key === 'net-pnl')
   const warnStat = view.metricStats.find((s) => s.key === 'warnings')
-  const heartbeatRow = view.operationalRows.find((r) => r.key === 'heartbeat')
+  const leaseRow = view.operationalRows.find((r) => r.key === 'lease')
   const mainActions = display.allowedActions.filter((a) => a.variant !== 'danger').slice(0, 2)
   const dangerActions = display.allowedActions.filter((a) => a.variant === 'danger').slice(0, 1)
 
@@ -574,7 +574,7 @@ export const LiveMonitorRow = memo(function LiveMonitorRow({
             <span className={`qt-mono text-xs font-semibold ${metricToneClass(pnlStat.tone)}`}>{pnlStat.value}</span>
           </div>
         ) : null}
-        {heartbeatRow ? <HeartbeatIndicator state={heartbeatRow.value} /> : null}
+        {leaseRow ? <LeaseIndicator state={leaseRow.value} /> : null}
         <div className="flex items-center gap-1">
           <ConfigIconButton bot={bot} onOpenConfig={onOpenConfig} />
           {[...mainActions, ...dangerActions].map((action) => (
@@ -725,7 +725,7 @@ export const BacktestRunCard = memo(function BacktestRunCard({
 
 // --- Shared sub-components ---------------------------------------------------
 
-function HeartbeatIndicator({ state }) {
+function LeaseIndicator({ state }) {
   const normalized = String(state || '').toLowerCase()
   const dotClass = normalized === 'fresh'
     ? 'bg-emerald-400'
