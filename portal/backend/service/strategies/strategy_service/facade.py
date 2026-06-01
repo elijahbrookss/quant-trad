@@ -43,8 +43,6 @@ def _parse_timestamp(value: Any) -> datetime:
             except ValueError:
                 continue
     return _utcnow()
-_LEGACY_TYPED_RULE_V1 = "typed_rule_v1"
-
 storage_load_strategies = persistence.load_strategies
 storage_upsert_strategy = persistence.upsert_strategy
 storage_delete_strategy = persistence.delete_strategy
@@ -350,20 +348,8 @@ def _serialize_compiled_strategy_payload(
     }
 
 
-def _legacy_rule_payload(rule_entry: Mapping[str, Any]) -> Dict[str, Any]:
+def _stored_rule_payload(rule_entry: Mapping[str, Any]) -> Dict[str, Any]:
     raw_conditions = rule_entry.get("conditions")
-    if isinstance(raw_conditions, Mapping) and str(raw_conditions.get("kind") or "").strip() == _LEGACY_TYPED_RULE_V1:
-        raw_when = raw_conditions.get("when")
-        payload: Dict[str, Any] = {
-            "id": rule_entry.get("id"),
-            "name": rule_entry.get("name"),
-            "intent": normalize_rule_intent(rule_entry.get("action", "buy")),
-            "description": rule_entry.get("description"),
-            "enabled": bool(rule_entry.get("enabled", True)),
-        }
-        if isinstance(raw_when, Mapping):
-            payload["when"] = raw_when
-        return payload
     if isinstance(raw_conditions, Mapping):
         payload = dict(raw_conditions)
         payload.setdefault("id", rule_entry.get("id"))
@@ -701,7 +687,7 @@ class StrategyRegistry:
                 if not rule_id:
                     continue
                 try:
-                    normalized_rule = _normalize_rule_contract(base, _legacy_rule_payload(rule_entry))
+                    normalized_rule = _normalize_rule_contract(base, _stored_rule_payload(rule_entry))
                 except Exception as exc:
                     logger.warning(
                         "strategy_rule_skipped | strategy_id=%s rule_id=%s error=%s",

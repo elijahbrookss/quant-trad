@@ -14,6 +14,7 @@ tags:
 code_paths:
   - portal/backend/db/models.py
   - portal/backend/db/session.py
+  - portal/backend/service/provenance.py
   - portal/backend/service/storage
   - portal/backend/service/storage/repos/run_leases.py
   - portal/backend/service/storage/repos/runtime_events.py
@@ -26,6 +27,7 @@ code_paths:
   - src/engines/bot_runtime/runtime/components/overlay_delta.py
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
   - docs/architecture/persistence/diagrams/runtime-event-ledger-flow.mmd
+  - scripts/db/manual_migration_versioning_hard_cutover.sql
 ---
 # Persistence Boundary
 
@@ -40,6 +42,12 @@ Related diagram: [runtime-event-ledger-flow.mmd](diagrams/runtime-event-ledger-f
 `PG_DSN` is the only runtime persistence DSN. Runtime services should write through explicit repository or gateway boundaries, not hidden globals or alternate data stores.
 
 Persistence owns durable storage. It does not own execution decisions or projection interpretation.
+
+Physical table, index, constraint, and ORM class names are stable concern names,
+not version carriers. Version and code-provenance fields live on the artifact
+that owns them. Runtime run rows carry runtime contract/source/image/storage
+provenance; report materialization rows carry report contract, dataset contract,
+builder source revision, and report storage provenance.
 
 ## Diagram Walkthrough
 
@@ -85,9 +93,9 @@ Active schema surfaces are justified by role:
   materialization tables. Fleet cards and API responses may project those rows
   together, but readers must not recover runtime truth from bot definition
   columns.
-- Keep as bounded observability: `observability_events.botlens_backend_events_v1`
-  and `observability_metrics.botlens_backend_metric_rollups_v1`.
-- Keep as bounded profiler data: `portal_bot_run_step_rollups_v1` stores typed
+- Keep as bounded observability: `observability_events.botlens_backend_events`
+  and `observability_metrics.botlens_backend_metric_rollups`.
+- Keep as bounded profiler data: `portal_bot_run_step_rollups` stores typed
   bucketed phase-duration metrics with mergeable histogram counts for p95/p99
   estimates. Raw `portal_bot_run_steps` rows are not part of the schema
   contract, and the storage repository accepts only precomputed rollups. Queue
@@ -124,7 +132,7 @@ transport event. Event retention is tiered:
   source/catalog storage instead of retained as runtime-event rows.
 - Tier 3, observability metrics: write latency, queue depth, runtime health,
   projector timing, and step metrics. These are aggregated in
-  `observability_metrics.botlens_backend_metric_rollups_v1`; raw metric samples
+  `observability_metrics.botlens_backend_metric_rollups`; raw metric samples
   are in-memory/live-only and are not part of the database schema contract.
 - Tier 4, live UI/projection transport: viewer notifications, repeated health
   pings, unchanged overlay state, and live fanout deltas. These are transport

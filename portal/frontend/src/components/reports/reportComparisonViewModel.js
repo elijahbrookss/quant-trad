@@ -130,7 +130,7 @@ export const buildRunComparisonView = (payload = {}) => {
 
   return {
     contractVersion: payload.contract_version,
-    supported: payload.contract_version === 'run_report_comparison_v1',
+    supported: payload.contract_version === 'run_report_comparison.v1',
     leftRunId: payload.left_run_id || '',
     rightRunId: payload.right_run_id || '',
     comparisonStatus: payload.comparison_status || UNKNOWN,

@@ -62,7 +62,7 @@ export const runReportView = (payload = {}) => {
   return {
     contractVersion: payload.contract_version,
     schemaVersion: payload.schema_version,
-    supported: payload.contract_version === 'run_report_v2',
+    supported: payload.contract_version === 'run_report.v2',
     runId: payload.run_id || identity.run_id,
     identity,
     trust,

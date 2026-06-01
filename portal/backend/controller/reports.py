@@ -156,7 +156,7 @@ async def compare_materialized_reports(
     include_golden: bool = Query(True, description="Read existing golden comparison evidence when available."),
     require_golden: bool = Query(False, description="Block comparison when existing golden evidence is unavailable."),
 ) -> RunComparisonDTO:
-    """Compare two ready materialized RunReportDTO v2 artifacts without building reports."""
+    """Compare two ready materialized RunReportDTO contract (`run_report.v2`) artifacts without building reports."""
 
     context = build_log_context(left_run_id=left_run_id, right_run_id=right_run_id, include_golden=include_golden, require_golden=require_golden)
     logger.info(with_log_context("run_report_compare_request", context))
@@ -305,7 +305,7 @@ async def build_run_report_materialization(
     async_build: bool = Query(False, description="Build in the background instead of returning the final status."),
     force_rebuild: bool = Query(False, description="Force a new materialized report build."),
 ) -> RunReportMaterializationResponse:
-    """Build or enqueue a materialized RunReportDTO v2 artifact without returning the artifact."""
+    """Build or enqueue a materialized RunReportDTO contract (`run_report.v2`) artifact without returning the artifact."""
 
     context = build_log_context(run_id=run_id, async_build=async_build, force_rebuild=force_rebuild)
     logger.info(with_log_context("run_report_materialization_build_request", context))
@@ -346,10 +346,10 @@ async def get_run_report(
     build: bool = Query(False, description="Deprecated. Report reads are side-effect free; use POST /run-report/build."),
     force_rebuild: bool = Query(False, description="Deprecated on GET. Use POST /run-report/build?force_rebuild=true."),
 ) -> Any:
-    """Return a materialized Run Report DTO v2 contract for a terminal run."""
+    """Return a materialized Run Report DTO contract for a terminal run."""
 
     context = build_log_context(run_id=run_id, build=build, force_rebuild=force_rebuild)
-    logger.info(with_log_context("run_report_v2_request", context))
+    logger.info(with_log_context("run_report_request", context))
     try:
         if build or force_rebuild:
             raise HTTPException(
@@ -363,7 +363,7 @@ async def get_run_report(
         if not force_rebuild:
             materialized = await _run_report_task(_materialized_run_report, run_id)
             if materialized is not None:
-                logger.info(with_log_context("run_report_v2_materialized_success", context))
+                logger.info(with_log_context("run_report_materialized_success", context))
                 return RunReportDTO.model_validate(materialized)
 
         status_payload = await _run_report_task(
@@ -383,10 +383,10 @@ async def get_run_report(
             )
         return JSONResponse(status_code=202, content=status_payload)
     except KeyError as exc:
-        logger.warning(with_log_context("run_report_v2_missing", context))
+        logger.warning(with_log_context("run_report_missing", context))
         raise HTTPException(404, str(exc)) from exc
     except RunReportMaterializationNotTerminal as exc:
-        logger.info(with_log_context("run_report_v2_not_terminal", context | {"run_status": exc.status}))
+        logger.info(with_log_context("run_report_not_terminal", context | {"run_status": exc.status}))
         raise HTTPException(
             status_code=409,
             detail={
@@ -399,7 +399,7 @@ async def get_run_report(
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - convert to API error
-        logger.error(with_log_context("run_report_v2_failed", context), exc_info=exc)
+        logger.error(with_log_context("run_report_failed", context), exc_info=exc)
         raise HTTPException(500, "Run report materialization failed") from exc
 
 

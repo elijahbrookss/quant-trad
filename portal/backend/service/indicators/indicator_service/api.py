@@ -391,7 +391,7 @@ def overlays_for_instance(
         )
         return {
             "indicator_id": inst_id,
-            "runtime_path": "typed_indicator_engine_v1",
+            "runtime_path": "typed_indicator_engine.v1",
             "overlay_state": {
                 "mode": "latest",
                 "cursor_epoch": None,
@@ -499,7 +499,7 @@ def overlays_for_instance(
     )
     return {
         "indicator_id": inst_id,
-        "runtime_path": "typed_indicator_engine_v1",
+        "runtime_path": "typed_indicator_engine.v1",
         "overlay_state": {
             "mode": overlay_state_mode,
             "cursor_epoch": overlay_epoch,

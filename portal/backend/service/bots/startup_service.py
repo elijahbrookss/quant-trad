@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import traceback
 import uuid
 from dataclasses import dataclass
@@ -11,6 +10,7 @@ from typing import Any, Dict, Mapping, Protocol
 
 from core.settings import get_settings
 
+from ..provenance import RUNTIME_CONTRACT_VERSION, RUNTIME_STORAGE_SCHEMA_VERSION, source_revision
 from .botlens_lifecycle_bridge import emit_lifecycle_event
 from .execution_behavior import execution_behavior_from_bot
 from .startup_lifecycle import (
@@ -24,9 +24,6 @@ from .startup_lifecycle import (
 
 logger = logging.getLogger(__name__)
 _BOT_RUNTIME_SETTINGS = get_settings().bot_runtime
-_RUNTIME_CONTRACT_VERSION = "runtime_contract.v1"
-_REPORT_DATASET_SCHEMA_VERSION = "run_research_dataset.v1"
-_SCHEMA_CONTRACT_VERSION = "portal_runtime_storage.v1"
 
 
 def _execution_mode_from_bot(bot: Mapping[str, Any]) -> str:
@@ -285,11 +282,10 @@ class BotStartupOrchestrator:
                         "config_hash": ctx.config_hash or None,
                     },
                 },
-                "runtime_contract_version": _RUNTIME_CONTRACT_VERSION,
-                "report_dataset_schema_version": _REPORT_DATASET_SCHEMA_VERSION,
-                "source_revision": os.getenv("GIT_COMMIT") or os.getenv("SOURCE_REVISION"),
-                "runtime_image": os.getenv("RUNTIME_IMAGE") or os.getenv("IMAGE_DIGEST"),
-                "schema_contract_version": _SCHEMA_CONTRACT_VERSION,
+                "runtime_contract_version": RUNTIME_CONTRACT_VERSION,
+                "runtime_source_revision": source_revision(),
+                "runtime_image": _BOT_RUNTIME_SETTINGS.image,
+                "storage_schema_version": RUNTIME_STORAGE_SCHEMA_VERSION,
             }
         )
 
@@ -401,11 +397,10 @@ class BotStartupOrchestrator:
                     "effective_strategy_config": effective_strategy_config,
                 },
                 "strategy_hash": strategy_hash,
-                "runtime_contract_version": _RUNTIME_CONTRACT_VERSION,
-                "report_dataset_schema_version": _REPORT_DATASET_SCHEMA_VERSION,
-                "source_revision": os.getenv("GIT_COMMIT") or os.getenv("SOURCE_REVISION"),
-                "runtime_image": os.getenv("RUNTIME_IMAGE") or os.getenv("IMAGE_DIGEST"),
-                "schema_contract_version": _SCHEMA_CONTRACT_VERSION,
+                "runtime_contract_version": RUNTIME_CONTRACT_VERSION,
+                "runtime_source_revision": source_revision(),
+                "runtime_image": _BOT_RUNTIME_SETTINGS.image,
+                "storage_schema_version": RUNTIME_STORAGE_SCHEMA_VERSION,
             }
         )
 

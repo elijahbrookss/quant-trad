@@ -239,7 +239,7 @@ The sequential suite contracts are artifact-reference based:
 - `instrument_matrix_experiment_request.v1`
 
 These contracts intentionally avoid embedding full report DTOs. Reports,
-research summaries, materialized `RunReportDTO v2`, and comparison semantics are
+research summaries, materialized RunReportDTO contract (`run_report.v2`), and comparison semantics are
 still owned by backend reporting routes.
 
 Pass gates are registry-backed evaluators. Shorthand plan keys such as

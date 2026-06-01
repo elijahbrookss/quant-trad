@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import statistics
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 from data_providers.utils.ohlcv import interval_to_timedelta
@@ -18,6 +18,7 @@ from utils.log_context import build_log_context, with_log_context
 import logging
 
 from ..market.candle_service import fetch_ohlcv_by_instrument
+from ..provenance import REPORT_CONTRACT_VERSION, REPORT_SCHEMA_VERSION
 from . import report_data
 from .run_research_dataset import DATASET_SCHEMA_VERSION, build_run_research_dataset
 
@@ -39,8 +40,10 @@ _COMPARABLE_SUMMARY_METRICS = (
 )
 _DATASET_CACHE_TTL_SECONDS = 15.0
 _DATASET_CACHE_MAX_ENTRIES = 32
-_DATASET_CACHE: "OrderedDict[Tuple[str, int], Tuple[float, Dict[str, Any]]]" = OrderedDict()
-_DATASET_INFLIGHT: Dict[Tuple[str, int], Future] = {}
+_DatasetBuilder = Callable[[str], Dict[str, Any]]
+_DatasetCacheKey = Tuple[str, _DatasetBuilder]
+_DATASET_CACHE: "OrderedDict[_DatasetCacheKey, Tuple[float, Dict[str, Any]]]" = OrderedDict()
+_DATASET_INFLIGHT: Dict[_DatasetCacheKey, Future] = {}
 _DATASET_CACHE_LOCK = threading.RLock()
 
 
@@ -84,11 +87,11 @@ def _execution_mode_from_run(run: Mapping[str, Any]) -> str:
     return normalized if normalized in {"fast", "full"} else "fast"
 
 
-def _dataset_cache_key(run_id: str) -> Tuple[str, int]:
-    return (str(run_id), id(build_run_research_dataset))
+def _dataset_cache_key(run_id: str) -> _DatasetCacheKey:
+    return (str(run_id), build_run_research_dataset)
 
 
-def _cached_dataset_unlocked(key: Tuple[str, int]) -> Optional[Dict[str, Any]]:
+def _cached_dataset_unlocked(key: _DatasetCacheKey) -> Optional[Dict[str, Any]]:
     entry = _DATASET_CACHE.get(key)
     if not entry:
         return None
@@ -114,7 +117,7 @@ def clear_report_dataset_cache(run_id: Optional[str] = None) -> None:
                 _DATASET_CACHE.pop(key, None)
 
 
-def _store_dataset_unlocked(key: Tuple[str, int], dataset: Dict[str, Any]) -> None:
+def _store_dataset_unlocked(key: _DatasetCacheKey, dataset: Dict[str, Any]) -> None:
     _DATASET_CACHE[key] = (time.monotonic(), dataset)
     _DATASET_CACHE.move_to_end(key)
     while len(_DATASET_CACHE) > _DATASET_CACHE_MAX_ENTRIES:
@@ -1207,7 +1210,7 @@ def _coordinator_waits(run_id: str) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - coordinator waits are diagnostic, not material truth.
         logger.warning(
             with_log_context(
-                "run_report_v2_coordinator_waits_unavailable",
+                "run_report_coordinator_waits_unavailable",
                 build_log_context(run_id=run_id, error=str(exc)),
             )
         )
@@ -1318,7 +1321,7 @@ def _run_report_identity(dataset: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def build_run_report(run_id: str) -> Dict[str, Any]:
-    """Build the RunReportDTO v2 payload from canonical report inputs."""
+    """Build the RunReportDTO payload from canonical report inputs."""
 
     dataset = _dataset(run_id)
     try:
@@ -1326,14 +1329,14 @@ def build_run_report(run_id: str) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - report v2 should degrade optional runtime ordering context.
         logger.warning(
             with_log_context(
-                "run_report_v2_runtime_ordering_context_unavailable",
+                "run_report_runtime_ordering_context_unavailable",
                 build_log_context(run_id=run_id, error=str(exc)),
             )
         )
         events = []
     return {
-        "contract_version": "run_report_v2",
-        "schema_version": "run_report.v2",
+        "contract_version": REPORT_CONTRACT_VERSION,
+        "schema_version": REPORT_SCHEMA_VERSION,
         "run_id": run_id,
         "identity": _run_report_identity(dataset),
         "trust": _research_trust(dataset, events),

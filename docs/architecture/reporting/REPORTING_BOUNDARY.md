@@ -11,6 +11,7 @@ tags:
   - diagnostics
   - export
 code_paths:
+  - portal/backend/service/provenance.py
   - portal/backend/service/reports
   - portal/backend/controller/reports.py
   - portal/backend/service/reports/comparison.py
@@ -32,15 +33,15 @@ Related diagram: [run-research-dataset-flow.mmd](diagrams/run-research-dataset-f
 
 Reports are views. `RunResearchDataset v1` is the canonical run-level data product. Export bundles are generated from the dataset and are not comparison truth.
 
-`RunReportDTO v2` is the typed single-run report contract for frontend and
+`RunReportDTO` with `contract_version=run_report.v2` is the typed single-run report contract for frontend and
 future MCP consumers. It wraps canonical dataset facts into research-trust and
 research-performance sections while keeping raw rows available only as
 referenced/debug data.
 
 Terminal report artifacts are materialized separately from run lifecycle truth.
 When a run reaches a terminal status, the backend may enqueue a
-`RunReportDTO v2` build and persist the artifact/status in
-`portal_report_materializations_v1`. Report states (`not_started`, `building`,
+`RunReportDTO` build and persist the artifact/status in
+`portal_report_materializations`. Report states (`not_started`, `building`,
 `ready`, `failed`, `stale`) do not alter run terminal status; report build
 failure is a reporting condition, not a runtime failure.
 
@@ -49,10 +50,12 @@ fingerprint recorded with the artifact. The fingerprint includes the run row,
 runtime-event high-water mark, and trade count/update boundary. A ready artifact
 with a missing or changed input fingerprint is stale and must be rebuilt before
 serving or comparing. Contract/schema version alone is not a cache validity
-boundary.
+boundary. Report materializations also record the builder source revision; a
+ready artifact built by another source revision is stale for the current backend
+and must be rebuilt before serving or comparing.
 
-Paired run-report comparison reads ready `RunReportDTO v2` artifacts from
-`portal_report_materializations_v1`. It returns structured blockers for
+Paired run-report comparison reads ready `RunReportDTO` artifacts from
+`portal_report_materializations`. It returns structured blockers for
 non-terminal, missing, building, failed, or stale report artifacts and does not
 enqueue cold report builds by default. Semantic, performance, behavior, wallet,
 symbol, coordinator-wait, and operational drift deltas are derived from the
@@ -87,7 +90,7 @@ The dataset is rebuildable from durable DB/read-model truth:
 - `portal_bot_runs` for metadata, lean provenance hashes, and bounded config snapshots,
 - `portal_bot_trades` and trade events for trade lifecycle and financial outcomes,
 - `portal_bot_run_events` for decisions, execution diagnostics, wallet/fallback facts, and BotLens-domain facts,
-- `portal_bot_run_step_rollups_v1` for phase-duration profiler timings and
+- `portal_bot_run_step_rollups` for phase-duration profiler timings and
   mergeable p95/p99 histogram estimates when present,
 - observability events for normalized report diagnostics.
 - the reporting candle service for bounded candle windows when requested.
@@ -231,7 +234,7 @@ new execution semantics.
 - Reporting is downstream of runtime truth.
 - Legacy dataset compare uses canonical dataset readiness, not ad hoc
   report-file existence. Materialized run-report compare additionally requires
-  both `RunReportDTO v2` artifacts to be `ready` so the comparison UI can use
+  both RunReportDTO contract (`run_report.v2`) artifacts to be `ready` so the comparison UI can use
   the same artifact truth source as single-run reports.
 - Standard computed metrics are exposed by the dataset; consumers should not need
   private formula implementations for normal report views.

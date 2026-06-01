@@ -63,7 +63,7 @@ REQUIRED_BOT_RUN_INDEXES = frozenset(
 
 REQUIRED_REPORT_MATERIALIZATION_INDEXES = frozenset(
     {
-        "ix_portal_report_materializations_v1_input_fingerprint",
+        "ix_portal_report_materializations_input_fingerprint",
     }
 )
 
@@ -604,10 +604,9 @@ class BotRunRecord(Base):
     strategy_hash = Column(String(64), nullable=True)
     data_snapshot_hash = Column(String(64), nullable=True)
     runtime_contract_version = Column(String(64), nullable=True)
-    report_dataset_schema_version = Column(String(64), nullable=True)
-    source_revision = Column(String(128), nullable=True)
+    runtime_source_revision = Column(String(128), nullable=True)
     runtime_image = Column(String(255), nullable=True)
-    schema_contract_version = Column(String(64), nullable=True)
+    storage_schema_version = Column(String(64), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -660,10 +659,9 @@ class BotRunRecord(Base):
             "strategy_hash": self.strategy_hash,
             "data_snapshot_hash": self.data_snapshot_hash,
             "runtime_contract_version": self.runtime_contract_version,
-            "report_dataset_schema_version": self.report_dataset_schema_version,
-            "source_revision": self.source_revision,
+            "runtime_source_revision": self.runtime_source_revision,
             "runtime_image": self.runtime_image,
-            "schema_contract_version": self.schema_contract_version,
+            "storage_schema_version": self.storage_schema_version,
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
@@ -672,13 +670,17 @@ class BotRunRecord(Base):
 class ReportMaterializationRecord(Base):
     """Persisted RunReportDTO artifact and build status for one run."""
 
-    __tablename__ = "portal_report_materializations_v1"
+    __tablename__ = "portal_report_materializations"
     __table_args__ = (
-        Index("ix_portal_report_materializations_v1_input_fingerprint", "input_fingerprint"),
+        Index("ix_portal_report_materializations_input_fingerprint", "input_fingerprint"),
     )
 
     run_id = Column(String(64), ForeignKey("portal_bot_runs.run_id", ondelete="CASCADE"), primary_key=True)
-    contract_version = Column(String(64), nullable=False, default="run_report_v2")
+    contract_version = Column(String(64), nullable=False, default="run_report.v2")
+    report_schema_version = Column(String(64), nullable=True)
+    dataset_schema_version = Column(String(64), nullable=True)
+    builder_source_revision = Column(String(128), nullable=True)
+    storage_schema_version = Column(String(64), nullable=True)
     status = Column(String(32), nullable=False, default="not_started")
     artifact_id = Column(String(160), nullable=True)
     artifact = Column(JSONB, nullable=True)
@@ -710,6 +712,10 @@ class ReportMaterializationRecord(Base):
             "run_id": self.run_id,
             "status": effective_status,
             "contract_version": self.contract_version,
+            "report_schema_version": self.report_schema_version,
+            "dataset_schema_version": self.dataset_schema_version,
+            "builder_source_revision": self.builder_source_revision,
+            "storage_schema_version": self.storage_schema_version,
             "artifact_id": self.artifact_id,
             "artifact_path": None,
             "built_at": (self.built_at.isoformat() + "Z") if self.built_at else None,
@@ -853,7 +859,7 @@ class BotRunLeaseRecord(Base):
 class BotRunStepRollupRecord(Base):
     """Bucketed runtime step profiler metric rollup."""
 
-    __tablename__ = "portal_bot_run_step_rollups_v1"
+    __tablename__ = "portal_bot_run_step_rollups"
     __table_args__ = (
         UniqueConstraint(
             "bucket_start",
@@ -866,17 +872,17 @@ class BotRunStepRollupRecord(Base):
             "symbol",
             "timeframe",
             "status",
-            name="uq_portal_bot_run_step_rollups_v1_bucket_identity",
+            name="uq_portal_bot_run_step_rollups_bucket_identity",
         ),
-        Index("ix_portal_bot_run_step_rollups_v1_run_bucket", "run_id", "bucket_start"),
+        Index("ix_portal_bot_run_step_rollups_run_bucket", "run_id", "bucket_start"),
         Index(
-            "ix_portal_bot_run_step_rollups_v1_run_step_metric_bucket",
+            "ix_portal_bot_run_step_rollups_run_step_metric_bucket",
             "run_id",
             "step_name",
             "metric_name",
             "bucket_start",
         ),
-        Index("ix_portal_bot_run_step_rollups_v1_bot_bucket", "bot_id", "bucket_start"),
+        Index("ix_portal_bot_run_step_rollups_bot_bucket", "bot_id", "bucket_start"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -1083,11 +1089,11 @@ class BotRunEventSeqAllocatorRecord(Base):
 class BotlensBackendEventRecord(Base):
     """Durable backend observability event row for BotLens/Grafana queries."""
 
-    __tablename__ = "botlens_backend_events_v1"
+    __tablename__ = "botlens_backend_events"
     __table_args__ = (
-        Index("ix_botlens_backend_events_v1_observed_at", "observed_at"),
-        Index("ix_botlens_backend_events_v1_event_name_observed_at", "event_name", "observed_at"),
-        Index("ix_botlens_backend_events_v1_run_id_observed_at", "run_id", "observed_at"),
+        Index("ix_botlens_backend_events_observed_at", "observed_at"),
+        Index("ix_botlens_backend_events_event_name_observed_at", "event_name", "observed_at"),
+        Index("ix_botlens_backend_events_run_id_observed_at", "run_id", "observed_at"),
         {"schema": "observability_events"},
     )
 
@@ -1148,7 +1154,7 @@ class BotlensBackendEventRecord(Base):
 class BotlensBackendMetricRollupRecord(Base):
     """Bucketed durable backend observability metric rollup row."""
 
-    __tablename__ = "botlens_backend_metric_rollups_v1"
+    __tablename__ = "botlens_backend_metric_rollups"
     __table_args__ = (
         UniqueConstraint(
             "bucket_start",
@@ -1168,15 +1174,15 @@ class BotlensBackendMetricRollupRecord(Base):
             "storage_target",
             "failure_mode",
             "label_hash",
-            name="uq_botlens_backend_metric_rollups_v1_bucket_identity",
+            name="uq_botlens_backend_metric_rollups_bucket_identity",
         ),
-        Index("ix_botlens_backend_metric_rollups_v1_bucket_start", "bucket_start"),
+        Index("ix_botlens_backend_metric_rollups_bucket_start", "bucket_start"),
         Index(
-            "ix_botlens_backend_metric_rollups_v1_metric_bucket",
+            "ix_botlens_backend_metric_rollups_metric_bucket",
             "metric_name",
             "bucket_start",
         ),
-        Index("ix_botlens_backend_metric_rollups_v1_run_bucket", "run_id", "bucket_start"),
+        Index("ix_botlens_backend_metric_rollups_run_bucket", "run_id", "bucket_start"),
         {"schema": "observability_metrics"},
     )
 

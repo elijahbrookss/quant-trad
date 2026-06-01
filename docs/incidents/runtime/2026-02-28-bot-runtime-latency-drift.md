@@ -62,7 +62,7 @@ None of the above used hard caps; each became more expensive as run state grew.
   - File: `portal/backend/service/storage/repos/runtime_events.py`
 - Later schema cleanup removed the legacy snapshot/view-state payload tables and
   raw step rows from the active storage contract. Runtime profiler data now
-  lands in `portal_bot_run_step_rollups_v1`.
+  lands in `portal_bot_run_step_rollups`.
 
 ### Telemetry Hub Compatibility
 - Ingest now supports lightweight telemetry payloads (without embedded full snapshot) and reconstructs broadcast payload from latest DB snapshot when viewers are present.

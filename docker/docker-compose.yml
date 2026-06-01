@@ -47,6 +47,7 @@ services:
       QT_WORKERS_INDICATORS_PROCESSES: ${QT_WORKERS_INDICATORS_PROCESSES:-5}
       QT_BOT_RUNTIME_IMAGE: ${QT_BOT_RUNTIME_IMAGE:-quanttrad-backend:dev}
       QT_BOT_RUNTIME_NETWORK: ${QT_BOT_RUNTIME_NETWORK:-quant-trad_quanttrad}
+      SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required for run provenance}
     ports:
       - "8000:8000"
     command:

@@ -323,7 +323,7 @@ def test_list_report_summaries_exposes_execution_mode(monkeypatch) -> None:
     monkeypatch.setattr(
         contract.report_data,
         "get_report_materialization_status",
-        lambda _run_id: {"status": "not_built", "contract_version": "run_report_v2"},
+        lambda _run_id: {"status": "not_built", "contract_version": "run_report.v2"},
     )
 
     payload = contract.list_report_summaries()
@@ -443,13 +443,13 @@ def test_report_contract_reuses_dataset_build_for_burst(monkeypatch) -> None:
     assert calls["count"] == 1
 
 
-def test_run_report_v2_builds_from_existing_dataset(monkeypatch) -> None:
+def test_run_report_builds_from_existing_dataset(monkeypatch) -> None:
     dataset = _run_report_dataset()
     _install_run_report_dataset(monkeypatch, dataset)
 
     payload = contract.get_run_report("run-1")
 
-    assert payload["contract_version"] == "run_report_v2"
+    assert payload["contract_version"] == "run_report.v2"
     assert payload["identity"]["run_id"] == "run-1"
     assert payload["trust"]["research_status"] == "research_valid"
     assert payload["performance"]["net_pnl"]["value"] == 14.0
@@ -460,7 +460,7 @@ def test_run_report_v2_builds_from_existing_dataset(monkeypatch) -> None:
     assert payload["operational_diagnostics"]["operational_fingerprint"] == "operational-fingerprint"
 
 
-def test_run_report_v2_metric_values_include_validity_metadata(monkeypatch) -> None:
+def test_run_report_metric_values_include_validity_metadata(monkeypatch) -> None:
     dataset = _run_report_dataset()
     _install_run_report_dataset(monkeypatch, dataset)
 
@@ -479,7 +479,7 @@ def test_run_report_v2_metric_values_include_validity_metadata(monkeypatch) -> N
     assert performance["slippage"]["invalid_reason"] == "not_modeled"
 
 
-def test_run_report_v2_trust_fields_are_backend_computed(monkeypatch) -> None:
+def test_run_report_trust_fields_are_backend_computed(monkeypatch) -> None:
     dataset = _run_report_dataset()
     _install_run_report_dataset(monkeypatch, dataset)
 
@@ -494,7 +494,7 @@ def test_run_report_v2_trust_fields_are_backend_computed(monkeypatch) -> None:
     assert trust["entry_decision_order_timeout_count"] == 0
 
 
-def test_run_report_v2_observer_diagnostics_stay_non_material(monkeypatch) -> None:
+def test_run_report_observer_diagnostics_stay_non_material(monkeypatch) -> None:
     dataset = _run_report_dataset()
     _install_run_report_dataset(monkeypatch, dataset)
 

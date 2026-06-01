@@ -116,7 +116,7 @@ def test_record_bot_run_steps_batch_accepts_precomputed_rollups(monkeypatch: pyt
     result = runtime_events.record_bot_run_steps_batch(
         [
             {
-                "_step_trace_rollup_v1": True,
+                "_step_trace_rollup": True,
                 "bucket_start": "2026-03-01T00:00:00Z",
                 "bucket_seconds": 60,
                 "first_seen": "2026-03-01T00:00:00Z",

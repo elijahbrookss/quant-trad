@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-STEP_TRACE_ROLLUP_SENTINEL = "_step_trace_rollup_v1"
+STEP_TRACE_ROLLUP_SENTINEL = "_step_trace_rollup"
 STEP_ROLLUP_BUCKET_SECONDS = 60
 
 STEP_HISTOGRAM_BOUNDS = (

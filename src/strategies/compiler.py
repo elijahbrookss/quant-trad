@@ -25,7 +25,7 @@ IndicatorMetaGetter = Callable[[str], Mapping[str, Any]]
 
 _ALLOWED_METRIC_OPERATORS = {">", ">=", "<", "<=", "==", "!="}
 _ALLOWED_SIGNAL_WINDOW_TYPES = {"signal_seen_within_bars", "signal_absent_within_bars"}
-_COMPILED_STRATEGY_HASH_VERSION = "compiled_strategy_v1"
+_COMPILED_STRATEGY_HASH_VERSION = "compiled_strategy.v1"
 
 
 def _is_valid_param_key(value: Any) -> bool:

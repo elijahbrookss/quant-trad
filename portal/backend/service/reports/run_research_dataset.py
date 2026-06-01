@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from utils.log_context import build_log_context, with_log_context
 
+from ..provenance import REPORT_DATASET_SCHEMA_VERSION
 from ..storage import storage
 from . import report_data
 from .metrics import compute_expectancy, compute_max_drawdown, compute_profit_factor
@@ -28,7 +29,7 @@ from .summary_metrics import ANNUALIZATION_PERIODS, compute_summary as compute_p
 
 logger = logging.getLogger(__name__)
 
-DATASET_SCHEMA_VERSION = "run_research_dataset.v1"
+DATASET_SCHEMA_VERSION = REPORT_DATASET_SCHEMA_VERSION
 _EPSILON = 1e-6
 _WALLET_EVENT_NAMES = {
     "wallet_initialized",

@@ -9,7 +9,7 @@ import {
 
 function comparisonPayload(overrides = {}) {
   return {
-    contract_version: 'run_report_comparison_v1',
+    contract_version: 'run_report_comparison.v1',
     left_run_id: 'left-run',
     right_run_id: 'right-run',
     comparison_status: 'ready',

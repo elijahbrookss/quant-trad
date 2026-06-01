@@ -49,3 +49,5 @@ respect.
 | [0028](0028-use-bounded-projection-dispatch-for-botlens-live-facts.md) | Use bounded projection dispatch for BotLens live facts | Accepted |
 | [0029](0029-batch-and-degrade-botlens-projection-drain.md) | Batch and degrade BotLens projection drain | Accepted |
 | [0030](0030-keep-portal-bots-definition-only.md) | Keep portal bots definition only | Accepted |
+| [0031](0031-fingerprint-reports-and-slim-runtime-storage.md) | Fingerprint reports and slim runtime storage | Accepted |
+| [0032](0032-use-field-owned-version-and-provenance-contracts.md) | Use field-owned version and provenance contracts | Accepted |

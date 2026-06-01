@@ -98,7 +98,7 @@ def test_normalise_enabled_event_keys_keeps_explicit_event_key_filter() -> None:
 def test_filter_signal_payload_requires_canonical_machine_and_ui_sections() -> None:
     with pytest.raises(RuntimeError, match="machine.signals"):
         filter_signal_payload(
-            {"runtime_path": "engine_snapshot_v1"},
+            {"runtime_path": "engine_snapshot.v1"},
             enabled_output_names={"balance_breakout"},
             enabled_event_keys=set(),
         )
@@ -107,7 +107,7 @@ def test_filter_signal_payload_requires_canonical_machine_and_ui_sections() -> N
         filter_signal_payload(
             {
                 "machine": {"signals": []},
-                "runtime_path": "engine_snapshot_v1",
+                "runtime_path": "engine_snapshot.v1",
             },
             enabled_output_names={"balance_breakout"},
             enabled_event_keys=set(),

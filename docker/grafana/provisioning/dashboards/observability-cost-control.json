@@ -70,7 +70,7 @@
         {
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), CONCAT_WS(' / ', metric_name, NULLIF(storage_target, '')) AS metric, max(p95_value)::double precision AS value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE $__timeFilter(bucket_start) AND metric_name IN ('observability_export_db_ms','db_write_ms','db_write_round_trip_ms','db_write_payload_build_ms','persistence_wait_ms') AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' GROUP BY 1,2 ORDER BY 1;",
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), CONCAT_WS(' / ', metric_name, NULLIF(storage_target, '')) AS metric, max(p95_value)::double precision AS value FROM observability_metrics.botlens_backend_metric_rollups WHERE $__timeFilter(bucket_start) AND metric_name IN ('observability_export_db_ms','db_write_ms','db_write_round_trip_ms','db_write_payload_build_ms','persistence_wait_ms') AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' GROUP BY 1,2 ORDER BY 1;",
           "refId": "A"
         }
       ],
@@ -110,7 +110,7 @@
         {
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), CONCAT_WS(' / ', metric_name, NULLIF(storage_target, '')) AS metric, sum(value_sum)::double precision AS value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE $__timeFilter(bucket_start) AND metric_name IN ('observability_raw_samples_seen','observability_rollup_rows_written','observability_export_errors','db_write_rows_total','db_write_attempted_rows_total') AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' GROUP BY 1,2 ORDER BY 1;",
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), CONCAT_WS(' / ', metric_name, NULLIF(storage_target, '')) AS metric, sum(value_sum)::double precision AS value FROM observability_metrics.botlens_backend_metric_rollups WHERE $__timeFilter(bucket_start) AND metric_name IN ('observability_raw_samples_seen','observability_rollup_rows_written','observability_export_errors','db_write_rows_total','db_write_attempted_rows_total') AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' GROUP BY 1,2 ORDER BY 1;",
           "refId": "A"
         }
       ],
@@ -150,7 +150,7 @@
         {
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), COALESCE(NULLIF(storage_target, ''), 'metric_rollups') AS metric, max(latest_value)::double precision AS value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE $__timeFilter(bucket_start) AND metric_name='observability_rollup_reduction_ratio' AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' GROUP BY 1,2 ORDER BY 1;",
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), COALESCE(NULLIF(storage_target, ''), 'metric_rollups') AS metric, max(latest_value)::double precision AS value FROM observability_metrics.botlens_backend_metric_rollups WHERE $__timeFilter(bucket_start) AND metric_name='observability_rollup_reduction_ratio' AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' GROUP BY 1,2 ORDER BY 1;",
           "refId": "A"
         }
       ],
@@ -182,7 +182,7 @@
         {
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT bucket_start AS time, component, metric_name, storage_target, pipeline_stage, message_kind, bot_id, run_id, ROUND(p95_value::numeric, 2)::double precision AS p95, ROUND(p99_value::numeric, 2)::double precision AS p99, ROUND(value_max::numeric, 2)::double precision AS max, sample_count FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE $__timeFilter(bucket_start) AND metric_name IN ('observability_export_db_ms','db_write_ms','db_write_round_trip_ms','db_write_payload_build_ms','persistence_wait_ms') AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' ORDER BY value_max DESC LIMIT 50;",
+          "rawSql": "SELECT bucket_start AS time, component, metric_name, storage_target, pipeline_stage, message_kind, bot_id, run_id, ROUND(p95_value::numeric, 2)::double precision AS p95, ROUND(p99_value::numeric, 2)::double precision AS p99, ROUND(value_max::numeric, 2)::double precision AS max, sample_count FROM observability_metrics.botlens_backend_metric_rollups WHERE $__timeFilter(bucket_start) AND metric_name IN ('observability_export_db_ms','db_write_ms','db_write_round_trip_ms','db_write_payload_build_ms','persistence_wait_ms') AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' ORDER BY value_max DESC LIMIT 50;",
           "refId": "A"
         }
       ],
@@ -214,7 +214,7 @@
         {
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT observed_at AS time, level, event_name, component, bot_id, run_id, storage_target, failure_mode, message, details FROM observability_events.botlens_backend_events_v1 WHERE $__timeFilter(observed_at) AND event_name IN ('observability_export_queue_overflow','db_write_slow','botlens_observability_metric_export_failed','botlens_observability_event_export_failed') AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' ORDER BY observed_at DESC LIMIT 100;",
+          "rawSql": "SELECT observed_at AS time, level, event_name, component, bot_id, run_id, storage_target, failure_mode, message, details FROM observability_events.botlens_backend_events WHERE $__timeFilter(observed_at) AND event_name IN ('observability_export_queue_overflow','db_write_slow','botlens_observability_metric_export_failed','botlens_observability_event_export_failed') AND COALESCE(bot_id, '') ~ '${bot_id:regex}' AND COALESCE(run_id, '') ~ '${run_id:regex}' ORDER BY observed_at DESC LIMIT 100;",
           "refId": "A"
         }
       ],
@@ -240,13 +240,13 @@
           "type": "postgres",
           "uid": "quanttrad-postgres"
         },
-        "definition": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT bot_id AS __text, bot_id AS __value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE bot_id IS NOT NULL ORDER BY 1;",
+        "definition": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT bot_id AS __text, bot_id AS __value FROM observability_metrics.botlens_backend_metric_rollups WHERE bot_id IS NOT NULL ORDER BY 1;",
         "hide": 0,
         "includeAll": false,
         "label": "bot_id",
         "name": "bot_id",
         "options": [],
-        "query": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT bot_id AS __text, bot_id AS __value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE bot_id IS NOT NULL ORDER BY 1;",
+        "query": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT bot_id AS __text, bot_id AS __value FROM observability_metrics.botlens_backend_metric_rollups WHERE bot_id IS NOT NULL ORDER BY 1;",
         "refresh": 1,
         "type": "query"
       },
@@ -259,13 +259,13 @@
           "type": "postgres",
           "uid": "quanttrad-postgres"
         },
-        "definition": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT run_id AS __text, run_id AS __value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE run_id IS NOT NULL ORDER BY 1 DESC LIMIT 200;",
+        "definition": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT run_id AS __text, run_id AS __value FROM observability_metrics.botlens_backend_metric_rollups WHERE run_id IS NOT NULL ORDER BY 1 DESC LIMIT 200;",
         "hide": 0,
         "includeAll": false,
         "label": "run_id",
         "name": "run_id",
         "options": [],
-        "query": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT run_id AS __text, run_id AS __value FROM observability_metrics.botlens_backend_metric_rollups_v1 WHERE run_id IS NOT NULL ORDER BY 1 DESC LIMIT 200;",
+        "query": "SELECT '.*' AS __text, '.*' AS __value UNION SELECT DISTINCT run_id AS __text, run_id AS __value FROM observability_metrics.botlens_backend_metric_rollups WHERE run_id IS NOT NULL ORDER BY 1 DESC LIMIT 200;",
         "refresh": 1,
         "type": "query"
       }

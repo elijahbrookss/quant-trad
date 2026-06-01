@@ -25,6 +25,12 @@ from .models import (
 logger = logging.getLogger(__name__)
 _SCHEMA_LOCK_KEY = 9021001
 _DB_SETTINGS = get_settings().database
+_HARD_CUTOVER_TABLE_RENAMES = {
+    (None, "portal_report_materializations"): "portal_report_materializations_v1",
+    (None, "portal_bot_run_step_rollups"): "portal_bot_run_step_rollups_v1",
+    ("observability_events", "botlens_backend_events"): "botlens_backend_events_v1",
+    ("observability_metrics", "botlens_backend_metric_rollups"): "botlens_backend_metric_rollups_v1",
+}
 
 
 class Database:
@@ -136,6 +142,25 @@ class Database:
                 ):
                     conn.execute(CreateSchema(schema_name, if_not_exists=True))
                 for table in Base.metadata.sorted_tables:
+                    schema_name = str(table.schema or "").strip() or None
+                    retired_name = _HARD_CUTOVER_TABLE_RENAMES.get((schema_name, table.name))
+                    if retired_name:
+                        active_ref = f"{schema_name or 'public'}.{table.name}"
+                        retired_ref = f"{schema_name or 'public'}.{retired_name}"
+                        active_exists, retired_exists = conn.execute(
+                            text("SELECT to_regclass(:active_ref), to_regclass(:retired_ref)"),
+                            {"active_ref": active_ref, "retired_ref": retired_ref},
+                        ).one()
+                        if active_exists is not None and retired_exists is not None:
+                            raise RuntimeError(
+                                f"Both active table '{active_ref}' and retired table '{retired_ref}' exist. "
+                                "Drop the retired table or rerun scripts/db/manual_migration_versioning_hard_cutover.sql cleanly."
+                            )
+                        if active_exists is None and retired_exists is not None:
+                            raise RuntimeError(
+                                f"Table '{active_ref}' is missing but retired table '{retired_ref}' exists. "
+                                "Run scripts/db/manual_migration_versioning_hard_cutover.sql before starting this code."
+                            )
                     conn.execute(CreateTable(table, if_not_exists=True))
             finally:
                 conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _SCHEMA_LOCK_KEY})
@@ -176,6 +201,13 @@ class Database:
         def require_table(name: str, *, schema: Optional[str] = None) -> None:
             metadata_key = f"{schema}.{name}" if schema else name
             if name not in _schema_table_names(schema):
+                retired_name = _HARD_CUTOVER_TABLE_RENAMES.get((schema, name))
+                if retired_name and retired_name in _schema_table_names(schema):
+                    raise RuntimeError(
+                        f"Table '{schema + '.' if schema else ''}{name}' is missing but retired table "
+                        f"'{schema + '.' if schema else ''}{retired_name}' exists. "
+                        "Run scripts/db/manual_migration_versioning_hard_cutover.sql before starting this code."
+                    )
                 Base.metadata.tables[metadata_key].create(self._engine, checkfirst=True)
                 logger.warning("portal_db_table_created | schema=%s | table=%s", schema or "public", name)
                 _schema_table_names(schema).add(name)
@@ -216,7 +248,7 @@ class Database:
                 )
 
         require_table("portal_bot_runs")
-        require_table("portal_bot_run_step_rollups_v1")
+        require_table("portal_bot_run_step_rollups")
         require_table("portal_bot_run_lifecycle")
         require_table("portal_bot_run_lifecycle_events")
         require_table("portal_bot_run_leases")
@@ -228,12 +260,12 @@ class Database:
         require_table("portal_strategy_instruments")
         require_table("portal_strategy_variants")
         require_table("portal_async_jobs")
-        require_table("portal_report_materializations_v1")
+        require_table("portal_report_materializations")
         require_table("portal_bot_run_events")
         require_table("portal_bot_run_event_seq_allocators")
-        require_table("botlens_backend_events_v1", schema="observability_events")
-        require_table("botlens_backend_metric_rollups_v1", schema="observability_metrics")
-        assert_columns("portal_bot_run_step_rollups_v1")
+        require_table("botlens_backend_events", schema="observability_events")
+        require_table("botlens_backend_metric_rollups", schema="observability_metrics")
+        assert_columns("portal_bot_run_step_rollups")
         assert_columns("portal_bot_run_lifecycle")
         assert_columns("portal_bot_run_lifecycle_events")
         assert_columns("portal_bot_run_leases")
@@ -245,11 +277,11 @@ class Database:
         assert_columns("portal_strategy_instruments")
         assert_columns("portal_strategy_variants")
         assert_columns("portal_async_jobs")
-        assert_columns("portal_report_materializations_v1")
+        assert_columns("portal_report_materializations")
         assert_columns("portal_bot_run_events")
         assert_columns("portal_bot_run_event_seq_allocators")
-        assert_columns("botlens_backend_events_v1", schema="observability_events")
-        assert_columns("botlens_backend_metric_rollups_v1", schema="observability_metrics")
+        assert_columns("botlens_backend_events", schema="observability_events")
+        assert_columns("botlens_backend_metric_rollups", schema="observability_metrics")
         warn_missing_indexes(
             "portal_bot_run_events",
             REQUIRED_BOT_RUN_EVENT_INDEXES,
@@ -258,12 +290,12 @@ class Database:
         warn_missing_indexes(
             "portal_bot_runs",
             REQUIRED_BOT_RUN_INDEXES,
-            migration="scripts/db/manual_migration_report_provenance_and_materialization_fingerprint_v1.sql",
+            migration="scripts/db/manual_migration_versioning_hard_cutover.sql",
         )
         warn_missing_indexes(
-            "portal_report_materializations_v1",
+            "portal_report_materializations",
             REQUIRED_REPORT_MATERIALIZATION_INDEXES,
-            migration="scripts/db/manual_migration_report_provenance_and_materialization_fingerprint_v1.sql",
+            migration="scripts/db/manual_migration_versioning_hard_cutover.sql",
         )
         warn_missing_indexes(
             "portal_bot_run_lifecycle",

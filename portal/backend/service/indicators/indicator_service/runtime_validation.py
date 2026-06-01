@@ -20,7 +20,7 @@ from .utils import build_meta_from_record, load_indicator_record
 
 logger = logging.getLogger(__name__)
 
-RUNTIME_VALIDATION_PATH = "typed_indicator_engine_v1"
+RUNTIME_VALIDATION_PATH = "typed_indicator_engine.v1"
 
 
 def _iso_utc(value: datetime) -> str:

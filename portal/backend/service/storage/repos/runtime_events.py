@@ -918,7 +918,7 @@ def _upsert_step_rollups(session: Any, rollups: Sequence[Mapping[str, Any]]) -> 
     statement = pg_insert(table).values(rows)
     excluded = statement.excluded
     statement = statement.on_conflict_do_update(
-        constraint="uq_portal_bot_run_step_rollups_v1_bucket_identity",
+        constraint="uq_portal_bot_run_step_rollups_bucket_identity",
         set_={
             "first_seen": excluded.first_seen,
             "last_seen": excluded.last_seen,

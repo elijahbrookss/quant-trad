@@ -60,7 +60,7 @@ def test_spot_proxy_runtime_profile_preserves_source_identity():
     payload = instrument_runtime_profile(record)
     profile = payload["profile"]
 
-    assert payload["runtime_policy"] == "proxy_derivative_v1"
+    assert payload["runtime_policy"] == "proxy_derivative"
     assert profile["instrument"]["source_instrument_type"] == "spot"
     assert profile["instrument"]["execution_semantics"] == "proxy_derivative"
     assert profile["constraints"]["contract_size"] == 0.01
@@ -90,5 +90,5 @@ def test_plain_spot_runtime_status_uses_spot_policy(monkeypatch):
     status = instrument_runtime_status(record)
 
     assert status["runtime_ready"] is True
-    assert status["runtime_policy"] == "spot_v1"
+    assert status["runtime_policy"] == "spot"
     assert status["execution_semantics"] == "spot"

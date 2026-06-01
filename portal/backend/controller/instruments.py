@@ -48,6 +48,7 @@ class InstrumentResponse(InstrumentPayload):
     runtime_ready: Optional[bool] = None
     runtime_message: Optional[str] = None
     runtime_policy: Optional[str] = None
+    runtime_policy_version: Optional[str] = None
     execution_semantics: Optional[str] = None
 
 

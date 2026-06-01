@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from typing import Any
 
 
-SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT = "engine_snapshot_v1"
+SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT = "engine_snapshot.v1"
 
 
 def assert_engine_signal_runtime_path(

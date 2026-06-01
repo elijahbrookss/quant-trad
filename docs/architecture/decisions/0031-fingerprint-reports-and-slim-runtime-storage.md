@@ -22,6 +22,7 @@ code_paths:
   - portal/backend/service/async_jobs/repository.py
   - src/engines/bot_runtime/runtime/components/step_trace_rollup.py
   - scripts/db/manual_migration_report_provenance_and_materialization_fingerprint_v1.sql
+  - scripts/db/manual_migration_versioning_hard_cutover.sql
 ---
 # ADR 0031: Fingerprint Reports And Slim Runtime Storage
 
@@ -53,11 +54,11 @@ high-water mark, trade count, config/provenance hashes, and summary hash. Ready
 artifacts with missing or changed fingerprints are stale.
 
 `portal_bot_runs` keeps run identity, lifecycle status, bounded config snapshot,
-summary, and explicit provenance/hash columns. It no longer stores
+summary, and explicit runtime provenance/hash columns. It no longer stores
 `decision_ledger`; report decisions come from BotLens-domain decision events in
 the runtime event ledger.
 
-`portal_bot_run_step_rollups_v1` is duration-only profiler storage. Queue
+`portal_bot_run_step_rollups` is duration-only profiler storage. Queue
 pressure, persistence lag, payload sizes, worker health, and internal debug
 counters belong to bounded observability rollups.
 

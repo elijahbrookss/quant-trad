@@ -282,7 +282,7 @@ def _cmd_write_latency(args: argparse.Namespace) -> int:
             ROUND((SUM(value_sum) / NULLIF(SUM(sample_count), 0))::numeric, 3) AS avg_value,
             ROUND(MAX(value_max)::numeric, 3) AS max_value,
             ROUND(MAX(p95_value)::numeric, 3) AS p95_value
-        FROM observability_metrics.botlens_backend_metric_rollups_v1
+        FROM observability_metrics.botlens_backend_metric_rollups
         WHERE run_id = :run_id
           AND storage_target IN ('bot_runtime_events', 'observability_metric_rollups', 'observability_events')
           AND metric_name IN (
@@ -328,7 +328,7 @@ def _cmd_observability_storage_budget(args: argparse.Namespace) -> int:
             COALESCE(SUM(pg_column_size(to_jsonb(r))), 0) AS approx_rollup_bytes,
             MIN(bucket_start) AS first_bucket,
             MAX(bucket_start) AS latest_bucket
-        FROM observability_metrics.botlens_backend_metric_rollups_v1 r
+        FROM observability_metrics.botlens_backend_metric_rollups r
         {scope}
         """,
         params,
@@ -347,7 +347,7 @@ def _cmd_observability_storage_budget(args: argparse.Namespace) -> int:
             ROUND((COALESCE(SUM(raw_sample_count), 0)::numeric / NULLIF(COUNT(*), 0)), 3) AS reduction_ratio,
             ROUND((COALESCE(SUM(raw_sample_count), 0)::numeric / NULLIF(SUM(source_metric_record_count), 0)), 3) AS source_budget_reduction_ratio,
             COALESCE(SUM(pg_column_size(to_jsonb(r))), 0) AS approx_bytes
-        FROM observability_metrics.botlens_backend_metric_rollups_v1 r
+        FROM observability_metrics.botlens_backend_metric_rollups r
         {scope}
         GROUP BY metric_name, component, storage_target
         ORDER BY raw_samples_seen DESC, rollup_rows DESC, metric_name
@@ -365,7 +365,7 @@ def _cmd_observability_storage_budget(args: argparse.Namespace) -> int:
             GREATEST(COALESCE(SUM(raw_sample_count), 0) - COUNT(*), 0) AS estimated_rows_avoided,
             GREATEST(COALESCE(SUM(raw_sample_count), 0) - COALESCE(SUM(source_metric_record_count), 0), 0) AS source_records_avoided,
             COALESCE(SUM(pg_column_size(to_jsonb(r))), 0) AS approx_bytes
-        FROM observability_metrics.botlens_backend_metric_rollups_v1 r
+        FROM observability_metrics.botlens_backend_metric_rollups r
         {scope}
         GROUP BY bucket
         ORDER BY bucket
@@ -380,7 +380,7 @@ def _cmd_observability_storage_budget(args: argparse.Namespace) -> int:
             COALESCE(SUM(value_sum) FILTER (WHERE metric_name = 'observability_metric_records_seen'), 0) AS exporter_metric_records_seen,
             COALESCE(SUM(value_sum) FILTER (WHERE metric_name = 'observability_raw_samples_seen'), 0) AS exporter_raw_samples_seen,
             ROUND(MAX(latest_value) FILTER (WHERE metric_name = 'observability_source_budget_reduction_ratio')::numeric, 3) AS max_source_budget_reduction_ratio
-        FROM observability_metrics.botlens_backend_metric_rollups_v1 r
+        FROM observability_metrics.botlens_backend_metric_rollups r
         {scope}
         """,
         params,

@@ -100,10 +100,9 @@ def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
             "strategy_hash",
             "data_snapshot_hash",
             "runtime_contract_version",
-            "report_dataset_schema_version",
-            "source_revision",
+            "runtime_source_revision",
             "runtime_image",
-            "schema_contract_version",
+            "storage_schema_version",
         ):
             if payload.get(field) not in (None, ""):
                 setattr(record, field, str(payload.get(field)).strip())

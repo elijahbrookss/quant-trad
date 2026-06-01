@@ -1,4 +1,4 @@
-"""Materialized RunReportDTO v2 comparison service."""
+"""Materialized RunReportDTO comparison service."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from .materialization import (
     report_materialization_status,
 )
 from .golden_evidence import read_golden_comparison_evidence
+from ..provenance import REPORT_CONTRACT_VERSION, REPORT_MATERIALIZATION_SCHEMA_VERSION
 from .schemas import (
     BehaviorDeltaDTO,
     CoordinatorWaitDeltaDTO,
@@ -33,7 +34,7 @@ def compare_materialized_run_reports(
     include_golden: bool = True,
     require_golden: bool = False,
 ) -> RunComparisonDTO:
-    """Compare two ready materialized RunReportDTO v2 artifacts without building them."""
+    """Compare two ready materialized RunReportDTO artifacts without building them."""
 
     left_status = _status_payload(left_run_id)
     right_status = _status_payload(right_run_id)
@@ -189,12 +190,12 @@ def _status_payload(run_id: str) -> Dict[str, Any]:
         return report_materialization_status(run_id, require_terminal=True)
     except RunReportMaterializationNotTerminal as exc:
         return {
-            "contract_version": "run_report_v2",
-            "schema_version": "run_report_materialization_status.v1",
+            "contract_version": REPORT_CONTRACT_VERSION,
+            "schema_version": REPORT_MATERIALIZATION_SCHEMA_VERSION,
             "run_id": run_id,
             "report_status": {
                 "status": "run_not_terminal",
-                "contract_version": "run_report_v2",
+                "contract_version": REPORT_CONTRACT_VERSION,
                 "can_view": False,
                 "can_build": False,
                 "can_retry": False,
@@ -250,7 +251,7 @@ def _blocked_comparison(
         ),
         golden_evidence=golden_evidence or GoldenEvidenceDTO(),
         raw_refs={
-            "source": "portal_report_materializations_v1",
+            "source": "portal_report_materializations",
             "left_report_status": left_status or {},
             "right_report_status": right_status or {},
             "golden_evidence_status": (golden_evidence.status if golden_evidence else "not_available"),
@@ -298,7 +299,7 @@ def _ready_comparison(
         first_divergence=golden_evidence.first_divergence if golden_evidence.status != "not_requested" else _first_divergence(left, right, semantic_match),
         golden_evidence=golden_evidence,
         raw_refs={
-            "source": "portal_report_materializations_v1",
+            "source": "portal_report_materializations",
             "left_artifact_id": (left_status.get("report_status") or {}).get("artifact_id"),
             "right_artifact_id": (right_status.get("report_status") or {}).get("artifact_id"),
             "left_contract_version": left.contract_version,

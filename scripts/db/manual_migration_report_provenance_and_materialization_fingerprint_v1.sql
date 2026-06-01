@@ -11,10 +11,9 @@ ALTER TABLE public.portal_bot_runs
     ADD COLUMN IF NOT EXISTS strategy_hash varchar(64),
     ADD COLUMN IF NOT EXISTS data_snapshot_hash varchar(64),
     ADD COLUMN IF NOT EXISTS runtime_contract_version varchar(64),
-    ADD COLUMN IF NOT EXISTS report_dataset_schema_version varchar(64),
-    ADD COLUMN IF NOT EXISTS source_revision varchar(128),
+    ADD COLUMN IF NOT EXISTS runtime_source_revision varchar(128),
     ADD COLUMN IF NOT EXISTS runtime_image varchar(255),
-    ADD COLUMN IF NOT EXISTS schema_contract_version varchar(64);
+    ADD COLUMN IF NOT EXISTS storage_schema_version varchar(64);
 
 ALTER TABLE public.portal_bot_runs
     DROP COLUMN IF EXISTS decision_ledger;
@@ -25,7 +24,11 @@ CREATE INDEX IF NOT EXISTS ix_portal_bot_runs_report_list
 CREATE INDEX IF NOT EXISTS ix_portal_bot_runs_bot_report_list
     ON public.portal_bot_runs (bot_id, run_type, status, ended_at DESC, started_at DESC, run_id);
 
-ALTER TABLE public.portal_report_materializations_v1
+ALTER TABLE public.portal_report_materializations
+    ADD COLUMN IF NOT EXISTS report_schema_version varchar(64),
+    ADD COLUMN IF NOT EXISTS dataset_schema_version varchar(64),
+    ADD COLUMN IF NOT EXISTS builder_source_revision varchar(128),
+    ADD COLUMN IF NOT EXISTS storage_schema_version varchar(64),
     ADD COLUMN IF NOT EXISTS input_fingerprint varchar(64),
     ADD COLUMN IF NOT EXISTS input_fingerprint_payload jsonb,
     ADD COLUMN IF NOT EXISTS source_event_count integer NOT NULL DEFAULT 0,
@@ -33,12 +36,12 @@ ALTER TABLE public.portal_report_materializations_v1
     ADD COLUMN IF NOT EXISTS source_trade_count integer NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS source_run_updated_at timestamp without time zone;
 
-CREATE INDEX IF NOT EXISTS ix_portal_report_materializations_v1_input_fingerprint
-    ON public.portal_report_materializations_v1 (input_fingerprint);
+CREATE INDEX IF NOT EXISTS ix_portal_report_materializations_input_fingerprint
+    ON public.portal_report_materializations (input_fingerprint);
 
 -- Old ready artifacts predate input fingerprints. They must be rebuilt through
 -- the current report contract rather than served as durable truth.
-UPDATE public.portal_report_materializations_v1
+UPDATE public.portal_report_materializations
 SET status = 'stale',
     stale_reason = 'input_fingerprint_missing',
     artifact = NULL,
@@ -51,7 +54,7 @@ WHERE status = 'ready'
 -- Step rollups are now phase-duration profiler rows only. Queue depth, lag,
 -- worker health, payload-size, and sub-phase debug metrics belong to bounded
 -- observability rollups.
-DELETE FROM public.portal_bot_run_step_rollups_v1
+DELETE FROM public.portal_bot_run_step_rollups
 WHERE metric_name <> 'duration_ms';
 
 COMMIT;

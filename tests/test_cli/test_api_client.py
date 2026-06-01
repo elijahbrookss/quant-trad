@@ -858,7 +858,7 @@ def test_experiments_collect_exports_materializes_and_compares(tmp_path, monkeyp
             return _Response(
                 json.dumps(
                     {
-                        "contract_version": "run_report_v2",
+                        "contract_version": "run_report.v2",
                         "schema_version": "run_report_materialization_status.v1",
                         "run_id": run_id,
                         "report_status": {"status": "ready", "can_view": True, "can_build": False, "can_retry": False},

@@ -22,16 +22,22 @@ from ._shared import (
     select,
     text,
 )
+from ...provenance import (
+    REPORT_CONTRACT_VERSION,
+    REPORT_DATASET_SCHEMA_VERSION,
+    REPORT_INPUT_FINGERPRINT_SCHEMA_VERSION,
+    REPORT_MATERIALIZATION_STORAGE_SCHEMA_VERSION,
+    REPORT_SCHEMA_VERSION,
+    source_revision,
+)
 
 
-REPORT_CONTRACT_VERSION = "run_report_v2"
 REPORT_STATUS_NOT_STARTED = "not_started"
 REPORT_STATUS_BUILDING = "building"
 REPORT_STATUS_READY = "ready"
 REPORT_STATUS_FAILED = "failed"
 REPORT_STATUS_STALE = "stale"
 _REPORT_MATERIALIZATION_LOCK_PERSON = b"qt_report"
-REPORT_INPUT_FINGERPRINT_SCHEMA_VERSION = "report_input_fingerprint.v1"
 
 
 def _empty_status(run_id: str, *, contract_version: str = REPORT_CONTRACT_VERSION) -> Dict[str, Any]:
@@ -39,6 +45,10 @@ def _empty_status(run_id: str, *, contract_version: str = REPORT_CONTRACT_VERSIO
         "run_id": str(run_id or ""),
         "status": REPORT_STATUS_NOT_STARTED,
         "contract_version": contract_version,
+        "report_schema_version": REPORT_SCHEMA_VERSION,
+        "dataset_schema_version": REPORT_DATASET_SCHEMA_VERSION,
+        "builder_source_revision": None,
+        "storage_schema_version": REPORT_MATERIALIZATION_STORAGE_SCHEMA_VERSION,
         "artifact_id": None,
         "artifact_path": None,
         "built_at": None,
@@ -101,6 +111,10 @@ def _input_fingerprint_status_payload(
         "material_config_hash": str(run.material_config_hash or ""),
         "strategy_hash": str(run.strategy_hash or ""),
         "data_snapshot_hash": str(run.data_snapshot_hash or ""),
+        "runtime_contract_version": str(run.runtime_contract_version or ""),
+        "runtime_source_revision": str(run.runtime_source_revision or ""),
+        "runtime_image": str(run.runtime_image or ""),
+        "storage_schema_version": str(run.storage_schema_version or ""),
         "summary_hash": _hash_payload(run.summary or {}),
         "event_count": int(event_count or 0),
         "event_high_water_run_seq": int(event_high_water_run_seq or 0),
@@ -217,6 +231,12 @@ def _record_status(
     status = record.to_dict()
     if record.contract_version != contract_version:
         return _mark_status_stale(status, "contract_version_changed")
+    if record.report_schema_version != REPORT_SCHEMA_VERSION:
+        return _mark_status_stale(status, "report_schema_version_changed")
+    if record.dataset_schema_version != REPORT_DATASET_SCHEMA_VERSION:
+        return _mark_status_stale(status, "dataset_schema_version_changed")
+    if record.status != REPORT_STATUS_NOT_STARTED and record.builder_source_revision != source_revision():
+        return _mark_status_stale(status, "builder_source_revision_changed")
     if record.status == REPORT_STATUS_READY:
         expected = str(input_fingerprint or "").strip()
         actual = str(record.input_fingerprint or "").strip()
@@ -311,6 +331,12 @@ def get_materialized_run_report(
             return None
         if record.contract_version != contract_version:
             return None
+        if record.report_schema_version != REPORT_SCHEMA_VERSION:
+            return None
+        if record.dataset_schema_version != REPORT_DATASET_SCHEMA_VERSION:
+            return None
+        if record.builder_source_revision != source_revision():
+            return None
         if not fingerprint or str(record.input_fingerprint or "").strip() != fingerprint:
             return None
         if record.status != REPORT_STATUS_READY or not isinstance(record.artifact, Mapping):
@@ -354,6 +380,9 @@ def claim_report_materialization_build(
             session.add(record)
         elif (
             record.contract_version == contract_version
+            and record.report_schema_version == REPORT_SCHEMA_VERSION
+            and record.dataset_schema_version == REPORT_DATASET_SCHEMA_VERSION
+            and record.builder_source_revision == source_revision()
             and record.to_dict().get("can_view")
             and str(record.input_fingerprint or "").strip() == expected_fingerprint
             and not force
@@ -362,12 +391,19 @@ def claim_report_materialization_build(
         elif (
             record.status == REPORT_STATUS_BUILDING
             and record.contract_version == contract_version
+            and record.report_schema_version == REPORT_SCHEMA_VERSION
+            and record.dataset_schema_version == REPORT_DATASET_SCHEMA_VERSION
+            and record.builder_source_revision == source_revision()
             and str(record.input_fingerprint or "").strip() == expected_fingerprint
             and not force
         ):
             return record.to_dict(), False, True
 
         record.contract_version = contract_version
+        record.report_schema_version = REPORT_SCHEMA_VERSION
+        record.dataset_schema_version = REPORT_DATASET_SCHEMA_VERSION
+        record.builder_source_revision = source_revision()
+        record.storage_schema_version = REPORT_MATERIALIZATION_STORAGE_SCHEMA_VERSION
         record.status = REPORT_STATUS_BUILDING
         record.cache_key = cache_key
         record.input_fingerprint = expected_fingerprint or None
@@ -398,7 +434,7 @@ def store_materialized_run_report(
     input_fingerprint_payload: Optional[Mapping[str, Any]] = None,
     duration_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Persist a completed RunReportDTO v2 artifact."""
+    """Persist a completed RunReportDTO artifact."""
 
     normalized_run_id = str(run_id or "").strip()
     if not normalized_run_id:
@@ -413,6 +449,10 @@ def store_materialized_run_report(
             record.created_at = now
             session.add(record)
         record.contract_version = contract_version
+        record.report_schema_version = REPORT_SCHEMA_VERSION
+        record.dataset_schema_version = REPORT_DATASET_SCHEMA_VERSION
+        record.builder_source_revision = source_revision()
+        record.storage_schema_version = REPORT_MATERIALIZATION_STORAGE_SCHEMA_VERSION
         record.status = REPORT_STATUS_READY
         fingerprint = str(input_fingerprint or "").strip()
         if not fingerprint:
@@ -459,6 +499,10 @@ def mark_report_materialization_failed(
             record.created_at = now
             session.add(record)
         record.contract_version = contract_version
+        record.report_schema_version = REPORT_SCHEMA_VERSION
+        record.dataset_schema_version = REPORT_DATASET_SCHEMA_VERSION
+        record.builder_source_revision = source_revision()
+        record.storage_schema_version = REPORT_MATERIALIZATION_STORAGE_SCHEMA_VERSION
         record.status = REPORT_STATUS_FAILED
         record.cache_key = cache_key
         fingerprint = str(input_fingerprint or "").strip()
@@ -499,6 +543,10 @@ def reset_report_materialization(
                 record.created_at = now
                 session.add(record)
             record.contract_version = contract_version
+            record.report_schema_version = REPORT_SCHEMA_VERSION
+            record.dataset_schema_version = REPORT_DATASET_SCHEMA_VERSION
+            record.builder_source_revision = None
+            record.storage_schema_version = REPORT_MATERIALIZATION_STORAGE_SCHEMA_VERSION
             record.status = REPORT_STATUS_NOT_STARTED
             record.artifact = None
             record.artifact_id = None

@@ -9,7 +9,7 @@ def _status(status: str = "not_started", *, can_view: bool = False) -> dict:
     return {
         "run_id": "run-1",
         "status": status,
-        "contract_version": "run_report_v2",
+        "contract_version": "run_report.v2",
         "artifact_id": None,
         "artifact_path": None,
         "built_at": None,
@@ -56,7 +56,7 @@ def test_terminal_run_builds_report_without_changing_run_lifecycle(monkeypatch: 
     monkeypatch.setattr(
         materialization,
         "build_run_report",
-        lambda run_id: {"contract_version": "run_report_v2", "schema_version": "run_report.v2", "run_id": run_id},
+        lambda run_id: {"contract_version": "run_report.v2", "schema_version": "run_report.v2", "run_id": run_id},
     )
 
     def store(run_id: str, payload: dict, **kwargs: object) -> dict:
@@ -69,7 +69,7 @@ def test_terminal_run_builds_report_without_changing_run_lifecycle(monkeypatch: 
 
     assert result["report_status"]["status"] == "ready"
     assert result["report_status"]["can_view"] is True
-    assert stored["payload"]["contract_version"] == "run_report_v2"
+    assert stored["payload"]["contract_version"] == "run_report.v2"
 
 
 def test_active_run_does_not_materialize_report(monkeypatch: pytest.MonkeyPatch) -> None:

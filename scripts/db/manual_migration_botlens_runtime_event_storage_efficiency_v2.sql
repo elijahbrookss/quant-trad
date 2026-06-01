@@ -56,7 +56,7 @@ ALTER TABLE public.portal_bot_run_events
     ADD COLUMN IF NOT EXISTS run_seq INTEGER,
     ADD COLUMN IF NOT EXISTS run_seq_status TEXT;
 
-CREATE OR REPLACE VIEW runtime_state.bot_runtime_events_v1 AS
+CREATE OR REPLACE VIEW runtime_state.bot_runtime_events AS
 SELECT
     e.id,
     e.event_id,

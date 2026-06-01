@@ -6,6 +6,14 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from ..provenance import (
+    REPORT_CONTRACT_VERSION,
+    REPORT_DATASET_SCHEMA_VERSION,
+    REPORT_MATERIALIZATION_SCHEMA_VERSION,
+    REPORT_MATERIALIZATION_STORAGE_SCHEMA_VERSION,
+    REPORT_SCHEMA_VERSION,
+)
+
 
 class ReportDiagnosticModel(BaseModel):
     severity: Literal["info", "warning", "critical"]
@@ -223,8 +231,8 @@ class OperationalDiagnosticsDTO(BaseModel):
 
 
 class RunReportDTO(BaseModel):
-    contract_version: str = "run_report_v2"
-    schema_version: str = "run_report.v2"
+    contract_version: str = REPORT_CONTRACT_VERSION
+    schema_version: str = REPORT_SCHEMA_VERSION
     run_id: str
     identity: Dict[str, Any] = Field(default_factory=dict)
     trust: ResearchTrustDTO = Field(default_factory=ResearchTrustDTO)
@@ -240,7 +248,11 @@ class RunReportDTO(BaseModel):
 
 class ReportMaterializationStatusDTO(BaseModel):
     status: str = "not_started"
-    contract_version: str = "run_report_v2"
+    contract_version: str = REPORT_CONTRACT_VERSION
+    report_schema_version: str = REPORT_SCHEMA_VERSION
+    dataset_schema_version: str = REPORT_DATASET_SCHEMA_VERSION
+    builder_source_revision: Optional[str] = None
+    storage_schema_version: str = REPORT_MATERIALIZATION_STORAGE_SCHEMA_VERSION
     artifact_id: Optional[str] = None
     artifact_path: Optional[str] = None
     built_at: Optional[str] = None
@@ -261,8 +273,8 @@ class ReportMaterializationStatusDTO(BaseModel):
 
 
 class RunReportMaterializationResponse(BaseModel):
-    contract_version: str = "run_report_v2"
-    schema_version: str = "run_report_materialization_status.v1"
+    contract_version: str = REPORT_CONTRACT_VERSION
+    schema_version: str = REPORT_MATERIALIZATION_SCHEMA_VERSION
     run_id: str
     report_status: ReportMaterializationStatusDTO
 
@@ -447,7 +459,7 @@ class GoldenEvidenceDTO(BaseModel):
 
 
 class RunComparisonDTO(BaseModel):
-    contract_version: str = "run_report_comparison_v1"
+    contract_version: str = "run_report_comparison.v1"
     left_run_id: str
     right_run_id: str
     comparison_status: str

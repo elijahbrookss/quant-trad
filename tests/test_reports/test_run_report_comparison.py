@@ -8,13 +8,13 @@ from portal.backend.service.reports.schemas import FirstDivergenceDTO, GoldenEvi
 
 def _ready_status(run_id: str, status: str = "ready", *, can_view: bool = True) -> dict:
     return {
-        "contract_version": "run_report_v2",
+        "contract_version": "run_report.v2",
         "schema_version": "run_report_materialization_status.v1",
         "run_id": run_id,
         "report_status": {
             "status": status,
-            "contract_version": "run_report_v2",
-            "artifact_id": f"{run_id}:run_report_v2" if status == "ready" else None,
+            "contract_version": "run_report.v2",
+            "artifact_id": f"{run_id}:run_report.v2" if status == "ready" else None,
             "built_at": "2026-05-16T01:00:00Z" if status == "ready" else None,
             "started_at": "2026-05-16T00:59:45Z" if status == "ready" else None,
             "duration_ms": 15_000 if status == "ready" else None,
@@ -39,7 +39,7 @@ def _metric(value: float | int | None, *, valid: bool = True, reason: str | None
 
 def _report(run_id: str, *, semantic: str = "semantic-a", operational: str = "operational-a", sharpe: dict | None = None) -> dict:
     return {
-        "contract_version": "run_report_v2",
+        "contract_version": "run_report.v2",
         "schema_version": "run_report.v2",
         "run_id": run_id,
         "identity": {"run_id": run_id, "symbols": ["BTC"], "timeframe": "1h"},

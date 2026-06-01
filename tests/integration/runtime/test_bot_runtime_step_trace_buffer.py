@@ -38,7 +38,7 @@ def test_step_trace_buffer_batches_and_flushes():
 
     flattened = [row for batch in batches for row in batch]
     assert len(flattened) == 1
-    assert flattened[0]["_step_trace_rollup_v1"] is True
+    assert flattened[0]["_step_trace_rollup"] is True
     assert flattened[0]["sample_count"] == 7
     assert flattened[0]["raw_sample_count"] == 7
 

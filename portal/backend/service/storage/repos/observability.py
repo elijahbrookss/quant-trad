@@ -203,7 +203,7 @@ def record_observability_metric_rollups_batch(payloads: Sequence[Mapping[str, An
         return 0
     statement = text(
         """
-        INSERT INTO observability_metrics.botlens_backend_metric_rollups_v1 AS rollup (
+        INSERT INTO observability_metrics.botlens_backend_metric_rollups AS rollup (
             bucket_start,
             bucket_seconds,
             first_seen,
@@ -269,7 +269,7 @@ def record_observability_metric_rollups_batch(payloads: Sequence[Mapping[str, An
             :created_at,
             :updated_at
         )
-        ON CONFLICT ON CONSTRAINT uq_botlens_backend_metric_rollups_v1_bucket_identity
+        ON CONFLICT ON CONSTRAINT uq_botlens_backend_metric_rollups_bucket_identity
         DO UPDATE SET
             first_seen = LEAST(rollup.first_seen, EXCLUDED.first_seen),
             last_seen = GREATEST(rollup.last_seen, EXCLUDED.last_seen),

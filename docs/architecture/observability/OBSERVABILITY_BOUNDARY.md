@@ -25,6 +25,7 @@ code_paths:
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
   - portal/backend/service/storage/repos/observability.py
   - scripts/db/manual_migration_observability_metric_rollups_v1.sql
+  - scripts/db/manual_migration_versioning_hard_cutover.sql
   - docker/docker-compose.yml
   - docker/grafana
   - docs/architecture/observability/diagrams/observability-flow.mmd

@@ -90,7 +90,7 @@ def test_report_contract_routes_expose_canonical_shapes(monkeypatch: pytest.Monk
         reports_controller,
         "_materialized_run_report",
         lambda run_id: {
-            "contract_version": "run_report_v2",
+            "contract_version": "run_report.v2",
             "schema_version": "run_report.v2",
             "run_id": run_id,
             "identity": {"run_id": run_id},
@@ -113,10 +113,10 @@ def test_report_contract_routes_expose_canonical_shapes(monkeypatch: pytest.Monk
         reports_controller,
         "_report_materialization_status",
         lambda run_id, **_kwargs: {
-            "contract_version": "run_report_v2",
+            "contract_version": "run_report.v2",
             "schema_version": "run_report_materialization_status.v1",
             "run_id": run_id,
-            "report_status": {"status": "ready", "contract_version": "run_report_v2", "can_view": True, "can_build": False, "can_retry": False},
+            "report_status": {"status": "ready", "contract_version": "run_report.v2", "can_view": True, "can_build": False, "can_retry": False},
         },
     )
     monkeypatch.setattr(reports_controller, "_get_report_sections", lambda _run_id: _dataset()["sections"])
@@ -194,9 +194,9 @@ def test_report_contract_routes_expose_canonical_shapes(monkeypatch: pytest.Monk
     assert client.get("/api/reports/run-1/summary").json()["portfolio_metrics"]["sharpe"] == 1.25
     assert client.get("/api/reports/run-1/research-summary").json()["schema_version"] == "run_research_summary.v1"
     assert client.get("/api/reports/run-1/research-summary").json()["metrics"]["net_pnl"] == 10.0
-    report_v2 = client.get("/api/reports/run-1/run-report").json()
-    assert report_v2["contract_version"] == "run_report_v2"
-    assert report_v2["performance"]["sharpe"]["valid"] is True
+    report_payload = client.get("/api/reports/run-1/run-report").json()
+    assert report_payload["contract_version"] == "run_report.v2"
+    assert report_payload["performance"]["sharpe"]["valid"] is True
     assert client.get("/api/reports/run-1/sections").json()["schema_version"] == "report_sections.v1"
     assert client.get("/api/reports/run-1/diagnostics").json()["schema_version"] == "report_diagnostics.v1"
     assert client.get("/api/reports/run-1/metrics").json()["schema_version"] == "report_metrics.v1"
@@ -241,7 +241,7 @@ def test_materialized_report_compare_route_exposes_run_comparison_dto(monkeypatc
         reports_controller,
         "_compare_materialized_run_reports",
         lambda left_run_id, right_run_id, **_kwargs: RunComparisonDTO.model_validate({
-            "contract_version": "run_report_comparison_v1",
+            "contract_version": "run_report_comparison.v1",
             "left_run_id": left_run_id,
             "right_run_id": right_run_id,
             "comparison_status": "ready",
@@ -265,7 +265,7 @@ def test_materialized_report_compare_route_exposes_run_comparison_dto(monkeypatc
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["contract_version"] == "run_report_comparison_v1"
+    assert payload["contract_version"] == "run_report_comparison.v1"
     assert payload["comparison_verdict"] == "semantic_match"
     assert payload["trust_comparison"]["semantic_fingerprint_match"] is True
 
@@ -298,10 +298,10 @@ def test_run_report_route_returns_status_without_building(monkeypatch: pytest.Mo
         reports_controller,
         "_report_materialization_status",
         lambda run_id, **_kwargs: {
-            "contract_version": "run_report_v2",
+            "contract_version": "run_report.v2",
             "schema_version": "run_report_materialization_status.v1",
             "run_id": run_id,
-            "report_status": {"status": "not_started", "contract_version": "run_report_v2", "can_view": False, "can_build": True, "can_retry": False},
+            "report_status": {"status": "not_started", "contract_version": "run_report.v2", "can_view": False, "can_build": True, "can_retry": False},
         },
     )
 

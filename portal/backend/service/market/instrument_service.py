@@ -271,11 +271,11 @@ def _execution_semantics_for_record(
 
 def _runtime_policy_from_execution_semantics(execution_semantics: str) -> str:
     if execution_semantics == "proxy_derivative":
-        return "proxy_derivative_v1"
+        return "proxy_derivative"
     if execution_semantics == "derivative":
-        return "derivatives_v1"
+        return "derivative"
     if execution_semantics == "spot":
-        return "spot_v1"
+        return "spot"
     return "unknown"
 
 
@@ -731,6 +731,7 @@ def instrument_runtime_profile(
         "instrument_id": payload.get("id"),
         "symbol": payload.get("symbol"),
         "runtime_policy": _runtime_policy_from_execution_semantics(profile.instrument.execution_semantics),
+        "runtime_policy_version": "instrument_runtime_policy.v1",
         "profile": profile.to_dict(),
     }
 
@@ -744,6 +745,7 @@ def instrument_runtime_status(record: Optional[Mapping[str, Any]]) -> Dict[str, 
             "runtime_ready": False,
             "runtime_message": "Instrument metadata is unavailable.",
             "runtime_policy": "unknown",
+            "runtime_policy_version": "instrument_runtime_policy.v1",
         }
 
     payload = _with_proxy_derivative_reference(record)
@@ -757,6 +759,7 @@ def instrument_runtime_status(record: Optional[Mapping[str, Any]]) -> Dict[str, 
             "runtime_ready": False,
             "runtime_message": str(exc),
             "runtime_policy": _runtime_policy_from_execution_semantics(execution_semantics),
+            "runtime_policy_version": "instrument_runtime_policy.v1",
             "execution_semantics": execution_semantics,
         }
 
@@ -767,6 +770,7 @@ def instrument_runtime_status(record: Optional[Mapping[str, Any]]) -> Dict[str, 
         "runtime_policy": _runtime_policy_from_execution_semantics(
             str(profile.get("instrument", {}).get("execution_semantics") or execution_semantics)
         ),
+        "runtime_policy_version": "instrument_runtime_policy.v1",
         "execution_semantics": profile.get("instrument", {}).get("execution_semantics") or execution_semantics,
     }
 

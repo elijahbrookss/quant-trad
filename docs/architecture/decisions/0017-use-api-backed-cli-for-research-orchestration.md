@@ -57,7 +57,7 @@ Long-running research runs use explicit resumable steps:
 - `start` creates a bot run through a compact backend start contract and writes
   a local experiment record,
 - `status` polls compact run lifecycle/report state,
-- `collect` exports reports, materializes `RunReportDTO v2` when needed, and
+- `collect` exports reports, materializes RunReportDTO contract (`run_report.v2`) when needed, and
   compares against a selected baseline.
 
 The normal CLI path uses compact API contracts such as `bot_run_context.v1`,

@@ -1,4 +1,4 @@
-"""RunReportDTO v2 materialization service.
+"""RunReportDTO contract (`run_report.v2`) materialization service.
 
 Report materialization is deliberately separate from run lifecycle truth. A run
 may complete successfully even if its report artifact later fails to build.
@@ -14,16 +14,19 @@ from typing import Any, Dict, Optional, Tuple
 
 from utils.log_context import build_log_context, with_log_context
 
+from ..provenance import (
+    REPORT_CONTRACT_VERSION,
+    REPORT_DATASET_SCHEMA_VERSION,
+    REPORT_MATERIALIZATION_SCHEMA_VERSION,
+    REPORT_SCHEMA_VERSION,
+    source_revision,
+)
 from . import report_data
 from .contract import build_run_report
-from .run_research_dataset import DATASET_SCHEMA_VERSION
 
 
 logger = logging.getLogger(__name__)
 
-REPORT_CONTRACT_VERSION = "run_report_v2"
-REPORT_SCHEMA_VERSION = "run_report.v2"
-REPORT_MATERIALIZATION_SCHEMA_VERSION = "run_report_materialization_status.v1"
 REPORT_TERMINAL_STATUSES = frozenset(
     {
         "completed",
@@ -61,7 +64,10 @@ def is_terminal_run_status(value: Any) -> bool:
 
 
 def _cache_key(run_id: str, input_fingerprint: str) -> str:
-    return f"{run_id}:{REPORT_CONTRACT_VERSION}:{REPORT_SCHEMA_VERSION}:{DATASET_SCHEMA_VERSION}:{input_fingerprint}"
+    return (
+        f"{run_id}:{REPORT_CONTRACT_VERSION}:{REPORT_SCHEMA_VERSION}:"
+        f"{REPORT_DATASET_SCHEMA_VERSION}:{source_revision()}:{input_fingerprint}"
+    )
 
 
 def _status_response(run_id: str, status: Dict[str, Any]) -> Dict[str, Any]:
@@ -87,7 +93,7 @@ def report_materialization_status(run_id: str, *, require_terminal: bool = False
 
 
 def materialized_run_report(run_id: str) -> Optional[Dict[str, Any]]:
-    """Return a persisted RunReportDTO v2 artifact if it is ready."""
+    """Return a persisted RunReportDTO contract (`run_report.v2`) artifact if it is ready."""
 
     return report_data.get_materialized_run_report(run_id)
 
@@ -190,7 +196,7 @@ def ensure_report_materialization(
     async_build: bool = True,
     terminal_status: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Ensure a terminal run has a RunReportDTO v2 materialization in flight."""
+    """Ensure a terminal run has a RunReportDTO contract (`run_report.v2`) materialization in flight."""
 
     run = report_data.get_run(run_id)
     if not run:

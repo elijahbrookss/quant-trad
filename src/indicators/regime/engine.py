@@ -408,12 +408,8 @@ def _require(stats: Mapping[str, Any], key: str) -> float:
     return float(value)
 
 
-RegimeEngineV1 = RegimeEngine
-
-
 __all__ = [
     "RegimeEngine",
-    "RegimeEngineV1",
     "RegimeOutput",
     "StructureEvidence",
     "build_structure_evidence",
