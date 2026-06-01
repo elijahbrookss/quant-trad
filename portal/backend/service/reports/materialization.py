@@ -60,8 +60,8 @@ def is_terminal_run_status(value: Any) -> bool:
     return _normalize_status(value) in REPORT_TERMINAL_STATUSES
 
 
-def _cache_key(run_id: str) -> str:
-    return f"{run_id}:{REPORT_CONTRACT_VERSION}:{REPORT_SCHEMA_VERSION}:{DATASET_SCHEMA_VERSION}"
+def _cache_key(run_id: str, input_fingerprint: str) -> str:
+    return f"{run_id}:{REPORT_CONTRACT_VERSION}:{REPORT_SCHEMA_VERSION}:{DATASET_SCHEMA_VERSION}:{input_fingerprint}"
 
 
 def _status_response(run_id: str, status: Dict[str, Any]) -> Dict[str, Any]:
@@ -92,7 +92,12 @@ def materialized_run_report(run_id: str) -> Optional[Dict[str, Any]]:
     return report_data.get_materialized_run_report(run_id)
 
 
-def _build_and_store(run_id: str, cache_key: str) -> Dict[str, Any]:
+def _build_and_store(
+    run_id: str,
+    cache_key: str,
+    input_fingerprint: str,
+    input_fingerprint_payload: Dict[str, Any],
+) -> Dict[str, Any]:
     started = time.perf_counter()
     logger.info(
         with_log_context(
@@ -107,6 +112,8 @@ def _build_and_store(run_id: str, cache_key: str) -> Dict[str, Any]:
             run_id,
             payload,
             cache_key=cache_key,
+            input_fingerprint=input_fingerprint,
+            input_fingerprint_payload=input_fingerprint_payload,
             duration_ms=duration_ms,
         )
         logger.info(
@@ -127,6 +134,8 @@ def _build_and_store(run_id: str, cache_key: str) -> Dict[str, Any]:
             run_id,
             error=str(exc),
             cache_key=cache_key,
+            input_fingerprint=input_fingerprint,
+            input_fingerprint_payload=input_fingerprint_payload,
             duration_ms=duration_ms,
         )
         logger.exception(
@@ -144,8 +153,13 @@ def _build_and_store(run_id: str, cache_key: str) -> Dict[str, Any]:
         return status
 
 
-def _submit_build(run_id: str, cache_key: str) -> Future:
-    key = (run_id, REPORT_CONTRACT_VERSION)
+def _submit_build(
+    run_id: str,
+    cache_key: str,
+    input_fingerprint: str,
+    input_fingerprint_payload: Dict[str, Any],
+) -> Future:
+    key = (run_id, REPORT_CONTRACT_VERSION, input_fingerprint)
     with _INFLIGHT_LOCK:
         existing = _INFLIGHT.get(key)
         if existing is not None and not existing.done():
@@ -157,7 +171,7 @@ def _submit_build(run_id: str, cache_key: str) -> Future:
             )
             return existing
 
-        future = _EXECUTOR.submit(_build_and_store, run_id, cache_key)
+        future = _EXECUTOR.submit(_build_and_store, run_id, cache_key, input_fingerprint, input_fingerprint_payload)
         _INFLIGHT[key] = future
 
         def _cleanup(done_future: Future) -> None:
@@ -195,10 +209,18 @@ def ensure_report_materialization(
         )
         return _status_response(run_id, existing)
 
-    cache_key = _cache_key(run_id)
+    input_state = report_data.compute_report_input_fingerprint(run_id)
+    input_fingerprint = str(input_state.get("input_fingerprint") or "").strip()
+    input_fingerprint_payload = dict(input_state.get("input_fingerprint_payload") or {})
+    if not input_fingerprint:
+        raise RuntimeError(f"report_input_fingerprint_unavailable: {run_id}")
+
+    cache_key = _cache_key(run_id, input_fingerprint)
     status, claimed, joined = report_data.claim_report_materialization_build(
         run_id,
         cache_key=cache_key,
+        input_fingerprint=input_fingerprint,
+        input_fingerprint_payload=input_fingerprint_payload,
         force=force,
     )
     if not claimed:
@@ -213,12 +235,14 @@ def ensure_report_materialization(
 
     if async_build:
         try:
-            _submit_build(run_id, cache_key)
+            _submit_build(run_id, cache_key, input_fingerprint, input_fingerprint_payload)
         except Exception as exc:  # noqa: BLE001 - persist enqueue failure as report failure, not run failure.
             failed_status = report_data.mark_report_materialization_failed(
                 run_id,
                 error=f"report_materialization_submit_failed: {exc}",
                 cache_key=cache_key,
+                input_fingerprint=input_fingerprint,
+                input_fingerprint_payload=input_fingerprint_payload,
                 duration_ms=0.0,
             )
             logger.exception(
@@ -230,7 +254,7 @@ def ensure_report_materialization(
             return _status_response(run_id, failed_status)
         return _status_response(run_id, status)
 
-    final_status = _build_and_store(run_id, cache_key)
+    final_status = _build_and_store(run_id, cache_key, input_fingerprint, input_fingerprint_payload)
     return _status_response(run_id, final_status)
 
 

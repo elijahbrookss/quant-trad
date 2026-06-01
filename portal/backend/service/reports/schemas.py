@@ -249,6 +249,12 @@ class ReportMaterializationStatusDTO(BaseModel):
     error: Optional[str] = None
     stale_reason: Optional[str] = None
     cache_key: Optional[str] = None
+    input_fingerprint: Optional[str] = None
+    input_fingerprint_payload: Dict[str, Any] = Field(default_factory=dict)
+    source_event_count: int = 0
+    source_event_high_water_run_seq: int = 0
+    source_trade_count: int = 0
+    source_run_updated_at: Optional[str] = None
     can_view: bool = False
     can_build: bool = False
     can_retry: bool = False

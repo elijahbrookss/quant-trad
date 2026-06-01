@@ -88,24 +88,18 @@ Active schema surfaces are justified by role:
 - Keep as bounded observability: `observability_events.botlens_backend_events_v1`
   and `observability_metrics.botlens_backend_metric_rollups_v1`.
 - Keep as bounded profiler data: `portal_bot_run_step_rollups_v1` stores typed
-  bucketed step metrics with mergeable histogram counts for p95/p99 estimates.
-  Raw `portal_bot_run_steps` rows are not part of the schema contract. Step
-  rollups intentionally use an allowlist of latency, payload size, and execution
-  timing fields; repeated queue-depth, queue-lag, worker-count, and internal
-  health gauges belong to queue observability or low-rate health summaries, not
-  per-step durable rows. Arbitrary `_ms` or `_count` debug context must not
-  become durable storage by suffix match.
-  Runtime aggregates these samples in memory and persists compact rollup rows
-  at a slower cadence; the storage repository still accepts raw step payloads
-  for compatibility and folds both forms into the same table contract.
+  bucketed phase-duration metrics with mergeable histogram counts for p95/p99
+  estimates. Raw `portal_bot_run_steps` rows are not part of the schema
+  contract, and the storage repository accepts only precomputed rollups. Queue
+  depth, queue lag, worker health, payload-size, and sub-phase debug metrics
+  belong to observability rollups, not per-step durable rows.
 - Removed from active contract: `portal_bot_run_snapshots` and
   `portal_bot_run_view_state`. They were legacy projection/cache payload stores,
   not canonical truth.
-- Question/reshape: `portal_async_jobs.result` is active for QuantLab async
-  responses and short-lived result reuse, but large overlay result blobs do not
-  belong permanently in the job queue row. The job table should retain status,
-  request fingerprint, failure context, and a bounded summary or artifact
-  pointer.
+- Keep as bounded job coordination: `portal_async_jobs.result` may hold a fresh
+  worker result long enough for the waiting API request to return, but succeeded
+  QuantLab jobs are not reusable result-cache truth. Finished result payloads are
+  pruned to bounded summaries after the configured short retention window.
 - Removed from active contract:
   `observability_metrics.botlens_backend_metric_samples_v1`; raw samples are not
   a durable database surface.

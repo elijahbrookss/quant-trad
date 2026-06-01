@@ -5,9 +5,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, Sequence
 
-from engines.bot_runtime.core.runtime_events import decision_trace_entry_from_runtime_event, runtime_event_from_dict
-from engines.bot_runtime.runtime.event_types import RUNTIME_PREFIX
-
 from ..storage import storage
 
 
@@ -48,13 +45,25 @@ def get_materialized_run_report(run_id: str) -> Optional[Dict[str, Any]]:
     return storage.get_materialized_run_report(run_id)
 
 
+def compute_report_input_fingerprint(run_id: str) -> Dict[str, Any]:
+    return storage.compute_report_input_fingerprint(run_id)
+
+
 def claim_report_materialization_build(
     run_id: str,
     *,
     cache_key: Optional[str] = None,
+    input_fingerprint: Optional[str] = None,
+    input_fingerprint_payload: Optional[Mapping[str, Any]] = None,
     force: bool = False,
 ) -> tuple[Dict[str, Any], bool, bool]:
-    return storage.claim_report_materialization_build(run_id, cache_key=cache_key, force=force)
+    return storage.claim_report_materialization_build(
+        run_id,
+        cache_key=cache_key,
+        input_fingerprint=input_fingerprint,
+        input_fingerprint_payload=input_fingerprint_payload,
+        force=force,
+    )
 
 
 def store_materialized_run_report(
@@ -62,9 +71,18 @@ def store_materialized_run_report(
     payload: Mapping[str, Any],
     *,
     cache_key: Optional[str] = None,
+    input_fingerprint: Optional[str] = None,
+    input_fingerprint_payload: Optional[Mapping[str, Any]] = None,
     duration_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
-    return storage.store_materialized_run_report(run_id, payload, cache_key=cache_key, duration_ms=duration_ms)
+    return storage.store_materialized_run_report(
+        run_id,
+        payload,
+        cache_key=cache_key,
+        input_fingerprint=input_fingerprint,
+        input_fingerprint_payload=input_fingerprint_payload,
+        duration_ms=duration_ms,
+    )
 
 
 def mark_report_materialization_failed(
@@ -72,31 +90,18 @@ def mark_report_materialization_failed(
     *,
     error: str,
     cache_key: Optional[str] = None,
+    input_fingerprint: Optional[str] = None,
+    input_fingerprint_payload: Optional[Mapping[str, Any]] = None,
     duration_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
     return storage.mark_report_materialization_failed(
         run_id,
         error=error,
         cache_key=cache_key,
+        input_fingerprint=input_fingerprint,
+        input_fingerprint_payload=input_fingerprint_payload,
         duration_ms=duration_ms,
     )
-
-
-def _runtime_decision_entry_from_event(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-    event = runtime_event_from_dict(payload)
-    decision_entry = decision_trace_entry_from_runtime_event(event)
-    if decision_entry is None:
-        return None
-    event_payload = dict(event.context.to_dict())
-    return {
-        **decision_entry,
-        "created_at": row.get("created_at"),
-        "instrument_id": event_payload.get("instrument_id"),
-        "strategy_name": event_payload.get("strategy_name"),
-        "evidence_refs": event_payload.get("evidence_refs") or [],
-        "alternatives_rejected": event_payload.get("alternatives_rejected") or [],
-    }
 
 
 def _payload(row: Mapping[str, Any]) -> Dict[str, Any]:
@@ -178,13 +183,6 @@ def _botlens_decision_entry_from_event(row: Dict[str, Any]) -> Optional[Dict[str
     }
 
 
-def _stored_decision_ledger(run: Mapping[str, Any]) -> List[Dict[str, Any]]:
-    ledger = run.get("decision_ledger")
-    if not isinstance(ledger, list):
-        return []
-    return [dict(entry) for entry in ledger if isinstance(entry, Mapping)]
-
-
 def list_run_events(
     run_id: str,
     *,
@@ -231,19 +229,6 @@ def list_decision_ledger(run_id: str) -> List[Dict[str, Any]]:
         projected = _botlens_decision_entry_from_event(row)
         if projected is not None:
             ledger.append(projected)
-    if ledger:
-        return ledger
-
-    stored_ledger = _stored_decision_ledger(run)
-    if stored_ledger:
-        return stored_ledger
-
-    rows = list_run_events(run_id, event_type_prefixes=[RUNTIME_PREFIX])
-    ledger: List[Dict[str, Any]] = []
-    for row in rows:
-        projected = _runtime_decision_entry_from_event(row)
-        if projected is not None:
-            ledger.append(projected)
     return ledger
 
 
@@ -257,11 +242,7 @@ def list_observability_events(run_id: str, *, limit: int = 2000) -> List[Dict[st
     list_events = getattr(storage, "list_observability_events", None)
     if not callable(list_events):
         return []
-    try:
-        return [dict(row) for row in list_events(run_id=run_id, limit=limit)]
-    except TypeError:
-        rows = list_events(limit=limit)
-        return [dict(row) for row in rows if str(row.get("run_id") or "") == str(run_id)]
+    return [dict(row) for row in list_events(run_id=run_id, limit=limit)]
 
 
 def summarize_decision_ledger(ledger: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
@@ -475,6 +456,7 @@ __all__ = [
     "get_materialized_run_report",
     "get_report_materialization_status",
     "claim_report_materialization_build",
+    "compute_report_input_fingerprint",
     "list_decision_ledger",
     "list_observability_events",
     "list_run_events",

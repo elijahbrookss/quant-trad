@@ -101,6 +101,9 @@ run/component/metric/bounded-label/time bucket.
 - latency panels read rollup p95/p99 fields instead of raw samples,
 - pressure gauges such as depth, utilization, age, high-water, and byte metrics
   keep the bucket maximum,
+- step-profiler storage is duration-only; queue pressure, persistence lag,
+  payload size, worker health, and debug counters are retained through this
+  observability budget instead of duplicated into per-step rollups,
 - labels are bounded to stable diagnostic dimensions; unbounded ids, messages,
   and errors are not part of the durable metric identity,
 - low-value repeated overflow events are compacted into one latest event with a

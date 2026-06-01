@@ -67,7 +67,6 @@ def _run(**overrides):
         "run_id": "run-1",
         "bot_id": "bot-1",
         "status": "completed",
-        "decision_ledger": [],
         "summary": {"net_pnl": 0.0, "total_trades": 0},
     }
     data.update(overrides)

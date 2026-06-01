@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Dict, List, Optional
 
 from ._shared import BotRunRecord, SQLAlchemyError, _json_safe, _parse_optional_timestamp, _utcnow, db, logger, select
+
+_NON_MATERIAL_CONFIG_KEYS = {
+    "generated_at",
+    "report_generated_at",
+    "report_warnings",
+    "request_id",
+    "runtime_warnings",
+    "updated_at",
+    "warnings",
+}
 
 
 def _merge_symbols(existing: Any, incoming: Any) -> list[str]:
@@ -17,6 +29,26 @@ def _merge_symbols(existing: Any, incoming: Any) -> list[str]:
         seen.add(symbol)
         merged.append(symbol)
     return merged
+
+
+def _hash_payload(payload: Any) -> Optional[str]:
+    safe_payload = _json_safe(payload)
+    if safe_payload in (None, "", [], {}):
+        return None
+    encoded = json.dumps(safe_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _material_config_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _material_config_payload(item)
+            for key, item in sorted(value.items(), key=lambda entry: str(entry[0]))
+            if str(key) not in _NON_MATERIAL_CONFIG_KEYS
+        }
+    if isinstance(value, list):
+        return [_material_config_payload(item) for item in value]
+    return _json_safe(value)
 
 
 def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -54,8 +86,27 @@ def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
             record.summary = dict(_json_safe(payload.get("summary") or {}))
         if payload.get("config_snapshot") is not None:
             record.config_snapshot = dict(_json_safe(payload.get("config_snapshot") or {}))
-        if payload.get("decision_ledger") is not None:
-            record.decision_ledger = list(_json_safe(payload.get("decision_ledger") or []))
+            record.config_hash = (
+                str(payload.get("config_hash") or "").strip()
+                or _hash_payload(record.config_snapshot)
+            )
+            record.material_config_hash = (
+                str(payload.get("material_config_hash") or payload.get("strategy_material_config_hash") or "").strip()
+                or _hash_payload(_material_config_payload(record.config_snapshot))
+            )
+        for field in (
+            "config_hash",
+            "material_config_hash",
+            "strategy_hash",
+            "data_snapshot_hash",
+            "runtime_contract_version",
+            "report_dataset_schema_version",
+            "source_revision",
+            "runtime_image",
+            "schema_contract_version",
+        ):
+            if payload.get(field) not in (None, ""):
+                setattr(record, field, str(payload.get(field)).strip())
         record.updated_at = now
         if record.created_at is None:
             record.created_at = now

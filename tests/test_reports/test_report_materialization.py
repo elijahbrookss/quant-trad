@@ -18,9 +18,27 @@ def _status(status: str = "not_started", *, can_view: bool = False) -> dict:
         "error": None,
         "stale_reason": None,
         "cache_key": None,
+        "input_fingerprint": "fp-1",
+        "input_fingerprint_payload": {"event_count": 0, "event_high_water_run_seq": 0, "trade_count": 0},
+        "source_event_count": 0,
+        "source_event_high_water_run_seq": 0,
+        "source_trade_count": 0,
+        "source_run_updated_at": None,
         "can_view": can_view,
         "can_build": status in {"not_started", "failed", "stale"},
         "can_retry": status == "failed",
+    }
+
+
+def _fingerprint() -> dict:
+    return {
+        "input_fingerprint": "fp-1",
+        "input_fingerprint_payload": {
+            "schema_version": "report_input_fingerprint.v1",
+            "event_count": 0,
+            "event_high_water_run_seq": 0,
+            "trade_count": 0,
+        },
     }
 
 
@@ -29,6 +47,7 @@ def test_terminal_run_builds_report_without_changing_run_lifecycle(monkeypatch: 
 
     monkeypatch.setattr(materialization.report_data, "get_run", lambda run_id: {"run_id": run_id, "status": "completed"})
     monkeypatch.setattr(materialization.report_data, "get_report_materialization_status", lambda run_id: _status())
+    monkeypatch.setattr(materialization.report_data, "compute_report_input_fingerprint", lambda run_id: _fingerprint())
     monkeypatch.setattr(
         materialization.report_data,
         "claim_report_materialization_build",
@@ -65,6 +84,7 @@ def test_duplicate_report_build_joins_existing_build(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(materialization.report_data, "get_run", lambda run_id: {"run_id": run_id, "status": "completed"})
     monkeypatch.setattr(materialization.report_data, "get_report_materialization_status", lambda run_id: _status("building"))
+    monkeypatch.setattr(materialization.report_data, "compute_report_input_fingerprint", lambda run_id: _fingerprint())
     monkeypatch.setattr(
         materialization.report_data,
         "claim_report_materialization_build",
@@ -86,6 +106,7 @@ def test_duplicate_report_build_joins_existing_build(monkeypatch: pytest.MonkeyP
 def test_report_build_failure_is_recorded_not_raised(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(materialization.report_data, "get_run", lambda run_id: {"run_id": run_id, "status": "completed"})
     monkeypatch.setattr(materialization.report_data, "get_report_materialization_status", lambda run_id: _status())
+    monkeypatch.setattr(materialization.report_data, "compute_report_input_fingerprint", lambda run_id: _fingerprint())
     monkeypatch.setattr(
         materialization.report_data,
         "claim_report_materialization_build",

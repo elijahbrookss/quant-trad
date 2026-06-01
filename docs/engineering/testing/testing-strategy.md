@@ -248,6 +248,11 @@ Mocks are acceptable at real boundaries:
 
 Mocks are not a substitute for understanding behavior. If the test mostly verifies that mocks were called, it is probably too implementation-focused.
 
+Unit tests must not touch live storage, container orchestration, telemetry hubs,
+or network services through an accidental service path. Stub those boundaries
+explicitly, or mark the test as integration and make the infrastructure
+dependency visible.
+
 ### Keep Scaffolding Small
 
 Do not introduce large fixture, factory, or mock systems unless they are clearly reused and actually reduce complexity.

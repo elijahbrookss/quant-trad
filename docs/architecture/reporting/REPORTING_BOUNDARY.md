@@ -44,6 +44,13 @@ When a run reaches a terminal status, the backend may enqueue a
 `ready`, `failed`, `stale`) do not alter run terminal status; report build
 failure is a reporting condition, not a runtime failure.
 
+Materialized report artifacts are valid only for the exact durable input
+fingerprint recorded with the artifact. The fingerprint includes the run row,
+runtime-event high-water mark, and trade count/update boundary. A ready artifact
+with a missing or changed input fingerprint is stale and must be rebuilt before
+serving or comparing. Contract/schema version alone is not a cache validity
+boundary.
+
 Paired run-report comparison reads ready `RunReportDTO v2` artifacts from
 `portal_report_materializations_v1`. It returns structured blockers for
 non-terminal, missing, building, failed, or stale report artifacts and does not
@@ -77,15 +84,16 @@ Reporting does not mutate strategy, execution, fee, wallet, trade, or BotLens se
 
 The dataset is rebuildable from durable DB/read-model truth:
 
-- `portal_bot_runs` for metadata and config snapshots,
+- `portal_bot_runs` for metadata, lean provenance hashes, and bounded config snapshots,
 - `portal_bot_trades` and trade events for trade lifecycle and financial outcomes,
 - `portal_bot_run_events` for decisions, execution diagnostics, wallet/fallback facts, and BotLens-domain facts,
-- `portal_bot_run_step_rollups_v1` for profiler timings and mergeable p95/p99
-  histogram estimates when present,
+- `portal_bot_run_step_rollups_v1` for phase-duration profiler timings and
+  mergeable p95/p99 histogram estimates when present,
 - observability events for normalized report diagnostics.
 - the reporting candle service for bounded candle windows when requested.
 
-Run configuration metadata preserves strategy variant provenance when available.
+Run configuration metadata preserves strategy variant provenance when available
+without embedding the full raw run snapshot in report artifacts.
 `run_strategy_snapshot` records the exact effective strategy configuration at run
 start, including `effective_params`, `output_filters`, `base_params`, and
 `param_source_map`. Reports expose this as provenance only. Reporting must not

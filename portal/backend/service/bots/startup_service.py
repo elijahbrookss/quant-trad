@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import traceback
 import uuid
 from dataclasses import dataclass
@@ -23,6 +24,9 @@ from .startup_lifecycle import (
 
 logger = logging.getLogger(__name__)
 _BOT_RUNTIME_SETTINGS = get_settings().bot_runtime
+_RUNTIME_CONTRACT_VERSION = "runtime_contract.v1"
+_REPORT_DATASET_SCHEMA_VERSION = "run_research_dataset.v1"
+_SCHEMA_CONTRACT_VERSION = "portal_runtime_storage.v1"
 
 
 def _execution_mode_from_bot(bot: Mapping[str, Any]) -> str:
@@ -41,6 +45,11 @@ def _duration_seconds_from_bot(bot: Mapping[str, Any]) -> float | None:
     except (TypeError, ValueError):
         raise ValueError("duration_seconds must be numeric") from None
     return duration if duration > 0 else None
+
+
+def _clean_hash(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def _bot_run_config_snapshot(bot: Mapping[str, Any]) -> Dict[str, Any]:
@@ -276,6 +285,11 @@ class BotStartupOrchestrator:
                         "config_hash": ctx.config_hash or None,
                     },
                 },
+                "runtime_contract_version": _RUNTIME_CONTRACT_VERSION,
+                "report_dataset_schema_version": _REPORT_DATASET_SCHEMA_VERSION,
+                "source_revision": os.getenv("GIT_COMMIT") or os.getenv("SOURCE_REVISION"),
+                "runtime_image": os.getenv("RUNTIME_IMAGE") or os.getenv("IMAGE_DIGEST"),
+                "schema_contract_version": _SCHEMA_CONTRACT_VERSION,
             }
         )
 
@@ -351,6 +365,11 @@ class BotStartupOrchestrator:
             start_request_overrides["duration_seconds"] = duration_seconds
         if isinstance(ctx.bot_record.get("market_data_stream_policy"), Mapping):
             start_request_overrides["market_data_stream_policy"] = dict(ctx.bot_record["market_data_stream_policy"])
+        strategy_hash = (
+            _clean_hash(strategy_payload.get("strategy_hash"))
+            or _clean_hash(run_strategy_snapshot.get("strategy_hash"))
+            or _clean_hash(effective_strategy_config.get("strategy_hash"))
+        )
         self.storage.upsert_bot_run(
             {
                 "run_id": ctx.run_id,
@@ -381,6 +400,12 @@ class BotStartupOrchestrator:
                     "run_strategy_snapshot": run_strategy_snapshot,
                     "effective_strategy_config": effective_strategy_config,
                 },
+                "strategy_hash": strategy_hash,
+                "runtime_contract_version": _RUNTIME_CONTRACT_VERSION,
+                "report_dataset_schema_version": _REPORT_DATASET_SCHEMA_VERSION,
+                "source_revision": os.getenv("GIT_COMMIT") or os.getenv("SOURCE_REVISION"),
+                "runtime_image": os.getenv("RUNTIME_IMAGE") or os.getenv("IMAGE_DIGEST"),
+                "schema_contract_version": _SCHEMA_CONTRACT_VERSION,
             }
         )
 

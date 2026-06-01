@@ -152,6 +152,31 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _prune_finished_job_results(
+    *,
+    session,
+    job_type: str,
+    before: datetime,
+) -> int:
+    stmt = (
+        update(AsyncJobRecord)
+        .where(AsyncJobRecord.job_type == str(job_type))
+        .where(AsyncJobRecord.status == STATUS_SUCCEEDED)
+        .where(AsyncJobRecord.finished_at.is_not(None))
+        .where(AsyncJobRecord.finished_at < before)
+        .values(
+            result={
+                "schema_version": "async_job_result_summary.v1",
+                "result_retained": False,
+                "pruned_reason": "result_cache_ttl_expired",
+            },
+            updated_at=_utcnow(),
+        )
+    )
+    outcome = session.execute(stmt)
+    return int(outcome.rowcount or 0)
+
+
 
 def enqueue_job(
     *,
@@ -179,6 +204,12 @@ def enqueue_job(
         updated_at=now,
     )
     with db.session() as session:
+        if record.job_type.startswith("quantlab_"):
+            _prune_finished_job_results(
+                session=session,
+                job_type=record.job_type,
+                before=now - timedelta(seconds=max(0.0, float(_ASYNC_SETTINGS.quantlab_result_cache_ttl_seconds))),
+            )
         session.add(record)
     logger.info(
         "async_job_enqueued | job_id=%s job_type=%s partition_key=%s partition_hash=%s max_attempts=%s",
@@ -276,9 +307,13 @@ def find_reusable_job(
         raise ValueError("request_fingerprint is required")
 
     now = _utcnow()
-    succeeded_after = now - timedelta(seconds=ttl_seconds) if ttl_seconds > 0 else None
-
     with db.session() as session:
+        if ttl_seconds >= 0:
+            _prune_finished_job_results(
+                session=session,
+                job_type=wanted_type,
+                before=now - timedelta(seconds=ttl_seconds),
+            )
         stmt = (
             select(AsyncJobRecord)
             .where(AsyncJobRecord.job_type == wanted_type)
@@ -307,21 +342,13 @@ def find_reusable_job(
                 "result": None,
             }
         if status == STATUS_SUCCEEDED:
-            finished_at = record.finished_at or record.updated_at or record.created_at
-            if ttl_seconds <= 0 or finished_at is None or finished_at < succeeded_after:
-                continue
             logger.info(
-                "async_job_reused_result | job_id=%s job_type=%s partition_key=%s age_seconds=%s",
+                "async_job_reuse_skipped_succeeded_result | job_id=%s job_type=%s partition_key=%s",
                 record.id,
                 wanted_type,
                 partition_key,
-                int((now - finished_at).total_seconds()) if finished_at is not None else None,
             )
-            return {
-                "id": str(record.id),
-                "status": status,
-                "result": dict(record.result or {}) if isinstance(record.result, dict) else record.result,
-            }
+            continue
     return None
 
 

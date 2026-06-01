@@ -2,7 +2,9 @@
 
 from .models import (
     Base,
+    REQUIRED_BOT_RUN_INDEXES,
     REQUIRED_BOT_RUN_EVENT_INDEXES,
+    REQUIRED_REPORT_MATERIALIZATION_INDEXES,
     ATMTemplateRecord,
     BotRecord,
     BotTradeEventRecord,
@@ -31,7 +33,9 @@ from .session import Database, db
 
 __all__ = [
     "Base",
+    "REQUIRED_BOT_RUN_INDEXES",
     "REQUIRED_BOT_RUN_EVENT_INDEXES",
+    "REQUIRED_REPORT_MATERIALIZATION_INDEXES",
     "Database",
     "ATMTemplateRecord",
     "BotRecord",

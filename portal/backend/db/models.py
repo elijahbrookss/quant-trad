@@ -54,6 +54,19 @@ REQUIRED_BOT_RUN_LEASE_INDEXES = frozenset(
     }
 )
 
+REQUIRED_BOT_RUN_INDEXES = frozenset(
+    {
+        "ix_portal_bot_runs_report_list",
+        "ix_portal_bot_runs_bot_report_list",
+    }
+)
+
+REQUIRED_REPORT_MATERIALIZATION_INDEXES = frozenset(
+    {
+        "ix_portal_report_materializations_v1_input_fingerprint",
+    }
+)
+
 
 class IndicatorRecord(Base):
     """Database record describing a persisted indicator instance."""
@@ -564,6 +577,10 @@ class BotRunRecord(Base):
     """Database row representing a completed bot run report snapshot."""
 
     __tablename__ = "portal_bot_runs"
+    __table_args__ = (
+        Index("ix_portal_bot_runs_report_list", "run_type", "status", "ended_at", "started_at", "run_id"),
+        Index("ix_portal_bot_runs_bot_report_list", "bot_id", "run_type", "status", "ended_at", "started_at", "run_id"),
+    )
 
     run_id = Column(String(64), primary_key=True)
     bot_id = Column(String(64), ForeignKey("portal_bots.id", ondelete="SET NULL"), nullable=True)
@@ -582,7 +599,15 @@ class BotRunRecord(Base):
     ended_at = Column(DateTime, nullable=True)
     summary = Column(JSON, nullable=True)
     config_snapshot = Column(JSON, nullable=True)
-    decision_ledger = Column(JSON, nullable=True)
+    config_hash = Column(String(64), nullable=True)
+    material_config_hash = Column(String(64), nullable=True)
+    strategy_hash = Column(String(64), nullable=True)
+    data_snapshot_hash = Column(String(64), nullable=True)
+    runtime_contract_version = Column(String(64), nullable=True)
+    report_dataset_schema_version = Column(String(64), nullable=True)
+    source_revision = Column(String(128), nullable=True)
+    runtime_image = Column(String(255), nullable=True)
+    schema_contract_version = Column(String(64), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -630,7 +655,15 @@ class BotRunRecord(Base):
             "execution_mode": execution_mode,
             "execution_behavior": execution_behavior,
             "config_snapshot": config_snapshot,
-            "decision_ledger": list(self.decision_ledger or []),
+            "config_hash": self.config_hash,
+            "material_config_hash": self.material_config_hash,
+            "strategy_hash": self.strategy_hash,
+            "data_snapshot_hash": self.data_snapshot_hash,
+            "runtime_contract_version": self.runtime_contract_version,
+            "report_dataset_schema_version": self.report_dataset_schema_version,
+            "source_revision": self.source_revision,
+            "runtime_image": self.runtime_image,
+            "schema_contract_version": self.schema_contract_version,
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
@@ -640,6 +673,9 @@ class ReportMaterializationRecord(Base):
     """Persisted RunReportDTO artifact and build status for one run."""
 
     __tablename__ = "portal_report_materializations_v1"
+    __table_args__ = (
+        Index("ix_portal_report_materializations_v1_input_fingerprint", "input_fingerprint"),
+    )
 
     run_id = Column(String(64), ForeignKey("portal_bot_runs.run_id", ondelete="CASCADE"), primary_key=True)
     contract_version = Column(String(64), nullable=False, default="run_report_v2")
@@ -647,6 +683,12 @@ class ReportMaterializationRecord(Base):
     artifact_id = Column(String(160), nullable=True)
     artifact = Column(JSONB, nullable=True)
     cache_key = Column(String(255), nullable=True)
+    input_fingerprint = Column(String(64), nullable=True)
+    input_fingerprint_payload = Column(JSONB, nullable=True)
+    source_event_count = Column(Integer, nullable=False, default=0)
+    source_event_high_water_run_seq = Column(Integer, nullable=False, default=0)
+    source_trade_count = Column(Integer, nullable=False, default=0)
+    source_run_updated_at = Column(DateTime, nullable=True)
     stale_reason = Column(String(512), nullable=True)
     error = Column(String(2048), nullable=True)
     started_at = Column(DateTime, nullable=True)
@@ -676,6 +718,12 @@ class ReportMaterializationRecord(Base):
             "error": self.error,
             "stale_reason": self.stale_reason or ("missing_artifact" if effective_status == "stale" else None),
             "cache_key": self.cache_key,
+            "input_fingerprint": self.input_fingerprint,
+            "input_fingerprint_payload": dict(self.input_fingerprint_payload or {}),
+            "source_event_count": int(self.source_event_count or 0),
+            "source_event_high_water_run_seq": int(self.source_event_high_water_run_seq or 0),
+            "source_trade_count": int(self.source_trade_count or 0),
+            "source_run_updated_at": (self.source_run_updated_at.isoformat() + "Z") if self.source_run_updated_at else None,
             "can_view": can_view,
             "can_build": can_build,
             "can_retry": can_retry,

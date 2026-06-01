@@ -47,12 +47,11 @@ def test_upsert_bot_run_json_sanitizes_nested_runtime_snapshot(monkeypatch) -> N
                 "started_at": datetime(2026, 5, 17, 7, 45, tzinfo=timezone.utc),
                 "bot": {"updated_at": datetime(2026, 5, 17, 7, 46)},
             },
-            "decision_ledger": [
-                {"known_at": datetime(2026, 5, 17, 7, 47, tzinfo=timezone.utc)}
-            ],
         }
     )
 
     assert result["config_snapshot"]["started_at"] == "2026-05-17T07:45:00Z"
     assert result["config_snapshot"]["bot"]["updated_at"] == "2026-05-17T07:46:00Z"
-    assert result["decision_ledger"][0]["known_at"] == "2026-05-17T07:47:00Z"
+    assert result["config_hash"]
+    assert result["material_config_hash"]
+    assert "decision_ledger" not in result

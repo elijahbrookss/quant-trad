@@ -453,12 +453,11 @@ def _configuration_metadata(config: Mapping[str, Any]) -> Dict[str, Any]:
     sections = _strategy_config_sections(config)
     return {
         "schema_version": "run_configuration_snapshot.v1",
-        "source": "portal_bot_runs.config_snapshot",
+        "source": "portal_bot_runs.provenance_columns",
         "available": bool(config),
         "config_hash": _config_hash(config),
         "material_config_hash": _material_config_hash(config),
         **sections,
-        "raw_snapshot": _redact_config_value(dict(config)),
     }
 
 
@@ -530,8 +529,6 @@ def _strategy_hash(run: Mapping[str, Any]) -> Optional[str]:
     for value in (
         run.get("strategy_hash"),
         config.get("strategy_hash"),
-        config.get("material_config_hash"),
-        config.get("strategy_material_config_hash"),
         strategy.get("strategy_hash") if isinstance(strategy, Mapping) else None,
         strategy.get("hash") if isinstance(strategy, Mapping) else None,
     ):
@@ -4851,12 +4848,12 @@ def _narrative_summary(
 def _metadata(run: Mapping[str, Any]) -> RunResearchMetadata:
     config = _mapping(run.get("config_snapshot"))
     material_hash = str(
-        config.get("material_config_hash")
+        run.get("material_config_hash")
+        or config.get("material_config_hash")
         or config.get("strategy_material_config_hash")
-        or run.get("material_config_hash")
         or ""
     ).strip() or _material_config_hash(config)
-    explicit_hash = str(config.get("config_hash") or run.get("config_hash") or "").strip() or None
+    explicit_hash = str(run.get("config_hash") or config.get("config_hash") or "").strip() or None
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     timeframes = _metadata_timeframes(run)
     datasource = str(run.get("provider") or run.get("datasource") or config.get("datasource") or "").strip() or None
@@ -4886,7 +4883,7 @@ def _metadata(run: Mapping[str, Any]) -> RunResearchMetadata:
         starting_capital=_starting_capital(config),
         config_hash=explicit_hash or _config_hash(config),
         material_config_hash=material_hash,
-        data_snapshot_hash=None,
+        data_snapshot_hash=str(run.get("data_snapshot_hash") or "").strip() or None,
         report_material_fingerprint=None,
         report_semantic_fingerprint=None,
         report_operational_fingerprint=None,

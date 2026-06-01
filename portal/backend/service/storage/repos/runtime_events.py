@@ -57,59 +57,6 @@ _OBSERVER = _STORAGE_OBSERVER
 _RUNTIME_EVENT_ID_CONFLICT_CONSTRAINT = "uq_portal_bot_run_events_event_id"
 _RUN_SEQ_STATUS_RUNTIME_ASSIGNED = "runtime_assigned"
 _STEP_ROLLUP_BUCKET_SECONDS = 60
-_STEP_CONTEXT_METRIC_EXACT = frozenset(
-    {
-        "build_state_ms",
-        "canonical_append_ms",
-        "candle_update_ms",
-        "db_commit_ms",
-        "delta_build_ms",
-        "delta_serialize_ms",
-        "dispatch_ms",
-        "enqueue_ms",
-        "execution_decision_flow_ms",
-        "execution_ms",
-        "execution_prime_ms",
-        "execution_settlement_ms",
-        "execution_trade_event_processing_ms",
-        "finalize_residual_ms",
-        "indicator_eval_ms",
-        "indicator_state_update_ms",
-        "max_overlay_payload_bytes",
-        "overlay_payload_bytes",
-        "overlay_projection_delta_ms",
-        "overlay_projection_entries_total",
-        "overlay_projection_ms",
-        "overlay_projection_ops_count",
-        "overlays_update_ms",
-        "payload_bytes",
-        "pending_signals_ops_ms",
-        "persist_ms",
-        "persistence_ms",
-        "rule_eval_ms",
-        "serialize_ms",
-        "series_overlay_entries_ms",
-        "signal_eval_ms",
-        "stats_update_ms",
-        "strategy_eval_ms",
-        "stream_emit_ms",
-        "trace_persist_ms",
-        "trade_lock_hold_ms",
-        "trade_lock_wait_ms",
-    }
-)
-_STEP_CONTEXT_METRIC_SUFFIXES: tuple[str, ...] = ()
-_STEP_CONTEXT_METRIC_SKIP = frozenset(
-    {
-        "bar_epoch",
-        "bar_index",
-        "bar_time",
-        "event",
-        "run_id",
-        "symbol",
-        "timeframe",
-    }
-)
 _STEP_HISTOGRAM_BOUNDS = (
     0.0,
     1.0,
@@ -749,13 +696,6 @@ def _finite_step_float(value: Any) -> Optional[float]:
     return parsed
 
 
-def _should_rollup_step_context_metric(key: str) -> bool:
-    metric_name = _clean_step_metric_name(key)
-    if not metric_name or metric_name in _STEP_CONTEXT_METRIC_SKIP:
-        return False
-    return metric_name in _STEP_CONTEXT_METRIC_EXACT or metric_name.endswith(_STEP_CONTEXT_METRIC_SUFFIXES)
-
-
 def _step_histogram_counts(values: Sequence[float]) -> List[int]:
     counts = [0 for _ in _STEP_HISTOGRAM_BOUNDS]
     for raw_value in values:
@@ -812,17 +752,7 @@ def _step_metric_samples(payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
         "status": "ok" if bool(payload.get("ok", True)) else "failed",
         "error_count": 1 if payload.get("error") else 0,
     }
-    samples = [{**base, "metric_name": "duration_ms", "value": float(duration_ms)}]
-    context = payload.get("context") if isinstance(payload.get("context"), Mapping) else {}
-    for key, raw_value in context.items():
-        metric_name = _clean_step_metric_name(key)
-        if not _should_rollup_step_context_metric(metric_name):
-            continue
-        value = _finite_step_float(raw_value)
-        if value is None:
-            continue
-        samples.append({**base, "metric_name": metric_name, "value": value})
-    return samples
+    return [{**base, "metric_name": "duration_ms", "value": float(duration_ms)}]
 
 
 def _rollup_step_metric_samples(payloads: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
@@ -1011,13 +941,13 @@ def _upsert_step_rollups(session: Any, rollups: Sequence[Mapping[str, Any]]) -> 
 
 
 def record_bot_run_step(payload: Dict[str, Any]) -> None:
-    """Persist a timed bot runtime step as typed profiler rollups."""
+    """Persist one precomputed runtime step rollup."""
 
     record_bot_run_steps_batch([payload])
 
 
 def record_bot_run_steps_batch(payloads: Sequence[Dict[str, Any]]) -> int:
-    """Persist runtime step trace batches as typed metric rollups."""
+    """Persist precomputed runtime step rollups."""
 
     if not db.available:
         return 0
@@ -1025,18 +955,14 @@ def record_bot_run_steps_batch(payloads: Sequence[Dict[str, Any]]) -> int:
     if not items:
         return 0
 
-    precomputed_items = [
-        item
-        for item in items
-        if isinstance(item, Mapping) and is_step_trace_rollup_payload(item)
-    ]
-    raw_items = [
+    invalid_items = [
         item
         for item in items
         if not (isinstance(item, Mapping) and is_step_trace_rollup_payload(item))
     ]
-    rollups = coerce_step_trace_rollup_payloads(precomputed_items)
-    rollups.extend(_rollup_step_metric_samples(raw_items))
+    if invalid_items:
+        raise ValueError("record_bot_run_steps_batch accepts precomputed step rollups only")
+    rollups = coerce_step_trace_rollup_payloads(items)
     if not rollups:
         return 0
 
@@ -1641,10 +1567,12 @@ def list_bot_runtime_events(
 
 
 def get_latest_bot_runtime_run_id(bot_id: str) -> Optional[str]:
+    """Return the latest run id from the run metadata read model."""
+
     if not db.available:
         return None
     with db.session() as session:
-        row = (
+        latest_run_id = (
             session.execute(
                 select(BotRunRecord.run_id)
                 .where(BotRunRecord.bot_id == str(bot_id))
@@ -1658,31 +1586,7 @@ def get_latest_bot_runtime_run_id(bot_id: str) -> Optional[str]:
             .scalars()
             .first()
         )
-        if row:
-            return str(row)
-        fallback = (
-            session.execute(
-                select(BotRunEventRecord.run_id)
-                .where(BotRunEventRecord.bot_id == str(bot_id))
-                .order_by(BotRunEventRecord.id.desc())
-                .limit(1)
-            )
-            .scalars()
-            .first()
-        )
-        if fallback:
-            return str(fallback)
-        lifecycle_row = (
-            session.execute(
-                select(BotRunLifecycleRecord.run_id)
-                .where(BotRunLifecycleRecord.bot_id == str(bot_id))
-                .order_by(BotRunLifecycleRecord.checkpoint_at.desc(), BotRunLifecycleRecord.updated_at.desc())
-                .limit(1)
-            )
-            .scalars()
-            .first()
-        )
-        return str(lifecycle_row) if lifecycle_row else None
+        return str(latest_run_id) if latest_run_id else None
 
 
 def get_latest_bot_runtime_event(

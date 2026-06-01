@@ -30,17 +30,15 @@ def test_step_rollups_include_mergeable_histogram_percentiles():
 
     rollups = runtime_events._rollup_step_metric_samples(payloads)
     duration_rollup = next(row for row in rollups if row["metric_name"] == "duration_ms")
-    append_rollup = next(row for row in rollups if row["metric_name"] == "canonical_append_ms")
 
     assert duration_rollup["sample_count"] == 4
     assert len(duration_rollup["histogram_bounds"]) == len(duration_rollup["histogram_counts"])
     assert sum(duration_rollup["histogram_counts"]) == 4
     assert duration_rollup["p95_value"] == 400.0
     assert duration_rollup["p99_value"] == 400.0
-    assert sum(append_rollup["histogram_counts"]) == 4
 
 
-def test_step_rollups_keep_only_budgeted_context_metrics():
+def test_step_rollups_keep_only_phase_duration_metric():
     payload = {
         "run_id": "run-1",
         "bot_id": "bot-1",
@@ -70,12 +68,7 @@ def test_step_rollups_keep_only_budgeted_context_metrics():
     rollups = runtime_events._rollup_step_metric_samples([payload])
     metric_names = {row["metric_name"] for row in rollups}
 
-    assert {
-        "duration_ms",
-        "strategy_eval_ms",
-        "overlay_projection_ms",
-        "payload_bytes",
-    } <= metric_names
+    assert metric_names == {"duration_ms"}
     assert "botlens_fact_stream_overlays_payload_bytes" not in metric_names
     assert "decision_order_wait_ms" not in metric_names
     assert "decision_order_release_count" not in metric_names
@@ -88,6 +81,25 @@ def test_step_rollups_keep_only_budgeted_context_metrics():
     assert "step_trace_queue_depth" not in metric_names
     assert "step_trace_persist_lag_ms" not in metric_names
     assert "one_off_internal_wait_ms" not in metric_names
+
+
+def test_record_bot_run_steps_batch_rejects_raw_step_payloads(monkeypatch: pytest.MonkeyPatch):
+    fake_db = _FakeDb([None])
+    monkeypatch.setattr(runtime_events, "db", fake_db)
+
+    with pytest.raises(ValueError, match="precomputed step rollups"):
+        runtime_events.record_bot_run_steps_batch(
+            [
+                {
+                    "run_id": "run-1",
+                    "bot_id": "bot-1",
+                    "step_name": "step_signal_eval",
+                    "started_at": "2026-03-01T00:00:01Z",
+                    "ended_at": "2026-03-01T00:00:01.100000Z",
+                    "duration_ms": 100.0,
+                }
+            ]
+        )
 
 
 def test_record_bot_run_steps_batch_accepts_precomputed_rollups(monkeypatch: pytest.MonkeyPatch):
@@ -324,7 +336,7 @@ def test_get_latest_bot_runtime_run_id_prefers_latest_run_row(monkeypatch: pytes
     assert result == "run-new"
 
 
-def test_get_latest_bot_runtime_run_id_falls_back_to_event_row_when_run_row_missing(
+def test_get_latest_bot_runtime_run_id_does_not_reconstruct_from_event_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_db = _FakeDb([None, "run-from-events", "run-from-events"])
@@ -332,7 +344,7 @@ def test_get_latest_bot_runtime_run_id_falls_back_to_event_row_when_run_row_miss
 
     result = runtime_events.get_latest_bot_runtime_run_id("bot-1")
 
-    assert result == "run-from-events"
+    assert result is None
 
 
 def test_record_bot_runtime_events_batch_records_observation_started_timer(

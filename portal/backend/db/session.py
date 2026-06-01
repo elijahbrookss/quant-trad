@@ -14,9 +14,11 @@ from sqlalchemy.schema import CreateSchema, CreateTable
 
 from .models import (
     Base,
+    REQUIRED_BOT_RUN_INDEXES,
     REQUIRED_BOT_RUN_EVENT_INDEXES,
     REQUIRED_BOT_RUN_LEASE_INDEXES,
     REQUIRED_BOT_RUN_LIFECYCLE_INDEXES,
+    REQUIRED_REPORT_MATERIALIZATION_INDEXES,
 )
 
 
@@ -252,6 +254,16 @@ class Database:
             "portal_bot_run_events",
             REQUIRED_BOT_RUN_EVENT_INDEXES,
             migration="scripts/db/manual_migration_runtime_event_run_seq_v3.sql",
+        )
+        warn_missing_indexes(
+            "portal_bot_runs",
+            REQUIRED_BOT_RUN_INDEXES,
+            migration="scripts/db/manual_migration_report_provenance_and_materialization_fingerprint_v1.sql",
+        )
+        warn_missing_indexes(
+            "portal_report_materializations_v1",
+            REQUIRED_REPORT_MATERIALIZATION_INDEXES,
+            migration="scripts/db/manual_migration_report_provenance_and_materialization_fingerprint_v1.sql",
         )
         warn_missing_indexes(
             "portal_bot_run_lifecycle",

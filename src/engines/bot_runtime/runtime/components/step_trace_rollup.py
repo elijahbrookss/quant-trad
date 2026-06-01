@@ -11,59 +11,6 @@ from typing import Any, Dict, List, Optional
 STEP_TRACE_ROLLUP_SENTINEL = "_step_trace_rollup_v1"
 STEP_ROLLUP_BUCKET_SECONDS = 60
 
-STEP_CONTEXT_METRIC_EXACT = frozenset(
-    {
-        "build_state_ms",
-        "canonical_append_ms",
-        "candle_update_ms",
-        "db_commit_ms",
-        "delta_build_ms",
-        "delta_serialize_ms",
-        "dispatch_ms",
-        "enqueue_ms",
-        "execution_decision_flow_ms",
-        "execution_ms",
-        "execution_prime_ms",
-        "execution_settlement_ms",
-        "execution_trade_event_processing_ms",
-        "finalize_residual_ms",
-        "indicator_eval_ms",
-        "indicator_state_update_ms",
-        "max_overlay_payload_bytes",
-        "overlay_payload_bytes",
-        "overlay_projection_delta_ms",
-        "overlay_projection_entries_total",
-        "overlay_projection_ms",
-        "overlay_projection_ops_count",
-        "overlays_update_ms",
-        "payload_bytes",
-        "pending_signals_ops_ms",
-        "persist_ms",
-        "persistence_ms",
-        "rule_eval_ms",
-        "serialize_ms",
-        "series_overlay_entries_ms",
-        "signal_eval_ms",
-        "stats_update_ms",
-        "strategy_eval_ms",
-        "stream_emit_ms",
-        "trace_persist_ms",
-        "trade_lock_hold_ms",
-        "trade_lock_wait_ms",
-    }
-)
-STEP_CONTEXT_METRIC_SUFFIXES: tuple[str, ...] = ()
-STEP_CONTEXT_METRIC_SKIP = frozenset(
-    {
-        "bar_epoch",
-        "bar_index",
-        "bar_time",
-        "event",
-        "run_id",
-        "symbol",
-        "timeframe",
-    }
-)
 STEP_HISTOGRAM_BOUNDS = (
     0.0,
     1.0,
@@ -154,13 +101,6 @@ def finite_step_float(value: Any) -> Optional[float]:
     return parsed
 
 
-def should_rollup_step_context_metric(key: str) -> bool:
-    metric_name = clean_step_metric_name(key)
-    if not metric_name or metric_name in STEP_CONTEXT_METRIC_SKIP:
-        return False
-    return metric_name in STEP_CONTEXT_METRIC_EXACT or metric_name.endswith(STEP_CONTEXT_METRIC_SUFFIXES)
-
-
 def step_histogram_counts(values: Sequence[float]) -> List[int]:
     counts = [0 for _ in STEP_HISTOGRAM_BOUNDS]
     for raw_value in values:
@@ -217,17 +157,7 @@ def step_metric_samples(payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
         "status": "ok" if bool(payload.get("ok", True)) else "failed",
         "error_count": 1 if payload.get("error") else 0,
     }
-    samples = [{**base, "metric_name": "duration_ms", "value": float(duration_ms)}]
-    context = payload.get("context") if isinstance(payload.get("context"), Mapping) else {}
-    for key, raw_value in context.items():
-        metric_name = clean_step_metric_name(key)
-        if not should_rollup_step_context_metric(metric_name):
-            continue
-        value = finite_step_float(raw_value)
-        if value is None:
-            continue
-        samples.append({**base, "metric_name": metric_name, "value": value})
-    return samples
+    return [{**base, "metric_name": "duration_ms", "value": float(duration_ms)}]
 
 
 def step_rollup_identity(row: Mapping[str, Any]) -> tuple[Any, ...]:

@@ -42,6 +42,7 @@ from .observability import (
 from .presets import delete_symbol_preset, list_symbol_presets, upsert_symbol_preset
 from .report_materializations import (
     claim_report_materialization_build,
+    compute_report_input_fingerprint,
     get_materialized_run_report,
     get_report_materialization_status,
     list_report_materialization_statuses,
@@ -168,6 +169,7 @@ __all__ = [
     "record_observability_events_batch",
     "record_observability_metric_rollups_batch",
     "claim_report_materialization_build",
+    "compute_report_input_fingerprint",
     "mark_report_materialization_failed",
     "reset_report_materialization",
     "record_bot_runtime_event",
