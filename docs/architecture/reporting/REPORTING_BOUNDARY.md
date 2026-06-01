@@ -73,7 +73,7 @@ Reporting does not mutate strategy, execution, fee, wallet, trade, or BotLens se
 2. `RunResearchDataset v1` normalizes metadata, readiness, summary metrics, timeseries, decisions, signals, trades, context/world-state rows, candle catalog, diagnostics, candle gaps, runtime performance, operational health, and insights.
 3. Reports, compare views, exports, and external analysis tools read from the dataset.
 
-## Dataset Truth
+## Dataset Rebuilds From Durable Run Facts
 
 The dataset is rebuildable from durable DB/read-model truth:
 
@@ -195,16 +195,13 @@ continuity evidence is absent, reporting blocks certification with
 `missing_canonical_continuity_evidence` instead of silently certifying from
 observer facts.
 
-## Outputs
+## What Reporting Publishes
 
-- report API payloads,
-- compare payloads,
-- compact research summary and comparison-summary payloads for CLI/agent
-  workflows,
-- downloadable/export bundles,
-- normalized diagnostics,
-- readiness and caveat explanations.
-- optional research exports with candle files.
+Reporting publishes report API payloads, compare payloads, compact research and
+comparison summaries for CLI/agent workflows, downloadable export bundles,
+normalized diagnostics, readiness/caveat explanations, and optional research
+exports with candle files. These are downstream products of the dataset, not
+new execution semantics.
 
 ## Failure And Recovery
 
@@ -212,7 +209,7 @@ observer facts.
 - Terminal open trades block safe comparison unless explicitly modeled.
 - Reports should explain which section is missing instead of returning optimistic partial truth.
 - A completed run with unclassified `RUN_FAILED` or `FAULT_RECORDED` facts blocks
-  golden-run certification. Recoverable watchdog stale-heartbeat facts are
+  golden-run certification. Recoverable watchdog expired-lease facts are
   reported as degraded lifecycle health instead of lifecycle contradiction.
   Recoverable startup container-ownership ambiguity is treated the same way
   when it is explicitly classified and later runtime truth proves the run

@@ -55,15 +55,16 @@ Core identifiers:
 6. Accepted decisions may create or update a `trade_id`.
 7. Runtime events carry hot fields for the IDs needed by BotLens, reporting, forensics, and logs.
 
-## Truth And Projection
+## Where IDs Come From
 
-Identity truth lives in runtime/domain contracts and durable rows. Projection layers may index or cache by those IDs, but they should not mint replacement IDs for canonical objects.
+Identity truth lives in runtime/domain contracts and durable rows. Projection
+layers may index or cache by those IDs, but they should not mint replacement IDs
+for canonical objects.
 
-Examples:
-
-- BotLens can build a selected-symbol view keyed by `bot_id`, `run_id`, and `series_key`.
-- Reports can group decisions and trades by `strategy_id`, `strategy_hash`, `instrument_id`, and `trade_id`.
-- Observability can correlate latency or projection failures by `run_id`, `bot_id`, `bar_time`, and `correlation_id`.
+That means BotLens builds selected-symbol views from `bot_id`, `run_id`, and
+`series_key`; reports group decisions and trades by strategy, instrument, and
+trade IDs; and observability correlates latency or projection failures by the
+same run, bot, bar-time, and correlation IDs that runtime emitted.
 
 ## Failure Behavior
 

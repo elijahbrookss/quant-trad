@@ -46,3 +46,6 @@ respect.
 | [0025](0025-use-per-run-leases.md) | Use per-run leases | Accepted |
 | [0026](0026-use-control-plane-telemetry-flush.md) | Use control-plane telemetry flush | Accepted |
 | [0027](0027-use-execution-profiles-as-runtime-instrument-authority.md) | Use execution profiles as runtime instrument authority | Accepted |
+| [0028](0028-use-bounded-projection-dispatch-for-botlens-live-facts.md) | Use bounded projection dispatch for BotLens live facts | Accepted |
+| [0029](0029-batch-and-degrade-botlens-projection-drain.md) | Batch and degrade BotLens projection drain | Accepted |
+| [0030](0030-keep-portal-bots-definition-only.md) | Keep portal bots definition only | Accepted |

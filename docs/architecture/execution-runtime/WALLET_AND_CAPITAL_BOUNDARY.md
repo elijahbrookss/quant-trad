@@ -69,22 +69,23 @@ metadata.
 5. Settlement releases or adjusts reservations.
 6. Wallet/runtime events make capital state auditable.
 
-## State And Truth
+## How Wallet State Stays Replayable
 
-Wallet truth is runtime truth. Reports and BotLens can project wallet effects, but they should not recompute a different wallet history.
+Wallet truth is runtime truth. Reports and BotLens can project wallet effects,
+but they should not recompute a different wallet history.
 
-`WALLET_INITIALIZED` is a run-scoped ledger transition owned by the container
-runtime/coordinator. A shared-wallet run must publish exactly one canonical
-mutating initialization fact for the run wallet before worker execution. That
-write goes through the canonical fact appender, not the live BotLens projection
-transport, so durable wallet truth is not dependent on a symbol-series route.
-Symbol workers attach to that shared wallet state; they must not emit their own
-canonical `WALLET_INITIALIZED` rows. Duplicate initialization with different
-state is a ledger defect, not a replay concern.
-When a runtime engine attaches the shared wallet gateway, both entry settlement
-and exit settlement must use that same gateway. Exit fills that bypass the
-shared gateway cannot allocate `wallet_commit_seq`, cannot produce canonical
-release facts, and must fail rather than emit clockless wallet ledger rows.
+`WALLET_INITIALIZED` starts the run wallet as a ledger transition owned by the
+container runtime/coordinator. A shared-wallet run publishes exactly one
+canonical mutating initialization fact before worker execution. That write goes
+through the canonical fact appender, not live BotLens projection transport, so
+durable wallet truth is not dependent on a symbol-series route.
+
+Symbol workers attach to that shared wallet state. They must not emit their own
+canonical `WALLET_INITIALIZED` rows, and duplicate initialization with different
+state is a ledger defect. When runtime attaches the shared wallet gateway, entry
+and exit settlement both use that gateway. Exit fills that bypass it cannot
+allocate `wallet_commit_seq`, cannot produce canonical release facts, and must
+fail rather than emit clockless wallet ledger rows.
 
 Reservation lifecycle should be inspectable:
 

@@ -71,28 +71,21 @@ Provider adapters are anti-corruption boundaries. External provider quirks shoul
 
 Unknown gaps are safer than false certainty. If the system cannot prove a market closure or provider explanation, the gap remains unknown.
 
-## Inputs
+## Source Facts Handed Downstream
 
-- Provider, venue, exchange, symbol, timeframe, start/end.
-- Provider credential references and runtime settings.
-- Provider registry metadata.
-- Cached candle rows and closure/session rows when available.
-- Instrument metadata requests.
+The data layer starts from an explicit request: provider or venue, exchange,
+symbol, timeframe, start/end, credential refs, registry metadata, cache rows,
+session evidence, and instrument metadata. It returns normalized candle rows,
+instrument validation, provider/cache provenance, continuity summaries,
+missing-range evidence, and source warnings.
 
-## Outputs
+Provider-backed candles are source facts. Cache rows are the same source facts
+with persistence provenance. Continuity summaries explain those facts; they do
+not turn missing data into usable market data.
 
-- Normalized candle rows.
-- Instrument metadata and validation results.
-- Provider/cache provenance.
-- Gap and continuity summaries.
-- Missing candle evidence for sparse/failed provider fetch ranges.
-- Source warnings that downstream layers can surface.
-
-## State And Truth
-
-Provider-backed candles are source facts. Cache rows are persisted source facts with provenance. Continuity summaries are diagnostics over those facts.
-
-The data boundary should not manufacture alternate execution truth. If source data is incomplete, downstream runtime can reject, degrade, or fall back according to its own contract, but the data layer should keep the incompleteness visible.
+When source data is incomplete, the data layer keeps the incompleteness visible.
+Runtime can reject, degrade, or fall back according to its own contract, but the
+data layer should not manufacture alternate execution truth.
 
 ## Failure And Recovery
 

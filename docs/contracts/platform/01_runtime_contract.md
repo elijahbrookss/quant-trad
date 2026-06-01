@@ -167,11 +167,19 @@ Rules:
 
 Projector rebuild failure is not an empty valid projection.
 
+Projection pressure is not execution truth. BotLens projection queues and
+transport handoffs may degrade, drop stale visual/debug work, and require a
+projection resync. They must not fail an otherwise valid run. Canonical runtime
+persistence remains strict: durable fact persistence overflow, writer failure,
+or terminal persistence drain timeout is a runtime failure.
+
 Rules:
 
 - run projector rebuild failures must surface `health.status=projection_error`, readiness false, and a bounded fault explaining the failed rebuild,
 - symbol projector rebuild failures must surface a `projection_error` diagnostic and `snapshot_ready=false`,
 - selected-symbol reads over a failed symbol projection must return an explicit unavailable/projection-error state,
+- producer-side BotLens projection overflow/drain timeout must be reported as projection degradation, not execution failure,
+- symbol fact projectors should drain ready messages in bounded batches before declaring projection pressure,
 - error details must be bounded and operationally useful, not raw unbounded persisted payloads,
 - downstream UI/service paths must distinguish "empty but valid" from "projection unavailable".
 

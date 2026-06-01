@@ -24,7 +24,7 @@ Accepted on 2026-05-19.
 
 ## Context
 
-Watchdog stale-heartbeat detection is already classified as recoverable
+Watchdog expired-lease detection is already classified as recoverable
 lifecycle degradation unless independent evidence proves a terminal runtime
 failure. That classification is correct, but the persisted lifecycle row did
 not carry enough evidence to explain why the watchdog degraded a run.
@@ -34,16 +34,16 @@ bot logs, WSL journal output, Docker events, and lifecycle rows manually.
 
 ## Decision
 
-When the watchdog records stale heartbeat or container-not-running conditions,
+When the watchdog records expired-lease or container-not-running conditions,
 persist bounded diagnostics in lifecycle metadata and failure payloads under
 `watchdog_diagnostics`.
 
-Stale-heartbeat diagnostics include:
+Expired-lease diagnostics include:
 
 - detecting runner id and previous runner id,
-- heartbeat timestamp or explicit missing heartbeat flag,
-- stale age and stale threshold,
-- active run id when available,
+- lease expiry timestamp or explicit missing expiry flag,
+- expiry age and stale threshold,
+- run id,
 - recent runner clock-gap evidence,
 - recent Docker lifecycle evidence for the bot container.
 

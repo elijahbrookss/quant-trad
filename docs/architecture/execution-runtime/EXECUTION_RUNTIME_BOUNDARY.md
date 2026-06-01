@@ -13,6 +13,7 @@ tags:
   - deterministic
 code_paths:
   - src/engines/bot_runtime
+  - src/engines/bot_runtime/runtime/components/canonical_facts.py
   - portal/backend/service/bots/bot_watchdog.py
   - portal/backend/service/bots/runner_observability.py
   - portal/backend/service/bots/run_lease.py
@@ -112,7 +113,7 @@ silently overwritten by a later completion. If durable facts contain both
 completion and an unclassified terminal failure/fault, reporting must expose a
 lifecycle contradiction and block golden-run certification.
 
-Watchdog stale-heartbeat detection is recoverable lifecycle degradation unless
+Watchdog expired-lease detection is recoverable lifecycle degradation unless
 there is independent evidence that the runtime process actually reached a
 terminal failure. Container-not-running and startup/process failures remain
 terminal only when the watchdog can verify the container belongs to the run it
@@ -120,16 +121,17 @@ is evaluating and startup launch grace has expired. A fixed-name container from
 an older run is startup ambiguity, not proof that the new run crashed.
 Recoverable watchdog conditions should produce degraded operational health with
 context, not `RUN_FAILED` or an unclassified terminal fault. Watchdog lifecycle
-rows should include bounded diagnostics such as stale age, previous runner,
-detecting runner, runner clock gap evidence, and nearby container lifecycle
-evidence when those facts are available.
+rows should include bounded diagnostics such as lease expiry age, previous
+runner, detecting runner, runner clock gap evidence, and nearby container
+lifecycle evidence when those facts are available.
 
 Run ownership is leased per `run_id`. The backend acquires a run lease before
 launching the runner, the runtime renews that lease while it is alive, and clean
-terminal exit releases it. A fresh run lease is stronger liveness evidence than
-the legacy bot-row heartbeat; stale bot heartbeats with a fresh run lease are
-not terminal proof. Runtime processes must fail loud if they lose the lease or
-cannot renew it before continuing to emit run facts.
+terminal exit releases it. `portal_bot_run_leases` is the liveness and ownership
+source; `portal_bots` remains a bot definition row and must not carry
+`runner_id`, heartbeat, status, summary, or artifact state. Runtime processes
+must fail loud if they lose the lease or cannot renew it before continuing to
+emit run facts.
 
 ## Execution Semantics
 
@@ -140,23 +142,32 @@ FAST and FULL are execution semantics, not playback modes.
 - Missing/incomplete/ambiguous intrabar data falls back to pessimistic behavior with diagnostics.
 - UI animation can replay events, but it must not change execution truth.
 
-## State And Truth
+## Evidence Runtime Must Leave Behind
 
-Runtime truth includes decisions, rejected decisions, fills, fees, trade state, wallet reservations, margin effects, terminal closes, lifecycle transitions, and domain events.
+Runtime truth includes decisions, rejected decisions, fills, fees, trade state,
+wallet reservations, margin effects, terminal closes, lifecycle transitions,
+and domain events. BotLens snapshots, fleet cards, API transport shapes, and
+report views are projections over that truth. Projection state may be rebuilt or
+unavailable; runtime truth should remain durable and inspectable.
 
-Runtime projections include BotLens snapshots, fleet cards, API transport shapes, and report views. Projection state may be rebuilt or unavailable; runtime truth should remain durable and inspectable.
+Performance diagnostics are supporting evidence, not execution truth. Step
+traces may be batched and lag the hot path, but they must flush before a run is
+considered fully finalized or surface a diagnostic if they cannot be drained.
 
-Runtime performance diagnostics are supporting evidence, not execution truth.
-Step traces may be batched and lag the hot path, but they must flush before a
-run is considered fully finalized or surface a diagnostic if they cannot be
-drained.
-
-Canonical BotLens facts are required runtime truth, so they use a stricter
-buffer than step traces. The runtime may enqueue sequenced canonical fact
-batches off the bar hot path and write them in bounded DB batches, but the queue
-must not drop rows. Terminal completion requires draining that buffer after the
-final status push. Queue overflow, write failure, or drain timeout fails the run
+Canonical BotLens facts are required runtime evidence, so they use a stricter
+buffer than step traces. Runtime may enqueue sequenced canonical fact batches
+off the bar hot path and write them in bounded DB batches, but the queue must
+not drop rows. Terminal completion requires draining that buffer after the final
+status push. Queue overflow, write failure, or drain timeout fails the run
 instead of silently producing a report from partial canonical facts.
+
+Live BotLens projection dispatch happens after the sequenced fact append. The
+bar step may build the compact fact batch from the current runtime timeline,
+assign its producer sequence, and enqueue the committed batch to a bounded
+projection dispatcher. It must not wait for websocket subscriber fanout or
+projector transport work before continuing execution. The dispatcher consumes
+the already stamped batch from that bar's known-at snapshot; it does not rebuild
+state from mutable runtime internals.
 
 ## Failure And Recovery
 

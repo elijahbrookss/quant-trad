@@ -80,28 +80,28 @@ Rejected decisions matter. A missed trade should be inspectable through an artif
 
 `signal_id` and `decision_id` are intentionally different identifiers. Do not alias them for legacy compatibility.
 
-## Inputs
+## What A Decision Carries Forward
 
-- `CompiledStrategySpec` including strategy ID, strategy hash, timeframe, rules, and history needs.
-- Typed indicator outputs for the current bar.
-- Bounded output history.
-- Instrument/series context from runtime.
+The evaluator starts with a `CompiledStrategySpec`, typed indicator outputs for
+the current bar, bounded output history, and instrument/series context from
+runtime. It emits decision artifacts with stable decision, strategy, rule,
+instrument, intent, direction, and evidence fields. It also emits rejection
+artifacts with stage and reason when a rule path cannot become a trade
+candidate.
 
-## Outputs
+Those artifacts are runtime truth candidates, not fills. Runtime still decides
+whether a candidate becomes execution behavior.
 
-- Decision artifacts with `decision_id`, `strategy_id`, `strategy_hash`, `instrument_id`, rule ID, intent, direction, and evidence.
-- Compact `referenced_outputs` snapshots for the typed outputs that caused or gated the decision. These snapshots carry output identity, type, readiness, bar time, and indicator commit sequence, but not overlays, details, debug blobs, or full indicator state.
-- Compact `output_filter_trace` records when variant output filters were
-  materialized into guards. These traces report output ref, field, operator,
-  expected value, actual value, readiness, and match result for audit only.
-- Rejection artifacts with stage and reason.
-- Runtime-facing provenance fields for event emission.
+The decision record keeps compact provenance for the typed outputs that caused
+or gated the decision. `referenced_outputs` carry output identity, type,
+readiness, bar time, and indicator commit sequence. They do not copy overlays,
+details, debug blobs, or full indicator state. `output_filter_trace` records
+variant filters as audit evidence from the same guard evaluation result, not as
+a second rule-evaluation path.
 
-## State And Truth
-
-Decision artifacts are runtime truth candidates. They are not fills. Runtime decides whether an artifact can become execution behavior.
-
-The decision layer can remember bounded output history because some guards ask whether a condition held or a signal was seen/absent within a window. That history must be built from known-at outputs only.
+The decision layer may remember bounded output history because some guards ask
+whether a condition held, appeared, or stayed absent within a window. That
+history is built from known-at outputs only.
 
 Strategy variants are named diffs against a strategy/default variant. Preview,
 bot config, runtime loading, and report metadata must resolve the same

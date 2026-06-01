@@ -20,6 +20,7 @@ code_paths:
   - portal/backend/service/bots/botlens_domain_events.py
   - portal/backend/service/bots/botlens_canonical_facts.py
   - portal/backend/service/bots/botlens_event_retention.py
+  - src/engines/bot_runtime/runtime/components/canonical_facts.py
   - src/engines/bot_runtime/runtime/components/step_trace_buffer.py
   - src/engines/bot_runtime/runtime/components/step_trace_rollup.py
   - src/engines/bot_runtime/runtime/components/overlay_delta.py
@@ -50,30 +51,25 @@ Persistence owns durable storage. It does not own execution decisions or project
 4. Reports rebuild datasets from run, trade, event, and step truth.
 5. Forensics page the ledger on cold paths.
 
-## Canonical Durable Truth
+## What Persistence Must Rebuild
 
-Canonical runtime persistence includes:
+Persistence stores the rows needed to recover a run without asking projections
+what they last displayed. `portal_bot_runs`, trade rows/events, run leases,
+runtime events, and lifecycle checkpoint rows are durable runtime evidence.
+Reports, BotLens rebuilds, and forensics should be able to start from those
+rows and explain the run again.
 
-- `portal_bot_runs`,
-- `portal_bot_trades`,
-- `portal_bot_trade_events`,
-- `portal_bot_run_leases`,
-- `portal_bot_run_events`,
-- lifecycle checkpoint rows.
+`portal_bots` is different: it stores bot definitions, not runtime liveness. A
+bot definition may contain name, strategy binding, run defaults, risk/wallet
+config, execution settings, and environment config. It should not become the
+place to recover run status, runner ownership, summaries, heartbeats, or report
+artifacts.
 
-Projection or convenience state includes:
-
-- BotLens run/symbol projections,
-- lifecycle helper views,
-- observability metric/event rows,
-- report artifact status.
-
-Projection rows can be rebuilt or unavailable. They must not contradict canonical runtime truth.
-Observability metric/event rows are diagnostic storage. They are not report or
-golden certification evidence unless the same fact is written through an
-explicit canonical runtime/reporting path. Viewer/debug writes must never
-promote themselves into material run identity by sharing a run ID, symbol, or
-continuity payload shape.
+BotLens projections, lifecycle helper views, observability rows, and report
+artifact status are convenience or diagnostic state. They can be rebuilt,
+unavailable, stale, or degraded, but they must not contradict durable runtime
+evidence. Viewer/debug writes also must not become material run identity just
+because they share a `run_id`, symbol, or continuity payload shape.
 
 ## Table Contract Triage
 
@@ -84,14 +80,21 @@ Active schema surfaces are justified by role:
   `portal_bot_trade_events`, `portal_bot_run_leases`, `portal_bot_run_lifecycle`,
   `portal_bot_run_lifecycle_events`, strategy/bot/instrument config tables, and
   market data source tables.
+- Keep as definition only: `portal_bots`. Runtime state belongs to
+  `portal_bot_runs`, lifecycle checkpoints, run leases, and report
+  materialization tables. Fleet cards and API responses may project those rows
+  together, but readers must not recover runtime truth from bot definition
+  columns.
 - Keep as bounded observability: `observability_events.botlens_backend_events_v1`
   and `observability_metrics.botlens_backend_metric_rollups_v1`.
 - Keep as bounded profiler data: `portal_bot_run_step_rollups_v1` stores typed
   bucketed step metrics with mergeable histogram counts for p95/p99 estimates.
   Raw `portal_bot_run_steps` rows are not part of the schema contract. Step
-  rollups intentionally use an allowlist of latency, queue pressure, payload
-  size, and execution timing fields; arbitrary `_ms` or `_count` debug context
-  must not become durable storage by suffix match.
+  rollups intentionally use an allowlist of latency, payload size, and execution
+  timing fields; repeated queue-depth, queue-lag, worker-count, and internal
+  health gauges belong to queue observability or low-rate health summaries, not
+  per-step durable rows. Arbitrary `_ms` or `_count` debug context must not
+  become durable storage by suffix match.
   Runtime aggregates these samples in memory and persists compact rollup rows
   at a slower cadence; the storage repository still accepts raw step payloads
   for compatibility and folds both forms into the same table contract.
@@ -106,6 +109,8 @@ Active schema surfaces are justified by role:
 - Removed from active contract:
   `observability_metrics.botlens_backend_metric_samples_v1`; raw samples are not
   a durable database surface.
+- Removed from active `portal_bots` contract: `status`, `last_run_at`,
+  `last_stats`, `last_run_artifact`, `runner_id`, and `heartbeat_at`.
 
 ## Runtime Event Storage Budget
 
@@ -184,6 +189,14 @@ a bounded per-process event-id idempotence cache to avoid repeated no-op DB
 prechecks for stable health, overlay, diagnostic, or stats facts. The database
 uniqueness constraint remains the final correctness guard after restarts or
 retries.
+
+Projection fanout uses a separate bounded dispatcher over the already committed
+batch. That dispatcher is not a second persistence authority and must not assign
+or rewrite durable ordering. It exists to keep websocket/projector fanout
+pressure out of the runtime bar step while preserving visible degradation
+semantics. Projection overflow or drain timeout may drop stale visual/debug
+handoffs and mark BotLens projection degraded. It must not fail the run unless
+canonical persistence also failed.
 
 Source-owned runtime batches carry both live facts and durable facts. The
 durable writer filters those batches through

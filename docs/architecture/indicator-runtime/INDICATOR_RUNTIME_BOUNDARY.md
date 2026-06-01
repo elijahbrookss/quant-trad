@@ -71,24 +71,18 @@ This is the indicator-specific form of `initialize -> apply_bar -> snapshot`.
 
 All three can derive from the same indicator-owned state, but only typed outputs are part of the decision contract.
 
-## Inputs
+## What The Engine Accepts And Publishes
 
-- Provider-backed candle bars.
-- Declared dependency outputs by `OutputRef`.
-- Indicator runtime specs, params, and replay-window hints.
+The engine advances indicators from provider-backed candle bars, declared
+dependency outputs by `OutputRef`, runtime specs, params, and replay-window
+hints. It publishes `RuntimeOutput` values typed as `signal`, `context`, or
+`metric`, plus output deltas carrying `base_indicator_commit_seq`,
+`indicator_commit_seq`, and `indicator_commit_seq_status=indicator_scoped`.
 
-## Outputs
-
-- `RuntimeOutput` values typed as `signal`, `context`, or `metric`.
-- `RuntimeOutputDelta` `set` operations carrying
-  `base_indicator_commit_seq`, `indicator_commit_seq`, and
-  `indicator_commit_seq_status=indicator_scoped`.
-- `RuntimeOverlay` values for visual inspection.
-- `RuntimeDetail` values for debug inspection.
-- Guard metrics and warnings when output/projection payloads are expensive or invalid.
-- Runtime diagnostics for source-fact quality, including indicator-owned candle
-  continuity caveats that should be visible to research tools without becoming
-  strategy inputs.
+Visual and debug surfaces leave through separate projection payloads:
+`RuntimeOverlay` for charts and `RuntimeDetail` for inspection. Guard metrics,
+payload warnings, and source-fact diagnostics can explain expensive or invalid
+projection/output behavior, but they do not become strategy inputs.
 
 ## Runtime Validation Surface
 
@@ -112,7 +106,7 @@ This surface is intentionally a validator, not an alternate runtime. It must not
 reconstruct indicator state from overlays, details, mutable internals, or MCP
 payloads.
 
-## State And Lifecycle
+## How Indicator State Advances
 
 Indicators should have one internal timeline:
 
