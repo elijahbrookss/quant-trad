@@ -25,7 +25,6 @@ class BotRuntimeDeps:
     record_bot_trade: Callable[[Mapping[str, Any]], None]
     record_bot_trade_event: Callable[[Mapping[str, Any]], None]
     record_bot_run_steps_batch: Callable[[list[dict[str, Any]]], int]
-    update_bot_run_artifact: Callable[[str, Mapping[str, Any]], None]
     build_run_artifact_bundle: Callable[[str, str, Mapping[str, Any], Sequence[Any]], Any]
     fetch_ohlcv_by_instrument: Optional[Callable[..., Any]] = None
     get_instrument_record: Optional[Callable[[str], Dict[str, Any]]] = None

@@ -911,7 +911,10 @@ def _upsert_step_rollups(session: Any, rollups: Sequence[Mapping[str, Any]]) -> 
         identity = _step_rollup_identity_for_row(item)
         existing = rows_by_identity.get(identity)
         rows_by_identity[identity] = merge_step_rollup_rows(existing or {}, item) if existing else item
-    rows = _merge_existing_step_rollups(session, list(rows_by_identity.values()))
+    rows = [
+        {key: value for key, value in dict(row).items() if key in writable_columns}
+        for row in _merge_existing_step_rollups(session, list(rows_by_identity.values()))
+    ]
     if not rows:
         return 0
 

@@ -1120,7 +1120,6 @@ class RuntimeEventsMixin:
             return
 
         artifact = self._run_artifact_payload(status)
-        self._deps.update_bot_run_artifact(self.bot_id, artifact)
         if self._report_artifact_bundle is not None:
             self._report_artifact_bundle.finalize(runtime_status=status, artifact=artifact)
 

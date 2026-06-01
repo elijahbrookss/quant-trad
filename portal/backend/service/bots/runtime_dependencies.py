@@ -23,7 +23,6 @@ from ..storage.storage import (
     record_bot_runtime_events_batch,
     record_bot_trade,
     record_bot_trade_event,
-    update_bot_run_artifact,
 )
 from ..storage.repos.observability import record_observability_events_batch
 from ..strategies.strategy_service.facade import run_strategy_preview
@@ -128,7 +127,6 @@ def build_bot_runtime_deps() -> BotRuntimeDeps:
         record_bot_trade=record_bot_trade,
         record_bot_trade_event=record_bot_trade_event,
         record_bot_run_steps_batch=record_bot_run_steps_batch,
-        update_bot_run_artifact=update_bot_run_artifact,
         build_run_artifact_bundle=build_run_artifact_bundle,
         record_bot_runtime_diagnostic_event=_record_bot_runtime_diagnostic_event,
     )

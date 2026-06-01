@@ -165,6 +165,7 @@ def test_step_rollup_upsert_uses_precomputed_percentiles_not_db_histogram_helper
         session,
         [
             {
+                "_step_trace_rollup": True,
                 "bucket_start": datetime(2026, 3, 1, tzinfo=timezone.utc),
                 "bucket_seconds": 60,
                 "first_seen": datetime(2026, 3, 1, tzinfo=timezone.utc),
@@ -195,8 +196,11 @@ def test_step_rollup_upsert_uses_precomputed_percentiles_not_db_histogram_helper
     )
 
     assert result == 1
-    compiled = str(session.statements[0].compile(dialect=postgresql.dialect()))
+    compiled_statement = session.statements[0].compile(dialect=postgresql.dialect())
+    compiled = str(compiled_statement)
     assert "quanttrad_jsonb_histogram" not in compiled
+    assert "_step_trace_rollup" not in compiled
+    assert "_step_trace_rollup" not in compiled_statement.params
 
 
 class _FakeScalarResult:

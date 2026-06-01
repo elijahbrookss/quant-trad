@@ -60,7 +60,6 @@ def _runtime_deps() -> BotRuntimeDeps:
         record_bot_trade=lambda _payload: None,
         record_bot_trade_event=lambda _payload: None,
         record_bot_run_steps_batch=lambda _payloads: 0,
-        update_bot_run_artifact=lambda _run_id, _payload: None,
         build_run_artifact_bundle=lambda _bot_id, _run_id, _config, _series: None,
     )
 
