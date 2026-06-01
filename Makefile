@@ -159,9 +159,9 @@ sync-docs: ## Sync ./docs to external path via rsync (set SYNC_DOCS_DEST or OBSI
 	"$(SYNC_DOCS_RSYNC)" $(SYNC_DOCS_RSYNC_FLAGS) $(SYNC_DOCS_DELETE_FLAG) "$$src" "$$dest"; \
 	echo "✓ Docs synced"
 
-architecture-svgs: mermaid-svgs ## Render docs/architecture .mmd files to sibling .svg files
+architecture-svgs: mermaid-svgs ## Render docs/architecture .mmd files to nearby SVG files
 
-mermaid-svgs: ## Render .mmd files to sibling .svg files (MERMAID_SRC=path)
+mermaid-svgs: ## Render .mmd files to nearby SVG files (MERMAID_SRC=path)
 	@$(PY) scripts/docs/render_mermaid_svgs.py --root "$(MERMAID_SRC)" --mmdc "$(MERMAID_CLI)" $(MERMAID_RENDER_ARGS) $(if $(strip $(MERMAID_CLI_ARGS)),-- $(MERMAID_CLI_ARGS),)
 
 ## ============================ BOOTSTRAP ================================= ##

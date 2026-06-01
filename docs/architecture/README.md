@@ -16,7 +16,9 @@ The architecture docs are organized by conceptual boundary, not by the current P
 
 ## Fastest Diagrams
 
-Mermaid sources live in a `diagrams/` folder beside the boundary doc they support.
+Mermaid sources live in a `diagrams/` folder beside the boundary doc they
+support. They are not decoration; keep them for flows, clocks, and boundaries
+that are easier to understand at a glance than in prose.
 
 - [System runtime truth flow](system/diagrams/system-runtime-truth-flow.mmd)
 - [Engine boundaries](engine/diagrams/engine-boundaries.mmd)
@@ -36,7 +38,15 @@ Mermaid sources live in a `diagrams/` folder beside the boundary doc they suppor
 - [RunResearchDataset flow](reporting/diagrams/run-research-dataset-flow.mmd)
 - [Observability flow](observability/diagrams/observability-flow.mmd)
 
-SVG outputs are not checked in yet because Mermaid CLI is not available in the current environment. The `.mmd` files are the diagram sources of record.
+Render SVGs with:
+
+```bash
+make architecture-svgs
+```
+
+Generated architecture SVGs are written beside the `.mmd` files in each local
+`diagrams/` folder. The `.mmd` files remain the diagram sources of record; the
+SVGs are the quick-reference files to open while reading nearby docs.
 
 ## Boundary Map
 
@@ -83,6 +93,8 @@ For adding extension points:
 
 - Contracts under `docs/contracts/platform/` remain the source of truth.
 - Boundary docs should prefer supported current behavior over future language.
+- Diagrams should be budgeted. Add one only when it makes the intent easier to
+  see than prose alone.
 - Projections are never execution truth.
 - Heavy debug/history belongs on cold paths.
 - Runtime hot-path payloads stay bounded and typed.

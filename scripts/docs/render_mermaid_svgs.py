@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render Mermaid .mmd files to sibling SVG files."""
+"""Render Mermaid .mmd files to nearby SVG files."""
 
 from __future__ import annotations
 
@@ -108,7 +108,7 @@ def _print_render_error(error: RenderError) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Render Mermaid .mmd files to sibling .svg files, replacing existing SVGs atomically."
+        description="Render Mermaid .mmd files to nearby .svg files, replacing existing SVGs atomically."
     )
     parser.add_argument(
         "--root",
