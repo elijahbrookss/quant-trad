@@ -19,6 +19,7 @@ from .experiments.plan_loader import load_plan, plan_preview
 from .experiments.runner import ExperimentRunner
 from .experiments.state_store import ExperimentStateStore, find_experiment_dir
 from .experiments.summarize import summarize_experiment, write_experiment_summary
+from .logs import DEFAULT_LOKI_URL, LokiClient, doctor_log_payload, query_log_payload, run_log_payload
 
 
 TERMINAL_STATUSES = {
@@ -515,6 +516,48 @@ def _cmd_runs_wait(args: argparse.Namespace) -> int:
         emit_final=True,
     )
     return code
+
+
+def _loki_client(args: argparse.Namespace) -> LokiClient:
+    return LokiClient(str(getattr(args, "loki_url", None) or DEFAULT_LOKI_URL), timeout=float(args.timeout))
+
+
+def _cmd_logs_run(args: argparse.Namespace) -> int:
+    payload = run_log_payload(
+        client=_loki_client(args),
+        run_id=args.run_id,
+        bot_id=getattr(args, "bot_id", None),
+        start=getattr(args, "start", None),
+        end=getattr(args, "end", None),
+        lookback_hours=float(getattr(args, "lookback_hours", 6.0)),
+        limit=int(getattr(args, "limit", 500)),
+    )
+    _print_json(payload)
+    return 0
+
+
+def _cmd_logs_query(args: argparse.Namespace) -> int:
+    payload = query_log_payload(
+        client=_loki_client(args),
+        logql=args.logql,
+        start=getattr(args, "start", None),
+        end=getattr(args, "end", None),
+        lookback_hours=float(getattr(args, "lookback_hours", 6.0)),
+        limit=int(getattr(args, "limit", 500)),
+    )
+    _print_json(payload)
+    return 0
+
+
+def _cmd_logs_doctor(args: argparse.Namespace) -> int:
+    payload = doctor_log_payload(
+        client=_loki_client(args),
+        start=getattr(args, "start", None),
+        end=getattr(args, "end", None),
+        lookback_hours=float(getattr(args, "lookback_hours", 24.0)),
+    )
+    _print_json(payload)
+    return 0
 
 
 def _cmd_strategies_list(args: argparse.Namespace) -> int:
@@ -1487,6 +1530,30 @@ def build_parser() -> argparse.ArgumentParser:
     runs_wait.add_argument("--print-each", action="store_true")
     runs_wait.add_argument("--allow-non-completed", action="store_true")
     runs_wait.set_defaults(func=_cmd_runs_wait)
+
+    logs = subparsers.add_parser("logs", help="Structured Loki log inspection helpers.")
+    logs.add_argument("--loki-url", default=os.environ.get("QT_LOKI_URL", DEFAULT_LOKI_URL))
+    logs_sub = logs.add_subparsers(dest="logs_command", required=True)
+    logs_run = logs_sub.add_parser("run", help="Fetch structured Loki logs for a run and nearby bot lifecycle.")
+    logs_run.add_argument("run_id")
+    logs_run.add_argument("--bot-id", help="Include nearby bot lifecycle logs when the run id is absent from those lines.")
+    logs_run.add_argument("--start", help="RFC3339 start time. Defaults to --lookback-hours.")
+    logs_run.add_argument("--end", help="RFC3339 end time. Defaults to now.")
+    logs_run.add_argument("--lookback-hours", type=float, default=6.0)
+    logs_run.add_argument("--limit", type=int, default=500)
+    logs_run.set_defaults(func=_cmd_logs_run)
+    logs_query = logs_sub.add_parser("query", help="Run a raw LogQL query and parse Quant-Trad structured lines.")
+    logs_query.add_argument("logql")
+    logs_query.add_argument("--start", help="RFC3339 start time. Defaults to --lookback-hours.")
+    logs_query.add_argument("--end", help="RFC3339 end time. Defaults to now.")
+    logs_query.add_argument("--lookback-hours", type=float, default=6.0)
+    logs_query.add_argument("--limit", type=int, default=500)
+    logs_query.set_defaults(func=_cmd_logs_query)
+    logs_doctor = logs_sub.add_parser("doctor", help="Check Loki/Promtail label visibility for Quant-Trad logs.")
+    logs_doctor.add_argument("--start", help="RFC3339 start time. Defaults to --lookback-hours.")
+    logs_doctor.add_argument("--end", help="RFC3339 end time. Defaults to now.")
+    logs_doctor.add_argument("--lookback-hours", type=float, default=24.0)
+    logs_doctor.set_defaults(func=_cmd_logs_doctor)
 
     strategies = subparsers.add_parser("strategies", help="Strategy, variant, compile, and preview commands.")
     strategies_sub = strategies.add_subparsers(dest="strategies_command", required=True)

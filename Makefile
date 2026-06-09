@@ -312,6 +312,7 @@ mcp-register-codex: venv ## Register the Quant-Trad MCP stdio server with Codex 
 .PHONY: status logs-backend logs-bots backend-shell bot-shell dbshell db-query db-file \
 	forensic-run-ordering forensic-run-throughput forensic-run-event-summary forensic-run-storage-budget \
 	forensic-run-seq-gaps forensic-run-write-latency forensic-observability-storage-budget \
+	forensic-run-logs forensic-logs-doctor \
 	forensic-botlens-check forensic-wallet-diagnostics forensic-golden-compare \
 	test-reporting test-reporting-api test-botlens test-runtime validate-docs frontend-test frontend-build frontend-check \
 	git-status git-diff git-check check
@@ -398,6 +399,15 @@ forensic-observability-storage-budget: venv ## Forensic: summarize durable obser
 	@set -euo pipefail; \
 	$(LOCAL_PG_ENV); \
 	$(PYTHON) scripts/reporting/runtime_event_diagnostics.py observability-storage-budget $(if $(strip $(run)),--run-id "$(run)",) $(if $(strip $(limit)),--limit "$(limit)",)
+
+forensic-run-logs: venv ## Forensic: fetch structured Loki logs for a run (run=<run_id> bot=<optional_bot_id>)
+	@set -euo pipefail; \
+	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
+	$(VENV_PYTHON) -m cli.main --no-audit-log logs $(if $(strip $(loki)),--loki-url "$(loki)",) run "$(run)" $(if $(strip $(bot)),--bot-id "$(bot)",) $(if $(strip $(start)),--start "$(start)",) $(if $(strip $(end)),--end "$(end)",) $(if $(strip $(hours)),--lookback-hours "$(hours)",) $(if $(strip $(limit)),--limit "$(limit)",)
+
+forensic-logs-doctor: venv ## Forensic: check Loki/Promtail visibility for Quant-Trad logs
+	@set -euo pipefail; \
+	$(VENV_PYTHON) -m cli.main --no-audit-log logs $(if $(strip $(loki)),--loki-url "$(loki)",) doctor $(if $(strip $(start)),--start "$(start)",) $(if $(strip $(end)),--end "$(end)",) $(if $(strip $(hours)),--lookback-hours "$(hours)",)
 
 forensic-botlens-check: venv ## Forensic: replay BotLens projection state from ledger (run=<run_id> symbol=<optional>)
 	@set -euo pipefail; \

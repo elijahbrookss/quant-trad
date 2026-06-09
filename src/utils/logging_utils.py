@@ -1,55 +1,38 @@
-# logging_utils.py
 import logging
-import json
-import requests
-from datetime import datetime
+import os
+from typing import Mapping
 
-class ExcludeLoggerFilter(logging.Filter):
-    def __init__(self, excluded_names):
-        self.excluded_names = excluded_names
+from utils.log_context import build_log_context, format_log_context
 
-    def filter(self, record):
-        return not any(record.name.startswith(name) for name in self.excluded_names)
 
-class LokiHandler(logging.Handler):
-    def __init__(self, url: str, labels: dict = None, timeout: float = 2.0):
-        super().__init__()
-        self.url = url.rstrip("/") + "/loki/api/v1/push"
-        self.labels = labels or {}
-        self.timeout = timeout
+class RuntimeContextFormatter(logging.Formatter):
+    """Append process-level runtime context to every emitted log line."""
 
-        self.internal_logger = logging.getLogger("loki.internal")
-        self.internal_logger.setLevel(logging.WARNING)
-        self.internal_logger.propagate = False
-        self._disabled = False
+    def __init__(self, fmt: str, *, context: Mapping[str, object] | None = None) -> None:
+        super().__init__(fmt)
+        self._rendered_context = format_log_context(context or {})
 
-    def emit(self, record):
-        if self._disabled:
-            return
+    def format(self, record: logging.LogRecord) -> str:
+        line = super().format(record)
+        if not self._rendered_context:
+            return line
+        return f"{line} | {self._rendered_context}"
 
-        if record.name.startswith("urllib3") or record.name.startswith("requests"):
-            return  # Avoid recursion
 
-        try:
-            line = self.format(record)
-            ts = str(int(record.created * 1e9))
-            payload = {
-                "streams": [
-                    {
-                        "stream": self.labels,
-                        "values": [[ts, line]]
-                    }
-                ]
-            }
+def runtime_log_context_from_env(env: Mapping[str, str] | None = None) -> dict[str, object]:
+    source = os.environ if env is None else env
+    request_id = str(source.get("QT_BOT_RUNTIME_REQUEST_ID") or source.get("QT_REQUEST_ID") or "").strip()
+    bot_id = str(source.get("QT_BOT_RUNTIME_BOT_ID") or "").strip()
+    run_id = str(source.get("QT_BOT_RUNTIME_RUN_ID") or "").strip()
+    source_revision = str(source.get("SOURCE_REVISION") or "").strip()
 
-            resp = requests.post(self.url, json=payload, timeout=self.timeout)
+    context = build_log_context(request_id=request_id, bot_id=bot_id, run_id=run_id)
+    if bot_id or run_id:
+        context["runtime"] = "bot"
+        context["service"] = "bot-runtime"
+    if source_revision and (bot_id or run_id):
+        context["source_revision"] = source_revision
+    return context
 
-            if resp.status_code >= 300:
-                self.internal_logger.warning(f"Loki response: {resp.status_code} - {resp.text}")
 
-        except Exception as e:
-            self.internal_logger.warning(
-                "Disabling Loki logging after transport error: %s", e, exc_info=False
-            )
-            self._disabled = True
-
+__all__ = ["RuntimeContextFormatter", "runtime_log_context_from_env"]

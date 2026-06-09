@@ -24,9 +24,14 @@ code_paths:
   - src/engines/bot_runtime/runtime/components/overlay_delta.py
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
   - portal/backend/service/storage/repos/observability.py
+  - cli/logs.py
+  - src/core/logger.py
+  - src/utils/logging_utils.py
   - scripts/db/manual_migration_observability_metric_rollups_v1.sql
   - scripts/db/manual_migration_versioning_hard_cutover.sql
   - docker/docker-compose.yml
+  - docker/promtail/config.yml
+  - docker/loki/config.yml
   - docker/grafana
   - docs/architecture/observability/diagrams/observability-flow.mmd
 ---
@@ -75,6 +80,17 @@ truth, wallet/order/trade facts, or research-valid status.
 2. The in-memory sink keeps hot-path emission cheap.
 3. The exporter persists durable observability rows after applying a storage budget.
 4. Grafana, Loki, and operator tools inspect health and incidents.
+
+`qt logs` is the operator-facing Loki tool. It does not create observability
+truth; it queries Loki, parses Quant-Trad structured log lines into fields, and
+keeps run incident investigation away from ad hoc curl command knowledge.
+
+Backend and runtime application logs enter Loki through one normal path:
+container stdout/stderr, Docker log storage, Promtail, then Loki. Runtime code
+must not synchronously post ordinary log lines to Loki. Bot-runtime processes
+append `run_id`, `bot_id`, `service=bot-runtime`, and `runtime=bot` to log
+lines so run-centered searches remain cheap enough without indexing every run as
+a Loki stream label.
 
 ## Storage Budget
 
@@ -133,6 +149,8 @@ complete database pressure signal.
 - fallback and degrade events,
 - runner clock-gap diagnostics,
 - Docker container lifecycle diagnostics for Quant-Trad containers,
+- structured Loki inspection through `qt logs` for run incident forensics,
+- Promtail-scraped backend and bot-runtime stdout/stderr logs,
 - control-plane telemetry flush status for runtime lifecycle and bootstrap
   messages,
 - storage write timing,
@@ -181,6 +199,10 @@ complete database pressure signal.
   errors on failure so API websocket receive loops are not held hostage by
   ordinary projection/debug storage pressure.
 - Dashboard gaps should point back to missing instrumentation or storage, not hidden execution semantics.
+- If Promtail/Loki are down while a short-lived bot container starts and exits,
+  and the container is later removed, Loki cannot retroactively recover that
+  runtime stdout/stderr stream. The fix is observability availability and
+  durable Docker/Loki storage, not a second runtime logging path.
 
 ## Invariants
 
@@ -189,6 +211,10 @@ complete database pressure signal.
 - Observability is designed for traceability from QuantLab to strategy to bot to trade to playback.
 - Durable observability rows must be bounded enough that observing pressure does
   not become the pressure source.
+- Loki labels must stay bounded to routing dimensions such as `job`, `service`,
+  `runtime`, `container`, and `compose_service`; run and bot identity belongs in
+  the structured log line unless a future measured need justifies the
+  cardinality cost.
 - Future MCP inspection/debug calls are observationally safe by default: pure
   reads must not create material evidence, and optional diagnostic writes remain
   non-material and best-effort.
@@ -199,3 +225,4 @@ complete database pressure signal.
 - [Persistence boundary](../persistence/PERSISTENCE_BOUNDARY.md)
 - [Execution runtime boundary](../execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md)
 - [Engineering observability overview](../../engineering/observability.md)
+- [ADR 0033: Use Promtail as Runtime Loki Ingress](../decisions/0033-use-promtail-as-runtime-loki-ingress.md)

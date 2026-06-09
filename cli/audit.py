@@ -54,6 +54,7 @@ def command_path(args: Any) -> str:
         getattr(args, "reports_command", None),
         getattr(args, "providers_command", None),
         getattr(args, "credentials_command", None),
+        getattr(args, "logs_command", None),
         getattr(args, "experiments_command", None),
         getattr(args, "mcp_command", None),
     ]
