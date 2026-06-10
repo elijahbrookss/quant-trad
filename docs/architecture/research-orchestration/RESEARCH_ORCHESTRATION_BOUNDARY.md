@@ -21,8 +21,10 @@ code_paths:
   - portal/backend/controller/bots.py
   - portal/backend/controller/indicators.py
   - portal/backend/controller/reports.py
+  - portal/backend/controller/research.py
   - portal/backend/service/bots/bot_service.py
   - portal/backend/service/indicators/indicator_service
+  - portal/backend/service/research
   - portal/backend/service/reports/contract.py
   - portal/backend/service/reports/comparison.py
   - docs/engineering/developer-audit-workflow.md
@@ -67,6 +69,8 @@ The boundary may:
 - write CLI invocation audit logs for command/API/artifact provenance.
 - run file-backed sequential experiment plans that compose those API routes.
 - expose MCP resources and tools that call these same API and CLI contracts.
+- create research-memory observations, checks, hypotheses, studies, and links
+  through the research API.
 
 The boundary must not:
 
@@ -78,6 +82,8 @@ The boundary must not:
 - mutate runtime or reporting semantics.
 - treat local experiment state as canonical runtime truth.
 - treat MCP resources as cached truth or introduce MCP-only workflow semantics.
+- treat research-memory items or check outputs as runtime, report, or execution
+  truth.
 
 ## Local Log Partitioning
 
@@ -127,6 +133,13 @@ evidence rather than post-run report truth.
 
 `qt data coverage` exposes the same `candle_coverage_preflight.v1` check for a
 single explicit instrument/window before a bot or experiment plan exists.
+
+`qt research` captures the reasoning trail around research work. Observations,
+lightweight research checks, hypotheses, studies, and links to strategies,
+variants, runs, reports, and experiments live in the research-memory boundary.
+Research checks may request source facts through existing data services and
+produce analytical evidence, but they do not execute strategies or simulate
+trades.
 
 `qt experiments summarize` reads the local suite artifacts and emits
 `experiment_summary.v1`: suite status, compact run metrics, readiness caveats,
@@ -178,6 +191,8 @@ for:
 - instrument listing, detail inspection, and runtime profile compilation through
   `qt instruments ...`,
 - direct candle coverage inspection through `qt data coverage`,
+- research-memory item/link capture and lightweight historical checks through
+  `qt research ...`,
 - run lifecycle waiting through compact run status API state,
 - report listing, readiness, compact research summary, diagnostics,
   materialization status/build, export, and materialized report comparison

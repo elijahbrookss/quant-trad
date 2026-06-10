@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.settings import get_settings
-from .controller import bots, candles, indicators as ind_controller, instruments, providers, reports, strategies
+from .controller import bots, candles, indicators as ind_controller, instruments, providers, reports, research, strategies
 from .service.bots import bot_service
 from .service.bots.bot_watchdog import get_watchdog
 from .service.bots.runner_observability import start_runner_observability, stop_runner_observability
@@ -114,6 +114,7 @@ app.include_router(instruments.router, prefix="/api/instruments")
 app.include_router(bots.router, prefix="/api/bots")
 app.include_router(providers.router, prefix="/api/providers")
 app.include_router(reports.router, prefix="/api/reports")
+app.include_router(research.router, prefix="/api/research")
 
 
 @app.get("/api/health")

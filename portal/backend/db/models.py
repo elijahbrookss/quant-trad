@@ -67,6 +67,20 @@ REQUIRED_REPORT_MATERIALIZATION_INDEXES = frozenset(
     }
 )
 
+REQUIRED_RESEARCH_ITEM_INDEXES = frozenset(
+    {
+        "ix_portal_research_items_kind_status_updated",
+        "ix_portal_research_items_symbol_timeframe",
+    }
+)
+
+REQUIRED_RESEARCH_LINK_INDEXES = frozenset(
+    {
+        "ix_portal_research_links_source_relation",
+        "ix_portal_research_links_target",
+    }
+)
+
 
 class IndicatorRecord(Base):
     """Database record describing a persisted indicator instance."""
@@ -349,6 +363,101 @@ class SymbolPresetRecord(Base):
             "exchange": self.exchange,
             "timeframe": self.timeframe,
             "symbol": self.symbol,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class ResearchItemRecord(Base):
+    """Research-memory item for observations, checks, hypotheses, and studies."""
+
+    __tablename__ = "portal_research_items"
+    __table_args__ = (
+        Index("ix_portal_research_items_kind_status_updated", "kind", "status", "updated_at"),
+        Index("ix_portal_research_items_symbol_timeframe", "symbol", "timeframe"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    kind = Column(String(32), nullable=False)
+    status = Column(String(32), nullable=False, default="draft")
+    title = Column(String(255), nullable=False)
+    body = Column(String(8192), nullable=True)
+    instrument_id = Column(String(64), nullable=True)
+    symbol = Column(String(64), nullable=True)
+    timeframe = Column(String(32), nullable=True)
+    datasource = Column(String(64), nullable=True)
+    exchange = Column(String(64), nullable=True)
+    window_start = Column(DateTime, nullable=True)
+    window_end = Column(DateTime, nullable=True)
+    tags = Column(JSONB, nullable=False, default=list)
+    payload = Column(JSONB, nullable=False, default=dict)
+    source_revision = Column(String(128), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return the research item as an API payload."""
+
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "status": self.status,
+            "title": self.title,
+            "body": self.body,
+            "instrument_id": self.instrument_id,
+            "symbol": self.symbol,
+            "timeframe": self.timeframe,
+            "datasource": self.datasource,
+            "exchange": self.exchange,
+            "window_start": (self.window_start.isoformat() + "Z") if self.window_start else None,
+            "window_end": (self.window_end.isoformat() + "Z") if self.window_end else None,
+            "tags": list(self.tags or []),
+            "payload": dict(self.payload or {}),
+            "source_revision": self.source_revision,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class ResearchLinkRecord(Base):
+    """Directed research-memory link to another research item or platform artifact."""
+
+    __tablename__ = "portal_research_links"
+    __table_args__ = (
+        Index("ix_portal_research_links_source_relation", "source_item_id", "relation"),
+        Index("ix_portal_research_links_target", "target_type", "target_id"),
+        UniqueConstraint(
+            "source_item_id",
+            "target_type",
+            "target_id",
+            "relation",
+            name="uq_research_link_identity",
+        ),
+    )
+
+    id = Column(String(96), primary_key=True)
+    source_item_id = Column(
+        String(64),
+        ForeignKey("portal_research_items.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    target_type = Column(String(64), nullable=False)
+    target_id = Column(String(255), nullable=False)
+    relation = Column(String(64), nullable=False)
+    link_metadata = Column("metadata", JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return the research link as an API payload."""
+
+        return {
+            "id": self.id,
+            "source_item_id": self.source_item_id,
+            "target_type": self.target_type,
+            "target_id": self.target_id,
+            "relation": self.relation,
+            "metadata": dict(self.link_metadata or {}),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }

@@ -19,6 +19,8 @@ from .models import (
     REQUIRED_BOT_RUN_LEASE_INDEXES,
     REQUIRED_BOT_RUN_LIFECYCLE_INDEXES,
     REQUIRED_REPORT_MATERIALIZATION_INDEXES,
+    REQUIRED_RESEARCH_ITEM_INDEXES,
+    REQUIRED_RESEARCH_LINK_INDEXES,
 )
 
 
@@ -259,6 +261,8 @@ class Database:
         require_table("portal_strategy_indicators")
         require_table("portal_strategy_instruments")
         require_table("portal_strategy_variants")
+        require_table("portal_research_items")
+        require_table("portal_research_links")
         require_table("portal_async_jobs")
         require_table("portal_report_materializations")
         require_table("portal_bot_run_events")
@@ -276,6 +280,8 @@ class Database:
         assert_columns("portal_strategy_indicators")
         assert_columns("portal_strategy_instruments")
         assert_columns("portal_strategy_variants")
+        assert_columns("portal_research_items")
+        assert_columns("portal_research_links")
         assert_columns("portal_async_jobs")
         assert_columns("portal_report_materializations")
         assert_columns("portal_bot_run_events")
@@ -306,6 +312,16 @@ class Database:
             "portal_bot_run_leases",
             REQUIRED_BOT_RUN_LEASE_INDEXES,
             migration="scripts/db/manual_migration_portal_bot_definition_only_indexes_v1.sql",
+        )
+        warn_missing_indexes(
+            "portal_research_items",
+            REQUIRED_RESEARCH_ITEM_INDEXES,
+            migration="scripts/db/manual_migration_research_memory_v1.sql",
+        )
+        warn_missing_indexes(
+            "portal_research_links",
+            REQUIRED_RESEARCH_LINK_INDEXES,
+            migration="scripts/db/manual_migration_research_memory_v1.sql",
         )
 
     @property

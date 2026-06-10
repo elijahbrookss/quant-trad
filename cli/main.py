@@ -931,6 +931,159 @@ def _cmd_data_coverage(args: argparse.Namespace) -> int:
     return 1
 
 
+def _cmd_research_items_list(args: argparse.Namespace) -> int:
+    payload = _client(args).request_json(
+        "GET",
+        "/api/research/items",
+        params={
+            "kind": args.kind,
+            "status": args.status,
+            "symbol": args.symbol,
+            "timeframe": args.timeframe,
+            "limit": args.limit,
+        },
+    )
+    _print_json(payload)
+    return 0
+
+
+def _cmd_research_items_get(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/research/items/{args.item_id}"))
+    return 0
+
+
+def _research_item_payload(
+    args: argparse.Namespace,
+    *,
+    default_kind: str | None = None,
+    default_status: str | None = None,
+) -> dict[str, Any]:
+    payload = _read_json_object_arg(getattr(args, "payload_json", None), label="--payload-json")
+    if default_kind:
+        payload.setdefault("kind", default_kind)
+    if default_status:
+        payload.setdefault("status", default_status)
+    for key in (
+        "kind",
+        "status",
+        "title",
+        "body",
+        "instrument_id",
+        "symbol",
+        "timeframe",
+        "datasource",
+        "exchange",
+        "window_start",
+        "window_end",
+    ):
+        value = getattr(args, key, None)
+        if value is not None:
+            payload[key] = value
+    tags = list(getattr(args, "tag", None) or [])
+    if tags:
+        payload["tags"] = tags
+    if getattr(args, "payload", None):
+        payload["payload"] = _read_json_object_arg(args.payload, label="--payload")
+    if not str(payload.get("kind") or "").strip():
+        raise ValueError("kind is required")
+    if not str(payload.get("title") or "").strip():
+        raise ValueError("title is required")
+    payload.setdefault("status", "draft")
+    return payload
+
+
+def _cmd_research_items_create(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("POST", "/api/research/items", payload=_research_item_payload(args)))
+    return 0
+
+
+def _cmd_research_observe_create(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            "/api/research/items",
+            payload=_research_item_payload(args, default_kind="observation", default_status="active"),
+        )
+    )
+    return 0
+
+
+def _cmd_research_links_create(args: argparse.Namespace) -> int:
+    payload = _read_json_object_arg(getattr(args, "payload_json", None), label="--payload-json")
+    for key in ("source_item_id", "target_type", "target_id", "relation"):
+        value = getattr(args, key, None)
+        if value is not None:
+            payload[key] = value
+    if getattr(args, "metadata_json", None):
+        payload["metadata"] = _read_json_object_arg(args.metadata_json, label="--metadata-json")
+    _print_json(_client(args).request_json("POST", "/api/research/links", payload=payload))
+    return 0
+
+
+def _cmd_research_links_list(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/research/items/{args.item_id}/links",
+            params={"include_inbound": args.include_inbound},
+        )
+    )
+    return 0
+
+
+def _research_check_payload(args: argparse.Namespace) -> dict[str, Any]:
+    payload = _read_json_object_arg(getattr(args, "request_json", None), label="--request-json")
+    for key in ("title", "body", "observation_id", "check_family"):
+        value = getattr(args, key, None)
+        if value is not None:
+            payload[key] = value
+    scope = dict(payload.get("scope") or {})
+    for key in ("instrument_id", "symbol", "datasource", "exchange", "timeframe", "start", "end"):
+        value = getattr(args, key, None)
+        if value is not None:
+            scope[key] = value
+    if scope:
+        payload["scope"] = scope
+    if getattr(args, "detector_json", None):
+        payload["detector"] = _read_json_object_arg(args.detector_json, label="--detector-json")
+    elif getattr(args, "field", None):
+        detector: dict[str, Any] = {
+            "type": "candle_condition",
+            "field": args.field,
+            "operator": args.operator or "lt",
+        }
+        if getattr(args, "value_field", None):
+            detector["value_field"] = args.value_field
+        elif getattr(args, "value", None) is not None:
+            detector["value"] = _json_value(str(args.value))
+        else:
+            raise ValueError("--value or --value-field is required with --field")
+        payload["detector"] = detector
+    outcomes = dict(payload.get("outcomes") or {})
+    if getattr(args, "forward_bars", None):
+        outcomes["forward_bars"] = [int(item.strip()) for item in str(args.forward_bars).split(",") if item.strip()]
+    if getattr(args, "direction", None):
+        outcomes["direction"] = args.direction
+    if getattr(args, "min_sample_count", None) is not None:
+        outcomes["min_sample_count"] = args.min_sample_count
+    if getattr(args, "min_edge_pct", None) is not None:
+        outcomes["min_edge_pct"] = args.min_edge_pct
+    if outcomes:
+        payload["outcomes"] = outcomes
+    tags = list(getattr(args, "tag", None) or [])
+    if tags:
+        payload["tags"] = tags
+    for required in ("title", "scope", "detector"):
+        if not payload.get(required):
+            raise ValueError(f"{required} is required")
+    return payload
+
+
+def _cmd_research_checks_run(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("POST", "/api/research/checks/run", payload=_research_check_payload(args)))
+    return 0
+
+
 def _cmd_instruments_list(args: argparse.Namespace) -> int:
     payload = _client(args).request_json("GET", "/api/instruments/")
     items = list(payload or [])
@@ -1775,6 +1928,97 @@ def build_parser() -> argparse.ArgumentParser:
     data_coverage.add_argument("--timeframe", required=True)
     data_coverage.add_argument("--fail-on-warning", action="store_true")
     data_coverage.set_defaults(func=_cmd_data_coverage)
+
+    research = subparsers.add_parser("research", help="Research memory and lightweight historical checks.")
+    research_sub = research.add_subparsers(dest="research_command", required=True)
+    research_items = research_sub.add_parser("items", help="Research memory item commands.")
+    research_items_sub = research_items.add_subparsers(dest="research_items_command", required=True)
+    research_items_list = research_items_sub.add_parser("list", help="List research memory items.")
+    research_items_list.add_argument("--kind", choices=["observation", "research_check", "hypothesis", "study"])
+    research_items_list.add_argument("--status")
+    research_items_list.add_argument("--symbol")
+    research_items_list.add_argument("--timeframe")
+    research_items_list.add_argument("--limit", type=int, default=100)
+    research_items_list.set_defaults(func=_cmd_research_items_list)
+    research_items_get = research_items_sub.add_parser("get", help="Fetch one research memory item.")
+    research_items_get.add_argument("item_id")
+    research_items_get.set_defaults(func=_cmd_research_items_get)
+    research_items_create = research_items_sub.add_parser("create", help="Create a research memory item.")
+    research_items_create.add_argument("--payload-json", help="JSON object path, inline object, or '-' for the full item payload.")
+    research_items_create.add_argument("--kind", choices=["observation", "research_check", "hypothesis", "study"])
+    research_items_create.add_argument("--status")
+    research_items_create.add_argument("--title")
+    research_items_create.add_argument("--body")
+    research_items_create.add_argument("--instrument-id")
+    research_items_create.add_argument("--symbol")
+    research_items_create.add_argument("--timeframe")
+    research_items_create.add_argument("--datasource")
+    research_items_create.add_argument("--exchange")
+    research_items_create.add_argument("--window-start")
+    research_items_create.add_argument("--window-end")
+    research_items_create.add_argument("--tag", action="append", default=[])
+    research_items_create.add_argument("--payload", help="Item payload JSON object path, inline object, or '-'.")
+    research_items_create.set_defaults(func=_cmd_research_items_create)
+
+    research_observe = research_sub.add_parser("observe", help="Observation capture commands.")
+    research_observe_sub = research_observe.add_subparsers(dest="research_observe_command", required=True)
+    research_observe_create = research_observe_sub.add_parser("create", help="Capture a market observation.")
+    research_observe_create.add_argument("--payload-json", help="JSON object path, inline object, or '-' for the full item payload.")
+    research_observe_create.add_argument("--status")
+    research_observe_create.add_argument("--title")
+    research_observe_create.add_argument("--body")
+    research_observe_create.add_argument("--instrument-id")
+    research_observe_create.add_argument("--symbol")
+    research_observe_create.add_argument("--timeframe")
+    research_observe_create.add_argument("--datasource")
+    research_observe_create.add_argument("--exchange")
+    research_observe_create.add_argument("--window-start")
+    research_observe_create.add_argument("--window-end")
+    research_observe_create.add_argument("--tag", action="append", default=[])
+    research_observe_create.add_argument("--payload", help="Observation payload JSON object path, inline object, or '-'.")
+    research_observe_create.set_defaults(func=_cmd_research_observe_create)
+
+    research_links = research_sub.add_parser("links", help="Research memory link commands.")
+    research_links_sub = research_links.add_subparsers(dest="research_links_command", required=True)
+    research_links_create = research_links_sub.add_parser("create", help="Create or update a research memory link.")
+    research_links_create.add_argument("--payload-json", help="JSON object path, inline object, or '-' for the full link payload.")
+    research_links_create.add_argument("--source-item-id")
+    research_links_create.add_argument("--target-type")
+    research_links_create.add_argument("--target-id")
+    research_links_create.add_argument("--relation")
+    research_links_create.add_argument("--metadata-json", help="Link metadata JSON object path, inline object, or '-'.")
+    research_links_create.set_defaults(func=_cmd_research_links_create)
+    research_links_list = research_links_sub.add_parser("list", help="List links connected to a research item.")
+    research_links_list.add_argument("item_id")
+    research_links_list.add_argument("--outbound-only", action="store_false", dest="include_inbound")
+    research_links_list.set_defaults(func=_cmd_research_links_list)
+
+    research_checks = research_sub.add_parser("checks", help="Lightweight analytical research checks.")
+    research_checks_sub = research_checks.add_subparsers(dest="research_checks_command", required=True)
+    research_checks_run = research_checks_sub.add_parser("run", help="Run and persist a lightweight historical check.")
+    research_checks_run.add_argument("--request-json", help="research_check_request.v1 JSON object path, inline object, or '-'.")
+    research_checks_run.add_argument("--title")
+    research_checks_run.add_argument("--body")
+    research_checks_run.add_argument("--observation-id")
+    research_checks_run.add_argument("--check-family")
+    research_checks_run.add_argument("--instrument-id")
+    research_checks_run.add_argument("--symbol")
+    research_checks_run.add_argument("--datasource")
+    research_checks_run.add_argument("--exchange")
+    research_checks_run.add_argument("--timeframe")
+    research_checks_run.add_argument("--start")
+    research_checks_run.add_argument("--end")
+    research_checks_run.add_argument("--detector-json", help="Detector JSON object path, inline object, or '-'.")
+    research_checks_run.add_argument("--field", help="Candle detector field, e.g. range_pct, body_pct, return_pct.")
+    research_checks_run.add_argument("--operator", default="lt", help="Detector operator, e.g. lt, lte, gt, gte, eq, between.")
+    research_checks_run.add_argument("--value", help="Detector comparison value. JSON scalar/list values are accepted.")
+    research_checks_run.add_argument("--value-field", help="Compare detector field to another candle field.")
+    research_checks_run.add_argument("--forward-bars")
+    research_checks_run.add_argument("--direction", choices=["long", "short"])
+    research_checks_run.add_argument("--min-sample-count", type=int)
+    research_checks_run.add_argument("--min-edge-pct", type=float)
+    research_checks_run.add_argument("--tag", action="append", default=[])
+    research_checks_run.set_defaults(func=_cmd_research_checks_run)
 
     instruments = subparsers.add_parser("instruments", help="Instrument metadata and runtime profiles.")
     instruments_sub = instruments.add_subparsers(dest="instruments_command", required=True)
