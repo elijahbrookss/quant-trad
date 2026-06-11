@@ -55,6 +55,19 @@ STACK_PROFILE_DISPLAY    := $(if $(STACK_PROFILE_WORDS),$(subst $(space),$(comma
 
 # Allow "make stack-up BUILD=1" to trigger docker compose --build
 STACK_BUILD_FLAG := $(if $(filter 1 true yes on,$(BUILD)),--build,)
+COMPOSE_STATUS_RE := ^([[:space:]]+(✔|⠿)|Container)
+COMPOSE_DOWN_STATUS_RE := ^([[:space:]]+(✔|⠿)|Container|Network)
+
+define RUN_COMPOSE_FILTERED
+	@tmp="$$(mktemp)"; \
+	if ! $(1) >"$$tmp" 2>&1; then \
+		cat "$$tmp"; \
+		rm -f "$$tmp"; \
+		exit 1; \
+	fi; \
+	grep -E '$(2)' "$$tmp" || true; \
+	rm -f "$$tmp"
+endef
 
 PID_DIR     ?= .pids
 LOG_DIR     ?= logs
@@ -215,7 +228,7 @@ _ensure_dirs:
 
 stack-up: ## Start selected docker compose profiles (STACK_PROFILES=all|core|database|observability)
 	@echo "► Starting stack [$(STACK_PROFILE_DISPLAY)]"
-	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) -d 2>&1 | grep -E '^(\s+(✔|⠿)|Container)' || true
+	$(call RUN_COMPOSE_FILTERED,$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) -d,$(COMPOSE_STATUS_RE))
 	@profiles="$(STACK_PROFILE_WORDS)"; \
 		endpoints=""; \
 		if echo "$$profiles" | grep -qw core; then \
@@ -233,17 +246,17 @@ stack-up: ## Start selected docker compose profiles (STACK_PROFILES=all|core|dat
 
 stack-stop: ## Stop running services for selected profiles (containers remain)
 	@echo "► Stopping stack [$(STACK_PROFILE_DISPLAY)]"
-	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) stop 2>&1 | grep -E '^(\s+(✔|⠿)|Container)' || true
+	$(call RUN_COMPOSE_FILTERED,$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) stop,$(COMPOSE_STATUS_RE))
 	@echo "✓ Stack stopped"
 
 stack-down: ## Remove containers for selected profiles
 	@echo "► Removing stack [$(STACK_PROFILE_DISPLAY)]"
-	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) down --remove-orphans 2>&1 | grep -E '^(\s+(✔|⠿)|Container|Network)' || true
+	$(call RUN_COMPOSE_FILTERED,$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) down --remove-orphans,$(COMPOSE_DOWN_STATUS_RE))
 	@echo "✓ Stack removed"
 
 stack-restart: ## Restart services for selected profiles (use BUILD=1 to rebuild)
 	@echo "► Restarting stack [$(STACK_PROFILE_DISPLAY)]"
-	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) --force-recreate -d 2>&1 | grep -E '^(\s+(✔|⠿)|Container)' || true
+	$(call RUN_COMPOSE_FILTERED,$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) --force-recreate -d,$(COMPOSE_STATUS_RE))
 	@echo "✓ Stack restarted"
 
 stack-logs: ## Follow logs for selected profiles (SERVICE=name to filter)
