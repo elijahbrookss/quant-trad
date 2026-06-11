@@ -110,6 +110,8 @@ def test_research_check_raw_builds_raw_condition_request(monkeypatch):
             "long",
             "--min-sample-count",
             "5",
+            "--max-examples",
+            "7",
         ]
     )
 
@@ -137,6 +139,7 @@ def test_research_check_raw_builds_raw_condition_request(monkeypatch):
                 "forward_bars": [1, 3, 5],
                 "direction": "long",
                 "min_sample_count": 5,
+                "max_examples": 7,
             },
         },
     }

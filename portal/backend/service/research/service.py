@@ -102,27 +102,52 @@ def list_research_links(item_id: str, *, include_inbound: bool = True) -> list[d
 
 def get_research_trail(item_id: str) -> dict[str, Any]:
     item = repository.get_item(item_id)
-    links = repository.list_links(item_id, include_inbound=True)
+    links: list[dict[str, Any]] = []
     related_items: list[dict[str, Any]] = []
     runs: list[dict[str, Any]] = []
+    seen_links: set[str] = set()
     seen_items: set[str] = set()
     seen_runs: set[str] = set()
-    for link in links:
-        if link.get("target_type") == "research_item":
-            related_id = str(link.get("target_id") or "").strip()
-            if related_id and related_id not in seen_items and related_id != item_id:
-                related_items.append(repository.get_item(related_id))
-                seen_items.add(related_id)
-        elif str(link.get("source_item_id") or "") != item_id:
-            related_id = str(link.get("source_item_id") or "").strip()
-            if related_id and related_id not in seen_items:
-                related_items.append(repository.get_item(related_id))
-                seen_items.add(related_id)
+
+    def add_link(link: Mapping[str, Any]) -> None:
+        link_key = str(link.get("id") or "").strip()
+        if not link_key:
+            link_key = "|".join(
+                str(link.get(key) or "")
+                for key in ("source_item_id", "target_type", "target_id", "relation")
+            )
+        if link_key in seen_links:
+            return
+        seen_links.add(link_key)
+        links.append(dict(link))
+
+    def add_related(related_id: str) -> None:
+        normalized = str(related_id or "").strip()
+        if not normalized or normalized == item_id or normalized in seen_items:
+            return
+        related_items.append(repository.get_item(normalized))
+        seen_items.add(normalized)
+
+    def collect_link(link: Mapping[str, Any]) -> None:
+        add_link(link)
+        source_id = str(link.get("source_item_id") or "").strip()
+        target_type = str(link.get("target_type") or "").strip()
+        target_id = str(link.get("target_id") or "").strip()
+        if target_type == "research_item":
+            add_related(source_id)
+            add_related(target_id)
+        elif source_id != item_id:
+            add_related(source_id)
         if link.get("target_type") == "run":
-            run_id = str(link.get("target_id") or "").strip()
-            if run_id and run_id not in seen_runs:
-                runs.append(_run_evidence_summary(run_id))
-                seen_runs.add(run_id)
+            if target_id and target_id not in seen_runs:
+                runs.append(_run_evidence_summary(target_id))
+                seen_runs.add(target_id)
+
+    for link in repository.list_links(item_id, include_inbound=True):
+        collect_link(link)
+    for related_id in list(seen_items):
+        for link in repository.list_links(related_id, include_inbound=False):
+            collect_link(link)
 
     checks = [
         related
@@ -183,6 +208,7 @@ def compare_research_checks(left_check_id: str, right_check_id: str) -> dict[str
             "sample_count": _numeric_delta(left_result.get("sample_count"), right_result.get("sample_count")),
             "eligible_bars": _numeric_delta(left_result.get("eligible_bars"), right_result.get("eligible_bars")),
             "eligible_events": _numeric_delta(left_result.get("eligible_events"), right_result.get("eligible_events")),
+            "eligible_decisions": _numeric_delta(left_result.get("eligible_decisions"), right_result.get("eligible_decisions")),
             "recommendation_changed": left_result.get("recommendation") != right_result.get("recommendation"),
             "status_changed": left_result.get("status") != right_result.get("status"),
             "forward_summary": _forward_summary_delta(left_result, right_result),
@@ -643,6 +669,7 @@ def _check_comparison_side(item: Mapping[str, Any], result: Mapping[str, Any]) -
         "sample_count": result.get("sample_count"),
         "eligible_bars": result.get("eligible_bars"),
         "eligible_events": result.get("eligible_events"),
+        "eligible_decisions": result.get("eligible_decisions"),
         "recommendation": result.get("recommendation"),
         "detector": dict(result.get("detector") or {}),
         "outcomes": dict(result.get("outcomes") or {}),
@@ -668,7 +695,7 @@ def _forward_summary_delta(left_result: Mapping[str, Any], right_result: Mapping
         left_window = left_summary.get(window) if isinstance(left_summary.get(window), Mapping) else {}
         right_window = right_summary.get(window) if isinstance(right_summary.get(window), Mapping) else {}
         window_delta: dict[str, Any] = {}
-        for key in ("median_return_pct", "hit_rate", "median_mfe_pct", "median_mae_pct"):
+        for key in sorted(set(left_window) | set(right_window), key=str):
             delta = _numeric_delta(left_window.get(key), right_window.get(key))
             if delta is not None:
                 window_delta[key] = delta

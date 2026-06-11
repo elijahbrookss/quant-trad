@@ -101,7 +101,7 @@ def evaluate_raw_event_check(
         raise ValueError("outcomes.direction must be 'long' or 'short'")
     min_sample_count = int(outcome_spec.get("min_sample_count") or 20)
     min_edge_pct = float(outcome_spec.get("min_edge_pct") or 0.0)
-    max_events = int(outcome_spec.get("max_events") or 250)
+    max_examples = int(outcome_spec.get("max_examples") or 250)
 
     event_indexes = [
         idx
@@ -131,7 +131,7 @@ def evaluate_raw_event_check(
             "close": outcome.close,
             "outcomes": {str(k): v for k, v in outcome.outcomes.items()},
         }
-        for outcome in event_outcomes[: max(0, max_events)]
+        for outcome in event_outcomes[: max(0, max_examples)]
     ]
     return {
         "schema_version": CHECK_RESULT_SCHEMA_VERSION,
@@ -330,7 +330,7 @@ def evaluate_indicator_forward_outcome(
         raise ValueError("outcomes.direction must be 'long' or 'short'")
     min_sample_count = int(outcome_spec.get("min_sample_count") or 20)
     min_edge_pct = float(outcome_spec.get("min_edge_pct") or 0.0)
-    max_examples = int(outcome_spec.get("max_examples") or outcome_spec.get("max_events") or 100)
+    max_examples = int(outcome_spec.get("max_examples") or 100)
     bucket_fields = _bucket_fields(outcome_spec, default=("indicator_id", "output_name", "event_key"))
 
     event_outcomes: list[EventOutcome] = []

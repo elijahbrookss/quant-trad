@@ -56,6 +56,19 @@ def test_raw_event_check_summarizes_forward_outcomes() -> None:
     assert payload["events"][0]["event_time"] == "2026-01-01T01:00:00Z"
 
 
+def test_raw_event_check_honors_max_examples() -> None:
+    payload = checks.evaluate_raw_event_check(
+        _candles(),
+        detector={"type": "raw_condition", "field": "close", "operator": "gt", "value_field": "previous_close"},
+        outcomes={"forward_bars": [1], "min_sample_count": 1, "max_examples": 1},
+        data_quality={"status": "clean"},
+    )
+
+    assert payload["sample_count"] == 5
+    assert len(payload["events"]) == 1
+    assert payload["event_count_truncated"] == 4
+
+
 def test_research_check_service_creates_observation_check_and_link(monkeypatch: pytest.MonkeyPatch) -> None:
     created: list[dict[str, Any]] = []
     links: list[dict[str, Any]] = []
@@ -753,8 +766,17 @@ def test_research_trail_collects_related_items_and_runs(monkeypatch: pytest.Monk
             "metadata": {},
         },
     ]
+    links_by_item = {
+        "obs-1": [links[0]],
+        "check-1": links,
+    }
+
     monkeypatch.setattr(service.repository, "get_item", lambda item_id: items[item_id])
-    monkeypatch.setattr(service.repository, "list_links", lambda item_id, include_inbound=True: links)
+    monkeypatch.setattr(
+        service.repository,
+        "list_links",
+        lambda item_id, include_inbound=True: links_by_item[item_id],
+    )
     monkeypatch.setattr(
         service,
         "_run_evidence_summary",
@@ -767,10 +789,11 @@ def test_research_trail_collects_related_items_and_runs(monkeypatch: pytest.Monk
     assert payload["item"]["id"] == "obs-1"
     assert payload["checks"][0]["id"] == "check-1"
     assert payload["runs"] == [{"schema_version": "run_research_evidence.v1", "run_id": "run-1"}]
+    assert {link["id"] for link in payload["links"]} == {"link-1", "link-2"}
     assert payload["summary"]["check_count"] == 1
 
 
-def test_research_check_compare_requires_matching_check_family(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_research_check_compare_uses_emitted_forward_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
     items = {
         "left": {
             "id": "left",
@@ -781,7 +804,16 @@ def test_research_check_compare_requires_matching_check_family(monkeypatch: pyte
                     "check_family": "indicator_forward_outcome",
                     "status": "completed",
                     "sample_count": 2,
-                    "outcomes": {"summary": {"1": {"median_return_pct": 0.01}}},
+                    "outcomes": {
+                        "summary": {
+                            "1": {
+                                "median_forward_return_pct": 0.01,
+                                "positive_rate": 0.5,
+                                "mean_mfe_pct": 0.02,
+                                "ignored_label": "left",
+                            }
+                        }
+                    },
                 }
             },
         },
@@ -794,7 +826,16 @@ def test_research_check_compare_requires_matching_check_family(monkeypatch: pyte
                     "check_family": "indicator_forward_outcome",
                     "status": "completed",
                     "sample_count": 5,
-                    "outcomes": {"summary": {"1": {"median_return_pct": 0.03}}},
+                    "outcomes": {
+                        "summary": {
+                            "1": {
+                                "median_forward_return_pct": 0.03,
+                                "positive_rate": 0.75,
+                                "mean_mfe_pct": 0.04,
+                                "ignored_label": "right",
+                            }
+                        }
+                    },
                 }
             },
         },
@@ -805,7 +846,50 @@ def test_research_check_compare_requires_matching_check_family(monkeypatch: pyte
 
     assert payload["schema_version"] == "research_check_comparison.v1"
     assert payload["deltas"]["sample_count"] == {"left": 2, "right": 5, "delta": 3.0}
-    assert payload["deltas"]["forward_summary"]["1"]["median_return_pct"]["delta"] == 0.019999999999999997
+    assert payload["deltas"]["forward_summary"]["1"]["median_forward_return_pct"]["delta"] == 0.019999999999999997
+    assert payload["deltas"]["forward_summary"]["1"]["positive_rate"]["delta"] == 0.25
+    assert payload["deltas"]["forward_summary"]["1"]["mean_mfe_pct"]["delta"] == 0.02
+    assert "ignored_label" not in payload["deltas"]["forward_summary"]["1"]
+
+
+def test_research_check_compare_includes_decision_denominator(monkeypatch: pytest.MonkeyPatch) -> None:
+    items = {
+        "left": {
+            "id": "left",
+            "kind": "research_check",
+            "title": "Left",
+            "payload": {
+                "result": {
+                    "check_family": "run_decision_trade_comparison",
+                    "status": "completed",
+                    "sample_count": 2,
+                    "eligible_decisions": 10,
+                    "outcomes": {"by_decision_state": {}},
+                }
+            },
+        },
+        "right": {
+            "id": "right",
+            "kind": "research_check",
+            "title": "Right",
+            "payload": {
+                "result": {
+                    "check_family": "run_decision_trade_comparison",
+                    "status": "completed",
+                    "sample_count": 3,
+                    "eligible_decisions": 12,
+                    "outcomes": {"by_decision_state": {}},
+                }
+            },
+        },
+    }
+    monkeypatch.setattr(service.repository, "get_item", lambda item_id: items[item_id])
+
+    payload = service.compare_research_checks("left", "right")
+
+    assert payload["left"]["eligible_decisions"] == 10
+    assert payload["right"]["eligible_decisions"] == 12
+    assert payload["deltas"]["eligible_decisions"] == {"left": 10, "right": 12, "delta": 2.0}
 
 
 def test_research_check_route_delegates_to_service(monkeypatch: pytest.MonkeyPatch) -> None:
