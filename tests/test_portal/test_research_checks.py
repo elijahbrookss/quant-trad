@@ -913,3 +913,49 @@ def test_research_check_route_delegates_to_service(monkeypatch: pytest.MonkeyPat
     assert response.status_code == 201
     assert response.json()["status"] == "completed"
     assert observed["payload"]["title"] == "Quick check"
+
+
+def test_research_read_routes_delegate_to_service_exports(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed = {}
+
+    def fake_run_research_evidence(run_id: str):
+        observed["run_id"] = run_id
+        return {"schema_version": "run_research_evidence.v1", "run_id": run_id}
+
+    def fake_research_trail(item_id: str):
+        observed["trail_item_id"] = item_id
+        return {"schema_version": "research_trail.v1", "item_id": item_id, "items": []}
+
+    def fake_compare(left_check_id: str, right_check_id: str):
+        observed["compare"] = (left_check_id, right_check_id)
+        return {
+            "schema_version": "research_check_comparison.v1",
+            "left": {"check_id": left_check_id},
+            "right": {"check_id": right_check_id},
+            "deltas": {},
+        }
+
+    monkeypatch.setattr(research_controller.research_service, "get_run_research_evidence", fake_run_research_evidence)
+    monkeypatch.setattr(research_controller.research_service, "get_research_trail", fake_research_trail)
+    monkeypatch.setattr(research_controller.research_service, "compare_research_checks", fake_compare)
+
+    client = TestClient(app)
+
+    run_response = client.get("/api/research/runs/run-1/evidence")
+    trail_response = client.get("/api/research/items/obs-1/trail")
+    compare_response = client.get(
+        "/api/research/checks/compare",
+        params={"left_check_id": "check-a", "right_check_id": "check-b"},
+    )
+
+    assert run_response.status_code == 200
+    assert run_response.json()["run_id"] == "run-1"
+    assert trail_response.status_code == 200
+    assert trail_response.json()["item_id"] == "obs-1"
+    assert compare_response.status_code == 200
+    assert compare_response.json()["left"]["check_id"] == "check-a"
+    assert observed == {
+        "run_id": "run-1",
+        "trail_item_id": "obs-1",
+        "compare": ("check-a", "check-b"),
+    }
