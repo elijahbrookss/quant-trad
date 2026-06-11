@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from 'react'
-import { symbolsFromInstrumentSlots } from '../../utils/instrumentSymbols'
+import { symbolsFromStrategy } from '../../utils/instrumentSymbols'
 
 /**
  * Build a map of symbol -> instrument for quick lookup
@@ -44,7 +44,7 @@ export const StrategyGrid = ({ strategies, selectedId, onSelect }) => {
     if (!query) return strategies
 
     return strategies.filter((strategy) => {
-      const symbols = symbolsFromInstrumentSlots(strategy?.instrument_slots)
+      const symbols = symbolsFromStrategy(strategy)
       const haystack = [
         strategy?.name,
         strategy?.exchange,
@@ -147,14 +147,14 @@ export const StrategyGrid = ({ strategies, selectedId, onSelect }) => {
           <div className={`border-y border-white/[0.05] ${collapsedGroups[group.exchange] ? 'hidden' : ''}`}>
             {group.items.map((strategy) => {
               const isActive = strategy.id === selectedId
-              const symbols = symbolsFromInstrumentSlots(strategy.instrument_slots)
+              const symbols = symbolsFromStrategy(strategy)
               const instrumentsMap = buildInstrumentMap(strategy.instruments)
               const primarySymbol = symbols[0] ? getSymbolDisplay(symbols[0], instrumentsMap) : 'No symbol'
               const symbolMeta = symbols.length > 1
                 ? `${primarySymbol} +${symbols.length - 1}`
                 : primarySymbol
               const timeframeMeta = strategy?.timeframe || '—'
-              const variantCount = Array.isArray(strategy?.variants) ? strategy.variants.length : 0
+              const variantCount = Number(strategy?.variant_count || strategy?.counts?.variant_count || 0)
 
               return (
                 <button

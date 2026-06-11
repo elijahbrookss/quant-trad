@@ -12,12 +12,12 @@ from data_providers.utils.ohlcv import interval_to_timedelta
 
 from indicators.definition_contract import definition_supports_compute, definition_supports_runtime
 from indicators.manifest import (
+    manifest_output_catalog,
     manifest_overlay_catalog,
     manifest_runtime_input_specs,
     serialize_indicator_manifest,
 )
 from indicators.registry import INDICATOR_MAP, get_indicator_definition, get_indicator_manifest
-from .output_prefs import typed_outputs_with_prefs
 
 from ..providers.data_provider_resolver import DataProviderResolver, default_resolver
 
@@ -95,12 +95,7 @@ class IndicatorFactory:
             meta["manifest"] = serialize_indicator_manifest(manifest)
             meta["color_mode"] = manifest.color_mode
             meta["color_palettes"] = meta["manifest"].get("color_palettes", [])
-            typed_outputs, output_prefs = typed_outputs_with_prefs(
-                manifest=manifest,
-                output_prefs=meta.get("output_prefs"),
-            )
-            meta["typed_outputs"] = typed_outputs
-            meta["output_prefs"] = output_prefs
+            meta["typed_outputs"] = manifest_output_catalog(manifest)
             meta["overlay_outputs"] = manifest_overlay_catalog(manifest)
             meta["runtime_supported"] = definition_supports_runtime(definition)
             meta["compute_supported"] = definition_supports_compute(definition)
@@ -248,7 +243,6 @@ class IndicatorFactory:
             "name": record.get("name") or record.get("type") or inst_id or "Indicator",
             "params": deepcopy(record.get("params") or {}),
             "dependencies": deepcopy(record.get("dependencies") or []),
-            "output_prefs": deepcopy(record.get("output_prefs") or {}),
             "color": record.get("color"),
             "color_palette": record.get("color_palette"),
             "datasource": record.get("datasource"),

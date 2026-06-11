@@ -104,10 +104,38 @@ async def run_research_check(body: ResearchCheckRunRequest) -> Dict[str, Any]:
         raise HTTPException(400, str(exc)) from exc
 
 
+@router.get("/checks/compare")
+async def compare_research_checks(left_check_id: str, right_check_id: str) -> Dict[str, Any]:
+    try:
+        return research_service.compare_research_checks(left_check_id, right_check_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/evidence")
+async def get_run_research_evidence(run_id: str) -> Dict[str, Any]:
+    try:
+        return research_service.get_run_research_evidence(run_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.get("/items/{item_id}")
 async def get_research_item(item_id: str) -> Dict[str, Any]:
     try:
         return research_service.get_research_item(item_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/items/{item_id}/trail")
+async def get_research_trail(item_id: str) -> Dict[str, Any]:
+    try:
+        return research_service.get_research_trail(item_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
 

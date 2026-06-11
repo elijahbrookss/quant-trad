@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any, Dict, Mapping, Optional, Sequence
 
+from core.events import serialize_value
 from engines.bot_runtime.core.domain import Candle
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
 from indicators.config import IndicatorExecutionContext
@@ -415,4 +416,199 @@ def validate_runtime_for_instance(
     }
 
 
-__all__ = ["RUNTIME_VALIDATION_PATH", "validate_runtime_for_instance"]
+def collect_runtime_output_evidence_for_instance(
+    inst_id: str,
+    start: str,
+    end: str,
+    interval: str,
+    *,
+    symbol: Optional[str] = None,
+    datasource: Optional[str] = None,
+    exchange: Optional[str] = None,
+    instrument_id: Optional[str] = None,
+    ctx: IndicatorServiceContext = _context,
+) -> Dict[str, Any]:
+    """Collect per-bar declared output evidence from the canonical runtime path."""
+
+    t0 = perf_counter()
+    record = load_indicator_record(inst_id, ctx=ctx)
+    meta = build_meta_from_record(record, ctx=ctx)
+    if not bool(meta.get("runtime_supported")):
+        raise RuntimeError(f"Indicator is not runtime-supported: {inst_id}")
+
+    (
+        resolved_symbol,
+        resolved_datasource,
+        resolved_exchange,
+        resolved_instrument_id,
+    ) = _resolve_market_selection(
+        meta,
+        symbol=symbol,
+        datasource=datasource,
+        exchange=exchange,
+        instrument_id=instrument_id,
+    )
+    execution_context = IndicatorExecutionContext(
+        symbol=resolved_symbol,
+        start=start,
+        end=end,
+        interval=interval,
+        datasource=resolved_datasource,
+        exchange=resolved_exchange,
+        instrument_id=resolved_instrument_id,
+    )
+
+    _, indicators = build_runtime_indicator_graph(
+        [inst_id],
+        execution_context=execution_context,
+        ctx=ctx,
+        preloaded_metas={inst_id: meta},
+    )
+    diagnostics = collect_runtime_indicator_diagnostics(indicators)
+    frame = _load_candle_frame(
+        start=start,
+        end=end,
+        interval=interval,
+        symbol=resolved_symbol,
+        datasource=resolved_datasource,
+        exchange=resolved_exchange,
+        instrument_id=resolved_instrument_id,
+    )
+    candles = _build_runtime_candles(frame)
+    if not candles:
+        raise LookupError("No candles available for indicator output evidence")
+    _configure_replay_window(indicators, history_bars=len(candles))
+
+    engine = IndicatorExecutionEngine(indicators)
+    output_types = {str(key): str(value) for key, value in engine.output_types.items()}
+    target_output_refs = sorted(
+        output_ref for output_ref in output_types if output_ref.startswith(f"{inst_id}.")
+    )
+    if not target_output_refs:
+        raise RuntimeError(f"Indicator declared no target outputs: {inst_id}")
+
+    output_rows: list[dict[str, Any]] = []
+    candle_rows: list[dict[str, Any]] = []
+    ready_counts: Counter[str] = Counter()
+    not_ready_counts: Counter[str] = Counter()
+
+    for bar_index, candle in enumerate(candles):
+        candle_time = _iso_utc(candle.time)
+        candle_rows.append(
+            {
+                "bar_index": bar_index,
+                "time": candle_time,
+                "open": float(candle.open),
+                "high": float(candle.high),
+                "low": float(candle.low),
+                "close": float(candle.close),
+                "volume": float(candle.volume or 0.0),
+            }
+        )
+        engine_frame = engine.step(
+            bar=candle,
+            bar_time=candle.time,
+            include_overlays=False,
+            include_details=False,
+        )
+        frame_outputs = getattr(engine_frame, "outputs", {}) or {}
+        missing_keys = sorted(set(output_types) - set(frame_outputs))
+        if missing_keys:
+            raise RuntimeError(
+                "indicator_output_evidence_failed: declared outputs missing "
+                f"indicator_id={inst_id} bar_time={candle_time} outputs={missing_keys}"
+            )
+        for output_ref in target_output_refs:
+            runtime_output = frame_outputs[output_ref]
+            output_type = output_types[output_ref]
+            indicator_id, _, output_name = output_ref.partition(".")
+            ready = bool(getattr(runtime_output, "ready", False))
+            if not ready:
+                not_ready_counts[output_name] += 1
+                continue
+            ready_counts[output_name] += 1
+            value = serialize_value(getattr(runtime_output, "value", {}) or {})
+            if output_type == "signal":
+                events = value.get("events") if isinstance(value, Mapping) else None
+                if not isinstance(events, list):
+                    continue
+                for event_index, event in enumerate(events):
+                    if not isinstance(event, Mapping):
+                        continue
+                    output_rows.append(
+                        {
+                            "bar_index": bar_index,
+                            "time": candle_time,
+                            "indicator_id": indicator_id,
+                            "indicator_type": meta.get("type"),
+                            "output_ref": output_ref,
+                            "output_name": output_name,
+                            "output_type": output_type,
+                            "event_index": event_index,
+                            "event_key": str(event.get("key") or ""),
+                            "event": serialize_value(dict(event)),
+                            "value": value,
+                        }
+                    )
+                continue
+            output_rows.append(
+                {
+                    "bar_index": bar_index,
+                    "time": candle_time,
+                    "indicator_id": indicator_id,
+                    "indicator_type": meta.get("type"),
+                    "output_ref": output_ref,
+                    "output_name": output_name,
+                    "output_type": output_type,
+                    "event_index": None,
+                    "event_key": None,
+                    "event": None,
+                    "value": value,
+                }
+            )
+
+    duration_ms = (perf_counter() - t0) * 1000.0
+    return {
+        "schema_version": "indicator_output_evidence.v1",
+        "runtime_path": RUNTIME_VALIDATION_PATH,
+        "indicator": {
+            "id": inst_id,
+            "type": meta.get("type"),
+            "name": meta.get("name"),
+            "params": dict(meta.get("params") or {}),
+            "dependencies": list(meta.get("dependencies") or []),
+            "updated_at": meta.get("updated_at"),
+        },
+        "market": {
+            "symbol": resolved_symbol,
+            "datasource": resolved_datasource,
+            "exchange": resolved_exchange,
+            "instrument_id": resolved_instrument_id,
+        },
+        "window": {
+            "start": start,
+            "end": end,
+            "interval": interval,
+            "first_bar_time": _iso_utc(candles[0].time),
+            "last_bar_time": _iso_utc(candles[-1].time),
+        },
+        "bars_evaluated": len(candles),
+        "output_types": output_types,
+        "ready_counts": dict(sorted(ready_counts.items())),
+        "not_ready_counts": dict(sorted(not_ready_counts.items())),
+        "candles": candle_rows,
+        "outputs": output_rows,
+        "diagnostics": {
+            "indicators": diagnostics,
+        },
+        "perf": {
+            "duration_ms": round(duration_ms, 3),
+        },
+    }
+
+
+__all__ = [
+    "RUNTIME_VALIDATION_PATH",
+    "collect_runtime_output_evidence_for_instance",
+    "validate_runtime_for_instance",
+]

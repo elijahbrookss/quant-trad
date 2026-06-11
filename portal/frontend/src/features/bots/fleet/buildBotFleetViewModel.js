@@ -3,7 +3,7 @@ import {
   formatRelativeTime,
   getBotCardDisplayState,
 } from '../state/botRuntimeStatus.js'
-import { symbolsFromInstrumentSlots } from '../../../utils/instrumentSymbols.js'
+import { symbolsFromStrategy } from '../../../utils/instrumentSymbols.js'
 import { mapRunToViewModel } from '../viewModels/runViewModel.js'
 import { formatExecutionModeLabel, resolveExecutionMode } from '../executionMode.js'
 import { getBotPerformanceTrace } from '../../../components/bots/botPerformanceTrace.js'
@@ -57,7 +57,7 @@ function strategyFor(bot, strategyLookup) {
 
 function symbolsFor(bot, strategyLookup) {
   const strategy = strategyFor(bot, strategyLookup)
-  return strategy ? symbolsFromInstrumentSlots(strategy.instrument_slots) : []
+  return strategy ? symbolsFromStrategy(strategy) : []
 }
 
 function formatTimeframeLabel(value) {

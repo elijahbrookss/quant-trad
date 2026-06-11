@@ -31,7 +31,7 @@ import {
   supportsCustomIndicatorColor,
   supportsIndicatorPaletteSelection,
 } from '../utils/indicatorColors.js'
-import { applySignalOutputPrefs, indicatorHasAuthorableOutputs } from '../utils/indicatorOutputs.js'
+import { indicatorHasAuthorableOutputs } from '../utils/indicatorOutputs.js'
 // import IndicatorModal from './IndicatorModal'
 import IndicatorModalV2 from './IndicatorModal.v2.jsx'
 const IndicatorModal = IndicatorModalV2; // for now, swap in new version under old name
@@ -203,13 +203,13 @@ export const IndicatorSection = ({ chartId }) => {
       : (Array.isArray(indicatorsRef.current) ? indicatorsRef.current : []);
     const merged = prevList.map((item) => {
       if (item?.id !== incoming.id) return item;
-      const next = applySignalOutputPrefs({ ...item, ...incoming }, incoming?.output_prefs || item?.output_prefs || {});
+      const next = { ...item, ...incoming };
       if (item?._draft && !incoming?._draft) next._draft = item._draft;
       return next;
     });
     const nextList = merged.some((item) => item?.id === incoming.id)
       ? merged
-      : [...prevList, applySignalOutputPrefs(incoming, incoming?.output_prefs || {})];
+      : [...prevList, incoming];
     const sorted = sortIndicators(nextList);
     updateChart(chartId, { indicators: sorted });
     return sorted;
@@ -726,7 +726,7 @@ export const IndicatorSection = ({ chartId }) => {
     }
   }, [fetchAndSyncIndicators, refreshEnabledOverlays, guardBusy, logError]);
 
-  const createIndicatorOptimistic = useCallback(async (meta, params, dependencies = [], outputPrefs = {}, reuseId = null) => {
+  const createIndicatorOptimistic = useCallback(async (meta, params, dependencies = [], reuseId = null) => {
     const tempId = reuseId || `temp-${Date.now()}`;
     const optimisticIndicator = {
       id: tempId,
@@ -734,7 +734,6 @@ export const IndicatorSection = ({ chartId }) => {
       type: meta.type,
       params,
       dependencies,
-      output_prefs: outputPrefs,
       enabled: true,
       color: meta.color || DEFAULT_INDICATOR_COLOR,
       created_at: new Date().toISOString(),
@@ -742,12 +741,11 @@ export const IndicatorSection = ({ chartId }) => {
       _local: true,
       _status: 'creating',
       _draft: {
-        type: meta.type,
-        params,
-        dependencies,
-        output_prefs: outputPrefs,
-        name: meta.name,
-        color: meta.color || null,
+      type: meta.type,
+      params,
+      dependencies,
+      name: meta.name,
+      color: meta.color || null,
       },
     };
 
@@ -764,7 +762,6 @@ export const IndicatorSection = ({ chartId }) => {
         type: meta.type,
         params,
         dependencies,
-        output_prefs: outputPrefs,
         name: meta.name,
       });
       const createdIndicator = {
@@ -806,11 +803,9 @@ export const IndicatorSection = ({ chartId }) => {
   const handleSave = async (meta) => {
     const core = stripRuntimeParams(normalizeParams(meta.params));
     const dependencies = Array.isArray(meta.dependencies) ? meta.dependencies : [];
-    const outputPrefs = meta.output_prefs || {};
     debug('indicator_save_requested', {
       indicatorId: meta.id || null,
       indicatorType: meta.type,
-      outputPrefs,
       dependencyCount: dependencies.length,
     });
     if (guardBusy('save_indicator')) return;
@@ -838,16 +833,15 @@ export const IndicatorSection = ({ chartId }) => {
           const existingCore = stripRuntimeParams(existing.params || {});
           const coreParamsChanged = JSON.stringify(existingCore) !== JSON.stringify(core);
           const dependenciesChanged = JSON.stringify(existing.dependencies || []) !== JSON.stringify(dependencies);
-          const outputPrefsChanged = JSON.stringify(existing.output_prefs || {}) !== JSON.stringify(outputPrefs);
           const nameChanged = meta.name !== existing.name;
-          needsIndicatorUpdate = coreParamsChanged || dependenciesChanged || outputPrefsChanged || nameChanged;
+          needsIndicatorUpdate = coreParamsChanged || dependenciesChanged || nameChanged;
         }
       }
 
       if (!needsIndicatorUpdate) return;
 
       if (!meta.id) {
-        await createIndicatorOptimistic(meta, params, dependencies, outputPrefs);
+        await createIndicatorOptimistic(meta, params, dependencies);
         return;
       }
 
@@ -856,7 +850,7 @@ export const IndicatorSection = ({ chartId }) => {
       startJob('Updating indicator…', { indicatorId: meta.id, type: 'update' });
       setIndicators((prev) => prev.map((ind) => (
         ind.id === meta.id
-          ? applySignalOutputPrefs({ ...ind, _status: 'updating' }, outputPrefs)
+          ? { ...ind, _status: 'updating' }
           : ind
       )));
       updateChart(chartId, {
@@ -872,17 +866,15 @@ export const IndicatorSection = ({ chartId }) => {
         type: meta.type,
         params,
         dependencies,
-        output_prefs: outputPrefs,
         name: meta.name,
         color: existing?.color ?? null,
       });
       debug('indicator_save_response', {
         indicatorId: meta.id,
-        responseOutputPrefs: payload?.output_prefs || null,
         responseTypedOutputs: Array.isArray(payload?.typed_outputs)
           ? payload.typed_outputs
               .filter((entry) => entry?.type === 'signal')
-              .map((entry) => ({ name: entry?.name, enabled: entry?.enabled !== false }))
+              .map((entry) => ({ name: entry?.name }))
           : null,
       });
       indicatorId = payload?.id ?? meta.id;
@@ -1333,13 +1325,11 @@ export const IndicatorSection = ({ chartId }) => {
     if (guardBusy('retry_indicator')) return;
     const params = stripRuntimeParams(indicator._draft.params || {});
     const dependencies = Array.isArray(indicator._draft.dependencies) ? indicator._draft.dependencies : [];
-    const outputPrefs = indicator._draft.output_prefs || {};
     try {
       await createIndicatorOptimistic(
         { type: indicator._draft.type, name: indicator._draft.name, color: indicator._draft.color },
         params,
         dependencies,
-        outputPrefs,
         indicator.id
       );
     } catch {

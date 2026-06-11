@@ -60,8 +60,8 @@ The boundary may:
 - call direct instrument/window candle coverage routes,
 - call canonical instrument read/profile routes when an experiment needs to
   bind source instruments to explicit execution semantics,
-- call indicator catalog, config validation, create, and runtime validation API
-  routes,
+- call indicator catalog, config validation, create, edit, delete, enable,
+  disable, strategy binding, and runtime validation API routes,
 - call report readiness, materialization, export, and comparison API routes,
 - compose API calls into small workflows,
 - print structured JSON for automation,
@@ -137,9 +137,9 @@ single explicit instrument/window before a bot or experiment plan exists.
 `qt research` captures the reasoning trail around research work. Observations,
 lightweight research checks, hypotheses, studies, and links to strategies,
 variants, runs, reports, and experiments live in the research-memory boundary.
-Research checks may request source facts through existing data services and
-produce analytical evidence, but they do not execute strategies or simulate
-trades.
+Research checks may request source candles, persisted indicator output evidence,
+or completed run report evidence through existing backend contracts and produce
+analytical evidence. They do not execute strategies or simulate trades.
 
 `qt experiments summarize` reads the local suite artifacts and emits
 `experiment_summary.v1`: suite status, compact run metrics, readiness caveats,
@@ -186,13 +186,18 @@ for:
 - strategy listing, detail inspection, compilation, and preview,
 - strategy variant listing, creation, update, and deletion through output
   filters,
-- indicator type/instance inspection, config validation, planned creation, and
-  runtime validation through `qt indicators ...`,
+- indicator type/instance inspection, config validation, planned creation,
+  clone/edit/delete/toggle operations, and runtime validation through
+  `qt indicators ...`,
 - instrument listing, detail inspection, and runtime profile compilation through
   `qt instruments ...`,
 - direct candle coverage inspection through `qt data coverage`,
 - research-memory item/link capture and lightweight historical checks through
-  `qt research ...`,
+  `qt research ...`; the check surface is intentionally compact:
+  `qt research check raw`, `qt research check indicator`,
+  `qt research check signal`, and `qt research check decision`,
+- research evidence read models through `qt research run`, `qt research trail`,
+  and `qt research compare`,
 - run lifecycle waiting through compact run status API state,
 - report listing, readiness, compact research summary, diagnostics,
   materialization status/build, export, and materialized report comparison
@@ -277,9 +282,11 @@ returns unsupported/failed rather than inventing a metric.
   operate workflows through `qt`.
 - MCP clients operate through `qt mcp serve`; MCP must stay a protocol adapter
   over `qt` and backend contracts.
-- Indicator research workflows must treat backend indicator config validation
-  and runtime validation as the truth surface for agent-visible indicator
-  readiness.
+- Indicator research workflows must treat backend indicator config validation,
+  runtime validation, and output evidence collection as the truth surface for
+  agent-visible indicator readiness and research checks.
+- Strategy-bound indicator parameter/dependency changes must be clone-first;
+  metadata edits may still use the edit path.
 - Plan-based experiments default to sequential execution. Bounded run-step
   parallelism belongs in the runner's `run_policy`, not in MCP-only workflow
   behavior.

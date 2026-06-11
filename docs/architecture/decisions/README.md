@@ -51,3 +51,6 @@ respect.
 | [0030](0030-keep-portal-bots-definition-only.md) | Keep portal bots definition only | Accepted |
 | [0031](0031-fingerprint-reports-and-slim-runtime-storage.md) | Fingerprint reports and slim runtime storage | Accepted |
 | [0032](0032-use-field-owned-version-and-provenance-contracts.md) | Use field-owned version and provenance contracts | Accepted |
+| [0033](0033-use-promtail-as-runtime-loki-ingress.md) | Use Promtail as runtime Loki ingress | Accepted |
+| [0034](0034-use-research-checks-as-analytical-memory-evidence.md) | Use research checks as analytical memory evidence | Accepted |
+| [0035](0035-use-complete-output-catalogs-and-split-strategy-read-contracts.md) | Use complete output catalogs and split strategy read contracts | Accepted |

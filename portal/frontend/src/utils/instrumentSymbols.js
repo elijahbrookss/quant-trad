@@ -27,3 +27,20 @@ export const symbolsFromInstruments = (instruments = []) => {
   }
   return symbols
 }
+
+export const symbolsFromStrategy = (strategy = {}) => {
+  const declared = Array.isArray(strategy?.symbols) ? strategy.symbols : []
+  const slots = symbolsFromInstrumentSlots(strategy?.instrument_slots)
+  const instruments = symbolsFromInstruments(strategy?.instruments)
+  const seen = new Set()
+  const symbols = []
+  for (const value of [...declared, ...slots, ...instruments]) {
+    const raw = typeof value === 'string' ? value.trim() : ''
+    if (!raw) continue
+    const key = raw.toUpperCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    symbols.push(raw)
+  }
+  return symbols
+}

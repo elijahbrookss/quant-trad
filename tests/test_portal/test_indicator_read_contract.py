@@ -33,13 +33,12 @@ def test_get_indicator_returns_nested_whole_indicator_contract(monkeypatch) -> N
             "color_palette": "warm",
             "datasource": "ALPACA",
             "exchange": "cme",
-            "output_prefs": {"balance_breakout": {"enabled": True}},
             "manifest": {
                 "type": "market_profile",
                 "label": "Market Profile",
                 "outputs": [{"name": "balance_breakout", "type": "signal"}],
             },
-            "typed_outputs": [{"name": "balance_breakout", "type": "signal", "enabled": True}],
+            "typed_outputs": [{"name": "balance_breakout", "type": "signal"}],
             "overlay_outputs": [{"name": "value_area", "kind": "band"}],
             "runtime_supported": True,
             "compute_supported": True,
@@ -61,7 +60,6 @@ def test_get_indicator_returns_nested_whole_indicator_contract(monkeypatch) -> N
             "color_palette": "warm",
             "datasource": "ALPACA",
             "exchange": "cme",
-            "output_prefs": {"balance_breakout": {"enabled": True}},
         },
         "manifest": {
             "type": "market_profile",
@@ -69,7 +67,7 @@ def test_get_indicator_returns_nested_whole_indicator_contract(monkeypatch) -> N
             "outputs": [{"name": "balance_breakout", "type": "signal"}],
         },
         "outputs": {
-            "typed": [{"name": "balance_breakout", "type": "signal", "enabled": True}],
+            "typed": [{"name": "balance_breakout", "type": "signal"}],
             "overlays": [{"name": "value_area", "kind": "band"}],
         },
         "capabilities": {
@@ -91,7 +89,6 @@ def test_validate_config_returns_nested_whole_indicator_contract(monkeypatch) ->
         dependencies=None,
         color=None,
         color_palette=None,
-        output_prefs=None,
     ):
         calls.append(
             {
@@ -101,7 +98,6 @@ def test_validate_config_returns_nested_whole_indicator_contract(monkeypatch) ->
                 "dependencies": dependencies,
                 "color": color,
                 "color_palette": color_palette,
-                "output_prefs": output_prefs,
             }
         )
         return {
@@ -115,7 +111,6 @@ def test_validate_config_returns_nested_whole_indicator_contract(monkeypatch) ->
             "color_palette": color_palette,
             "datasource": "ALPACA",
             "exchange": None,
-            "output_prefs": output_prefs or {},
             "manifest": {"type": type_str, "label": "Candle Stats"},
             "typed_outputs": [{"name": "candle_stats", "type": "metric"}],
             "overlay_outputs": [],
@@ -132,7 +127,6 @@ def test_validate_config_returns_nested_whole_indicator_contract(monkeypatch) ->
             "name": "ATR Check",
             "params": {"warmup_bars": 5},
             "dependencies": [],
-            "output_prefs": {"candle_stats": {"enabled": True}},
             "color": "#00ffaa",
             "color_palette": "cool",
         },
@@ -147,7 +141,6 @@ def test_validate_config_returns_nested_whole_indicator_contract(monkeypatch) ->
             "dependencies": [],
             "color": "#00ffaa",
             "color_palette": "cool",
-            "output_prefs": {"candle_stats": {"enabled": True}},
         }
     ]
     assert response.json() == {
@@ -162,7 +155,6 @@ def test_validate_config_returns_nested_whole_indicator_contract(monkeypatch) ->
             "color_palette": "cool",
             "datasource": "ALPACA",
             "exchange": None,
-            "output_prefs": {"candle_stats": {"enabled": True}},
         },
         "manifest": {"type": "candle_stats", "label": "Candle Stats"},
         "outputs": {

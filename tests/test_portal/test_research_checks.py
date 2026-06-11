@@ -38,19 +38,20 @@ def _candles() -> pd.DataFrame:
     )
 
 
-def test_candle_event_check_summarizes_forward_outcomes() -> None:
-    payload = checks.evaluate_candle_event_check(
+def test_raw_event_check_summarizes_forward_outcomes() -> None:
+    payload = checks.evaluate_raw_event_check(
         _candles(),
-        detector={"field": "range_pct", "operator": "lt", "value": 0.01},
+        detector={"type": "raw_condition", "field": "close", "operator": "gt", "value_field": "previous_close"},
         outcomes={"forward_bars": [1, 2], "min_sample_count": 1},
         data_quality={"status": "clean"},
     )
 
     assert payload["schema_version"] == "research_check_result.v1"
+    assert payload["check_family"] == "raw_forward_outcome"
     assert payload["status"] == "completed"
-    assert payload["sample_count"] == 2
-    assert payload["outcomes"]["summary"]["1"]["sample_count"] == 2
-    assert payload["outcomes"]["summary"]["2"]["sample_count"] == 2
+    assert payload["sample_count"] == 5
+    assert payload["outcomes"]["summary"]["1"]["sample_count"] == 4
+    assert payload["outcomes"]["summary"]["2"]["sample_count"] == 3
     assert payload["recommendation"] == "promote_to_hypothesis"
     assert payload["events"][0]["event_time"] == "2026-01-01T01:00:00Z"
 
@@ -117,7 +118,7 @@ def test_research_check_service_creates_observation_check_and_link(monkeypatch: 
                 "start": "2026-01-01T00:00:00Z",
                 "end": "2026-01-01T06:00:00Z",
             },
-            "detector": {"field": "range_pct", "operator": "lt", "value": 0.01},
+            "detector": {"type": "raw_condition", "field": "close", "operator": "gt", "value_field": "previous_close"},
             "outcomes": {"forward_bars": [1], "min_sample_count": 1},
         }
     )
@@ -139,6 +140,674 @@ def test_research_check_service_creates_observation_check_and_link(monkeypatch: 
     ]
 
 
+def test_research_check_service_fails_loud_for_invalid_detector_before_blocked_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(service, "source_revision", lambda: "abc123")
+    monkeypatch.setattr(service.repository, "create_item", lambda **kwargs: created.append(kwargs) or kwargs)
+    monkeypatch.setattr(
+        service.instrument_service,
+        "get_instrument_record",
+        lambda instrument_id: {
+            "id": instrument_id,
+            "symbol": "ETH/USD",
+            "datasource": "CCXT",
+            "exchange": "coinbase",
+        },
+    )
+    monkeypatch.setattr(
+        service.candle_service,
+        "preflight_candle_coverage_by_instrument",
+        lambda *args: {
+            "schema_version": "candle_coverage_preflight.v1",
+            "instrument_id": "inst-eth",
+            "symbol": "ETH/USD",
+            "provider": "CCXT",
+            "exchange": "coinbase",
+            "timeframe": "1h",
+            "status": "error",
+            "continuity": {"final_status": "missing"},
+            "row_count": 0,
+            "missing_ranges": [],
+            "message": "missing source candles",
+        },
+    )
+
+    with pytest.raises(ValueError, match="unsupported raw detector field"):
+        service.run_research_check(
+            {
+                "title": "ETH bad field",
+                "scope": {
+                    "instrument_id": "inst-eth",
+                    "timeframe": "1h",
+                    "start": "2026-01-01T00:00:00Z",
+                    "end": "2026-01-01T06:00:00Z",
+                },
+                "detector": {"type": "raw_condition", "field": "future_close", "operator": "lt", "value": 0.01},
+            }
+        )
+
+    assert created == []
+
+
+def test_run_signal_summary_check_summarizes_report_signals() -> None:
+    payload = checks.evaluate_run_signal_summary(
+        {
+            "signals": [
+                {
+                    "signal_id": "sig-1",
+                    "symbol": "BTCUSDT",
+                    "output_name": "confirmed_balance_breakout",
+                    "event_key": "confirmed_balance_breakout_long",
+                },
+                {
+                    "signal_id": "sig-2",
+                    "symbol": "ETHUSDT",
+                    "output_name": "balance_retest",
+                    "event_key": "balance_retest_long",
+                },
+            ],
+            "decisions": [{"decision_id": "decision-1", "signal_id": "sig-1", "decision_state": "accepted"}],
+            "trades": [{"id": "trade-1", "decision_id": "decision-1", "net_pnl": 12.0}],
+        },
+        detector={"type": "run_signal_match", "output_name": "confirmed_balance_breakout"},
+        outcomes={"bucket_by": ["symbol", "event_key"], "min_sample_count": 1},
+        data_quality={"status": "clean"},
+    )
+
+    assert payload["check_family"] == "run_signal_summary"
+    assert payload["sample_count"] == 1
+    assert payload["outcomes"]["decision_states"] == {"accepted": 1}
+    assert payload["outcomes"]["trade_counts"] == {"with_trade": 1}
+    assert payload["recommendation"] == "promote_to_hypothesis"
+
+
+def test_run_signal_summary_normalizes_report_signal_context_fields() -> None:
+    payload = checks.evaluate_run_signal_summary(
+        {
+            "signals": [
+                {
+                    "signal_id": "sig-1",
+                    "symbol": "BTCUSDT",
+                    "context": {
+                        "event_key": "confirmed_balance_breakout_long",
+                        "decision_artifact": {
+                            "decision_context": {
+                                "trigger_output_ref": "profile-1.confirmed_balance_breakout",
+                                "event_key": "confirmed_balance_breakout_long",
+                            },
+                            "referenced_outputs": {
+                                "profile-1.confirmed_balance_breakout": {
+                                    "type": "signal",
+                                    "event_keys": [
+                                        "confirmed_balance_breakout_long",
+                                        "confirmed_balance_breakout_short",
+                                    ],
+                                }
+                            },
+                        },
+                    },
+                    "indicator_context": {
+                        "outputs": {
+                            "profile-1.confirmed_balance_breakout": {
+                                "output_name": "confirmed_balance_breakout",
+                                "event_keys": ["confirmed_balance_breakout_long"],
+                            }
+                        }
+                    },
+                },
+                {
+                    "signal_id": "sig-2",
+                    "symbol": "ETHUSDT",
+                    "context": {
+                        "event_key": "balance_retest_long",
+                        "decision_artifact": {
+                            "decision_context": {
+                                "trigger_output_ref": "profile-1.balance_retest",
+                                "event_key": "balance_retest_long",
+                            }
+                        },
+                    },
+                },
+            ],
+            "decisions": [],
+            "trades": [],
+        },
+        detector={"type": "run_signal_match", "output_name": "confirmed_balance_breakout"},
+        outcomes={"bucket_by": ["symbol", "output_name", "event_key"], "min_sample_count": 1},
+        data_quality={"status": "clean"},
+    )
+
+    assert payload["sample_count"] == 1
+    assert payload["outcomes"]["buckets"] == {
+        "symbol=BTCUSDT|output_name=confirmed_balance_breakout|event_key=confirmed_balance_breakout_long": 1
+    }
+    assert payload["events"][0]["output_name"] == "confirmed_balance_breakout"
+    assert payload["events"][0]["event_key"] == "confirmed_balance_breakout_long"
+    assert payload["recommendation"] == "promote_to_hypothesis"
+
+
+def test_run_check_matching_preserves_falsey_values() -> None:
+    payload = checks.evaluate_run_signal_summary(
+        {
+            "signals": [
+                {"signal_id": "sig-1", "symbol": "BTCUSDT", "linked_trade_count": 0},
+                {"signal_id": "sig-2", "symbol": "ETHUSDT"},
+            ],
+            "decisions": [],
+            "trades": [],
+        },
+        detector={"type": "run_signal_match", "linked_trade_count": 0},
+        outcomes={"min_sample_count": 1},
+        data_quality={"status": "clean"},
+    )
+
+    assert payload["sample_count"] == 1
+    assert payload["events"][0]["signal_id"] == "sig-1"
+
+
+def test_report_backed_check_rejects_mismatched_detector_family() -> None:
+    with pytest.raises(ValueError, match="unsupported run check detector type for run_signal_summary"):
+        checks.evaluate_run_signal_summary(
+            {"signals": [], "decisions": [], "trades": []},
+            detector={"type": "run_decision_match", "decision_state": "accepted"},
+            outcomes={},
+            data_quality={"status": "clean"},
+        )
+
+    with pytest.raises(ValueError, match="unsupported run check detector type for run_decision_trade_comparison"):
+        checks.evaluate_run_decision_trade_comparison(
+            {"signals": [], "decisions": [], "trades": []},
+            detector={"type": "run_signal_match", "output_name": "confirmed_balance_breakout"},
+            outcomes={},
+            data_quality={"status": "clean"},
+        )
+
+
+def test_report_backed_research_check_rejects_mismatched_detector_before_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(service.repository, "create_item", lambda **kwargs: created.append(kwargs) or kwargs)
+
+    with pytest.raises(ValueError, match="unsupported run check detector type for run_signal_summary"):
+        service.run_research_check(
+            {
+                "title": "Mismatched detector",
+                "check_family": "run_signal_summary",
+                "scope": {"run_id": "run-1"},
+                "detector": {"type": "run_decision_match", "decision_state": "accepted"},
+            }
+        )
+
+    assert created == []
+
+
+def test_report_backed_research_check_links_observation_and_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    created: list[dict[str, Any]] = []
+    links: list[dict[str, Any]] = []
+
+    def fake_create_item(**kwargs):
+        item_id = kwargs.get("item_id") or f"item-{len(created) + 1}"
+        item = {
+            "id": item_id,
+            "kind": kwargs["kind"],
+            "status": kwargs["status"],
+            "title": kwargs["title"],
+            "payload": dict(kwargs.get("payload") or {}),
+            "symbol": kwargs.get("symbol"),
+            "timeframe": kwargs.get("timeframe"),
+        }
+        created.append(item)
+        return item
+
+    def fake_create_link(**kwargs):
+        link = {"id": f"link-{len(links) + 1}", **kwargs}
+        links.append(link)
+        return link
+
+    monkeypatch.setattr(service, "source_revision", lambda: "abc123")
+    monkeypatch.setattr(service.repository, "create_item", fake_create_item)
+    monkeypatch.setattr(service.repository, "create_link", fake_create_link)
+    monkeypatch.setattr(
+        service.reports_contract,
+        "get_run_research_dataset",
+        lambda run_id: {
+            "metadata": {
+                "run_id": run_id,
+                "bot_id": "bot-1",
+                "strategy_id": "strategy-1",
+                "symbols": ["BTCUSDT"],
+                "timeframe": "5m",
+                "simulated_window": {"start": "2026-01-01T00:00:00Z", "end": "2026-01-02T00:00:00Z"},
+            },
+            "readiness": {"dataset_status": "ready", "safe_to_compare": True, "caveats": []},
+            "diagnostics": {"summary": {}},
+            "signals": [
+                {
+                    "signal_id": "sig-1",
+                    "symbol": "BTCUSDT",
+                    "output_name": "confirmed_balance_breakout",
+                    "event_key": "confirmed_balance_breakout_long",
+                }
+            ],
+            "decisions": [{"decision_id": "decision-1", "signal_id": "sig-1", "decision_state": "accepted"}],
+            "trades": [{"id": "trade-1", "decision_id": "decision-1", "net_pnl": 1.0}],
+        },
+    )
+
+    payload = service.run_research_check(
+        {
+            "title": "Run signal check",
+            "check_family": "run_signal_summary",
+            "scope": {"run_id": "run-1"},
+            "detector": {"type": "run_signal_match", "output_name": "confirmed_balance_breakout"},
+            "outcomes": {"min_sample_count": 1},
+        }
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["result"]["check_family"] == "run_signal_summary"
+    assert created[0]["kind"] == "observation"
+    assert created[0]["symbol"] == "BTCUSDT"
+    assert created[0]["timeframe"] == "5m"
+    assert created[0]["payload"]["scope"]["run_id"] == "run-1"
+    assert created[0]["payload"]["scope"]["strategy_id"] == "strategy-1"
+    assert created[0]["payload"]["scope"]["bot_id"] == "bot-1"
+    assert created[0]["payload"]["scope"]["start"] == "2026-01-01T00:00:00Z"
+    assert created[0]["payload"]["scope"]["end"] == "2026-01-02T00:00:00Z"
+    assert created[1]["payload"]["request"]["scope"]["run_id"] == "run-1"
+    assert [link["target_type"] for link in links] == ["research_item", "run"]
+    assert links[1]["relation"] == "analyzes"
+
+
+def test_report_backed_research_check_blocks_on_report_readiness(monkeypatch: pytest.MonkeyPatch) -> None:
+    created: list[dict[str, Any]] = []
+    links: list[dict[str, Any]] = []
+
+    def fake_create_item(**kwargs):
+        item_id = kwargs.get("item_id") or f"item-{len(created) + 1}"
+        item = {
+            "id": item_id,
+            "kind": kwargs["kind"],
+            "status": kwargs["status"],
+            "title": kwargs["title"],
+            "payload": dict(kwargs.get("payload") or {}),
+            "symbol": kwargs.get("symbol"),
+            "timeframe": kwargs.get("timeframe"),
+        }
+        created.append(item)
+        return item
+
+    def fake_create_link(**kwargs):
+        link = {"id": f"link-{len(links) + 1}", **kwargs}
+        links.append(link)
+        return link
+
+    monkeypatch.setattr(service, "source_revision", lambda: "abc123")
+    monkeypatch.setattr(service.repository, "create_item", fake_create_item)
+    monkeypatch.setattr(service.repository, "create_link", fake_create_link)
+    monkeypatch.setattr(
+        service.reports_contract,
+        "get_run_research_dataset",
+        lambda run_id: {
+            "metadata": {
+                "run_id": run_id,
+                "symbols": ["BTCUSDT"],
+                "timeframe": "5m",
+                "simulated_window": {"start": "2026-01-01T00:00:00Z", "end": "2026-01-02T00:00:00Z"},
+            },
+            "readiness": {"dataset_status": "failed", "safe_to_compare": False, "caveats": ["run_failed"]},
+            "diagnostics": {"summary": {"errors": 1}},
+            "signals": [],
+            "decisions": [],
+            "trades": [],
+        },
+    )
+
+    payload = service.run_research_check(
+        {
+            "title": "Failed run signal check",
+            "check_family": "run_signal_summary",
+            "scope": {"run_id": "run-2"},
+            "detector": {"type": "run_signal_match", "output_name": "confirmed_balance_breakout"},
+            "outcomes": {"min_sample_count": 1},
+        }
+    )
+
+    assert payload["status"] == "blocked"
+    assert created[0]["kind"] == "observation"
+    assert created[1]["kind"] == "research_check"
+    assert created[1]["status"] == "blocked"
+    assert created[1]["payload"]["result"]["data_quality"]["status"] == "blocked"
+    assert created[1]["payload"]["result"]["data_quality"]["readiness_status"] == "failed"
+    assert [link["target_type"] for link in links] == ["research_item", "run"]
+
+
+def test_report_backed_research_check_fails_loud_for_unsupported_detector(monkeypatch: pytest.MonkeyPatch) -> None:
+    created: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(service, "source_revision", lambda: "abc123")
+    monkeypatch.setattr(service.repository, "create_item", lambda **kwargs: created.append(kwargs) or kwargs)
+    monkeypatch.setattr(
+        service.reports_contract,
+        "get_run_research_dataset",
+        lambda run_id: {
+            "metadata": {
+                "run_id": run_id,
+                "symbols": ["BTCUSDT"],
+                "timeframe": "5m",
+                "simulated_window": {"start": "2026-01-01T00:00:00Z", "end": "2026-01-02T00:00:00Z"},
+            },
+            "readiness": {"dataset_status": "ready", "safe_to_compare": True, "caveats": []},
+            "diagnostics": {"summary": {}},
+            "signals": [{"signal_id": "sig-1", "symbol": "BTCUSDT"}],
+            "decisions": [],
+            "trades": [],
+        },
+    )
+
+    with pytest.raises(ValueError, match="unsupported run check detector type"):
+        service.run_research_check(
+            {
+                "title": "Bad run signal check",
+                "check_family": "run_signal_summary",
+                "scope": {"run_id": "run-3"},
+                "detector": {"type": "unsupported_detector"},
+            }
+        )
+
+    assert created == []
+
+
+def test_indicator_forward_outcome_matches_output_fields() -> None:
+    payload = checks.evaluate_indicator_forward_outcome(
+        {
+            "indicator": {"id": "stats-1", "type": "candle_stats"},
+            "runtime_path": "typed_indicator_engine.v1",
+            "ready_counts": {"candle_stats": 3},
+            "not_ready_counts": {},
+            "candles": [
+                {"time": "2026-01-01T00:00:00Z", "open": 100, "high": 102, "low": 99, "close": 101, "volume": 10},
+                {"time": "2026-01-01T01:00:00Z", "open": 101, "high": 103, "low": 100, "close": 102, "volume": 11},
+                {"time": "2026-01-01T02:00:00Z", "open": 102, "high": 104, "low": 101, "close": 103, "volume": 12},
+            ],
+            "outputs": [
+                {
+                    "bar_index": 0,
+                    "time": "2026-01-01T00:00:00Z",
+                    "indicator_id": "stats-1",
+                    "indicator_type": "candle_stats",
+                    "output_name": "candle_stats",
+                    "output_type": "metric",
+                    "value": {"range_pct": 0.01},
+                },
+                {
+                    "bar_index": 1,
+                    "time": "2026-01-01T01:00:00Z",
+                    "indicator_id": "stats-1",
+                    "indicator_type": "candle_stats",
+                    "output_name": "candle_stats",
+                    "output_type": "metric",
+                    "value": {"range_pct": 0.03},
+                },
+            ],
+        },
+        detector={
+            "type": "indicator_output_match",
+            "output_name": "candle_stats",
+            "field": "range_pct",
+            "operator": "gt",
+            "value": 0.02,
+        },
+        outcomes={"forward_bars": [1], "min_sample_count": 1},
+        data_quality={"status": "clean"},
+    )
+
+    assert payload["check_family"] == "indicator_forward_outcome"
+    assert payload["sample_count"] == 1
+    assert payload["events"][0]["output_name"] == "candle_stats"
+    assert payload["events"][0]["field_value"] == 0.03
+    assert payload["recommendation"] == "refine"
+
+
+def test_indicator_research_check_uses_persisted_indicator_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    created: list[dict[str, Any]] = []
+    links: list[dict[str, Any]] = []
+
+    def fake_create_item(**kwargs):
+        item_id = kwargs.get("item_id") or f"item-{len(created) + 1}"
+        item = {
+            "id": item_id,
+            "kind": kwargs["kind"],
+            "status": kwargs["status"],
+            "title": kwargs["title"],
+            "payload": dict(kwargs.get("payload") or {}),
+            "symbol": kwargs.get("symbol"),
+            "timeframe": kwargs.get("timeframe"),
+            "instrument_id": kwargs.get("instrument_id"),
+        }
+        created.append(item)
+        return item
+
+    monkeypatch.setattr(service, "source_revision", lambda: "abc123")
+    monkeypatch.setattr(service.repository, "create_item", fake_create_item)
+    monkeypatch.setattr(service.repository, "create_link", lambda **kwargs: links.append(kwargs) or kwargs)
+    monkeypatch.setattr(
+        service.instrument_service,
+        "get_instrument_record",
+        lambda instrument_id: {
+            "id": instrument_id,
+            "symbol": "ETH/USD",
+            "datasource": "CCXT",
+            "exchange": "coinbase",
+        },
+    )
+    monkeypatch.setattr(
+        service.candle_service,
+        "preflight_candle_coverage_by_instrument",
+        lambda *args: {
+            "schema_version": "candle_coverage_preflight.v1",
+            "instrument_id": "inst-eth",
+            "symbol": "ETH/USD",
+            "provider": "CCXT",
+            "exchange": "coinbase",
+            "timeframe": "1h",
+            "status": "ok",
+            "continuity": {"final_status": "clean"},
+            "row_count": 3,
+            "missing_ranges": [],
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "collect_runtime_output_evidence_for_instance",
+        lambda *args, **kwargs: {
+            "indicator": {"id": "stats-1", "type": "candle_stats"},
+            "runtime_path": "typed_indicator_engine.v1",
+            "ready_counts": {"candle_stats": 2},
+            "not_ready_counts": {},
+            "candles": [
+                {"time": "2026-01-01T00:00:00Z", "open": 100, "high": 102, "low": 99, "close": 101, "volume": 10},
+                {"time": "2026-01-01T01:00:00Z", "open": 101, "high": 103, "low": 100, "close": 102, "volume": 11},
+            ],
+            "outputs": [
+                {
+                    "bar_index": 0,
+                    "time": "2026-01-01T00:00:00Z",
+                    "indicator_id": "stats-1",
+                    "indicator_type": "candle_stats",
+                    "output_name": "candle_stats",
+                    "output_type": "metric",
+                    "value": {"range_pct": 0.03},
+                }
+            ],
+        },
+    )
+
+    payload = service.run_research_check(
+        {
+            "title": "Indicator range follow-through",
+            "check_family": "indicator_forward_outcome",
+            "scope": {
+                "indicator_id": "stats-1",
+                "instrument_id": "inst-eth",
+                "timeframe": "1h",
+                "start": "2026-01-01T00:00:00Z",
+                "end": "2026-01-01T02:00:00Z",
+            },
+            "detector": {
+                "type": "indicator_output_match",
+                "output_name": "candle_stats",
+                "field": "range_pct",
+                "operator": "gt",
+                "value": 0.02,
+            },
+            "outcomes": {"forward_bars": [1], "min_sample_count": 1},
+        }
+    )
+
+    assert payload["status"] == "completed"
+    assert created[1]["payload"]["request"]["scope"]["indicator_id"] == "stats-1"
+    assert created[1]["payload"]["result"]["check_family"] == "indicator_forward_outcome"
+    assert links[0]["relation"] == "tests"
+
+
+def test_run_research_evidence_summarizes_checkable_report_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        service.reports_contract,
+        "get_run_research_dataset",
+        lambda run_id: {
+            "metadata": {
+                "run_id": run_id,
+                "bot_id": "bot-1",
+                "strategy_id": "strategy-1",
+                "symbols": ["BTCUSDT"],
+                "instrument_ids": ["inst-btc"],
+                "timeframe": "5m",
+                "simulated_window": {"start": "2026-01-01T00:00:00Z", "end": "2026-01-02T00:00:00Z"},
+            },
+            "readiness": {"dataset_status": "ready", "safe_to_compare": True, "caveats": []},
+            "summary": {"accepted_decisions": 1, "rejected_decisions": 1, "closed_trades": 1, "open_trades": 0},
+            "signals": [
+                {
+                    "signal_id": "sig-1",
+                    "symbol": "BTCUSDT",
+                    "context": {"event_key": "confirmed_balance_breakout_long"},
+                    "indicator_context": {
+                        "outputs": {
+                            "profile-1.confirmed_balance_breakout": {
+                                "output_name": "confirmed_balance_breakout",
+                                "event_keys": ["confirmed_balance_breakout_long"],
+                            }
+                        }
+                    },
+                }
+            ],
+            "decisions": [
+                {"decision_id": "decision-1", "decision_state": "accepted", "reason_code": "ENTRY"},
+                {"decision_id": "decision-2", "decision_state": "rejected", "reason_code": "FILTER"},
+            ],
+            "trades": [{"id": "trade-1", "decision_id": "decision-1"}],
+        },
+    )
+
+    payload = service.get_run_research_evidence("run-1")
+
+    assert payload["schema_version"] == "run_research_evidence.v1"
+    assert payload["counts"]["signals"] == 1
+    assert payload["signals"]["output_names"] == {"confirmed_balance_breakout": 1}
+    assert payload["signals"]["event_keys"] == {"confirmed_balance_breakout_long": 1}
+    assert payload["decisions"]["states"] == {"accepted": 1, "rejected": 1}
+    assert payload["supported_checks"][0]["command"] == "qt research check signal"
+
+
+def test_research_trail_collects_related_items_and_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    items = {
+        "obs-1": {"id": "obs-1", "kind": "observation", "title": "Observation", "payload": {}},
+        "check-1": {
+            "id": "check-1",
+            "kind": "research_check",
+            "title": "Check",
+            "payload": {"result": {"check_family": "run_signal_summary", "sample_count": 1}},
+        },
+    }
+    links = [
+        {
+            "id": "link-1",
+            "source_item_id": "check-1",
+            "target_type": "research_item",
+            "target_id": "obs-1",
+            "relation": "tests",
+            "metadata": {},
+        },
+        {
+            "id": "link-2",
+            "source_item_id": "check-1",
+            "target_type": "run",
+            "target_id": "run-1",
+            "relation": "analyzes",
+            "metadata": {},
+        },
+    ]
+    monkeypatch.setattr(service.repository, "get_item", lambda item_id: items[item_id])
+    monkeypatch.setattr(service.repository, "list_links", lambda item_id, include_inbound=True: links)
+    monkeypatch.setattr(
+        service,
+        "_run_evidence_summary",
+        lambda run_id: {"schema_version": "run_research_evidence.v1", "run_id": run_id},
+    )
+
+    payload = service.get_research_trail("obs-1")
+
+    assert payload["schema_version"] == "research_trail.v1"
+    assert payload["item"]["id"] == "obs-1"
+    assert payload["checks"][0]["id"] == "check-1"
+    assert payload["runs"] == [{"schema_version": "run_research_evidence.v1", "run_id": "run-1"}]
+    assert payload["summary"]["check_count"] == 1
+
+
+def test_research_check_compare_requires_matching_check_family(monkeypatch: pytest.MonkeyPatch) -> None:
+    items = {
+        "left": {
+            "id": "left",
+            "kind": "research_check",
+            "title": "Left",
+            "payload": {
+                "result": {
+                    "check_family": "indicator_forward_outcome",
+                    "status": "completed",
+                    "sample_count": 2,
+                    "outcomes": {"summary": {"1": {"median_return_pct": 0.01}}},
+                }
+            },
+        },
+        "right": {
+            "id": "right",
+            "kind": "research_check",
+            "title": "Right",
+            "payload": {
+                "result": {
+                    "check_family": "indicator_forward_outcome",
+                    "status": "completed",
+                    "sample_count": 5,
+                    "outcomes": {"summary": {"1": {"median_return_pct": 0.03}}},
+                }
+            },
+        },
+    }
+    monkeypatch.setattr(service.repository, "get_item", lambda item_id: items[item_id])
+
+    payload = service.compare_research_checks("left", "right")
+
+    assert payload["schema_version"] == "research_check_comparison.v1"
+    assert payload["deltas"]["sample_count"] == {"left": 2, "right": 5, "delta": 3.0}
+    assert payload["deltas"]["forward_summary"]["1"]["median_return_pct"]["delta"] == 0.019999999999999997
+
+
 def test_research_check_route_delegates_to_service(monkeypatch: pytest.MonkeyPatch) -> None:
     observed = {}
 
@@ -153,7 +822,7 @@ def test_research_check_route_delegates_to_service(monkeypatch: pytest.MonkeyPat
         json={
             "title": "Quick check",
             "scope": {"instrument_id": "inst-1", "timeframe": "1h", "start": "2026-01-01T00:00:00Z", "end": "2026-01-02T00:00:00Z"},
-            "detector": {"field": "range_pct", "operator": "lt", "value": 0.01},
+            "detector": {"type": "raw_condition", "field": "close", "operator": "gt", "value_field": "previous_close"},
         },
     )
 

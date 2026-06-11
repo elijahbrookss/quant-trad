@@ -15,6 +15,8 @@ code_paths:
   - src/engines/indicator_engine
   - src/indicators
   - portal/backend/controller/indicators.py
+  - portal/backend/service/indicators/indicator_factory.py
+  - portal/backend/service/indicators/signal_payload_filtering.py
   - portal/backend/service/indicators/indicator_service/runtime_validation.py
   - docs/architecture/indicator-runtime/diagrams/indicator-runtime-contract.mmd
   - docs/architecture/indicator-runtime/diagrams/indicator-surfaces.mmd
@@ -44,6 +46,14 @@ after it has applied the bar and validated the declared snapshot surface.
 | `detail_snapshot()` | operator/debug views | diagnostic payload, not a strategy input |
 
 Strategies consume typed outputs only. They do not inspect overlays, details, helper caches, or mutable indicator internals.
+
+Indicator output catalogs describe every public typed output the indicator may
+emit. A catalog entry may describe signal event keys, context state keys, or
+metric fields, but it must not carry persisted enable/disable preferences.
+Output selection belongs to consumers such as strategy rules, strategy variants,
+research checks, signal preview requests, or UI visibility state. Persisting a
+disabled output on the indicator would turn a consumer choice into indicator
+truth and make reports, replay, and observation mining incomplete.
 
 ## Diagram Walkthrough: Runtime Contract
 
@@ -86,9 +96,10 @@ projection/output behavior, but they do not become strategy inputs.
 
 ## Runtime Validation Surface
 
-The backend indicator runtime validation endpoint is the research-facing proof
-surface for agent-visible indicators. It builds the same runtime graph as normal
-indicator execution and advances the engine one candle at a time through:
+The backend indicator runtime validation endpoint and output evidence collector
+are the research-facing proof surfaces for agent-visible indicators. They build
+the same runtime graph as normal indicator execution and advance the engine one
+candle at a time through:
 
 ```text
 initialize -> apply_bar -> snapshot
@@ -99,8 +110,10 @@ the engine frame. Readiness is measured separately: warmup windows may produce
 `ready=false`, but missing outputs are invalid. The validation result summarizes
 per-output presence, first/last readiness, ready bar counts, signal event
 counts, observed metric/context fields, commit sequence provenance, guard
-warnings, source-fact diagnostics, and optional assertions such as `require_ready_by_end` or
-`min_ready_bars`.
+warnings, source-fact diagnostics, and optional assertions such as
+`require_ready_by_end` or `min_ready_bars`. The evidence collector exposes the
+same declared output rows alongside aligned source candles so research checks
+can test indicator-produced facts without inspecting indicator internals.
 
 This surface is intentionally a validator, not an alternate runtime. It must not
 reconstruct indicator state from overlays, details, mutable internals, or MCP
@@ -133,6 +146,8 @@ or unordered mapping iteration.
 - Indicators never predict or backfill future state.
 - Dependency outputs are read through declared refs.
 - Signal, context, and metric outputs are typed contracts, not arbitrary blobs.
+- Public output catalogs are complete; consumers select outputs without mutating
+  indicator identity.
 - Overlays and details are projections.
 - Runtime validation must validate declared output presence on every bar and
   report readiness separately from presence.

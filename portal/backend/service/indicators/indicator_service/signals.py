@@ -208,8 +208,8 @@ class IndicatorSignalExecutor:
             exchange=resolved_exchange,
             instrument_id=resolved_instrument_id,
         )
-        enabled_event_keys = self._normalise_enabled_event_keys(dict(config or {}))
-        requested_output_names = self._normalise_enabled_output_names(dict(config or {}))
+        event_keys = self._normalise_signal_event_keys(dict(config or {}))
+        requested_output_names = self._normalise_signal_output_names(dict(config or {}))
         _, indicators = build_runtime_indicator_graph(
             [inst_id],
             execution_context=execution_context,
@@ -226,18 +226,18 @@ class IndicatorSignalExecutor:
         )
         candles = _build_candles(df)
         engine = IndicatorExecutionEngine(indicators)
-        enabled_output_names = {
+        signal_output_names = {
             str(output.get("name") or "")
             for output in (meta.get("typed_outputs") or [])
             if isinstance(output, Mapping)
             and output.get("type") == "signal"
             and str(output.get("name") or "").strip()
-            and output.get("enabled", True) is not False
         }
+        output_names = set(signal_output_names)
         if requested_output_names is not None:
-            enabled_output_names = {
+            output_names = {
                 output_name
-                for output_name in enabled_output_names
+                for output_name in signal_output_names
                 if output_name in requested_output_names
             }
 
@@ -255,8 +255,8 @@ class IndicatorSignalExecutor:
                 datasource=execution_context.datasource,
                 exchange=execution_context.exchange,
                 instrument_id=execution_context.instrument_id,
-                enabled_output_names=enabled_output_names,
-                enabled_event_keys=enabled_event_keys,
+                output_names=output_names,
+                event_keys=event_keys,
             )
             signals.extend(frame_signals)
             self._append_signal_bubbles(
@@ -423,8 +423,8 @@ class IndicatorSignalExecutor:
         datasource: Optional[str],
         exchange: Optional[str],
         instrument_id: Optional[str],
-        enabled_output_names: Optional[Set[str]],
-        enabled_event_keys: Set[str],
+        output_names: Optional[Set[str]],
+        event_keys: Set[str],
     ) -> List[Dict[str, Any]]:
         collected: List[Dict[str, Any]] = []
         event_time = _iso_utc(candle.time)
@@ -440,7 +440,7 @@ class IndicatorSignalExecutor:
             if runtime_output is None or not getattr(runtime_output, "ready", False):
                 continue
             indicator_key, _, output_name = str(output_ref).partition(".")
-            if enabled_output_names is not None and output_name not in enabled_output_names:
+            if output_names is not None and output_name not in output_names:
                 continue
             value = getattr(runtime_output, "value", {})
             events = value.get("events") if isinstance(value, Mapping) else None
@@ -452,7 +452,7 @@ class IndicatorSignalExecutor:
                 assert_signal_output_event(event)
                 assert_signal_output_has_no_execution_fields(event)
                 event_key = str(event.get("key") or "").strip()
-                if enabled_event_keys and event_key.lower() not in enabled_event_keys:
+                if event_keys and event_key.lower() not in event_keys:
                     continue
                 known_at = event.get("known_at")
                 metadata = dict(event.get("metadata") or {})
@@ -568,14 +568,14 @@ class IndicatorSignalExecutor:
         return overlays
 
     @staticmethod
-    def _normalise_enabled_event_keys(config: Mapping[str, Any]) -> Set[str]:
-        enabled = config.get("enabled_event_keys")
-        if enabled is None:
+    def _normalise_signal_event_keys(config: Mapping[str, Any]) -> Set[str]:
+        requested = config.get("event_keys")
+        if requested is None:
             return set()
-        if isinstance(enabled, (str, bytes)):
-            candidates = [enabled]
-        elif isinstance(enabled, Sequence):
-            candidates = list(enabled)
+        if isinstance(requested, (str, bytes)):
+            candidates = [requested]
+        elif isinstance(requested, Sequence):
+            candidates = list(requested)
         else:
             candidates = []
         return {
@@ -585,14 +585,14 @@ class IndicatorSignalExecutor:
         }
 
     @staticmethod
-    def _normalise_enabled_output_names(config: Mapping[str, Any]) -> Set[str] | None:
-        enabled = config.get("enabled_signal_outputs")
-        if enabled is None:
+    def _normalise_signal_output_names(config: Mapping[str, Any]) -> Set[str] | None:
+        requested = config.get("output_names")
+        if requested is None:
             return None
-        if isinstance(enabled, (str, bytes)):
-            candidates: Sequence[Any] = [enabled]
-        elif isinstance(enabled, Sequence):
-            candidates = list(enabled)
+        if isinstance(requested, (str, bytes)):
+            candidates: Sequence[Any] = [requested]
+        elif isinstance(requested, Sequence):
+            candidates = list(requested)
         else:
             candidates = []
         return {

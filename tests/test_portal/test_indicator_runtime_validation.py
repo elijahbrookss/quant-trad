@@ -102,6 +102,72 @@ def test_runtime_validation_summarizes_output_presence_and_readiness(monkeypatch
     assert output["observed_fields"] == ["atr"]
 
 
+def test_runtime_output_evidence_collects_per_bar_declared_values(monkeypatch) -> None:
+    monkeypatch.setattr(runtime_validation, "load_indicator_record", lambda inst_id, ctx=None: {"id": inst_id})
+    monkeypatch.setattr(
+        runtime_validation,
+        "build_meta_from_record",
+        lambda record, ctx=None: {
+            "id": record["id"],
+            "type": "candle_stats",
+            "name": "Candle Stats",
+            "params": {"warmup_bars": 1},
+            "dependencies": [],
+            "runtime_supported": True,
+        },
+    )
+    monkeypatch.setattr(
+        runtime_validation.instrument_service,
+        "get_instrument_record",
+        lambda instrument_id: {
+            "id": instrument_id,
+            "symbol": "ES",
+            "datasource": "ALPACA",
+            "exchange": "cme",
+        },
+    )
+    monkeypatch.setattr(runtime_validation, "build_runtime_indicator_graph", lambda *args, **kwargs: ({}, ["indicator"]))
+    monkeypatch.setattr(runtime_validation.candle_service, "fetch_ohlcv_by_instrument", lambda *args, **kwargs: _frame())
+
+    class _FakeEngine:
+        output_types = {"indicator-1.candle_stats": "metric"}
+
+        def __init__(self, indicators):
+            _ = indicators
+            self.calls = 0
+
+        def step(self, *, bar, bar_time, include_overlays, include_details):
+            _ = bar, include_overlays, include_details
+            self.calls += 1
+            return SimpleNamespace(
+                outputs={
+                    "indicator-1.candle_stats": RuntimeOutput(
+                        bar_time=bar_time,
+                        ready=True,
+                        value={"range_pct": 0.01 * self.calls},
+                    )
+                },
+                guard_metrics=(),
+                guard_warnings=(),
+            )
+
+    monkeypatch.setattr(runtime_validation, "IndicatorExecutionEngine", _FakeEngine)
+
+    payload = runtime_validation.collect_runtime_output_evidence_for_instance(
+        "indicator-1",
+        "2026-02-01T00:00:00Z",
+        "2026-02-01T02:00:00Z",
+        "1h",
+        instrument_id="instrument-1",
+    )
+
+    assert payload["schema_version"] == "indicator_output_evidence.v1"
+    assert payload["bars_evaluated"] == 2
+    assert payload["ready_counts"] == {"candle_stats": 2}
+    assert payload["candles"][0]["time"] == "2026-02-01T00:00:00Z"
+    assert payload["outputs"][1]["value"] == {"range_pct": 0.02}
+
+
 def test_runtime_validation_reports_readiness_assertion_failures(monkeypatch) -> None:
     monkeypatch.setattr(runtime_validation, "load_indicator_record", lambda inst_id, ctx=None: {"id": inst_id})
     monkeypatch.setattr(

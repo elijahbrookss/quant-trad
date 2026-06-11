@@ -16,6 +16,7 @@ code_paths:
   - portal/backend/service/strategies
   - portal/backend/service/bots/config_service.py
   - portal/backend/controller/strategies.py
+  - cli/experiments/instrument_matrix.py
   - src/engines/bot_runtime/strategy
   - portal/backend/service/bots/strategy_loader.py
   - docs/architecture/decision-layer/diagrams/decision-flow.mmd
@@ -110,6 +111,25 @@ carry the resulting `effective_strategy_config` and `run_strategy_snapshot` as
 provenance only; these fields must not change evaluator, wallet, order, fee, or
 trade semantics.
 
+Strategy read contracts are split by concern:
+
+- `strategy_inventory.v1` lists thin strategy rows and counts.
+- `strategy_definition.v1` returns the core strategy definition and readiness
+  context.
+- `strategy_bindings.v1` returns compact instrument and indicator bindings
+  without embedding full indicator manifests in inventory rows.
+- `strategy_rules.v1` returns stored decision rules.
+- `strategy_variants.v1` returns saved variant rows.
+- `effective_strategy.v1` returns the compiled, runtime-effective strategy for
+  the selected/default variant.
+- `strategy_decision_inputs.v1` returns attached indicator signal, context, and
+  metric inputs and marks which effective rules or variant filters reference
+  them.
+
+The split read surface is for agents, CLI, MCP, and UI inspection. Runtime truth
+still comes from compiled strategy specs and run snapshots, not from frontend
+state or ad hoc route joins.
+
 ## Failure And Recovery
 
 - Missing typed outputs make dependent rules false or rejected with context.
@@ -126,6 +146,9 @@ trade semantics.
 - Variant resolution is shared across preview, bot config, runtime loading, and
   report metadata. A selected variant must not have one effective param map in
   preview and another at runtime.
+- Agent-facing readers must use split strategy read contracts instead of
+  bundled detail payloads when they only need inventory, bindings, rules,
+  variants, effective config, or decision inputs.
 - Output-filter traces are derived from the same guard evaluation result used
   by the decision. They must not trigger a second rule evaluation path.
 - Bounded history never includes future bars.

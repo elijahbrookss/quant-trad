@@ -157,12 +157,19 @@ Implementation seams:
   template IDs.
 - `resolve_strategy_variant()` resolves effective params from the base strategy
   and effective output filters from the selected/default variant.
+- Strategy read APIs are split by concern. Inventory, definition, bindings,
+  rules, variants, effective compiled strategy, and decision-input catalog are
+  separate read contracts instead of one bundled detail response.
 - Bot config or experiment config selects ATM independently from variants.
 - Strategy preview and bot runtime must call the same variant resolver so
   preview, compile, runtime loading, execution, and report metadata agree on
   the same effective decision configuration.
 - Reports should preserve both authored `output_filters` and materialized guards
   in `effective_strategy_config` / `run_strategy_snapshot`.
+- `strategy_decision_inputs.v1` should expose attached indicator signal event
+  keys, context state keys, and metric fields, marking which effective rules or
+  variant filters reference them. This is an inspection/mining aid, not runtime
+  truth.
 - Materialized guards should preserve compact provenance identifying their
   source `variant_output_filter`, but that provenance is audit metadata. It must
   not change match semantics or behavioral strategy hashes.

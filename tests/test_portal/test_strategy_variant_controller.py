@@ -77,7 +77,8 @@ def test_strategy_variant_crud_routes_are_thin_service_wrappers(monkeypatch) -> 
 
     response = client.get("/api/strategies/strategy-1/variants")
     assert response.status_code == 200
-    assert response.json()[0]["name"] == "expanding-only"
+    assert response.json()["schema_version"] == "strategy_variants.v1"
+    assert response.json()["variants"][0]["name"] == "expanding-only"
     filter_payload = {
         "scope": {"intent": ["enter_long"]},
         "indicator_id": "regime-1",
@@ -156,6 +157,8 @@ def test_strategy_preview_and_compile_routes_forward_variant_id(monkeypatch) -> 
 
     monkeypatch.setattr(controller.strategy_service, "run_strategy_preview", _preview)
     monkeypatch.setattr(controller.strategy_service, "compile_strategy_contract", _compile)
+    monkeypatch.setattr(controller.strategy_service, "get_effective_strategy_contract", _compile)
+    monkeypatch.setattr(controller.strategy_service, "get_strategy_decision_inputs", _compile)
 
     response = client.post(
         "/api/strategies/strategy-1/preview",
@@ -187,4 +190,20 @@ def test_strategy_preview_and_compile_routes_forward_variant_id(monkeypatch) -> 
         "strategy_id": "strategy-1",
         "variant_id": "variant-1",
         "variant_name": "expanding-only",
+    }
+
+    response = client.get("/api/strategies/strategy-1/effective?variant_name=expanding-only")
+    assert response.status_code == 200
+    assert captured["compile"] == {
+        "strategy_id": "strategy-1",
+        "variant_id": None,
+        "variant_name": "expanding-only",
+    }
+
+    response = client.get("/api/strategies/strategy-1/decision-inputs?variant_id=variant-1")
+    assert response.status_code == 200
+    assert captured["compile"] == {
+        "strategy_id": "strategy-1",
+        "variant_id": "variant-1",
+        "variant_name": None,
     }

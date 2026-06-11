@@ -134,7 +134,98 @@ def test_compile_strategy_contract_materializes_selected_variant_output_filters(
         ],
         "is_default": False,
     }
-    assert payload["compiled"]["rule_count"] == 1
+
+
+def test_strategy_decision_inputs_catalog_marks_selected_rule_inputs(monkeypatch) -> None:
+    record = _strategy_record()
+
+    monkeypatch.setattr(facade._REGISTRY, "get", lambda strategy_id: record)  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        facade,
+        "storage_ensure_default_strategy_variant",
+        lambda strategy_id: {
+            "id": "variant-default",
+            "strategy_id": strategy_id,
+            "name": "default",
+            "output_filters": [],
+            "is_default": True,
+        },
+    )
+    monkeypatch.setattr(
+        facade,
+        "get_instance_meta",
+        lambda indicator_id: {
+            "id": indicator_id,
+            "type": "market_profile",
+            "name": "Profile",
+            "runtime_supported": True,
+            "compute_supported": False,
+            "typed_outputs": [
+                {
+                    "name": "balance_breakout",
+                    "type": "signal",
+                    "label": "Balance Breakout",
+                    "event_keys": ["breakout_long", "breakout_short"],
+                },
+                {
+                    "name": "market_state",
+                    "type": "context",
+                    "label": "Market State",
+                    "state_keys": ["expansion_state"],
+                },
+            ],
+        },
+    )
+
+    def _compile_strategy(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            strategy_id="strategy-1",
+            timeframe="15m",
+            strategy_hash="hash-1",
+            max_history_bars=3,
+            rules=(
+                SimpleNamespace(
+                    id="rule-1",
+                    name="Breakout Long",
+                    intent="enter_long",
+                    priority=1,
+                    enabled=True,
+                    description=None,
+                    trigger=SimpleNamespace(
+                        type="signal_match",
+                        indicator_id="indicator-1",
+                        output_name="balance_breakout",
+                        output_key="indicator-1.balance_breakout",
+                        event_key="breakout_long",
+                    ),
+                    guards=(
+                        SimpleNamespace(
+                            type="context_match",
+                            indicator_id="indicator-1",
+                            output_name="market_state",
+                            output_key="indicator-1.market_state",
+                            field="expansion_state",
+                            value=("expanding",),
+                            source=None,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(facade, "compile_strategy", _compile_strategy)
+
+    payload = facade.get_strategy_decision_inputs("strategy-1")
+
+    assert payload["schema_version"] == "strategy_decision_inputs.v1"
+    assert payload["summary"]["selected_trigger_count"] == 1
+    selected_trigger = next(item for item in payload["triggers"] if item["event_key"] == "breakout_long")
+    assert selected_trigger["selected"] is True
+    assert selected_trigger["selected_by"][0]["kind"] == "rule_trigger"
+    selected_context = payload["context_fields"][0]
+    assert selected_context["field"] == "expansion_state"
+    assert selected_context["selected"] is True
 
 
 def test_compile_strategy_contract_can_select_variant_by_name(monkeypatch) -> None:

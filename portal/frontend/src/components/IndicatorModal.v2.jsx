@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { fetchIndicatorTypes, fetchIndicatorType, fetchIndicators } from '../adapters/indicator.adapter.js'
 import { createLogger } from '../utils/logger.js'
-import { buildSignalOutputEnabledMap, buildSignalOutputPrefs, getIndicatorOutputsByType } from '../utils/indicatorOutputs.js'
+import { getIndicatorOutputsByType } from '../utils/indicatorOutputs.js'
 import DropdownSelect from './ChartComponent/DropdownSelect.jsx'
 
 const EMPTY_META = {
@@ -270,7 +270,6 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
   const [name, setName] = useState(initial?.name || '')
   const [params, setParams] = useState({})
   const [dependencyBindings, setDependencyBindings] = useState({})
-  const [signalOutputEnabled, setSignalOutputEnabled] = useState({})
   const [meta, setMeta] = useState(EMPTY_META)
   const [metaError, setMetaError] = useState(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -294,7 +293,6 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     setMetaError(null)
     setParams(initial?.params || {})
     setDependencyBindings({})
-    setSignalOutputEnabled({})
     setShowAdvanced(false)
     dependencyInitKeyRef.current = ''
   }, [initial, isOpen])
@@ -310,13 +308,6 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
         setMeta(nextMeta)
         const preparedParams = prepareInitialParams(nextMeta, initial?.params)
         setParams(preparedParams)
-        setSignalOutputEnabled(
-          buildSignalOutputEnabledMap({
-            outputs: nextMeta.outputs,
-            typed_outputs: initial?.type === typeId ? initial?.typed_outputs : undefined,
-            output_prefs: initial?.type === typeId ? initial?.output_prefs : undefined,
-          }),
-        )
         setShowAdvanced(false)
 
       })
@@ -331,7 +322,6 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
   }, [
     initial?.dependencies,
     initial?.id,
-    initial?.output_prefs,
     initial?.params,
     initial?.typed_outputs,
     initial?.type,
@@ -466,13 +456,6 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     setDependencyBindings((prev) => ({ ...prev, [outputName]: indicatorId }))
   }
 
-  const handleSignalOutputToggle = (outputName) => (enabled) => {
-    setSignalOutputEnabled((prev) => ({
-      ...prev,
-      [outputName]: Boolean(enabled),
-    }))
-  }
-
   const handleSubmit = () => {
     if (!typeId) {
       setMetaError('Please select an indicator type.')
@@ -498,12 +481,9 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
       return
     }
     const preparedParams = convertParamsForSave(meta, params)
-    const outputPrefs = buildSignalOutputPrefs(meta, signalOutputEnabled)
     debug('indicator_modal_submit', {
       indicatorId: initial?.id || null,
       typeId,
-      signalOutputEnabled,
-      outputPrefs,
     })
     onSave({
       id: initial?.id,
@@ -511,7 +491,6 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
       name: name.trim(),
       params: preparedParams,
       dependencies: preparedDependencies,
-      output_prefs: outputPrefs,
     })
   }
 
@@ -685,40 +664,22 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
                   <div className="space-y-3 rounded-lg border border-white/12 bg-slate-900/60 p-4">
                     <div>
                       <h4 className="text-sm font-semibold text-white">Signal outputs</h4>
-                      <p className="text-xs text-slate-400">
-                        Signal outputs auto-discover from the indicator manifest. Disable them here to hide them from authoring and preview surfaces only. Bot runtime still evaluates whatever signals your strategy rules reference.
-                      </p>
                     </div>
                     <div className={signalSectionScrollable ? 'max-h-[min(30vh,24rem)] overflow-y-auto pr-1' : ''}>
                       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                         {signalOutputs.map((output) => {
                           const outputName = String(output?.name || '').trim()
-                          const enabled = signalOutputEnabled[outputName] !== false
                           return (
                             <div
                               key={outputName}
                               className="space-y-2 rounded-lg border border-white/10 bg-slate-800/60 px-4 py-3 shadow-sm"
                             >
-                              <div className="flex items-start justify-between gap-3">
-                                <div>
-                                  <label className="text-sm font-semibold text-white">
-                                    {output.label || outputName}
-                                  </label>
-                                  <p className="text-xs text-slate-400">{outputName}</p>
-                                </div>
-                                <Switch
-                                  checked={enabled}
-                                  onChange={handleSignalOutputToggle(outputName)}
-                                  className={`${enabled ? 'bg-emerald-500/70' : 'bg-slate-600/60'} relative inline-flex h-6 w-11 items-center rounded-full transition`}
-                                >
-                                  <span className={`${enabled ? 'translate-x-6' : 'translate-x-1'} inline-block h-4 w-4 transform rounded-full bg-white transition`} />
-                                </Switch>
+                              <div>
+                                <label className="text-sm font-semibold text-white">
+                                  {output.label || outputName}
+                                </label>
+                                <p className="text-xs text-slate-400">{outputName}</p>
                               </div>
-                              <p className="text-xs text-slate-300/80">
-                                {enabled
-                                  ? 'Available in indicator signal previews and rule creation.'
-                                  : 'Hidden from indicator signal previews and new rule creation.'}
-                              </p>
                             </div>
                           )
                         })}

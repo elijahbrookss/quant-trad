@@ -16,7 +16,7 @@ def _client() -> TestClient:
     return TestClient(app)
 
 
-def test_get_strategy_returns_nested_detail_contract(monkeypatch) -> None:
+def test_strategy_read_routes_return_split_contracts(monkeypatch) -> None:
     client = _client()
 
     monkeypatch.setattr(
@@ -32,7 +32,24 @@ def test_get_strategy_returns_nested_detail_contract(monkeypatch) -> None:
             "datasource": "ALPACA",
             "exchange": "cme",
             "indicator_ids": ["indicator-1"],
-            "indicators": [{"id": "indicator-1", "status": "active", "meta": {"id": "indicator-1"}}],
+            "indicators": [
+                {
+                    "id": "indicator-1",
+                    "status": "active",
+                    "meta": {
+                        "id": "indicator-1",
+                        "type": "market_profile",
+                        "name": "Profile",
+                        "typed_outputs": [
+                            {"name": "confirmed_balance_breakout", "type": "signal"},
+                            {"name": "value_location", "type": "context"},
+                            {"name": "value_area_metrics", "type": "metric"},
+                        ],
+                        "runtime_supported": True,
+                        "compute_supported": False,
+                    },
+                }
+            ],
             "missing_indicators": [],
             "instruments": [{"symbol": "ES", "id": "instrument-1"}],
             "instrument_messages": [],
@@ -57,28 +74,15 @@ def test_get_strategy_returns_nested_detail_contract(monkeypatch) -> None:
             "updated_at": "2026-04-05T00:00:00Z",
         },
     )
-    monkeypatch.setattr(
-        controller.strategy_service,
-        "list_strategy_variants",
-        lambda strategy_id: [
-            {
-                "id": "variant-1",
-                "strategy_id": strategy_id,
-                "name": "default",
-                "description": None,
-                "output_filters": [],
-                "is_default": True,
-                "created_at": "2026-04-05T00:00:00Z",
-                "updated_at": "2026-04-05T00:00:00Z",
-            }
-        ],
-    )
+    definition_response = client.get("/api/strategies/strategy-1")
+    bindings_response = client.get("/api/strategies/strategy-1/bindings")
+    rules_response = client.get("/api/strategies/strategy-1/rules")
 
-    response = client.get("/api/strategies/strategy-1")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body == {
+    assert definition_response.status_code == 200
+    assert bindings_response.status_code == 200
+    assert rules_response.status_code == 200
+    assert definition_response.json() == {
+        "schema_version": "strategy_definition.v1",
         "strategy": {
             "id": "strategy-1",
             "name": "Breakout",
@@ -94,43 +98,23 @@ def test_get_strategy_returns_nested_detail_contract(monkeypatch) -> None:
             "created_at": "2026-04-05T00:00:00Z",
             "updated_at": "2026-04-05T00:00:00Z",
         },
-        "bindings": {
-            "symbols": ["ES"],
-            "instrument_slots": [{"symbol": "ES"}],
-            "instruments": [{"symbol": "ES", "id": "instrument-1"}],
-            "indicator_ids": ["indicator-1"],
-            "indicators": [{"id": "indicator-1", "status": "active", "meta": {"id": "indicator-1"}}],
-        },
-        "decision": {
-            "rules": [
-                {
-                    "id": "rule-1",
-                    "name": "Breakout Long",
-                    "intent": "enter_long",
-                    "priority": 1,
-                    "trigger": {"type": "signal_match"},
-                    "guards": [],
-                    "description": None,
-                    "enabled": True,
-                    "created_at": "2026-04-05T00:00:00Z",
-                    "updated_at": "2026-04-05T00:00:00Z",
-                }
-            ]
-        },
         "read_context": {
             "missing_indicators": [],
             "instrument_messages": [],
         },
-        "variants": [
-            {
-                "id": "variant-1",
-                "strategy_id": "strategy-1",
-                "name": "default",
-                "description": None,
-                "output_filters": [],
-                "is_default": True,
-                "created_at": "2026-04-05T00:00:00Z",
-                "updated_at": "2026-04-05T00:00:00Z",
-            }
-        ],
+        "counts": {"instrument_count": 1, "indicator_count": 1, "rule_count": 1},
     }
+    assert bindings_response.json()["schema_version"] == "strategy_bindings.v1"
+    assert bindings_response.json()["bindings"]["indicators"] == [
+        {
+            "id": "indicator-1",
+            "status": "active",
+            "type": "market_profile",
+            "name": "Profile",
+            "runtime_supported": True,
+            "compute_supported": False,
+            "output_counts": {"signal": 1, "context": 1, "metric": 1, "other": 0},
+        }
+    ]
+    assert rules_response.json()["schema_version"] == "strategy_rules.v1"
+    assert rules_response.json()["total"] == 1

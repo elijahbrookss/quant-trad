@@ -4,7 +4,6 @@ import { ArrowLeft, ChevronDown, ChevronUp, Copy, Crosshair, Search } from 'luci
 import { fetchIndicatorOverlays } from '../adapters/indicator.adapter.js';
 import { useChartState, useChartValue } from '../contexts/ChartStateContext.jsx';
 import { createLogger } from '../utils/logger.js';
-import { isSignalOutputEnabled } from '../utils/indicatorOutputs.js';
 import { normalizeIndicatorArtifactResponse } from './indicatorArtifacts.js';
 import {
   buildColorMap,
@@ -13,73 +12,9 @@ import {
 } from './indicatorChartArtifacts.js';
 import { writeIndicatorArtifactSliceCache } from './indicatorOverlaySlices.js';
 import {
-  buildSignalInspectionKey,
   collectSignalBubbleEpochs,
-  formatSignalEventLabel,
-  formatSignalIdSuffix,
-  formatSignalTimestamp,
-  resolveSignalChartEpoch,
-  resolveSignalCursorEpoch,
-  resolveSignalId,
-  sortSignalsNewestFirst,
 } from './indicatorSignalDebug.js';
-
-const flattenSignals = (
-  signalEventsByIndicator = {},
-  indicatorsById = {},
-  bubbleEpochBySignalId = new Map(),
-) => {
-  const rows = [];
-  Object.entries(signalEventsByIndicator || {}).forEach(([indicatorId, signals]) => {
-    if (!Array.isArray(signals) || !signals.length) return;
-    const indicator = indicatorsById?.[indicatorId] || null;
-    sortSignalsNewestFirst(signals).forEach((signal) => {
-      const outputName = typeof signal?.output_name === 'string' ? signal.output_name.trim() : '';
-      if (indicator && outputName && !isSignalOutputEnabled(indicator, outputName)) {
-        return;
-      }
-      const signalId = resolveSignalId(signal);
-      const signalKey = buildSignalInspectionKey(signal);
-      const chartEpoch = (signalId && bubbleEpochBySignalId.get(signalId))
-        ?? resolveSignalChartEpoch(signal)
-        ?? null;
-      rows.push({
-        indicator,
-        indicatorId,
-        signal,
-        signalId,
-        signalKey,
-        signalSuffix: formatSignalIdSuffix(signal),
-        label: formatSignalEventLabel(signal?.event_key),
-        timestamp: formatSignalTimestamp(signal),
-        epoch: resolveSignalCursorEpoch(signal) || 0,
-        chartEpoch,
-        direction: typeof signal?.direction === 'string' ? signal.direction.trim() : '',
-        outputName,
-        seriesKey: typeof signal?.series_key === 'string' ? signal.series_key.trim() : '',
-      });
-    });
-  });
-  return rows.sort((left, right) => right.epoch - left.epoch);
-};
-
-const buildSearchHaystack = (entry) => {
-  const tokens = [
-    entry?.label,
-    entry?.signalId,
-    entry?.signalSuffix,
-    entry?.direction,
-    entry?.outputName,
-    entry?.seriesKey,
-    entry?.indicator?.name,
-    entry?.indicator?.type,
-    entry?.timestamp,
-  ];
-  return tokens
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase();
-};
+import { buildSearchHaystack, flattenSignals } from './quantLabSignalsRailModel.js';
 
 const toISO = (value) => {
   if (!value) return null;

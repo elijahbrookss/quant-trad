@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 from typing import Any, Callable
-from urllib.parse import parse_qs, unquote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from cli.api import ApiClient
 from cli.audit import date_partition, safe_path_part, timestamp_slug
@@ -228,8 +228,25 @@ class QuantTradMcpServer:
             return _ensure_object(client.request_json("GET", "/api/strategies/"), "GET /api/strategies/")
         if len(parts) == 2 and parts[0] == "strategies":
             return _ensure_object(client.request_json("GET", f"/api/strategies/{parts[1]}"), f"GET strategy {parts[1]}")
+        if len(parts) == 3 and parts[0] == "strategies" and parts[2] == "bindings":
+            return _ensure_object(client.request_json("GET", f"/api/strategies/{parts[1]}/bindings"), f"GET strategy {parts[1]} bindings")
+        if len(parts) == 3 and parts[0] == "strategies" and parts[2] == "rules":
+            return _ensure_object(client.request_json("GET", f"/api/strategies/{parts[1]}/rules"), f"GET strategy {parts[1]} rules")
         if len(parts) == 3 and parts[0] == "strategies" and parts[2] == "variants":
             return _ensure_object(client.request_json("GET", f"/api/strategies/{parts[1]}/variants"), f"GET strategy {parts[1]} variants")
+        if len(parts) == 3 and parts[0] == "strategies" and parts[2] in {"effective", "decision-inputs"}:
+            params = {
+                key: value
+                for key, value in {
+                    "variant_id": _query_str(query, "variant_id", None),
+                    "variant_name": _query_str(query, "variant_name", None),
+                }.items()
+                if value
+            }
+            return _ensure_object(
+                client.request_json("GET", f"/api/strategies/{parts[1]}/{parts[2]}", params=params),
+                f"GET strategy {parts[1]} {parts[2]}",
+            )
         if parts == ["indicators"]:
             return {"items": client.request_json("GET", "/api/indicators/")}
         if parts == ["indicators", "types"]:
@@ -351,8 +368,38 @@ class QuantTradMcpServer:
     def _tool_get_strategy(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return self.read_resource(f"quanttrad://strategies/{_required_str(arguments, 'strategy_id')}")
 
+    def _tool_get_strategy_bindings(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self.read_resource(f"quanttrad://strategies/{_required_str(arguments, 'strategy_id')}/bindings")
+
+    def _tool_get_strategy_rules(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self.read_resource(f"quanttrad://strategies/{_required_str(arguments, 'strategy_id')}/rules")
+
     def _tool_list_strategy_variants(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return self.read_resource(f"quanttrad://strategies/{_required_str(arguments, 'strategy_id')}/variants")
+
+    def _tool_get_effective_strategy(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        strategy_id = _required_str(arguments, "strategy_id")
+        params = []
+        variant_id = _optional_str(arguments, "variant_id")
+        variant_name = _optional_str(arguments, "variant_name")
+        if variant_id:
+            params.append(f"variant_id={quote(variant_id, safe='')}")
+        if variant_name:
+            params.append(f"variant_name={quote(variant_name, safe='')}")
+        suffix = f"?{'&'.join(params)}" if params else ""
+        return self.read_resource(f"quanttrad://strategies/{strategy_id}/effective{suffix}")
+
+    def _tool_get_strategy_decision_inputs(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        strategy_id = _required_str(arguments, "strategy_id")
+        params = []
+        variant_id = _optional_str(arguments, "variant_id")
+        variant_name = _optional_str(arguments, "variant_name")
+        if variant_id:
+            params.append(f"variant_id={quote(variant_id, safe='')}")
+        if variant_name:
+            params.append(f"variant_name={quote(variant_name, safe='')}")
+        suffix = f"?{'&'.join(params)}" if params else ""
+        return self.read_resource(f"quanttrad://strategies/{strategy_id}/decision-inputs{suffix}")
 
     def _tool_list_indicator_types(self, _arguments: dict[str, Any]) -> dict[str, Any]:
         return self._command_runner.run(["indicators", "types"], timeout_seconds=300.0)
@@ -392,11 +439,6 @@ class QuantTradMcpServer:
             if not isinstance(dependencies, list):
                 raise McpError("dependencies must be an array", code=-32602)
             payload["dependencies"] = dependencies
-        if arguments.get("output_prefs") is not None:
-            output_prefs = arguments.get("output_prefs")
-            if not isinstance(output_prefs, dict):
-                raise McpError("output_prefs must be an object", code=-32602)
-            payload["output_prefs"] = output_prefs
         return payload
 
     def _tool_validate_indicator_config(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -824,8 +866,12 @@ class QuantTradMcpServer:
             _template("quanttrad://bots/{bot_id}", "Bot run context"),
             _template("quanttrad://bots/{bot_id}/runs?limit={limit}", "Bot recent runs"),
             _template("quanttrad://bots/{bot_id}/active-run", "Bot active run"),
-            _template("quanttrad://strategies/{strategy_id}", "Strategy detail"),
+            _template("quanttrad://strategies/{strategy_id}", "Strategy definition"),
+            _template("quanttrad://strategies/{strategy_id}/bindings", "Strategy bindings"),
+            _template("quanttrad://strategies/{strategy_id}/rules", "Strategy rules"),
             _template("quanttrad://strategies/{strategy_id}/variants", "Strategy variants"),
+            _template("quanttrad://strategies/{strategy_id}/effective?variant_id={variant_id}&variant_name={variant_name}", "Effective strategy contract"),
+            _template("quanttrad://strategies/{strategy_id}/decision-inputs?variant_id={variant_id}&variant_name={variant_name}", "Strategy decision inputs"),
             _template("quanttrad://indicators/types/{type_id}", "Indicator type detail"),
             _template("quanttrad://indicators/{indicator_id}", "Indicator detail"),
             _template("quanttrad://indicators/{indicator_id}/strategies", "Indicator strategy usage"),
@@ -876,14 +922,48 @@ class QuantTradMcpServer:
                 "handler": self._tool_list_strategies,
             },
             "get_strategy": {
-                "description": "Read one strategy detail payload.",
+                "description": "Read one strategy definition payload.",
                 "inputSchema": _object_schema({"strategy_id": _string_schema()}, required=["strategy_id"]),
                 "handler": self._tool_get_strategy,
+            },
+            "get_strategy_bindings": {
+                "description": "Read one strategy's instrument and indicator bindings.",
+                "inputSchema": _object_schema({"strategy_id": _string_schema()}, required=["strategy_id"]),
+                "handler": self._tool_get_strategy_bindings,
+            },
+            "get_strategy_rules": {
+                "description": "Read one strategy's stored rules.",
+                "inputSchema": _object_schema({"strategy_id": _string_schema()}, required=["strategy_id"]),
+                "handler": self._tool_get_strategy_rules,
             },
             "list_strategy_variants": {
                 "description": "List variants for a strategy.",
                 "inputSchema": _object_schema({"strategy_id": _string_schema()}, required=["strategy_id"]),
                 "handler": self._tool_list_strategy_variants,
+            },
+            "get_effective_strategy": {
+                "description": "Read the runtime-effective strategy contract for the default or selected variant.",
+                "inputSchema": _object_schema(
+                    {
+                        "strategy_id": _string_schema(),
+                        "variant_id": _string_schema(),
+                        "variant_name": _string_schema(),
+                    },
+                    required=["strategy_id"],
+                ),
+                "handler": self._tool_get_effective_strategy,
+            },
+            "get_strategy_decision_inputs": {
+                "description": "Read attached indicator decision inputs and effective rule references.",
+                "inputSchema": _object_schema(
+                    {
+                        "strategy_id": _string_schema(),
+                        "variant_id": _string_schema(),
+                        "variant_name": _string_schema(),
+                    },
+                    required=["strategy_id"],
+                ),
+                "handler": self._tool_get_strategy_decision_inputs,
             },
             "list_indicator_types": {
                 "description": "List registered indicator types.",
@@ -918,7 +998,6 @@ class QuantTradMcpServer:
                         "name": _string_schema(),
                         "params": _free_object_schema(),
                         "dependencies": {"type": "array", "items": _free_object_schema()},
-                        "output_prefs": _free_object_schema(),
                         "color": _string_schema(),
                         "color_palette": _string_schema(),
                     },
@@ -934,7 +1013,6 @@ class QuantTradMcpServer:
                         "name": _string_schema(),
                         "params": _free_object_schema(),
                         "dependencies": {"type": "array", "items": _free_object_schema()},
-                        "output_prefs": _free_object_schema(),
                         "color": _string_schema(),
                         "color_palette": _string_schema(),
                         "apply": _boolean_schema(default=False),

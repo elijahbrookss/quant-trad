@@ -239,6 +239,58 @@ def test_bots_create_and_update_use_backend_bot_routes(tmp_path, monkeypatch):
     )
 
 
+def test_research_check_cli_accepts_run_id_for_report_backed_checks(tmp_path, monkeypatch):
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        observed["method"] = request.get_method()
+        observed["path"] = urllib.parse.urlparse(request.full_url).path
+        observed["body"] = json.loads(request.data.decode("utf-8"))
+        return _Response(b'{"schema_version":"research_check_run.v1","status":"completed"}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    exit_code = main(
+        [
+            "--log-root",
+            str(tmp_path),
+            "research",
+            "check",
+            "signal",
+            "--title",
+            "Run signal check",
+            "--run-id",
+            "run-1",
+            "--detector-json",
+            '{"type":"run_signal_match","output_name":"confirmed_balance_breakout"}',
+            "--bucket-by",
+            "symbol,event_key",
+            "--max-examples",
+            "10",
+            "--min-sample-count",
+            "1",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed == {
+        "method": "POST",
+        "path": "/api/research/checks/run",
+        "body": {
+            "title": "Run signal check",
+            "check_family": "run_signal_summary",
+            "scope": {"run_id": "run-1"},
+            "detector": {"type": "run_signal_match", "output_name": "confirmed_balance_breakout"},
+            "outcomes": {
+                "bucket_by": ["symbol", "event_key"],
+                "max_examples": 10,
+                "min_sample_count": 1,
+            },
+        },
+    }
+
+
 def test_providers_stream_smoke_uses_backend_route(tmp_path, monkeypatch):
     observed = {}
 
@@ -509,6 +561,80 @@ def test_indicators_commands_use_backend_routes(monkeypatch):
     ]
 
 
+def test_indicator_mutation_commands_use_backend_routes(monkeypatch):
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        parsed = urllib.parse.urlparse(request.full_url)
+        body = json.loads(request.data.decode("utf-8")) if request.data else None
+        calls.append((request.get_method(), parsed.path, urllib.parse.parse_qs(parsed.query), body))
+        if parsed.path == "/api/indicators/ind-1":
+            if request.get_method() == "GET":
+                return _Response(
+                    b'{"instance":{"id":"ind-1","type":"candle_stats","name":"Base","params":{"warmup_bars":200},"dependencies":[],"color":"#fff"}}'
+                )
+            if request.get_method() == "PUT":
+                return _Response(b'{"instance":{"id":"ind-1","type":"candle_stats"}}')
+        if parsed.path == "/api/indicators/ind-1/strategies":
+            return _Response(b"[]")
+        if parsed.path == "/api/indicators/validate-config":
+            return _Response(b'{"instance":{"id":"planned"},"outputs":{"typed":[]}}')
+        if parsed.path == "/api/indicators/":
+            return _Response(b'{"instance":{"id":"ind-2"}}')
+        if parsed.path == "/api/indicators/ind-1/enabled":
+            return _Response(b'{"instance":{"id":"ind-1","enabled":true}}')
+        if parsed.path == "/api/indicators/ind-2":
+            return _Response(b"")
+        return _Response(b'{"ok": true}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    assert main(["indicators", "clone", "ind-1", "--name", "Fast", "--param", "warmup_bars=80"]) == 0
+    assert main(["indicators", "clone", "ind-1", "--name", "Fast", "--param", "warmup_bars=80", "--apply", "--confirm"]) == 0
+    assert main(["indicators", "edit", "ind-1", "--name", "Base renamed"]) == 0
+    assert main(["indicators", "edit", "ind-1", "--name", "Base renamed", "--apply", "--confirm"]) == 0
+    assert main(["indicators", "on", "ind-1"]) == 0
+    assert main(["indicators", "off", "ind-1"]) == 0
+    assert main(["indicators", "rm", "ind-2", "--confirm"]) == 0
+
+    assert calls[0:2] == [
+        ("GET", "/api/indicators/ind-1", {}, None),
+        (
+            "POST",
+            "/api/indicators/validate-config",
+            {},
+            {
+                "type": "candle_stats",
+                "name": "Fast",
+                "params": {"warmup_bars": 80},
+                "dependencies": [],
+                "color": "#fff",
+                "color_palette": None,
+            },
+        ),
+    ]
+    assert ("POST", "/api/indicators/", {}, {
+        "type": "candle_stats",
+        "name": "Fast",
+        "params": {"warmup_bars": 80},
+        "dependencies": [],
+        "color": "#fff",
+        "color_palette": None,
+    }) in calls
+    assert ("PUT", "/api/indicators/ind-1", {}, {
+        "type": "candle_stats",
+        "name": "Base renamed",
+        "params": {"warmup_bars": 200},
+        "dependencies": [],
+        "color": "#fff",
+        "color_palette": None,
+    }) in calls
+    assert ("PATCH", "/api/indicators/ind-1/enabled", {}, {"enabled": True}) in calls
+    assert ("PATCH", "/api/indicators/ind-1/enabled", {}, {"enabled": False}) in calls
+    assert ("DELETE", "/api/indicators/ind-2", {}, None) in calls
+
+
 def test_data_coverage_command_uses_backend_route(monkeypatch):
     calls = []
 
@@ -577,6 +703,37 @@ def test_instruments_commands_use_backend_routes(monkeypatch):
     assert main(["instruments", "list", "--datasource", "CCXT", "--symbol", "BTC"]) == 0
     assert main(["instruments", "profile", "inst-1", "--execution-semantics", "proxy_derivative"]) == 0
     assert main(["instruments", "resolve", "--symbol", "ETH/USD", "--provider", "CCXT", "--venue", "coinbase"]) == 0
+    assert (
+        main(
+            [
+                "instruments",
+                "coverage-matrix",
+                "--start",
+                "2026-01-01T00:00:00Z",
+                "--end",
+                "2026-01-02T00:00:00Z",
+                "--timeframe",
+                "1h",
+                "--instrument-id",
+                "inst-1",
+                "--symbol",
+                "BTC/USD",
+                "--datasource",
+                "CCXT",
+                "--exchange",
+                "coinbase",
+                "--instrument-type",
+                "spot",
+                "--runtime-ready",
+                "true",
+                "--research-ready",
+                "false",
+                "--execution-semantics",
+                "proxy_derivative",
+            ]
+        )
+        == 0
+    )
 
     assert calls == [
         ("GET", "/api/instruments/", {}, None),
@@ -592,6 +749,24 @@ def test_instruments_commands_use_backend_routes(monkeypatch):
                 "provider_id": "CCXT",
                 "venue_id": "coinbase",
                 "force_refresh": False,
+            },
+        ),
+        (
+            "POST",
+            "/api/instruments/coverage-matrix",
+            {},
+            {
+                "start": "2026-01-01T00:00:00Z",
+                "end": "2026-01-02T00:00:00Z",
+                "timeframe": "1h",
+                "instrument_ids": ["inst-1"],
+                "symbol": "BTC/USD",
+                "datasource": "CCXT",
+                "exchange": "coinbase",
+                "instrument_type": "spot",
+                "runtime_ready": True,
+                "research_ready": False,
+                "execution_semantics": "proxy_derivative",
             },
         ),
     ]
@@ -660,20 +835,33 @@ def test_experiments_prepare_instrument_matrix_creates_solo_bots_and_plan(tmp_pa
                             "atm_template_id": "atm-1",
                             "risk_config": {"max_risk": 0.01},
                         },
-                        "bindings": {"indicator_ids": ["ind-1"]},
-                        "decision": {
-                            "rules": [
-                                {
-                                    "id": "rule-1",
-                                    "name": "Long",
-                                    "intent": "enter_long",
-                                    "priority": 1,
-                                    "trigger": {"type": "always"},
-                                    "guards": [],
-                                    "enabled": True,
-                                }
-                            ]
-                        },
+                    }
+                ).encode("utf-8")
+            )
+        if path == "/api/strategies/strategy-source/bindings":
+            return _Response(json.dumps({"bindings": {"indicator_ids": ["ind-1"]}}).encode("utf-8"))
+        if path == "/api/strategies/strategy-source/rules":
+            return _Response(
+                json.dumps(
+                    {
+                        "rules": [
+                            {
+                                "id": "rule-1",
+                                "name": "Long",
+                                "intent": "enter_long",
+                                "priority": 1,
+                                "trigger": {"type": "always"},
+                                "guards": [],
+                                "enabled": True,
+                            }
+                        ]
+                    }
+                ).encode("utf-8")
+            )
+        if path == "/api/strategies/strategy-source/variants":
+            return _Response(
+                json.dumps(
+                    {
                         "variants": [
                             {
                                 "id": "variant-source-default",
@@ -683,7 +871,7 @@ def test_experiments_prepare_instrument_matrix_creates_solo_bots_and_plan(tmp_pa
                                 "output_filters": [],
                                 "is_default": True,
                             }
-                        ],
+                        ]
                     }
                 ).encode("utf-8")
             )
@@ -712,7 +900,23 @@ def test_experiments_prepare_instrument_matrix_creates_solo_bots_and_plan(tmp_pa
                 json.dumps(
                     {
                         "strategy": {"id": strategy_id, "name": body["name"], "timeframe": body["timeframe"]},
-                        "variants": [{"id": f"{strategy_id}-default", "name": "default", "is_default": True}],
+                    }
+                ).encode("utf-8")
+            )
+        if path.startswith("/api/strategies/") and path.endswith("/variants") and request.get_method() == "GET":
+            strategy_id = path.split("/")[3]
+            return _Response(
+                json.dumps(
+                    {
+                        "variants": [
+                            {
+                                "id": f"{strategy_id}-default",
+                                "strategy_id": strategy_id,
+                                "name": "default",
+                                "output_filters": [],
+                                "is_default": True,
+                            }
+                        ]
                     }
                 ).encode("utf-8")
             )

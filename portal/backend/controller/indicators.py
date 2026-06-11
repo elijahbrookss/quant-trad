@@ -40,9 +40,9 @@ from portal.backend.service.indicators.indicator_service.runtime_contract import
     assert_engine_signal_runtime_path,
 )
 from portal.backend.service.indicators.signal_payload_filtering import (
-    enabled_signal_output_names_from_meta,
     filter_signal_payload,
-    normalise_enabled_event_keys,
+    normalise_signal_event_keys,
+    normalise_signal_output_names,
 )
 
 router = APIRouter()
@@ -67,7 +67,6 @@ def _indicator_instance_section(meta: Dict[str, Any]) -> Dict[str, Any]:
         "color_palette": meta.get("color_palette"),
         "datasource": meta.get("datasource"),
         "exchange": meta.get("exchange"),
-        "output_prefs": dict(meta.get("output_prefs") or {}),
     }
 
 
@@ -203,7 +202,6 @@ class IndicatorInstanceIn(BaseModel):
     name: Optional[str] = None
     params: Dict[str, Any]
     dependencies: List[Dict[str, Any]] = Field(default_factory=list)
-    output_prefs: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     color: Optional[str] = None
     color_palette: Optional[str] = None
 
@@ -220,7 +218,6 @@ class IndicatorInstanceOut(BaseModel):
     color_palettes: Optional[List[Dict[str, Any]]] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
-    output_prefs: Optional[Dict[str, Dict[str, Any]]] = None
     typed_outputs: Optional[List[Dict[str, Any]]] = None
     overlay_outputs: Optional[List[Dict[str, Any]]] = None
     runtime_supported: Optional[bool] = None
@@ -325,7 +322,6 @@ async def create(body: IndicatorInstanceIn):
             dependencies=list(body.dependencies or []),
             color=body.color,
             color_palette=body.color_palette,
-            output_prefs=dict(body.output_prefs or {}),
         )
         return _indicator_read(meta)
     except ValueError as e:
@@ -344,7 +340,6 @@ async def validate_config(body: IndicatorInstanceIn):
             dependencies=list(body.dependencies or []),
             color=body.color,
             color_palette=body.color_palette,
-            output_prefs=dict(body.output_prefs or {}),
         )
         return _indicator_read(meta)
     except ValueError as e:
@@ -359,10 +354,9 @@ async def update(inst_id: str, body: IndicatorInstanceIn):
         color_provided = "color" in body.__fields_set__
         color_palette_provided = "color_palette" in body.__fields_set__
         logger.info(
-            "event=indicator_update_request indicator_id=%s indicator_type=%s output_prefs=%s dependency_count=%s",
+            "event=indicator_update_request indicator_id=%s indicator_type=%s dependency_count=%s",
             inst_id,
             body.type,
-            dict(body.output_prefs or {}),
             len(list(body.dependencies or [])),
         )
         updated = update_instance(
@@ -371,20 +365,17 @@ async def update(inst_id: str, body: IndicatorInstanceIn):
             dict(body.params),
             body.name,
             dependencies=list(body.dependencies or []),
-            output_prefs=dict(body.output_prefs or {}),
             color=body.color,
             color_provided=color_provided,
             color_palette=body.color_palette,
             color_palette_provided=color_palette_provided,
         )
         logger.info(
-            "event=indicator_update_response indicator_id=%s output_prefs=%s typed_outputs=%s",
+            "event=indicator_update_response indicator_id=%s typed_outputs=%s",
             inst_id,
-            dict(updated.get("output_prefs") or {}),
             [
                 {
                     "name": output.get("name"),
-                    "enabled": output.get("enabled", True),
                 }
                 for output in (updated.get("typed_outputs") or [])
                 if output.get("type") == "signal"
@@ -810,11 +801,10 @@ async def signals(inst_id: str, req: SignalRequest):
         req.instrument_id,
     )
     try:
-        meta = get_instance_meta(inst_id)
-        enabled_output_names = enabled_signal_output_names_from_meta(meta)
         effective_config = dict(req.config or {})
-        effective_config["enabled_signal_outputs"] = sorted(enabled_output_names)
-        enabled_event_keys = normalise_enabled_event_keys(effective_config)
+        output_names = normalise_signal_output_names(effective_config)
+        event_keys = normalise_signal_event_keys(effective_config)
+        meta = get_instance_meta(inst_id)
         request_fingerprint = quantlab_request_fingerprint(
             job_type=JOB_TYPE_SIGNALS,
             indicator_id=inst_id,
@@ -850,8 +840,8 @@ async def signals(inst_id: str, req: SignalRequest):
             if isinstance(payload, dict):
                 payload = filter_signal_payload(
                     payload,
-                    enabled_output_names=enabled_output_names,
-                    enabled_event_keys=enabled_event_keys,
+                    output_names=output_names,
+                    event_keys=event_keys,
                 )
                 assert_engine_signal_runtime_path(
                     payload,
@@ -885,8 +875,8 @@ async def signals(inst_id: str, req: SignalRequest):
         if isinstance(payload, dict):
             payload = filter_signal_payload(
                 payload,
-                enabled_output_names=enabled_output_names,
-                enabled_event_keys=enabled_event_keys,
+                output_names=output_names,
+                event_keys=event_keys,
             )
             assert_engine_signal_runtime_path(
                 payload,

@@ -191,12 +191,11 @@ def create_instance(
     dependencies: Optional[Sequence[Dict[str, Any]]] = None,
     color: Optional[str] = None,
     color_palette: Optional[str] = None,
-    output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
     *,
     ctx: IndicatorServiceContext = _context,
 ) -> Dict[str, Any]:
     creator = IndicatorInstanceCreator(ctx)
-    return creator.create(type_str, name, params, dependencies, color, color_palette, output_prefs)
+    return creator.create(type_str, name, params, dependencies, color, color_palette)
 
 
 def validate_instance_config(
@@ -206,12 +205,11 @@ def validate_instance_config(
     dependencies: Optional[Sequence[Dict[str, Any]]] = None,
     color: Optional[str] = None,
     color_palette: Optional[str] = None,
-    output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
     *,
     ctx: IndicatorServiceContext = _context,
 ) -> Dict[str, Any]:
     creator = IndicatorInstanceCreator(ctx)
-    return creator.validate(type_str, name, params, dependencies, color, color_palette, output_prefs)
+    return creator.validate(type_str, name, params, dependencies, color, color_palette)
 
 
 def update_instance(
@@ -220,7 +218,6 @@ def update_instance(
     params: Dict[str, Any],
     name: Optional[str],
     dependencies: Optional[Sequence[Dict[str, Any]]] = None,
-    output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
     *,
     color: Optional[str] = None,
     color_provided: bool = False,
@@ -235,7 +232,6 @@ def update_instance(
         params,
         name,
         dependencies,
-        output_prefs,
         color=color,
         color_provided=color_provided,
         color_palette=color_palette,
@@ -598,9 +594,8 @@ class IndicatorService:
         dependencies: Optional[Sequence[Dict[str, Any]]] = None,
         color: Optional[str] = None,
         color_palette: Optional[str] = None,
-        output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        return create_instance(type_str, name, params, dependencies, color, color_palette, output_prefs, ctx=self._ctx)
+        return create_instance(type_str, name, params, dependencies, color, color_palette, ctx=self._ctx)
 
     def validate_instance_config(
         self,
@@ -610,7 +605,6 @@ class IndicatorService:
         dependencies: Optional[Sequence[Dict[str, Any]]] = None,
         color: Optional[str] = None,
         color_palette: Optional[str] = None,
-        output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         return validate_instance_config(
             type_str,
@@ -619,7 +613,6 @@ class IndicatorService:
             dependencies,
             color,
             color_palette,
-            output_prefs,
             ctx=self._ctx,
         )
 
@@ -630,7 +623,6 @@ class IndicatorService:
         params: Dict[str, Any],
         name: Optional[str],
         dependencies: Optional[Sequence[Dict[str, Any]]] = None,
-        output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
         *,
         color: Optional[str] = None,
         color_provided: bool = False,
@@ -643,7 +635,6 @@ class IndicatorService:
             params,
             name,
             dependencies,
-            output_prefs,
             color=color,
             color_provided=color_provided,
             color_palette=color_palette,

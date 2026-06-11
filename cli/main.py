@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from .api import ApiClient, ApiError, filename_from_content_disposition
 from .audit import CliAuditLog, experiment_dir, report_export_dir, safe_path_part
@@ -570,6 +571,45 @@ def _cmd_strategies_get(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_strategies_bindings(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/strategies/{args.strategy_id}/bindings"))
+    return 0
+
+
+def _cmd_strategies_rules(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/strategies/{args.strategy_id}/rules"))
+    return 0
+
+
+def _variant_query(args: argparse.Namespace) -> str:
+    params: list[str] = []
+    if getattr(args, "variant_id", None):
+        params.append(f"variant_id={quote(str(args.variant_id), safe='')}")
+    if getattr(args, "variant_name", None):
+        params.append(f"variant_name={quote(str(args.variant_name), safe='')}")
+    return f"?{'&'.join(params)}" if params else ""
+
+
+def _cmd_strategies_effective(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/strategies/{args.strategy_id}/effective{_variant_query(args)}",
+        )
+    )
+    return 0
+
+
+def _cmd_strategies_decision_inputs(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/strategies/{args.strategy_id}/decision-inputs{_variant_query(args)}",
+        )
+    )
+    return 0
+
+
 def _cmd_strategies_compile(args: argparse.Namespace) -> int:
     payload: dict[str, Any] = {}
     if args.variant_id:
@@ -640,8 +680,9 @@ def _cmd_variants_delete(args: argparse.Namespace) -> int:
     return 0
 
 
-def _indicator_payload_from_args(args: argparse.Namespace) -> dict[str, Any]:
-    payload = _read_json_object_arg(getattr(args, "payload_json", None), label="--payload-json")
+def _indicator_payload_from_args(args: argparse.Namespace, base: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = dict(base or {})
+    payload.update(_read_json_object_arg(getattr(args, "payload_json", None), label="--payload-json"))
     if getattr(args, "type", None) is not None:
         payload["type"] = args.type
     if getattr(args, "name", None) is not None:
@@ -667,8 +708,6 @@ def _indicator_payload_from_args(args: argparse.Namespace) -> dict[str, Any]:
         if not isinstance(dependencies, list):
             raise ValueError("--dependencies-json must be a JSON array")
         payload["dependencies"] = dependencies
-    if getattr(args, "output_prefs_json", None) is not None:
-        payload["output_prefs"] = _read_json_object_arg(args.output_prefs_json, label="--output-prefs-json")
     for key in ("color", "color_palette"):
         value = getattr(args, key, None)
         if value is not None:
@@ -734,6 +773,105 @@ def _cmd_indicators_create(args: argparse.Namespace) -> int:
     if not bool(args.confirm):
         raise ValueError("create indicator requires --confirm when --apply is set")
     _print_json(_client(args).request_json("POST", "/api/indicators/", payload=payload))
+    return 0
+
+
+def _indicator_payload_from_read(read_payload: dict[str, Any]) -> dict[str, Any]:
+    instance = read_payload.get("instance") if isinstance(read_payload.get("instance"), dict) else {}
+    return {
+        "type": instance.get("type"),
+        "name": instance.get("name"),
+        "params": dict(instance.get("params") or {}),
+        "dependencies": list(instance.get("dependencies") or []),
+        "color": instance.get("color"),
+        "color_palette": instance.get("color_palette"),
+    }
+
+
+def _indicator_material_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": payload.get("type"),
+        "params": dict(payload.get("params") or {}),
+        "dependencies": list(payload.get("dependencies") or []),
+    }
+
+
+def _cmd_indicators_clone(args: argparse.Namespace) -> int:
+    client = _client(args)
+    source = client.request_json("GET", f"/api/indicators/{args.indicator_id}")
+    base = _indicator_payload_from_read(source)
+    base["name"] = args.name or f"{base.get('name') or base.get('type')} Copy"
+    payload = _indicator_payload_from_args(args, base=base)
+    if payload.get("type") != base.get("type"):
+        raise ValueError("indicator clone cannot change type; create a new indicator instead")
+    normalized = client.request_json("POST", "/api/indicators/validate-config", payload=payload)
+    if not bool(args.apply):
+        _print_json(
+            {
+                "schema_version": "qt_planned_mutation.v1",
+                "operation": "clone_indicator",
+                "apply": False,
+                "source_indicator_id": args.indicator_id,
+                "payload": payload,
+                "normalized": normalized,
+            }
+        )
+        return 0
+    if not bool(args.confirm):
+        raise ValueError("clone indicator requires --confirm when --apply is set")
+    _print_json(client.request_json("POST", "/api/indicators/", payload=payload))
+    return 0
+
+
+def _cmd_indicators_edit(args: argparse.Namespace) -> int:
+    client = _client(args)
+    current = client.request_json("GET", f"/api/indicators/{args.indicator_id}")
+    before = _indicator_payload_from_read(current)
+    payload = _indicator_payload_from_args(args, base=before)
+    if payload.get("type") != before.get("type"):
+        raise ValueError("indicator type cannot be edited; create a new indicator instead")
+    normalized = client.request_json("POST", "/api/indicators/validate-config", payload=payload)
+    material_changed = _indicator_material_payload(before) != _indicator_material_payload(payload)
+    if bool(args.apply) and material_changed:
+        strategies = client.request_json("GET", f"/api/indicators/{args.indicator_id}/strategies")
+        if strategies:
+            raise ValueError("strategy-bound indicator params/dependencies cannot be edited; clone instead")
+    if not bool(args.apply):
+        _print_json(
+            {
+                "schema_version": "qt_planned_mutation.v1",
+                "operation": "edit_indicator",
+                "apply": False,
+                "indicator_id": args.indicator_id,
+                "material_changed": material_changed,
+                "before": before,
+                "payload": payload,
+                "normalized": normalized,
+            }
+        )
+        return 0
+    if not bool(args.confirm):
+        raise ValueError("edit indicator requires --confirm when --apply is set")
+    _print_json(client.request_json("PUT", f"/api/indicators/{args.indicator_id}", payload=payload))
+    return 0
+
+
+def _cmd_indicators_rm(args: argparse.Namespace) -> int:
+    if not bool(args.confirm):
+        raise ValueError("rm indicator requires --confirm")
+    _client(args).request_bytes("DELETE", f"/api/indicators/{args.indicator_id}")
+    _print_json({"deleted": True, "indicator_id": args.indicator_id})
+    return 0
+
+
+def _cmd_indicators_toggle(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "PATCH",
+            f"/api/indicators/{args.indicator_id}/enabled",
+            payload={"enabled": bool(args.enabled)},
+        )
+    )
     return 0
 
 
@@ -1031,24 +1169,64 @@ def _cmd_research_links_list(args: argparse.Namespace) -> int:
     return 0
 
 
-def _research_check_payload(args: argparse.Namespace) -> dict[str, Any]:
-    payload = _read_json_object_arg(getattr(args, "request_json", None), label="--request-json")
-    for key in ("title", "body", "observation_id", "check_family"):
-        value = getattr(args, key, None)
-        if value is not None:
-            payload[key] = value
-    scope = dict(payload.get("scope") or {})
+def _research_scope_from_args(args: argparse.Namespace, *, include_indicator: bool = False, include_run: bool = False) -> dict[str, Any]:
+    scope: dict[str, Any] = {}
     for key in ("instrument_id", "symbol", "datasource", "exchange", "timeframe", "start", "end"):
         value = getattr(args, key, None)
         if value is not None:
             scope[key] = value
-    if scope:
-        payload["scope"] = scope
-    if getattr(args, "detector_json", None):
-        payload["detector"] = _read_json_object_arg(args.detector_json, label="--detector-json")
-    elif getattr(args, "field", None):
-        detector: dict[str, Any] = {
-            "type": "candle_condition",
+    if include_indicator:
+        scope["indicator_id"] = args.indicator_id
+    if include_run:
+        scope["run_id"] = args.run_id
+    return scope
+
+
+def _research_outcomes_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    outcomes: dict[str, Any] = {}
+    if getattr(args, "forward_bars", None):
+        outcomes["forward_bars"] = [int(item.strip()) for item in str(args.forward_bars).split(",") if item.strip()]
+    if getattr(args, "direction", None):
+        outcomes["direction"] = args.direction
+    if getattr(args, "min_sample_count", None) is not None:
+        outcomes["min_sample_count"] = args.min_sample_count
+    if getattr(args, "min_edge_pct", None) is not None:
+        outcomes["min_edge_pct"] = args.min_edge_pct
+    if getattr(args, "bucket_by", None):
+        outcomes["bucket_by"] = [item.strip() for item in str(args.bucket_by).split(",") if item.strip()]
+    if getattr(args, "max_examples", None) is not None:
+        outcomes["max_examples"] = args.max_examples
+    return outcomes
+
+
+def _research_check_request_base(args: argparse.Namespace, *, title: str, check_family: str) -> dict[str, Any]:
+    payload = _read_json_object_arg(getattr(args, "request_json", None), label="--request-json")
+    payload.setdefault("title", title)
+    payload["check_family"] = check_family
+    if getattr(args, "title", None):
+        payload["title"] = args.title
+    if getattr(args, "body", None):
+        payload["body"] = args.body
+    if getattr(args, "observation_id", None):
+        payload["observation_id"] = args.observation_id
+    tags = list(getattr(args, "tag", None) or [])
+    if tags:
+        payload["tags"] = tags
+    return payload
+
+
+def _post_research_check(args: argparse.Namespace, payload: dict[str, Any]) -> int:
+    _print_json(_client(args).request_json("POST", "/api/research/checks/run", payload=payload))
+    return 0
+
+
+def _cmd_research_check_raw(args: argparse.Namespace) -> int:
+    detector = _read_json_object_arg(getattr(args, "detector_json", None), label="--detector-json")
+    if not detector:
+        if not getattr(args, "field", None):
+            raise ValueError("raw check requires --field or --detector-json")
+        detector = {
+            "type": "raw_condition",
             "field": args.field,
             "operator": args.operator or "lt",
         }
@@ -1058,29 +1236,128 @@ def _research_check_payload(args: argparse.Namespace) -> dict[str, Any]:
             detector["value"] = _json_value(str(args.value))
         else:
             raise ValueError("--value or --value-field is required with --field")
-        payload["detector"] = detector
-    outcomes = dict(payload.get("outcomes") or {})
-    if getattr(args, "forward_bars", None):
-        outcomes["forward_bars"] = [int(item.strip()) for item in str(args.forward_bars).split(",") if item.strip()]
-    if getattr(args, "direction", None):
-        outcomes["direction"] = args.direction
-    if getattr(args, "min_sample_count", None) is not None:
-        outcomes["min_sample_count"] = args.min_sample_count
-    if getattr(args, "min_edge_pct", None) is not None:
-        outcomes["min_edge_pct"] = args.min_edge_pct
+    payload = _research_check_request_base(
+        args,
+        title=f"Raw {detector.get('field')} {detector.get('operator', 'eq')} check",
+        check_family="raw_forward_outcome",
+    )
+    payload["scope"] = {**dict(payload.get("scope") or {}), **_research_scope_from_args(args)}
+    payload["detector"] = detector
+    outcomes = {**dict(payload.get("outcomes") or {}), **_research_outcomes_from_args(args)}
     if outcomes:
         payload["outcomes"] = outcomes
-    tags = list(getattr(args, "tag", None) or [])
-    if tags:
-        payload["tags"] = tags
-    for required in ("title", "scope", "detector"):
-        if not payload.get(required):
-            raise ValueError(f"{required} is required")
-    return payload
+    return _post_research_check(args, payload)
 
 
-def _cmd_research_checks_run(args: argparse.Namespace) -> int:
-    _print_json(_client(args).request_json("POST", "/api/research/checks/run", payload=_research_check_payload(args)))
+def _cmd_research_check_signal(args: argparse.Namespace) -> int:
+    detector = _read_json_object_arg(getattr(args, "detector_json", None), label="--detector-json")
+    if not detector:
+        detector = {"type": "run_signal_match"}
+        for attr, key in (
+            ("output_name", "output_name"),
+            ("event_key", "event_key"),
+            ("symbol", "symbol"),
+            ("direction", "direction"),
+        ):
+            value = getattr(args, attr, None)
+            if value is not None:
+                detector[key] = value
+        if len(detector) == 1:
+            raise ValueError("signal check requires --output-name, --event-key, --symbol, --direction, or --detector-json")
+    payload = _research_check_request_base(
+        args,
+        title=f"Run signal check: {detector.get('output_name') or detector.get('event_key') or args.run_id}",
+        check_family="run_signal_summary",
+    )
+    payload["scope"] = {**dict(payload.get("scope") or {}), **_research_scope_from_args(args, include_run=True)}
+    payload["detector"] = detector
+    outcomes = {**dict(payload.get("outcomes") or {}), **_research_outcomes_from_args(args)}
+    if outcomes:
+        payload["outcomes"] = outcomes
+    return _post_research_check(args, payload)
+
+
+def _cmd_research_check_decision(args: argparse.Namespace) -> int:
+    detector = _read_json_object_arg(getattr(args, "detector_json", None), label="--detector-json")
+    if not detector:
+        detector = {"type": "run_decision_match"}
+        if getattr(args, "state", None):
+            detector["decision_state"] = args.state
+        if getattr(args, "reason_code", None):
+            detector["reason_code"] = args.reason_code
+        if getattr(args, "symbol", None):
+            detector["symbol"] = args.symbol
+        if len(detector) == 1:
+            raise ValueError("decision check requires --state, --reason-code, --symbol, or --detector-json")
+    payload = _research_check_request_base(
+        args,
+        title=f"Run decision check: {detector.get('decision_state') or detector.get('reason_code') or args.run_id}",
+        check_family="run_decision_trade_comparison",
+    )
+    payload["scope"] = {**dict(payload.get("scope") or {}), **_research_scope_from_args(args, include_run=True)}
+    payload["detector"] = detector
+    outcomes = {**dict(payload.get("outcomes") or {}), **_research_outcomes_from_args(args)}
+    if outcomes:
+        payload["outcomes"] = outcomes
+    return _post_research_check(args, payload)
+
+
+def _cmd_research_check_indicator(args: argparse.Namespace) -> int:
+    detector = _read_json_object_arg(getattr(args, "detector_json", None), label="--detector-json")
+    if not detector:
+        if not getattr(args, "output", None):
+            raise ValueError("indicator check requires --output or --detector-json")
+        if getattr(args, "field", None):
+            detector = {
+                "type": "indicator_output_match",
+                "output_name": args.output,
+                "field": args.field,
+                "operator": args.operator or "eq",
+            }
+            if getattr(args, "value_field", None):
+                detector["value_field"] = args.value_field
+            elif getattr(args, "value", None) is not None:
+                detector["value"] = _json_value(str(args.value))
+            else:
+                raise ValueError("--value or --value-field is required with --field")
+        else:
+            detector = {
+                "type": "indicator_event_match",
+                "output_name": args.output,
+            }
+            if getattr(args, "event_key", None):
+                detector["event_key"] = args.event_key
+    payload = _research_check_request_base(
+        args,
+        title=f"Indicator check: {detector.get('output_name') or args.indicator_id}",
+        check_family="indicator_forward_outcome",
+    )
+    payload["scope"] = {**dict(payload.get("scope") or {}), **_research_scope_from_args(args, include_indicator=True)}
+    payload["detector"] = detector
+    outcomes = {**dict(payload.get("outcomes") or {}), **_research_outcomes_from_args(args)}
+    if outcomes:
+        payload["outcomes"] = outcomes
+    return _post_research_check(args, payload)
+
+
+def _cmd_research_trail(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/research/items/{args.item_id}/trail"))
+    return 0
+
+
+def _cmd_research_run(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/research/runs/{args.run_id}/evidence"))
+    return 0
+
+
+def _cmd_research_compare(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/research/checks/compare",
+            params={"left_check_id": args.left_check_id, "right_check_id": args.right_check_id},
+        )
+    )
     return 0
 
 
@@ -1135,6 +1412,35 @@ def _cmd_instruments_health(args: argparse.Namespace) -> int:
             params={"datasource": args.datasource, "exchange": args.exchange},
         )
     )
+    return 0
+
+
+def _optional_bool_arg(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y"}:
+        return True
+    if normalized in {"0", "false", "no", "n"}:
+        return False
+    raise ValueError(f"invalid boolean value: {value}")
+
+
+def _cmd_instruments_coverage_matrix(args: argparse.Namespace) -> int:
+    payload = {
+        "start": args.start,
+        "end": args.end,
+        "timeframe": args.timeframe,
+        "instrument_ids": list(args.instrument_id or []),
+        "symbol": args.symbol,
+        "datasource": args.datasource,
+        "exchange": args.exchange,
+        "instrument_type": args.instrument_type,
+        "runtime_ready": _optional_bool_arg(args.runtime_ready),
+        "research_ready": _optional_bool_arg(args.research_ready),
+        "execution_semantics": args.execution_semantics,
+    }
+    _print_json(_client(args).request_json("POST", "/api/instruments/coverage-matrix", payload=payload))
     return 0
 
 
@@ -1712,9 +2018,28 @@ def build_parser() -> argparse.ArgumentParser:
     strategies_sub = strategies.add_subparsers(dest="strategies_command", required=True)
     strategies_list = strategies_sub.add_parser("list", help="List strategies.")
     strategies_list.set_defaults(func=_cmd_strategies_list)
-    strategies_get = strategies_sub.add_parser("get", help="Get a strategy detail payload.")
+    strategies_get = strategies_sub.add_parser("get", help="Get a strategy definition payload.")
     strategies_get.add_argument("strategy_id")
     strategies_get.set_defaults(func=_cmd_strategies_get)
+    strategies_bindings = strategies_sub.add_parser("bindings", help="Get strategy instrument and indicator bindings.")
+    strategies_bindings.add_argument("strategy_id")
+    strategies_bindings.set_defaults(func=_cmd_strategies_bindings)
+    strategies_rules = strategies_sub.add_parser("rules", help="Get stored strategy rules.")
+    strategies_rules.add_argument("strategy_id")
+    strategies_rules.set_defaults(func=_cmd_strategies_rules)
+    strategies_effective = strategies_sub.add_parser("effective", help="Get the runtime-effective strategy contract.")
+    strategies_effective.add_argument("strategy_id")
+    strategies_effective.add_argument("--variant-id")
+    strategies_effective.add_argument("--variant-name")
+    strategies_effective.set_defaults(func=_cmd_strategies_effective)
+    strategies_decision_inputs = strategies_sub.add_parser(
+        "decision-inputs",
+        help="Get attached indicator decision inputs and effective rule references.",
+    )
+    strategies_decision_inputs.add_argument("strategy_id")
+    strategies_decision_inputs.add_argument("--variant-id")
+    strategies_decision_inputs.add_argument("--variant-name")
+    strategies_decision_inputs.set_defaults(func=_cmd_strategies_decision_inputs)
     strategies_compile = strategies_sub.add_parser("compile", help="Compile a strategy with the default or selected variant.")
     strategies_compile.add_argument("strategy_id")
     strategies_compile.add_argument("--variant-id")
@@ -1797,7 +2122,6 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--params-json", help="Indicator params JSON object path, inline object, or '-'.")
         command.add_argument("--param", action="append", default=[], help="Indicator param as key=value. JSON scalar values are accepted.")
         command.add_argument("--dependencies-json", help="Indicator dependencies JSON array path, inline array, or '-'.")
-        command.add_argument("--output-prefs-json", help="Indicator output_prefs JSON object path, inline object, or '-'.")
         command.add_argument("--color")
         command.add_argument("--color-palette", dest="color_palette")
 
@@ -1812,6 +2136,28 @@ def build_parser() -> argparse.ArgumentParser:
     indicators_create.add_argument("--apply", action="store_true")
     indicators_create.add_argument("--confirm", action="store_true")
     indicators_create.set_defaults(func=_cmd_indicators_create)
+    indicators_clone = indicators_sub.add_parser("clone", help="Plan or apply a cloned indicator instance.")
+    indicators_clone.add_argument("indicator_id")
+    add_indicator_payload_args(indicators_clone)
+    indicators_clone.add_argument("--apply", action="store_true")
+    indicators_clone.add_argument("--confirm", action="store_true")
+    indicators_clone.set_defaults(func=_cmd_indicators_clone)
+    indicators_edit = indicators_sub.add_parser("edit", help="Plan or apply an indicator edit.")
+    indicators_edit.add_argument("indicator_id")
+    add_indicator_payload_args(indicators_edit)
+    indicators_edit.add_argument("--apply", action="store_true")
+    indicators_edit.add_argument("--confirm", action="store_true")
+    indicators_edit.set_defaults(func=_cmd_indicators_edit)
+    indicators_rm = indicators_sub.add_parser("rm", help="Remove an indicator instance.")
+    indicators_rm.add_argument("indicator_id")
+    indicators_rm.add_argument("--confirm", action="store_true")
+    indicators_rm.set_defaults(func=_cmd_indicators_rm)
+    indicators_on = indicators_sub.add_parser("on", help="Enable an indicator instance.")
+    indicators_on.add_argument("indicator_id")
+    indicators_on.set_defaults(func=_cmd_indicators_toggle, enabled=True)
+    indicators_off = indicators_sub.add_parser("off", help="Disable an indicator instance.")
+    indicators_off.add_argument("indicator_id")
+    indicators_off.set_defaults(func=_cmd_indicators_toggle, enabled=False)
 
     def add_indicator_window_args(command: argparse.ArgumentParser) -> None:
         command.add_argument("indicator_id")
@@ -1993,32 +2339,85 @@ def build_parser() -> argparse.ArgumentParser:
     research_links_list.add_argument("--outbound-only", action="store_false", dest="include_inbound")
     research_links_list.set_defaults(func=_cmd_research_links_list)
 
-    research_checks = research_sub.add_parser("checks", help="Lightweight analytical research checks.")
-    research_checks_sub = research_checks.add_subparsers(dest="research_checks_command", required=True)
-    research_checks_run = research_checks_sub.add_parser("run", help="Run and persist a lightweight historical check.")
-    research_checks_run.add_argument("--request-json", help="research_check_request.v1 JSON object path, inline object, or '-'.")
-    research_checks_run.add_argument("--title")
-    research_checks_run.add_argument("--body")
-    research_checks_run.add_argument("--observation-id")
-    research_checks_run.add_argument("--check-family")
-    research_checks_run.add_argument("--instrument-id")
-    research_checks_run.add_argument("--symbol")
-    research_checks_run.add_argument("--datasource")
-    research_checks_run.add_argument("--exchange")
-    research_checks_run.add_argument("--timeframe")
-    research_checks_run.add_argument("--start")
-    research_checks_run.add_argument("--end")
-    research_checks_run.add_argument("--detector-json", help="Detector JSON object path, inline object, or '-'.")
-    research_checks_run.add_argument("--field", help="Candle detector field, e.g. range_pct, body_pct, return_pct.")
-    research_checks_run.add_argument("--operator", default="lt", help="Detector operator, e.g. lt, lte, gt, gte, eq, between.")
-    research_checks_run.add_argument("--value", help="Detector comparison value. JSON scalar/list values are accepted.")
-    research_checks_run.add_argument("--value-field", help="Compare detector field to another candle field.")
-    research_checks_run.add_argument("--forward-bars")
-    research_checks_run.add_argument("--direction", choices=["long", "short"])
-    research_checks_run.add_argument("--min-sample-count", type=int)
-    research_checks_run.add_argument("--min-edge-pct", type=float)
-    research_checks_run.add_argument("--tag", action="append", default=[])
-    research_checks_run.set_defaults(func=_cmd_research_checks_run)
+    def add_research_check_base_args(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--request-json", help="research_check_request.v1 JSON object path, inline object, or '-'.")
+        command.add_argument("--title")
+        command.add_argument("--body")
+        command.add_argument("--observation-id")
+        command.add_argument("--detector-json", help="Detector JSON object path, inline object, or '-'.")
+        command.add_argument("--min-sample-count", type=int)
+        command.add_argument("--bucket-by", help="Comma-separated bucket fields.")
+        command.add_argument("--max-examples", type=int)
+        command.add_argument("--tag", action="append", default=[])
+
+    def add_research_window_args(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--instrument-id")
+        command.add_argument("--symbol")
+        command.add_argument("--datasource")
+        command.add_argument("--exchange")
+        command.add_argument("--timeframe", required=True)
+        command.add_argument("--start", required=True)
+        command.add_argument("--end", required=True)
+
+    def add_forward_outcome_args(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--forward-bars")
+        command.add_argument("--direction", choices=["long", "short"])
+        command.add_argument("--min-edge-pct", type=float)
+
+    research_check = research_sub.add_parser("check", help="Run and persist lightweight analytical checks.")
+    research_check_sub = research_check.add_subparsers(dest="research_check_command", required=True)
+    research_check_raw = research_check_sub.add_parser("raw", help="Check raw OHLCV conditions against forward outcomes.")
+    add_research_check_base_args(research_check_raw)
+    add_research_window_args(research_check_raw)
+    add_forward_outcome_args(research_check_raw)
+    research_check_raw.add_argument("--field", help="Raw field: open, high, low, close, volume, or previous_*.")
+    research_check_raw.add_argument("--operator", default="lt", help="Detector operator, e.g. lt, lte, gt, gte, eq, between.")
+    research_check_raw.add_argument("--value", help="Detector comparison value. JSON scalar/list values are accepted.")
+    research_check_raw.add_argument("--value-field", help="Compare detector field to another raw field.")
+    research_check_raw.set_defaults(func=_cmd_research_check_raw)
+
+    research_check_indicator = research_check_sub.add_parser("indicator", help="Check persisted indicator output events against forward outcomes.")
+    add_research_check_base_args(research_check_indicator)
+    add_research_window_args(research_check_indicator)
+    add_forward_outcome_args(research_check_indicator)
+    research_check_indicator.add_argument("--indicator-id", required=True)
+    research_check_indicator.add_argument("--output", help="Indicator output name.")
+    research_check_indicator.add_argument("--event-key")
+    research_check_indicator.add_argument("--field", help="Indicator output value field.")
+    research_check_indicator.add_argument("--operator", default="eq")
+    research_check_indicator.add_argument("--value")
+    research_check_indicator.add_argument("--value-field")
+    research_check_indicator.set_defaults(func=_cmd_research_check_indicator)
+
+    research_check_signal = research_check_sub.add_parser("signal", help="Check completed run signal evidence.")
+    add_research_check_base_args(research_check_signal)
+    research_check_signal.add_argument("--run-id", required=True)
+    research_check_signal.add_argument("--output-name")
+    research_check_signal.add_argument("--event-key")
+    research_check_signal.add_argument("--symbol")
+    research_check_signal.add_argument("--direction")
+    research_check_signal.set_defaults(func=_cmd_research_check_signal)
+
+    research_check_decision = research_check_sub.add_parser("decision", help="Check completed run decision/trade evidence.")
+    add_research_check_base_args(research_check_decision)
+    research_check_decision.add_argument("--run-id", required=True)
+    research_check_decision.add_argument("--state")
+    research_check_decision.add_argument("--reason-code")
+    research_check_decision.add_argument("--symbol")
+    research_check_decision.set_defaults(func=_cmd_research_check_decision)
+
+    research_trail = research_sub.add_parser("trail", help="Inspect the reasoning trail around a research item.")
+    research_trail.add_argument("item_id")
+    research_trail.set_defaults(func=_cmd_research_trail)
+
+    research_run = research_sub.add_parser("run", help="Inspect available research evidence for a completed run.")
+    research_run.add_argument("run_id")
+    research_run.set_defaults(func=_cmd_research_run)
+
+    research_compare = research_sub.add_parser("compare", help="Compare two persisted research checks.")
+    research_compare.add_argument("left_check_id")
+    research_compare.add_argument("right_check_id")
+    research_compare.set_defaults(func=_cmd_research_compare)
 
     instruments = subparsers.add_parser("instruments", help="Instrument metadata and runtime profiles.")
     instruments_sub = instruments.add_subparsers(dest="instruments_command", required=True)
@@ -2046,6 +2445,22 @@ def build_parser() -> argparse.ArgumentParser:
     instruments_health.add_argument("--datasource")
     instruments_health.add_argument("--exchange")
     instruments_health.set_defaults(func=_cmd_instruments_health)
+    instruments_coverage_matrix = instruments_sub.add_parser(
+        "coverage-matrix",
+        help="Check candle coverage across a filtered instrument set.",
+    )
+    instruments_coverage_matrix.add_argument("--start", required=True)
+    instruments_coverage_matrix.add_argument("--end", required=True)
+    instruments_coverage_matrix.add_argument("--timeframe", required=True)
+    instruments_coverage_matrix.add_argument("--instrument-id", action="append", default=[])
+    instruments_coverage_matrix.add_argument("--symbol")
+    instruments_coverage_matrix.add_argument("--datasource")
+    instruments_coverage_matrix.add_argument("--exchange")
+    instruments_coverage_matrix.add_argument("--instrument-type")
+    instruments_coverage_matrix.add_argument("--runtime-ready", choices=["true", "false", "yes", "no", "1", "0"])
+    instruments_coverage_matrix.add_argument("--research-ready", choices=["true", "false", "yes", "no", "1", "0"])
+    instruments_coverage_matrix.add_argument("--execution-semantics", choices=["spot", "derivative", "proxy_derivative"])
+    instruments_coverage_matrix.set_defaults(func=_cmd_instruments_coverage_matrix)
 
     providers = subparsers.add_parser("providers", help="Provider metadata and stream checks.")
     providers_sub = providers.add_subparsers(dest="providers_command", required=True)

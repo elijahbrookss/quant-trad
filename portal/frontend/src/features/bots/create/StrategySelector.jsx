@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Search, Check } from 'lucide-react'
-import { symbolsFromInstrumentSlots } from '../../../utils/instrumentSymbols.js'
+import { symbolsFromStrategy } from '../../../utils/instrumentSymbols.js'
 
 /**
  * Get base currency from instrument metadata or truncate symbol
@@ -34,7 +34,7 @@ export function StrategySelector({
     const needle = query.trim().toLowerCase()
     if (!needle) return strategies
     return strategies.filter((strategy) => {
-      const symbols = symbolsFromInstrumentSlots(strategy.instrument_slots).join(', ')
+      const symbols = symbolsFromStrategy(strategy).join(', ')
       const haystack = [strategy.name, strategy.timeframe, strategy.exchange, strategy.datasource, symbols]
         .filter(Boolean)
         .join(' ')
@@ -73,7 +73,7 @@ export function StrategySelector({
           ) : (
             filteredStrategies.map((strategy) => {
               const checked = selectedIds.includes(strategy.id)
-              const rawSymbols = symbolsFromInstrumentSlots(strategy.instrument_slots)
+              const rawSymbols = symbolsFromStrategy(strategy)
               const displaySymbols = rawSymbols.slice(0, 3).map(s => getSymbolDisplay(s, strategy)).join(', ')
               const extraCount = rawSymbols.length - 3
               return (
@@ -137,7 +137,7 @@ export function StrategySelector({
         ) : (
           filteredStrategies.map((strategy) => {
             const checked = selectedIds.includes(strategy.id)
-            const rawSymbols = symbolsFromInstrumentSlots(strategy.instrument_slots)
+            const rawSymbols = symbolsFromStrategy(strategy)
             const displaySymbols = rawSymbols.slice(0, 3).map(s => getSymbolDisplay(s, strategy)).join(', ')
             const extraCount = rawSymbols.length - 3
             return (

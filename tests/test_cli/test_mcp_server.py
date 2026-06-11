@@ -29,6 +29,18 @@ class _FakeClient:
             return {"items": [{"run_id": "run-1"}], "limit": params["limit"]}
         if method == "GET" and path == "/api/strategies/":
             return {"items": [{"id": "strategy-1"}]}
+        if method == "GET" and path == "/api/strategies/strategy-1":
+            return {"schema_version": "strategy_definition.v1", "strategy": {"id": "strategy-1"}}
+        if method == "GET" and path == "/api/strategies/strategy-1/bindings":
+            return {"schema_version": "strategy_bindings.v1", "bindings": {"indicator_ids": ["ind-1"]}}
+        if method == "GET" and path == "/api/strategies/strategy-1/rules":
+            return {"schema_version": "strategy_rules.v1", "rules": [{"id": "rule-1"}]}
+        if method == "GET" and path == "/api/strategies/strategy-1/variants":
+            return {"schema_version": "strategy_variants.v1", "variants": [{"id": "variant-1"}]}
+        if method == "GET" and path == "/api/strategies/strategy-1/effective":
+            return {"schema_version": "effective_strategy.v1", "params": params}
+        if method == "GET" and path == "/api/strategies/strategy-1/decision-inputs":
+            return {"schema_version": "strategy_decision_inputs.v1", "params": params}
         if method == "GET" and path == "/api/indicators/":
             return [{"id": "ind-1", "type": "candle_stats"}]
         if method == "GET" and path == "/api/indicators/types":
@@ -109,6 +121,9 @@ def test_mcp_initialize_and_tools_list_exclude_python_handlers(tmp_path):
         "check_data_coverage",
         "list_instruments",
         "get_instrument_runtime_profile",
+        "get_strategy_bindings",
+        "get_strategy_decision_inputs",
+        "get_effective_strategy",
         "prepare_instrument_matrix_experiment",
         "summarize_experiment",
     }
@@ -160,6 +175,27 @@ def test_mcp_indicator_resources_route_to_backend_contracts(tmp_path):
     assert type_detail["runtime_supported"] is True
     assert detail["instance"]["id"] == "ind-1"
     assert strategies["items"] == [{"id": "strategy-1"}]
+
+
+def test_mcp_strategy_resources_route_to_split_backend_contracts(tmp_path):
+    client = _FakeClient()
+    server = _server(tmp_path, client=client)
+
+    inventory = server.read_resource("quanttrad://strategies")
+    definition = server.read_resource("quanttrad://strategies/strategy-1")
+    bindings = server.read_resource("quanttrad://strategies/strategy-1/bindings")
+    rules = server.read_resource("quanttrad://strategies/strategy-1/rules")
+    variants = server.read_resource("quanttrad://strategies/strategy-1/variants")
+    effective = server.read_resource("quanttrad://strategies/strategy-1/effective?variant_name=default")
+    decision_inputs = server.read_resource("quanttrad://strategies/strategy-1/decision-inputs?variant_id=variant-1")
+
+    assert inventory["items"] == [{"id": "strategy-1"}]
+    assert definition["schema_version"] == "strategy_definition.v1"
+    assert bindings["bindings"]["indicator_ids"] == ["ind-1"]
+    assert rules["rules"] == [{"id": "rule-1"}]
+    assert variants["variants"] == [{"id": "variant-1"}]
+    assert effective["params"] == {"variant_name": "default"}
+    assert decision_inputs["params"] == {"variant_id": "variant-1"}
 
 
 def test_mcp_instrument_resources_route_to_backend_contracts(tmp_path):
