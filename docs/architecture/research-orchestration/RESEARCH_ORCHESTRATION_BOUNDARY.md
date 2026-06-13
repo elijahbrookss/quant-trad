@@ -139,7 +139,10 @@ lightweight research checks, hypotheses, studies, and links to strategies,
 variants, runs, reports, and experiments live in the research-memory boundary.
 Research checks may request source candles, persisted indicator output evidence,
 or completed run report evidence through existing backend contracts and produce
-analytical evidence. They do not execute strategies or simulate trades.
+analytical evidence. `qt research check sweep` runs non-persisted
+indicator-backed check variants, ranks explicit emitted metric paths, and can
+render either JSON or a compact metric table. It does not create research
+memory, execute strategies, or simulate trades.
 
 `qt experiments summarize` reads the local suite artifacts and emits
 `experiment_summary.v1`: suite status, compact run metrics, readiness caveats,
@@ -196,7 +199,8 @@ for:
   `qt research ...`; the check surface is intentionally compact:
   `qt research check raw`, `qt research check indicator`,
   `qt research check audit`, `qt research check lifecycle`,
-  `qt research check signal`, and `qt research check decision`,
+  `qt research check signal`, `qt research check decision`, and
+  `qt research check sweep`,
 - research evidence read models through `qt research run`, `qt research trail`,
   and `qt research compare`,
 - run lifecycle waiting through compact run status API state,

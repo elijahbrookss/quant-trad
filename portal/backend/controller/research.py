@@ -49,6 +49,17 @@ class ResearchCheckRunRequest(BaseModel):
     tags: List[str] = Field(default_factory=list)
 
 
+class ResearchCheckSweepRequest(BaseModel):
+    title: Optional[str] = None
+    check_family: str
+    scope: Optional[Dict[str, Any]] = None
+    scopes: Optional[List[Dict[str, Any]]] = None
+    detector: Dict[str, Any]
+    outcomes: Dict[str, Any] = Field(default_factory=dict)
+    variants: List[Dict[str, Any]]
+    ranking: Dict[str, Any]
+
+
 def _model_payload(model: BaseModel) -> Dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
@@ -98,6 +109,26 @@ async def create_research_link(body: ResearchLinkRequest) -> Dict[str, Any]:
 async def run_research_check(body: ResearchCheckRunRequest) -> Dict[str, Any]:
     try:
         return research_service.run_research_check(_model_payload(body))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/checks/evaluate")
+async def evaluate_research_check(body: ResearchCheckRunRequest) -> Dict[str, Any]:
+    try:
+        return research_service.evaluate_research_check(_model_payload(body))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/checks/sweep")
+async def sweep_research_checks(body: ResearchCheckSweepRequest) -> Dict[str, Any]:
+    try:
+        return research_service.sweep_research_checks(_model_payload(body))
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:

@@ -1422,6 +1422,131 @@ def _cmd_research_check_lifecycle(args: argparse.Namespace) -> int:
     return _post_research_check(args, payload)
 
 
+def _research_sweep_variants_from_args(args: argparse.Namespace) -> list[dict[str, Any]]:
+    variants: list[dict[str, Any]] = []
+    for raw in getattr(args, "variant_json", None) or []:
+        variants.append(_read_json_object_arg(raw, label="--variant-json"))
+    for raw in getattr(args, "variant", None) or []:
+        spec = str(raw or "").strip()
+        if not spec:
+            continue
+        variant_id, _, raw_params = spec.partition(":")
+        variant_id = variant_id.strip()
+        if not variant_id:
+            raise ValueError("--variant requires a non-empty variant id")
+        param_overrides: dict[str, Any] = {}
+        for item in [part.strip() for part in raw_params.split(",") if part.strip()]:
+            if "=" not in item:
+                raise ValueError(f"expected key=value in --variant params, got {item!r}")
+            key, value = item.split("=", 1)
+            key = key.strip()
+            if not key:
+                raise ValueError(f"expected non-empty key in --variant params, got {item!r}")
+            param_overrides[key] = _json_value(value)
+        variants.append({"id": variant_id, "param_overrides": param_overrides})
+    return variants
+
+
+def _cmd_research_check_sweep(args: argparse.Namespace) -> int:
+    payload = _read_json_object_arg(getattr(args, "request_json", None), label="--request-json")
+    if getattr(args, "title", None):
+        payload["title"] = args.title
+    if getattr(args, "check_family", None):
+        payload["check_family"] = args.check_family
+    if getattr(args, "detector_json", None):
+        payload["detector"] = _read_json_object_arg(args.detector_json, label="--detector-json")
+    if getattr(args, "outcomes_json", None):
+        payload["outcomes"] = {
+            **dict(payload.get("outcomes") or {}),
+            **_read_json_object_arg(args.outcomes_json, label="--outcomes-json"),
+        }
+    outcomes = {**dict(payload.get("outcomes") or {}), **_research_outcomes_from_args(args)}
+    if outcomes:
+        payload["outcomes"] = outcomes
+    scope_args = _research_scope_from_args(args, include_indicator=bool(getattr(args, "indicator_id", None)))
+    if scope_args:
+        if payload.get("scopes") not in (None, ""):
+            raise ValueError("--scope flags cannot be combined with request.scopes")
+        payload["scope"] = {**dict(payload.get("scope") or {}), **scope_args}
+    variants = _research_sweep_variants_from_args(args)
+    if variants:
+        payload["variants"] = variants
+    display_metrics = [str(item).strip() for item in getattr(args, "display_metric", None) or [] if str(item).strip()]
+    ranking = dict(payload.get("ranking") or {})
+    if getattr(args, "rank_by", None):
+        ranking["rank_by"] = args.rank_by
+    if getattr(args, "rank_direction", None):
+        ranking["direction"] = args.rank_direction
+    if display_metrics:
+        ranking["display_metrics"] = display_metrics
+    if ranking:
+        payload["ranking"] = ranking
+
+    missing = [key for key in ("check_family", "detector", "variants", "ranking") if key not in payload]
+    if missing:
+        raise ValueError(f"research check sweep missing required fields: {', '.join(missing)}")
+    if "scope" not in payload and "scopes" not in payload:
+        raise ValueError("research check sweep requires scope flags, request.scope, or request.scopes")
+
+    result = _client(args).request_json("POST", "/api/research/checks/sweep", payload=payload)
+    if str(getattr(args, "format", "json") or "json") == "table":
+        _print_research_leaderboard_table(result)
+    else:
+        _print_json(result)
+    return 0
+
+
+def _print_research_leaderboard_table(payload: dict[str, Any]) -> None:
+    leaderboard = payload.get("leaderboard") if isinstance(payload.get("leaderboard"), dict) else {}
+    rows = leaderboard.get("rows") if isinstance(leaderboard.get("rows"), list) else []
+    rank_by = str(leaderboard.get("rank_by") or "")
+    display_paths = [str(item) for item in leaderboard.get("display_metrics") or []]
+    headers = ["rank", "variant", "scope", "status", "samples", rank_by, *display_paths, "recommendation", "caveats"]
+    table_rows: list[list[str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        display_by_path = {
+            str(item.get("path")): item.get("value")
+            for item in row.get("display_metrics") or []
+            if isinstance(item, dict)
+        }
+        table_rows.append(
+            [
+                str(row.get("rank") or ""),
+                str(row.get("variant_label") or row.get("variant_id") or ""),
+                str(row.get("scope_id") or ""),
+                str(row.get("status") or ""),
+                str(row.get("sample_count") or ""),
+                _format_metric_value((row.get("rank_metric") or {}).get("value")),
+                *[_format_metric_value(display_by_path.get(path)) for path in display_paths],
+                str(row.get("recommendation") or ""),
+                str(row.get("caveat_count") or 0),
+            ]
+        )
+    if not table_rows:
+        print("No ranked rows.", flush=True)
+        return
+    widths = [
+        max(len(str(header)), *(len(row[index]) for row in table_rows))
+        for index, header in enumerate(headers)
+    ]
+    print("  ".join(str(header).ljust(widths[index]) for index, header in enumerate(headers)), flush=True)
+    print("  ".join("-" * width for width in widths), flush=True)
+    for row in table_rows:
+        print("  ".join(value.ljust(widths[index]) for index, value in enumerate(row)), flush=True)
+
+
+def _format_metric_value(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{number:.6g}"
+
+
 def _cmd_research_trail(args: argparse.Namespace) -> int:
     _print_json(_client(args).request_json("GET", f"/api/research/items/{args.item_id}/trail"))
     return 0
@@ -2504,6 +2629,39 @@ def build_parser() -> argparse.ArgumentParser:
     research_check_lifecycle.add_argument("--terminal-stages", help="Comma-separated stages that close a candidate.")
     research_check_lifecycle.add_argument("--signal-stages", help="Comma-separated lifecycle stages that should reconcile to emitted signals.")
     research_check_lifecycle.set_defaults(func=_cmd_research_check_lifecycle)
+
+    research_check_sweep = research_check_sub.add_parser("sweep", help="Run non-persisted indicator research check variants and rank emitted metrics.")
+    research_check_sweep.add_argument("--request-json", help="research_check_sweep.v1 JSON object path, inline object, or '-'.")
+    research_check_sweep.add_argument("--title")
+    research_check_sweep.add_argument("--check-family", choices=["indicator_forward_outcome", "signal_audit", "candidate_lifecycle"])
+    research_check_sweep.add_argument("--indicator-id")
+    research_check_sweep.add_argument("--instrument-id")
+    research_check_sweep.add_argument("--symbol")
+    research_check_sweep.add_argument("--datasource")
+    research_check_sweep.add_argument("--exchange")
+    research_check_sweep.add_argument("--timeframe")
+    research_check_sweep.add_argument("--start")
+    research_check_sweep.add_argument("--end")
+    research_check_sweep.add_argument("--detector-json", help="Detector JSON object path, inline object, or '-'.")
+    research_check_sweep.add_argument("--outcomes-json", help="Outcomes JSON object path, inline object, or '-'.")
+    research_check_sweep.add_argument("--forward-bars")
+    research_check_sweep.add_argument("--direction", choices=["long", "short"])
+    research_check_sweep.add_argument("--min-sample-count", type=int)
+    research_check_sweep.add_argument("--min-edge-pct", type=float)
+    research_check_sweep.add_argument("--bucket-by", help="Comma-separated bucket fields.")
+    research_check_sweep.add_argument("--max-examples", type=int)
+    research_check_sweep.add_argument(
+        "--variant",
+        action="append",
+        default=[],
+        help="Variant id with optional param overrides, e.g. base or tol04:touch=0.4,window=12.",
+    )
+    research_check_sweep.add_argument("--variant-json", action="append", default=[], help="Variant JSON object path, inline object, or '-'.")
+    research_check_sweep.add_argument("--rank-by", help="Explicit numeric result path used for ranking.")
+    research_check_sweep.add_argument("--rank-direction", choices=["asc", "desc"], help="Ranking direction for --rank-by.")
+    research_check_sweep.add_argument("--display-metric", action="append", default=[], help="Additional numeric result path to include in the leaderboard.")
+    research_check_sweep.add_argument("--format", choices=["json", "table"], default="json")
+    research_check_sweep.set_defaults(func=_cmd_research_check_sweep)
 
     research_check_signal = research_check_sub.add_parser("signal", help="Check completed run signal evidence.")
     add_research_check_base_args(research_check_signal)

@@ -4,7 +4,7 @@ import logging
 from collections import Counter
 from datetime import datetime, timezone
 from time import perf_counter
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, Mapping, MutableMapping, Optional, Sequence
 
 from core.events import serialize_value
 from engines.bot_runtime.core.domain import Candle
@@ -108,6 +108,22 @@ def _load_candle_frame(
         datasource=datasource,
         exchange=exchange,
     )
+
+
+def _meta_with_param_overrides(
+    meta: Mapping[str, Any],
+    param_overrides: Mapping[str, Any] | None,
+) -> Dict[str, Any]:
+    resolved = dict(meta)
+    if param_overrides is None:
+        return resolved
+    if not isinstance(param_overrides, Mapping):
+        raise ValueError("indicator_param_overrides must be an object")
+    params = dict(resolved.get("params") or {})
+    params.update(dict(param_overrides))
+    resolved["params"] = params
+    resolved["param_overrides"] = dict(param_overrides)
+    return resolved
 
 
 def _new_output_summary(*, output_key: str, output_type: str, target_indicator_id: str) -> Dict[str, Any]:
@@ -426,13 +442,18 @@ def collect_runtime_output_evidence_for_instance(
     datasource: Optional[str] = None,
     exchange: Optional[str] = None,
     instrument_id: Optional[str] = None,
+    indicator_param_overrides: Mapping[str, Any] | None = None,
+    candle_frame: Any = None,
+    source_frame_cache: MutableMapping[tuple[str, ...], Any] | None = None,
+    source_frame_cache_stats: MutableMapping[str, int] | None = None,
     ctx: IndicatorServiceContext = _context,
 ) -> Dict[str, Any]:
     """Collect per-bar declared output evidence from the canonical runtime path."""
 
     t0 = perf_counter()
     record = load_indicator_record(inst_id, ctx=ctx)
-    meta = build_meta_from_record(record, ctx=ctx)
+    base_meta = build_meta_from_record(record, ctx=ctx)
+    meta = _meta_with_param_overrides(base_meta, indicator_param_overrides)
     if not bool(meta.get("runtime_supported")):
         raise RuntimeError(f"Indicator is not runtime-supported: {inst_id}")
 
@@ -463,17 +484,21 @@ def collect_runtime_output_evidence_for_instance(
         execution_context=execution_context,
         ctx=ctx,
         preloaded_metas={inst_id: meta},
+        source_frame_cache=source_frame_cache,
+        source_frame_cache_stats=source_frame_cache_stats,
     )
     diagnostics = collect_runtime_indicator_diagnostics(indicators)
-    frame = _load_candle_frame(
-        start=start,
-        end=end,
-        interval=interval,
-        symbol=resolved_symbol,
-        datasource=resolved_datasource,
-        exchange=resolved_exchange,
-        instrument_id=resolved_instrument_id,
-    )
+    frame = candle_frame
+    if frame is None:
+        frame = _load_candle_frame(
+            start=start,
+            end=end,
+            interval=interval,
+            symbol=resolved_symbol,
+            datasource=resolved_datasource,
+            exchange=resolved_exchange,
+            instrument_id=resolved_instrument_id,
+        )
     candles = _build_runtime_candles(frame)
     if not candles:
         raise LookupError("No candles available for indicator output evidence")
@@ -577,6 +602,8 @@ def collect_runtime_output_evidence_for_instance(
             "type": meta.get("type"),
             "name": meta.get("name"),
             "params": dict(meta.get("params") or {}),
+            "base_params": dict(base_meta.get("params") or {}),
+            "param_overrides": dict(indicator_param_overrides or {}),
             "dependencies": list(meta.get("dependencies") or []),
             "updated_at": meta.get("updated_at"),
         },

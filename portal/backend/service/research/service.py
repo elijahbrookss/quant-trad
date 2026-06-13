@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
+from time import perf_counter
 from typing import Any, Mapping
 import uuid
 
@@ -34,12 +35,62 @@ from .checks import (
     normalize_run_signal_records,
     validate_check_detector,
 )
+from .metrics import build_leaderboard, extract_numeric_metrics
 
 
 logger = logging.getLogger(__name__)
 
 RESEARCH_ITEM_KINDS = {"observation", "research_check", "hypothesis", "study"}
 RESEARCH_ITEM_STATUSES = {"draft", "active", "tested", "promoted", "rejected", "archived", "blocked"}
+INDICATOR_CHECK_FAMILIES = {INDICATOR_FORWARD_OUTCOME, SIGNAL_AUDIT, CANDIDATE_LIFECYCLE}
+
+
+class ResearchEvaluationCache:
+    """Per-request cache for repeated research check evaluation."""
+
+    def __init__(self) -> None:
+        self.coverage_by_scope: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        self.candles_by_scope: dict[tuple[str, str, str, str], Any] = {}
+        self.source_frames_by_request: dict[tuple[str, ...], Any] = {}
+        self.stats: Counter[str] = Counter()
+
+    def coverage(self, scope: Mapping[str, Any]) -> dict[str, Any]:
+        key = _scope_cache_key(scope)
+        if key in self.coverage_by_scope:
+            self.stats["coverage_hits"] += 1
+            return self.coverage_by_scope[key]
+        self.stats["coverage_misses"] += 1
+        coverage = candle_service.preflight_candle_coverage_by_instrument(
+            scope["instrument_id"],
+            scope["start"],
+            scope["end"],
+            scope["timeframe"],
+        )
+        self.coverage_by_scope[key] = dict(coverage)
+        return dict(coverage)
+
+    def candles(self, scope: Mapping[str, Any]) -> Any:
+        key = _scope_cache_key(scope)
+        if key in self.candles_by_scope:
+            self.stats["candle_hits"] += 1
+            return self.candles_by_scope[key]
+        self.stats["candle_misses"] += 1
+        frame = candle_service.fetch_ohlcv_by_instrument(
+            scope["instrument_id"],
+            scope["start"],
+            scope["end"],
+            scope["timeframe"],
+        )
+        self.candles_by_scope[key] = frame
+        return frame
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "coverage_entries": len(self.coverage_by_scope),
+            "candle_entries": len(self.candles_by_scope),
+            "source_frame_entries": len(self.source_frames_by_request),
+            "stats": dict(sorted(self.stats.items())),
+        }
 
 
 def create_research_item(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -220,7 +271,11 @@ def compare_research_checks(left_check_id: str, right_check_id: str) -> dict[str
     }
 
 
-def run_research_check(payload: Mapping[str, Any]) -> dict[str, Any]:
+def evaluate_research_check(
+    payload: Mapping[str, Any],
+    *,
+    cache: ResearchEvaluationCache | None = None,
+) -> dict[str, Any]:
     request = dict(payload or {})
     check_family = str(request.get("check_family") or SUPPORTED_CHECK_FAMILY).strip()
     if check_family not in SUPPORTED_CHECK_FAMILIES:
@@ -232,170 +287,35 @@ def run_research_check(payload: Mapping[str, Any]) -> dict[str, Any]:
     detector = _mapping(request.get("detector"), "detector")
     outcomes = _mapping_or_empty(request.get("outcomes"))
     validate_check_detector(check_family=check_family, detector=detector)
+    normalized_scope, result = _evaluate_research_check_request(
+        title=title,
+        check_family=check_family,
+        scope=scope,
+        detector=detector,
+        outcomes=outcomes,
+        cache=cache,
+    )
+    return {
+        "schema_version": "research_check_evaluation.v1",
+        "status": result.get("status"),
+        "check_family": check_family,
+        "scope": normalized_scope,
+        "detector": detector,
+        "outcomes": outcomes,
+        "result": result,
+    }
+
+
+def run_research_check(payload: Mapping[str, Any]) -> dict[str, Any]:
+    request = dict(payload or {})
     existing_observation = _existing_observation(request)
-    if check_family == RAW_FORWARD_OUTCOME:
-        normalized_scope = _normalize_scope(scope)
-        coverage = candle_service.preflight_candle_coverage_by_instrument(
-            normalized_scope["instrument_id"],
-            normalized_scope["start"],
-            normalized_scope["end"],
-            normalized_scope["timeframe"],
-        )
-        data_quality = _data_quality_from_coverage(coverage)
-        if data_quality["status"] == "blocked":
-            result = blocked_check_result(
-                reason=str(coverage.get("message") or "candle coverage is blocked"),
-                detector=detector,
-                outcomes=outcomes,
-                data_quality=data_quality,
-                check_family=check_family,
-            )
-        else:
-            try:
-                candles = candle_service.fetch_ohlcv_by_instrument(
-                    normalized_scope["instrument_id"],
-                    normalized_scope["start"],
-                    normalized_scope["end"],
-                    normalized_scope["timeframe"],
-                )
-            except Exception as exc:  # noqa: BLE001 - source data unavailability is analytical evidence.
-                logger.warning(
-                    "research_check_candle_fetch_blocked | title=%s instrument_id=%s timeframe=%s start=%s end=%s error=%s",
-                    title,
-                    normalized_scope["instrument_id"],
-                    normalized_scope["timeframe"],
-                    normalized_scope["start"],
-                    normalized_scope["end"],
-                    exc,
-                )
-                result = blocked_check_result(
-                    reason=f"research check evaluation failed: {exc}",
-                    detector=detector,
-                    outcomes=outcomes,
-                    data_quality={**data_quality, "status": "blocked"},
-                    check_family=check_family,
-                )
-            else:
-                if candles is None or candles.empty:
-                    result = blocked_check_result(
-                        reason="no candles returned for research check window",
-                        detector=detector,
-                        outcomes=outcomes,
-                        data_quality={**data_quality, "status": "blocked"},
-                        check_family=check_family,
-                    )
-                else:
-                    result = evaluate_raw_event_check(
-                        candles,
-                        detector=detector,
-                        outcomes=outcomes,
-                        data_quality=data_quality,
-                    )
-    elif check_family in {INDICATOR_FORWARD_OUTCOME, SIGNAL_AUDIT, CANDIDATE_LIFECYCLE}:
-        normalized_scope = _normalize_indicator_scope(scope)
-        coverage = candle_service.preflight_candle_coverage_by_instrument(
-            normalized_scope["instrument_id"],
-            normalized_scope["start"],
-            normalized_scope["end"],
-            normalized_scope["timeframe"],
-        )
-        data_quality = _data_quality_from_coverage(coverage)
-        if data_quality["status"] == "blocked":
-            result = blocked_check_result(
-                reason=str(coverage.get("message") or "indicator check source candle coverage is blocked"),
-                detector=detector,
-                outcomes=outcomes,
-                data_quality=data_quality,
-                check_family=check_family,
-            )
-        else:
-            try:
-                evidence = collect_runtime_output_evidence_for_instance(
-                    normalized_scope["indicator_id"],
-                    normalized_scope["start"],
-                    normalized_scope["end"],
-                    normalized_scope["timeframe"],
-                    symbol=normalized_scope.get("symbol"),
-                    datasource=normalized_scope.get("datasource"),
-                    exchange=normalized_scope.get("exchange"),
-                    instrument_id=normalized_scope.get("instrument_id"),
-                )
-            except LookupError as exc:
-                logger.warning(
-                    "research_check_indicator_evidence_blocked | title=%s indicator_id=%s instrument_id=%s timeframe=%s start=%s end=%s error=%s",
-                    title,
-                    normalized_scope["indicator_id"],
-                    normalized_scope["instrument_id"],
-                    normalized_scope["timeframe"],
-                    normalized_scope["start"],
-                    normalized_scope["end"],
-                    exc,
-                )
-                result = blocked_check_result(
-                    reason=f"indicator check evidence failed: {exc}",
-                    detector=detector,
-                    outcomes=outcomes,
-                    data_quality={**data_quality, "status": "blocked"},
-                    check_family=check_family,
-                )
-            else:
-                if check_family == INDICATOR_FORWARD_OUTCOME:
-                    result = evaluate_indicator_forward_outcome(
-                        evidence,
-                        detector=detector,
-                        outcomes=outcomes,
-                        data_quality=data_quality,
-                    )
-                elif check_family == SIGNAL_AUDIT:
-                    result = evaluate_signal_audit(
-                        evidence,
-                        detector=detector,
-                        outcomes=outcomes,
-                        data_quality=data_quality,
-                    )
-                else:
-                    result = evaluate_candidate_lifecycle(
-                        evidence,
-                        detector=detector,
-                        outcomes=outcomes,
-                        data_quality=data_quality,
-                    )
-    else:
-        normalized_scope = _normalize_report_scope(scope)
-        dataset = reports_contract.get_run_research_dataset(normalized_scope["run_id"])
-        normalized_scope = _merge_scope_context(normalized_scope, _report_scope_context(dataset))
-        data_quality = _data_quality_from_report_dataset(dataset)
-        if data_quality["status"] == "blocked":
-            logger.warning(
-                "research_check_report_data_blocked | title=%s run_id=%s check_family=%s readiness_status=%s",
-                title,
-                normalized_scope["run_id"],
-                check_family,
-                data_quality.get("readiness_status"),
-            )
-            result = blocked_check_result(
-                reason=str(data_quality.get("readiness_status") or "run research dataset is not analyzable"),
-                detector=detector,
-                outcomes=outcomes,
-                data_quality=data_quality,
-                check_family=check_family,
-            )
-        elif check_family == RUN_SIGNAL_SUMMARY:
-            result = evaluate_run_signal_summary(
-                dataset,
-                detector=detector,
-                outcomes=outcomes,
-                data_quality=data_quality,
-            )
-        elif check_family == RUN_DECISION_TRADE_COMPARISON:
-            result = evaluate_run_decision_trade_comparison(
-                dataset,
-                detector=detector,
-                outcomes=outcomes,
-                data_quality=data_quality,
-            )
-        else:
-            raise ValueError(f"unsupported research check family: {check_family}")
+    evaluation = evaluate_research_check(request)
+    check_family = evaluation["check_family"]
+    title = str(request.get("title") or "").strip()
+    detector = dict(evaluation["detector"])
+    outcomes = dict(evaluation["outcomes"])
+    normalized_scope = dict(evaluation["scope"])
+    result = dict(evaluation["result"])
 
     observation = existing_observation or _create_auto_observation(
         request,
@@ -463,6 +383,262 @@ def run_research_check(payload: Mapping[str, Any]) -> dict[str, Any]:
         "links": links,
         "result": {**result, "check_id": check_id},
     }
+
+
+def sweep_research_checks(payload: Mapping[str, Any]) -> dict[str, Any]:
+    request = dict(payload or {})
+    check_family = str(request.get("check_family") or "").strip()
+    if check_family not in INDICATOR_CHECK_FAMILIES:
+        raise ValueError(
+            "research check sweep supports indicator-backed check families: "
+            f"{', '.join(sorted(INDICATOR_CHECK_FAMILIES))}"
+        )
+    detector = _mapping(request.get("detector"), "detector")
+    outcomes = _mapping_or_empty(request.get("outcomes"))
+    validate_check_detector(check_family=check_family, detector=detector)
+    scopes = _normalize_sweep_scopes(request)
+    variants = _normalize_sweep_variants(request.get("variants"))
+    ranking = _mapping(request.get("ranking"), "ranking")
+    rank_by = _required_text(ranking.get("rank_by"), "ranking.rank_by")
+    rank_direction = _required_text(ranking.get("direction"), "ranking.direction")
+    display_metrics = _string_list(ranking.get("display_metrics") or [])
+    title = str(request.get("title") or "Research check sweep").strip()
+    cache = ResearchEvaluationCache()
+    evaluations: list[dict[str, Any]] = []
+    progress: list[dict[str, Any]] = []
+
+    for scope in scopes:
+        scope_id = str(scope["id"])
+        evaluation_scope = {key: value for key, value in scope.items() if key != "id"}
+        for variant in variants:
+            variant_scope = dict(evaluation_scope)
+            if variant["param_overrides"]:
+                variant_scope["indicator_param_overrides"] = dict(variant["param_overrides"])
+            started_at = perf_counter()
+            evaluation = evaluate_research_check(
+                {
+                    "title": f"{title}: {variant['id']} @ {scope_id}",
+                    "check_family": check_family,
+                    "scope": variant_scope,
+                    "detector": detector,
+                    "outcomes": outcomes,
+                },
+                cache=cache,
+            )
+            duration_ms = round((perf_counter() - started_at) * 1000.0, 3)
+            result = dict(evaluation["result"])
+            normalized_scope = {**dict(evaluation["scope"]), "id": scope_id}
+            normalized_variant = dict(variant)
+            row = {
+                "schema_version": "research_check_sweep_evaluation.v1",
+                "variant": normalized_variant,
+                "scope": normalized_scope,
+                "status": result.get("status"),
+                "result": result,
+                "metrics": extract_numeric_metrics(result),
+                "duration_ms": duration_ms,
+            }
+            evaluations.append(row)
+            progress.append(
+                {
+                    "variant_id": variant["id"],
+                    "scope_id": scope_id,
+                    "status": result.get("status"),
+                    "sample_count": result.get("sample_count"),
+                    "duration_ms": duration_ms,
+                }
+            )
+
+    leaderboard = build_leaderboard(
+        evaluations,
+        rank_by=rank_by,
+        rank_direction=rank_direction,
+        display_metrics=display_metrics,
+    )
+    return {
+        "schema_version": "research_check_sweep.v1",
+        "check_family": check_family,
+        "scope_count": len(scopes),
+        "variant_count": len(variants),
+        "evaluation_count": len(evaluations),
+        "ranking": {
+            "rank_by": rank_by,
+            "direction": rank_direction,
+            "display_metrics": display_metrics,
+        },
+        "leaderboard": leaderboard,
+        "evaluations": evaluations,
+        "progress": progress,
+        "cache": cache.snapshot(),
+    }
+
+
+def _evaluate_research_check_request(
+    *,
+    title: str,
+    check_family: str,
+    scope: Mapping[str, Any],
+    detector: Mapping[str, Any],
+    outcomes: Mapping[str, Any],
+    cache: ResearchEvaluationCache | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if check_family == RAW_FORWARD_OUTCOME:
+        normalized_scope = _normalize_scope(scope)
+        coverage = _coverage_for_scope(normalized_scope, cache)
+        data_quality = _data_quality_from_coverage(coverage)
+        if data_quality["status"] == "blocked":
+            result = blocked_check_result(
+                reason=str(coverage.get("message") or "candle coverage is blocked"),
+                detector=detector,
+                outcomes=outcomes,
+                data_quality=data_quality,
+                check_family=check_family,
+            )
+        else:
+            try:
+                candles = _candles_for_scope(normalized_scope, cache)
+            except Exception as exc:  # noqa: BLE001 - source data unavailability is analytical evidence.
+                logger.warning(
+                    "research_check_candle_fetch_blocked | title=%s instrument_id=%s timeframe=%s start=%s end=%s error=%s",
+                    title,
+                    normalized_scope["instrument_id"],
+                    normalized_scope["timeframe"],
+                    normalized_scope["start"],
+                    normalized_scope["end"],
+                    exc,
+                )
+                result = blocked_check_result(
+                    reason=f"research check evaluation failed: {exc}",
+                    detector=detector,
+                    outcomes=outcomes,
+                    data_quality={**data_quality, "status": "blocked"},
+                    check_family=check_family,
+                )
+            else:
+                if candles is None or candles.empty:
+                    result = blocked_check_result(
+                        reason="no candles returned for research check window",
+                        detector=detector,
+                        outcomes=outcomes,
+                        data_quality={**data_quality, "status": "blocked"},
+                        check_family=check_family,
+                    )
+                else:
+                    result = evaluate_raw_event_check(
+                        candles,
+                        detector=detector,
+                        outcomes=outcomes,
+                        data_quality=data_quality,
+                    )
+        return normalized_scope, result
+
+    if check_family in INDICATOR_CHECK_FAMILIES:
+        normalized_scope = _normalize_indicator_scope(scope)
+        coverage = _coverage_for_scope(normalized_scope, cache)
+        data_quality = _data_quality_from_coverage(coverage)
+        if data_quality["status"] == "blocked":
+            result = blocked_check_result(
+                reason=str(coverage.get("message") or "indicator check source candle coverage is blocked"),
+                detector=detector,
+                outcomes=outcomes,
+                data_quality=data_quality,
+                check_family=check_family,
+            )
+        else:
+            try:
+                evidence = collect_runtime_output_evidence_for_instance(
+                    normalized_scope["indicator_id"],
+                    normalized_scope["start"],
+                    normalized_scope["end"],
+                    normalized_scope["timeframe"],
+                    symbol=normalized_scope.get("symbol"),
+                    datasource=normalized_scope.get("datasource"),
+                    exchange=normalized_scope.get("exchange"),
+                    instrument_id=normalized_scope.get("instrument_id"),
+                    indicator_param_overrides=normalized_scope.get("indicator_param_overrides"),
+                    candle_frame=_candles_for_scope(normalized_scope, cache) if cache is not None else None,
+                    source_frame_cache=cache.source_frames_by_request if cache is not None else None,
+                    source_frame_cache_stats=cache.stats if cache is not None else None,
+                )
+            except LookupError as exc:
+                logger.warning(
+                    "research_check_indicator_evidence_blocked | title=%s indicator_id=%s instrument_id=%s timeframe=%s start=%s end=%s error=%s",
+                    title,
+                    normalized_scope["indicator_id"],
+                    normalized_scope["instrument_id"],
+                    normalized_scope["timeframe"],
+                    normalized_scope["start"],
+                    normalized_scope["end"],
+                    exc,
+                )
+                result = blocked_check_result(
+                    reason=f"indicator check evidence failed: {exc}",
+                    detector=detector,
+                    outcomes=outcomes,
+                    data_quality={**data_quality, "status": "blocked"},
+                    check_family=check_family,
+                )
+            else:
+                if check_family == INDICATOR_FORWARD_OUTCOME:
+                    result = evaluate_indicator_forward_outcome(
+                        evidence,
+                        detector=detector,
+                        outcomes=outcomes,
+                        data_quality=data_quality,
+                    )
+                elif check_family == SIGNAL_AUDIT:
+                    result = evaluate_signal_audit(
+                        evidence,
+                        detector=detector,
+                        outcomes=outcomes,
+                        data_quality=data_quality,
+                    )
+                else:
+                    result = evaluate_candidate_lifecycle(
+                        evidence,
+                        detector=detector,
+                        outcomes=outcomes,
+                        data_quality=data_quality,
+                    )
+        return normalized_scope, result
+
+    normalized_scope = _normalize_report_scope(scope)
+    dataset = reports_contract.get_run_research_dataset(normalized_scope["run_id"])
+    normalized_scope = _merge_scope_context(normalized_scope, _report_scope_context(dataset))
+    data_quality = _data_quality_from_report_dataset(dataset)
+    if data_quality["status"] == "blocked":
+        logger.warning(
+            "research_check_report_data_blocked | title=%s run_id=%s check_family=%s readiness_status=%s",
+            title,
+            normalized_scope["run_id"],
+            check_family,
+            data_quality.get("readiness_status"),
+        )
+        result = blocked_check_result(
+            reason=str(data_quality.get("readiness_status") or "run research dataset is not analyzable"),
+            detector=detector,
+            outcomes=outcomes,
+            data_quality=data_quality,
+            check_family=check_family,
+        )
+    elif check_family == RUN_SIGNAL_SUMMARY:
+        result = evaluate_run_signal_summary(
+            dataset,
+            detector=detector,
+            outcomes=outcomes,
+            data_quality=data_quality,
+        )
+    elif check_family == RUN_DECISION_TRADE_COMPARISON:
+        result = evaluate_run_decision_trade_comparison(
+            dataset,
+            detector=detector,
+            outcomes=outcomes,
+            data_quality=data_quality,
+        )
+    else:
+        raise ValueError(f"unsupported research check family: {check_family}")
+    return normalized_scope, result
+
 
 def _existing_observation(request: Mapping[str, Any]) -> dict[str, Any] | None:
     observation_id = str(request.get("observation_id") or "").strip()
@@ -539,7 +715,90 @@ def _normalize_indicator_scope(scope: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("scope.indicator_id is required for indicator research checks")
     normalized = _normalize_scope(scope)
     normalized["indicator_id"] = indicator_id
+    if "indicator_param_overrides" in scope:
+        normalized["indicator_param_overrides"] = _mapping(
+            scope.get("indicator_param_overrides"),
+            "scope.indicator_param_overrides",
+        )
     return normalized
+
+
+def _normalize_sweep_scopes(request: Mapping[str, Any]) -> list[dict[str, Any]]:
+    has_scopes = request.get("scopes") not in (None, "")
+    has_scope = request.get("scope") not in (None, "")
+    if has_scopes and has_scope:
+        raise ValueError("research check sweep accepts scope or scopes, not both")
+    if has_scopes:
+        raw_scopes = request.get("scopes")
+        if not isinstance(raw_scopes, list) or not raw_scopes:
+            raise ValueError("scopes must be a non-empty list")
+        scopes = [_mapping(raw, "scopes item") for raw in raw_scopes]
+        if any(not str(scope.get("id") or "").strip() for scope in scopes):
+            raise ValueError("each sweep scope requires id")
+        return [{**dict(scope), "id": str(scope["id"]).strip()} for scope in scopes]
+    if not has_scope:
+        raise ValueError("research check sweep requires scope or scopes")
+    scope = dict(_mapping(request.get("scope"), "scope"))
+    scope["id"] = str(scope.get("id") or "scope").strip()
+    return [scope]
+
+
+def _normalize_sweep_variants(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("research check sweep requires non-empty variants")
+    allowed = {"id", "label", "description", "param_overrides"}
+    variants: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in value:
+        variant = dict(_mapping(raw, "variants item"))
+        unsupported = sorted(str(key) for key in variant if str(key) not in allowed)
+        if unsupported:
+            raise ValueError(f"unsupported sweep variant fields: {', '.join(unsupported)}")
+        variant_id = _required_text(variant.get("id"), "variant.id")
+        if variant_id in seen:
+            raise ValueError(f"duplicate sweep variant id: {variant_id}")
+        seen.add(variant_id)
+        param_overrides = _mapping_or_empty(variant.get("param_overrides"))
+        variants.append(
+            {
+                "id": variant_id,
+                "label": _optional(variant.get("label")) or variant_id,
+                "description": _optional(variant.get("description")),
+                "param_overrides": param_overrides,
+            }
+        )
+    return variants
+
+
+def _scope_cache_key(scope: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(scope.get("instrument_id") or ""),
+        str(scope.get("start") or ""),
+        str(scope.get("end") or ""),
+        str(scope.get("timeframe") or ""),
+    )
+
+
+def _coverage_for_scope(scope: Mapping[str, Any], cache: ResearchEvaluationCache | None) -> dict[str, Any]:
+    if cache is not None:
+        return cache.coverage(scope)
+    return candle_service.preflight_candle_coverage_by_instrument(
+        scope["instrument_id"],
+        scope["start"],
+        scope["end"],
+        scope["timeframe"],
+    )
+
+
+def _candles_for_scope(scope: Mapping[str, Any], cache: ResearchEvaluationCache | None) -> Any:
+    if cache is not None:
+        return cache.candles(scope)
+    return candle_service.fetch_ohlcv_by_instrument(
+        scope["instrument_id"],
+        scope["start"],
+        scope["end"],
+        scope["timeframe"],
+    )
 
 
 def _normalize_report_scope(scope: Mapping[str, Any]) -> dict[str, Any]:
@@ -806,6 +1065,23 @@ def _mapping_or_empty(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError("expected object payload")
     return dict(value)
+
+
+def _required_text(value: Any, field: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field} is required")
+    return text
+
+
+def _string_list(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    raise ValueError("expected a string or list of strings")
 
 
 def _tags(value: Any) -> list[str]:

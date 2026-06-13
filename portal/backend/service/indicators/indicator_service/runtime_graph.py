@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import logging
 from time import perf_counter
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, Mapping, MutableMapping, Optional, Sequence
 
 from indicators.config import IndicatorExecutionContext
 from indicators.runtime.source_diagnostics import build_source_candle_continuity_payload
@@ -73,6 +73,23 @@ def _attach_runtime_diagnostics(indicator: Any, diagnostics: Mapping[str, Any] |
         return
 
 
+def _runtime_data_request_cache_key(
+    data_request: Any,
+    *,
+    datasource: Optional[str],
+    exchange: Optional[str],
+) -> tuple[str, ...]:
+    return (
+        str(getattr(data_request, "instrument_id", "") or ""),
+        str(getattr(data_request, "symbol", "") or ""),
+        str(getattr(data_request, "start", "") or ""),
+        str(getattr(data_request, "end", "") or ""),
+        str(getattr(data_request, "interval", "") or ""),
+        str(datasource or ""),
+        str(exchange or ""),
+    )
+
+
 def build_runtime_indicator_instance(
     indicator_id: str,
     *,
@@ -80,6 +97,8 @@ def build_runtime_indicator_instance(
     strategy_indicator_metas: Mapping[str, Mapping[str, Any]] | None = None,
     execution_context: IndicatorExecutionContext | None = None,
     ctx: IndicatorServiceContext = _context,
+    source_frame_cache: MutableMapping[tuple[str, ...], Any] | None = None,
+    source_frame_cache_stats: MutableMapping[str, int] | None = None,
 ) -> Any:
     started_at = perf_counter()
     indicator_type = str(meta.get("type") or "").strip()
@@ -115,12 +134,32 @@ def build_runtime_indicator_instance(
         if data_request is not None:
             resolved_datasource = execution_context.datasource or meta.get("datasource")
             resolved_exchange = execution_context.exchange or meta.get("exchange")
+            datasource_text = str(resolved_datasource or "").strip() or None
+            exchange_text = str(resolved_exchange or "").strip() or None
             fetch_started_at = perf_counter()
-            source_frame = candle_service.fetch_ohlcv_for_context(
+            cache_key = _runtime_data_request_cache_key(
                 data_request,
-                datasource=str(resolved_datasource or "").strip() or None,
-                exchange=str(resolved_exchange or "").strip() or None,
+                datasource=datasource_text,
+                exchange=exchange_text,
             )
+            if source_frame_cache is not None and cache_key in source_frame_cache:
+                if source_frame_cache_stats is not None:
+                    source_frame_cache_stats["source_frame_hits"] = (
+                        int(source_frame_cache_stats.get("source_frame_hits", 0)) + 1
+                    )
+                source_frame = source_frame_cache[cache_key]
+            else:
+                if source_frame_cache_stats is not None:
+                    source_frame_cache_stats["source_frame_misses"] = (
+                        int(source_frame_cache_stats.get("source_frame_misses", 0)) + 1
+                    )
+                source_frame = candle_service.fetch_ohlcv_for_context(
+                    data_request,
+                    datasource=datasource_text,
+                    exchange=exchange_text,
+                )
+                if source_frame_cache is not None:
+                    source_frame_cache[cache_key] = source_frame
             fetch_duration_ms = (perf_counter() - fetch_started_at) * 1000.0
             if source_frame is None or getattr(source_frame, "empty", False):
                 raise LookupError(
@@ -236,6 +275,8 @@ def build_runtime_indicator_graph(
     execution_context: IndicatorExecutionContext,
     ctx: IndicatorServiceContext = _context,
     preloaded_metas: Mapping[str, Mapping[str, Any]] | None = None,
+    source_frame_cache: MutableMapping[tuple[str, ...], Any] | None = None,
+    source_frame_cache_stats: MutableMapping[str, int] | None = None,
 ) -> tuple[Dict[str, Dict[str, Any]], list[Any]]:
     metas = collect_runtime_indicator_metas(
         indicator_ids,
@@ -249,6 +290,8 @@ def build_runtime_indicator_graph(
             strategy_indicator_metas=metas,
             execution_context=execution_context,
             ctx=ctx,
+            source_frame_cache=source_frame_cache,
+            source_frame_cache_stats=source_frame_cache_stats,
         )
         for indicator_id, meta in metas.items()
     ]

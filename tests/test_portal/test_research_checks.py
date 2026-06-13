@@ -205,6 +205,194 @@ def test_research_check_service_fails_loud_for_invalid_detector_before_blocked_d
     assert created == []
 
 
+def test_research_check_sweep_ranks_metric_contract_and_reuses_scope_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[dict[str, Any]] = []
+    coverage_calls: list[tuple[Any, ...]] = []
+    candle_calls: list[tuple[Any, ...]] = []
+    evidence_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(service.repository, "create_item", lambda **kwargs: created.append(kwargs) or kwargs)
+    monkeypatch.setattr(
+        service.instrument_service,
+        "get_instrument_record",
+        lambda instrument_id: {
+            "id": instrument_id,
+            "symbol": "ETH/USD",
+            "datasource": "CCXT",
+            "exchange": "coinbase",
+        },
+    )
+
+    def fake_coverage(*args):
+        coverage_calls.append(args)
+        return {
+            "schema_version": "candle_coverage_preflight.v1",
+            "instrument_id": "inst-eth",
+            "symbol": "ETH/USD",
+            "provider": "CCXT",
+            "exchange": "coinbase",
+            "timeframe": "1h",
+            "status": "ok",
+            "continuity": {"final_status": "clean"},
+            "row_count": 6,
+            "missing_ranges": [],
+        }
+
+    def fake_candles(*args):
+        candle_calls.append(args)
+        return _candles()
+
+    def fake_evidence(
+        inst_id,
+        start,
+        end,
+        interval,
+        *,
+        indicator_param_overrides=None,
+        candle_frame=None,
+        source_frame_cache=None,
+        **_kwargs,
+    ):
+        assert inst_id == "indicator-1"
+        assert start == "2026-01-01T00:00:00Z"
+        assert end == "2026-01-01T06:00:00Z"
+        assert interval == "1h"
+        assert candle_frame is not None
+        assert source_frame_cache is not None
+        overrides = dict(indicator_param_overrides or {})
+        evidence_calls.append(overrides)
+        sample_count = 3 if overrides.get("touch_tolerance") == 0.4 else 1
+        outputs = [
+            {
+                "bar_index": index + 1,
+                "time": f"2026-01-01T0{index + 1}:00:00Z",
+                "indicator_id": "indicator-1",
+                "indicator_type": "generic",
+                "output_name": "entry",
+                "output_type": "signal",
+                "event_key": "entry_long",
+                "event": {"key": "entry_long"},
+                "value": {"events": [{"key": "entry_long"}]},
+            }
+            for index in range(sample_count)
+        ]
+        return {
+            "schema_version": "indicator_output_evidence.v1",
+            "indicator": {"id": "indicator-1", "type": "generic", "params": overrides},
+            "runtime_path": "typed_indicator_engine.v1",
+            "ready_counts": {"entry": sample_count},
+            "not_ready_counts": {},
+            "candles": [
+                {"time": str(timestamp).replace("+00:00", "Z"), **{field: float(row[field]) for field in ["open", "high", "low", "close", "volume"]}}
+                for timestamp, row in _candles().iterrows()
+            ],
+            "outputs": outputs,
+        }
+
+    monkeypatch.setattr(service.candle_service, "preflight_candle_coverage_by_instrument", fake_coverage)
+    monkeypatch.setattr(service.candle_service, "fetch_ohlcv_by_instrument", fake_candles)
+    monkeypatch.setattr(service, "collect_runtime_output_evidence_for_instance", fake_evidence)
+
+    payload = service.sweep_research_checks(
+        {
+            "title": "Entry variant sweep",
+            "check_family": "indicator_forward_outcome",
+            "scope": {
+                "indicator_id": "indicator-1",
+                "instrument_id": "inst-eth",
+                "timeframe": "1h",
+                "start": "2026-01-01T00:00:00Z",
+                "end": "2026-01-01T06:00:00Z",
+            },
+            "detector": {"type": "record_match", "output_name": "entry"},
+            "outcomes": {"forward_bars": [1], "min_sample_count": 1},
+            "variants": [
+                {"id": "base", "param_overrides": {}},
+                {"id": "tol04", "label": "touch 0.4", "param_overrides": {"touch_tolerance": 0.4}},
+            ],
+            "ranking": {
+                "rank_by": "sample_count",
+                "direction": "desc",
+                "display_metrics": ["eligible_events"],
+            },
+        }
+    )
+
+    assert payload["schema_version"] == "research_check_sweep.v1"
+    assert payload["evaluation_count"] == 2
+    assert payload["leaderboard"]["rows"][0]["variant_id"] == "tol04"
+    assert payload["leaderboard"]["rows"][0]["rank_metric"] == {"path": "sample_count", "value": 3.0}
+    assert payload["leaderboard"]["rows"][1]["variant_id"] == "base"
+    assert payload["cache"]["stats"] == {
+        "candle_hits": 1,
+        "candle_misses": 1,
+        "coverage_hits": 1,
+        "coverage_misses": 1,
+    }
+    assert len(coverage_calls) == 1
+    assert len(candle_calls) == 1
+    assert evidence_calls == [{}, {"touch_tolerance": 0.4}]
+    assert created == []
+
+
+def test_research_check_sweep_fails_when_rank_metric_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        service.instrument_service,
+        "get_instrument_record",
+        lambda instrument_id: {
+            "id": instrument_id,
+            "symbol": "ETH/USD",
+            "datasource": "CCXT",
+            "exchange": "coinbase",
+        },
+    )
+    monkeypatch.setattr(
+        service.candle_service,
+        "preflight_candle_coverage_by_instrument",
+        lambda *args: {
+            "status": "ok",
+            "continuity": {"final_status": "clean"},
+            "row_count": 6,
+            "missing_ranges": [],
+        },
+    )
+    monkeypatch.setattr(service.candle_service, "fetch_ohlcv_by_instrument", lambda *args: _candles())
+    monkeypatch.setattr(
+        service,
+        "collect_runtime_output_evidence_for_instance",
+        lambda *args, **kwargs: {
+            "indicator": {"id": "indicator-1", "type": "generic"},
+            "runtime_path": "typed_indicator_engine.v1",
+            "ready_counts": {},
+            "not_ready_counts": {},
+            "candles": [
+                {"time": str(timestamp).replace("+00:00", "Z"), **{field: float(row[field]) for field in ["open", "high", "low", "close", "volume"]}}
+                for timestamp, row in _candles().iterrows()
+            ],
+            "outputs": [],
+        },
+    )
+
+    with pytest.raises(ValueError, match="rank metric missing"):
+        service.sweep_research_checks(
+            {
+                "check_family": "indicator_forward_outcome",
+                "scope": {
+                    "indicator_id": "indicator-1",
+                    "instrument_id": "inst-eth",
+                    "timeframe": "1h",
+                    "start": "2026-01-01T00:00:00Z",
+                    "end": "2026-01-01T06:00:00Z",
+                },
+                "detector": {"type": "record_match", "output_name": "entry"},
+                "variants": [{"id": "base", "param_overrides": {}}],
+                "ranking": {"rank_by": "outcomes.summary.12.median_forward_return_pct", "direction": "desc"},
+            }
+        )
+
+
 def test_run_signal_summary_check_summarizes_report_signals() -> None:
     payload = checks.evaluate_run_signal_summary(
         {
@@ -1612,6 +1800,46 @@ def test_research_check_route_delegates_to_service(monkeypatch: pytest.MonkeyPat
     assert response.status_code == 201
     assert response.json()["status"] == "completed"
     assert observed["payload"]["title"] == "Quick check"
+
+
+def test_research_check_preview_and_sweep_routes_delegate_to_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed = {}
+
+    def fake_evaluate_research_check(payload):
+        observed["evaluate"] = payload
+        return {"schema_version": "research_check_evaluation.v1", "status": "completed"}
+
+    def fake_sweep_research_checks(payload):
+        observed["sweep"] = payload
+        return {"schema_version": "research_check_sweep.v1", "evaluation_count": 1}
+
+    monkeypatch.setattr(research_controller.research_service, "evaluate_research_check", fake_evaluate_research_check)
+    monkeypatch.setattr(research_controller.research_service, "sweep_research_checks", fake_sweep_research_checks)
+
+    client = TestClient(app)
+    evaluate_response = client.post(
+        "/api/research/checks/evaluate",
+        json={
+            "title": "Preview check",
+            "scope": {"instrument_id": "inst-1", "timeframe": "1h", "start": "2026-01-01T00:00:00Z", "end": "2026-01-02T00:00:00Z"},
+            "detector": {"type": "raw_condition", "field": "close", "operator": "gt", "value_field": "previous_close"},
+        },
+    )
+    sweep_response = client.post(
+        "/api/research/checks/sweep",
+        json={
+            "check_family": "candidate_lifecycle",
+            "scope": {"indicator_id": "indicator-1", "instrument_id": "inst-1", "timeframe": "1h", "start": "2026-01-01T00:00:00Z", "end": "2026-01-02T00:00:00Z"},
+            "detector": {"type": "candidate_lifecycle"},
+            "variants": [{"id": "base", "param_overrides": {}}],
+            "ranking": {"rank_by": "sample_count", "direction": "desc"},
+        },
+    )
+
+    assert evaluate_response.status_code == 200
+    assert sweep_response.status_code == 200
+    assert observed["evaluate"]["title"] == "Preview check"
+    assert observed["sweep"]["check_family"] == "candidate_lifecycle"
 
 
 def test_research_read_routes_delegate_to_service_exports(monkeypatch: pytest.MonkeyPatch) -> None:

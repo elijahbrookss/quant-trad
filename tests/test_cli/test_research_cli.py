@@ -397,6 +397,83 @@ def test_research_check_lifecycle_builds_candidate_lifecycle_request(monkeypatch
     }
 
 
+def test_research_check_sweep_builds_variant_metric_request(monkeypatch):
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        observed["method"] = request.get_method()
+        observed["path"] = urllib.parse.urlparse(request.full_url).path
+        observed["body"] = json.loads(request.data.decode("utf-8"))
+        return _Response(
+            b'{"schema_version":"research_check_sweep.v1","leaderboard":{"schema_version":"research_metric_leaderboard.v1","rows":[]}}'
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "research",
+            "check",
+            "sweep",
+            "--title",
+            "Retest sweep",
+            "--check-family",
+            "candidate_lifecycle",
+            "--indicator-id",
+            "indicator-1",
+            "--instrument-id",
+            "inst-eth",
+            "--timeframe",
+            "1h",
+            "--start",
+            "2026-01-01T00:00:00Z",
+            "--end",
+            "2026-02-01T00:00:00Z",
+            "--detector-json",
+            '{"type":"candidate_lifecycle","family":"retest"}',
+            "--variant",
+            "base",
+            "--variant",
+            "tol04:touch_tolerance=0.4,max_bars=12",
+            "--rank-by",
+            "outcomes.summary.candidate_count",
+            "--rank-direction",
+            "desc",
+            "--display-metric",
+            "sample_count",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed == {
+        "method": "POST",
+        "path": "/api/research/checks/sweep",
+        "body": {
+            "title": "Retest sweep",
+            "check_family": "candidate_lifecycle",
+            "detector": {"type": "candidate_lifecycle", "family": "retest"},
+            "scope": {
+                "indicator_id": "indicator-1",
+                "instrument_id": "inst-eth",
+                "timeframe": "1h",
+                "start": "2026-01-01T00:00:00Z",
+                "end": "2026-02-01T00:00:00Z",
+            },
+            "variants": [
+                {"id": "base", "param_overrides": {}},
+                {"id": "tol04", "param_overrides": {"touch_tolerance": 0.4, "max_bars": 12}},
+            ],
+            "ranking": {
+                "rank_by": "outcomes.summary.candidate_count",
+                "direction": "desc",
+                "display_metrics": ["sample_count"],
+            },
+        },
+    }
+
+
 def test_research_read_models_use_backend_routes(monkeypatch):
     calls = []
 

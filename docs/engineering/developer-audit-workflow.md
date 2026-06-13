@@ -41,6 +41,7 @@ Common agent/tool workflow commands:
 - `qt indicators validate-config --type <type> --params-json '<json>'`
 - `qt indicators validate-runtime <indicator_id> --instrument-id <instrument_id> --start <iso> --end <iso> --interval <timeframe>`
 - `qt data coverage --instrument-id <instrument_id> --start <iso> --end <iso> --timeframe <timeframe>`
+- `qt research check sweep --check-family <family> --indicator-id <indicator_id> --instrument-id <instrument_id> --start <iso> --end <iso> --timeframe <timeframe> --detector-json '<json>' --variant <id[:key=value]> --rank-by <metric.path> --rank-direction <asc|desc>`
 - `qt instruments list`
 - `qt instruments profile <instrument_id> --execution-semantics proxy_derivative`
 - `qt experiments validate-plan <plan>`

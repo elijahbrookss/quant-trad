@@ -85,6 +85,63 @@ def test_runtime_indicator_source_fetch_uses_canonical_candle_service(monkeypatc
     }
 
 
+def test_runtime_indicator_source_fetch_uses_explicit_source_frame_cache(monkeypatch):
+    source_frame = SimpleNamespace(empty=False, rows=12)
+    fetch_count = 0
+    cache = {}
+    stats = {}
+
+    def fake_fetch(ctx, *, datasource=None, exchange=None):
+        nonlocal fetch_count
+        _ = ctx, datasource, exchange
+        fetch_count += 1
+        return source_frame
+
+    def fake_builder(**kwargs):
+        return {"source_facts": kwargs["source_facts"]}
+
+    monkeypatch.setitem(runtime_graph._INDICATOR_MAP, "fake_runtime_indicator", _FakeRuntimeIndicator)
+    monkeypatch.setattr(runtime_graph, "runtime_indicator_builder_for_type", lambda indicator_type: fake_builder)
+    monkeypatch.setattr(runtime_graph.candle_service, "fetch_ohlcv_for_context", fake_fetch)
+
+    execution_context = IndicatorExecutionContext(
+        symbol="BTCUSD",
+        start="2026-01-01T00:00:00Z",
+        end="2026-01-02T00:00:00Z",
+        interval="1h",
+        datasource="COINBASE",
+        exchange="coinbase_direct",
+        instrument_id="instrument-1",
+    )
+    meta = {
+        "id": "indicator-1",
+        "type": "fake_runtime_indicator",
+        "params": {},
+        "datasource": "COINBASE",
+        "exchange": "coinbase_direct",
+    }
+
+    first = runtime_graph.build_runtime_indicator_instance(
+        "indicator-1",
+        meta=meta,
+        execution_context=execution_context,
+        source_frame_cache=cache,
+        source_frame_cache_stats=stats,
+    )
+    second = runtime_graph.build_runtime_indicator_instance(
+        "indicator-1",
+        meta=meta,
+        execution_context=execution_context,
+        source_frame_cache=cache,
+        source_frame_cache_stats=stats,
+    )
+
+    assert fetch_count == 1
+    assert len(cache) == 1
+    assert stats == {"source_frame_hits": 1, "source_frame_misses": 1}
+    assert first == second == {"source_facts": {"source_rows": 12, "timeframe": "1h", "params": {}}}
+
+
 def test_collect_runtime_indicator_diagnostics_keeps_indicator_identity() -> None:
     indicator = SimpleNamespace(
         runtime_spec=SimpleNamespace(

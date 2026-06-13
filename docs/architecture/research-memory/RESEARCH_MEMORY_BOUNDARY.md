@@ -46,6 +46,8 @@ Research memory may:
 - run bounded signal audits that reconcile declared expectations against
   emitted indicator signal events using public typed output rows,
 - run bounded analytical checks over canonical report datasets,
+- run non-persisted indicator-backed check sweeps for explicit temporary
+  parameter variants,
 - persist check outputs as evidence items,
 - recommend whether an observation should be discarded, refined, or promoted to
   a hypothesis.
@@ -197,6 +199,27 @@ Future report-candle joined checks may reuse this request and persistence shape,
 but they must keep the same boundary: analytical evidence only, not execution
 truth.
 
+## Research Check Sweeps
+
+Research check sweeps are non-persisted analytical previews over the same check
+evaluators used by persisted research checks. They exist to compare explicit
+indicator parameter variants before deciding which evidence deserves a
+research-memory item, hypothesis, clone, strategy variant, or experiment.
+
+Sweeps are limited to indicator-backed check families:
+`indicator_forward_outcome`, `signal_audit`, and `candidate_lifecycle`.
+Each sweep variant must declare an id and explicit `param_overrides` for the
+target persisted indicator. The persisted indicator still supplies identity,
+type, dependencies, and base params; the override branch is part of the sweep
+request contract and is returned in the evidence payload. Unknown params fail
+through the indicator config/runtime contract.
+
+Sweeps must use the canonical runtime graph and `initialize -> apply_bar ->
+snapshot` timeline. They may cache candle coverage, source candles, and
+indicator runtime source frames inside one request, but that cache is a
+performance detail only. It does not become provider truth, report truth, or
+research memory.
+
 ## Research Metric Presentation
 
 Research-memory presentation surfaces, including compact comparisons and future
@@ -255,6 +278,9 @@ Useful relations include:
   rows; they must not import indicator-family code or inspect mutable indicator
   internals.
 - Forward outcomes are analytical summaries, not simulated trades.
+- Research check sweeps are previews. They must not create research-memory
+  items unless the user later runs a persisted check or creates an item/link
+  explicitly.
 - Research metric presentation must be driven by emitted metric contracts and
   explicit rank intent; it must not contain indicator-family logic or hidden
   fallback ranking.
