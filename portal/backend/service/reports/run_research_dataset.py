@@ -22,6 +22,7 @@ from utils.log_context import build_log_context, with_log_context
 
 from ..provenance import REPORT_DATASET_SCHEMA_VERSION
 from ..storage import storage
+from . import artifacts as report_artifacts
 from . import report_data
 from .metrics import compute_expectancy, compute_max_drawdown, compute_profit_factor
 from .summary_metrics import ANNUALIZATION_PERIODS, compute_summary as compute_portfolio_metric_summary
@@ -70,6 +71,8 @@ _OBSERVER_CANDLE_CONTINUITY_STAGES = frozenset(
     }
 )
 _OBSERVER_CANDLE_CONTINUITY_MESSAGE_KINDS = frozenset({"ephemeral"})
+_CANDIDATE_LIFECYCLE_FUNNEL_STAGES = ("formed", "eligible", "touched", "confirmed")
+_CANDIDATE_LIFECYCLE_TERMINAL_STAGES = frozenset({"confirmed", "invalidated", "expired"})
 
 
 @dataclass(frozen=True)
@@ -198,6 +201,7 @@ class RunResearchDataset:
     signals: List[Dict[str, Any]]
     trades: List[Dict[str, Any]]
     context: Dict[str, Any]
+    candidate_lifecycle: Dict[str, Any]
     candle_catalog: Dict[str, Any]
     fee_accounting: Dict[str, Any]
     wallet_accounting: Dict[str, Any]
@@ -3062,6 +3066,7 @@ def _sections(
     trades: Sequence[Mapping[str, Any]],
     timeseries: Mapping[str, Any],
     context: Mapping[str, Any],
+    candidate_lifecycle: Mapping[str, Any],
     candle_catalog: Mapping[str, Any],
     diagnostics: Mapping[str, Any],
     execution: Mapping[str, Any],
@@ -3114,6 +3119,7 @@ def _sections(
             section("decision_context", available=bool(context.get("decision_context", {}).get("available")), row_count=int(context.get("decision_context", {}).get("row_count") or 0), reason=context.get("decision_context", {}).get("reason")),
             section("trade_context", available=bool(context.get("trade_context", {}).get("available")), row_count=int(context.get("trade_context", {}).get("row_count") or 0), reason=context.get("trade_context", {}).get("reason")),
             section("market_state", available=bool(context.get("market_state", {}).get("available")), row_count=int(context.get("market_state", {}).get("row_count") or 0), reason=context.get("market_state", {}).get("reason")),
+            section("candidate_lifecycle", available=bool(candidate_lifecycle.get("available")), row_count=int(candidate_lifecycle.get("row_count") or 0), reason=candidate_lifecycle.get("reason")),
             section("candle_catalog", available=bool(candle_catalog.get("items")), row_count=len(candle_catalog.get("items") or []), reason=None if candle_catalog.get("items") else "candle_catalog_unavailable"),
             section("diagnostics", available=True, row_count=int(_mapping(diagnostics.get("summary")).get("total") or 0)),
             section("wallet_diagnostics", available=bool(wallet), row_count=int(wallet.get("wallet_event_count") or 0), reason=None if wallet else "wallet_diagnostics_unavailable"),
@@ -3229,6 +3235,226 @@ def _series_payload(*, schema_version: str, rows: Sequence[Mapping[str, Any]], r
     if reason and not rows:
         payload["reason"] = reason
     return payload
+
+
+def _artifact_row_ready(row: Mapping[str, Any]) -> bool:
+    value = row.get("ready")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes"}
+    return bool(value)
+
+
+def _lifecycle_text(value: Any, field: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise RuntimeError(f"candidate_lifecycle_event_invalid: missing {field}")
+    return text
+
+
+def _lifecycle_mapping(value: Any, *, field: str) -> Dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise RuntimeError(f"candidate_lifecycle_event_invalid: {field} must be an object")
+    return _json_safe(dict(value))
+
+
+def _lifecycle_output_value(row: Mapping[str, Any]) -> Dict[str, Any]:
+    raw = row.get("value_json")
+    if raw in (None, "") and isinstance(row.get("value"), Mapping):
+        return dict(row.get("value") or {})
+    if not isinstance(raw, str):
+        raise RuntimeError(
+            "candidate_lifecycle_artifact_invalid: value_json missing "
+            f"path={row.get('source_path') or '<unknown>'}"
+        )
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "candidate_lifecycle_artifact_invalid: value_json is not valid JSON "
+            f"path={row.get('source_path') or '<unknown>'}"
+        ) from exc
+    if not isinstance(decoded, Mapping):
+        raise RuntimeError(
+            "candidate_lifecycle_artifact_invalid: value_json must decode to an object "
+            f"path={row.get('source_path') or '<unknown>'}"
+        )
+    return dict(decoded)
+
+
+def _candidate_lifecycle_rows(
+    *,
+    metadata: RunResearchMetadata,
+    artifact_rows: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for output_index, output_row in enumerate(artifact_rows):
+        if str(output_row.get("output_type") or "").strip().lower() != "lifecycle":
+            continue
+        if not _artifact_row_ready(output_row):
+            continue
+        value = _lifecycle_output_value(output_row)
+        events = value.get("events")
+        if not isinstance(events, list):
+            raise RuntimeError(
+                "candidate_lifecycle_artifact_invalid: lifecycle value.events must be a list "
+                f"path={output_row.get('source_path') or '<unknown>'}"
+            )
+        for event_index, event in enumerate(events):
+            if not isinstance(event, Mapping):
+                raise RuntimeError("candidate_lifecycle_event_invalid: event must be an object")
+            event_map = dict(event)
+            known_at = event_map.get("known_at")
+            if known_at is None:
+                raise RuntimeError("candidate_lifecycle_event_invalid: missing known_at")
+            stage = _lifecycle_text(event_map.get("stage"), "stage")
+            row = {
+                "run_id": metadata.run_id,
+                "bot_id": metadata.bot_id,
+                "strategy_id": metadata.strategy_id,
+                "strategy_hash": metadata.strategy_hash,
+                "instrument_id": output_row.get("instrument_id"),
+                "symbol": output_row.get("symbol"),
+                "timeframe": output_row.get("timeframe"),
+                "bar_time": output_row.get("bar_time"),
+                "known_at": known_at,
+                "indicator_id": output_row.get("indicator_id"),
+                "indicator_type": output_row.get("indicator_type"),
+                "indicator_version": output_row.get("indicator_version"),
+                "output_name": output_row.get("output_name"),
+                "output_type": "lifecycle",
+                "output_op": output_row.get("output_op"),
+                "base_indicator_commit_seq": _safe_int(output_row.get("base_indicator_commit_seq")),
+                "indicator_commit_seq": _safe_int(output_row.get("indicator_commit_seq")),
+                "indicator_commit_seq_status": output_row.get("indicator_commit_seq_status"),
+                "output_row_index": output_index,
+                "event_index": event_index,
+                "event_key": str(event_map.get("key") or stage),
+                "candidate_id": _lifecycle_text(event_map.get("candidate_id"), "candidate_id"),
+                "family": _lifecycle_text(event_map.get("family"), "family"),
+                "side": _lifecycle_text(event_map.get("side"), "side"),
+                "stage": stage,
+                "status": _lifecycle_text(event_map.get("status"), "status"),
+                "reason": _lifecycle_text(event_map.get("reason"), "reason"),
+                "group_key": _clean_text(event_map.get("group_key")),
+                "source_event_id": _clean_text(event_map.get("source_event_id")),
+                "source_output": _clean_text(event_map.get("source_output")),
+                "source_event_key": _clean_text(event_map.get("source_event_key")),
+                "signal_output": _clean_text(event_map.get("signal_output")),
+                "signal_event_key": _clean_text(event_map.get("signal_event_key")),
+                "reference": _lifecycle_mapping(event_map.get("reference"), field="reference"),
+                "metrics": _lifecycle_mapping(event_map.get("metrics"), field="metrics"),
+                "thresholds": _lifecycle_mapping(event_map.get("thresholds"), field="thresholds"),
+                "source_path": output_row.get("source_path"),
+            }
+            rows.append(row)
+    rows.sort(
+        key=lambda row: (
+            str(row.get("bar_time") or ""),
+            _safe_int(row.get("indicator_commit_seq")) or 0,
+            int(row.get("event_index") or 0),
+            str(row.get("candidate_id") or ""),
+        )
+    )
+    return rows
+
+
+def _candidate_lifecycle_summary(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    rows_by_candidate: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    stage_event_counts: Counter[str] = Counter()
+    status_counts: Counter[str] = Counter()
+    reason_counts: Counter[str] = Counter()
+    family_side_counts: Counter[str] = Counter()
+    for row in rows:
+        candidate_id = str(row.get("candidate_id") or "")
+        rows_by_candidate[candidate_id].append(dict(row))
+        stage_event_counts[str(row.get("stage") or "unknown")] += 1
+        status_counts[str(row.get("status") or "unknown")] += 1
+        reason_counts[str(row.get("reason") or "unknown")] += 1
+        family_side_counts[f"{row.get('family') or 'unknown'}|{row.get('side') or 'unknown'}"] += 1
+    for candidate_rows in rows_by_candidate.values():
+        candidate_rows.sort(
+            key=lambda row: (
+                str(row.get("bar_time") or ""),
+                _safe_int(row.get("indicator_commit_seq")) or 0,
+                int(row.get("event_index") or 0),
+            )
+        )
+    funnel: Dict[str, Dict[str, Any]] = {}
+    previous_count: int | None = None
+    for stage in _CANDIDATE_LIFECYCLE_FUNNEL_STAGES:
+        count = sum(
+            1
+            for candidate_rows in rows_by_candidate.values()
+            if any(str(row.get("stage") or "") == stage for row in candidate_rows)
+        )
+        funnel[stage] = {
+            "candidate_count": count,
+            "conversion_from_previous": (count / previous_count) if previous_count else None,
+        }
+        previous_count = count
+    terminal_counts: Counter[str] = Counter()
+    open_candidate_count = 0
+    for candidate_rows in rows_by_candidate.values():
+        terminal_rows = [
+            row
+            for row in candidate_rows
+            if str(row.get("stage") or "") in _CANDIDATE_LIFECYCLE_TERMINAL_STAGES
+        ]
+        if terminal_rows:
+            terminal_counts[str(terminal_rows[-1].get("stage") or "unknown")] += 1
+        else:
+            open_candidate_count += 1
+    return {
+        "candidate_count": len(rows_by_candidate),
+        "lifecycle_event_count": len(rows),
+        "open_candidate_count": open_candidate_count,
+        "terminal_candidate_count": sum(terminal_counts.values()),
+        "funnel": funnel,
+        "stage_counts": dict(sorted(stage_event_counts.items())),
+        "status_counts": dict(sorted(status_counts.items())),
+        "terminal_counts": dict(sorted(terminal_counts.items())),
+        "reason_counts": dict(sorted(reason_counts.items())),
+        "by_family_side": dict(sorted(family_side_counts.items())),
+    }
+
+
+def _candidate_lifecycle_dataset(*, metadata: RunResearchMetadata) -> Dict[str, Any]:
+    artifact_payload = report_artifacts.list_run_indicator_output_rows(
+        metadata.run_id,
+        bot_id=metadata.bot_id,
+        output_type="lifecycle",
+    )
+    artifact_rows = [
+        dict(row)
+        for row in artifact_payload.get("items") or []
+        if isinstance(row, Mapping)
+    ]
+    rows = _candidate_lifecycle_rows(metadata=metadata, artifact_rows=artifact_rows)
+    reason = None
+    if not rows:
+        reason = (
+            artifact_payload.get("reason")
+            if not artifact_payload.get("available")
+            else "candidate_lifecycle_events_unavailable"
+        )
+    return {
+        "schema_version": "candidate_lifecycle_dataset.v1",
+        "available": bool(rows),
+        "row_count": len(rows),
+        "items": rows,
+        "summary": _candidate_lifecycle_summary(rows),
+        "source": {
+            "kind": "report_indicator_output_artifacts",
+            "available": bool(artifact_payload.get("available")),
+            "reason": artifact_payload.get("reason"),
+            "source_files": list(artifact_payload.get("source_files") or []),
+        },
+        **({"reason": reason} if reason else {}),
+    }
 
 
 def _rolling(values: Sequence[float], *, window: int, index: int) -> List[float]:
@@ -5133,6 +5359,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     timeseries = _timeseries(metadata=metadata, trades=trades, summary=summary)
     performance = _performance(run, events)
     context = _context_dataset(metadata=metadata, decisions=decisions, signals=signals, trades=trades)
+    candidate_lifecycle = _candidate_lifecycle_dataset(metadata=metadata)
     candle_catalog = _candle_catalog(metadata=metadata, traces=trace_rows, candle_gaps=candle_gaps)
     position_ordering = _position_ordering_health(events)
     execution = dict(execution)
@@ -5179,6 +5406,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         trades=trades,
         timeseries=timeseries,
         context=context,
+        candidate_lifecycle=candidate_lifecycle,
         candle_catalog=candle_catalog,
         diagnostics=diagnostics,
         execution=execution,
@@ -5200,6 +5428,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         trades=trades,
         timeseries=timeseries,
         context=context,
+        candidate_lifecycle=candidate_lifecycle,
         candle_catalog=candle_catalog,
         diagnostics=diagnostics,
         execution=execution,
@@ -5252,6 +5481,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         trades=trades,
         timeseries=timeseries,
         context=context,
+        candidate_lifecycle=candidate_lifecycle,
         candle_catalog=candle_catalog,
         diagnostics=diagnostics,
         execution=execution,
@@ -5278,6 +5508,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         signals=signals,
         trades=trades,
         context=context,
+        candidate_lifecycle=candidate_lifecycle,
         candle_catalog=candle_catalog,
         fee_accounting=fee_accounting,
         wallet_accounting=wallet_accounting,

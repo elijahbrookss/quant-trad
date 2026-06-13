@@ -498,6 +498,75 @@ def test_dataset_builds_from_db_truth_without_artifact_directory(monkeypatch: py
     assert dataset["operational_health"]["schema_version"] == "operational_health.v1"
 
 
+def test_dataset_exposes_candidate_lifecycle_from_report_indicator_artifacts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        run_research_dataset.report_artifacts,
+        "list_run_indicator_output_rows",
+        lambda *_args, **_kwargs: {
+            "schema_version": "indicator_output_artifact_rows.v1",
+            "run_id": "run-1",
+            "available": True,
+            "source_files": [{"path": "series/symbol=BTC/timeframe=1h/indicators/ind-1.csv", "rows": 2}],
+            "items": [
+                {
+                    "run_id": "run-1",
+                    "bot_id": "bot-1",
+                    "symbol": "BTC",
+                    "timeframe": "1h",
+                    "instrument_id": "instrument-btc",
+                    "bar_time": "2026-03-01T00:00:00Z",
+                    "known_at": "2026-03-01T00:00:00Z",
+                    "indicator_id": "ind-1",
+                    "indicator_type": "generic",
+                    "indicator_version": "current",
+                    "output_name": "candidate_lifecycle",
+                    "output_type": "lifecycle",
+                    "ready": True,
+                    "indicator_commit_seq": 1,
+                    "indicator_commit_seq_status": "indicator_scoped",
+                    "value_json": '{"events":[{"candidate_id":"candidate-1","family":"retest","side":"long","stage":"formed","status":"active","group_key":"profile-1","known_at":1761955200,"reason":"source_confirmed"}]}',
+                    "source_path": "series/symbol=BTC/timeframe=1h/indicators/ind-1.csv",
+                },
+                {
+                    "run_id": "run-1",
+                    "bot_id": "bot-1",
+                    "symbol": "BTC",
+                    "timeframe": "1h",
+                    "instrument_id": "instrument-btc",
+                    "bar_time": "2026-03-01T01:00:00Z",
+                    "known_at": "2026-03-01T01:00:00Z",
+                    "indicator_id": "ind-1",
+                    "indicator_type": "generic",
+                    "indicator_version": "current",
+                    "output_name": "candidate_lifecycle",
+                    "output_type": "lifecycle",
+                    "ready": True,
+                    "indicator_commit_seq": 2,
+                    "indicator_commit_seq_status": "indicator_scoped",
+                    "value_json": '{"events":[{"candidate_id":"candidate-1","family":"retest","side":"long","stage":"confirmed","status":"closed","group_key":"profile-1","known_at":1761958800,"reason":"signal_emitted","signal_output":"entry","signal_event_key":"entry_long"}]}',
+                    "source_path": "series/symbol=BTC/timeframe=1h/indicators/ind-1.csv",
+                },
+            ],
+        },
+    )
+
+    dataset = _build(monkeypatch)
+
+    lifecycle = dataset["candidate_lifecycle"]
+    assert lifecycle["schema_version"] == "candidate_lifecycle_dataset.v1"
+    assert lifecycle["available"] is True
+    assert lifecycle["row_count"] == 2
+    assert lifecycle["items"][0]["candidate_id"] == "candidate-1"
+    assert lifecycle["items"][1]["signal_event_key"] == "entry_long"
+    assert lifecycle["summary"]["candidate_count"] == 1
+    assert lifecycle["summary"]["terminal_counts"] == {"confirmed": 1}
+    assert lifecycle["summary"]["funnel"]["formed"]["candidate_count"] == 1
+    assert lifecycle["summary"]["funnel"]["confirmed"]["candidate_count"] == 1
+    section = next(row for row in dataset["sections"]["items"] if row["name"] == "candidate_lifecycle")
+    assert section["available"] is True
+    assert section["row_count"] == 2
+
+
 def test_dataset_summary_matches_trades_events_and_report_db_values(monkeypatch: pytest.MonkeyPatch) -> None:
     dataset = _build(monkeypatch)
 

@@ -119,6 +119,11 @@ def test_breakout_state_machine_emits_structural_long_retest_after_acceptance() 
 
     confirmed = emitted[2]["confirmed_balance_breakout"][0]
     retest = emitted[5]["balance_retest"][0]
+    lifecycle = [
+        event
+        for payload in emitted
+        for event in payload["candidate_lifecycle"]
+    ]
 
     assert emitted[5]["balance_reclaim"] == []
     assert retest["key"] == "balance_retest_long"
@@ -128,6 +133,16 @@ def test_breakout_state_machine_emits_structural_long_retest_after_acceptance() 
     assert retest["metadata"]["hold_confirm_price"] == states[5].close
     assert retest["metadata"]["max_excursion_from_reference"] > 1.0
     assert retest["metadata"]["retest_touch_penetration"] > 0.0
+    assert [event["stage"] for event in lifecycle] == [
+        "formed",
+        "eligible",
+        "touched",
+        "confirmed",
+    ]
+    assert all(event["family"] == "retest" for event in lifecycle)
+    assert all(event["candidate_id"] == confirmed["pattern_id"] for event in lifecycle)
+    assert lifecycle[-1]["signal_output"] == "balance_retest"
+    assert lifecycle[-1]["signal_event_key"] == "balance_retest_long"
 
 
 def test_breakout_state_machine_rejects_deep_pullback_as_structural_retest() -> None:

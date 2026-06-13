@@ -74,6 +74,26 @@ that fact must come from a persisted indicator through
 through the canonical runtime graph before measuring the same forward candle
 outcomes.
 
+`signal_audit` evaluates declared expectations over public indicator typed
+outputs and reconciles them against emitted signal events. It is a semantic
+contract check, not a profitability check. The research layer remains
+indicator-agnostic: callers name the source output, source field, transition or
+condition, optional grouping fields, expected signal output, and expected event
+key. The result reports matched, missing expected, invalid emitted, and excluded
+candidate counts so indicator signal meaning can be reviewed before strategy
+or forward-outcome work trusts the signal labels.
+
+`candidate_lifecycle` evaluates optional public lifecycle typed outputs for
+stateful candidate/setup funnels. It is generic: indicators may emit lifecycle
+events with candidate id, family, side, stage, status, group key, source event,
+known-at time, reason, reference, metrics, thresholds, and optional emitted
+signal link fields. The check groups lifecycle events by candidate, summarizes
+funnels and terminal outcomes, and reconciles declared signal-stage links
+against emitted signal events. It does not require every signal to expose
+lifecycle facts. Simple signals remain signal-only; lifecycle is reserved for
+sequence-based signals where candidate denominators, invalidations, expirations,
+and missed emissions are meaningful research evidence.
+
 Report-backed check families read `RunResearchDataset` through the reporting
 contract. `run_signal_summary` summarizes matching report signals and their
 linked decisions/trades. `run_decision_trade_comparison` summarizes matching
@@ -107,6 +127,8 @@ auditable research graph.
   idea into a strategy variant.
 - Raw, indicator-backed, and report-backed checks reuse the same storage and
   link model while keeping their source-evidence contracts separate.
+- Candidate lifecycle checks expose setup funnels without creating a new
+  execution engine or making lifecycle facts strategy inputs.
 - Promotion remains explicit: a promising check recommends a hypothesis; it
   does not auto-create executable trading logic.
 

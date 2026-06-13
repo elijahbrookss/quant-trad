@@ -77,6 +77,7 @@ def build_not_ready_outputs(bar_time: datetime) -> dict[str, RuntimeOutput]:
         "confirmed_balance_breakout": RuntimeOutput(bar_time=bar_time, ready=False, value={}),
         "balance_reclaim": RuntimeOutput(bar_time=bar_time, ready=False, value={}),
         "balance_retest": RuntimeOutput(bar_time=bar_time, ready=False, value={}),
+        "candidate_lifecycle": RuntimeOutput(bar_time=bar_time, ready=False, value={}),
     }
 
 
@@ -99,7 +100,13 @@ def build_market_profile_outputs(
         "value_location": RuntimeOutput(
             bar_time=state.bar_time,
             ready=True,
-            value={"state_key": state.location},
+            value={
+                "state_key": state.location,
+                "fields": {
+                    "active_profile_key": state.active_profile_key,
+                    "previous_location": state.previous_location,
+                },
+            },
         ),
         "balance_state": RuntimeOutput(
             bar_time=state.bar_time,
@@ -113,6 +120,7 @@ def build_market_profile_outputs(
         "confirmed_balance_breakout",
         "balance_reclaim",
         "balance_retest",
+        "candidate_lifecycle",
     ):
         outputs[output_name] = RuntimeOutput(
             bar_time=state.bar_time,

@@ -149,6 +149,19 @@ def test_report_contract_routes_expose_canonical_shapes(monkeypatch: pytest.Monk
             "items": [{"decision_id": "decision-1"}],
         },
     )
+    monkeypatch.setattr(
+        reports_controller,
+        "_get_candidate_lifecycle_dataset",
+        lambda run_id, **_kwargs: {
+            "schema_version": "dataset_page.v1",
+            "run_id": run_id,
+            "section": "candidate_lifecycle",
+            "limit": 100,
+            "offset": 0,
+            "total": 1,
+            "items": [{"candidate_id": "candidate-1", "stage": "formed"}],
+        },
+    )
     monkeypatch.setattr(reports_controller, "_get_candle_catalog", lambda run_id: {"schema_version": "candle_catalog.v1", "run_id": run_id, "items": [], "caveats": []})
     monkeypatch.setattr(
         reports_controller,
@@ -204,6 +217,7 @@ def test_report_contract_routes_expose_canonical_shapes(monkeypatch: pytest.Monk
     assert client.get("/api/reports/run-1/trades").json()["schema_version"] == "trades_dataset.v1"
     assert client.get("/api/reports/run-1/timeseries/equity_curve").json()["section"] == "timeseries.equity_curve"
     assert client.get("/api/reports/run-1/context").json()["section"] == "context.decision_context"
+    assert client.get("/api/reports/run-1/candidate-lifecycle").json()["section"] == "candidate_lifecycle"
     assert client.get("/api/reports/run-1/candles/catalog").json()["schema_version"] == "candle_catalog.v1"
     assert client.get("/api/reports/run-1/metrics/sharpe/explanation").json()["value"] == 1.25
 

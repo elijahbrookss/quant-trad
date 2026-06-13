@@ -122,6 +122,7 @@ class BreakoutSequence:
     hold_confirm_bars_observed: int = 0
     hold_confirm_time: datetime | None = None
     hold_confirm_price: float | None = None
+    retest_lifecycle_closed: bool = False
 
     @property
     def level_name(self) -> str:
@@ -196,12 +197,21 @@ class BreakoutRetestStateMachine:
             "confirmed_balance_breakout": [],
             "balance_reclaim": [],
             "balance_retest": [],
+            "candidate_lifecycle": [],
         }
         current_atr = self._atr.step(state)
         raw_breakout_direction = _breakout_direction(state)
         consumed_raw_breakout = False
 
         if self._sequence is not None and self._sequence.profile_key != state.active_profile_key:
+            if self._sequence.confirmed_time is not None:
+                self._append_terminal_lifecycle_event(
+                    events,
+                    state=state,
+                    sequence=self._sequence,
+                    stage="invalidated",
+                    reason="group_changed",
+                )
             self._sequence = None
 
         if self._sequence is not None:
@@ -217,12 +227,30 @@ class BreakoutRetestStateMachine:
                         events["confirmed_balance_breakout"].append(
                             self._confirmed_event(state, sequence)
                         )
+                        events["candidate_lifecycle"].append(
+                            self._lifecycle_event(
+                                state=state,
+                                sequence=sequence,
+                                stage="formed",
+                                status="active",
+                                reason="confirmed_breakout",
+                                source_output="confirmed_balance_breakout",
+                                source_event_key=f"confirmed_balance_breakout_{sequence.direction}",
+                            )
+                        )
                 else:
                     self._sequence = None
             else:
                 if sequence.confirmed_time is not None and state.bar_time != sequence.confirmed_time:
                     sequence.bars_since_confirmation += 1
                 if raw_breakout_direction and raw_breakout_direction != sequence.direction:
+                    self._append_terminal_lifecycle_event(
+                        events,
+                        state=state,
+                        sequence=sequence,
+                        stage="invalidated",
+                        reason="opposite_breakout",
+                    )
                     self._sequence = None
                 elif sequence.phase == "reclaim_touched":
                     if sequence.bars_since_confirmation > self._reclaim_max_bars:
@@ -253,6 +281,17 @@ class BreakoutRetestStateMachine:
                 events["confirmed_balance_breakout"].append(
                     self._confirmed_event(state, self._sequence)
                 )
+                events["candidate_lifecycle"].append(
+                    self._lifecycle_event(
+                        state=state,
+                        sequence=self._sequence,
+                        stage="formed",
+                        status="active",
+                        reason="confirmed_breakout",
+                        source_output="confirmed_balance_breakout",
+                        source_event_key=f"confirmed_balance_breakout_{self._sequence.direction}",
+                    )
+                )
 
         return events
 
@@ -273,6 +312,13 @@ class BreakoutRetestStateMachine:
             ):
                 sequence.reclaim_touch_time = state.bar_time
                 sequence.reclaim_touch_price = float(state.close)
+                self._append_terminal_lifecycle_event(
+                    events,
+                    state=state,
+                    sequence=sequence,
+                    stage="invalidated",
+                    reason="reclaim_touch",
+                )
                 return
             if sequence.acceptance_time is None and self._acceptance_established(
                 sequence=sequence,
@@ -281,8 +327,25 @@ class BreakoutRetestStateMachine:
                 sequence.acceptance_time = state.bar_time
                 sequence.acceptance_trigger_price = float(state.close)
                 sequence.acceptance_atr = float(current_atr)
+                events["candidate_lifecycle"].append(
+                    self._lifecycle_event(
+                        state=state,
+                        sequence=sequence,
+                        stage="eligible",
+                        status="active",
+                        reason="acceptance_threshold_met",
+                        current_atr=current_atr,
+                    )
+                )
                 return
             if state.location != _outside_location(sequence.direction):
+                self._append_terminal_lifecycle_event(
+                    events,
+                    state=state,
+                    sequence=sequence,
+                    stage="invalidated",
+                    reason="left_outside_before_acceptance",
+                )
                 self._sequence = None
                 return
 
@@ -292,6 +355,14 @@ class BreakoutRetestStateMachine:
         if state.bar_time != sequence.acceptance_time:
             sequence.bars_since_acceptance += 1
         if sequence.bars_since_acceptance > self._retest_max_bars:
+            self._append_terminal_lifecycle_event(
+                events,
+                state=state,
+                sequence=sequence,
+                stage="expired",
+                reason="retest_window_elapsed",
+                current_atr=current_atr,
+            )
             self._sequence = None
             return
 
@@ -300,6 +371,14 @@ class BreakoutRetestStateMachine:
             sequence=sequence,
             current_atr=current_atr,
         ):
+            self._append_terminal_lifecycle_event(
+                events,
+                state=state,
+                sequence=sequence,
+                stage="invalidated",
+                reason="penetration_threshold_exceeded",
+                current_atr=current_atr,
+            )
             self._sequence = None
             return
 
@@ -315,6 +394,16 @@ class BreakoutRetestStateMachine:
                 state=state,
                 sequence=sequence,
             )
+            events["candidate_lifecycle"].append(
+                self._lifecycle_event(
+                    state=state,
+                    sequence=sequence,
+                    stage="touched",
+                    status="active",
+                    reason="reference_touched",
+                    current_atr=current_atr,
+                )
+            )
 
         if sequence.retest_touch_time is None:
             return
@@ -324,12 +413,21 @@ class BreakoutRetestStateMachine:
             sequence.hold_confirm_time = state.bar_time
             sequence.hold_confirm_price = float(state.close)
             if sequence.hold_confirm_bars_observed >= self._retest_hold_confirm_bars:
-                events["balance_retest"].append(
-                    self._retest_event(
-                        state=state,
-                        sequence=sequence,
-                        current_atr=current_atr,
-                    )
+                retest_event = self._retest_event(
+                    state=state,
+                    sequence=sequence,
+                    current_atr=current_atr,
+                )
+                events["balance_retest"].append(retest_event)
+                self._append_terminal_lifecycle_event(
+                    events,
+                    state=state,
+                    sequence=sequence,
+                    stage="confirmed",
+                    reason="signal_emitted",
+                    current_atr=current_atr,
+                    signal_output="balance_retest",
+                    signal_event_key=str(retest_event["key"]),
                 )
                 self._sequence = None
         else:
@@ -590,6 +688,95 @@ class BreakoutRetestStateMachine:
                     direction=sequence.direction,
                 ),
             },
+        }
+
+    def _append_terminal_lifecycle_event(
+        self,
+        events: dict[str, list[dict[str, Any]]],
+        *,
+        state: MarketProfileBarState,
+        sequence: BreakoutSequence,
+        stage: str,
+        reason: str,
+        current_atr: float | None = None,
+        signal_output: str | None = None,
+        signal_event_key: str | None = None,
+    ) -> None:
+        if sequence.retest_lifecycle_closed:
+            return
+        sequence.retest_lifecycle_closed = True
+        events["candidate_lifecycle"].append(
+            self._lifecycle_event(
+                state=state,
+                sequence=sequence,
+                stage=stage,
+                status="closed",
+                reason=reason,
+                current_atr=current_atr,
+                signal_output=signal_output,
+                signal_event_key=signal_event_key,
+            )
+        )
+
+    def _lifecycle_event(
+        self,
+        *,
+        state: MarketProfileBarState,
+        sequence: BreakoutSequence,
+        stage: str,
+        status: str,
+        reason: str,
+        current_atr: float | None = None,
+        source_output: str | None = None,
+        source_event_key: str | None = None,
+        signal_output: str | None = None,
+        signal_event_key: str | None = None,
+    ) -> dict[str, Any]:
+        metrics: dict[str, Any] = {
+            "bars_since_confirmation": int(sequence.bars_since_confirmation),
+            "outside_bars_since_confirmation": int(sequence.outside_bars_since_confirmation),
+            "bars_since_acceptance": int(sequence.bars_since_acceptance),
+            "max_excursion_from_reference": float(sequence.max_excursion_from_reference),
+            "hold_confirm_bars_observed": int(sequence.hold_confirm_bars_observed),
+            "reference_price": float(sequence.reference_price),
+            "trigger_price": float(state.close),
+        }
+        if current_atr is not None:
+            metrics["current_atr"] = float(current_atr)
+        if sequence.acceptance_atr is not None:
+            metrics["acceptance_atr"] = float(sequence.acceptance_atr)
+        if sequence.retest_touch_penetration is not None:
+            metrics["retest_touch_penetration"] = float(sequence.retest_touch_penetration)
+        thresholds = {
+            "retest_min_acceptance_bars": int(self._retest_min_acceptance_bars),
+            "retest_min_excursion_atr": float(self._retest_min_excursion_atr),
+            "retest_max_bars": int(self._retest_max_bars),
+            "retest_atr_period": int(self._atr.period),
+            "retest_touch_tolerance_atr": float(self._retest_touch_tolerance_atr),
+            "retest_max_penetration_atr": float(self._retest_max_penetration_atr),
+            "retest_hold_confirm_bars": int(self._retest_hold_confirm_bars),
+        }
+        return {
+            "candidate_id": sequence.pattern_id,
+            "family": "retest",
+            "side": sequence.direction,
+            "stage": stage,
+            "status": status,
+            "group_key": sequence.profile_key,
+            "source_event_id": sequence.pattern_id,
+            "source_output": source_output or "confirmed_balance_breakout",
+            "source_event_key": source_event_key or f"confirmed_balance_breakout_{sequence.direction}",
+            "signal_output": signal_output,
+            "signal_event_key": signal_event_key,
+            "known_at": _epoch(state.bar_time),
+            "reason": reason,
+            "reference": build_value_area_reference(
+                state,
+                level_name=sequence.level_name,
+                price=sequence.reference_price,
+            ),
+            "metrics": metrics,
+            "thresholds": thresholds,
         }
 
 

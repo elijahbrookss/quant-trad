@@ -587,6 +587,480 @@ def test_indicator_forward_outcome_matches_output_fields() -> None:
     assert payload["recommendation"] == "refine"
 
 
+def test_signal_audit_reconciles_public_output_expectations() -> None:
+    payload = checks.evaluate_signal_audit(
+        {
+            "indicator": {"id": "indicator-1", "type": "generic_state"},
+            "runtime_path": "typed_indicator_engine.v1",
+            "ready_counts": {"state": 4, "break": 1},
+            "not_ready_counts": {},
+            "outputs": [
+                {
+                    "bar_index": 0,
+                    "time": "2026-01-01T00:00:00Z",
+                    "indicator_id": "indicator-1",
+                    "output_name": "state",
+                    "output_type": "context",
+                    "value": {"state_key": "inside", "group_key": "A"},
+                },
+                {
+                    "bar_index": 1,
+                    "time": "2026-01-01T01:00:00Z",
+                    "indicator_id": "indicator-1",
+                    "output_name": "state",
+                    "output_type": "context",
+                    "value": {"state_key": "outside", "group_key": "A"},
+                },
+                {
+                    "bar_index": 1,
+                    "time": "2026-01-01T01:00:00Z",
+                    "indicator_id": "indicator-1",
+                    "output_name": "break",
+                    "output_type": "signal",
+                    "event_key": "break_out",
+                    "event": {"key": "break_out"},
+                    "value": {"events": [{"key": "break_out"}]},
+                },
+                {
+                    "bar_index": 2,
+                    "time": "2026-01-01T02:00:00Z",
+                    "indicator_id": "indicator-1",
+                    "output_name": "state",
+                    "output_type": "context",
+                    "value": {"state_key": "inside", "group_key": "A"},
+                },
+                {
+                    "bar_index": 3,
+                    "time": "2026-01-01T03:00:00Z",
+                    "indicator_id": "indicator-1",
+                    "output_name": "state",
+                    "output_type": "context",
+                    "value": {"state_key": "outside", "group_key": "B"},
+                },
+            ],
+        },
+        detector={
+            "type": "signal_audit",
+            "name": "generic break",
+            "source_output": "state",
+            "source_field": "state_key",
+            "from": "inside",
+            "to": "outside",
+            "same_group_by": ["group_key"],
+            "signal_output": "break",
+            "event_key": "break_out",
+        },
+        outcomes={"max_examples": 10},
+        data_quality={"status": "clean"},
+    )
+
+    assert payload["check_family"] == "signal_audit"
+    assert payload["recommendation"] == "review_contract"
+    assert payload["outcomes"]["summary"] == {
+        "expected_count": 1,
+        "emitted_count": 1,
+        "matched_count": 1,
+        "missing_expected_count": 0,
+        "invalid_emitted_count": 0,
+        "excluded_candidate_count": 1,
+    }
+    assert payload["events"][0]["classification"] == "excluded_candidate"
+    assert payload["events"][0]["group_values"] == {"group_key": "B"}
+
+
+def test_signal_audit_surfaces_missing_and_invalid_events() -> None:
+    payload = checks.evaluate_signal_audit(
+        {
+            "indicator": {"id": "indicator-1", "type": "generic_state"},
+            "outputs": [
+                {
+                    "bar_index": 0,
+                    "time": "2026-01-01T00:00:00Z",
+                    "output_name": "state",
+                    "output_type": "context",
+                    "value": {"state_key": "inside"},
+                },
+                {
+                    "bar_index": 1,
+                    "time": "2026-01-01T01:00:00Z",
+                    "output_name": "state",
+                    "output_type": "context",
+                    "value": {"state_key": "outside"},
+                },
+                {
+                    "bar_index": 2,
+                    "time": "2026-01-01T02:00:00Z",
+                    "output_name": "break",
+                    "output_type": "signal",
+                    "event_key": "break_out",
+                    "event": {"key": "break_out"},
+                    "value": {"events": [{"key": "break_out"}]},
+                },
+            ],
+        },
+        detector={
+            "type": "signal_audit",
+            "source_output": "state",
+            "source_field": "state_key",
+            "from": "inside",
+            "to": "outside",
+            "signal_output": "break",
+            "event_key": "break_out",
+        },
+        outcomes={"max_examples": 10},
+        data_quality={"status": "clean"},
+    )
+
+    assert payload["recommendation"] == "repair_signal"
+    assert payload["outcomes"]["summary"]["missing_expected_count"] == 1
+    assert payload["outcomes"]["summary"]["invalid_emitted_count"] == 1
+    assert [event["classification"] for event in payload["events"]] == [
+        "missing_expected",
+        "invalid_emitted",
+    ]
+
+
+def test_signal_audit_condition_preserves_null_expected_value() -> None:
+    payload = checks.evaluate_signal_audit(
+        {
+            "indicator": {"id": "indicator-1", "type": "generic_state"},
+            "outputs": [
+                {
+                    "bar_index": 1,
+                    "time": "2026-01-01T01:00:00Z",
+                    "output_name": "state",
+                    "output_type": "context",
+                    "value": {"candidate_id": None},
+                },
+                {
+                    "bar_index": 1,
+                    "time": "2026-01-01T01:00:00Z",
+                    "output_name": "entry",
+                    "output_type": "signal",
+                    "event_key": "entry_long",
+                    "event": {"key": "entry_long"},
+                    "value": {"events": [{"key": "entry_long"}]},
+                },
+            ],
+        },
+        detector={
+            "type": "signal_audit",
+            "expectation_type": "condition",
+            "source_output": "state",
+            "source_field": "candidate_id",
+            "operator": "eq",
+            "value": None,
+            "signal_output": "entry",
+            "event_key": "entry_long",
+        },
+        outcomes={"max_examples": 10},
+        data_quality={"status": "clean"},
+    )
+
+    assert payload["recommendation"] == "contract_holds"
+    assert payload["outcomes"]["summary"]["matched_count"] == 1
+    assert payload["outcomes"]["summary"]["missing_expected_count"] == 0
+    assert payload["outcomes"]["summary"]["invalid_emitted_count"] == 0
+
+
+def test_candidate_lifecycle_summarizes_generic_funnel_and_signal_links() -> None:
+    outputs = [
+        {
+            "bar_index": 0,
+            "event_index": 0,
+            "time": "2026-01-01T00:00:00Z",
+            "output_name": "candidate_lifecycle",
+            "output_type": "lifecycle",
+            "event_key": "formed",
+            "event": {
+                "candidate_id": "candidate-a",
+                "family": "retest",
+                "side": "long",
+                "stage": "formed",
+                "status": "active",
+                "group_key": "group-1",
+                "known_at": 1767225600,
+                "reason": "source_confirmed",
+            },
+        },
+        {
+            "bar_index": 1,
+            "event_index": 0,
+            "time": "2026-01-01T01:00:00Z",
+            "output_name": "candidate_lifecycle",
+            "output_type": "lifecycle",
+            "event_key": "eligible",
+            "event": {
+                "candidate_id": "candidate-a",
+                "family": "retest",
+                "side": "long",
+                "stage": "eligible",
+                "status": "active",
+                "group_key": "group-1",
+                "known_at": 1767229200,
+                "reason": "threshold_met",
+            },
+        },
+        {
+            "bar_index": 2,
+            "event_index": 0,
+            "time": "2026-01-01T02:00:00Z",
+            "output_name": "candidate_lifecycle",
+            "output_type": "lifecycle",
+            "event_key": "touched",
+            "event": {
+                "candidate_id": "candidate-a",
+                "family": "retest",
+                "side": "long",
+                "stage": "touched",
+                "status": "active",
+                "group_key": "group-1",
+                "known_at": 1767232800,
+                "reason": "reference_touched",
+            },
+        },
+        {
+            "bar_index": 3,
+            "event_index": 0,
+            "time": "2026-01-01T03:00:00Z",
+            "output_name": "candidate_lifecycle",
+            "output_type": "lifecycle",
+            "event_key": "confirmed",
+            "event": {
+                "candidate_id": "candidate-a",
+                "family": "retest",
+                "side": "long",
+                "stage": "confirmed",
+                "status": "closed",
+                "group_key": "group-1",
+                "signal_output": "entry",
+                "signal_event_key": "entry_long",
+                "known_at": 1767236400,
+                "reason": "signal_emitted",
+            },
+        },
+        {
+            "bar_index": 3,
+            "event_index": 0,
+            "time": "2026-01-01T03:00:00Z",
+            "output_name": "entry",
+            "output_type": "signal",
+            "event_key": "entry_long",
+            "event": {"key": "entry_long", "pattern_id": "candidate-a"},
+            "value": {"events": [{"key": "entry_long", "pattern_id": "candidate-a"}]},
+        },
+        {
+            "bar_index": 0,
+            "event_index": 1,
+            "time": "2026-01-01T00:00:00Z",
+            "output_name": "candidate_lifecycle",
+            "output_type": "lifecycle",
+            "event_key": "formed",
+            "event": {
+                "candidate_id": "candidate-b",
+                "family": "retest",
+                "side": "short",
+                "stage": "formed",
+                "status": "active",
+                "group_key": "group-2",
+                "known_at": 1767225600,
+                "reason": "source_confirmed",
+            },
+        },
+        {
+            "bar_index": 1,
+            "event_index": 1,
+            "time": "2026-01-01T01:00:00Z",
+            "output_name": "candidate_lifecycle",
+            "output_type": "lifecycle",
+            "event_key": "eligible",
+            "event": {
+                "candidate_id": "candidate-b",
+                "family": "retest",
+                "side": "short",
+                "stage": "eligible",
+                "status": "active",
+                "group_key": "group-2",
+                "known_at": 1767229200,
+                "reason": "threshold_met",
+            },
+        },
+        {
+            "bar_index": 4,
+            "event_index": 0,
+            "time": "2026-01-01T04:00:00Z",
+            "output_name": "candidate_lifecycle",
+            "output_type": "lifecycle",
+            "event_key": "expired",
+            "event": {
+                "candidate_id": "candidate-b",
+                "family": "retest",
+                "side": "short",
+                "stage": "expired",
+                "status": "closed",
+                "group_key": "group-2",
+                "known_at": 1767240000,
+                "reason": "window_elapsed",
+            },
+        },
+    ]
+
+    payload = checks.evaluate_candidate_lifecycle(
+        {"indicator": {"id": "indicator-1", "type": "generic"}, "outputs": outputs},
+        detector={"type": "candidate_lifecycle", "family": "retest"},
+        outcomes={"max_examples": 10},
+        data_quality={"status": "clean"},
+    )
+
+    assert payload["check_family"] == "candidate_lifecycle"
+    assert payload["recommendation"] == "contract_holds"
+    assert payload["sample_count"] == 2
+    assert payload["outcomes"]["funnel"]["formed"]["candidate_count"] == 2
+    assert payload["outcomes"]["funnel"]["eligible"]["candidate_count"] == 2
+    assert payload["outcomes"]["funnel"]["touched"]["candidate_count"] == 1
+    assert payload["outcomes"]["funnel"]["confirmed"]["candidate_count"] == 1
+    assert payload["outcomes"]["terminal_counts"] == {"confirmed": 1, "expired": 1}
+    assert payload["outcomes"]["summary"]["matched_signal_count"] == 1
+    assert payload["outcomes"]["summary"]["missing_signal_count"] == 0
+    assert payload["outcomes"]["summary"]["invalid_signal_count"] == 0
+
+
+def test_candidate_lifecycle_signal_defaults_do_not_filter_lifecycle_rows() -> None:
+    outputs = [
+        {
+            "bar_index": 0,
+            "event_index": 0,
+            "time": "2026-01-01T00:00:00Z",
+            "output_name": "candidate_lifecycle",
+            "output_type": "lifecycle",
+            "event_key": "formed",
+            "event": {
+                "candidate_id": "candidate-a",
+                "family": "retest",
+                "side": "long",
+                "stage": "formed",
+                "status": "active",
+                "known_at": 1767225600,
+                "reason": "source_confirmed",
+            },
+        },
+        {
+            "bar_index": 1,
+            "event_index": 0,
+            "time": "2026-01-01T01:00:00Z",
+            "output_name": "candidate_lifecycle",
+            "output_type": "lifecycle",
+            "event_key": "eligible",
+            "event": {
+                "candidate_id": "candidate-a",
+                "family": "retest",
+                "side": "long",
+                "stage": "eligible",
+                "status": "active",
+                "known_at": 1767229200,
+                "reason": "threshold_met",
+            },
+        },
+        {
+            "bar_index": 2,
+            "event_index": 0,
+            "time": "2026-01-01T02:00:00Z",
+            "output_name": "candidate_lifecycle",
+            "output_type": "lifecycle",
+            "event_key": "confirmed",
+            "event": {
+                "candidate_id": "candidate-a",
+                "family": "retest",
+                "side": "long",
+                "stage": "confirmed",
+                "status": "closed",
+                "known_at": 1767232800,
+                "reason": "signal_emitted",
+            },
+        },
+        {
+            "bar_index": 2,
+            "event_index": 0,
+            "time": "2026-01-01T02:00:00Z",
+            "output_name": "entry",
+            "output_type": "signal",
+            "event_key": "entry_long",
+            "event": {"key": "entry_long", "pattern_id": "candidate-a"},
+            "value": {"events": [{"key": "entry_long", "pattern_id": "candidate-a"}]},
+        },
+    ]
+
+    payload = checks.evaluate_candidate_lifecycle(
+        {"indicator": {"id": "indicator-1", "type": "generic"}, "outputs": outputs},
+        detector={
+            "type": "candidate_lifecycle",
+            "family": "retest",
+            "signal_output": "entry",
+            "signal_event_key": "entry_long",
+        },
+        outcomes={"max_examples": 10},
+        data_quality={"status": "clean"},
+    )
+
+    assert payload["recommendation"] == "contract_holds"
+    assert payload["sample_count"] == 1
+    assert payload["outcomes"]["funnel"]["formed"]["candidate_count"] == 1
+    assert payload["outcomes"]["funnel"]["eligible"]["candidate_count"] == 1
+    assert payload["outcomes"]["funnel"]["confirmed"]["candidate_count"] == 1
+    assert payload["outcomes"]["summary"]["matched_signal_count"] == 1
+    assert payload["outcomes"]["summary"]["missing_signal_count"] == 0
+    assert payload["outcomes"]["summary"]["invalid_signal_count"] == 0
+
+
+def test_candidate_lifecycle_surfaces_missing_and_invalid_signal_links() -> None:
+    outputs = [
+        {
+            "bar_index": 2,
+            "event_index": 0,
+            "time": "2026-01-01T02:00:00Z",
+            "output_name": "candidate_lifecycle",
+            "output_type": "lifecycle",
+            "event_key": "confirmed",
+            "event": {
+                "candidate_id": "candidate-a",
+                "family": "retest",
+                "side": "long",
+                "stage": "confirmed",
+                "status": "closed",
+                "signal_output": "entry",
+                "signal_event_key": "entry_long",
+                "known_at": 1767232800,
+                "reason": "signal_emitted",
+            },
+        },
+        {
+            "bar_index": 2,
+            "event_index": 0,
+            "time": "2026-01-01T02:00:00Z",
+            "output_name": "entry",
+            "output_type": "signal",
+            "event_key": "entry_long",
+            "event": {"key": "entry_long", "pattern_id": "candidate-b"},
+            "value": {"events": [{"key": "entry_long", "pattern_id": "candidate-b"}]},
+        },
+    ]
+
+    payload = checks.evaluate_candidate_lifecycle(
+        {"indicator": {"id": "indicator-1", "type": "generic"}, "outputs": outputs},
+        detector={"type": "candidate_lifecycle", "family": "retest"},
+        outcomes={"max_examples": 10},
+        data_quality={"status": "clean"},
+    )
+
+    assert payload["recommendation"] == "repair_lifecycle"
+    assert payload["outcomes"]["summary"]["missing_signal_count"] == 1
+    assert payload["outcomes"]["summary"]["invalid_signal_count"] == 1
+    assert [event["classification"] for event in payload["events"]] == [
+        "missing_signal",
+        "invalid_signal",
+    ]
+
+
 def test_indicator_research_check_uses_persisted_indicator_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
     created: list[dict[str, Any]] = []
     links: list[dict[str, Any]] = []
@@ -687,6 +1161,231 @@ def test_indicator_research_check_uses_persisted_indicator_evidence(monkeypatch:
     assert created[1]["payload"]["request"]["scope"]["indicator_id"] == "stats-1"
     assert created[1]["payload"]["result"]["check_family"] == "indicator_forward_outcome"
     assert links[0]["relation"] == "tests"
+
+
+def test_signal_audit_research_check_uses_persisted_indicator_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    created: list[dict[str, Any]] = []
+
+    def fake_create_item(**kwargs):
+        item_id = kwargs.get("item_id") or f"item-{len(created) + 1}"
+        item = {
+            "id": item_id,
+            "kind": kwargs["kind"],
+            "status": kwargs["status"],
+            "title": kwargs["title"],
+            "payload": dict(kwargs.get("payload") or {}),
+            "symbol": kwargs.get("symbol"),
+            "timeframe": kwargs.get("timeframe"),
+            "instrument_id": kwargs.get("instrument_id"),
+        }
+        created.append(item)
+        return item
+
+    monkeypatch.setattr(service, "source_revision", lambda: "abc123")
+    monkeypatch.setattr(service.repository, "create_item", fake_create_item)
+    monkeypatch.setattr(service.repository, "create_link", lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        service.instrument_service,
+        "get_instrument_record",
+        lambda instrument_id: {
+            "id": instrument_id,
+            "symbol": "ETH/USD",
+            "datasource": "CCXT",
+            "exchange": "coinbase",
+        },
+    )
+    monkeypatch.setattr(
+        service.candle_service,
+        "preflight_candle_coverage_by_instrument",
+        lambda *args: {
+            "schema_version": "candle_coverage_preflight.v1",
+            "instrument_id": "inst-eth",
+            "symbol": "ETH/USD",
+            "provider": "CCXT",
+            "exchange": "coinbase",
+            "timeframe": "1h",
+            "status": "ok",
+            "continuity": {"final_status": "clean"},
+            "row_count": 2,
+            "missing_ranges": [],
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "collect_runtime_output_evidence_for_instance",
+        lambda *args, **kwargs: {
+            "indicator": {"id": "indicator-1", "type": "generic_state"},
+            "runtime_path": "typed_indicator_engine.v1",
+            "ready_counts": {"state": 2, "break": 1},
+            "not_ready_counts": {},
+            "outputs": [
+                {
+                    "bar_index": 0,
+                    "time": "2026-01-01T00:00:00Z",
+                    "output_name": "state",
+                    "output_type": "context",
+                    "value": {"state_key": "inside"},
+                },
+                {
+                    "bar_index": 1,
+                    "time": "2026-01-01T01:00:00Z",
+                    "output_name": "state",
+                    "output_type": "context",
+                    "value": {"state_key": "outside"},
+                },
+                {
+                    "bar_index": 1,
+                    "time": "2026-01-01T01:00:00Z",
+                    "output_name": "break",
+                    "output_type": "signal",
+                    "event_key": "break_out",
+                    "event": {"key": "break_out"},
+                    "value": {"events": [{"key": "break_out"}]},
+                },
+            ],
+        },
+    )
+
+    payload = service.run_research_check(
+        {
+            "title": "Signal audit",
+            "check_family": "signal_audit",
+            "scope": {
+                "indicator_id": "indicator-1",
+                "instrument_id": "inst-eth",
+                "timeframe": "1h",
+                "start": "2026-01-01T00:00:00Z",
+                "end": "2026-01-01T02:00:00Z",
+            },
+            "detector": {
+                "type": "signal_audit",
+                "source_output": "state",
+                "source_field": "state_key",
+                "from": "inside",
+                "to": "outside",
+                "signal_output": "break",
+                "event_key": "break_out",
+            },
+        }
+    )
+
+    assert payload["status"] == "completed"
+    assert created[1]["payload"]["request"]["scope"]["indicator_id"] == "indicator-1"
+    assert created[1]["payload"]["result"]["check_family"] == "signal_audit"
+    assert created[1]["payload"]["result"]["recommendation"] == "contract_holds"
+
+
+def test_candidate_lifecycle_research_check_uses_persisted_indicator_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    created: list[dict[str, Any]] = []
+
+    def fake_create_item(**kwargs):
+        item_id = kwargs.get("item_id") or f"item-{len(created) + 1}"
+        item = {
+            "id": item_id,
+            "kind": kwargs["kind"],
+            "status": kwargs["status"],
+            "title": kwargs["title"],
+            "payload": dict(kwargs.get("payload") or {}),
+            "symbol": kwargs.get("symbol"),
+            "timeframe": kwargs.get("timeframe"),
+            "instrument_id": kwargs.get("instrument_id"),
+        }
+        created.append(item)
+        return item
+
+    monkeypatch.setattr(service, "source_revision", lambda: "abc123")
+    monkeypatch.setattr(service.repository, "create_item", fake_create_item)
+    monkeypatch.setattr(service.repository, "create_link", lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        service.instrument_service,
+        "get_instrument_record",
+        lambda instrument_id: {
+            "id": instrument_id,
+            "symbol": "ETH/USD",
+            "datasource": "CCXT",
+            "exchange": "coinbase",
+        },
+    )
+    monkeypatch.setattr(
+        service.candle_service,
+        "preflight_candle_coverage_by_instrument",
+        lambda *args: {
+            "schema_version": "candle_coverage_preflight.v1",
+            "instrument_id": "inst-eth",
+            "symbol": "ETH/USD",
+            "provider": "CCXT",
+            "exchange": "coinbase",
+            "timeframe": "1h",
+            "status": "ok",
+            "continuity": {"final_status": "clean"},
+            "row_count": 2,
+            "missing_ranges": [],
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "collect_runtime_output_evidence_for_instance",
+        lambda *args, **kwargs: {
+            "indicator": {"id": "indicator-1", "type": "generic_state"},
+            "runtime_path": "typed_indicator_engine.v1",
+            "ready_counts": {"candidate_lifecycle": 1, "entry": 1},
+            "not_ready_counts": {},
+            "outputs": [
+                {
+                    "bar_index": 1,
+                    "event_index": 0,
+                    "time": "2026-01-01T01:00:00Z",
+                    "output_name": "candidate_lifecycle",
+                    "output_type": "lifecycle",
+                    "event_key": "confirmed",
+                    "event": {
+                        "candidate_id": "candidate-a",
+                        "family": "retest",
+                        "side": "long",
+                        "stage": "confirmed",
+                        "status": "closed",
+                        "signal_output": "entry",
+                        "signal_event_key": "entry_long",
+                        "known_at": 1767229200,
+                        "reason": "signal_emitted",
+                    },
+                },
+                {
+                    "bar_index": 1,
+                    "event_index": 0,
+                    "time": "2026-01-01T01:00:00Z",
+                    "output_name": "entry",
+                    "output_type": "signal",
+                    "event_key": "entry_long",
+                    "event": {"key": "entry_long", "pattern_id": "candidate-a"},
+                    "value": {"events": [{"key": "entry_long", "pattern_id": "candidate-a"}]},
+                },
+            ],
+        },
+    )
+
+    payload = service.run_research_check(
+        {
+            "title": "Lifecycle audit",
+            "check_family": "candidate_lifecycle",
+            "scope": {
+                "indicator_id": "indicator-1",
+                "instrument_id": "inst-eth",
+                "timeframe": "1h",
+                "start": "2026-01-01T00:00:00Z",
+                "end": "2026-01-01T02:00:00Z",
+            },
+            "detector": {
+                "type": "candidate_lifecycle",
+                "family": "retest",
+            },
+        }
+    )
+
+    assert payload["status"] == "completed"
+    assert created[1]["payload"]["request"]["scope"]["indicator_id"] == "indicator-1"
+    assert created[1]["payload"]["result"]["check_family"] == "candidate_lifecycle"
+    assert created[1]["payload"]["result"]["recommendation"] == "contract_holds"
 
 
 def test_run_research_evidence_summarizes_checkable_report_fields(monkeypatch: pytest.MonkeyPatch) -> None:

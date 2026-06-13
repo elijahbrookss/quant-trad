@@ -195,6 +195,7 @@ for:
 - research-memory item/link capture and lightweight historical checks through
   `qt research ...`; the check surface is intentionally compact:
   `qt research check raw`, `qt research check indicator`,
+  `qt research check audit`, `qt research check lifecycle`,
   `qt research check signal`, and `qt research check decision`,
 - research evidence read models through `qt research run`, `qt research trail`,
   and `qt research compare`,

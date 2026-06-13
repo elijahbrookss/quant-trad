@@ -12,16 +12,22 @@ import pandas as pd
 
 RAW_FORWARD_OUTCOME = "raw_forward_outcome"
 INDICATOR_FORWARD_OUTCOME = "indicator_forward_outcome"
+SIGNAL_AUDIT = "signal_audit"
+CANDIDATE_LIFECYCLE = "candidate_lifecycle"
 RUN_SIGNAL_SUMMARY = "run_signal_summary"
 RUN_DECISION_TRADE_COMPARISON = "run_decision_trade_comparison"
 SUPPORTED_CHECK_FAMILY = RAW_FORWARD_OUTCOME
 SUPPORTED_CHECK_FAMILIES = {
     RAW_FORWARD_OUTCOME,
     INDICATOR_FORWARD_OUTCOME,
+    SIGNAL_AUDIT,
+    CANDIDATE_LIFECYCLE,
     RUN_SIGNAL_SUMMARY,
     RUN_DECISION_TRADE_COMPARISON,
 }
 CHECK_RESULT_SCHEMA_VERSION = "research_check_result.v1"
+SIGNAL_AUDIT_SCHEMA_VERSION = "signal_audit_result.v1"
+CANDIDATE_LIFECYCLE_SCHEMA_VERSION = "candidate_lifecycle_result.v1"
 _RAW_DETECTOR_FIELDS = {
     "open",
     "high",
@@ -61,6 +67,32 @@ _RUN_DETECTOR_TYPES_BY_FAMILY = {
     RUN_DECISION_TRADE_COMPARISON: {"run_decision_match", "record_match"},
 }
 _INDICATOR_DETECTOR_TYPES = {"indicator_output_match", "indicator_event_match", "record_match"}
+_SIGNAL_AUDIT_DETECTOR_TYPES = {"signal_audit"}
+_CANDIDATE_LIFECYCLE_DETECTOR_TYPES = {"candidate_lifecycle"}
+_CANDIDATE_LIFECYCLE_FILTER_FIELDS = {
+    "output_name",
+    "candidate_id",
+    "family",
+    "side",
+    "stage",
+    "status",
+    "group_key",
+    "source_event_id",
+    "source_output",
+    "source_event_key",
+    "signal_output",
+    "signal_event_key",
+    "known_at",
+    "reason",
+}
+_CANDIDATE_LIFECYCLE_SIGNAL_LINK_FIELDS = {"signal_output", "signal_event_key"}
+_CANDIDATE_LIFECYCLE_MATCHER_CONTROL_FIELDS = {
+    "type",
+    "funnel_stages",
+    "terminal_stages",
+    "signal_stages",
+    *_CANDIDATE_LIFECYCLE_SIGNAL_LINK_FIELDS,
+}
 
 
 @dataclass(frozen=True)
@@ -77,6 +109,12 @@ def validate_check_detector(*, check_family: str, detector: Mapping[str, Any]) -
         return
     if check_family == INDICATOR_FORWARD_OUTCOME:
         _validate_indicator_detector(detector)
+        return
+    if check_family == SIGNAL_AUDIT:
+        _validate_signal_audit_detector(detector)
+        return
+    if check_family == CANDIDATE_LIFECYCLE:
+        _validate_candidate_lifecycle_detector(detector)
         return
     if check_family in {RUN_SIGNAL_SUMMARY, RUN_DECISION_TRADE_COMPARISON}:
         _validate_run_detector(detector, check_family=check_family)
@@ -404,6 +442,174 @@ def evaluate_indicator_forward_outcome(
     }
 
 
+def evaluate_signal_audit(
+    evidence: Mapping[str, Any],
+    *,
+    detector: Mapping[str, Any],
+    outcomes: Mapping[str, Any] | None = None,
+    data_quality: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    _validate_signal_audit_detector(detector)
+    indicator = evidence.get("indicator") if isinstance(evidence.get("indicator"), Mapping) else {}
+    outcome_spec = dict(outcomes or {})
+    max_examples = int(outcome_spec.get("max_examples") or 100)
+    expectations = _signal_audit_expectations(detector)
+    output_rows = _records(evidence.get("outputs"))
+    audit = _audit_signal_expectations(
+        output_rows,
+        expectations=expectations,
+    )
+    issue_examples = audit["issues"][: max(0, max_examples)]
+    summary = audit["summary"]
+    missing_count = int(summary["missing_expected_count"])
+    invalid_count = int(summary["invalid_emitted_count"])
+    excluded_count = int(summary["excluded_candidate_count"])
+    if missing_count or invalid_count:
+        recommendation = "repair_signal"
+        caveats = ["Signal emissions diverged from the declared public-output expectation."]
+    elif excluded_count:
+        recommendation = "review_contract"
+        caveats = ["Some candidate transitions were excluded by the declared expectation policy."]
+    else:
+        recommendation = "contract_holds"
+        caveats = []
+
+    return {
+        "schema_version": SIGNAL_AUDIT_SCHEMA_VERSION,
+        "check_family": SIGNAL_AUDIT,
+        "status": "completed",
+        "sample_count": int(summary["expected_count"]),
+        "eligible_bars": len(
+            {
+                _required_int(row.get("bar_index"), "output.bar_index")
+                for row in output_rows
+                if row.get("bar_index") is not None
+            }
+        ),
+        "eligible_events": int(summary["emitted_count"]),
+        "detector": dict(detector or {}),
+        "outcomes": {
+            "audit_kind": "semantic_signal_reconciliation",
+            "expectations": expectations,
+            "summary": summary,
+            "by_expectation": audit["by_expectation"],
+        },
+        "data_quality": {
+            **dict(data_quality or {}),
+            "indicator": dict(indicator),
+            "runtime_path": evidence.get("runtime_path"),
+            "ready_counts": dict(evidence.get("ready_counts") or {}),
+            "not_ready_counts": dict(evidence.get("not_ready_counts") or {}),
+        },
+        "recommendation": recommendation,
+        "caveats": caveats,
+        "events": issue_examples,
+        "event_count_truncated": max(0, len(audit["issues"]) - len(issue_examples)),
+    }
+
+
+def evaluate_candidate_lifecycle(
+    evidence: Mapping[str, Any],
+    *,
+    detector: Mapping[str, Any],
+    outcomes: Mapping[str, Any] | None = None,
+    data_quality: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    _validate_candidate_lifecycle_detector(detector)
+    indicator = evidence.get("indicator") if isinstance(evidence.get("indicator"), Mapping) else {}
+    outcome_spec = dict(outcomes or {})
+    max_examples = int(outcome_spec.get("max_examples") or 100)
+    funnel_stages = _string_list(
+        outcome_spec.get("funnel_stages")
+        or detector.get("funnel_stages")
+        or ["formed", "eligible", "touched", "confirmed"]
+    )
+    terminal_stages = set(
+        _string_list(
+            outcome_spec.get("terminal_stages")
+            or detector.get("terminal_stages")
+            or ["confirmed", "invalidated", "expired"]
+        )
+    )
+    signal_stages = set(
+        _string_list(
+            outcome_spec.get("signal_stages")
+            or detector.get("signal_stages")
+            or ["confirmed"]
+        )
+    )
+    output_rows = _records(evidence.get("outputs"))
+    lifecycle_rows = [
+        row
+        for row in (_normalize_lifecycle_row(row) for row in output_rows if str(row.get("output_type") or "") == "lifecycle")
+        if _candidate_lifecycle_row_matches(row, detector)
+    ]
+    signal_rows = [
+        row
+        for row in output_rows
+        if str(row.get("output_type") or "") == "signal"
+    ]
+    audit = _audit_candidate_lifecycle(
+        lifecycle_rows,
+        signal_rows,
+        detector=detector,
+        funnel_stages=funnel_stages,
+        terminal_stages=terminal_stages,
+        signal_stages=signal_stages,
+    )
+    issue_examples = audit["issues"][: max(0, max_examples)]
+    summary = audit["summary"]
+    if summary["missing_signal_count"] or summary["invalid_signal_count"] or summary["lifecycle_issue_count"]:
+        recommendation = "repair_lifecycle"
+        caveats = ["Candidate lifecycle evidence diverged from emitted signals or valid stage ordering."]
+    elif not lifecycle_rows:
+        recommendation = "needs_lifecycle_evidence"
+        caveats = ["No matching lifecycle events found."]
+    else:
+        recommendation = "contract_holds"
+        caveats = []
+
+    return {
+        "schema_version": CANDIDATE_LIFECYCLE_SCHEMA_VERSION,
+        "check_family": CANDIDATE_LIFECYCLE,
+        "status": "completed",
+        "sample_count": int(summary["candidate_count"]),
+        "eligible_events": len(lifecycle_rows),
+        "eligible_bars": len(
+            {
+                _required_int(row.get("bar_index"), "output.bar_index")
+                for row in lifecycle_rows
+                if row.get("bar_index") is not None
+            }
+        ),
+        "detector": dict(detector or {}),
+        "outcomes": {
+            "audit_kind": "candidate_lifecycle_funnel",
+            "funnel_stages": funnel_stages,
+            "terminal_stages": sorted(terminal_stages),
+            "signal_stages": sorted(signal_stages),
+            "summary": summary,
+            "funnel": audit["funnel"],
+            "stage_counts": audit["stage_counts"],
+            "status_counts": audit["status_counts"],
+            "terminal_counts": audit["terminal_counts"],
+            "reason_counts": audit["reason_counts"],
+            "by_family_side": audit["by_family_side"],
+        },
+        "data_quality": {
+            **dict(data_quality or {}),
+            "indicator": dict(indicator),
+            "runtime_path": evidence.get("runtime_path"),
+            "ready_counts": dict(evidence.get("ready_counts") or {}),
+            "not_ready_counts": dict(evidence.get("not_ready_counts") or {}),
+        },
+        "recommendation": recommendation,
+        "caveats": caveats,
+        "events": issue_examples,
+        "event_count_truncated": max(0, len(audit["issues"]) - len(issue_examples)),
+    }
+
+
 def _normalize_candles(candles: pd.DataFrame) -> pd.DataFrame:
     if candles is None or candles.empty:
         return pd.DataFrame(columns=["time", "open", "high", "low", "close", "volume"])
@@ -583,6 +789,679 @@ def _validate_indicator_detector(detector: Mapping[str, Any]) -> None:
         operator = str(detector.get("operator") or "eq").strip().lower()
         if operator not in _DETECTOR_OPERATORS:
             raise ValueError(f"unsupported detector operator: {operator}")
+
+
+def _validate_signal_audit_detector(detector: Mapping[str, Any]) -> None:
+    detector_type = str(detector.get("type") or "").strip()
+    if detector_type not in _SIGNAL_AUDIT_DETECTOR_TYPES:
+        raise ValueError(f"unsupported signal audit detector type: {detector_type or '<empty>'}")
+    _signal_audit_expectations(detector)
+
+
+def _validate_candidate_lifecycle_detector(detector: Mapping[str, Any]) -> None:
+    detector_type = str(detector.get("type") or "").strip()
+    if detector_type not in _CANDIDATE_LIFECYCLE_DETECTOR_TYPES:
+        raise ValueError(f"unsupported candidate lifecycle detector type: {detector_type or '<empty>'}")
+    allowed = {
+        "type",
+        "funnel_stages",
+        "terminal_stages",
+        "signal_stages",
+        *_CANDIDATE_LIFECYCLE_FILTER_FIELDS,
+    }
+    unsupported = sorted(str(key) for key in detector.keys() if str(key) not in allowed)
+    if unsupported:
+        raise ValueError(f"unsupported candidate lifecycle detector fields: {', '.join(unsupported)}")
+
+
+def _signal_audit_expectations(detector: Mapping[str, Any]) -> list[dict[str, Any]]:
+    raw_expectations = detector.get("expectations")
+    if raw_expectations is None:
+        raw_expectations = [
+            {
+                key: value
+                for key, value in detector.items()
+                if key not in {"type", "expectations"}
+            }
+        ]
+    if not isinstance(raw_expectations, Sequence) or isinstance(raw_expectations, (str, bytes, Mapping)):
+        raise ValueError("detector.expectations must be a list")
+    expectations = [
+        _normalize_signal_audit_expectation(_mapping(raw, "detector.expectations item"), index=index)
+        for index, raw in enumerate(raw_expectations)
+    ]
+    if not expectations:
+        raise ValueError("signal audit requires at least one expectation")
+    return expectations
+
+
+def _normalize_signal_audit_expectation(raw: Mapping[str, Any], *, index: int) -> dict[str, Any]:
+    expectation_type = str(
+        raw.get("expectation_type")
+        or raw.get("mode")
+        or raw.get("kind")
+        or raw.get("audit_type")
+        or ("transition" if "transition" in raw or "from" in raw or "to" in raw else "condition")
+    ).strip()
+    if expectation_type not in {"transition", "condition"}:
+        raise ValueError(f"unsupported signal audit expectation type: {expectation_type}")
+    source_output = _required_text(
+        raw.get("source_output") or raw.get("source_output_name"),
+        "expectation.source_output",
+    )
+    source_field = _required_text(
+        raw.get("source_field") or raw.get("field"),
+        "expectation.source_field",
+    )
+    signal_output = _required_text(
+        raw.get("signal_output") or raw.get("signal_output_name") or raw.get("output_name"),
+        "expectation.signal_output",
+    )
+    event_key = _required_text(raw.get("event_key"), "expectation.event_key")
+    expectation = {
+        "name": str(raw.get("name") or f"expectation_{index + 1}").strip(),
+        "expectation_type": expectation_type,
+        "source_output": source_output,
+        "source_field": source_field,
+        "signal_output": signal_output,
+        "event_key": event_key,
+        "same_group_by": _string_list(raw.get("same_group_by") or raw.get("same_group_fields") or []),
+        "record_excluded_candidates": bool(raw.get("record_excluded_candidates", True)),
+        "require_contiguous_source_rows": bool(raw.get("require_contiguous_source_rows", True)),
+    }
+    if expectation_type == "transition":
+        transition = raw.get("transition") if isinstance(raw.get("transition"), Mapping) else {}
+        if _has_mapping_key(transition, "from"):
+            from_value = transition.get("from")
+        elif "from" in raw:
+            from_value = raw.get("from")
+        else:
+            raise ValueError("transition expectation requires from")
+        if _has_mapping_key(transition, "to"):
+            to_value = transition.get("to")
+        elif "to" in raw:
+            to_value = raw.get("to")
+        else:
+            raise ValueError("transition expectation requires to")
+        expectation["from"] = from_value
+        expectation["to"] = to_value
+    else:
+        operator = str(raw.get("operator") or "eq").strip().lower()
+        if operator not in _DETECTOR_OPERATORS:
+            raise ValueError(f"unsupported signal audit condition operator: {operator}")
+        expectation["operator"] = operator
+        if raw.get("value_field") is not None:
+            expectation["value_field"] = str(raw.get("value_field") or "").strip()
+            if not expectation["value_field"]:
+                raise ValueError("condition expectation value_field must not be empty")
+        elif _has_mapping_key(raw, "value"):
+            expectation["value"] = raw.get("value")
+        elif operator not in {"is_true", "true"}:
+            raise ValueError("condition expectation requires value or value_field")
+    return expectation
+
+
+def _audit_signal_expectations(
+    output_rows: Sequence[Mapping[str, Any]],
+    *,
+    expectations: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    rows_by_output = _rows_by_output(output_rows)
+    expected: list[dict[str, Any]] = []
+    emitted: list[dict[str, Any]] = []
+    excluded_candidates: list[dict[str, Any]] = []
+    by_expectation: dict[str, dict[str, int]] = {}
+    for expectation in expectations:
+        expectation_name = str(expectation["name"])
+        expectation_expected, expectation_excluded = _expected_signal_events_for_expectation(
+            rows_by_output,
+            expectation=expectation,
+        )
+        expectation_emitted = _emitted_signal_events_for_expectation(
+            rows_by_output,
+            expectation=expectation,
+        )
+        expectation_expected_by_key = _audit_events_by_key(expectation_expected)
+        expectation_emitted_by_key = _audit_events_by_key(expectation_emitted)
+        expectation_expected_keys = set(expectation_expected_by_key)
+        expectation_emitted_keys = set(expectation_emitted_by_key)
+        by_expectation[expectation_name] = {
+            "expected_count": len(expectation_expected),
+            "emitted_count": len(expectation_emitted),
+            "matched_count": len(expectation_expected_keys & expectation_emitted_keys),
+            "missing_expected_count": len(expectation_expected_keys - expectation_emitted_keys),
+            "invalid_emitted_count": len(expectation_emitted_keys - expectation_expected_keys),
+            "excluded_candidate_count": len(expectation_excluded),
+        }
+        expected.extend(expectation_expected)
+        emitted.extend(expectation_emitted)
+        excluded_candidates.extend(expectation_excluded)
+
+    expected_by_key = _audit_events_by_key(expected)
+    emitted_by_key = _audit_events_by_key(emitted)
+    expected_keys = set(expected_by_key)
+    emitted_keys = set(emitted_by_key)
+    issues: list[dict[str, Any]] = []
+    for key in sorted(expected_keys - emitted_keys, key=_audit_key_sort):
+        for event in expected_by_key[key]:
+            issues.append({"classification": "missing_expected", **event})
+    for key in sorted(emitted_keys - expected_keys, key=_audit_key_sort):
+        for event in emitted_by_key[key]:
+            issues.append({"classification": "invalid_emitted", **_compact_emitted_event(event)})
+    for event in excluded_candidates:
+        issues.append({"classification": "excluded_candidate", **event})
+
+    summary = {
+        "expected_count": len(expected),
+        "emitted_count": len(emitted),
+        "matched_count": len(expected_keys & emitted_keys),
+        "missing_expected_count": len(expected_keys - emitted_keys),
+        "invalid_emitted_count": len(emitted_keys - expected_keys),
+        "excluded_candidate_count": len(excluded_candidates),
+    }
+    return {"summary": summary, "by_expectation": by_expectation, "issues": issues}
+
+
+def _expected_signal_events_for_expectation(
+    rows_by_output: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    expectation: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    source_rows = list(rows_by_output.get(str(expectation["source_output"])) or [])
+    previous_row: Mapping[str, Any] | None = None
+    expected: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    for row in source_rows:
+        matches, reason = _source_row_matches_expectation(
+            previous_row=previous_row,
+            row=row,
+            expectation=expectation,
+        )
+        if matches:
+            event = _audit_expected_event(row, expectation=expectation, reason=reason)
+            if _expectation_group_changed(previous_row=previous_row, row=row, expectation=expectation):
+                if bool(expectation.get("record_excluded_candidates", True)):
+                    excluded.append({**event, "reason": "group_changed_excluded"})
+            else:
+                expected.append(event)
+        previous_row = row
+    return expected, excluded
+
+
+def _emitted_signal_events_for_expectation(
+    rows_by_output: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    expectation: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for row in rows_by_output.get(str(expectation["signal_output"])) or []:
+        if str(row.get("output_type") or "") != "signal":
+            continue
+        if not _values_equal(row.get("event_key"), expectation["event_key"]):
+            continue
+        events.append(
+            {
+                "expectation": expectation["name"],
+                "bar_index": _required_int(row.get("bar_index"), "output.bar_index"),
+                "time": row.get("time"),
+                "output_name": row.get("output_name"),
+                "event_key": row.get("event_key"),
+                "source_output": expectation["source_output"],
+                "source_field": expectation["source_field"],
+            }
+        )
+    return events
+
+
+def _source_row_matches_expectation(
+    *,
+    previous_row: Mapping[str, Any] | None,
+    row: Mapping[str, Any],
+    expectation: Mapping[str, Any],
+) -> tuple[bool, str]:
+    expectation_type = str(expectation.get("expectation_type") or "")
+    if expectation_type == "transition":
+        if previous_row is None:
+            return False, "missing_previous_source_row"
+        if bool(expectation.get("require_contiguous_source_rows", True)) and (
+            _required_int(row.get("bar_index"), "output.bar_index")
+            != _required_int(previous_row.get("bar_index"), "output.bar_index") + 1
+        ):
+            return False, "non_contiguous_source_row"
+        found_previous, previous_value = _indicator_field_lookup(previous_row, str(expectation["source_field"]))
+        found_current, current_value = _indicator_field_lookup(row, str(expectation["source_field"]))
+        return (
+            found_previous
+            and found_current
+            and _values_equal(previous_value, expectation["from"])
+            and _values_equal(current_value, expectation["to"]),
+            "transition_matched",
+        )
+    found_left, left = _indicator_field_lookup(row, str(expectation["source_field"]))
+    if not found_left:
+        return False, "field_missing"
+    if "value_field" in expectation and expectation.get("value_field") is not None:
+        found_right, right = _indicator_field_lookup(row, str(expectation["value_field"]))
+        if not found_right:
+            return False, "value_field_missing"
+    elif "value" in expectation:
+        right = expectation.get("value")
+    elif str(expectation.get("operator") or "").lower() in {"is_true", "true"}:
+        right = True
+    else:
+        raise ValueError("condition expectation requires value or value_field")
+    return _compare(left, str(expectation.get("operator") or "eq"), right), "condition_matched"
+
+
+def _expectation_group_changed(
+    *,
+    previous_row: Mapping[str, Any] | None,
+    row: Mapping[str, Any],
+    expectation: Mapping[str, Any],
+) -> bool:
+    fields = list(expectation.get("same_group_by") or [])
+    if not fields:
+        return False
+    if previous_row is None:
+        return True
+    for field in fields:
+        found_previous, previous_value = _indicator_field_lookup(previous_row, str(field))
+        found_current, current_value = _indicator_field_lookup(row, str(field))
+        if not found_previous or not found_current or not _values_equal(previous_value, current_value):
+            return True
+    return False
+
+
+def _audit_expected_event(
+    row: Mapping[str, Any],
+    *,
+    expectation: Mapping[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    found_value, source_value = _indicator_field_lookup(row, str(expectation["source_field"]))
+    group_values: dict[str, Any] = {}
+    for field in expectation.get("same_group_by") or []:
+        found, value = _indicator_field_lookup(row, str(field))
+        group_values[str(field)] = value if found else None
+    return {
+        "expectation": expectation["name"],
+        "bar_index": int(row["bar_index"]),
+        "time": row.get("time"),
+        "output_name": expectation["signal_output"],
+        "event_key": expectation["event_key"],
+        "reason": reason,
+        "source_output": expectation["source_output"],
+        "source_field": expectation["source_field"],
+        "source_value": source_value if found_value else None,
+        "group_values": group_values,
+    }
+
+
+def _compact_emitted_event(event: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "expectation": event.get("expectation"),
+        "bar_index": int(event["bar_index"]),
+        "time": event.get("time"),
+        "output_name": event.get("output_name"),
+        "event_key": event.get("event_key"),
+        "source_output": event.get("source_output"),
+        "source_field": event.get("source_field"),
+    }
+
+
+def _audit_events_by_key(events: Sequence[Mapping[str, Any]]) -> dict[tuple[str, int, str, str], list[dict[str, Any]]]:
+    grouped: dict[tuple[str, int, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for event in events:
+        key = (
+            str(event.get("expectation") or ""),
+            int(event["bar_index"]),
+            str(event["output_name"]),
+            str(event["event_key"]),
+        )
+        grouped[key].append(dict(event))
+    return grouped
+
+
+def _audit_key_sort(key: tuple[str, int, str, str]) -> tuple[int, str, str, str]:
+    return (key[1], key[0], key[2], key[3])
+
+
+def _rows_by_output(output_rows: Sequence[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in output_rows:
+        output_name = str(row.get("output_name") or "").strip()
+        if not output_name:
+            continue
+        _required_int(row.get("bar_index"), "output.bar_index")
+        rows[output_name].append(dict(row))
+    for values in rows.values():
+        values.sort(key=lambda row: (_required_int(row.get("bar_index"), "output.bar_index"), str(row.get("event_key") or "")))
+    return rows
+
+
+def _normalize_lifecycle_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(row)
+    for field in _CANDIDATE_LIFECYCLE_FILTER_FIELDS:
+        found, value = _indicator_field_lookup(row, field)
+        if found:
+            normalized[field] = value
+    candidate_id = _required_text(normalized.get("candidate_id"), "lifecycle.candidate_id")
+    family = _required_text(normalized.get("family"), "lifecycle.family")
+    side = _required_text(normalized.get("side"), "lifecycle.side")
+    stage = _required_text(normalized.get("stage"), "lifecycle.stage")
+    status = _required_text(normalized.get("status"), "lifecycle.status")
+    known_at = normalized.get("known_at")
+    if known_at is None:
+        raise ValueError("lifecycle.known_at is required")
+    normalized["candidate_id"] = candidate_id
+    normalized["family"] = family
+    normalized["side"] = side
+    normalized["stage"] = stage
+    normalized["status"] = status
+    normalized["known_at"] = known_at
+    return normalized
+
+
+def _candidate_lifecycle_row_matches(row: Mapping[str, Any], detector: Mapping[str, Any]) -> bool:
+    for key, expected in detector.items():
+        if key in _CANDIDATE_LIFECYCLE_MATCHER_CONTROL_FIELDS:
+            continue
+        candidates = _match_values(row, str(key))
+        if not candidates:
+            return False
+        if isinstance(expected, Sequence) and not isinstance(expected, (str, bytes, Mapping)):
+            expected_values = _sequence_values(expected)
+            if not any(_values_equal(candidate, item) for candidate in candidates for item in expected_values):
+                return False
+            continue
+        if not any(_values_equal(candidate, expected) for candidate in candidates):
+            return False
+    return True
+
+
+def _audit_candidate_lifecycle(
+    lifecycle_rows: Sequence[Mapping[str, Any]],
+    signal_rows: Sequence[Mapping[str, Any]],
+    *,
+    detector: Mapping[str, Any],
+    funnel_stages: Sequence[str],
+    terminal_stages: set[str],
+    signal_stages: set[str],
+) -> dict[str, Any]:
+    rows_by_candidate: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    stage_event_counts: Counter[str] = Counter()
+    status_counts: Counter[str] = Counter()
+    reason_counts: Counter[str] = Counter()
+    by_family_side: Counter[str] = Counter()
+    for row in lifecycle_rows:
+        candidate_id = str(row["candidate_id"])
+        row_copy = dict(row)
+        rows_by_candidate[candidate_id].append(row_copy)
+        stage_event_counts[str(row_copy["stage"])] += 1
+        status_counts[str(row_copy["status"])] += 1
+        reason = str(row_copy.get("reason") or "").strip()
+        if reason:
+            reason_counts[reason] += 1
+        by_family_side[_bucket_key(row_copy, ("family", "side"))] += 1
+
+    for rows in rows_by_candidate.values():
+        rows.sort(key=_lifecycle_row_sort_key)
+
+    stage_candidate_counts = {
+        stage: sum(
+            1
+            for rows in rows_by_candidate.values()
+            if any(str(row.get("stage") or "") == stage for row in rows)
+        )
+        for stage in sorted(stage_event_counts)
+    }
+    funnel: dict[str, dict[str, Any]] = {}
+    previous_count: int | None = None
+    for stage in funnel_stages:
+        count = sum(
+            1
+            for rows in rows_by_candidate.values()
+            if any(str(row.get("stage") or "") == stage for row in rows)
+        )
+        funnel[stage] = {
+            "candidate_count": count,
+            "conversion_from_previous": (
+                (count / previous_count) if previous_count else None
+            ),
+        }
+        previous_count = count
+
+    terminal_counts: Counter[str] = Counter()
+    open_candidate_count = 0
+    lifecycle_issues: list[dict[str, Any]] = []
+    for candidate_id, rows in rows_by_candidate.items():
+        terminal_rows = [row for row in rows if str(row.get("stage") or "") in terminal_stages]
+        if not terminal_rows:
+            open_candidate_count += 1
+        else:
+            terminal_counts[str(terminal_rows[-1].get("stage") or "unknown")] += 1
+        if len(terminal_rows) > 1:
+            lifecycle_issues.append(
+                {
+                    "classification": "lifecycle_issue",
+                    "issue": "multiple_terminal_stages",
+                    "candidate_id": candidate_id,
+                    "stages": [row.get("stage") for row in terminal_rows],
+                }
+            )
+        if terminal_rows and rows[-1] is not terminal_rows[-1]:
+            lifecycle_issues.append(
+                {
+                    "classification": "lifecycle_issue",
+                    "issue": "terminal_stage_followed_by_lifecycle",
+                    "candidate_id": candidate_id,
+                    "terminal_stage": terminal_rows[-1].get("stage"),
+                    "last_stage": rows[-1].get("stage"),
+                }
+            )
+        previous_known_at: float | None = None
+        for row in rows:
+            known_at = _known_at_number(row.get("known_at"))
+            if known_at is not None and previous_known_at is not None and known_at < previous_known_at:
+                lifecycle_issues.append(
+                    {
+                        "classification": "lifecycle_issue",
+                        "issue": "known_at_decreased",
+                        "candidate_id": candidate_id,
+                        "stage": row.get("stage"),
+                        "known_at": row.get("known_at"),
+                    }
+                )
+            if known_at is not None:
+                previous_known_at = known_at
+
+    signal_audit = _audit_lifecycle_signal_links(
+        lifecycle_rows,
+        signal_rows,
+        detector=detector,
+        signal_stages=signal_stages,
+    )
+    issues = [*lifecycle_issues, *signal_audit["issues"]]
+    summary = {
+        "candidate_count": len(rows_by_candidate),
+        "lifecycle_event_count": len(lifecycle_rows),
+        "open_candidate_count": open_candidate_count,
+        "terminal_candidate_count": sum(terminal_counts.values()),
+        "missing_signal_count": signal_audit["missing_signal_count"],
+        "invalid_signal_count": signal_audit["invalid_signal_count"],
+        "matched_signal_count": signal_audit["matched_signal_count"],
+        "expected_signal_count": signal_audit["expected_signal_count"],
+        "lifecycle_issue_count": len(lifecycle_issues),
+    }
+    return {
+        "summary": summary,
+        "funnel": funnel,
+        "stage_counts": {
+            "events": dict(sorted(stage_event_counts.items())),
+            "candidates": dict(sorted(stage_candidate_counts.items())),
+        },
+        "status_counts": dict(sorted(status_counts.items())),
+        "terminal_counts": dict(sorted(terminal_counts.items())),
+        "reason_counts": dict(sorted(reason_counts.items())),
+        "by_family_side": dict(sorted(by_family_side.items())),
+        "issues": issues,
+    }
+
+
+def _audit_lifecycle_signal_links(
+    lifecycle_rows: Sequence[Mapping[str, Any]],
+    signal_rows: Sequence[Mapping[str, Any]],
+    *,
+    detector: Mapping[str, Any],
+    signal_stages: set[str],
+) -> dict[str, Any]:
+    expected: list[dict[str, Any]] = []
+    for row in lifecycle_rows:
+        if str(row.get("stage") or "") not in signal_stages:
+            continue
+        signal_output = _lifecycle_signal_field(row, detector, "signal_output")
+        signal_event_key = _lifecycle_signal_field(row, detector, "signal_event_key")
+        if not signal_output or not signal_event_key:
+            continue
+        expected.append(
+            {
+                "candidate_id": str(row["candidate_id"]),
+                "bar_index": _required_int(row.get("bar_index"), "output.bar_index"),
+                "time": row.get("time"),
+                "output_name": signal_output,
+                "event_key": signal_event_key,
+                "stage": row.get("stage"),
+            }
+        )
+    expected_pairs = {
+        (str(item["output_name"]), str(item["event_key"]))
+        for item in expected
+    }
+    if not expected_pairs:
+        return {
+            "expected_signal_count": 0,
+            "matched_signal_count": 0,
+            "missing_signal_count": 0,
+            "invalid_signal_count": 0,
+            "issues": [],
+        }
+    emitted: list[dict[str, Any]] = []
+    for row in signal_rows:
+        output_name = str(row.get("output_name") or "").strip()
+        event_key = str(row.get("event_key") or "").strip()
+        if expected_pairs and (output_name, event_key) not in expected_pairs:
+            continue
+        candidate_id = _signal_candidate_id(row)
+        if not candidate_id:
+            continue
+        emitted.append(
+            {
+                "candidate_id": candidate_id,
+                "bar_index": _required_int(row.get("bar_index"), "output.bar_index"),
+                "time": row.get("time"),
+                "output_name": output_name,
+                "event_key": event_key,
+            }
+        )
+    expected_by_key = _candidate_signal_events_by_key(expected)
+    emitted_by_key = _candidate_signal_events_by_key(emitted)
+    expected_keys = set(expected_by_key)
+    emitted_keys = set(emitted_by_key)
+    issues: list[dict[str, Any]] = []
+    for key in sorted(expected_keys - emitted_keys, key=_candidate_signal_key_sort):
+        for event in expected_by_key[key]:
+            issues.append({"classification": "missing_signal", **event})
+    for key in sorted(emitted_keys - expected_keys, key=_candidate_signal_key_sort):
+        for event in emitted_by_key[key]:
+            issues.append({"classification": "invalid_signal", **event})
+    return {
+        "expected_signal_count": len(expected),
+        "matched_signal_count": len(expected_keys & emitted_keys),
+        "missing_signal_count": len(expected_keys - emitted_keys),
+        "invalid_signal_count": len(emitted_keys - expected_keys),
+        "issues": issues,
+    }
+
+
+def _lifecycle_signal_field(row: Mapping[str, Any], detector: Mapping[str, Any], field: str) -> str | None:
+    found, value = _indicator_field_lookup(row, field)
+    if found and str(value or "").strip():
+        return str(value).strip()
+    detector_value = detector.get(field)
+    if str(detector_value or "").strip():
+        return str(detector_value).strip()
+    return None
+
+
+def _signal_candidate_id(row: Mapping[str, Any]) -> str | None:
+    for field in ("candidate_id", "pattern_id", "metadata.candidate_id"):
+        found, value = _indicator_field_lookup(row, field)
+        if found and str(value or "").strip():
+            return str(value).strip()
+    return None
+
+
+def _candidate_signal_events_by_key(
+    events: Sequence[Mapping[str, Any]],
+) -> dict[tuple[str, int, str, str], list[dict[str, Any]]]:
+    grouped: dict[tuple[str, int, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for event in events:
+        key = (
+            str(event["candidate_id"]),
+            int(event["bar_index"]),
+            str(event["output_name"]),
+            str(event["event_key"]),
+        )
+        grouped[key].append(dict(event))
+    return grouped
+
+
+def _candidate_signal_key_sort(key: tuple[str, int, str, str]) -> tuple[int, str, str, str]:
+    return (key[1], key[0], key[2], key[3])
+
+
+def _lifecycle_row_sort_key(row: Mapping[str, Any]) -> tuple[int, int, float]:
+    known_at = _known_at_number(row.get("known_at"))
+    return (
+        _required_int(row.get("bar_index"), "output.bar_index"),
+        _required_int(row.get("event_index") or 0, "output.event_index"),
+        float(known_at if known_at is not None else 0.0),
+    )
+
+
+def _known_at_number(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _string_list(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, Mapping)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    raise ValueError("expected a string or list of strings")
+
+
+def _required_text(value: Any, field: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field} is required")
+    return text
+
+
+def _has_mapping_key(value: Mapping[str, Any], key: str) -> bool:
+    return key in value
+
+
+def _required_int(value: Any, field: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} is required") from exc
 
 
 def _validate_run_detector(detector: Mapping[str, Any], *, check_family: str) -> None:

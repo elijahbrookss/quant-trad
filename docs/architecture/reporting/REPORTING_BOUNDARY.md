@@ -80,7 +80,7 @@ Reporting does not mutate strategy, execution, fee, wallet, trade, or BotLens se
 [run-research-dataset-flow.mmd](diagrams/run-research-dataset-flow.mmd) shows:
 
 1. Run, trade, runtime-event, and step rows are read from durable storage.
-2. `RunResearchDataset v1` normalizes metadata, readiness, summary metrics, timeseries, decisions, signals, trades, context/world-state rows, candle catalog, diagnostics, candle gaps, runtime performance, operational health, and insights.
+2. `RunResearchDataset v1` normalizes metadata, readiness, summary metrics, timeseries, decisions, signals, trades, context/world-state rows, candidate lifecycle evidence, candle catalog, diagnostics, candle gaps, runtime performance, operational health, and insights.
 3. Reports, compare views, exports, and external analysis tools read from the dataset.
 
 ## Dataset Rebuilds From Durable Run Facts
@@ -133,6 +133,14 @@ metadata, such as breakout timing, confirmation counters, value-area references,
 and distance-from-reference values, remains part of indicator output context;
 reporting must not add strategy-specific signal fields that reinterpret an
 indicator's private state.
+
+Candidate lifecycle evidence comes from finalized report artifact indicator
+output rows whose output type is `lifecycle`. Reporting flattens stage-change
+events into a `candidate_lifecycle` dataset section and summarizes candidate
+funnels, terminal outcomes, reasons, and family/side buckets. This is report and
+research evidence only. It must not make lifecycle outputs strategy-visible,
+rerun indicator logic, inspect indicator internals, or reinterpret candidate
+meaning outside the generic lifecycle event contract.
 
 Display-facing metrics must use `MetricValueDTO` validity metadata. Consumers
 must render `invalid`, `not_available`, or `not_computed` states instead of
@@ -210,9 +218,10 @@ observer facts.
 
 Reporting publishes report API payloads, compare payloads, compact research and
 comparison summaries for CLI/agent workflows, downloadable export bundles,
-normalized diagnostics, readiness/caveat explanations, and optional research
-exports with candle files. These are downstream products of the dataset, not
-new execution semantics.
+normalized diagnostics, paged signal/decision/trade/context/candidate-lifecycle
+datasets, readiness/caveat explanations, and optional research exports with
+candle files. These are downstream products of the dataset, not new execution
+semantics.
 
 ## Failure And Recovery
 

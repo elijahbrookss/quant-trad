@@ -12,6 +12,7 @@ from starlette.concurrency import run_in_threadpool
 
 from ..service.reports.contract import (
     compare_run_datasets as _compare_run_datasets,
+    get_candidate_lifecycle_dataset as _get_candidate_lifecycle_dataset,
     get_candle_catalog as _get_candle_catalog,
     get_candle_dataset as _get_candle_dataset,
     get_context_dataset as _get_context_dataset,
@@ -557,6 +558,55 @@ async def get_signal_dataset(
     except Exception as exc:  # noqa: BLE001 - convert to API error
         logger.error(with_log_context("report_signals_failed", context), exc_info=exc)
         raise HTTPException(500, "Signal dataset build failed") from exc
+
+
+@router.get("/{run_id}/candidate-lifecycle", response_model=DatasetPageResponse)
+async def get_candidate_lifecycle_dataset(
+    run_id: str,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    symbol: Optional[str] = Query(None),
+    instrument_id: Optional[str] = Query(None, alias="instrumentId"),
+    family: Optional[str] = Query(None),
+    side: Optional[str] = Query(None),
+    stage: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+) -> DatasetPageResponse:
+    """Return paged candidate lifecycle evidence for a run."""
+
+    context = build_log_context(
+        run_id=run_id,
+        limit=limit,
+        offset=offset,
+        symbol=symbol,
+        instrument_id=instrument_id,
+        family=family,
+        side=side,
+        stage=stage,
+        status=status,
+    )
+    logger.info(with_log_context("report_candidate_lifecycle_request", context))
+    try:
+        payload = await _run_report_task(
+            _get_candidate_lifecycle_dataset,
+            run_id,
+            limit=limit,
+            offset=offset,
+            symbol=symbol,
+            instrument_id=instrument_id,
+            family=family,
+            side=side,
+            stage=stage,
+            status=status,
+        )
+        logger.info(with_log_context("report_candidate_lifecycle_success", context | {"total": payload.get("total")}))
+        return DatasetPageResponse.model_validate(payload)
+    except KeyError as exc:
+        logger.warning(with_log_context("report_candidate_lifecycle_missing", context))
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - convert to API error
+        logger.error(with_log_context("report_candidate_lifecycle_failed", context), exc_info=exc)
+        raise HTTPException(500, "Candidate lifecycle dataset build failed") from exc
 
 
 @router.get("/{run_id}/timeseries/{section}", response_model=DatasetPageResponse)

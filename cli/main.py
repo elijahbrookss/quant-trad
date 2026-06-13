@@ -1340,6 +1340,88 @@ def _cmd_research_check_indicator(args: argparse.Namespace) -> int:
     return _post_research_check(args, payload)
 
 
+def _cmd_research_check_audit(args: argparse.Namespace) -> int:
+    detector = _read_json_object_arg(getattr(args, "detector_json", None), label="--detector-json")
+    if not detector:
+        for field in ("source_output", "source_field", "signal_output", "event_key"):
+            if not getattr(args, field, None):
+                raise ValueError(f"audit check requires --{field.replace('_', '-')} or --detector-json")
+        expectation_type = args.expectation_type or "transition"
+        detector = {
+            "type": "signal_audit",
+            "expectation_type": expectation_type,
+            "source_output": args.source_output,
+            "source_field": args.source_field,
+            "signal_output": args.signal_output,
+            "event_key": args.event_key,
+        }
+        if args.name:
+            detector["name"] = args.name
+        if args.same_group_by:
+            detector["same_group_by"] = [item.strip() for item in str(args.same_group_by).split(",") if item.strip()]
+        if expectation_type == "transition":
+            if getattr(args, "from_value", None) is None or getattr(args, "to_value", None) is None:
+                raise ValueError("transition audit check requires --from and --to")
+            detector["from"] = _json_value(str(args.from_value))
+            detector["to"] = _json_value(str(args.to_value))
+        else:
+            detector["operator"] = args.operator or "eq"
+            if getattr(args, "value_field", None):
+                detector["value_field"] = args.value_field
+            elif getattr(args, "value", None) is not None:
+                detector["value"] = _json_value(str(args.value))
+            elif str(detector["operator"]).lower() not in {"is_true", "true"}:
+                raise ValueError("condition audit check requires --value or --value-field")
+    payload = _research_check_request_base(
+        args,
+        title=f"Signal audit: {detector.get('event_key') or args.indicator_id}",
+        check_family="signal_audit",
+    )
+    payload["scope"] = {**dict(payload.get("scope") or {}), **_research_scope_from_args(args, include_indicator=True)}
+    payload["detector"] = detector
+    outcomes = {**dict(payload.get("outcomes") or {}), **_research_outcomes_from_args(args)}
+    if outcomes:
+        payload["outcomes"] = outcomes
+    return _post_research_check(args, payload)
+
+
+def _cmd_research_check_lifecycle(args: argparse.Namespace) -> int:
+    detector = _read_json_object_arg(getattr(args, "detector_json", None), label="--detector-json")
+    if not detector:
+        detector = {"type": "candidate_lifecycle"}
+        for attr, key in (
+            ("output_name", "output_name"),
+            ("family", "family"),
+            ("side", "side"),
+            ("stage", "stage"),
+            ("status", "status"),
+            ("signal_output", "signal_output"),
+            ("signal_event_key", "signal_event_key"),
+        ):
+            value = getattr(args, attr, None)
+            if value is not None:
+                detector[key] = value
+        for attr, key in (
+            ("funnel_stages", "funnel_stages"),
+            ("terminal_stages", "terminal_stages"),
+            ("signal_stages", "signal_stages"),
+        ):
+            value = getattr(args, attr, None)
+            if value:
+                detector[key] = [item.strip() for item in str(value).split(",") if item.strip()]
+    payload = _research_check_request_base(
+        args,
+        title=f"Lifecycle check: {detector.get('family') or detector.get('output_name') or args.indicator_id}",
+        check_family="candidate_lifecycle",
+    )
+    payload["scope"] = {**dict(payload.get("scope") or {}), **_research_scope_from_args(args, include_indicator=True)}
+    payload["detector"] = detector
+    outcomes = {**dict(payload.get("outcomes") or {}), **_research_outcomes_from_args(args)}
+    if outcomes:
+        payload["outcomes"] = outcomes
+    return _post_research_check(args, payload)
+
+
 def _cmd_research_trail(args: argparse.Namespace) -> int:
     _print_json(_client(args).request_json("GET", f"/api/research/items/{args.item_id}/trail"))
     return 0
@@ -2388,6 +2470,40 @@ def build_parser() -> argparse.ArgumentParser:
     research_check_indicator.add_argument("--value")
     research_check_indicator.add_argument("--value-field")
     research_check_indicator.set_defaults(func=_cmd_research_check_indicator)
+
+    research_check_audit = research_check_sub.add_parser("audit", help="Audit signal emissions against public indicator output expectations.")
+    add_research_check_base_args(research_check_audit)
+    add_research_window_args(research_check_audit)
+    research_check_audit.add_argument("--indicator-id", required=True)
+    research_check_audit.add_argument("--name")
+    research_check_audit.add_argument("--expectation-type", choices=["transition", "condition"], default="transition")
+    research_check_audit.add_argument("--source-output")
+    research_check_audit.add_argument("--source-field")
+    research_check_audit.add_argument("--from", dest="from_value")
+    research_check_audit.add_argument("--to", dest="to_value")
+    research_check_audit.add_argument("--same-group-by", help="Comma-separated source-output fields that must stay equal across a transition.")
+    research_check_audit.add_argument("--signal-output")
+    research_check_audit.add_argument("--event-key")
+    research_check_audit.add_argument("--operator", default="eq")
+    research_check_audit.add_argument("--value")
+    research_check_audit.add_argument("--value-field")
+    research_check_audit.set_defaults(func=_cmd_research_check_audit)
+
+    research_check_lifecycle = research_check_sub.add_parser("lifecycle", help="Audit generic indicator candidate lifecycle funnels.")
+    add_research_check_base_args(research_check_lifecycle)
+    add_research_window_args(research_check_lifecycle)
+    research_check_lifecycle.add_argument("--indicator-id", required=True)
+    research_check_lifecycle.add_argument("--output-name", help="Lifecycle output name.")
+    research_check_lifecycle.add_argument("--family")
+    research_check_lifecycle.add_argument("--side")
+    research_check_lifecycle.add_argument("--stage")
+    research_check_lifecycle.add_argument("--status")
+    research_check_lifecycle.add_argument("--signal-output")
+    research_check_lifecycle.add_argument("--signal-event-key")
+    research_check_lifecycle.add_argument("--funnel-stages", help="Comma-separated ordered lifecycle stages for funnel reporting.")
+    research_check_lifecycle.add_argument("--terminal-stages", help="Comma-separated stages that close a candidate.")
+    research_check_lifecycle.add_argument("--signal-stages", help="Comma-separated lifecycle stages that should reconcile to emitted signals.")
+    research_check_lifecycle.set_defaults(func=_cmd_research_check_lifecycle)
 
     research_check_signal = research_check_sub.add_parser("signal", help="Check completed run signal evidence.")
     add_research_check_base_args(research_check_signal)

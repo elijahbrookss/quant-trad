@@ -43,6 +43,8 @@ Research memory may:
 - run bounded analytical checks over source candles,
 - run bounded analytical checks over persisted indicator outputs collected
   through the canonical runtime graph,
+- run bounded signal audits that reconcile declared expectations against
+  emitted indicator signal events using public typed output rows,
 - run bounded analytical checks over canonical report datasets,
 - persist check outputs as evidence items,
 - recommend whether an observation should be discarded, refined, or promoted to
@@ -92,12 +94,93 @@ measures the same forward analytical outcomes over the aligned source candles.
 It does not create ephemeral indicator params or inspect overlays, details, or
 mutable indicator internals.
 
+The signal audit check family is `signal_audit`. It also requires a persisted
+`indicator_id` and the canonical indicator runtime graph, but it answers a
+different question:
+
+```text
+Given public output fields that imply a signal should exist, did the matching
+signal event actually emit on the expected bar?
+```
+
+Signal audits are indicator-agnostic. The research layer does not import an
+indicator family or encode family-specific event names. The caller supplies one
+or more expectations over public typed output rows. A transition expectation
+names a source output, a source field, a `from` value, a `to` value, the
+expected signal output, and the expected event key. Optional `same_group_by`
+fields require a transition to remain inside the same caller-defined grouping
+before it counts as expected. Group changes are reported as excluded
+candidates, not silently discarded, so signal contracts can be challenged with
+evidence.
+
+For example, a balance-breakout-style audit can be expressed as:
+
+```json
+{
+  "type": "signal_audit",
+  "source_output": "value_location",
+  "source_field": "state_key",
+  "from": "inside_value",
+  "to": "above_value",
+  "same_group_by": ["active_profile_key"],
+  "signal_output": "balance_breakout",
+  "event_key": "balance_breakout_long"
+}
+```
+
+That request shape is generic: another indicator can use the same audit family
+with different output names, fields, groups, and event keys. Signal audits
+produce matched, missing expected, invalid emitted, and excluded candidate
+counts. They do not measure profitability; forward outcome checks remain the
+surface for that.
+
+The candidate lifecycle check family is `candidate_lifecycle`. It requires a
+persisted `indicator_id` and the canonical indicator runtime graph. It reads
+public lifecycle typed output rows and summarizes candidate/setup funnels
+without understanding the indicator family that produced them.
+
+Lifecycle outputs are optional. They are for stateful or sequence-based signals
+that have a meaningful pre-signal path. Simple one-bar signals do not need to
+emit lifecycle facts. A lifecycle event should expose generic fields such as:
+
+```json
+{
+  "candidate_id": "stable candidate identity",
+  "family": "retest",
+  "side": "long",
+  "stage": "eligible",
+  "status": "active",
+  "group_key": "reference object identity",
+  "source_event_id": "upstream event identity",
+  "source_output": "confirmed_breakout",
+  "source_event_key": "confirmed_breakout_long",
+  "signal_output": "entry",
+  "signal_event_key": "entry_long",
+  "known_at": 1767229200,
+  "reason": "threshold_met",
+  "reference": {"kind": "price_level", "name": "reference", "price": 100.0},
+  "metrics": {},
+  "thresholds": {}
+}
+```
+
+The research check groups lifecycle rows by `candidate_id`, counts stage
+funnels, terminal outcomes, reasons, family/side buckets, and open candidates.
+When a lifecycle stage declares a `signal_output` and `signal_event_key`, the
+check reconciles that candidate against emitted signal events using the same
+runtime evidence. This lets research distinguish "no candidate existed",
+"candidate was filtered or expired", "candidate confirmed and emitted", and
+"candidate confirmed but the signal did not emit" without reading indicator
+private state.
+
 Report-backed check families read `RunResearchDataset` through the reporting
 contract. `run_signal_summary` counts matching signals, buckets them by
 requested fields, and summarizes linked decision/trade presence. `run_decision_trade_comparison`
 summarizes matching decisions by decision state and linked trade PnL. These
 families do not replay runtime or rebuild indicator state; they mine completed
-report evidence.
+report evidence. Completed run datasets may also expose `candidate_lifecycle`
+rows from lifecycle typed outputs captured in report artifacts, so future
+report-backed checks can inspect setup funnels without replaying indicators.
 
 Report-backed checks hydrate run context from `RunResearchDataset` before
 creating ad hoc observations. Caller-supplied observations are linked as-is.
@@ -150,6 +233,9 @@ Useful relations include:
   indicator outputs.
 - Indicator checks must use persisted indicator instances and the canonical
   runtime graph.
+- Signal audits must be expressed as expectations over public typed output
+  rows; they must not import indicator-family code or inspect mutable indicator
+  internals.
 - Forward outcomes are analytical summaries, not simulated trades.
 - Report-backed checks must read `RunResearchDataset` and must not reconstruct
   runtime state from logs, frontend projections, or indicator internals.

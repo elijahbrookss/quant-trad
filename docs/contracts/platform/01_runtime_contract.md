@@ -62,12 +62,13 @@ shortened market window.
 Indicators are computation units with internal state.
 
 Public runtime surfaces are:
-- typed outputs for strategy/runtime truth,
+- typed outputs for strategy/runtime/research truth,
 - optional canonical overlays for chart rendering,
 - optional runtime details for operator/debug inspection.
 
 Rules:
-- outputs are the only strategy-visible indicator interface,
+- signal, context, and metric outputs are the only strategy-visible indicator interface,
+- lifecycle outputs are public research evidence for candidate/setup funnels and are not strategy inputs,
 - overlays are not strategy inputs,
 - runtime details are not strategy inputs,
 - normal trading evaluation advances indicators with output-only frames; overlays and runtime details are opt-in projection/debug reads,

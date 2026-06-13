@@ -491,6 +491,8 @@ class DatasetPageResponse(BaseModel):
     offset: int
     total: int
     items: List[Dict[str, Any]] = Field(default_factory=list)
+    availability: Dict[str, Any] = Field(default_factory=dict)
+    summary: Dict[str, Any] = Field(default_factory=dict)
 
 
 class MetricExplanationResponse(BaseModel):
@@ -530,6 +532,7 @@ class RunResearchDatasetResponse(BaseModel):
     signals: List[Dict[str, Any]] = Field(default_factory=list)
     trades: List[Dict[str, Any]] = Field(default_factory=list)
     context: Dict[str, Any] = Field(default_factory=dict)
+    candidate_lifecycle: Dict[str, Any] = Field(default_factory=dict)
     candle_catalog: Dict[str, Any] = Field(default_factory=dict)
     fee_accounting: Dict[str, Any] = Field(default_factory=dict)
     wallet_accounting: Dict[str, Any] = Field(default_factory=dict)

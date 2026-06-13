@@ -1354,6 +1354,7 @@ def build_run_report(run_id: str) -> Dict[str, Any]:
             "readiness_route": f"/api/reports/{run_id}/readiness",
             "diagnostics_route": f"/api/reports/{run_id}/diagnostics",
             "metrics_route": f"/api/reports/{run_id}/metrics",
+            "candidate_lifecycle_route": f"/api/reports/{run_id}/candidate-lifecycle",
         },
     }
 
@@ -1469,6 +1470,51 @@ def get_signal_dataset(
         rows = [row for row in rows if str(row.get("instrument_id") or "") == instrument_id]
     rows.sort(key=lambda row: (str(row.get("bar_time") or row.get("known_at") or ""), str(row.get("signal_id") or "")))
     return _page(run_id=run_id, section="signals", rows=rows, limit=limit, offset=offset)
+
+
+def get_candidate_lifecycle_dataset(
+    run_id: str,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    symbol: Optional[str] = None,
+    instrument_id: Optional[str] = None,
+    family: Optional[str] = None,
+    side: Optional[str] = None,
+    stage: Optional[str] = None,
+    status: Optional[str] = None,
+) -> Dict[str, Any]:
+    dataset = _dataset(run_id)
+    payload = _mapping(dataset.get("candidate_lifecycle"))
+    rows = [dict(row) for row in payload.get("items") or [] if isinstance(row, Mapping)]
+    if symbol:
+        rows = [row for row in rows if str(row.get("symbol") or "") == symbol]
+    if instrument_id:
+        rows = [row for row in rows if str(row.get("instrument_id") or "") == instrument_id]
+    if family:
+        rows = [row for row in rows if str(row.get("family") or "") == family]
+    if side:
+        rows = [row for row in rows if str(row.get("side") or "") == side]
+    if stage:
+        rows = [row for row in rows if str(row.get("stage") or "") == stage]
+    if status:
+        rows = [row for row in rows if str(row.get("status") or "") == status]
+    rows.sort(
+        key=lambda row: (
+            str(row.get("bar_time") or row.get("known_at") or ""),
+            int(row.get("indicator_commit_seq") or 0),
+            int(row.get("event_index") or 0),
+            str(row.get("candidate_id") or ""),
+        )
+    )
+    return _page(run_id=run_id, section="candidate_lifecycle", rows=rows, limit=limit, offset=offset) | {
+        "availability": {
+            "available": bool(payload.get("available")),
+            "reason": payload.get("reason"),
+            "schema_version": payload.get("schema_version"),
+        },
+        "summary": _mapping(payload.get("summary")),
+    }
 
 
 def get_timeseries_dataset(

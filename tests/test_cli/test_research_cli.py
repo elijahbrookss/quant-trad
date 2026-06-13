@@ -245,6 +245,158 @@ def test_research_check_indicator_builds_indicator_request(monkeypatch):
     }
 
 
+def test_research_check_audit_builds_signal_audit_request(monkeypatch):
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        observed["method"] = request.get_method()
+        observed["path"] = urllib.parse.urlparse(request.full_url).path
+        observed["body"] = json.loads(request.data.decode("utf-8"))
+        return _Response(b'{"schema_version":"research_check_run.v1","status":"completed"}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "research",
+            "check",
+            "audit",
+            "--indicator-id",
+            "indicator-1",
+            "--instrument-id",
+            "inst-eth",
+            "--timeframe",
+            "1h",
+            "--start",
+            "2026-01-01T00:00:00Z",
+            "--end",
+            "2026-02-01T00:00:00Z",
+            "--source-output",
+            "state",
+            "--source-field",
+            "state_key",
+            "--from",
+            "inside",
+            "--to",
+            "outside",
+            "--same-group-by",
+            "group_key",
+            "--signal-output",
+            "break",
+            "--event-key",
+            "break_out",
+            "--max-examples",
+            "5",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed["method"] == "POST"
+    assert observed["path"] == "/api/research/checks/run"
+    assert observed["body"] == {
+        "title": "Signal audit: break_out",
+        "check_family": "signal_audit",
+        "scope": {
+            "instrument_id": "inst-eth",
+            "timeframe": "1h",
+            "start": "2026-01-01T00:00:00Z",
+            "end": "2026-02-01T00:00:00Z",
+            "indicator_id": "indicator-1",
+        },
+        "detector": {
+            "type": "signal_audit",
+            "expectation_type": "transition",
+            "source_output": "state",
+            "source_field": "state_key",
+            "signal_output": "break",
+            "event_key": "break_out",
+            "same_group_by": ["group_key"],
+            "from": "inside",
+            "to": "outside",
+        },
+        "outcomes": {"max_examples": 5},
+    }
+
+
+def test_research_check_lifecycle_builds_candidate_lifecycle_request(monkeypatch):
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        observed["method"] = request.get_method()
+        observed["path"] = urllib.parse.urlparse(request.full_url).path
+        observed["body"] = json.loads(request.data.decode("utf-8"))
+        return _Response(b'{"schema_version":"research_check_run.v1","status":"completed"}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "research",
+            "check",
+            "lifecycle",
+            "--indicator-id",
+            "indicator-1",
+            "--instrument-id",
+            "inst-eth",
+            "--timeframe",
+            "1h",
+            "--start",
+            "2026-01-01T00:00:00Z",
+            "--end",
+            "2026-02-01T00:00:00Z",
+            "--output-name",
+            "candidate_lifecycle",
+            "--family",
+            "retest",
+            "--side",
+            "long",
+            "--signal-output",
+            "entry",
+            "--signal-event-key",
+            "entry_long",
+            "--funnel-stages",
+            "formed,eligible,touched,confirmed",
+            "--terminal-stages",
+            "confirmed,invalidated,expired",
+            "--signal-stages",
+            "confirmed",
+            "--max-examples",
+            "5",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed["method"] == "POST"
+    assert observed["path"] == "/api/research/checks/run"
+    assert observed["body"] == {
+        "title": "Lifecycle check: retest",
+        "check_family": "candidate_lifecycle",
+        "scope": {
+            "instrument_id": "inst-eth",
+            "timeframe": "1h",
+            "start": "2026-01-01T00:00:00Z",
+            "end": "2026-02-01T00:00:00Z",
+            "indicator_id": "indicator-1",
+        },
+        "detector": {
+            "type": "candidate_lifecycle",
+            "output_name": "candidate_lifecycle",
+            "family": "retest",
+            "side": "long",
+            "signal_output": "entry",
+            "signal_event_key": "entry_long",
+            "funnel_stages": ["formed", "eligible", "touched", "confirmed"],
+            "terminal_stages": ["confirmed", "invalidated", "expired"],
+            "signal_stages": ["confirmed"],
+        },
+        "outcomes": {"max_examples": 5},
+    }
+
+
 def test_research_read_models_use_backend_routes(monkeypatch):
     calls = []
 

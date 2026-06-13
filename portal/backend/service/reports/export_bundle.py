@@ -111,6 +111,12 @@ def _export_files(
     trades = [dict(row) for row in dataset.get("trades") or [] if isinstance(row, Mapping)]
     decisions = [dict(row) for row in dataset.get("decisions") or [] if isinstance(row, Mapping)]
     signals = [dict(row) for row in dataset.get("signals") or [] if isinstance(row, Mapping)]
+    candidate_lifecycle = dict(dataset.get("candidate_lifecycle") or {})
+    candidate_lifecycle_rows = [
+        dict(row)
+        for row in candidate_lifecycle.get("items") or []
+        if isinstance(row, Mapping)
+    ]
     timeseries = dict(dataset.get("timeseries") or {})
     timeseries_sections = dict(timeseries.get("items") or {})
     context = dict(dataset.get("context") or {})
@@ -126,6 +132,7 @@ def _export_files(
         add_json("trades.json", "trades", trades, row_count=len(trades))
         add_json("decisions.json", "decisions", decisions, row_count=len(decisions))
         add_json("signals.json", "signals", signals, row_count=len(signals))
+        add_json("candidate_lifecycle.json", "candidate_lifecycle", candidate_lifecycle, row_count=len(candidate_lifecycle_rows))
         add_json("metrics.json", "metrics", _metrics_payload(dataset))
         add_json("candle_catalog.json", "candle_catalog", candle_catalog, row_count=len(candle_catalog_rows))
         add_json("context.json", "context", context)
@@ -142,6 +149,7 @@ def _export_files(
         add_csv("trades.csv", "trades", trades)
         add_csv("decisions.csv", "decisions", decisions)
         add_csv("signals.csv", "signals", signals)
+        add_csv("candidate_lifecycle.csv", "candidate_lifecycle", candidate_lifecycle_rows)
         add_csv("diagnostics.csv", "diagnostics", diagnostics_items)
         add_csv("candle_catalog.csv", "candle_catalog", candle_catalog_rows)
         for name, payload in timeseries_sections.items():

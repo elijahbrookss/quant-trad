@@ -134,7 +134,7 @@ def _new_output_summary(*, output_key: str, output_type: str, target_indicator_i
 
 def _observe_fields(summary: Dict[str, Any], *, output_type: str, value: Mapping[str, Any]) -> None:
     fields = summary["observed_fields"]
-    if output_type == "signal":
+    if output_type in {"signal", "lifecycle"}:
         return
     if output_type == "context":
         if "state_key" in value:
@@ -149,12 +149,12 @@ def _observe_fields(summary: Dict[str, Any], *, output_type: str, value: Mapping
 
 
 def _observe_ready_value(summary: Dict[str, Any], *, output_type: str, value: Mapping[str, Any]) -> None:
-    if output_type == "signal":
+    if output_type in {"signal", "lifecycle"}:
         events = value.get("events")
         if isinstance(events, list):
             for event in events:
                 if isinstance(event, Mapping):
-                    key = str(event.get("key") or "").strip()
+                    key = str(event.get("key") or event.get("stage") or "").strip()
                     if key:
                         summary["event_counts"][key] += 1
         return
@@ -528,13 +528,14 @@ def collect_runtime_output_evidence_for_instance(
                 continue
             ready_counts[output_name] += 1
             value = serialize_value(getattr(runtime_output, "value", {}) or {})
-            if output_type == "signal":
+            if output_type in {"signal", "lifecycle"}:
                 events = value.get("events") if isinstance(value, Mapping) else None
                 if not isinstance(events, list):
                     continue
                 for event_index, event in enumerate(events):
                     if not isinstance(event, Mapping):
                         continue
+                    event_key = str(event.get("key") or event.get("stage") or "")
                     output_rows.append(
                         {
                             "bar_index": bar_index,
@@ -545,7 +546,7 @@ def collect_runtime_output_evidence_for_instance(
                             "output_name": output_name,
                             "output_type": output_type,
                             "event_index": event_index,
-                            "event_key": str(event.get("key") or ""),
+                            "event_key": event_key,
                             "event": serialize_value(dict(event)),
                             "value": value,
                         }

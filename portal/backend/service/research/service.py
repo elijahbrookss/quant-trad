@@ -16,17 +16,21 @@ from portal.backend.service.reports import contract as reports_contract
 
 from . import repository
 from .checks import (
+    CANDIDATE_LIFECYCLE,
     INDICATOR_FORWARD_OUTCOME,
     RAW_FORWARD_OUTCOME,
     RUN_DECISION_TRADE_COMPARISON,
     RUN_SIGNAL_SUMMARY,
+    SIGNAL_AUDIT,
     SUPPORTED_CHECK_FAMILY,
     SUPPORTED_CHECK_FAMILIES,
     blocked_check_result,
+    evaluate_candidate_lifecycle,
     evaluate_indicator_forward_outcome,
     evaluate_raw_event_check,
     evaluate_run_decision_trade_comparison,
     evaluate_run_signal_summary,
+    evaluate_signal_audit,
     normalize_run_signal_records,
     validate_check_detector,
 )
@@ -287,7 +291,7 @@ def run_research_check(payload: Mapping[str, Any]) -> dict[str, Any]:
                         outcomes=outcomes,
                         data_quality=data_quality,
                     )
-    elif check_family == INDICATOR_FORWARD_OUTCOME:
+    elif check_family in {INDICATOR_FORWARD_OUTCOME, SIGNAL_AUDIT, CANDIDATE_LIFECYCLE}:
         normalized_scope = _normalize_indicator_scope(scope)
         coverage = candle_service.preflight_candle_coverage_by_instrument(
             normalized_scope["instrument_id"],
@@ -335,12 +339,27 @@ def run_research_check(payload: Mapping[str, Any]) -> dict[str, Any]:
                     check_family=check_family,
                 )
             else:
-                result = evaluate_indicator_forward_outcome(
-                    evidence,
-                    detector=detector,
-                    outcomes=outcomes,
-                    data_quality=data_quality,
-                )
+                if check_family == INDICATOR_FORWARD_OUTCOME:
+                    result = evaluate_indicator_forward_outcome(
+                        evidence,
+                        detector=detector,
+                        outcomes=outcomes,
+                        data_quality=data_quality,
+                    )
+                elif check_family == SIGNAL_AUDIT:
+                    result = evaluate_signal_audit(
+                        evidence,
+                        detector=detector,
+                        outcomes=outcomes,
+                        data_quality=data_quality,
+                    )
+                else:
+                    result = evaluate_candidate_lifecycle(
+                        evidence,
+                        detector=detector,
+                        outcomes=outcomes,
+                        data_quality=data_quality,
+                    )
     else:
         normalized_scope = _normalize_report_scope(scope)
         dataset = reports_contract.get_run_research_dataset(normalized_scope["run_id"])

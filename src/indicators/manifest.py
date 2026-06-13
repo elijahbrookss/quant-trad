@@ -57,7 +57,7 @@ class IndicatorParam:
 @dataclass(frozen=True)
 class IndicatorOutput:
     name: str
-    type: Literal["signal", "context", "metric"]
+    type: Literal["signal", "context", "metric", "lifecycle"]
     label: str
     event_keys: tuple[str, ...] = ()
     state_keys: tuple[str, ...] = ()
