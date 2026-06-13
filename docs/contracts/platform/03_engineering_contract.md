@@ -15,6 +15,20 @@ Use interfaces at real boundaries:
 
 Keep leaf logic explicit and simple.
 
+Framework-style surfaces must be contract-driven, not domain-shaped. A generic
+surface may render, rank, compare, route, or validate facts only through fields
+declared by the producing contract. It must not import indicator, strategy, bot,
+or report-family knowledge to make a generic workflow look smarter.
+
+If a reusable surface needs ordering or interpretation, that intent must be
+explicit in the request or emitted contract. Missing rank keys, metric
+directions, grouping fields, or required semantics are contract errors, not
+places to guess.
+
+Hidden fallbacks are not allowed. A second path is valid only when it is an
+explicit contract branch with clear inputs, outputs, and operator-visible
+context.
+
 ## Schema Semantics
 
 - No runtime migrations/backfills in app paths.

@@ -197,6 +197,24 @@ Future report-candle joined checks may reuse this request and persistence shape,
 but they must keep the same boundary: analytical evidence only, not execution
 truth.
 
+## Research Metric Presentation
+
+Research-memory presentation surfaces, including compact comparisons and future
+leaderboard-style CLI/API views, are generic read models over emitted research
+metrics. They are not indicator-specific analysis layers.
+
+A presentation surface may group, rank, and display check outputs only through
+explicit metric and dimension contracts. The rank metric must be supplied by
+the caller or declared by the producing check contract. Comparable metrics
+should carry enough semantics for generic handling: name, value, optional unit,
+optional direction, role, dimensions, sample count, caveats, and provenance.
+
+Presentation surfaces must not import indicator-family code, hardcode
+family-specific meanings, infer signal quality from labels alone, or choose a
+fallback rank metric when intent is missing. Missing rank keys, metric
+directions, grouping fields, or required dimensions fail loud before presenting
+misleading evidence.
+
 ## Memory Graph
 
 The storage model is intentionally small:
@@ -237,6 +255,9 @@ Useful relations include:
   rows; they must not import indicator-family code or inspect mutable indicator
   internals.
 - Forward outcomes are analytical summaries, not simulated trades.
+- Research metric presentation must be driven by emitted metric contracts and
+  explicit rank intent; it must not contain indicator-family logic or hidden
+  fallback ranking.
 - Report-backed checks must read `RunResearchDataset` and must not reconstruct
   runtime state from logs, frontend projections, or indicator internals.
 - Report-backed auto observations must be created after the dataset is read so
@@ -255,3 +276,4 @@ Useful relations include:
 - [Indicator runtime boundary](../indicator-runtime/INDICATOR_RUNTIME_BOUNDARY.md)
 - [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)
 - [ADR 0034: Use Research Checks as Analytical Memory Evidence](../decisions/0034-use-research-checks-as-analytical-memory-evidence.md)
+- [ADR 0037: Keep Research Presentations Metric-Contract Driven](../decisions/0037-keep-research-presentations-metric-contract-driven.md)
