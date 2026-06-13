@@ -105,7 +105,7 @@ class TypedMarketProfileIndicator(Indicator):
             ),
             reclaim_max_bars=params.get(
                 "reclaim_max_bars",
-                params.get("retest_max_bars", DEFAULT_RECLAIM_MAX_BARS),
+                DEFAULT_RECLAIM_MAX_BARS,
             ),
             retest_min_acceptance_bars=params.get(
                 "retest_min_acceptance_bars",

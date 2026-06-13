@@ -92,7 +92,10 @@ hints. It publishes `RuntimeOutput` values typed as `signal`, `context`,
 `indicator_commit_seq`, and `indicator_commit_seq_status=indicator_scoped`.
 Lifecycle outputs are optional public research evidence for stateful candidate
 funnels such as setup, eligible, touched, confirmed, invalidated, or expired.
-They are not decision inputs.
+They are not decision inputs. A lifecycle candidate should reference the
+earliest public typed output that formed the candidate. It should not wait for a
+later confirmation signal unless that confirmation is truly the source fact for
+the candidate family.
 
 Visual and debug surfaces leave through separate projection payloads:
 `RuntimeOverlay` for charts and `RuntimeDetail` for inspection. Guard metrics,

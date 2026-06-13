@@ -53,7 +53,7 @@ def _machine(**overrides) -> BreakoutRetestStateMachine:
 
 
 def test_breakout_state_machine_emits_long_confirm_then_reclaim() -> None:
-    machine = _machine()
+    machine = _machine(retest_min_excursion_atr=10.0)
 
     states = [
         _state(hour=0, previous_location=None, location="inside_value", open=100.0, high=100.8, low=99.5, close=100.0),
@@ -80,7 +80,7 @@ def test_breakout_state_machine_emits_long_confirm_then_reclaim() -> None:
 
 
 def test_breakout_state_machine_emits_short_confirm_then_reclaim() -> None:
-    machine = _machine()
+    machine = _machine(retest_min_excursion_atr=10.0)
 
     states = [
         _state(hour=0, previous_location=None, location="inside_value", open=100.0, high=100.5, low=99.3, close=100.0),
@@ -128,8 +128,10 @@ def test_breakout_state_machine_emits_structural_long_retest_after_acceptance() 
     assert emitted[5]["balance_reclaim"] == []
     assert retest["key"] == "balance_retest_long"
     assert retest["pattern_id"] == confirmed["pattern_id"]
-    assert retest["metadata"]["acceptance_time"] == int(states[4].bar_time.timestamp())
+    assert retest["metadata"]["acceptance_time"] == int(states[2].bar_time.timestamp())
     assert retest["metadata"]["retest_touch_time"] == int(states[5].bar_time.timestamp())
+    assert retest["metadata"]["confirmation_time"] == int(states[2].bar_time.timestamp())
+    assert retest["metadata"]["outside_bars_since_breakout"] >= 2
     assert retest["metadata"]["hold_confirm_price"] == states[5].close
     assert retest["metadata"]["max_excursion_from_reference"] > 1.0
     assert retest["metadata"]["retest_touch_penetration"] > 0.0
@@ -139,10 +141,52 @@ def test_breakout_state_machine_emits_structural_long_retest_after_acceptance() 
         "touched",
         "confirmed",
     ]
+    assert lifecycle[0]["known_at"] == int(states[1].bar_time.timestamp())
+    assert lifecycle[0]["reason"] == "raw_breakout"
+    assert lifecycle[0]["source_output"] == "balance_breakout"
+    assert lifecycle[0]["source_event_key"] == "balance_breakout_long"
+    assert lifecycle[1]["known_at"] == int(states[2].bar_time.timestamp())
     assert all(event["family"] == "retest" for event in lifecycle)
     assert all(event["candidate_id"] == confirmed["pattern_id"] for event in lifecycle)
     assert lifecycle[-1]["signal_output"] == "balance_retest"
     assert lifecycle[-1]["signal_event_key"] == "balance_retest_long"
+
+
+def test_breakout_state_machine_can_retest_before_breakout_confirmation() -> None:
+    machine = _machine(
+        breakout_confirm_bars=4,
+        retest_min_acceptance_bars=2,
+        retest_min_excursion_atr=0.5,
+        retest_touch_tolerance_atr=0.35,
+        retest_max_penetration_atr=0.35,
+    )
+
+    states = [
+        _state(hour=0, previous_location=None, location="inside_value", open=100.0, high=100.8, low=99.8, close=100.1),
+        _state(hour=1, previous_location="inside_value", location="above_value", open=100.3, high=104.0, low=100.2, close=103.4),
+        _state(hour=2, previous_location="above_value", location="above_value", open=103.3, high=104.5, low=102.8, close=103.8),
+        _state(hour=3, previous_location="above_value", location="above_value", open=103.7, high=104.0, low=100.8, close=102.0),
+    ]
+
+    emitted = [machine.step(state) for state in states]
+
+    retest = emitted[3]["balance_retest"][0]
+    lifecycle = [
+        event
+        for payload in emitted
+        for event in payload["candidate_lifecycle"]
+    ]
+
+    assert emitted[3]["confirmed_balance_breakout"] == []
+    assert retest["key"] == "balance_retest_long"
+    assert retest["metadata"]["confirmation_time"] is None
+    assert retest["metadata"]["acceptance_time"] == int(states[2].bar_time.timestamp())
+    assert [event["stage"] for event in lifecycle] == [
+        "formed",
+        "eligible",
+        "touched",
+        "confirmed",
+    ]
 
 
 def test_breakout_state_machine_rejects_deep_pullback_as_structural_retest() -> None:
@@ -164,7 +208,7 @@ def test_breakout_state_machine_rejects_deep_pullback_as_structural_retest() -> 
 
 
 def test_breakout_state_machine_times_out_reclaim_and_allows_new_sequence() -> None:
-    machine = _machine(reclaim_max_bars=1)
+    machine = _machine(reclaim_max_bars=1, retest_min_excursion_atr=10.0)
 
     states = [
         _state(hour=0, previous_location=None, location="inside_value", open=100.0, high=100.8, low=99.8, close=100.0),
