@@ -56,6 +56,9 @@ remote or multi-tenant hosting.
   reading provider-specific API key env vars.
 - Credential refs can be validated structurally and revoked without deleting
   audit metadata.
+- The `portal_provider_credential_refs` table and lookup index are owned by
+  portal schema bootstrap. Credential helpers validate the bootstrapped table
+  shape before use; they do not create a duplicate credential schema at runtime.
 
 ## Known Gaps
 

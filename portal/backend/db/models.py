@@ -81,6 +81,12 @@ REQUIRED_RESEARCH_LINK_INDEXES = frozenset(
     }
 )
 
+REQUIRED_PROVIDER_CREDENTIAL_INDEXES = frozenset(
+    {
+        "ix_provider_credential_refs_provider_venue",
+    }
+)
+
 
 class IndicatorRecord(Base):
     """Database record describing a persisted indicator instance."""
@@ -333,6 +339,16 @@ class ProviderCredentialRefRecord(Base):
     last_validated_at = Column(DateTime, nullable=True)
     last_used_at = Column(DateTime, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_provider_credential_refs_provider_venue",
+            "provider_id",
+            "venue_id",
+            "environment",
+            postgresql_where=revoked_at.is_(None),
+        ),
+    )
 
 
 class SymbolPresetRecord(Base):

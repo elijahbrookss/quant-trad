@@ -10,7 +10,7 @@ from core.settings import get_settings
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.schema import CreateSchema, CreateTable
+from sqlalchemy.schema import CreateIndex, CreateSchema, CreateTable
 
 from .models import (
     Base,
@@ -18,6 +18,7 @@ from .models import (
     REQUIRED_BOT_RUN_EVENT_INDEXES,
     REQUIRED_BOT_RUN_LEASE_INDEXES,
     REQUIRED_BOT_RUN_LIFECYCLE_INDEXES,
+    REQUIRED_PROVIDER_CREDENTIAL_INDEXES,
     REQUIRED_REPORT_MATERIALIZATION_INDEXES,
     REQUIRED_RESEARCH_ITEM_INDEXES,
     REQUIRED_RESEARCH_LINK_INDEXES,
@@ -93,8 +94,7 @@ class Database:
                     autoflush=False,
                     future=True,
                 )
-            self._create_tables_if_not_exists()
-            self._assert_schema_contract()
+            self._bootstrap_schema_contract()
             self._available = True
             logger.info("portal_db_ready | dsn=%s", self.dsn)
         except SQLAlchemyError as exc:
@@ -126,8 +126,8 @@ class Database:
         finally:
             session.close()
 
-    def _create_tables_if_not_exists(self) -> None:
-        """Create ORM tables using PostgreSQL IF NOT EXISTS semantics."""
+    def _bootstrap_schema_contract(self) -> None:
+        """Create missing schema objects and assert existing objects match the ORM contract."""
 
         if not self._engine:
             return
@@ -135,37 +135,71 @@ class Database:
             # Serialize schema DDL across backend + workers.
             conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _SCHEMA_LOCK_KEY})
             try:
-                for schema_name in sorted(
-                    {
-                        str(table.schema)
-                        for table in Base.metadata.sorted_tables
-                        if str(table.schema or "").strip()
-                    }
-                ):
-                    conn.execute(CreateSchema(schema_name, if_not_exists=True))
-                for table in Base.metadata.sorted_tables:
-                    schema_name = str(table.schema or "").strip() or None
-                    retired_name = _HARD_CUTOVER_TABLE_RENAMES.get((schema_name, table.name))
-                    if retired_name:
-                        active_ref = f"{schema_name or 'public'}.{table.name}"
-                        retired_ref = f"{schema_name or 'public'}.{retired_name}"
-                        active_exists, retired_exists = conn.execute(
-                            text("SELECT to_regclass(:active_ref), to_regclass(:retired_ref)"),
-                            {"active_ref": active_ref, "retired_ref": retired_ref},
-                        ).one()
-                        if active_exists is not None and retired_exists is not None:
-                            raise RuntimeError(
-                                f"Both active table '{active_ref}' and retired table '{retired_ref}' exist. "
-                                "Drop the retired table or rerun scripts/db/manual_migration_versioning_hard_cutover.sql cleanly."
-                            )
-                        if active_exists is None and retired_exists is not None:
-                            raise RuntimeError(
-                                f"Table '{active_ref}' is missing but retired table '{retired_ref}' exists. "
-                                "Run scripts/db/manual_migration_versioning_hard_cutover.sql before starting this code."
-                            )
-                    conn.execute(CreateTable(table, if_not_exists=True))
+                self._create_missing_schemas(conn)
+                self._create_missing_tables(conn)
+                self._assert_columns(conn)
+                self._create_missing_indexes(conn)
+                self._assert_required_indexes(conn)
+                logger.info("portal_db_schema_contract_ready")
             finally:
                 conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _SCHEMA_LOCK_KEY})
+
+    def _create_missing_schemas(self, conn) -> None:
+        """Create non-public schemas declared by metadata when absent."""
+
+        inspector = inspect(conn)
+        existing_schemas = {str(name) for name in inspector.get_schema_names()}
+        for schema_name in sorted(
+            {
+                str(table.schema)
+                for table in Base.metadata.sorted_tables
+                if str(table.schema or "").strip()
+            }
+        ):
+            if schema_name in existing_schemas:
+                continue
+            conn.execute(CreateSchema(schema_name))
+            logger.info("portal_db_schema_created | schema=%s", schema_name)
+            existing_schemas.add(schema_name)
+
+    def _create_missing_tables(self, conn) -> None:
+        """Create metadata tables that are missing from the configured database."""
+
+        inspector = inspect(conn)
+        table_names_by_schema: Dict[Optional[str], set[str]] = {}
+
+        def schema_table_names(schema: Optional[str]) -> set[str]:
+            key = str(schema).strip() if schema is not None else None
+            if key not in table_names_by_schema:
+                table_names_by_schema[key] = set(inspector.get_table_names(schema=key))
+            return table_names_by_schema[key]
+
+        for table in Base.metadata.sorted_tables:
+            schema_name = str(table.schema or "").strip() or None
+            retired_name = _HARD_CUTOVER_TABLE_RENAMES.get((schema_name, table.name))
+            if retired_name:
+                active_ref = f"{schema_name or 'public'}.{table.name}"
+                retired_ref = f"{schema_name or 'public'}.{retired_name}"
+                active_exists, retired_exists = conn.execute(
+                    text("SELECT to_regclass(:active_ref), to_regclass(:retired_ref)"),
+                    {"active_ref": active_ref, "retired_ref": retired_ref},
+                ).one()
+                if active_exists is not None and retired_exists is not None:
+                    raise RuntimeError(
+                        f"Both active table '{active_ref}' and retired table '{retired_ref}' exist. "
+                        "Drop the retired table or rerun scripts/db/manual_migration_versioning_hard_cutover.sql cleanly."
+                    )
+                if active_exists is None and retired_exists is not None:
+                    raise RuntimeError(
+                        f"Table '{active_ref}' is missing but retired table '{retired_ref}' exists. "
+                        "Run scripts/db/manual_migration_versioning_hard_cutover.sql before starting this code."
+                    )
+
+            if table.name in schema_table_names(schema_name):
+                continue
+            conn.execute(CreateTable(table))
+            logger.warning("portal_db_table_created | schema=%s | table=%s", schema_name or "public", table.name)
+            schema_table_names(schema_name).add(table.name)
 
     def _reset_engine(self) -> None:
         """Dispose engine/session so the next readiness check can retry init cleanly."""
@@ -187,142 +221,82 @@ class Database:
         self._available = False
         self._error = None
 
-    def _assert_schema_contract(self) -> None:
-        """Assert tables/columns match ORM contract; create missing tables once."""
-        if not self._engine:
-            return
-        inspector = inspect(self._engine)
-        table_names_by_schema: Dict[Optional[str], set[str]] = {}
+    def _assert_columns(self, conn) -> None:
+        """Fail loud when an existing table does not match the current column contract."""
 
-        def _schema_table_names(schema: Optional[str]) -> set[str]:
-            key = str(schema).strip() if schema is not None else None
-            if key not in table_names_by_schema:
-                table_names_by_schema[key] = set(inspector.get_table_names(schema=key))
-            return table_names_by_schema[key]
+        inspector = inspect(conn)
+        for table in Base.metadata.sorted_tables:
+            schema_name = str(table.schema or "").strip() or None
+            expected = {column.name for column in table.columns}
+            existing = {col["name"] for col in inspector.get_columns(table.name, schema=schema_name)}
+            missing = sorted(expected - existing)
+            if not missing:
+                continue
+            logger.error(
+                "portal_db_column_mismatch | schema=%s | table=%s | missing=%s",
+                schema_name or "public",
+                table.name,
+                ",".join(missing),
+            )
+            raise RuntimeError(
+                f"Table '{schema_name + '.' if schema_name else ''}{table.name}' is missing columns: {', '.join(missing)}. "
+                "Drop the table or rebuild the database to ensure a clean schema."
+            )
 
-        def require_table(name: str, *, schema: Optional[str] = None) -> None:
-            metadata_key = f"{schema}.{name}" if schema else name
-            if name not in _schema_table_names(schema):
-                retired_name = _HARD_CUTOVER_TABLE_RENAMES.get((schema, name))
-                if retired_name and retired_name in _schema_table_names(schema):
-                    raise RuntimeError(
-                        f"Table '{schema + '.' if schema else ''}{name}' is missing but retired table "
-                        f"'{schema + '.' if schema else ''}{retired_name}' exists. "
-                        "Run scripts/db/manual_migration_versioning_hard_cutover.sql before starting this code."
-                    )
-                Base.metadata.tables[metadata_key].create(self._engine, checkfirst=True)
-                logger.warning("portal_db_table_created | schema=%s | table=%s", schema or "public", name)
-                _schema_table_names(schema).add(name)
+    def _create_missing_indexes(self, conn) -> None:
+        """Create metadata indexes that are missing from otherwise valid tables."""
 
-        def assert_columns(name: str, *, schema: Optional[str] = None) -> None:
-            metadata_key = f"{schema}.{name}" if schema else name
-            expected = {column.name for column in Base.metadata.tables[metadata_key].columns}
-            existing = {col["name"] for col in inspector.get_columns(name, schema=schema)}
-            missing = sorted(set(expected) - existing)
-            if missing:
-                logger.error(
-                    "portal_db_column_mismatch | schema=%s | table=%s | missing=%s",
-                    schema or "public",
-                    name,
-                    ",".join(missing),
+        inspector = inspect(conn)
+        for table in Base.metadata.sorted_tables:
+            schema_name = str(table.schema or "").strip() or None
+            existing = {str(index.get("name") or "") for index in inspector.get_indexes(table.name, schema=schema_name)}
+            for index in sorted(table.indexes, key=lambda item: str(item.name or "")):
+                index_name = str(index.name or "").strip()
+                if not index_name or index_name in existing:
+                    continue
+                conn.execute(CreateIndex(index))
+                logger.info(
+                    "portal_db_index_created | schema=%s | table=%s | index=%s",
+                    schema_name or "public",
+                    table.name,
+                    index_name,
                 )
-                raise RuntimeError(
-                    f"Table '{schema + '.' if schema else ''}{name}' is missing columns: {', '.join(missing)}. "
-                    "Drop the table or rebuild the database to ensure a clean schema."
-                )
+                existing.add(index_name)
 
-        def warn_missing_indexes(
+    def _assert_required_indexes(self, conn) -> None:
+        """Fail loud when a required operational index is still absent after bootstrap."""
+
+        inspector = inspect(conn)
+
+        def assert_required_indexes(
             name: str,
             required: set[str] | frozenset[str],
             *,
             schema: Optional[str] = None,
-            migration: str,
         ) -> None:
             existing = {str(index.get("name") or "") for index in inspector.get_indexes(name, schema=schema)}
             missing = sorted(set(required) - existing)
-            if missing:
-                logger.warning(
-                    "portal_db_required_indexes_missing | schema=%s | table=%s | missing=%s | migration=%s",
-                    schema or "public",
-                    name,
-                    ",".join(missing),
-                    migration,
-                )
+            if not missing:
+                return
+            logger.error(
+                "portal_db_required_indexes_missing | schema=%s | table=%s | missing=%s",
+                schema or "public",
+                name,
+                ",".join(missing),
+            )
+            raise RuntimeError(
+                f"Table '{schema + '.' if schema else ''}{name}' is missing required indexes: {', '.join(missing)}. "
+                "The bootstrap creates indexes declared in portal/backend/db/models.py; update the model contract or rebuild the database."
+            )
 
-        require_table("portal_bot_runs")
-        require_table("portal_bot_run_step_rollups")
-        require_table("portal_bot_run_lifecycle")
-        require_table("portal_bot_run_lifecycle_events")
-        require_table("portal_bot_run_leases")
-        require_table("portal_bot_trades")
-        require_table("portal_bots")
-        require_table("portal_strategies")
-        require_table("portal_strategy_rules")
-        require_table("portal_strategy_indicators")
-        require_table("portal_strategy_instruments")
-        require_table("portal_strategy_variants")
-        require_table("portal_research_items")
-        require_table("portal_research_links")
-        require_table("portal_async_jobs")
-        require_table("portal_report_materializations")
-        require_table("portal_bot_run_events")
-        require_table("portal_bot_run_event_seq_allocators")
-        require_table("botlens_backend_events", schema="observability_events")
-        require_table("botlens_backend_metric_rollups", schema="observability_metrics")
-        assert_columns("portal_bot_run_step_rollups")
-        assert_columns("portal_bot_run_lifecycle")
-        assert_columns("portal_bot_run_lifecycle_events")
-        assert_columns("portal_bot_run_leases")
-        assert_columns("portal_bot_trades")
-        assert_columns("portal_bots")
-        assert_columns("portal_strategies")
-        assert_columns("portal_strategy_rules")
-        assert_columns("portal_strategy_indicators")
-        assert_columns("portal_strategy_instruments")
-        assert_columns("portal_strategy_variants")
-        assert_columns("portal_research_items")
-        assert_columns("portal_research_links")
-        assert_columns("portal_async_jobs")
-        assert_columns("portal_report_materializations")
-        assert_columns("portal_bot_run_events")
-        assert_columns("portal_bot_run_event_seq_allocators")
-        assert_columns("botlens_backend_events", schema="observability_events")
-        assert_columns("botlens_backend_metric_rollups", schema="observability_metrics")
-        warn_missing_indexes(
-            "portal_bot_run_events",
-            REQUIRED_BOT_RUN_EVENT_INDEXES,
-            migration="scripts/db/manual_migration_runtime_event_run_seq_v3.sql",
-        )
-        warn_missing_indexes(
-            "portal_bot_runs",
-            REQUIRED_BOT_RUN_INDEXES,
-            migration="scripts/db/manual_migration_versioning_hard_cutover.sql",
-        )
-        warn_missing_indexes(
-            "portal_report_materializations",
-            REQUIRED_REPORT_MATERIALIZATION_INDEXES,
-            migration="scripts/db/manual_migration_versioning_hard_cutover.sql",
-        )
-        warn_missing_indexes(
-            "portal_bot_run_lifecycle",
-            REQUIRED_BOT_RUN_LIFECYCLE_INDEXES,
-            migration="scripts/db/manual_migration_portal_bot_definition_only_indexes_v1.sql",
-        )
-        warn_missing_indexes(
-            "portal_bot_run_leases",
-            REQUIRED_BOT_RUN_LEASE_INDEXES,
-            migration="scripts/db/manual_migration_portal_bot_definition_only_indexes_v1.sql",
-        )
-        warn_missing_indexes(
-            "portal_research_items",
-            REQUIRED_RESEARCH_ITEM_INDEXES,
-            migration="scripts/db/manual_migration_research_memory_v1.sql",
-        )
-        warn_missing_indexes(
-            "portal_research_links",
-            REQUIRED_RESEARCH_LINK_INDEXES,
-            migration="scripts/db/manual_migration_research_memory_v1.sql",
-        )
+        assert_required_indexes("portal_bot_run_events", REQUIRED_BOT_RUN_EVENT_INDEXES)
+        assert_required_indexes("portal_bot_runs", REQUIRED_BOT_RUN_INDEXES)
+        assert_required_indexes("portal_report_materializations", REQUIRED_REPORT_MATERIALIZATION_INDEXES)
+        assert_required_indexes("portal_bot_run_lifecycle", REQUIRED_BOT_RUN_LIFECYCLE_INDEXES)
+        assert_required_indexes("portal_bot_run_leases", REQUIRED_BOT_RUN_LEASE_INDEXES)
+        assert_required_indexes("portal_research_items", REQUIRED_RESEARCH_ITEM_INDEXES)
+        assert_required_indexes("portal_research_links", REQUIRED_RESEARCH_LINK_INDEXES)
+        assert_required_indexes("portal_provider_credential_refs", REQUIRED_PROVIDER_CREDENTIAL_INDEXES)
 
     @property
     def available(self) -> bool:

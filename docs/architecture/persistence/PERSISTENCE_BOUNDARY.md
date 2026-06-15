@@ -49,6 +49,34 @@ that owns them. Runtime run rows carry runtime contract/source/image/storage
 provenance; report materialization rows carry report contract, dataset contract,
 builder source revision, and report storage provenance.
 
+## Schema Bootstrap Contract
+
+Fresh database bootstrap is a first-class persistence responsibility. Backend
+startup creates the current model-declared schemas, tables, and indexes from
+`portal/backend/db/models.py` using the single `PG_DSN`; a new desktop or clean
+Docker volume must not require operators to replay historical manual migration
+files.
+
+Bootstrap may create missing schemas, tables, and model-declared indexes. It
+must not use blanket `IF NOT EXISTS` DDL as the schema contract. Existing tables
+are inspected against the current column contract; missing columns fail loud
+with the table and column names so the operator can rebuild the database or
+intentionally run an out-of-band migration.
+
+Required operational indexes are part of the current schema contract. If they
+are still absent after bootstrap attempts to create model-declared indexes,
+startup fails. Historical SQL files under `scripts/db/` are repair/reference
+artifacts for old local databases, not normal fresh-start instructions.
+
+Provider market-data storage follows the same rule for
+`market_candles_raw`, `derivatives_market_state`, and
+`portal_candle_closures`: inspect the configured table names, create missing
+tables once, assert existing columns, create required indexes, and fail loud if
+the contract still does not hold. Provider credential helpers do not create
+their own table; `portal_provider_credential_refs` is owned by the portal ORM
+metadata and credential helpers only validate that the bootstrapped table and
+lookup index exist.
+
 ## Diagram Walkthrough
 
 [runtime-event-ledger-flow.mmd](diagrams/runtime-event-ledger-flow.mmd) shows:
@@ -228,7 +256,8 @@ fact without `wallet_commit_seq` is malformed and must block certification.
 
 - Required persistence for audit trails fails loud.
 - Missing required columns fail with actionable errors.
-- Missing useful indexes should warn with migration guidance.
+- Missing model-declared indexes are created during bootstrap.
+- Missing required indexes after bootstrap fail with actionable errors.
 - Duplicate event IDs represent idempotency/replay outcomes, not new truth.
 - Sequence/cursor ordering is a replay contract.
 
@@ -237,7 +266,8 @@ fact without `wallet_commit_seq` is malformed and must block certification.
 - Durable truth is append-friendly and replayable.
 - Runtime events preserve known-at context.
 - Storage does not perform hidden execution reconstruction.
-- Schema changes come from clean definitions or explicit migrations, not runtime backfills.
+- Fresh schemas come from current clean definitions.
+- Existing schema drift fails loud instead of being patched with hidden runtime backfills.
 
 ## Related Docs
 
