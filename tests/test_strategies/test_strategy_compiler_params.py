@@ -133,6 +133,35 @@ def test_market_profile_confirmed_breakout_metrics_can_gate_confirmed_breakout_s
     assert guard.field == "distance_from_reference_pct"
 
 
+def test_candle_stats_atr_expansion_can_be_standalone_strategy_trigger() -> None:
+    outputs = manifest_output_catalog(get_indicator_manifest("candle_stats"))
+
+    spec = compile_strategy(
+        strategy_id="s1",
+        timeframe="1h",
+        rules={
+            "r1": {
+                "id": "r1",
+                "name": "ATR expansion long",
+                "intent": "enter_long",
+                "trigger": {
+                    "type": "signal_match",
+                    "indicator_id": "candle-stats-1",
+                    "output_name": "atr_expansion",
+                    "event_key": "atr_expansion_long",
+                },
+                "guards": [],
+            }
+        },
+        attached_indicator_ids=["candle-stats-1"],
+        indicator_meta_getter=_make_meta_getter(outputs),
+    )
+
+    assert spec.rules[0].trigger.output_name == "atr_expansion"
+    assert spec.rules[0].trigger.event_key == "atr_expansion_long"
+    assert spec.rules[0].guards == ()
+
+
 def test_parameterized_metric_match_resolves_correctly() -> None:
     rules = _rules(_metric_guard(value="$params.min_atr_z"))
 

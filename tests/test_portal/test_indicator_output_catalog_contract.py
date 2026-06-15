@@ -89,6 +89,30 @@ def test_factory_build_meta_from_record_keeps_outputs_catalog_only() -> None:
     assert "enabled" not in typed_outputs["balance_retest"]
 
 
+def test_candle_stats_exposes_atr_expansion_signal_output() -> None:
+    factory = IndicatorFactory()
+
+    meta = factory.build_meta_from_record(
+        {
+            "id": "candle-stats-1",
+            "type": "candle_stats",
+            "name": "Candle Stats",
+            "params": {},
+            "dependencies": [],
+            "enabled": True,
+        }
+    )
+
+    typed_outputs = {entry["name"]: entry for entry in meta["typed_outputs"]}
+
+    assert typed_outputs["atr_expansion"] == {
+        "name": "atr_expansion",
+        "type": "signal",
+        "label": "ATR Expansion",
+        "event_keys": ["atr_expansion_long"],
+    }
+
+
 def test_indicator_update_rejects_material_edit_when_strategy_bound() -> None:
     ctx = _ctx()
 

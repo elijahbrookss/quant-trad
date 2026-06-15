@@ -239,6 +239,68 @@ def test_bots_create_and_update_use_backend_bot_routes(tmp_path, monkeypatch):
     )
 
 
+def test_strategies_create_and_rule_create_use_backend_contracts(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        calls.append((request.get_method(), urllib.parse.urlparse(request.full_url).path, json.loads(request.data.decode("utf-8"))))
+        return _Response(b'{"ok": true}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    strategy_payload = {
+        "name": "ATR expansion BTC",
+        "instrument_slots": [{"symbol": "BTC/USD", "instrument_id": "inst-btc"}],
+        "timeframe": "1h",
+        "datasource": "CCXT",
+        "exchange": "COINBASE",
+        "indicator_ids": ["candle-stats-1"],
+        "atm_template_id": "atm-1",
+        "risk_config": {"base_risk_per_trade": 250.0},
+    }
+    rule_payload = {
+        "name": "ATR expansion long",
+        "intent": "enter_long",
+        "trigger": {
+            "type": "signal_match",
+            "indicator_id": "candle-stats-1",
+            "output_name": "atr_expansion",
+            "event_key": "atr_expansion_long",
+        },
+        "guards": [],
+    }
+
+    create_code = main(
+        [
+            "--log-root",
+            str(tmp_path),
+            "strategies",
+            "create",
+            "--payload-json",
+            json.dumps(strategy_payload),
+        ]
+    )
+    rule_code = main(
+        [
+            "--log-root",
+            str(tmp_path),
+            "strategies",
+            "rule-create",
+            "strategy-1",
+            "--payload-json",
+            json.dumps(rule_payload),
+        ]
+    )
+
+    assert create_code == 0
+    assert rule_code == 0
+    assert calls == [
+        ("POST", "/api/strategies/", strategy_payload),
+        ("POST", "/api/strategies/strategy-1/rules", rule_payload),
+    ]
+
+
 def test_research_check_cli_accepts_run_id_for_report_backed_checks(tmp_path, monkeypatch):
     observed = {}
 

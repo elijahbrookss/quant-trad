@@ -142,6 +142,15 @@ MANIFEST = IndicatorManifest(
             advanced=True,
             group="stability",
         ),
+        IndicatorParam(
+            key="atr_expansion_signal_threshold",
+            type="float",
+            label="ATR Expansion Signal Threshold",
+            description="ATR z-score threshold crossed before emitting an ATR expansion signal.",
+            default=2.0,
+            advanced=True,
+            group="signals",
+        ),
     ),
     outputs=(
         IndicatorOutput(
@@ -165,6 +174,12 @@ MANIFEST = IndicatorManifest(
                 "volume_ratio",
                 "body_overlap_pct",
             ),
+        ),
+        IndicatorOutput(
+            name="atr_expansion",
+            type="signal",
+            label="ATR Expansion",
+            event_keys=("atr_expansion_long",),
         ),
     ),
     overlays=(

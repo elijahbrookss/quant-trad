@@ -566,6 +566,12 @@ def _cmd_strategies_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_strategies_create(args: argparse.Namespace) -> int:
+    payload = _read_json_object_arg(args.payload_json, label="--payload-json")
+    _print_json(_client(args).request_json("POST", "/api/strategies/", payload=payload))
+    return 0
+
+
 def _cmd_strategies_get(args: argparse.Namespace) -> int:
     _print_json(_client(args).request_json("GET", f"/api/strategies/{args.strategy_id}"))
     return 0
@@ -578,6 +584,12 @@ def _cmd_strategies_bindings(args: argparse.Namespace) -> int:
 
 def _cmd_strategies_rules(args: argparse.Namespace) -> int:
     _print_json(_client(args).request_json("GET", f"/api/strategies/{args.strategy_id}/rules"))
+    return 0
+
+
+def _cmd_strategies_rule_create(args: argparse.Namespace) -> int:
+    payload = _read_json_object_arg(args.payload_json, label="--payload-json")
+    _print_json(_client(args).request_json("POST", f"/api/strategies/{args.strategy_id}/rules", payload=payload))
     return 0
 
 
@@ -2227,6 +2239,9 @@ def build_parser() -> argparse.ArgumentParser:
     strategies_sub = strategies.add_subparsers(dest="strategies_command", required=True)
     strategies_list = strategies_sub.add_parser("list", help="List strategies.")
     strategies_list.set_defaults(func=_cmd_strategies_list)
+    strategies_create = strategies_sub.add_parser("create", help="Create a strategy from the backend strategy JSON contract.")
+    strategies_create.add_argument("--payload-json", required=True, help="Strategy create JSON object, path to JSON, or '-' for stdin.")
+    strategies_create.set_defaults(func=_cmd_strategies_create)
     strategies_get = strategies_sub.add_parser("get", help="Get a strategy definition payload.")
     strategies_get.add_argument("strategy_id")
     strategies_get.set_defaults(func=_cmd_strategies_get)
@@ -2236,6 +2251,10 @@ def build_parser() -> argparse.ArgumentParser:
     strategies_rules = strategies_sub.add_parser("rules", help="Get stored strategy rules.")
     strategies_rules.add_argument("strategy_id")
     strategies_rules.set_defaults(func=_cmd_strategies_rules)
+    strategies_rule_create = strategies_sub.add_parser("rule-create", help="Create a strategy rule from the backend rule JSON contract.")
+    strategies_rule_create.add_argument("strategy_id")
+    strategies_rule_create.add_argument("--payload-json", required=True, help="Strategy rule create JSON object, path to JSON, or '-' for stdin.")
+    strategies_rule_create.set_defaults(func=_cmd_strategies_rule_create)
     strategies_effective = strategies_sub.add_parser("effective", help="Get the runtime-effective strategy contract.")
     strategies_effective.add_argument("strategy_id")
     strategies_effective.add_argument("--variant-id")
