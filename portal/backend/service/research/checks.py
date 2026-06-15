@@ -99,7 +99,10 @@ _CANDIDATE_LIFECYCLE_MATCHER_CONTROL_FIELDS = {
 class EventOutcome:
     event_index: int
     event_time: str
-    close: float
+    event_close: float
+    entry_index: int
+    entry_time: str
+    entry_close: float
     outcomes: dict[int, dict[str, float]]
 
 
@@ -134,6 +137,7 @@ def evaluate_raw_event_check(
     frame = _normalize_candles(candles)
     outcome_spec = dict(outcomes or {})
     forward_bars = _forward_bars(outcome_spec)
+    entry_lag_bars = _entry_lag_bars(outcome_spec)
     direction = str(outcome_spec.get("direction") or "long").strip().lower()
     if direction not in {"long", "short"}:
         raise ValueError("outcomes.direction must be 'long' or 'short'")
@@ -147,11 +151,11 @@ def evaluate_raw_event_check(
         if _evaluate_detector(dict(detector or {}), frame, idx)
     ]
     event_outcomes = [
-        _event_outcome(frame, idx, forward_bars=forward_bars, direction=direction)
+        _event_outcome(frame, idx, forward_bars=forward_bars, direction=direction, entry_lag_bars=entry_lag_bars)
         for idx in event_indexes
     ]
     baseline_outcomes = [
-        _event_outcome(frame, idx, forward_bars=forward_bars, direction=direction)
+        _event_outcome(frame, idx, forward_bars=forward_bars, direction=direction, entry_lag_bars=entry_lag_bars)
         for idx in range(len(frame))
     ]
 
@@ -166,7 +170,11 @@ def evaluate_raw_event_check(
         {
             "event_time": outcome.event_time,
             "event_index": outcome.event_index,
-            "close": outcome.close,
+            "event_close": outcome.event_close,
+            "entry_time": outcome.entry_time,
+            "entry_index": outcome.entry_index,
+            "entry_close": outcome.entry_close,
+            "close": outcome.event_close,
             "outcomes": {str(k): v for k, v in outcome.outcomes.items()},
         }
         for outcome in event_outcomes[: max(0, max_examples)]
@@ -181,6 +189,7 @@ def evaluate_raw_event_check(
         "outcomes": {
             "direction": direction,
             "forward_bars": forward_bars,
+            "entry_lag_bars": entry_lag_bars,
             "min_sample_count": min_sample_count,
             "min_edge_pct": min_edge_pct,
             "summary": summary["by_window"],
@@ -363,6 +372,7 @@ def evaluate_indicator_forward_outcome(
     rows = [row for row in _records(evidence.get("outputs")) if _indicator_row_matches(row, detector)]
     outcome_spec = dict(outcomes or {})
     forward_bars = _forward_bars(outcome_spec)
+    entry_lag_bars = _entry_lag_bars(outcome_spec)
     direction = str(outcome_spec.get("direction") or "long").strip().lower()
     if direction not in {"long", "short"}:
         raise ValueError("outcomes.direction must be 'long' or 'short'")
@@ -378,7 +388,7 @@ def evaluate_indicator_forward_outcome(
         bar_index = int(row.get("bar_index") or 0)
         if bar_index < 0 or bar_index >= len(frame):
             continue
-        outcome = _event_outcome(frame, bar_index, forward_bars=forward_bars, direction=direction)
+        outcome = _event_outcome(frame, bar_index, forward_bars=forward_bars, direction=direction, entry_lag_bars=entry_lag_bars)
         event_outcomes.append(outcome)
         buckets[_bucket_key(row, bucket_fields)] += 1
         if len(examples) < max_examples:
@@ -395,13 +405,17 @@ def evaluate_indicator_forward_outcome(
                     "field_value": _indicator_field_value(row, str(detector.get("field") or ""))
                     if detector.get("field")
                     else None,
-                    "close": outcome.close,
+                    "event_close": outcome.event_close,
+                    "entry_time": outcome.entry_time,
+                    "entry_index": outcome.entry_index,
+                    "entry_close": outcome.entry_close,
+                    "close": outcome.event_close,
                     "outcomes": {str(k): v for k, v in outcome.outcomes.items()},
                 }
             )
 
     baseline_outcomes = [
-        _event_outcome(frame, idx, forward_bars=forward_bars, direction=direction)
+        _event_outcome(frame, idx, forward_bars=forward_bars, direction=direction, entry_lag_bars=entry_lag_bars)
         for idx in range(len(frame))
     ]
     summary = _summarize_outcomes(
@@ -422,6 +436,7 @@ def evaluate_indicator_forward_outcome(
         "outcomes": {
             "direction": direction,
             "forward_bars": forward_bars,
+            "entry_lag_bars": entry_lag_bars,
             "min_sample_count": min_sample_count,
             "min_edge_pct": min_edge_pct,
             "bucket_by": bucket_fields,
@@ -650,6 +665,17 @@ def _forward_bars(outcome_spec: Mapping[str, Any]) -> list[int]:
     return bars
 
 
+def _entry_lag_bars(outcome_spec: Mapping[str, Any]) -> int:
+    raw = outcome_spec.get("entry_lag_bars", 0)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("outcomes.entry_lag_bars must be a non-negative integer") from exc
+    if value < 0:
+        raise ValueError("outcomes.entry_lag_bars must be a non-negative integer")
+    return value
+
+
 def _evaluate_detector(detector: Mapping[str, Any], frame: pd.DataFrame, idx: int) -> bool:
     if "all" in detector:
         conditions = detector.get("all")
@@ -770,6 +796,24 @@ def _validate_raw_detector(detector: Mapping[str, Any]) -> None:
 
 
 def _validate_indicator_detector(detector: Mapping[str, Any]) -> None:
+    if "all" in detector:
+        conditions = detector.get("all")
+        if not isinstance(conditions, Sequence) or isinstance(conditions, (str, bytes)):
+            raise ValueError("detector.all must be a list")
+        for item in conditions:
+            _validate_indicator_detector(_mapping(item, "detector.all item"))
+        return
+    if "any" in detector:
+        conditions = detector.get("any")
+        if not isinstance(conditions, Sequence) or isinstance(conditions, (str, bytes)):
+            raise ValueError("detector.any must be a list")
+        for item in conditions:
+            _validate_indicator_detector(_mapping(item, "detector.any item"))
+        return
+    if "not" in detector:
+        _validate_indicator_detector(_mapping(detector.get("not"), "detector.not"))
+        return
+
     detector_type = str(detector.get("type") or "").strip()
     if detector_type not in _INDICATOR_DETECTOR_TYPES:
         raise ValueError(f"unsupported indicator check detector type: {detector_type or '<empty>'}")
@@ -1476,6 +1520,19 @@ def _validate_run_detector(detector: Mapping[str, Any], *, check_family: str) ->
 
 
 def _indicator_row_matches(row: Mapping[str, Any], detector: Mapping[str, Any]) -> bool:
+    if "all" in detector:
+        conditions = detector.get("all")
+        if not isinstance(conditions, Sequence) or isinstance(conditions, (str, bytes)):
+            raise ValueError("detector.all must be a list")
+        return all(_indicator_row_matches(row, _mapping(item, "detector.all item")) for item in conditions)
+    if "any" in detector:
+        conditions = detector.get("any")
+        if not isinstance(conditions, Sequence) or isinstance(conditions, (str, bytes)):
+            raise ValueError("detector.any must be a list")
+        return any(_indicator_row_matches(row, _mapping(item, "detector.any item")) for item in conditions)
+    if "not" in detector:
+        return not _indicator_row_matches(row, _mapping(detector.get("not"), "detector.not"))
+
     detector_type = str(detector.get("type") or "").strip()
     if detector_type not in _INDICATOR_DETECTOR_TYPES:
         raise ValueError(f"unsupported indicator check detector type: {detector_type or '<empty>'}")
@@ -1833,33 +1890,49 @@ def _event_outcome(
     *,
     forward_bars: Sequence[int],
     direction: str,
+    entry_lag_bars: int,
 ) -> EventOutcome:
-    close = float(frame.iloc[idx]["close"])
+    event_close = float(frame.iloc[idx]["close"])
+    entry_idx = idx + int(entry_lag_bars)
+    if entry_idx >= len(frame):
+        return EventOutcome(
+            event_index=idx,
+            event_time=pd.Timestamp(frame.iloc[idx]["time"]).isoformat().replace("+00:00", "Z"),
+            event_close=event_close,
+            entry_index=entry_idx,
+            entry_time="",
+            entry_close=0.0,
+            outcomes={},
+        )
+    entry_close = float(frame.iloc[entry_idx]["close"])
     sign = -1.0 if direction == "short" else 1.0
     outcomes: dict[int, dict[str, float]] = {}
     for bars in forward_bars:
-        end_idx = idx + int(bars)
+        end_idx = entry_idx + int(bars)
         if end_idx >= len(frame):
             continue
-        future = frame.iloc[idx + 1 : end_idx + 1]
+        future = frame.iloc[entry_idx + 1 : end_idx + 1]
         future_close = float(frame.iloc[end_idx]["close"])
         high = float(future["high"].max())
         low = float(future["low"].min())
         if direction == "short":
-            mfe = _safe_ratio(close - low, close)
-            mae = _safe_ratio(close - high, close)
+            mfe = _safe_ratio(entry_close - low, entry_close)
+            mae = _safe_ratio(entry_close - high, entry_close)
         else:
-            mfe = _safe_ratio(high - close, close)
-            mae = _safe_ratio(low - close, close)
+            mfe = _safe_ratio(high - entry_close, entry_close)
+            mae = _safe_ratio(low - entry_close, entry_close)
         outcomes[int(bars)] = {
-            "forward_return_pct": _safe_ratio(future_close - close, close) * sign,
+            "forward_return_pct": _safe_ratio(future_close - entry_close, entry_close) * sign,
             "max_favorable_excursion_pct": mfe,
             "max_adverse_excursion_pct": mae,
         }
     return EventOutcome(
         event_index=idx,
         event_time=pd.Timestamp(frame.iloc[idx]["time"]).isoformat().replace("+00:00", "Z"),
-        close=close,
+        event_close=event_close,
+        entry_index=entry_idx,
+        entry_time=pd.Timestamp(frame.iloc[entry_idx]["time"]).isoformat().replace("+00:00", "Z"),
+        entry_close=entry_close,
         outcomes=outcomes,
     )
 

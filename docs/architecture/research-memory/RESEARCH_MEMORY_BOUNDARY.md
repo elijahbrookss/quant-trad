@@ -96,6 +96,18 @@ measures the same forward analytical outcomes over the aligned source candles.
 It does not create ephemeral indicator params or inspect overlays, details, or
 mutable indicator internals.
 
+Indicator detectors may be single output/event matches or boolean detector
+trees using `all`, `any`, and `not`. Boolean branches are still evaluated over
+public typed output rows from the canonical indicator runtime graph. This lets
+research checks ask generic same-output questions such as "did this metric
+exceed a threshold while another public metric was positive?" without importing
+indicator-family code.
+
+Forward outcomes may include `entry_lag_bars`. A lag of `0` measures from the
+event bar close, `1` measures from the next bar close, and so on. Forward return,
+MFE, and MAE are measured from the delayed entry close while the event time
+remains the known-at source event being studied.
+
 The signal audit check family is `signal_audit`. It also requires a persisted
 `indicator_id` and the canonical indicator runtime graph, but it answers a
 different question:

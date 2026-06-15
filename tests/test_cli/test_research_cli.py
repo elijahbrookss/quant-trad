@@ -224,6 +224,8 @@ def test_research_check_indicator_builds_indicator_request(monkeypatch):
             "0.02",
             "--forward-bars",
             "1,3",
+            "--entry-lag-bars",
+            "2",
         ]
     )
 
@@ -243,6 +245,7 @@ def test_research_check_indicator_builds_indicator_request(monkeypatch):
         "operator": "gt",
         "value": 0.02,
     }
+    assert observed["body"]["outcomes"]["entry_lag_bars"] == 2
 
 
 def test_research_check_audit_builds_signal_audit_request(monkeypatch):

@@ -1186,6 +1186,8 @@ def _research_outcomes_from_args(args: argparse.Namespace) -> dict[str, Any]:
     outcomes: dict[str, Any] = {}
     if getattr(args, "forward_bars", None):
         outcomes["forward_bars"] = [int(item.strip()) for item in str(args.forward_bars).split(",") if item.strip()]
+    if getattr(args, "entry_lag_bars", None) is not None:
+        outcomes["entry_lag_bars"] = args.entry_lag_bars
     if getattr(args, "direction", None):
         outcomes["direction"] = args.direction
     if getattr(args, "min_sample_count", None) is not None:
@@ -2568,6 +2570,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     def add_forward_outcome_args(command: argparse.ArgumentParser) -> None:
         command.add_argument("--forward-bars")
+        command.add_argument("--entry-lag-bars", type=int)
         command.add_argument("--direction", choices=["long", "short"])
         command.add_argument("--min-edge-pct", type=float)
 
@@ -2645,6 +2648,7 @@ def build_parser() -> argparse.ArgumentParser:
     research_check_sweep.add_argument("--detector-json", help="Detector JSON object path, inline object, or '-'.")
     research_check_sweep.add_argument("--outcomes-json", help="Outcomes JSON object path, inline object, or '-'.")
     research_check_sweep.add_argument("--forward-bars")
+    research_check_sweep.add_argument("--entry-lag-bars", type=int)
     research_check_sweep.add_argument("--direction", choices=["long", "short"])
     research_check_sweep.add_argument("--min-sample-count", type=int)
     research_check_sweep.add_argument("--min-edge-pct", type=float)

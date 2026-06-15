@@ -74,6 +74,13 @@ that fact must come from a persisted indicator through
 through the canonical runtime graph before measuring the same forward candle
 outcomes.
 
+Forward outcome specs may declare `entry_lag_bars` so a check can compare
+same-bar, next-bar, or later analytical entries without changing runtime
+execution semantics. Detector specs for indicator checks may use `all`, `any`,
+and `not` boolean trees over public typed output rows. These remain generic
+research contracts; they do not import indicator implementation code or create
+strategy behavior.
+
 `signal_audit` evaluates declared expectations over public indicator typed
 outputs and reconciles them against emitted signal events. It is a semantic
 contract check, not a profitability check. The research layer remains

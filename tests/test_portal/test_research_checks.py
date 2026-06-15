@@ -69,6 +69,23 @@ def test_raw_event_check_honors_max_examples() -> None:
     assert payload["event_count_truncated"] == 4
 
 
+def test_raw_event_check_honors_entry_lag_bars() -> None:
+    payload = checks.evaluate_raw_event_check(
+        _candles(),
+        detector={"type": "raw_condition", "field": "close", "operator": "gt", "value_field": "previous_close"},
+        outcomes={"forward_bars": [1], "entry_lag_bars": 1, "min_sample_count": 1},
+        data_quality={"status": "clean"},
+    )
+
+    first = payload["events"][0]
+    assert payload["outcomes"]["entry_lag_bars"] == 1
+    assert first["event_time"] == "2026-01-01T01:00:00Z"
+    assert first["entry_time"] == "2026-01-01T02:00:00Z"
+    assert first["event_close"] == 101.2
+    assert first["entry_close"] == 102.6
+    assert first["outcomes"]["1"]["forward_return_pct"] == pytest.approx((102.8 - 102.6) / 102.6)
+
+
 def test_research_check_service_creates_observation_check_and_link(monkeypatch: pytest.MonkeyPatch) -> None:
     created: list[dict[str, Any]] = []
     links: list[dict[str, Any]] = []
@@ -773,6 +790,65 @@ def test_indicator_forward_outcome_matches_output_fields() -> None:
     assert payload["events"][0]["output_name"] == "candle_stats"
     assert payload["events"][0]["field_value"] == 0.03
     assert payload["recommendation"] == "refine"
+
+
+def test_indicator_forward_outcome_matches_boolean_output_conditions() -> None:
+    payload = checks.evaluate_indicator_forward_outcome(
+        {
+            "indicator": {"id": "stats-1", "type": "candle_stats"},
+            "runtime_path": "typed_indicator_engine.v1",
+            "ready_counts": {"candle_stats": 3},
+            "not_ready_counts": {},
+            "candles": [
+                {"time": "2026-01-01T00:00:00Z", "open": 100, "high": 102, "low": 99, "close": 101, "volume": 10},
+                {"time": "2026-01-01T01:00:00Z", "open": 101, "high": 103, "low": 100, "close": 102, "volume": 11},
+                {"time": "2026-01-01T02:00:00Z", "open": 102, "high": 104, "low": 101, "close": 103, "volume": 12},
+            ],
+            "outputs": [
+                {
+                    "bar_index": 0,
+                    "time": "2026-01-01T00:00:00Z",
+                    "indicator_id": "stats-1",
+                    "indicator_type": "candle_stats",
+                    "output_name": "candle_stats",
+                    "output_type": "metric",
+                    "value": {"atr_zscore": 1.2, "slope": -0.1},
+                },
+                {
+                    "bar_index": 1,
+                    "time": "2026-01-01T01:00:00Z",
+                    "indicator_id": "stats-1",
+                    "indicator_type": "candle_stats",
+                    "output_name": "candle_stats",
+                    "output_type": "metric",
+                    "value": {"atr_zscore": 1.4, "slope": 0.2},
+                },
+            ],
+        },
+        detector={
+            "all": [
+                {
+                    "type": "indicator_output_match",
+                    "output_name": "candle_stats",
+                    "field": "atr_zscore",
+                    "operator": "gt",
+                    "value": 1,
+                },
+                {
+                    "type": "indicator_output_match",
+                    "output_name": "candle_stats",
+                    "field": "slope",
+                    "operator": "gt",
+                    "value": 0,
+                },
+            ]
+        },
+        outcomes={"forward_bars": [1], "min_sample_count": 1},
+        data_quality={"status": "clean"},
+    )
+
+    assert payload["sample_count"] == 1
+    assert payload["events"][0]["event_time"] == "2026-01-01T01:00:00Z"
 
 
 def test_signal_audit_reconciles_public_output_expectations() -> None:
