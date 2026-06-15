@@ -586,6 +586,12 @@ export function buildBotLensRuntimeViewModel({
           }
   const transportEligible = Boolean(runState?.transportEligible)
   const selectedSnapshotReady = Boolean(selectedReadiness.snapshot_ready)
+  const overlayProjection = selectedSymbolState?.overlay_projection
+    || selectedSymbolState?.live_cursors?.overlay_projection
+    || null
+  const boundedOverlayCount = (Array.isArray(chartOverlays) ? chartOverlays : [])
+    .filter((overlay) => String(overlay?.detail_level || '').trim().toLowerCase() === 'bounded_render')
+    .length
 
   const header = {
     kicker: 'BotLens Runtime',
@@ -744,6 +750,14 @@ export function buildBotLensRuntimeViewModel({
       candles: Array.isArray(chartCandles) ? chartCandles : [],
       trades: Array.isArray(chartTrades) ? chartTrades : [],
       overlays: Array.isArray(chartOverlays) ? chartOverlays : [],
+      overlayProjection: {
+        mode: overlayProjection?.mode || null,
+        windowBars: Number(overlayProjection?.window_bars || 0) || null,
+        emitEveryBars: Number(overlayProjection?.emit_every_bars || 0) || null,
+        barIndex: Number.isFinite(Number(overlayProjection?.bar_index)) ? Number(overlayProjection.bar_index) : null,
+        overlays: Array.isArray(chartOverlays) ? chartOverlays.length : 0,
+        boundedOverlays: boundedOverlayCount,
+      },
       timeframe: selectedSymbolMetadata?.timeframe || selectedSymbolState?.timeframe || null,
       mode: chartPlaybackMode,
       timerMode: timerRunMode,

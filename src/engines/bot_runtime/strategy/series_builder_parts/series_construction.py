@@ -551,8 +551,9 @@ class SeriesBuilderConstructionMixin:
         )
         logger.info(with_log_context("bot_runtime_series_ready", ready_context))
 
-        # No precomputed signals/overlays in runtime path. These are evaluated incrementally per bar.
-        overlays: List[Dict[str, Any]] = []
+        # No precomputed signals or visual projections in runtime path.
+        # Signals are evaluated incrementally per bar; BotLens overlays are
+        # projected from indicator snapshots on the bounded projection cadence.
         signals = deque()
         return StrategySeries(
             strategy_id=strategy.id,
@@ -563,7 +564,6 @@ class SeriesBuilderConstructionMixin:
             exchange=exchange,
             candles=candles,
             signals=signals,
-            overlays=overlays,
             risk_engine=risk_engine,
             window_start=window_start_iso,
             window_end=end_iso,

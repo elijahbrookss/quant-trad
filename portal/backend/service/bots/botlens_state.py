@@ -74,6 +74,7 @@ class SymbolOverlaysState:
     overlays: Tuple[Dict[str, Any], ...]
     overlay_commit_seq: int = 0
     overlay_commit_seq_status: Optional[str] = None
+    overlay_projection: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -1284,6 +1285,11 @@ def read_symbol_projection_snapshot(payload: Any, *, symbol_key: str) -> SymbolP
                 str(_mapping(concerns.get("overlays")).get("overlay_commit_seq_status") or "").strip()
                 or None
             ),
+            overlay_projection=(
+                dict(_mapping(concerns.get("overlays")).get("overlay_projection"))
+                if isinstance(_mapping(concerns.get("overlays")).get("overlay_projection"), Mapping)
+                else None
+            ),
         ),
         signals=SymbolSignalsState(signals=_copy_entries(entry for entry in _mapping(concerns.get("signals")).get("items", []) if isinstance(entry, Mapping))),
         decisions=SymbolDecisionsState(decisions=_copy_entries(entry for entry in _mapping(concerns.get("decisions")).get("items", []) if isinstance(entry, Mapping))),
@@ -1410,9 +1416,18 @@ def serialize_symbol_projection_snapshot(state: SymbolProjectionSnapshot) -> Dic
                     )
                 },
                 "overlays": {
-                    "items": [dict(entry) for entry in state.overlays.overlays],
-                    "overlay_commit_seq": int(state.overlays.overlay_commit_seq or 0),
-                    "overlay_commit_seq_status": state.overlays.overlay_commit_seq_status,
+                    key: value
+                    for key, value in {
+                        "items": [dict(entry) for entry in state.overlays.overlays],
+                        "overlay_commit_seq": int(state.overlays.overlay_commit_seq or 0),
+                        "overlay_commit_seq_status": state.overlays.overlay_commit_seq_status,
+                        "overlay_projection": (
+                            dict(state.overlays.overlay_projection)
+                            if isinstance(state.overlays.overlay_projection, Mapping)
+                            else None
+                        ),
+                    }.items()
+                    if key == "items" or value not in (None, "", [], {})
                 },
                 "signals": {"items": [dict(entry) for entry in state.signals.signals]},
                 "decisions": {"items": [dict(entry) for entry in state.decisions.decisions]},
@@ -1712,6 +1727,7 @@ def apply_symbol_overlay_projector(
         if event.event_name != BotLensDomainEventName.OVERLAY_STATE_CHANGED:
             continue
         overlay_ops = _mapping(event.context.to_dict().get("overlay_delta"))
+        overlay_projection = _mapping(overlay_ops.get("projection"))
         next_state = SymbolOverlaysState(
             overlays=apply_overlay_delta(next_state.overlays, overlay_ops),
             overlay_commit_seq=_overlay_clock_int(
@@ -1724,6 +1740,7 @@ def apply_symbol_overlay_projector(
                 or ""
             ).strip()
             or None,
+            overlay_projection=dict(overlay_projection) if overlay_projection else next_state.overlay_projection,
         )
         deltas.append(
             OverlayDelta(

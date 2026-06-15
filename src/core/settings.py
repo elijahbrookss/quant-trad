@@ -118,6 +118,8 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_BOT_RUNTIME_BOTLENS_MAX_CANDLES", ("bot_runtime", "botlens", "max_candles")),
     ("QT_BOT_RUNTIME_BOTLENS_MAX_OVERLAYS", ("bot_runtime", "botlens", "max_overlays")),
     ("QT_BOT_RUNTIME_BOTLENS_MAX_OVERLAY_POINTS", ("bot_runtime", "botlens", "max_overlay_points")),
+    ("QT_BOT_RUNTIME_BOTLENS_OVERLAY_WINDOW_BARS", ("bot_runtime", "botlens", "overlay_window_bars")),
+    ("QT_BOT_RUNTIME_BOTLENS_OVERLAY_EMIT_EVERY_BARS", ("bot_runtime", "botlens", "overlay_emit_every_bars")),
     ("QT_BOT_RUNTIME_BOTLENS_MAX_CLOSED_TRADES", ("bot_runtime", "botlens", "max_closed_trades")),
     ("QT_BOT_RUNTIME_BOTLENS_MAX_LOGS", ("bot_runtime", "botlens", "max_logs")),
     ("QT_BOT_RUNTIME_BOTLENS_MAX_DECISIONS", ("bot_runtime", "botlens", "max_decisions")),
@@ -484,6 +486,8 @@ class BotlensSettings:
     max_candles: int
     max_overlays: int
     max_overlay_points: int
+    overlay_window_bars: int
+    overlay_emit_every_bars: int
     max_closed_trades: int
     max_logs: int
     max_decisions: int
@@ -861,6 +865,8 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                 max_candles=_coerce_int(botlens_payload.get("max_candles"), 320, minimum=50),
                 max_overlays=_coerce_int(botlens_payload.get("max_overlays"), 400, minimum=50),
                 max_overlay_points=_coerce_int(botlens_payload.get("max_overlay_points"), 160, minimum=20),
+                overlay_window_bars=_coerce_int(botlens_payload.get("overlay_window_bars"), 640, minimum=20),
+                overlay_emit_every_bars=_coerce_int(botlens_payload.get("overlay_emit_every_bars"), 25, minimum=1),
                 max_closed_trades=_coerce_int(botlens_payload.get("max_closed_trades"), 240, minimum=20),
                 max_logs=_coerce_int(botlens_payload.get("max_logs"), 300, minimum=50),
                 max_decisions=_coerce_int(botlens_payload.get("max_decisions"), 600, minimum=100),

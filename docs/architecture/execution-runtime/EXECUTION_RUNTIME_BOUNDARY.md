@@ -52,7 +52,8 @@ Runtime emits:
 - trade lifecycle rows/events,
 - fee, margin, wallet, and settlement effects,
 - lifecycle checkpoints,
-- runtime diagnostics and fallback events.
+- runtime diagnostics and fallback events,
+- bounded BotLens projection/debug facts that never become execution authority.
 
 Runtime separates source identity from execution modeling:
 
@@ -92,9 +93,14 @@ Runtime separates source identity from execution modeling:
 3. The per-bar loop advances indicator snapshots and decision evaluation.
 4. Execution core resolves FAST/FULL behavior, intrabar fallback, fills, fees, margin, and settlement.
 5. Runtime emits events and persists trade/run facts.
-6. Projections and reports consume those facts downstream.
+6. Runtime emits compact BotLens push facts without building visual overlay
+   geometry.
+7. Visual overlay projection runs as a separate bounded projection step when
+   its bar cadence is due.
+8. Projections and reports consume those facts downstream.
 
-Hot-path payloads should stay compact. Detailed debug and history belong on cold paths.
+Hot-path payloads should stay compact. Detailed debug and history belong on
+cold paths or bounded projection steps.
 
 ## Diagram Walkthrough: Lifecycle State
 
@@ -169,6 +175,15 @@ projector transport work before continuing execution. The dispatcher consumes
 the already stamped batch from that bar's known-at snapshot; it does not rebuild
 state from mutable runtime internals.
 
+Visual overlay projection is separate from ordinary runtime push dispatch.
+`_push_update` does not materialize indicator overlay geometry and does not
+read or write a `StrategySeries.overlays` cache. After bar finalization,
+runtime may run an `overlay_projection` step that snapshots indicator visual
+state, diffs the bounded overlay cache, and emits overlay deltas only when the
+projected viewport changed. Overlay projection pressure degrades BotLens
+overlay freshness; it must not change decisions, fills, wallet effects,
+reports, or execution completion.
+
 ## Failure And Recovery
 
 - Invalid config fails before execution.
@@ -182,6 +197,8 @@ state from mutable runtime internals.
 - All bot runs are walk-forward.
 - Known-at timing governs indicators, decisions, and execution.
 - Runtime truth does not come from frontend playback.
+- Visual overlays are bounded BotLens projection state, not runtime series
+  truth.
 - Shared-wallet and symbol-sharded paths must preserve deterministic ordering.
 - Heavy debug/history reads are cold-path behavior.
 

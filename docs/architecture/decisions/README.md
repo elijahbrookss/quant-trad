@@ -54,3 +54,6 @@ respect.
 | [0033](0033-use-promtail-as-runtime-loki-ingress.md) | Use Promtail as runtime Loki ingress | Accepted |
 | [0034](0034-use-research-checks-as-analytical-memory-evidence.md) | Use research checks as analytical memory evidence | Accepted |
 | [0035](0035-use-complete-output-catalogs-and-split-strategy-read-contracts.md) | Use complete output catalogs and split strategy read contracts | Accepted |
+| [0036](0036-anchor-market-profile-retests-on-raw-breakouts.md) | Anchor Market Profile retests on raw breakouts | Accepted |
+| [0037](0037-keep-research-presentations-metric-contract-driven.md) | Keep research presentations metric-contract driven | Accepted |
+| [0038](0038-decouple-visual-overlay-projection-from-runtime-push.md) | Decouple visual overlay projection from runtime push | Accepted |

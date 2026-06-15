@@ -28,13 +28,21 @@ code_paths:
   - portal/backend/service/bots/container_runtime.py
   - portal/backend/service/bots/container_runtime_telemetry.py
   - portal/backend/service/bots/paper_market_stream.py
+  - src/core/settings.py
   - src/engines/bot_runtime/live_market.py
   - src/engines/bot_runtime/runtime/components/canonical_facts.py
   - src/engines/bot_runtime/runtime/components/chart_state.py
   - src/engines/bot_runtime/runtime/components/overlay_delta.py
+  - src/engines/bot_runtime/runtime/mixins/setup_prepare.py
+  - src/engines/bot_runtime/runtime/mixins/execution_loop.py
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
+  - src/engines/bot_runtime/runtime/mixins/runtime_projection.py
+  - src/engines/bot_runtime/strategy/series_builder_parts/models.py
   - portal/frontend/src/features/bots/botlens
   - portal/frontend/src/components/bots/BotLensChart.jsx
+  - portal/frontend/src/components/bots/botlensProjection.js
+  - portal/frontend/src/features/bots/botlens/buildBotLensRuntimeViewModel.js
+  - portal/frontend/src/features/bots/botlens/components/ChartPanel.jsx
   - docs/architecture/botlens-projections/diagrams/botlens-projection-flow.mmd
 ---
 # BotLens Projection Boundary
@@ -52,8 +60,9 @@ BotLens owns:
 - run projection snapshots,
 - symbol projection snapshots,
 - selected-symbol read models,
-- trade overlays,
+- trade markers and trade visual projections built from trade facts,
 - decision/runtime event overlays,
+- bounded visual overlay projections,
 - live deltas and stream continuity,
 - cold-path forensics reads.
 
@@ -99,7 +108,8 @@ Symbol projection owns symbol-level state:
 
 - candles,
 - display-only provisional candle,
-- overlays,
+- bounded overlays,
+- overlay projection metadata,
 - decisions,
 - trades and markers,
 - runtime diagnostics,
@@ -189,15 +199,45 @@ strategy, wallet, order, trade, report, or replay semantics.
 
 Runtime bootstrap must assemble the selected series directly from runtime
 state. It uses the chart state builder for the configured candle window,
-selected overlays, selected series stats, wallet/debug facts, and a bounded
-closed-trade tail plus open trades. Full multi-series chart composition and
-historical aggregate trade lists belong to explicit chart/debug reads.
+projected overlays already in the overlay projection cache, selected series
+stats, wallet/debug facts, and a bounded closed-trade tail plus open trades.
+Full multi-series chart composition and historical aggregate trade lists belong
+to explicit chart/debug reads.
 
 Chart/debug payloads use the same bounded visual-trade contract. Runtime asks
 the risk engine for a configured trade window instead of serializing every
 trade and slicing afterward. Live trade deltas use `trade_revision`: if the
 cursor is too old for the retained change log, runtime warns and emits the
 available current trade batch as a projection resync boundary.
+
+## Bounded Visual Overlay Projection
+
+Visual overlays are projection/read-model artifacts. They are not stored on
+`StrategySeries`, do not participate in strategy decisions, and are not built by
+ordinary runtime push updates.
+
+Runtime configures each indicator's visual replay window from
+`bot_runtime.botlens.overlay_window_bars`. Indicator typed outputs still follow
+the normal `initialize -> apply_bar -> snapshot` runtime timeline. Overlay
+geometry is requested only through the overlay projection step, which snapshots
+the current indicator visual state without mutating the runtime series model.
+
+The ordinary runtime push update emits compact BotLens facts for candles,
+series state, health, decisions, trades, wallet, logs, and stats. After a bar is
+finalized, a separate `overlay_projection` step may build visible overlay
+geometry, diff it against the overlay projection cache, and emit
+`overlay_ops_emitted` only when there are changed overlay operations.
+
+Overlay projection cadence is bar based, not wall-clock based. The cadence is
+controlled by `bot_runtime.botlens.overlay_emit_every_bars`, with terminal bars
+forcing a final projection. Projection deltas carry a `projection` object with
+`mode`, `window_bars`, `emit_every_bars`, and `bar_index` so the backend and
+frontend can display the overlay viewport as bounded projection state.
+
+Trade visuals follow the trade-fact path. Runtime no longer registers or emits
+a runtime-owned trade overlay type. The frontend may draw trade markers,
+regions, segments, and price lines from projected trade facts, but those are
+not indicator overlays and not execution truth.
 
 ## Projection Clocks And Resync
 
@@ -248,6 +288,8 @@ or bootstrap facts.
 - Stale selected-symbol snapshots are rejected or refreshed.
 - Stream continuity uses sequence/cursor fields.
 - Rebuild failures surface bounded operational faults.
+- Visual overlay projection failure records `overlay_projection` diagnostics
+  and degrades BotLens overlay freshness without rewriting execution truth.
 - Forensics can page the ledger when live projection is insufficient.
 - Symbol fact queue pressure is handled by bounded batch drains first; if
   projection still falls behind, projection state is degraded/resync-required

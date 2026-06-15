@@ -22,7 +22,6 @@ from utils.log_context import with_log_context
 from utils.perf_log import perf_log, should_sample
 
 from ..components import SignalConsumption, consume_signals
-from ..components.overlay_delta import count_overlay_points
 from ..core import (
     INTRABAR_BASE_SECONDS,
     OVERLAY_SUMMARY_INTERVAL,
@@ -106,6 +105,7 @@ class RuntimeExecutionLoopMixin:
             self._run_context = None
             self._runner = None
             self._push_series_cache = {}
+            self._overlay_projection_cache = {}
             self._log_revision = 0
             self._decision_revision = 0
             self._push_log_marker = None
@@ -277,12 +277,8 @@ class RuntimeExecutionLoopMixin:
             series_runner=self._series_runner_type,
             series_count=len(self._series_states),
         )
-        self._start_overlay_aggregator()
-        try:
-            self._runner = self._build_series_runner()
-            self._runner.run()
-        finally:
-            self._stop_overlay_aggregator()
+        self._runner = self._build_series_runner()
+        self._runner.run()
         loop_ended = datetime.now(timezone.utc)
         self._runtime_loop_ended_at = loop_ended
         self._runtime_loop_duration_seconds = max((loop_ended - loop_started).total_seconds(), 0.0)
@@ -496,7 +492,6 @@ class RuntimeExecutionLoopMixin:
                             )
                         if event_subtype == "close":
                             self._persist_trade_close(series, event)
-                self._update_trade_overlay(series)
                 if getattr(engine, "active_trade", None) is not None:
                     raise RuntimeError(
                         "backtest_terminal_close_incomplete "
@@ -650,7 +645,6 @@ class RuntimeExecutionLoopMixin:
             "series_key": self._strategy_key(series),
         }
         candle_update_ms: Optional[float] = None
-        overlays_update_ms: Optional[float] = None
         pending_signals_ops_ms: Optional[float] = None
         execution_ms: Optional[float] = None
         stats_update_ms: Optional[float] = None
@@ -659,18 +653,16 @@ class RuntimeExecutionLoopMixin:
         delta_build_ms: Optional[float] = None
         delta_serialize_ms: Optional[float] = None
         stream_emit_ms: Optional[float] = None
+        overlay_projection_ms: Optional[float] = None
+        overlay_projection_projected_count: Optional[float] = None
+        overlay_projection_skipped_count: Optional[float] = None
+        overlay_projection_entries_total: Optional[float] = None
+        overlay_projection_ops_count: Optional[float] = None
+        overlay_projection_dispatch_ms: Optional[float] = None
+        overlay_projection_error_count: Optional[float] = None
         indicators_count: Optional[float] = None
-        overlays_changed_count: Optional[float] = None
-        overlay_points_changed: Optional[float] = None
         signals_emitted_count: Optional[float] = None
         subscribers_count: Optional[float] = None
-        series_overlay_entries_ms: Optional[float] = None
-        series_overlay_indicator_entries_ms: Optional[float] = None
-        series_overlay_regime_build_ms: Optional[float] = None
-        series_overlay_indicator_entries_count: Optional[float] = None
-        series_overlay_regime_entries_count: Optional[float] = None
-        series_overlay_total_entries_count: Optional[float] = None
-        series_overlay_regime_mode_rebuild: Optional[float] = None
         trades_touched_count: float = 0.0
         decision_events_logged = 0
         execution_events_logged = 0
@@ -741,21 +733,9 @@ class RuntimeExecutionLoopMixin:
                     )
                     direction = chosen_signal.direction if chosen_signal is not None else None
                     selected_decision = self._selected_decision_artifact_for_signal(state, chosen_signal)
-                    overlays_update_ms = signal_eval_metrics.get("overlays_update_ms")
                     pending_signals_ops_ms = signal_eval_metrics.get("pending_signals_ops_ms")
                     indicators_count = signal_eval_metrics.get("indicators_count")
-                    overlays_changed_count = signal_eval_metrics.get("overlays_changed_count")
-                    overlay_points_changed = signal_eval_metrics.get("overlay_points_changed")
                     signals_emitted_count = signal_eval_metrics.get("signals_emitted_count")
-                    series_overlay_entries_ms = signal_eval_metrics.get("series_overlay_entries_ms")
-                    series_overlay_indicator_entries_ms = signal_eval_metrics.get("series_overlay_indicator_entries_ms")
-                    series_overlay_regime_build_ms = signal_eval_metrics.get("series_overlay_regime_build_ms")
-                    series_overlay_indicator_entries_count = signal_eval_metrics.get(
-                        "series_overlay_indicator_entries_count"
-                    )
-                    series_overlay_regime_entries_count = signal_eval_metrics.get("series_overlay_regime_entries_count")
-                    series_overlay_total_entries_count = signal_eval_metrics.get("series_overlay_total_entries_count")
-                    series_overlay_regime_mode_rebuild = signal_eval_metrics.get("series_overlay_regime_mode_rebuild")
                     step_context["signals_pending"] = signals_pending
                     self._record_signal_consumption(state, epoch, consumed_signals, chosen_signal)
 
@@ -795,41 +775,10 @@ class RuntimeExecutionLoopMixin:
                             "rule_eval_ms": signal_eval_metrics.get("rule_eval_ms"),
                             "indicator_state_update_ms": signal_eval_metrics.get("indicator_state_update_ms"),
                             "signal_eval_ms": signal_eval_metrics.get("signal_eval_ms"),
-                            "overlay_projection_ms": signal_eval_metrics.get("overlay_projection_ms"),
-                            "overlay_projection_skipped_count": signal_eval_metrics.get("overlay_projection_skipped_count"),
-                            "overlay_projection_projector_ms": signal_eval_metrics.get("overlay_projection_projector_ms"),
-                            "overlay_projection_delta_ms": signal_eval_metrics.get("overlay_projection_delta_ms"),
-                            "overlay_projection_normalize_ms": signal_eval_metrics.get("overlay_projection_normalize_ms"),
-                            "overlay_projection_fingerprint_ms": signal_eval_metrics.get("overlay_projection_fingerprint_ms"),
-                            "overlay_projection_entries_total": signal_eval_metrics.get("overlay_projection_entries_total"),
-                            "overlay_projection_entries_changed": signal_eval_metrics.get("overlay_projection_entries_changed"),
-                            "overlay_projection_ops_count": signal_eval_metrics.get("overlay_projection_ops_count"),
-                            "overlay_projection_normalize_cache_hits": signal_eval_metrics.get("overlay_projection_normalize_cache_hits"),
-                            "overlay_projection_normalize_cache_misses": signal_eval_metrics.get("overlay_projection_normalize_cache_misses"),
                             "state_revisions_changed_count": signal_eval_metrics.get("state_revisions_changed_count"),
                             "signals_emitted_count": signal_eval_metrics.get("signals_emitted_count"),
-                            "overlays_update_ms": signal_eval_metrics.get("overlays_update_ms"),
                             "pending_signals_ops_ms": signal_eval_metrics.get("pending_signals_ops_ms"),
                             "indicators_count": signal_eval_metrics.get("indicators_count"),
-                            "overlays_changed_count": signal_eval_metrics.get("overlays_changed_count"),
-                            "overlay_points_changed": signal_eval_metrics.get("overlay_points_changed"),
-                            "series_overlay_entries_ms": signal_eval_metrics.get("series_overlay_entries_ms"),
-                            "series_overlay_indicator_entries_ms": signal_eval_metrics.get(
-                                "series_overlay_indicator_entries_ms"
-                            ),
-                            "series_overlay_regime_build_ms": signal_eval_metrics.get("series_overlay_regime_build_ms"),
-                            "series_overlay_indicator_entries_count": signal_eval_metrics.get(
-                                "series_overlay_indicator_entries_count"
-                            ),
-                            "series_overlay_regime_entries_count": signal_eval_metrics.get(
-                                "series_overlay_regime_entries_count"
-                            ),
-                            "series_overlay_total_entries_count": signal_eval_metrics.get(
-                                "series_overlay_total_entries_count"
-                            ),
-                            "series_overlay_regime_mode_rebuild": signal_eval_metrics.get(
-                                "series_overlay_regime_mode_rebuild"
-                            ),
                         },
                     )
                 except Exception as exc:
@@ -853,30 +802,9 @@ class RuntimeExecutionLoopMixin:
                             "signals_emitted_count": None,
                             "indicator_state_update_ms": None,
                             "signal_eval_ms": None,
-                            "overlay_projection_ms": None,
-                            "overlay_projection_skipped_count": None,
-                            "overlay_projection_projector_ms": None,
-                            "overlay_projection_delta_ms": None,
-                            "overlay_projection_normalize_ms": None,
-                            "overlay_projection_fingerprint_ms": None,
-                            "overlay_projection_entries_total": None,
-                            "overlay_projection_entries_changed": None,
-                            "overlay_projection_ops_count": None,
-                            "overlay_projection_normalize_cache_hits": None,
-                            "overlay_projection_normalize_cache_misses": None,
                             "state_revisions_changed_count": None,
-                            "overlays_update_ms": None,
                             "pending_signals_ops_ms": None,
                             "indicators_count": None,
-                            "overlays_changed_count": None,
-                            "overlay_points_changed": None,
-                            "series_overlay_entries_ms": None,
-                            "series_overlay_indicator_entries_ms": None,
-                            "series_overlay_regime_build_ms": None,
-                            "series_overlay_indicator_entries_count": None,
-                            "series_overlay_regime_entries_count": None,
-                            "series_overlay_total_entries_count": None,
-                            "series_overlay_regime_mode_rebuild": None,
                         },
                     )
                     raise
@@ -1104,7 +1032,6 @@ class RuntimeExecutionLoopMixin:
                         series,
                         new_trade,
                     )
-                    self._update_trade_overlay(series)
                 if decision_order_ticket is not None and decision_order_ticket.has_candidate:
                     self._decision_order_coordinator().complete_candidate(
                         decision_order_ticket,
@@ -1278,7 +1205,6 @@ class RuntimeExecutionLoopMixin:
                             )
                         if event_subtype == "close":
                             self._persist_trade_close(series, event)
-                self._update_trade_overlay(series)
                 state.last_evaluated_epoch = max(state.last_evaluated_epoch, next_last_evaluated_epoch)
                 state.last_consumed_epoch = max(state.last_consumed_epoch, next_last_consumed_epoch)
                 series.last_consumed_epoch = state.last_consumed_epoch
@@ -1330,6 +1256,13 @@ class RuntimeExecutionLoopMixin:
                     delta_serialize_ms = finalize_metrics.get("delta_serialize_ms")
                     stream_emit_ms = finalize_metrics.get("stream_emit_ms")
                     subscribers_count = finalize_metrics.get("subscribers_count")
+                    overlay_projection_ms = finalize_metrics.get("overlay_projection_ms")
+                    overlay_projection_projected_count = finalize_metrics.get("overlay_projection_projected_count")
+                    overlay_projection_skipped_count = finalize_metrics.get("overlay_projection_skipped_count")
+                    overlay_projection_entries_total = finalize_metrics.get("overlay_projection_entries_total")
+                    overlay_projection_ops_count = finalize_metrics.get("overlay_projection_ops_count")
+                    overlay_projection_dispatch_ms = finalize_metrics.get("overlay_projection_dispatch_ms")
+                    overlay_projection_error_count = finalize_metrics.get("overlay_projection_error_count")
                     self._record_step_trace(
                         "step_finalize_bar",
                         started_at=finalize_started,
@@ -1350,6 +1283,13 @@ class RuntimeExecutionLoopMixin:
                             "delta_serialize_ms": finalize_metrics.get("delta_serialize_ms"),
                             "stream_emit_ms": finalize_metrics.get("stream_emit_ms"),
                             "subscribers_count": finalize_metrics.get("subscribers_count"),
+                            "overlay_projection_ms": overlay_projection_ms,
+                            "overlay_projection_projected_count": overlay_projection_projected_count,
+                            "overlay_projection_skipped_count": overlay_projection_skipped_count,
+                            "overlay_projection_entries_total": overlay_projection_entries_total,
+                            "overlay_projection_ops_count": overlay_projection_ops_count,
+                            "overlay_projection_dispatch_ms": overlay_projection_dispatch_ms,
+                            "overlay_projection_error_count": overlay_projection_error_count,
                         },
                     )
                 except Exception as exc:
@@ -1374,6 +1314,13 @@ class RuntimeExecutionLoopMixin:
                             "delta_serialize_ms": None,
                             "stream_emit_ms": None,
                             "subscribers_count": None,
+                            "overlay_projection_ms": None,
+                            "overlay_projection_projected_count": None,
+                            "overlay_projection_skipped_count": None,
+                            "overlay_projection_entries_total": None,
+                            "overlay_projection_ops_count": None,
+                            "overlay_projection_dispatch_ms": None,
+                            "overlay_projection_error_count": None,
                         },
                     )
                     raise
@@ -1386,7 +1333,6 @@ class RuntimeExecutionLoopMixin:
             step_context["trade_lock_wait_ms"] = trade_lock_wait_ms
             step_context["trade_lock_hold_ms"] = trade_lock_hold_ms
             step_context["candle_update_ms"] = candle_update_ms
-            step_context["overlays_update_ms"] = overlays_update_ms
             step_context["pending_signals_ops_ms"] = pending_signals_ops_ms
             step_context["execution_ms"] = execution_ms
             step_context["stats_update_ms"] = stats_update_ms
@@ -1396,17 +1342,15 @@ class RuntimeExecutionLoopMixin:
             step_context["delta_build_ms"] = delta_build_ms
             step_context["delta_serialize_ms"] = delta_serialize_ms
             step_context["stream_emit_ms"] = stream_emit_ms
+            step_context["overlay_projection_ms"] = overlay_projection_ms
+            step_context["overlay_projection_projected_count"] = overlay_projection_projected_count
+            step_context["overlay_projection_skipped_count"] = overlay_projection_skipped_count
+            step_context["overlay_projection_entries_total"] = overlay_projection_entries_total
+            step_context["overlay_projection_ops_count"] = overlay_projection_ops_count
+            step_context["overlay_projection_dispatch_ms"] = overlay_projection_dispatch_ms
+            step_context["overlay_projection_error_count"] = overlay_projection_error_count
             step_context["indicators_count"] = indicators_count
-            step_context["overlays_changed_count"] = overlays_changed_count
-            step_context["overlay_points_changed"] = overlay_points_changed
             step_context["signals_emitted_count"] = signals_emitted_count
-            step_context["series_overlay_entries_ms"] = series_overlay_entries_ms
-            step_context["series_overlay_indicator_entries_ms"] = series_overlay_indicator_entries_ms
-            step_context["series_overlay_regime_build_ms"] = series_overlay_regime_build_ms
-            step_context["series_overlay_indicator_entries_count"] = series_overlay_indicator_entries_count
-            step_context["series_overlay_regime_entries_count"] = series_overlay_regime_entries_count
-            step_context["series_overlay_total_entries_count"] = series_overlay_total_entries_count
-            step_context["series_overlay_regime_mode_rebuild"] = series_overlay_regime_mode_rebuild
             step_context["trades_touched_count"] = trades_touched_count
             step_context["subscribers_count"] = subscribers_count
             step_context["execution_decision_flow_ms"] = decision_flow_ms
@@ -1431,7 +1375,6 @@ class RuntimeExecutionLoopMixin:
             step_context["trade_lock_wait_ms"] = trade_lock_wait_ms
             step_context["trade_lock_hold_ms"] = trade_lock_hold_ms
             step_context["candle_update_ms"] = candle_update_ms
-            step_context["overlays_update_ms"] = overlays_update_ms
             step_context["pending_signals_ops_ms"] = pending_signals_ops_ms
             step_context["execution_ms"] = execution_ms
             step_context["stats_update_ms"] = stats_update_ms
@@ -1441,17 +1384,15 @@ class RuntimeExecutionLoopMixin:
             step_context["delta_build_ms"] = delta_build_ms
             step_context["delta_serialize_ms"] = delta_serialize_ms
             step_context["stream_emit_ms"] = stream_emit_ms
+            step_context["overlay_projection_ms"] = overlay_projection_ms
+            step_context["overlay_projection_projected_count"] = overlay_projection_projected_count
+            step_context["overlay_projection_skipped_count"] = overlay_projection_skipped_count
+            step_context["overlay_projection_entries_total"] = overlay_projection_entries_total
+            step_context["overlay_projection_ops_count"] = overlay_projection_ops_count
+            step_context["overlay_projection_dispatch_ms"] = overlay_projection_dispatch_ms
+            step_context["overlay_projection_error_count"] = overlay_projection_error_count
             step_context["indicators_count"] = indicators_count
-            step_context["overlays_changed_count"] = overlays_changed_count
-            step_context["overlay_points_changed"] = overlay_points_changed
             step_context["signals_emitted_count"] = signals_emitted_count
-            step_context["series_overlay_entries_ms"] = series_overlay_entries_ms
-            step_context["series_overlay_indicator_entries_ms"] = series_overlay_indicator_entries_ms
-            step_context["series_overlay_regime_build_ms"] = series_overlay_regime_build_ms
-            step_context["series_overlay_indicator_entries_count"] = series_overlay_indicator_entries_count
-            step_context["series_overlay_regime_entries_count"] = series_overlay_regime_entries_count
-            step_context["series_overlay_total_entries_count"] = series_overlay_total_entries_count
-            step_context["series_overlay_regime_mode_rebuild"] = series_overlay_regime_mode_rebuild
             step_context["trades_touched_count"] = trades_touched_count
             step_context["subscribers_count"] = subscribers_count
             self._record_step_trace(
@@ -1492,31 +1433,10 @@ class RuntimeExecutionLoopMixin:
                     "pending_signals_consume_ms": pending_consume_ms,
                     "pending_signals_ops_ms": pending_consume_ms,
                     "signals_emitted_count": 0.0,
-                    "overlays_update_ms": 0.0,
                     "indicator_state_update_ms": 0.0,
                     "signal_eval_ms": 0.0,
-                    "overlay_projection_ms": 0.0,
-                    "overlay_projection_skipped_count": 0.0,
-                    "overlay_projection_projector_ms": 0.0,
-                    "overlay_projection_delta_ms": 0.0,
-                    "overlay_projection_normalize_ms": 0.0,
-                    "overlay_projection_fingerprint_ms": 0.0,
-                    "overlay_projection_entries_total": 0.0,
-                    "overlay_projection_entries_changed": 0.0,
-                    "overlay_projection_ops_count": 0.0,
-                    "overlay_projection_normalize_cache_hits": 0.0,
-                    "overlay_projection_normalize_cache_misses": 0.0,
-                    "series_overlay_entries_ms": 0.0,
-                    "series_overlay_indicator_entries_ms": 0.0,
-                    "series_overlay_regime_build_ms": 0.0,
-                    "series_overlay_indicator_entries_count": 0.0,
-                    "series_overlay_regime_entries_count": 0.0,
-                    "series_overlay_total_entries_count": 0.0,
-                    "series_overlay_regime_mode_rebuild": 0.0,
                     "state_revisions_changed_count": 0.0,
                     "indicators_count": 0.0,
-                    "overlays_changed_count": 0.0,
-                    "overlay_points_changed": 0.0,
                 },
                 state.last_evaluated_epoch,
                 updated_last,
@@ -1566,31 +1486,6 @@ class RuntimeExecutionLoopMixin:
                 self._run_context.decision_artifacts.append(self._copy_decision_artifact_for_runtime(artifact))
         signal_eval_ms = max((time.perf_counter() - signal_started) * 1000.0, 0.0)
 
-        previous_overlays = list(series.overlays or [])
-        previous_overlay_count = float(len(previous_overlays))
-        previous_overlay_points = float(count_overlay_points(previous_overlays))
-        overlay_projection_ms = 0.0
-        overlay_projection_skipped_count = 0
-        overlay_projection_projector_ms = 0.0
-        overlay_projection_delta_ms = 0.0
-        overlay_projection_normalize_ms = 0.0
-        overlay_projection_fingerprint_ms = 0.0
-        overlay_projection_entries_total = 0.0
-        overlay_projection_entries_changed = 0.0
-        overlay_projection_ops_count = 0.0
-        overlay_projection_normalize_cache_hits = 0.0
-        overlay_projection_normalize_cache_misses = 0.0
-        series_overlay_entries_ms = 0.0
-        series_overlay_indicator_entries_ms = 0.0
-        series_overlay_regime_build_ms = 0.0
-        series_overlay_indicator_entries_count = 0.0
-        series_overlay_regime_entries_count = 0.0
-        series_overlay_total_entries_count = 0.0
-        series_overlay_regime_mode_rebuild = 0.0
-        overlays_update_ms = overlay_projection_ms + series_overlay_entries_ms
-        overlays_changed_count = 0.0
-        overlay_points_changed = 0.0
-
         append_started = time.perf_counter()
         if decision_result.selected_artifact is not None:
             state.pending_signals.append(
@@ -1617,35 +1512,10 @@ class RuntimeExecutionLoopMixin:
             "pending_signals_consume_ms": pending_consume_ms,
             "pending_signals_ops_ms": pending_ops_ms,
             "signals_emitted_count": 1.0 if decision_result.selected_artifact is not None else 0.0,
-            "overlays_update_ms": overlays_update_ms,
             "indicator_state_update_ms": indicator_state_update_ms,
             "signal_eval_ms": signal_eval_ms,
-            "overlay_projection_ms": overlay_projection_ms,
-            "overlay_projection_skipped_count": float(overlay_projection_skipped_count),
-            "overlay_projection_projector_ms": overlay_projection_projector_ms,
-            "overlay_projection_delta_ms": overlay_projection_delta_ms,
-            "overlay_projection_normalize_ms": overlay_projection_normalize_ms,
-            "overlay_projection_fingerprint_ms": overlay_projection_fingerprint_ms,
-            "overlay_projection_entries_total": overlay_projection_entries_total,
-            "overlay_projection_entries_changed": overlay_projection_entries_changed,
-            "overlay_projection_ops_count": overlay_projection_ops_count,
-            "overlay_projection_normalize_cache_hits": overlay_projection_normalize_cache_hits,
-            "overlay_projection_normalize_cache_misses": overlay_projection_normalize_cache_misses,
-            "series_overlay_entries_ms": series_overlay_entries_ms,
-            "series_overlay_indicator_entries_ms": series_overlay_indicator_entries_ms,
-            "series_overlay_regime_build_ms": series_overlay_regime_build_ms,
-            "series_overlay_indicator_entries_count": series_overlay_indicator_entries_count,
-            "series_overlay_regime_entries_count": series_overlay_regime_entries_count,
-            "series_overlay_total_entries_count": series_overlay_total_entries_count,
-            "series_overlay_regime_mode_rebuild": series_overlay_regime_mode_rebuild,
             "state_revisions_changed_count": float(len(outputs)),
             "indicators_count": float(len(state.indicator_engine.order)),
-            "overlays_changed_count": overlays_changed_count,
-            "overlay_points_changed": overlay_points_changed,
-            "overlay_count_before": previous_overlay_count,
-            "overlay_count_after": previous_overlay_count,
-            "overlay_points_before": previous_overlay_points,
-            "overlay_points_after": previous_overlay_points,
         }
 
         next_last_evaluated = epoch
@@ -1801,7 +1671,6 @@ class RuntimeExecutionLoopMixin:
                     state.total_bars = len(state.series.candles)
                     if state.done and state.bar_index < state.total_bars:
                         state.done = False
-            self._rebuild_overlay_cache()
             self._log_event("live_refresh", message="Appended live candles")
             self._push_update("live_refresh")
         return updated
@@ -1825,7 +1694,6 @@ class RuntimeExecutionLoopMixin:
                 if state.done and state.bar_index < state.total_bars:
                     state.done = False
                 self._total_bars = max(len(s.candles) for s in self._series) if self._series else 0
-            self._rebuild_overlay_cache()
             self._log_event("live_refresh", message="Appended provider stream candles")
             self._push_update("live_refresh")
             return True
@@ -1838,7 +1706,6 @@ class RuntimeExecutionLoopMixin:
             if state.done and state.bar_index < state.total_bars:
                 state.done = False
             self._total_bars = max(len(s.candles) for s in self._series) if self._series else 0
-        self._rebuild_overlay_cache()
         self._log_event("live_refresh", message="Appended live candles")
         self._push_update("live_refresh")
         return True

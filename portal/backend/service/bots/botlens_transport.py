@@ -127,9 +127,19 @@ def _symbol_identity_payload(state: SymbolProjectionSnapshot) -> Dict[str, Any]:
 def _symbol_overlay_cursor_payload(state: SymbolProjectionSnapshot) -> Dict[str, Any]:
     overlay_commit_seq = max(0, int(state.overlays.overlay_commit_seq or 0))
     overlay_commit_seq_status = str(state.overlays.overlay_commit_seq_status or "").strip() or None
-    return {
+    payload = {
         "overlay_commit_seq": overlay_commit_seq,
         "overlay_commit_seq_status": overlay_commit_seq_status,
+        "overlay_projection": (
+            dict(state.overlays.overlay_projection)
+            if isinstance(state.overlays.overlay_projection, Mapping)
+            else None
+        ),
+    }
+    return {
+        key: value
+        for key, value in payload.items()
+        if value not in (None, "", [], {})
     }
 
 
@@ -734,7 +744,17 @@ class BotLensTransport:
                     "overlay_commit_seq": delta.overlay_ops.get("overlay_commit_seq"),
                     "base_overlay_commit_seq": delta.overlay_ops.get("base_overlay_commit_seq"),
                     "overlay_commit_seq_status": delta.overlay_ops.get("overlay_commit_seq_status"),
+                    "projection": (
+                        dict(delta.overlay_ops.get("projection"))
+                        if isinstance(delta.overlay_ops.get("projection"), Mapping)
+                        else None
+                    ),
                     "ops": [dict(entry) for entry in delta.overlay_ops.get("ops", []) if isinstance(entry, Mapping)],
+                }
+                overlay_payload = {
+                    key: value
+                    for key, value in overlay_payload.items()
+                    if value not in (None, "", [], {})
                 }
                 prepared.append(
                     self._build_prepared(

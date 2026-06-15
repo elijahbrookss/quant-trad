@@ -29,6 +29,11 @@ Amended by [ADR 0029](0029-batch-and-degrade-botlens-projection-drain.md):
 producer-side BotLens projection pressure degrades projection instead of failing
 the run. Canonical persistence remains fail-loud.
 
+Amended by
+[ADR 0038](0038-decouple-visual-overlay-projection-from-runtime-push.md):
+visual overlay geometry is built by a separate bounded overlay projection step,
+not by the ordinary runtime push-update batch.
+
 ## Context
 
 Runtime bar steps produce compact BotLens fact batches from the same
@@ -70,8 +75,9 @@ does not rewrite event identity, and it is not a second storage authority.
 - Terminal run finalization must drain canonical persistence and attempt a
   bounded projection dispatch drain without treating BotLens projection as
   canonical truth.
-- Rich projection payload construction still belongs on the runtime snapshot
-  boundary until a separate immutable projection-input contract exists.
+- Rich non-overlay projection payload construction still belongs on the runtime
+  snapshot boundary until a separate immutable projection-input contract exists.
+  Visual overlay geometry follows ADR 0038 and is projected separately.
 
 ## References
 

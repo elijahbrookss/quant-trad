@@ -81,9 +81,12 @@ Rules:
 - `overlay_snapshot()` is a read of current indicator state and may be requested selectively by consumers,
 - `detail_snapshot()` is a read of current indicator state and may be transported independently from overlays,
 - chart readouts that depend on the same live timeline should prefer canonical overlay payloads over a parallel detail refetch path,
-- runtime transport may diff those full overlay snapshots and stream only deltas downstream,
+- runtime transport may request those full overlay snapshots on a bounded
+  projection cadence, diff them, and stream only changed overlay deltas
+  downstream,
 - every declared output must be returned every bar,
-- every declared overlay must be returned every bar,
+- every declared overlay must be returned for every requested overlay snapshot
+  bar,
 - every declared detail must be returned every bar,
 - `ready=False` means unusable now, not pending,
 - runtime never waits, retries, or substitutes missing values,

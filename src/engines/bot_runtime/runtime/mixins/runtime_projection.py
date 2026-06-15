@@ -128,8 +128,6 @@ class RuntimeProjectionMixin:
                         "timeframe": series.timeframe,
                         "replay_start_index": int(getattr(series, "replay_start_index", 0) or 0),
                         "bootstrap_completed": bool(getattr(series, "bootstrap_completed", False)),
-                        "bootstrap_total_overlays": int(getattr(series, "bootstrap_total_overlays", 0) or 0),
-                        "bootstrap_indicator_overlays": int(getattr(series, "bootstrap_indicator_overlays", 0) or 0),
                         "expected_indicators": len(indicator_links),
                     }
                 )
@@ -187,7 +185,35 @@ class RuntimeProjectionMixin:
     def regime_overlay_dump(self) -> Dict[str, Any]:
         if not self._prepared:
             raise RuntimeError("Runtime is not prepared. Call warm_up() or start() before overlay dump.")
-        self._aggregate_overlays_to_cache()
+        status = str(self.state.get("status") or "").lower()
+        with self._series_update_lock:
+            for state in self._series_states:
+                series = state.series
+                active_candle = state.active_candle
+                if active_candle is None and series.candles:
+                    index = max(min(int(state.bar_index or 0) - 1, len(series.candles) - 1), 0)
+                    active_candle = series.candles[index]
+                if active_candle is None:
+                    continue
+                raw = self._build_indicator_overlay_projection_for_state(
+                    state,
+                    candle=active_candle,
+                    reason="regime_overlay_dump",
+                    force=True,
+                )
+                visible = self._chart_state_builder.visible_overlays(
+                    raw,
+                    status,
+                    int(active_candle.time.timestamp()),
+                )
+                series_key = self._public_series_key_for_series(series)
+                cache = self._overlay_projection_cache.setdefault(series_key, {})
+                cache["raw_overlays"] = [dict(entry) for entry in raw if isinstance(entry, Mapping)]
+                cache["visible_overlays"] = [dict(entry) for entry in visible if isinstance(entry, Mapping)]
+                cache["last_projected_bar_index"] = int(getattr(state, "bar_index", 0) or 0)
+                cache["last_projected_epoch"] = int(active_candle.time.timestamp())
+                cache["projection_mode"] = "bounded"
+        self._refresh_chart_overlay_cache_from_projection()
         raw_overlays = [
             ov
             for ov in self._chart_overlays or []
@@ -196,7 +222,6 @@ class RuntimeProjectionMixin:
 
         current_candle = self._primary_state_candle()
         current_epoch = int(current_candle.time.timestamp()) if current_candle else None
-        status = str(self.state.get("status") or "").lower()
         visible = self._chart_state_builder.visible_overlays(raw_overlays, status, current_epoch)
 
         def _start_end(overlay: Mapping[str, Any]) -> Tuple[Optional[int], Optional[int]]:

@@ -366,6 +366,24 @@ def _durable_overlay_payload_patch(value: Any) -> Dict[str, Any]:
 def _durable_overlay_delta(value: Any) -> Dict[str, Any]:
     payload = _mapping(value)
     overlay_commit_seq, base_overlay_commit_seq, overlay_commit_seq_status = _overlay_delta_clock(payload)
+    projection = _mapping(payload.get("projection"))
+    projection_bar_index = (
+        _coerce_int(projection.get("bar_index"), -1)
+        if projection.get("bar_index") is not None
+        else -1
+    )
+    durable_projection = {
+        "mode": _optional_text(projection.get("mode")),
+        "window_bars": _coerce_int(projection.get("window_bars"), 0) or None,
+        "emit_every_bars": _coerce_int(projection.get("emit_every_bars"), 0) or None,
+        "bar_index": projection_bar_index if projection_bar_index >= 0 else None,
+        "source": _optional_text(projection.get("source")),
+    }
+    durable_projection = {
+        key: item
+        for key, item in durable_projection.items()
+        if item not in (None, "", [], {}, ())
+    }
     durable_ops: List[Dict[str, Any]] = []
     op_counts: Dict[str, int] = {}
     point_count = 0
@@ -393,6 +411,7 @@ def _durable_overlay_delta(value: Any) -> Dict[str, Any]:
         "overlay_commit_seq": overlay_commit_seq,
         "base_overlay_commit_seq": base_overlay_commit_seq,
         "overlay_commit_seq_status": overlay_commit_seq_status,
+        "projection": durable_projection or None,
         "ops": durable_ops,
         "op_counts": op_counts or None,
         "point_count": point_count or None,

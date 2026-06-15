@@ -171,11 +171,9 @@ class SeriesBuilderLiveUpdatesMixin:
                     perf.add_fields(
                         decision_artifacts_count=len(decision_artifacts),
                     )
-            series.overlays = [dict(entry) for entry in evaluation.get("overlays") or [] if isinstance(entry, Mapping)]
             marker_context = self._series_log_context(
                 series,
                 decision_artifacts=len(decision_artifacts),
-                overlays=len(series.overlays),
             )
             logger.debug(with_log_context("append_series_updates_preview_result", marker_context))
             signals = self._build_signals_from_decision_artifacts(decision_artifacts)

@@ -12,7 +12,6 @@ test('resolveOverlayGroup splits chart overlays into scan-friendly buckets', () 
   assert.equal(resolveOverlayGroup({ group: 'context', type: 'custom_overlay' }), 'indicator')
 })
 
-test('resolveOverlayGroup still keeps trade overlays separate', () => {
-  assert.equal(resolveOverlayGroup({ type: 'bot_trade_rays' }), 'trade')
+test('resolveOverlayGroup still keeps trade fact visuals separate', () => {
   assert.equal(resolveOverlayGroup({ ui: { group: 'trade' }, type: 'custom_overlay' }), 'trade')
 })

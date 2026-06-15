@@ -107,6 +107,8 @@ bot_runtime:
     max_candles: 320
     max_overlays: 400
     max_overlay_points: 160
+    overlay_window_bars: 640
+    overlay_emit_every_bars: 25
     max_closed_trades: 240
     max_logs: 300
     max_decisions: 600

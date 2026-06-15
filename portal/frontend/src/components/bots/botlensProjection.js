@@ -649,8 +649,27 @@ function normalizeScopedCursors(source, { seq = 0, trades = [] } = {}) {
         ?? 0,
       ) || 0,
     ),
+    overlay_projection: normalizeOverlayProjection(source?.overlay_projection ?? cursors.overlay_projection),
     position_commit_seq_by_trade: normalizePositionCommitSeqByTrade(source, trades),
   }
+}
+
+function normalizeOverlayProjection(value) {
+  const source = value && typeof value === 'object' ? value : {}
+  const mode = String(source.mode || '').trim().toLowerCase()
+  const windowBars = toPositiveInt(source.window_bars)
+  const emitEveryBars = toPositiveInt(source.emit_every_bars)
+  const barIndex = toNonNegativeInt(source.bar_index)
+  const normalized = {
+    ...(mode ? { mode } : {}),
+    ...(windowBars ? { window_bars: windowBars } : {}),
+    ...(emitEveryBars ? { emit_every_bars: emitEveryBars } : {}),
+    ...(barIndex !== null ? { bar_index: barIndex } : {}),
+    source: String(source.source || '').trim() || null,
+  }
+  return Object.values(normalized).some((entry) => entry !== null && entry !== undefined && entry !== '')
+    ? normalized
+    : null
 }
 
 function mergeScopedCursors(base, patch) {
@@ -665,6 +684,8 @@ function mergeScopedCursors(base, patch) {
       Number(baseCursors.overlay_commit_seq || 0) || 0,
       Number(patchCursors.overlay_commit_seq || 0) || 0,
     ),
+    overlay_projection: normalizeOverlayProjection(patchCursors.overlay_projection)
+      || normalizeOverlayProjection(baseCursors.overlay_projection),
     position_commit_seq_by_trade: {
       ...(baseCursors.position_commit_seq_by_trade || {}),
       ...(patchCursors.position_commit_seq_by_trade || {}),
@@ -705,6 +726,7 @@ export function normalizeSelectedSymbolState(selectedSymbol, { symbolKey = null,
     stats: source.stats && typeof source.stats === 'object' ? { ...source.stats } : {},
     runtime: source.runtime && typeof source.runtime === 'object' ? { ...source.runtime } : {},
     continuity: normalizeContinuity(source.continuity),
+    overlay_projection: normalizeOverlayProjection(source.overlay_projection),
     live_cursors: normalizeScopedCursors(source, { seq: normalizedSeq, trades: recentTrades }),
   }
 }
@@ -1241,9 +1263,11 @@ export function applyOverlayDeltaMessage(store, message) {
       next.live_cursors = {
         ...next.live_cursors,
         overlay_commit_seq: clock.overlayCommitSeq,
+        overlay_projection: normalizeOverlayProjection(payload.projection),
       }
       next.overlay_commit_seq = clock.overlayCommitSeq
       next.overlay_commit_seq_status = clock.status
+      next.overlay_projection = normalizeOverlayProjection(payload.projection)
     }
     return next
   })
