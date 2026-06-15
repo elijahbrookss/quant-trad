@@ -7,7 +7,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import quote
 
 from .api import ApiClient, ApiError, filename_from_content_disposition
@@ -84,6 +84,20 @@ def _read_json_object_arg(value: str | None, *, label: str) -> dict[str, Any]:
         raise ValueError(f"invalid JSON object for {label}: {exc}") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"{label} must be a JSON object")
+    return payload
+
+
+def _read_json_array_or_object_arg(value: str | None, *, label: str) -> Any:
+    if not value:
+        return None
+    text = str(value).strip()
+    raw = sys.stdin.read() if text == "-" else text if text.startswith(("{", "[")) else Path(text).expanduser().read_text(encoding="utf-8")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON for {label}: {exc}") from exc
+    if not isinstance(payload, (dict, list)):
+        raise ValueError(f"{label} must be a JSON object or array")
     return payload
 
 
@@ -632,7 +646,7 @@ def _cmd_strategies_compile(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_strategies_preview(args: argparse.Namespace) -> int:
+def _strategy_preview_request_payload(args: argparse.Namespace) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "start": args.start,
         "end": args.end,
@@ -643,7 +657,126 @@ def _cmd_strategies_preview(args: argparse.Namespace) -> int:
         payload["variant_id"] = args.variant_id
     if args.variant_name:
         payload["variant_name"] = args.variant_name
-    _print_json(_client(args).request_json("POST", f"/api/strategies/{args.strategy_id}/preview", payload=payload))
+    return payload
+
+
+def _strategy_preview_signals_view(summary: Mapping[str, Any]) -> dict[str, Any]:
+    signals: list[dict[str, Any]] = []
+    instruments = summary.get("instruments")
+    if not isinstance(instruments, dict):
+        raise ValueError("strategy preview summary is missing instruments")
+    for instrument in instruments.values():
+        if not isinstance(instrument, dict):
+            continue
+        rows = instrument.get("signals_detail")
+        if isinstance(rows, list):
+            signals.extend(dict(row) for row in rows if isinstance(row, dict))
+        else:
+            signals.extend(dict(row) for row in instrument.get("examples") or [] if isinstance(row, dict))
+    signals.sort(key=lambda row: (int(row.get("bar_epoch") or 0), str(row.get("signal_id") or "")))
+    return {
+        "schema_version": "strategy_preview_signals.v1",
+        "preview_id": summary.get("preview_id"),
+        "strategy_id": summary.get("strategy_id"),
+        "strategy_name": summary.get("strategy_name"),
+        "total": len(signals),
+        "signals": signals,
+    }
+
+
+def _strategy_preview_empty_view(summary: Mapping[str, Any]) -> dict[str, Any]:
+    instruments = summary.get("instruments")
+    if not isinstance(instruments, dict):
+        raise ValueError("strategy preview summary is missing instruments")
+    return {
+        "schema_version": "strategy_preview_empty_diagnostics.v1",
+        "preview_id": summary.get("preview_id"),
+        "strategy_id": summary.get("strategy_id"),
+        "strategy_name": summary.get("strategy_name"),
+        "instruments": {
+            str(instrument_id): {
+                "instrument_id": instrument.get("instrument_id"),
+                "symbol": instrument.get("symbol"),
+                "signals": instrument.get("signals"),
+                "why_empty": list(instrument.get("why_empty") or []),
+            }
+            for instrument_id, instrument in instruments.items()
+            if isinstance(instrument, dict)
+        },
+    }
+
+
+def _cmd_strategies_preview(args: argparse.Namespace) -> int:
+    if args.full and (args.signals or args.why_empty):
+        raise ValueError("--full cannot be combined with --signals or --why-empty")
+    payload = _strategy_preview_request_payload(args)
+    if args.full:
+        _print_json(_client(args).request_json("POST", f"/api/strategies/{args.strategy_id}/preview", payload=payload))
+        return 0
+    payload["max_examples"] = args.examples
+    payload["include_signals"] = bool(args.signals)
+    summary = _client(args).request_json("POST", f"/api/strategies/{args.strategy_id}/preview/summary", payload=payload)
+    if args.signals:
+        _print_json(_strategy_preview_signals_view(summary))
+    elif args.why_empty:
+        _print_json(_strategy_preview_empty_view(summary))
+    else:
+        _print_json(summary)
+    return 0
+
+
+def _parse_strategy_preview_case(raw: str) -> dict[str, Any]:
+    text = str(raw or "").strip()
+    if not text:
+        raise ValueError("--case cannot be empty")
+    label = None
+    body = text
+    if "=" in text:
+        label, body = text.split("=", 1)
+        label = label.strip() or None
+    if ":" not in body:
+        raise ValueError("--case must look like LABEL=STRATEGY_ID:INSTRUMENT_ID[,INSTRUMENT_ID]")
+    strategy_id, instruments_raw = body.split(":", 1)
+    instrument_ids = [item.strip() for item in instruments_raw.split(",") if item.strip()]
+    if not strategy_id.strip() or not instrument_ids:
+        raise ValueError("--case requires strategy_id and at least one instrument_id")
+    payload: dict[str, Any] = {
+        "strategy_id": strategy_id.strip(),
+        "instrument_ids": instrument_ids,
+    }
+    if label:
+        payload["label"] = label
+    return payload
+
+
+def _strategy_preview_compare_cases(args: argparse.Namespace) -> list[dict[str, Any]]:
+    cases: list[dict[str, Any]] = []
+    for raw in args.case or []:
+        cases.append(_parse_strategy_preview_case(raw))
+    for raw_json in args.case_json or []:
+        payload = _read_json_array_or_object_arg(raw_json, label="--case-json")
+        if isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    raise ValueError("--case-json array items must be JSON objects")
+                cases.append(item)
+        elif isinstance(payload, dict):
+            cases.append(payload)
+    if not cases:
+        raise ValueError("at least one --case or --case-json is required")
+    return cases
+
+
+def _cmd_strategies_preview_compare(args: argparse.Namespace) -> int:
+    payload: dict[str, Any] = {
+        "start": args.start,
+        "end": args.end,
+        "interval": args.interval,
+        "cases": _strategy_preview_compare_cases(args),
+        "max_examples": args.examples,
+        "include_signals": bool(args.signals),
+    }
+    _print_json(_client(args).request_json("POST", "/api/strategies/preview/compare", payload=payload))
     return 0
 
 
@@ -2281,7 +2414,30 @@ def build_parser() -> argparse.ArgumentParser:
     strategies_preview.add_argument("--instrument-id", action="append", default=[])
     strategies_preview.add_argument("--variant-id")
     strategies_preview.add_argument("--variant-name")
+    strategies_preview.add_argument("--examples", type=int, default=5, help="Maximum compact signal examples in summary output.")
+    strategies_preview.add_argument("--signals", action="store_true", help="Print compact signal rows instead of the summary.")
+    strategies_preview.add_argument("--why-empty", action="store_true", help="Print empty-preview diagnostics instead of the summary.")
+    strategies_preview.add_argument("--full", action="store_true", help="Print the full preview artifact.")
     strategies_preview.set_defaults(func=_cmd_strategies_preview)
+    strategies_preview_compare = strategies_sub.add_parser("preview-compare", help="Compare compact strategy previews.")
+    strategies_preview_compare.add_argument("--start", required=True)
+    strategies_preview_compare.add_argument("--end", required=True)
+    strategies_preview_compare.add_argument("--interval", required=True)
+    strategies_preview_compare.add_argument(
+        "--case",
+        action="append",
+        default=[],
+        help="Preview case as LABEL=STRATEGY_ID:INSTRUMENT_ID[,INSTRUMENT_ID].",
+    )
+    strategies_preview_compare.add_argument(
+        "--case-json",
+        action="append",
+        default=[],
+        help="Preview case JSON object/array, inline or path.",
+    )
+    strategies_preview_compare.add_argument("--examples", type=int, default=5, help="Maximum compact signal examples per case.")
+    strategies_preview_compare.add_argument("--signals", action="store_true", help="Include compact signal rows inside case summaries.")
+    strategies_preview_compare.set_defaults(func=_cmd_strategies_preview_compare)
 
     variants = strategies_sub.add_parser("variants", help="Strategy variant commands.")
     variants_sub = variants.add_subparsers(dest="variants_command", required=True)

@@ -16,6 +16,7 @@ code_paths:
   - portal/backend/service/strategies
   - portal/backend/service/bots/config_service.py
   - portal/backend/controller/strategies.py
+  - cli/main.py
   - cli/experiments/instrument_matrix.py
   - src/engines/bot_runtime/strategy
   - portal/backend/service/bots/strategy_loader.py
@@ -125,10 +126,22 @@ Strategy read contracts are split by concern:
 - `strategy_decision_inputs.v1` returns attached indicator signal, context, and
   metric inputs and marks which effective rules or variant filters reference
   them.
+- `strategy_preview_summary.v1` returns the compact agent-facing answer for a
+  preview: evaluated bars, decision artifact counts, signal counts, first/last
+  signal times, event/rule breakdowns, examples, and empty-preview diagnostics.
+- `strategy_preview_compare.v1` compares multiple compact preview summaries
+  over one requested window. Cases are explicit strategy/instrument selections
+  so cross-symbol and cross-variant research does not depend on hidden defaults.
 
 The split read surface is for agents, CLI, MCP, and UI inspection. Runtime truth
 still comes from compiled strategy specs and run snapshots, not from frontend
 state or ad hoc route joins.
+
+The full preview artifact remains the inspection surface. CLI and agent
+workflows should default to `strategy_preview_summary.v1`; consumers should ask
+for the full preview only when they need machine decisions, overlays, or signal
+audit detail. Preview summaries and comparisons must be derived from the same
+walk-forward preview artifact and must not re-run rules through another path.
 
 ## Failure And Recovery
 
@@ -136,6 +149,8 @@ state or ad hoc route joins.
 - Invalid strategy specs fail at compile/load time.
 - Runtime rejections should include explicit reason codes and blocking context.
 - Strategy previews must not use a different semantic path than runtime decisions.
+- Preview summaries and comparisons must not become a second strategy
+  evaluator; they are read models over canonical preview results.
 
 ## Invariants
 

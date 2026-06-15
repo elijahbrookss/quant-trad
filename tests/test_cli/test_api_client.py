@@ -301,6 +301,174 @@ def test_strategies_create_and_rule_create_use_backend_contracts(tmp_path, monke
     ]
 
 
+def test_strategies_preview_defaults_to_summary_and_compare_uses_cases(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        body = json.loads(request.data.decode("utf-8")) if request.data else None
+        path = urllib.parse.urlparse(request.full_url).path
+        calls.append((request.get_method(), path, body))
+        if path.endswith("/preview/summary"):
+            return _Response(
+                json.dumps(
+                    {
+                        "schema_version": "strategy_preview_summary.v1",
+                        "preview_id": "preview-1",
+                        "strategy_id": "strategy-1",
+                        "strategy_name": "Strategy One",
+                        "instruments": {
+                            "instrument-1": {
+                                "instrument_id": "instrument-1",
+                                "symbol": "BTC/USD",
+                                "signals": 1,
+                                "why_empty": [],
+                                "examples": [{"signal_id": "signal-1", "bar_epoch": 1}],
+                                "signals_detail": [{"signal_id": "signal-1", "bar_epoch": 1}],
+                            }
+                        },
+                    }
+                ).encode("utf-8")
+            )
+        if path.endswith("/preview"):
+            return _Response(b'{"preview_id":"preview-full"}')
+        if path == "/api/strategies/preview/compare":
+            return _Response(b'{"schema_version":"strategy_preview_compare.v1","case_count":2}')
+        raise AssertionError(f"unexpected API call: {request.get_method()} {request.full_url}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    summary_code = main(
+        [
+            "--log-root",
+            str(tmp_path),
+            "strategies",
+            "preview",
+            "strategy-1",
+            "--start",
+            "2026-02-01T00:00:00Z",
+            "--end",
+            "2026-02-02T00:00:00Z",
+            "--interval",
+            "1h",
+            "--instrument-id",
+            "instrument-1",
+            "--examples",
+            "2",
+        ]
+    )
+    signals_code = main(
+        [
+            "--log-root",
+            str(tmp_path),
+            "strategies",
+            "preview",
+            "strategy-1",
+            "--start",
+            "2026-02-01T00:00:00Z",
+            "--end",
+            "2026-02-02T00:00:00Z",
+            "--interval",
+            "1h",
+            "--instrument-id",
+            "instrument-1",
+            "--signals",
+        ]
+    )
+    full_code = main(
+        [
+            "--log-root",
+            str(tmp_path),
+            "strategies",
+            "preview",
+            "strategy-1",
+            "--start",
+            "2026-02-01T00:00:00Z",
+            "--end",
+            "2026-02-02T00:00:00Z",
+            "--interval",
+            "1h",
+            "--instrument-id",
+            "instrument-1",
+            "--full",
+        ]
+    )
+    compare_code = main(
+        [
+            "--log-root",
+            str(tmp_path),
+            "strategies",
+            "preview-compare",
+            "--start",
+            "2026-02-01T00:00:00Z",
+            "--end",
+            "2026-02-02T00:00:00Z",
+            "--interval",
+            "1h",
+            "--case",
+            "btc=strategy-btc:instrument-btc",
+            "--case",
+            "eth=strategy-eth:instrument-eth",
+        ]
+    )
+
+    assert summary_code == 0
+    assert signals_code == 0
+    assert full_code == 0
+    assert compare_code == 0
+    assert calls == [
+        (
+            "POST",
+            "/api/strategies/strategy-1/preview/summary",
+            {
+                "start": "2026-02-01T00:00:00Z",
+                "end": "2026-02-02T00:00:00Z",
+                "interval": "1h",
+                "instrument_ids": ["instrument-1"],
+                "max_examples": 2,
+                "include_signals": False,
+            },
+        ),
+        (
+            "POST",
+            "/api/strategies/strategy-1/preview/summary",
+            {
+                "start": "2026-02-01T00:00:00Z",
+                "end": "2026-02-02T00:00:00Z",
+                "interval": "1h",
+                "instrument_ids": ["instrument-1"],
+                "max_examples": 5,
+                "include_signals": True,
+            },
+        ),
+        (
+            "POST",
+            "/api/strategies/strategy-1/preview",
+            {
+                "start": "2026-02-01T00:00:00Z",
+                "end": "2026-02-02T00:00:00Z",
+                "interval": "1h",
+                "instrument_ids": ["instrument-1"],
+            },
+        ),
+        (
+            "POST",
+            "/api/strategies/preview/compare",
+            {
+                "start": "2026-02-01T00:00:00Z",
+                "end": "2026-02-02T00:00:00Z",
+                "interval": "1h",
+                "cases": [
+                    {"strategy_id": "strategy-btc", "instrument_ids": ["instrument-btc"], "label": "btc"},
+                    {"strategy_id": "strategy-eth", "instrument_ids": ["instrument-eth"], "label": "eth"},
+                ],
+                "max_examples": 5,
+                "include_signals": False,
+            },
+        ),
+    ]
+
+
 def test_research_check_cli_accepts_run_id_for_report_backed_checks(tmp_path, monkeypatch):
     observed = {}
 

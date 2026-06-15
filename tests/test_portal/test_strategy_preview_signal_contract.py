@@ -225,6 +225,84 @@ def test_strategy_preview_response_separates_machine_and_ui(monkeypatch) -> None
     markers = instrument_payload["ui"]["overlays"][-1]["payload"]["markers"]
     assert markers[0]["signal_id"] == expected_signal_id
     assert markers[0]["source_id"] == "preview-1"
+    assert instrument_payload["machine"]["bars_evaluated"] == 1
+
+    summary = typed_preview.build_strategy_preview_summary(payload, max_examples=1, include_signals=True)
+
+    assert summary["schema_version"] == "strategy_preview_summary.v1"
+    assert summary["preview_id"] == "preview-1"
+    assert summary["totals"] == {
+        "bars_evaluated": 1,
+        "decision_artifacts": 1,
+        "signals": 1,
+        "rule_matches": 1,
+    }
+    assert summary["event_keys"] == {"breakout_long": 1}
+    assert summary["rules"] == {"Breakout Long": 1}
+    compact = summary["instruments"]["instrument-1"]
+    assert compact["first_signal_time"] == "2026-02-01T00:00:00Z"
+    assert compact["last_signal_time"] == "2026-02-01T00:00:00Z"
+    assert compact["examples"] == [
+        {
+            "signal_id": expected_signal_id,
+            "decision_id": "decision-1",
+            "bar_epoch": 1769904000,
+            "bar_time": "2026-02-01T00:00:00Z",
+            "symbol": "ES",
+            "instrument_id": "instrument-1",
+            "rule_id": "rule-1",
+            "rule_name": "Breakout Long",
+            "intent": "enter_long",
+            "direction": "long",
+            "event_key": "breakout_long",
+            "price": 100.5,
+            "trigger_output_ref": "indicator-1.balance_breakout",
+        }
+    ]
+    assert compact["signals_detail"] == compact["examples"]
+
+
+def test_strategy_preview_compare_ranks_cases_by_signal_count() -> None:
+    base_summary = {
+        "preview_id": "preview-a",
+        "strategy_id": "strategy-a",
+        "strategy_name": "Strategy A",
+        "variant": {"name": "default"},
+        "instrument_count": 1,
+        "totals": {"signals": 1, "bars_evaluated": 10, "decision_artifacts": 10, "rule_matches": 1},
+        "event_keys": {"breakout_long": 1},
+        "rules": {"Long": 1},
+    }
+    stronger_summary = {
+        "preview_id": "preview-b",
+        "strategy_id": "strategy-b",
+        "strategy_name": "Strategy B",
+        "variant": {"name": "default"},
+        "instrument_count": 1,
+        "totals": {"signals": 3, "bars_evaluated": 10, "decision_artifacts": 10, "rule_matches": 3},
+        "event_keys": {"breakout_long": 3},
+        "rules": {"Long": 3},
+    }
+
+    payload = typed_preview.build_strategy_preview_compare(
+        start="2026-02-01T00:00:00Z",
+        end="2026-02-02T00:00:00Z",
+        interval="1h",
+        cases=[
+            {"label": "base", "summary": base_summary},
+            {"label": "candidate", "summary": stronger_summary},
+        ],
+    )
+
+    assert payload["schema_version"] == "strategy_preview_compare.v1"
+    assert payload["baseline_label"] == "base"
+    assert payload["cases"][0]["delta_vs_baseline"] == {"signals": 0}
+    assert payload["cases"][1]["delta_vs_baseline"] == {"signals": 2}
+    assert payload["cases"][0]["instruments"] == {}
+    assert payload["rankings"]["by_signal_count"] == [
+        {"label": "candidate", "strategy_id": "strategy-b", "signals": 3},
+        {"label": "base", "strategy_id": "strategy-a", "signals": 1},
+    ]
 
 
 def test_strategy_preview_store_returns_signal_detail() -> None:

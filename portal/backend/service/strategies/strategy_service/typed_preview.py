@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -325,6 +326,350 @@ def _configure_replay_window(indicators: Sequence[Any], *, history_bars: int) ->
             configure(history_bars=history_bars)
 
 
+def _require_mapping(payload: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    value = payload.get(key)
+    if not isinstance(value, Mapping):
+        raise ValueError(f"strategy_preview_summary_invalid: {key} must be an object")
+    return value
+
+
+def _signal_sort_key(signal: Mapping[str, Any]) -> tuple[int, str]:
+    return int(signal.get("bar_epoch") or 0), str(signal.get("signal_id") or "")
+
+
+def _counter_payload(values: Sequence[Any]) -> Dict[str, int]:
+    counts = Counter(str(value or "").strip() for value in values if str(value or "").strip())
+    return dict(sorted(counts.items()))
+
+
+def _marker_index(ui_payload: Mapping[str, Any]) -> Dict[str, Mapping[str, Any]]:
+    markers: Dict[str, Mapping[str, Any]] = {}
+    overlays = ui_payload.get("overlays")
+    if not isinstance(overlays, list):
+        return markers
+    for overlay in overlays:
+        if not isinstance(overlay, Mapping):
+            continue
+        overlay_payload = overlay.get("payload")
+        if not isinstance(overlay_payload, Mapping):
+            continue
+        for marker in overlay_payload.get("markers") or []:
+            if not isinstance(marker, Mapping):
+                continue
+            signal_id = str(marker.get("signal_id") or "").strip()
+            if signal_id:
+                markers[signal_id] = marker
+    return markers
+
+
+def _decision_index(machine_payload: Mapping[str, Any]) -> Dict[str, Mapping[str, Any]]:
+    decisions: Dict[str, Mapping[str, Any]] = {}
+    artifacts = machine_payload.get("decision_artifacts")
+    if not isinstance(artifacts, list):
+        return decisions
+    for artifact in artifacts:
+        if not isinstance(artifact, Mapping):
+            continue
+        decision_id = str(artifact.get("decision_id") or "").strip()
+        if decision_id:
+            decisions[decision_id] = artifact
+    return decisions
+
+
+def _signal_metadata(artifact: Mapping[str, Any], event_key: str) -> Mapping[str, Any]:
+    trigger = artifact.get("trigger") if isinstance(artifact.get("trigger"), Mapping) else {}
+    output_ref = str(trigger.get("output_ref") or "").strip()
+    referenced_outputs = (
+        artifact.get("referenced_outputs")
+        if isinstance(artifact.get("referenced_outputs"), Mapping)
+        else {}
+    )
+    output_payload = referenced_outputs.get(output_ref)
+    if not isinstance(output_payload, Mapping):
+        return {}
+    events = output_payload.get("events")
+    if not isinstance(events, list):
+        return {}
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        if str(event.get("key") or "").strip() != event_key:
+            continue
+        metadata = event.get("metadata")
+        return metadata if isinstance(metadata, Mapping) else {}
+    return {}
+
+
+def _compact_signal_row(
+    *,
+    signal: Mapping[str, Any],
+    decision: Mapping[str, Any] | None,
+    marker: Mapping[str, Any] | None,
+) -> Dict[str, Any]:
+    event_key = str(signal.get("event_key") or "").strip()
+    row: Dict[str, Any] = {
+        "signal_id": signal.get("signal_id"),
+        "decision_id": signal.get("decision_id"),
+        "bar_epoch": signal.get("bar_epoch"),
+        "bar_time": signal.get("bar_time"),
+        "symbol": signal.get("symbol"),
+        "instrument_id": signal.get("instrument_id"),
+        "rule_id": signal.get("rule_id"),
+        "rule_name": signal.get("rule_name"),
+        "intent": signal.get("intent"),
+        "direction": signal.get("direction"),
+        "event_key": event_key,
+    }
+    if marker is not None and marker.get("price") is not None:
+        row["price"] = marker.get("price")
+    if decision is not None:
+        trigger = decision.get("trigger") if isinstance(decision.get("trigger"), Mapping) else {}
+        if trigger.get("output_ref") is not None:
+            row["trigger_output_ref"] = trigger.get("output_ref")
+        metadata = _signal_metadata(decision, event_key)
+        if metadata:
+            row["metadata"] = dict(metadata)
+    return row
+
+
+def _compact_signal_rows(instrument_payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    machine = _require_mapping(instrument_payload, "machine")
+    ui_payload = _require_mapping(instrument_payload, "ui")
+    signals = machine.get("signals")
+    if not isinstance(signals, list):
+        raise ValueError("strategy_preview_summary_invalid: machine.signals must be a list")
+    decisions = _decision_index(machine)
+    markers = _marker_index(ui_payload)
+    return [
+        _compact_signal_row(
+            signal=signal,
+            decision=decisions.get(str(signal.get("decision_id") or "").strip()),
+            marker=markers.get(str(signal.get("signal_id") or "").strip()),
+        )
+        for signal in sorted((item for item in signals if isinstance(item, Mapping)), key=_signal_sort_key)
+    ]
+
+
+def _empty_diagnostics(machine: Mapping[str, Any], *, status: str, missing_indicators: Sequence[Any]) -> List[str]:
+    signals = machine.get("signals")
+    if isinstance(signals, list) and signals:
+        return []
+    diagnostics: List[str] = []
+    if status != "ok":
+        diagnostics.append(f"instrument_status={status}")
+    if missing_indicators:
+        diagnostics.append("missing_indicators")
+    artifacts = machine.get("decision_artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        diagnostics.append("no_decision_artifacts")
+        return diagnostics
+    results = _counter_payload([artifact.get("evaluation_result") for artifact in artifacts if isinstance(artifact, Mapping)])
+    diagnostics.append(f"decision_results={results}")
+    not_ready = sum(
+        1
+        for artifact in artifacts
+        if isinstance(artifact, Mapping)
+        and isinstance(artifact.get("trigger"), Mapping)
+        and artifact["trigger"].get("ready") is False
+    )
+    if not_ready:
+        diagnostics.append(f"trigger_not_ready={not_ready}")
+    matched = sum(
+        1
+        for artifact in artifacts
+        if isinstance(artifact, Mapping)
+        and isinstance(artifact.get("trigger"), Mapping)
+        and artifact["trigger"].get("matched") is True
+    )
+    if not matched:
+        diagnostics.append("no_trigger_matches")
+    return diagnostics
+
+
+def build_strategy_preview_summary(
+    payload: Mapping[str, Any],
+    *,
+    max_examples: int = 5,
+    include_signals: bool = False,
+) -> Dict[str, Any]:
+    if max_examples < 0:
+        raise ValueError("strategy_preview_summary_invalid: max_examples must be >= 0")
+    instruments = _require_mapping(payload, "instruments")
+    summary: Dict[str, Any] = {
+        "schema_version": "strategy_preview_summary.v1",
+        "preview_id": payload.get("preview_id"),
+        "source_type": payload.get("source_type"),
+        "source_id": payload.get("source_id"),
+        "strategy_id": payload.get("strategy_id"),
+        "strategy_name": payload.get("strategy_name"),
+        "strategy_hash": payload.get("strategy_hash"),
+        "variant": dict(payload.get("variant") or {}),
+        "instrument_count": len(instruments),
+        "totals": {
+            "bars_evaluated": 0,
+            "decision_artifacts": 0,
+            "signals": 0,
+            "rule_matches": 0,
+        },
+        "event_keys": {},
+        "rules": {},
+        "instruments": {},
+    }
+
+    total_event_keys: list[Any] = []
+    total_rules: list[Any] = []
+    for instrument_id, instrument_payload in instruments.items():
+        if not isinstance(instrument_payload, Mapping):
+            raise ValueError("strategy_preview_summary_invalid: instrument payload must be an object")
+        machine = _require_mapping(instrument_payload, "machine")
+        window = _require_mapping(instrument_payload, "window")
+        status = str(instrument_payload.get("status") or "").strip()
+        missing_indicators = list(instrument_payload.get("missing_indicators") or [])
+        signals = machine.get("signals")
+        artifacts = machine.get("decision_artifacts")
+        if not isinstance(signals, list):
+            raise ValueError("strategy_preview_summary_invalid: machine.signals must be a list")
+        if not isinstance(artifacts, list):
+            raise ValueError("strategy_preview_summary_invalid: machine.decision_artifacts must be a list")
+        signal_rows = _compact_signal_rows(instrument_payload)
+        epochs = [int(row["bar_epoch"]) for row in signal_rows if row.get("bar_epoch") is not None]
+        times = [str(row["bar_time"]) for row in signal_rows if row.get("bar_time")]
+        unique_bars = {
+            artifact.get("bar_epoch")
+            for artifact in artifacts
+            if isinstance(artifact, Mapping) and artifact.get("bar_epoch") is not None
+        }
+        bars_evaluated = int(machine.get("bars_evaluated") or len(unique_bars))
+        rule_matches = int(machine.get("rule_matches") or len(signal_rows))
+        event_keys = _counter_payload([row.get("event_key") for row in signal_rows])
+        rules = _counter_payload([row.get("rule_name") or row.get("rule_id") for row in signal_rows])
+        instrument_summary: Dict[str, Any] = {
+            "instrument_id": instrument_id,
+            "symbol": instrument_payload.get("symbol"),
+            "status": status,
+            "window": dict(window),
+            "bars_evaluated": bars_evaluated,
+            "decision_artifacts": len(artifacts),
+            "signals": len(signal_rows),
+            "rule_matches": rule_matches,
+            "first_signal_epoch": min(epochs) if epochs else None,
+            "first_signal_time": min(times) if times else None,
+            "last_signal_epoch": max(epochs) if epochs else None,
+            "last_signal_time": max(times) if times else None,
+            "event_keys": event_keys,
+            "rules": rules,
+            "examples": signal_rows[:max_examples],
+            "why_empty": _empty_diagnostics(machine, status=status, missing_indicators=missing_indicators),
+            "perf": dict(instrument_payload.get("perf") or {}),
+        }
+        if include_signals:
+            instrument_summary["signals_detail"] = signal_rows
+        summary["instruments"][str(instrument_id)] = instrument_summary
+        summary["totals"]["bars_evaluated"] += bars_evaluated
+        summary["totals"]["decision_artifacts"] += len(artifacts)
+        summary["totals"]["signals"] += len(signal_rows)
+        summary["totals"]["rule_matches"] += rule_matches
+        total_event_keys.extend(row.get("event_key") for row in signal_rows)
+        total_rules.extend(row.get("rule_name") or row.get("rule_id") for row in signal_rows)
+
+    summary["event_keys"] = _counter_payload(total_event_keys)
+    summary["rules"] = _counter_payload(total_rules)
+    return summary
+
+
+def build_strategy_preview_signals_view(summary: Mapping[str, Any]) -> Dict[str, Any]:
+    instruments = _require_mapping(summary, "instruments")
+    signals: List[Dict[str, Any]] = []
+    for instrument_payload in instruments.values():
+        if not isinstance(instrument_payload, Mapping):
+            continue
+        rows = instrument_payload.get("signals_detail")
+        if isinstance(rows, list):
+            signals.extend(dict(row) for row in rows if isinstance(row, Mapping))
+        else:
+            signals.extend(dict(row) for row in instrument_payload.get("examples") or [] if isinstance(row, Mapping))
+    signals.sort(key=lambda row: (int(row.get("bar_epoch") or 0), str(row.get("signal_id") or "")))
+    return {
+        "schema_version": "strategy_preview_signals.v1",
+        "preview_id": summary.get("preview_id"),
+        "strategy_id": summary.get("strategy_id"),
+        "strategy_name": summary.get("strategy_name"),
+        "total": len(signals),
+        "signals": signals,
+    }
+
+
+def build_strategy_preview_empty_diagnostics(summary: Mapping[str, Any]) -> Dict[str, Any]:
+    instruments = _require_mapping(summary, "instruments")
+    return {
+        "schema_version": "strategy_preview_empty_diagnostics.v1",
+        "preview_id": summary.get("preview_id"),
+        "strategy_id": summary.get("strategy_id"),
+        "strategy_name": summary.get("strategy_name"),
+        "instruments": {
+            str(instrument_id): {
+                "instrument_id": instrument_payload.get("instrument_id"),
+                "symbol": instrument_payload.get("symbol"),
+                "signals": instrument_payload.get("signals"),
+                "why_empty": list(instrument_payload.get("why_empty") or []),
+            }
+            for instrument_id, instrument_payload in instruments.items()
+            if isinstance(instrument_payload, Mapping)
+        },
+    }
+
+
+def build_strategy_preview_compare(
+    *,
+    start: str,
+    end: str,
+    interval: str,
+    cases: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    case_rows: List[Dict[str, Any]] = []
+    for index, case in enumerate(cases):
+        summary = _require_mapping(case, "summary")
+        label = str(case.get("label") or summary.get("strategy_name") or summary.get("strategy_id") or f"case-{index + 1}").strip()
+        row = {
+            "case_index": index,
+            "label": label,
+            "strategy_id": summary.get("strategy_id"),
+            "strategy_name": summary.get("strategy_name"),
+            "preview_id": summary.get("preview_id"),
+            "variant": dict(summary.get("variant") or {}),
+            "instrument_count": summary.get("instrument_count"),
+            "totals": dict(summary.get("totals") or {}),
+            "event_keys": dict(summary.get("event_keys") or {}),
+            "rules": dict(summary.get("rules") or {}),
+            "instruments": dict(summary.get("instruments") or {}),
+        }
+        case_rows.append(row)
+    baseline_signals = int((case_rows[0].get("totals") or {}).get("signals") or 0) if case_rows else 0
+    for row in case_rows:
+        signals = int((row.get("totals") or {}).get("signals") or 0)
+        row["delta_vs_baseline"] = {"signals": signals - baseline_signals}
+    return {
+        "schema_version": "strategy_preview_compare.v1",
+        "window": {"start": start, "end": end, "interval": interval},
+        "case_count": len(case_rows),
+        "baseline_label": case_rows[0]["label"] if case_rows else None,
+        "cases": case_rows,
+        "rankings": {
+            "by_signal_count": sorted(
+                (
+                    {
+                        "label": row["label"],
+                        "strategy_id": row["strategy_id"],
+                        "signals": int((row.get("totals") or {}).get("signals") or 0),
+                    }
+                    for row in case_rows
+                ),
+                key=lambda row: (-row["signals"], row["label"]),
+            )
+        },
+    }
+
+
 def evaluate_strategy_preview(
     *,
     record: Any,
@@ -471,6 +816,7 @@ def evaluate_strategy_preview(
             "signals": strategy_signals,
             "decision_artifacts": decision_artifacts,
             "rule_matches": len(strategy_signals),
+            "bars_evaluated": len(candles),
         }
         ui_payload = {
             "overlays": overlays,
@@ -500,4 +846,10 @@ def evaluate_strategy_preview(
     return result
 
 
-__all__ = ["evaluate_strategy_preview"]
+__all__ = [
+    "build_strategy_preview_compare",
+    "build_strategy_preview_empty_diagnostics",
+    "build_strategy_preview_signals_view",
+    "build_strategy_preview_summary",
+    "evaluate_strategy_preview",
+]

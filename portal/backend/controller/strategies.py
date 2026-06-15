@@ -382,6 +382,32 @@ class StrategyPreviewRequest(StrategyVariantSelectionRequest):
     instrument_ids: List[str] = Field(default_factory=list)
 
 
+class StrategyPreviewSummaryRequest(StrategyPreviewRequest):
+    """Request payload for generating a compact strategy preview summary."""
+
+    max_examples: int = Field(default=5, ge=0, le=100)
+    include_signals: bool = False
+
+
+class StrategyPreviewCompareCaseRequest(StrategyVariantSelectionRequest):
+    """One strategy preview case inside a comparison request."""
+
+    label: Optional[str] = None
+    strategy_id: str
+    instrument_ids: List[str] = Field(default_factory=list)
+
+
+class StrategyPreviewCompareRequest(BaseModel):
+    """Request payload for comparing compact strategy preview summaries."""
+
+    start: str
+    end: str
+    interval: str
+    cases: List[StrategyPreviewCompareCaseRequest] = Field(default_factory=list)
+    max_examples: int = Field(default=5, ge=0, le=100)
+    include_signals: bool = False
+
+
 class SymbolPresetRequest(BaseModel):
     """Payload describing a datasource/exchange/timeframe/symbol combination."""
 
@@ -802,6 +828,49 @@ async def run_preview(strategy_id: str, body: StrategyPreviewRequest) -> Dict[st
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("strategy_preview_failed")
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/{strategy_id}/preview/summary")
+async def run_preview_summary(strategy_id: str, body: StrategyPreviewSummaryRequest) -> Dict[str, Any]:
+    """Run a rule-logic preview and return its compact summary."""
+
+    try:
+        return strategy_service.run_strategy_preview_summary(
+            strategy_id,
+            start=body.start,
+            end=body.end,
+            interval=body.interval,
+            instrument_ids=body.instrument_ids,
+            variant_id=body.variant_id,
+            variant_name=body.variant_name,
+            max_examples=body.max_examples,
+            include_signals=body.include_signals,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("strategy_preview_summary_failed")
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/preview/compare")
+async def compare_previews(body: StrategyPreviewCompareRequest) -> Dict[str, Any]:
+    """Run and compare compact previews for several strategies."""
+
+    try:
+        return strategy_service.compare_strategy_previews(
+            start=body.start,
+            end=body.end,
+            interval=body.interval,
+            cases=[case.model_dump() for case in body.cases],
+            max_examples=body.max_examples,
+            include_signals=body.include_signals,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("strategy_preview_compare_failed")
         raise HTTPException(400, str(exc)) from exc
 
 

@@ -18,7 +18,7 @@ from risk import normalise_risk_config
 from strategies.contracts import CompiledStrategySpec, DecisionRuleSpec
 from strategies.compiler import compile_strategy, normalize_rule_intent
 from . import persistence
-from .typed_preview import evaluate_strategy_preview
+from .typed_preview import build_strategy_preview_compare, build_strategy_preview_summary, evaluate_strategy_preview
 
 
 logger = logging.getLogger(__name__)
@@ -1411,6 +1411,35 @@ class StrategyRegistry:
         _PREVIEW_RESULTS.put(payload)
         return payload
 
+    def evaluate_summary(
+        self,
+        strategy_id: str,
+        *,
+        start: str,
+        end: str,
+        interval: str,
+        instrument_ids: Optional[List[str]] = None,
+        variant_id: Optional[str] = None,
+        variant_name: Optional[str] = None,
+        max_examples: int = 5,
+        include_signals: bool = False,
+    ) -> Dict[str, Any]:
+        """Run a preview and return the compact read model."""
+        payload = self.evaluate(
+            strategy_id,
+            start=start,
+            end=end,
+            interval=interval,
+            instrument_ids=instrument_ids,
+            variant_id=variant_id,
+            variant_name=variant_name,
+        )
+        return build_strategy_preview_summary(
+            payload,
+            max_examples=max_examples,
+            include_signals=include_signals,
+        )
+
 
 @dataclass(frozen=True)
 class StrategyPreviewResult:
@@ -1748,6 +1777,78 @@ def run_strategy_preview(
         variant_id=variant_id,
         variant_name=variant_name,
         config=config,
+    )
+
+
+def run_strategy_preview_summary(
+    strategy_id: str,
+    *,
+    start: str,
+    end: str,
+    interval: str,
+    instrument_ids: Optional[List[str]] = None,
+    variant_id: Optional[str] = None,
+    variant_name: Optional[str] = None,
+    max_examples: int = 5,
+    include_signals: bool = False,
+) -> Dict[str, Any]:
+    """Run a strategy preview and return its compact summary read model."""
+
+    return _REGISTRY.evaluate_summary(
+        strategy_id,
+        start=start,
+        end=end,
+        interval=interval,
+        instrument_ids=instrument_ids,
+        variant_id=variant_id,
+        variant_name=variant_name,
+        max_examples=max_examples,
+        include_signals=include_signals,
+    )
+
+
+def compare_strategy_previews(
+    *,
+    start: str,
+    end: str,
+    interval: str,
+    cases: Sequence[Mapping[str, Any]],
+    max_examples: int = 5,
+    include_signals: bool = False,
+) -> Dict[str, Any]:
+    """Run multiple strategy preview summaries and compare their signal surfaces."""
+
+    if not cases:
+        raise ValueError("strategy_preview_compare_invalid: at least one case is required")
+    summaries: List[Dict[str, Any]] = []
+    for index, case in enumerate(cases):
+        strategy_id = str(case.get("strategy_id") or "").strip()
+        if not strategy_id:
+            raise ValueError(f"strategy_preview_compare_invalid: case {index + 1} missing strategy_id")
+        instrument_ids = [str(item).strip() for item in case.get("instrument_ids") or [] if str(item).strip()]
+        if not instrument_ids:
+            raise ValueError(f"strategy_preview_compare_invalid: case {index + 1} missing instrument_ids")
+        summaries.append(
+            {
+                "label": str(case.get("label") or "").strip(),
+                "summary": run_strategy_preview_summary(
+                    strategy_id,
+                    start=start,
+                    end=end,
+                    interval=interval,
+                    instrument_ids=instrument_ids,
+                    variant_id=case.get("variant_id"),
+                    variant_name=case.get("variant_name"),
+                    max_examples=max_examples,
+                    include_signals=include_signals,
+                ),
+            }
+        )
+    return build_strategy_preview_compare(
+        start=start,
+        end=end,
+        interval=interval,
+        cases=summaries,
     )
 
 
