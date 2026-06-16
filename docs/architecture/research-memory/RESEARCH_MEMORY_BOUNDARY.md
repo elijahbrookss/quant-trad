@@ -13,7 +13,10 @@ tags:
   - checks
 code_paths:
   - portal/backend/controller/research.py
+  - portal/backend/service/research/async_dispatch.py
   - portal/backend/service/research
+  - portal/backend/workers/research_worker.py
+  - portal/backend/service/async_jobs
   - portal/backend/service/indicators/indicator_service/runtime_validation.py
   - portal/backend/service/reports/contract.py
   - portal/backend/db/models.py
@@ -48,6 +51,7 @@ Research memory may:
 - run bounded analytical checks over canonical report datasets,
 - run non-persisted indicator-backed check sweeps for explicit temporary
   parameter variants,
+- queue long-running check runs and sweeps through the shared async job store,
 - persist check outputs as evidence items,
 - recommend whether an observation should be discarded, refined, or promoted to
   a hypothesis.
@@ -107,6 +111,27 @@ Forward outcomes may include `entry_lag_bars`. A lag of `0` measures from the
 event bar close, `1` measures from the next bar close, and so on. Forward return,
 MFE, and MAE are measured from the delayed entry close while the event time
 remains the known-at source event being studied.
+
+## Async Research Jobs
+
+Interactive check routes remain available for small requests. Long-running
+research checks and sweeps may be submitted as async research jobs:
+
+- `POST /api/research/jobs/checks/run`
+- `POST /api/research/jobs/checks/sweep`
+- `GET /api/research/jobs/{job_id}`
+- `GET /api/research/jobs/{job_id}/result`
+
+Async research jobs use the shared `portal_async_jobs` table for queue state,
+attempts, locking, result storage, and failure visibility. The research worker
+executes the same `run_research_check` and `sweep_research_checks` service
+functions used by synchronous routes. The job layer is orchestration only; it
+does not introduce a new detector, indicator, candle, report, or strategy
+truth path.
+
+Job status responses are compact operator read models. Completed job results
+carry the original research check or sweep contract so downstream analysis can
+read the same payload a synchronous call would have returned.
 
 The signal audit check family is `signal_audit`. It also requires a persisted
 `indicator_id` and the canonical indicator runtime graph, but it answers a

@@ -47,6 +47,8 @@ def safe_path_part(value: Any, *, fallback: str = "unknown") -> str:
 def command_path(args: Any) -> str:
     parts = [
         getattr(args, "command", None),
+        getattr(args, "setup_command", None),
+        getattr(args, "setup_provider_command", None),
         getattr(args, "bots_command", None),
         getattr(args, "runs_command", None),
         getattr(args, "strategies_command", None),
@@ -59,6 +61,8 @@ def command_path(args: Any) -> str:
         getattr(args, "research_items_command", None),
         getattr(args, "research_observe_command", None),
         getattr(args, "research_links_command", None),
+        getattr(args, "research_jobs_command", None),
+        getattr(args, "research_check_command", None),
         getattr(args, "research_checks_command", None),
         getattr(args, "experiments_command", None),
         getattr(args, "mcp_command", None),

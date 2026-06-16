@@ -5,7 +5,7 @@ SHELL := /bin/bash
 -include .sync-docs.mk
 
 PYTHONPATH ?= .:src
-PY          ?= python3
+PY          ?= python3.12
 VENV        ?= .venv
 VENV_PYTHON := $(VENV)/bin/python
 PYTHON      := PYTHONPATH=$(PYTHONPATH) $(VENV_PYTHON)
@@ -181,7 +181,7 @@ mermaid-svgs: ## Render .mmd files to nearby SVG files (MERMAID_SRC=path)
 	@$(PY) scripts/docs/render_mermaid_svgs.py --root "$(MERMAID_SRC)" --mmdc "$(MERMAID_CLI)" $(MERMAID_RENDER_ARGS) $(if $(strip $(MERMAID_CLI_ARGS)),-- $(MERMAID_CLI_ARGS),)
 
 ## ============================ BOOTSTRAP ================================= ##
-.PHONY: deps venv _deps_hash _ensure_python _ensure_dirs
+.PHONY: deps venv _deps_hash _ensure_python _ensure_venv_python _ensure_dirs
 
 deps: _ensure_python _deps_hash ## Install Python dependencies
 	@if [ ! -x "$(VENV_PYTHON)" ]; then \
@@ -192,7 +192,8 @@ deps: _ensure_python _deps_hash ## Install Python dependencies
 			$(PY) -m venv $(VENV); \
 		fi; \
 	fi
-	@if [ "$$(cat $(REQS_HASH).new)" != "$$(cat $(REQS_HASH) 2>/dev/null || echo _none_)" ]; then \
+	@$(MAKE) --no-print-directory _ensure_venv_python
+	@if [ "$$(cat $(REQS_HASH).new)" != "$$(cat $(REQS_HASH) 2>/dev/null || echo _none_)" ] || [ ! -x "$(VENV)/bin/qt" ]; then \
 		echo "► Installing Python deps..."; \
 		if command -v "$(UV)" >/dev/null 2>&1; then \
 			[ -f "$(REQ)" ] && $(UV) pip install --python "$(VENV_PYTHON)" -r "$(REQ)" || true; \
@@ -213,11 +214,18 @@ deps: _ensure_python _deps_hash ## Install Python dependencies
 venv: deps ## Ensure virtualenv and Python dependencies
 
 _deps_hash:
+	@mkdir -p "$(VENV)"
 	@{ cat pyproject.toml 2>/dev/null || true; echo; cat $(REQ) 2>/dev/null || true; echo; cat $(DEV_REQ) 2>/dev/null || true; } \
 	| sha256sum | awk '{print $$1}' > $(REQS_HASH).new
 
 _ensure_python:
 	@command -v $(PY) >/dev/null 2>&1 || { echo "✗ $(PY) not found on PATH"; exit 1; }
+
+_ensure_venv_python:
+	@$(VENV_PYTHON) -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' || { \
+		echo "✗ $(VENV) uses unsupported Python. Move it aside and rerun: mv $(VENV) $(VENV).old && make deps PY=$(PY)"; \
+		exit 1; \
+	}
 
 _ensure_dirs:
 	@mkdir -p $(PID_DIR) $(LOG_DIR)

@@ -477,6 +477,111 @@ def test_research_check_sweep_builds_variant_metric_request(monkeypatch):
     }
 
 
+def test_research_check_sweep_dispatches_async_job(monkeypatch, capsys):
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        observed["method"] = request.get_method()
+        observed["path"] = urllib.parse.urlparse(request.full_url).path
+        observed["body"] = json.loads(request.data.decode("utf-8"))
+        return _Response(
+            b'{"schema_version":"research_job_dispatch.v1","job_id":"job-1","job_type":"research_check_sweep","status":"queued","reused":false}'
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "research",
+            "check",
+            "sweep",
+            "--dispatch",
+            "--title",
+            "Retest sweep",
+            "--check-family",
+            "candidate_lifecycle",
+            "--indicator-id",
+            "indicator-1",
+            "--instrument-id",
+            "inst-eth",
+            "--timeframe",
+            "1h",
+            "--start",
+            "2026-01-01T00:00:00Z",
+            "--end",
+            "2026-02-01T00:00:00Z",
+            "--detector-json",
+            '{"type":"candidate_lifecycle","family":"retest"}',
+            "--variant",
+            "base",
+            "--rank-by",
+            "sample_count",
+            "--rank-direction",
+            "desc",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert observed["method"] == "POST"
+    assert observed["path"] == "/api/research/jobs/checks/sweep"
+    assert observed["body"]["title"] == "Retest sweep"
+    assert "Job id: job-1" in output
+    assert "research jobs status job-1" in output
+
+
+def test_research_jobs_status_and_result_use_backend_routes(monkeypatch, capsys):
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        path = urllib.parse.urlparse(request.full_url).path
+        calls.append((request.get_method(), path))
+        if path.endswith("/result"):
+            return _Response(
+                b'{"schema_version":"research_job_status.v1","job_id":"job-1","status":"succeeded","result":{"schema_version":"research_check_sweep.v1","leaderboard":{"schema_version":"research_metric_leaderboard.v1","rank_by":"sample_count","display_metrics":[],"rows":[{"rank":1,"variant_id":"base","scope_id":"scope","status":"completed","sample_count":3,"rank_metric":{"path":"sample_count","value":3},"recommendation":"promote_to_hypothesis","caveat_count":0}]}}}'
+            )
+        return _Response(
+            b'{"schema_version":"research_job_status.v1","job_id":"job-1","job_type":"research_check_sweep","status":"succeeded","attempts":1,"max_attempts":2,"result_summary":{"result_type":"research_check_sweep","evaluation_count":1}}'
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    assert main(["--no-audit-log", "research", "jobs", "status", "job-1"]) == 0
+    assert main(["--no-audit-log", "research", "jobs", "result", "job-1", "--format", "table"]) == 0
+
+    output = capsys.readouterr().out
+    assert calls == [
+        ("GET", "/api/research/jobs/job-1"),
+        ("GET", "/api/research/jobs/job-1/result"),
+    ]
+    assert "Status: succeeded" in output
+    assert "variant" in output
+    assert "base" in output
+
+
+def test_research_job_result_table_falls_back_to_summary_for_single_check(monkeypatch, capsys):
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        path = urllib.parse.urlparse(request.full_url).path
+        assert path == "/api/research/jobs/job-raw/result"
+        return _Response(
+            b'{"schema_version":"research_job_status.v1","job_id":"job-raw","job_type":"research_check_run","status":"succeeded","attempts":1,"max_attempts":2,"result_summary":{"schema_version":"research_job_result_summary.v1","result_type":"research_check_run","sample_count":12,"recommendation":"needs_more_data"},"result":{"schema_version":"research_check_run.v1","status":"completed","check":{"symbol":"ETH/USD","timeframe":"1h"},"result":{"check_id":"check-1","sample_count":12,"recommendation":"needs_more_data"}}}'
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    assert main(["--no-audit-log", "research", "jobs", "result", "job-raw", "--format", "table"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Research job: job-raw" in output
+    assert "Samples: 12" in output
+    assert "Next:" not in output
+    assert '"schema_version"' not in output
+
+
 def test_research_read_models_use_backend_routes(monkeypatch):
     calls = []
 

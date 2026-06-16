@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+repo_root="$(cd "$script_dir/.." >/dev/null 2>&1 && pwd)"
+venv_qt="$repo_root/.venv/bin/qt"
+
+if [ -x "$venv_qt" ]; then
+  exec "$venv_qt" "$@"
+fi
+
+python_bin=""
+for candidate in python3.12 python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1; then
+    python_bin="$candidate"
+    break
+  fi
+done
+
+if [ -z "$python_bin" ]; then
+  echo "qt dispatcher failed: Python 3.12+ is required; install Python 3.12 and run make deps" >&2
+  exit 127
+fi
+
+if ! "$python_bin" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1; then
+  echo "qt dispatcher failed: bootstrap interpreter must be Python 3.12+; got $("$python_bin" --version 2>&1)" >&2
+  exit 127
+fi
+
+export PYTHONPATH="$repo_root:$repo_root/src${PYTHONPATH:+:$PYTHONPATH}"
+cd "$repo_root"
+exec "$python_bin" -m cli.main "$@"

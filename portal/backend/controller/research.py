@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ..service import research as research_service
+from ..service.research import async_dispatch as research_async_dispatch
 
 
 router = APIRouter()
@@ -133,6 +134,40 @@ async def sweep_research_checks(body: ResearchCheckSweepRequest) -> Dict[str, An
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/jobs/checks/run", status_code=202)
+async def dispatch_research_check(body: ResearchCheckRunRequest) -> Dict[str, Any]:
+    try:
+        return research_async_dispatch.dispatch_research_check_run(_model_payload(body))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/jobs/checks/sweep", status_code=202)
+async def dispatch_research_check_sweep(body: ResearchCheckSweepRequest) -> Dict[str, Any]:
+    try:
+        return research_async_dispatch.dispatch_research_check_sweep(_model_payload(body))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/jobs/{job_id}")
+async def get_research_job_status(job_id: str) -> Dict[str, Any]:
+    try:
+        return research_async_dispatch.get_research_job_status(job_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/jobs/{job_id}/result")
+async def get_research_job_result(job_id: str) -> Dict[str, Any]:
+    try:
+        return research_async_dispatch.get_research_job_result(job_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.get("/checks/compare")

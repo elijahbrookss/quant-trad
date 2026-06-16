@@ -85,14 +85,16 @@ def main() -> int:
     host = _SETTINGS.backend.host
     port = _SETTINGS.backend.port
     indicator_workers = _SETTINGS.workers.indicators.processes
+    research_workers = _SETTINGS.workers.research.processes
     node = socket.gethostname()
 
     logger.info(
-        "backend_supervisor_starting | node=%s api=%s:%s indicator_workers=%s",
+        "backend_supervisor_starting | node=%s api=%s:%s indicator_workers=%s research_workers=%s",
         node,
         host,
         str(port),
         indicator_workers,
+        research_workers,
     )
 
     processes: List[ManagedProcess] = []
@@ -116,6 +118,18 @@ def main() -> int:
                 env_overrides={
                     "QT_WORKERS_INDICATORS_INDEX": str(idx),
                     "QT_WORKERS_INDICATORS_TOTAL": str(indicator_workers),
+                },
+            )
+        )
+
+    for idx in range(research_workers):
+        processes.append(
+            _spawn_process(
+                f"research-worker-{idx}",
+                [sys.executable, "-m", "portal.backend.workers.research_worker"],
+                env_overrides={
+                    "QT_WORKERS_RESEARCH_INDEX": str(idx),
+                    "QT_WORKERS_RESEARCH_TOTAL": str(research_workers),
                 },
             )
         )

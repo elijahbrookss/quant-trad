@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import logging
 from typing import Any, Iterable
 
 import pytest
@@ -108,6 +109,41 @@ def _database_with_fake_engine(monkeypatch, inspector: _Inspector) -> tuple[db_s
     database = db_session.Database("postgresql+psycopg2://test:test@localhost/test")
     database._engine = _Engine(connection)
     return database, connection
+
+
+def test_redact_dsn_for_log_removes_userinfo_and_sensitive_query_values() -> None:
+    redacted = db_session._redact_dsn_for_log(
+        "postgresql+psycopg2://quanttrad:super-secret@tsdb:5432/quanttrad"
+        "?sslmode=require&token=raw-token&sslkey=/private/key.pem"
+    )
+
+    assert "quanttrad:super-secret" not in redacted
+    assert "super-secret" not in redacted
+    assert "raw-token" not in redacted
+    assert "/private/key.pem" not in redacted
+    assert redacted == (
+        "postgresql+psycopg2://redacted:***@tsdb:5432/quanttrad"
+        "?sslkey=redacted&sslmode=require&token=redacted"
+    )
+
+
+def test_database_ready_log_redacts_dsn(monkeypatch, caplog) -> None:
+    database = db_session.Database(
+        "postgresql+psycopg2://quanttrad:super-secret@tsdb:5432/quanttrad?token=raw-token"
+    )
+    database._engine = object()
+    database._session_factory = object()
+    monkeypatch.setattr(database, "_bootstrap_schema_contract", lambda: None)
+
+    caplog.set_level(logging.INFO, logger=db_session.logger.name)
+
+    assert database.ensure_schema() is True
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "portal_db_ready" in messages
+    assert "super-secret" not in messages
+    assert "raw-token" not in messages
+    assert "postgresql+psycopg2://redacted:***@tsdb:5432/quanttrad?token=redacted" in messages
 
 
 def test_bootstrap_fresh_database_creates_current_tables_and_indexes(monkeypatch) -> None:

@@ -21,6 +21,7 @@ from .experiments.runner import ExperimentRunner
 from .experiments.state_store import ExperimentStateStore, find_experiment_dir
 from .experiments.summarize import summarize_experiment, write_experiment_summary
 from .logs import DEFAULT_LOKI_URL, LokiClient, doctor_log_payload, query_log_payload, run_log_payload
+from .setup import setup_doctor_payload, setup_env_payload
 
 
 TERMINAL_STATUSES = {
@@ -1363,6 +1364,10 @@ def _research_check_request_base(args: argparse.Namespace, *, title: str, check_
 
 
 def _post_research_check(args: argparse.Namespace, payload: dict[str, Any]) -> int:
+    if getattr(args, "dispatch", False):
+        result = _client(args).request_json("POST", "/api/research/jobs/checks/run", payload=payload)
+        _print_research_job_dispatch(result)
+        return 0
     _print_json(_client(args).request_json("POST", "/api/research/checks/run", payload=payload))
     return 0
 
@@ -1635,11 +1640,89 @@ def _cmd_research_check_sweep(args: argparse.Namespace) -> int:
     if "scope" not in payload and "scopes" not in payload:
         raise ValueError("research check sweep requires scope flags, request.scope, or request.scopes")
 
+    if getattr(args, "dispatch", False):
+        result = _client(args).request_json("POST", "/api/research/jobs/checks/sweep", payload=payload)
+        _print_research_job_dispatch(result)
+        return 0
+
     result = _client(args).request_json("POST", "/api/research/checks/sweep", payload=payload)
     if str(getattr(args, "format", "json") or "json") == "table":
         _print_research_leaderboard_table(result)
     else:
         _print_json(result)
+    return 0
+
+
+def _print_research_job_dispatch(payload: dict[str, Any]) -> None:
+    job_id = str(payload.get("job_id") or "")
+    status = str(payload.get("status") or "")
+    job_type = str(payload.get("job_type") or "")
+    reused = bool(payload.get("reused"))
+    print(f"Research job {status}.", flush=True)
+    print(f"Job id: {job_id}", flush=True)
+    print(f"Type: {job_type}", flush=True)
+    if reused:
+        print("Reused existing in-flight job.", flush=True)
+    print("", flush=True)
+    print("Next:", flush=True)
+    print(f"  ./scripts/qt research jobs status {job_id}", flush=True)
+    print(f"  ./scripts/qt research jobs result {job_id} --format table", flush=True)
+
+
+def _print_research_job_status(payload: dict[str, Any], *, show_next: bool = True) -> None:
+    job_id = str(payload.get("job_id") or "")
+    status = str(payload.get("status") or "")
+    print(f"Research job: {job_id}", flush=True)
+    print(f"Status: {status}", flush=True)
+    print(f"Type: {payload.get('job_type') or ''}", flush=True)
+    print(f"Attempts: {payload.get('attempts')}/{payload.get('max_attempts')}", flush=True)
+    for label, key in (("Created", "created_at"), ("Started", "started_at"), ("Finished", "finished_at")):
+        if payload.get(key):
+            print(f"{label}: {payload[key]}", flush=True)
+    if payload.get("error"):
+        print(f"Error: {payload['error']}", flush=True)
+    summary = payload.get("result_summary") if isinstance(payload.get("result_summary"), dict) else {}
+    if summary:
+        result_type = str(summary.get("result_type") or "")
+        print(f"Result: {result_type}", flush=True)
+        if summary.get("evaluation_count") is not None:
+            print(f"Evaluations: {summary.get('evaluation_count')}", flush=True)
+        if summary.get("sample_count") is not None:
+            print(f"Samples: {summary.get('sample_count')}", flush=True)
+        if summary.get("recommendation"):
+            print(f"Recommendation: {summary.get('recommendation')}", flush=True)
+    if not show_next:
+        return
+    if status != "succeeded":
+        print("", flush=True)
+        print("Next:", flush=True)
+        print(f"  ./scripts/qt research jobs status {job_id}", flush=True)
+    else:
+        print("", flush=True)
+        print("Next:", flush=True)
+        print(f"  ./scripts/qt research jobs result {job_id} --format table", flush=True)
+
+
+def _cmd_research_job_status(args: argparse.Namespace) -> int:
+    payload = _client(args).request_json("GET", f"/api/research/jobs/{args.job_id}")
+    if getattr(args, "json", False):
+        _print_json(payload)
+    else:
+        _print_research_job_status(payload)
+    return 0
+
+
+def _cmd_research_job_result(args: argparse.Namespace) -> int:
+    payload = _client(args).request_json("GET", f"/api/research/jobs/{args.job_id}/result")
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    output_format = str(getattr(args, "format", "auto") or "auto")
+    result_schema = str(result.get("schema_version") or "")
+    if output_format == "json":
+        _print_json(result or payload)
+    elif (output_format in {"auto", "table"}) and result_schema == "research_check_sweep.v1":
+        _print_research_leaderboard_table(result)
+    else:
+        _print_research_job_status(payload, show_next=False)
     return 0
 
 
@@ -1958,6 +2041,100 @@ def _cmd_provider_credentials_revoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_setup_doctor(args: argparse.Namespace) -> int:
+    payload = setup_doctor_payload(
+        venv=args.venv,
+        api_url=args.api_url,
+        timeout=min(float(args.timeout), float(args.backend_timeout)),
+        include_backend=not args.no_backend,
+    )
+    _print_json(payload)
+    return 0 if payload.get("status") in {"ok", "degraded"} else 1
+
+
+def _cmd_setup_env(args: argparse.Namespace) -> int:
+    code, payload = setup_env_payload()
+    _print_json(payload)
+    return code
+
+
+def _cmd_setup_provider_coinbase(args: argparse.Namespace) -> int:
+    provider = "COINBASE"
+    venue = "COINBASE_DIRECT"
+    client = _client(args)
+    schema = client.request_json(
+        "GET",
+        "/api/providers/credentials/schema",
+        params={
+            "provider_id": provider,
+            "venue_id": venue,
+            "environment": args.environment,
+        },
+    )
+    if not isinstance(schema, dict):
+        raise ApiError("GET credential schema returned an unexpected payload")
+
+    credentials = _collect_credential_values(args, schema)
+    save_payload = {
+        "provider_id": provider,
+        "venue_id": venue,
+        "credential_ref": args.ref or schema.get("default_credential_ref"),
+        "environment": schema.get("environment") or args.environment,
+        "display_name": args.display_name,
+        "credentials": credentials,
+    }
+    saved = client.request_json("POST", "/api/providers/credentials", payload=save_payload)
+    credential_ref = (
+        ((saved.get("credential") or {}) if isinstance(saved, dict) else {}).get("credential_ref")
+        or args.ref
+        or schema.get("default_credential_ref")
+    )
+    validation = client.request_json("POST", f"/api/providers/credentials/{credential_ref}/validate")
+
+    result: dict[str, Any] = {
+        "schema_version": "qt_setup_provider.v1",
+        "operation": "provider",
+        "provider": provider,
+        "venue": venue,
+        "environment": schema.get("environment") or args.environment,
+        "status": "ok",
+        "credential_ref": credential_ref,
+        "credential": saved.get("credential") if isinstance(saved, dict) else saved,
+        "validation": validation.get("credential") if isinstance(validation, dict) else validation,
+        "secrets_are_returned": False,
+        "next_steps": [
+            "Use this credential_ref in provider-backed paper/live workflows when a ref is required.",
+            "Run `./scripts/qt providers stream-smoke --provider COINBASE --venue COINBASE_DIRECT --symbol <symbol> --auth-mode authenticated` when you want a live provider smoke check.",
+        ],
+    }
+
+    if args.stream_smoke:
+        if not args.symbol:
+            raise ValueError("--symbol is required with --stream-smoke")
+        smoke_payload = {
+            "provider_id": provider,
+            "venue_id": venue,
+            "symbol": args.symbol,
+            "product_id": args.product_id,
+            "channels": args.channel or None,
+            "timeframe": args.timeframe,
+            "auth_mode": args.auth_mode,
+            "duration_seconds": args.duration,
+            "sample_limit": args.sample_limit,
+        }
+        smoke_client = ApiClient(
+            args.api_url,
+            timeout=max(float(args.timeout), float(args.duration) + 10.0),
+        )
+        smoke = smoke_client.request_json("POST", "/api/providers/stream-smoke", payload=smoke_payload)
+        result["stream_smoke"] = smoke
+        if str(smoke.get("status") or "").lower() != "completed":
+            result["status"] = "needs_attention"
+
+    _print_json(result)
+    return 0 if result.get("status") == "ok" else 1
+
+
 def _ensure_run_report_materialized(client: ApiClient, run_id: str, *, force_rebuild: bool = False) -> dict[str, Any]:
     payload = client.request_json(
         "POST",
@@ -2240,6 +2417,43 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Quant-Trad API-backed research CLI.")
     _add_global_args(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    setup = subparsers.add_parser("setup", help="Canonical local onboarding and readiness checks.")
+    setup_sub = setup.add_subparsers(dest="setup_command", required=True)
+    setup_doctor = setup_sub.add_parser("doctor", help="Check local setup readiness.")
+    setup_doctor.add_argument("--venv", default=".venv", help="Virtualenv path. Defaults to .venv.")
+    setup_doctor.add_argument("--backend-timeout", type=float, default=2.0, help="Bounded backend probe timeout.")
+    setup_doctor.add_argument("--no-backend", action="store_true", help="Skip the optional backend health probe.")
+    setup_doctor.set_defaults(func=_cmd_setup_doctor)
+    setup_env = setup_sub.add_parser("env", help="Create or repair the local operator secrets.env file.")
+    setup_env.set_defaults(func=_cmd_setup_env)
+    setup_provider = setup_sub.add_parser("provider", help="Provider-specific onboarding through canonical provider APIs.")
+    setup_provider_sub = setup_provider.add_subparsers(dest="setup_provider_command", required=True)
+    setup_coinbase = setup_provider_sub.add_parser("coinbase", help="Store and validate Coinbase Direct credential refs.")
+    setup_coinbase.add_argument("--environment", default="paper")
+    setup_coinbase.add_argument("--ref", help="Credential reference. Defaults to provider-venue-environment.")
+    setup_coinbase.add_argument("--display-name")
+    setup_coinbase.add_argument(
+        "--secrets-json",
+        help="Secret JSON object as a path, inline object, or '-' for stdin. Prefer '-' so secrets do not enter shell history.",
+    )
+    setup_coinbase.add_argument(
+        "--secret-env",
+        action="append",
+        default=[],
+        help="Map a credential key to an environment variable, e.g. COINBASE_API_KEY=QT_COINBASE_KEY.",
+    )
+    setup_coinbase.add_argument("--from-env", action="store_true", help="Read accepted credential keys from matching environment variables.")
+    setup_coinbase.add_argument("--no-input", action="store_true", help="Fail instead of prompting for missing required secrets.")
+    setup_coinbase.add_argument("--stream-smoke", action="store_true", help="Run a bounded provider stream smoke check after saving credentials.")
+    setup_coinbase.add_argument("--symbol", help="Required with --stream-smoke.")
+    setup_coinbase.add_argument("--product-id", help="Provider product id. Defaults to --symbol.")
+    setup_coinbase.add_argument("--channel", action="append", default=[], help="Provider channel. Repeat for multiple channels.")
+    setup_coinbase.add_argument("--timeframe")
+    setup_coinbase.add_argument("--auth-mode", default="authenticated")
+    setup_coinbase.add_argument("--duration", type=float, default=10.0, help="Smoke duration in seconds.")
+    setup_coinbase.add_argument("--sample-limit", type=int, default=10)
+    setup_coinbase.set_defaults(func=_cmd_setup_provider_coinbase)
 
     health = subparsers.add_parser("health", help="Check backend API health.")
     health.set_defaults(func=_cmd_health)
@@ -2723,6 +2937,17 @@ def build_parser() -> argparse.ArgumentParser:
     research_links_list.add_argument("--outbound-only", action="store_false", dest="include_inbound")
     research_links_list.set_defaults(func=_cmd_research_links_list)
 
+    research_jobs = research_sub.add_parser("jobs", help="Asynchronous research check job commands.")
+    research_jobs_sub = research_jobs.add_subparsers(dest="research_jobs_command", required=True)
+    research_jobs_status = research_jobs_sub.add_parser("status", help="Show a dispatched research job status.")
+    research_jobs_status.add_argument("job_id")
+    research_jobs_status.add_argument("--json", action="store_true", help="Print the machine-readable status payload.")
+    research_jobs_status.set_defaults(func=_cmd_research_job_status)
+    research_jobs_result = research_jobs_sub.add_parser("result", help="Print a completed research job result.")
+    research_jobs_result.add_argument("job_id")
+    research_jobs_result.add_argument("--format", choices=["auto", "json", "table", "summary"], default="auto")
+    research_jobs_result.set_defaults(func=_cmd_research_job_result)
+
     def add_research_check_base_args(command: argparse.ArgumentParser) -> None:
         command.add_argument("--request-json", help="research_check_request.v1 JSON object path, inline object, or '-'.")
         command.add_argument("--title")
@@ -2733,6 +2958,7 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--bucket-by", help="Comma-separated bucket fields.")
         command.add_argument("--max-examples", type=int)
         command.add_argument("--tag", action="append", default=[])
+        command.add_argument("--dispatch", action="store_true", help="Queue the check as an async research job and return the job id.")
 
     def add_research_window_args(command: argparse.ArgumentParser) -> None:
         command.add_argument("--instrument-id")
@@ -2840,6 +3066,7 @@ def build_parser() -> argparse.ArgumentParser:
     research_check_sweep.add_argument("--rank-direction", choices=["asc", "desc"], help="Ranking direction for --rank-by.")
     research_check_sweep.add_argument("--display-metric", action="append", default=[], help="Additional numeric result path to include in the leaderboard.")
     research_check_sweep.add_argument("--format", choices=["json", "table"], default="json")
+    research_check_sweep.add_argument("--dispatch", action="store_true", help="Queue the sweep as an async research job and return the job id.")
     research_check_sweep.set_defaults(func=_cmd_research_check_sweep)
 
     research_check_signal = research_check_sub.add_parser("signal", help="Check completed run signal evidence.")

@@ -8,6 +8,7 @@ from typing import Dict, Iterator, Optional
 
 from core.settings import get_settings
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.schema import CreateIndex, CreateSchema, CreateTable
@@ -28,12 +29,52 @@ from .models import (
 logger = logging.getLogger(__name__)
 _SCHEMA_LOCK_KEY = 9021001
 _DB_SETTINGS = get_settings().database
+_SENSITIVE_DSN_QUERY_TOKENS = (
+    "api_key",
+    "credential",
+    "key",
+    "pass",
+    "password",
+    "pwd",
+    "secret",
+    "token",
+)
 _HARD_CUTOVER_TABLE_RENAMES = {
     (None, "portal_report_materializations"): "portal_report_materializations_v1",
     (None, "portal_bot_run_step_rollups"): "portal_bot_run_step_rollups_v1",
     ("observability_events", "botlens_backend_events"): "botlens_backend_events_v1",
     ("observability_metrics", "botlens_backend_metric_rollups"): "botlens_backend_metric_rollups_v1",
 }
+
+
+def _redact_dsn_for_log(dsn: Optional[str]) -> str:
+    """Return a DSN safe for lifecycle logs while preserving routing context."""
+
+    raw = str(dsn or "").strip()
+    if not raw:
+        return "<unset>"
+    try:
+        url = make_url(raw)
+    except Exception:  # noqa: BLE001 - malformed DSNs may still contain secrets
+        return "<redacted-dsn>"
+
+    query = dict(url.query)
+    redacted_query: dict[str, object] = {}
+    for key, value in query.items():
+        key_lower = str(key).lower()
+        if any(token in key_lower for token in _SENSITIVE_DSN_QUERY_TOKENS):
+            if isinstance(value, tuple):
+                redacted_query[str(key)] = tuple("redacted" for _ in value)
+            else:
+                redacted_query[str(key)] = "redacted"
+        else:
+            redacted_query[str(key)] = value
+
+    if url.username is not None or url.password is not None:
+        url = url.set(username="redacted", password="redacted")
+    if redacted_query != query:
+        url = url.set(query=redacted_query)
+    return url.render_as_string(hide_password=True)
 
 
 class Database:
@@ -96,17 +137,17 @@ class Database:
                 )
             self._bootstrap_schema_contract()
             self._available = True
-            logger.info("portal_db_ready | dsn=%s", self.dsn)
+            logger.info("portal_db_ready | dsn=%s", _redact_dsn_for_log(self.dsn))
         except SQLAlchemyError as exc:
             self._error = exc
             self._available = False
             self._reset_engine()
-            logger.warning("portal_db_unavailable | dsn=%s | error=%s", self.dsn, exc)
+            logger.warning("portal_db_unavailable | dsn=%s | error=%s", _redact_dsn_for_log(self.dsn), exc)
         except Exception as exc:  # noqa: BLE001 - defensive catch
             self._error = exc
             self._available = False
             self._reset_engine()
-            logger.exception("portal_db_initialise_failed | dsn=%s", self.dsn)
+            logger.exception("portal_db_initialise_failed | dsn=%s", _redact_dsn_for_log(self.dsn))
         return self._available
 
     @contextmanager

@@ -17,7 +17,9 @@ code_paths:
   - src/core/settings.py
   - portal/backend/controller/providers.py
   - portal/backend/service/providers
+  - portal/backend/db/session.py
   - portal/backend/service/bots/runner.py
+  - cli/setup.py
   - cli/main.py
   - cli/audit.py
 ---
@@ -50,6 +52,7 @@ remote or multi-tenant hosting.
 - Credential API reads return metadata only; secret values are never returned.
 - CLI credential add supports no-echo prompts, stdin JSON, and env-var mapping.
 - CLI audit logs redact `--secrets-json` and secret-bearing argument fields.
+- Portal DB lifecycle logs redact `PG_DSN` userinfo and sensitive query values.
 - Provider registry metadata declares required and optional credential keys so
   UI, CLI, agents, and adapters share one capability contract.
 - Provider adapters resolve credentials through the credential store rather than
@@ -93,16 +96,14 @@ Credentials are stored as `credential_ref` records:
 Typical human workflow:
 
 ```bash
-python -m cli.main providers credentials add --provider COINBASE --venue COINBASE_DIRECT
+qt setup provider coinbase
 ```
 
 Agent-safe workflow:
 
 ```bash
 printf '%s\n' '{"COINBASE_API_KEY":"...","COINBASE_API_SECRET":"..."}' \
-  | python -m cli.main providers credentials add \
-      --provider COINBASE \
-      --venue COINBASE_DIRECT \
+  | qt setup provider coinbase \
       --secrets-json - \
       --no-input
 ```

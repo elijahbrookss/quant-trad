@@ -18,6 +18,7 @@ code_paths:
   - cli/experiments
   - pyproject.toml
   - Makefile
+  - portal/backend/run_backend.py
   - portal/backend/controller/bots.py
   - portal/backend/controller/indicators.py
   - portal/backend/controller/reports.py
@@ -25,6 +26,7 @@ code_paths:
   - portal/backend/service/bots/bot_service.py
   - portal/backend/service/indicators/indicator_service
   - portal/backend/service/research
+  - portal/backend/workers/research_worker.py
   - portal/backend/service/reports/contract.py
   - portal/backend/service/reports/comparison.py
   - docs/engineering/developer-audit-workflow.md
@@ -71,6 +73,8 @@ The boundary may:
 - expose MCP resources and tools that call these same API and CLI contracts.
 - create research-memory observations, checks, hypotheses, studies, and links
   through the research API.
+- dispatch long-running research checks and sweeps through shared async jobs,
+  then read status/result contracts by job id.
 
 The boundary must not:
 
@@ -144,6 +148,12 @@ indicator-backed check variants, ranks explicit emitted metric paths, and can
 render either JSON or a compact metric table. It does not create research
 memory, execute strategies, or simulate trades.
 
+For heavier check runs and sweeps, `qt research check ... --dispatch` submits a
+research async job and returns a job id immediately. `qt research jobs status`
+and `qt research jobs result` read the shared backend job contract. This keeps
+agent workflows from polling progress while preserving the same research check
+contracts for final evidence.
+
 `qt experiments summarize` reads the local suite artifacts and emits
 `experiment_summary.v1`: suite status, compact run metrics, readiness caveats,
 section row counts, comparison deltas, pass gate status, and data preflight
@@ -201,6 +211,8 @@ for:
   `qt research check audit`, `qt research check lifecycle`,
   `qt research check signal`, `qt research check decision`, and
   `qt research check sweep`,
+- asynchronous research check dispatch through `qt research check ... --dispatch`
+  plus `qt research jobs status/result <job_id>`,
 - research evidence read models through `qt research run`, `qt research trail`,
   and `qt research compare`,
 - run lifecycle waiting through compact run status API state,

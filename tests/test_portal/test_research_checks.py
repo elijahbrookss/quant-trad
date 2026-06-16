@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -13,6 +14,8 @@ from fastapi.testclient import TestClient
 from portal.backend.controller import research as research_controller
 from portal.backend.main import app
 from portal.backend.service.research import checks, service
+from portal.backend.service.research import async_dispatch as research_async_dispatch
+from portal.backend.workers import research_worker
 
 
 def _candles() -> pd.DataFrame:
@@ -352,6 +355,60 @@ def test_research_check_sweep_ranks_metric_contract_and_reuses_scope_cache(
     assert len(candle_calls) == 1
     assert evidence_calls == [{}, {"touch_tolerance": 0.4}]
     assert created == []
+
+
+def test_research_check_sweep_dispatch_enqueues_async_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    enqueued: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(research_async_dispatch, "find_reusable_job", lambda **_kwargs: None)
+
+    def fake_enqueue_job(**kwargs):
+        enqueued.append(kwargs)
+        return "job-1"
+
+    monkeypatch.setattr(research_async_dispatch, "enqueue_job", fake_enqueue_job)
+
+    payload = research_async_dispatch.dispatch_research_check_sweep(
+        {
+            "title": "ATR sweep",
+            "check_family": "indicator_forward_outcome",
+            "scope": {
+                "indicator_id": "indicator-1",
+                "instrument_id": "inst-eth",
+                "timeframe": "1h",
+                "start": "2026-01-01T00:00:00Z",
+                "end": "2026-01-02T00:00:00Z",
+            },
+            "detector": {"type": "record_match", "output_name": "entry"},
+            "variants": [{"id": "base", "param_overrides": {}}],
+            "ranking": {"rank_by": "sample_count", "direction": "desc"},
+        }
+    )
+
+    assert payload["schema_version"] == "research_job_dispatch.v1"
+    assert payload["job_id"] == "job-1"
+    assert payload["job_type"] == research_async_dispatch.JOB_TYPE_RESEARCH_CHECK_SWEEP
+    assert enqueued[0]["job_type"] == research_async_dispatch.JOB_TYPE_RESEARCH_CHECK_SWEEP
+    assert enqueued[0]["payload"]["request"]["title"] == "ATR sweep"
+    assert enqueued[0]["payload"]["request_fingerprint"]
+
+
+def test_research_worker_processes_sweep_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: dict[str, Any] = {}
+
+    def fake_sweep(request):
+        observed["request"] = request
+        return {"schema_version": "research_check_sweep.v1", "evaluation_count": 1}
+
+    monkeypatch.setattr(research_worker.research_service, "sweep_research_checks", fake_sweep)
+
+    payload = research_worker.process_research_job(
+        research_async_dispatch.JOB_TYPE_RESEARCH_CHECK_SWEEP,
+        {"request": {"title": "ATR sweep", "check_family": "indicator_forward_outcome"}},
+    )
+
+    assert payload["schema_version"] == "research_check_sweep.v1"
+    assert observed["request"]["title"] == "ATR sweep"
 
 
 def test_research_check_sweep_fails_when_rank_metric_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1916,6 +1973,60 @@ def test_research_check_preview_and_sweep_routes_delegate_to_service(monkeypatch
     assert sweep_response.status_code == 200
     assert observed["evaluate"]["title"] == "Preview check"
     assert observed["sweep"]["check_family"] == "candidate_lifecycle"
+
+
+def test_research_job_routes_delegate_to_async_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed = {}
+
+    def fake_dispatch(payload):
+        observed["dispatch"] = payload
+        return {"schema_version": "research_job_dispatch.v1", "job_id": "job-1", "status": "queued"}
+
+    def fake_status(job_id: str):
+        observed["status"] = job_id
+        return {"schema_version": "research_job_status.v1", "job_id": job_id, "status": "queued"}
+
+    def fake_result(job_id: str):
+        observed["result"] = job_id
+        return {
+            "schema_version": "research_job_status.v1",
+            "job_id": job_id,
+            "status": "succeeded",
+            "result": {"schema_version": "research_check_sweep.v1", "evaluation_count": 1},
+        }
+
+    monkeypatch.setattr(research_controller.research_async_dispatch, "dispatch_research_check_sweep", fake_dispatch)
+    monkeypatch.setattr(research_controller.research_async_dispatch, "get_research_job_status", fake_status)
+    monkeypatch.setattr(research_controller.research_async_dispatch, "get_research_job_result", fake_result)
+
+    dispatch_response = asyncio.run(
+        research_controller.dispatch_research_check_sweep(
+            research_controller.ResearchCheckSweepRequest(
+                **{
+                    "check_family": "candidate_lifecycle",
+                    "scope": {
+                        "indicator_id": "indicator-1",
+                        "instrument_id": "inst-1",
+                        "timeframe": "1h",
+                        "start": "2026-01-01T00:00:00Z",
+                        "end": "2026-01-02T00:00:00Z",
+                    },
+                    "detector": {"type": "candidate_lifecycle"},
+                    "variants": [{"id": "base", "param_overrides": {}}],
+                    "ranking": {"rank_by": "sample_count", "direction": "desc"},
+                }
+            )
+        )
+    )
+    status_response = asyncio.run(research_controller.get_research_job_status("job-1"))
+    result_response = asyncio.run(research_controller.get_research_job_result("job-1"))
+
+    assert dispatch_response["job_id"] == "job-1"
+    assert status_response["status"] == "queued"
+    assert result_response["result"]["schema_version"] == "research_check_sweep.v1"
+    assert observed["dispatch"]["check_family"] == "candidate_lifecycle"
+    assert observed["status"] == "job-1"
+    assert observed["result"] == "job-1"
 
 
 def test_research_read_routes_delegate_to_service_exports(monkeypatch: pytest.MonkeyPatch) -> None:
