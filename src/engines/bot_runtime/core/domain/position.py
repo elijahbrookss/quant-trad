@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -16,6 +16,7 @@ from utils.log_context import build_log_context, with_log_context
 from ..execution import FillRejection, FillResult
 from ..execution_adapter import ExecutionAdapter
 from ..events import ExitSettlementPayload
+from ..execution_policy import ExitExecutionPolicy, exit_policy_for, fee_rate_for_role, normalize_liquidity_role
 from ..execution_profile import SeriesExecutionProfile
 from ..exit_settlement import ExitSettlement, ExitSettlementService
 from ..fees import executed_fee, executed_notional
@@ -99,6 +100,7 @@ class LadderPosition:
     trailing_distance_ticks: Optional[float] = None
     trailing_active: bool = False
     trailing_atr_multiple: float = 0.0
+    fixed_horizon_bars: Optional[int] = None
     pre_entry_context: Optional[Dict[str, Optional[float]]] = None
     wallet_fill_metadata: Dict[str, Any] = field(default_factory=dict)
     position_commit_seq: int = 0
@@ -124,25 +126,49 @@ class LadderPosition:
             self._update_net()
 
     def _execute_spot_fill(
-        self, price: float, contracts: float, side: str
+        self,
+        price: float,
+        contracts: float,
+        side: str,
+        *,
+        liquidity_role: object = "taker",
     ) -> Tuple[Optional[FillResult], Optional[FillRejection]]:
+        fee_rate = fee_rate_for_role(
+            role=liquidity_role,
+            maker_fee_rate=self.maker_fee_rate,
+            taker_fee_rate=self.taker_fee_rate,
+        )
         if self.execution_adapter:
-            return self.execution_adapter.fill_market(
+            fill, rejection = self.execution_adapter.fill_market(
                 side=side,
                 requested_qty=contracts,
                 price=price,
-                fee_rate=self.taker_fee_rate or 0.0,
+                fee_rate=fee_rate,
                 enforce_price_tick=False,
             )
+            return self._fill_with_liquidity_role(fill, liquidity_role), rejection
         if not self.execution_model:
             return None, None
-        return self.execution_model.fill_market(
+        fill, rejection = self.execution_model.fill_market(
             side=side,
             requested_qty=contracts,
             price=price,
-            fee_rate=self.taker_fee_rate or 0.0,
+            fee_rate=fee_rate,
             enforce_price_tick=False,
         )
+        return self._fill_with_liquidity_role(fill, liquidity_role), rejection
+
+    @staticmethod
+    def _fill_with_liquidity_role(
+        fill: Optional[FillResult],
+        liquidity_role: object,
+    ) -> Optional[FillResult]:
+        if fill is None:
+            return None
+        role = normalize_liquidity_role(liquidity_role)
+        metadata = dict(fill.metadata or {})
+        metadata.setdefault("liquidity_role", role)
+        return replace(fill, fee_role=role, metadata=metadata)
 
     def _exit_settlement(self) -> ExitSettlement:
         if self.exit_settlement:
@@ -175,6 +201,7 @@ class LadderPosition:
         """Check if candle price hits any target levels and process fills."""
         events: List[Dict[str, Any]] = []
         ordered = sorted(self.legs, key=lambda leg: leg.ticks)
+        policy = exit_policy_for("target")
 
         for leg in ordered:
             if leg.status != "open":
@@ -193,7 +220,10 @@ class LadderPosition:
             side = "sell" if self.direction == "long" else "buy"
             if self._uses_wallet_execution():
                 fill_result, rejection = self._execute_spot_fill(
-                    leg.target_price, leg.contracts, side=side
+                    leg.target_price,
+                    leg.contracts,
+                    side=side,
+                    liquidity_role=policy.liquidity_role,
                 )
                 if rejection:
                     context = build_log_context(
@@ -249,15 +279,15 @@ class LadderPosition:
             fee_value = (
                 float(fill_result.fee)
                 if fill_result
-                else self._fee_for_fill(exit_price, exit_qty)
+                else self._fee_for_fill(exit_price, exit_qty, liquidity_role=policy.liquidity_role)
             )
             notional = float(fill_result.notional) if fill_result else self._notional_for_fill(exit_price, exit_qty)
             self._apply_fee_amount(fee_value)
-            fee_metadata = self._fee_metadata_for_fill(fill_result)
+            fee_metadata = self._fee_metadata_for_fill(fill_result, liquidity_role=policy.liquidity_role)
 
             settlement_payload: ExitSettlementPayload = {
                 "event_type": "EXIT_FILL",
-                "exit_kind": "TARGET",
+                "exit_kind": policy.exit_kind,
                 "side": side,
                 "base_currency": self.base_currency or "",
                 "quote_currency": self.quote_currency_code or "",
@@ -297,14 +327,12 @@ class LadderPosition:
                     "fee_type": fee_metadata["fee_type"],
                     "fee_source": fee_metadata["fee_source"],
                     "fee_version": fee_metadata["fee_version"],
+                    "order_type": policy.order_type,
+                    "price_source": policy.price_source,
+                    "reason_code": policy.reason_code,
                     "settlement": settlement_payload,
                 }
             )
-
-            # Move to breakeven if threshold reached
-            if not self.moved_to_breakeven and leg.ticks >= self.breakeven_trigger_ticks:
-                self.stop_price = self.entry_price
-                self.moved_to_breakeven = True
 
         return events
 
@@ -341,8 +369,14 @@ class LadderPosition:
                 candidate = self.entry_price
             elif rule.get("action_type") == "move_to_r":
                 action_r = rule.get("action_r")
-                if action_r not in (None, 0) and self.r_value not in (None, 0):
-                    candidate = risk_math.price_from_r(self.entry_price, self.direction, float(self.r_value), float(action_r))
+                if action_r not in (None, 0) and self.r_ticks not in (None, 0):
+                    r_price = float(self.r_ticks) * float(self.tick_size)
+                    candidate = risk_math.price_from_r(
+                        self.entry_price,
+                        self.direction,
+                        r_price,
+                        float(action_r),
+                    )
 
             if candidate is None:
                 continue
@@ -366,6 +400,7 @@ class LadderPosition:
 
     def _apply_stop(self, candle: Candle) -> List[Dict[str, Any]]:
         events: List[Dict[str, Any]] = []
+        policy = exit_policy_for("stop")
         triggered = False
         if self.direction == "long" and candle.low <= self.stop_price:
             triggered = True
@@ -380,7 +415,10 @@ class LadderPosition:
                 side = "sell" if self.direction == "long" else "buy"
                 if self._uses_wallet_execution():
                     fill_result, rejection = self._execute_spot_fill(
-                        self.stop_price, leg.contracts, side=side
+                        self.stop_price,
+                        leg.contracts,
+                        side=side,
+                        liquidity_role=policy.liquidity_role,
                     )
                     if rejection:
                         context = build_log_context(
@@ -421,14 +459,14 @@ class LadderPosition:
                 fee_value = (
                     float(fill_result.fee)
                     if fill_result
-                    else self._fee_for_fill(exit_price, exit_qty)
+                    else self._fee_for_fill(exit_price, exit_qty, liquidity_role=policy.liquidity_role)
                 )
                 notional = float(fill_result.notional) if fill_result else self._notional_for_fill(exit_price, exit_qty)
                 self._apply_fee_amount(fee_value)
-                fee_metadata = self._fee_metadata_for_fill(fill_result)
+                fee_metadata = self._fee_metadata_for_fill(fill_result, liquidity_role=policy.liquidity_role)
                 settlement_payload: ExitSettlementPayload = {
                     "event_type": "EXIT_FILL",
-                    "exit_kind": "STOP",
+                    "exit_kind": policy.exit_kind,
                     "side": side,
                     "base_currency": self.base_currency or "",
                     "quote_currency": self.quote_currency_code or "",
@@ -467,6 +505,9 @@ class LadderPosition:
                         "fee_type": fee_metadata["fee_type"],
                         "fee_source": fee_metadata["fee_source"],
                         "fee_version": fee_metadata["fee_version"],
+                        "order_type": policy.order_type,
+                        "price_source": policy.price_source,
+                        "reason_code": policy.reason_code,
                         "settlement": settlement_payload,
                     }
                 )
@@ -525,7 +566,11 @@ class LadderPosition:
             stop_events = self._apply_stop(candle)
         if stop_events:
             events.extend(stop_events)
-        if not self.is_active():
+        if self.is_active():
+            fixed_horizon_events = self._maybe_apply_fixed_horizon_exit(candle)
+            if fixed_horizon_events:
+                events.extend(fixed_horizon_events)
+        if not self.is_active() and not any(event.get("type") == "close" for event in events):
             events.append(
                 {
                     "type": "close",
@@ -542,6 +587,17 @@ class LadderPosition:
             )
         return events
 
+    def _maybe_apply_fixed_horizon_exit(self, candle: Candle) -> List[Dict[str, Any]]:
+        bars = int(self.fixed_horizon_bars or 0)
+        if bars <= 0 or self.bars_held < bars:
+            return []
+        return self._close_open_legs_at_price(
+            candle,
+            exit_price_source=float(candle.close),
+            policy=exit_policy_for("fixed_horizon"),
+            rejection_event_name="fixed_horizon_close_rejected",
+        )
+
     def force_close_at_backtest_end(
         self,
         candle: Candle,
@@ -553,11 +609,30 @@ class LadderPosition:
         if not self.is_active():
             return []
 
+        normalized_reason = str(reason_code or "BACKTEST_END").strip().upper() or "BACKTEST_END"
+        policy = exit_policy_for(
+            "terminal_liquidation" if normalized_reason == "TERMINAL_LIQUIDATION" else "backtest_end"
+        )
+        if normalized_reason != policy.reason_code:
+            policy = replace(policy, reason_code=normalized_reason)
+        return self._close_open_legs_at_price(
+            candle,
+            exit_price_source=float(candle.close),
+            policy=policy,
+            rejection_event_name="backtest_terminal_close_rejected",
+        )
+
+    def _close_open_legs_at_price(
+        self,
+        candle: Candle,
+        *,
+        exit_price_source: float,
+        policy: ExitExecutionPolicy,
+        rejection_event_name: str,
+    ) -> List[Dict[str, Any]]:
         events: List[Dict[str, Any]] = []
-        exit_price_source = float(candle.close)
         event_time = isoformat(candle.time)
         side = "sell" if self.direction == "long" else "buy"
-        normalized_reason = str(reason_code or "BACKTEST_END").strip().upper() or "BACKTEST_END"
 
         for leg in self.legs:
             if leg.status != "open":
@@ -568,6 +643,7 @@ class LadderPosition:
                     exit_price_source,
                     leg.contracts,
                     side=side,
+                    liquidity_role=policy.liquidity_role,
                 )
                 if rejection:
                     context = build_log_context(
@@ -578,16 +654,16 @@ class LadderPosition:
                         price=round(exit_price_source, 4),
                         direction=self.direction,
                     )
-                    logger.error(with_log_context("backtest_terminal_close_rejected", context))
+                    logger.error(with_log_context(rejection_event_name, context))
                     raise RuntimeError(
-                        "backtest_terminal_close_rejected "
+                        f"{rejection_event_name} "
                         f"trade_id={self.trade_id} leg_id={leg.leg_id} reason={rejection.reason}"
                     )
 
             exit_price = fill_result.fill_price if fill_result else exit_price_source
             exit_qty = fill_result.filled_qty if fill_result else leg.contracts
             pnl = self._pnl_for_exit(exit_price, exit_qty)
-            leg.status = "backtest_end"
+            leg.status = policy.event_type
             leg.exit_price = exit_price
             leg.exit_time = event_time
             leg.exit_created_at = isoformat(datetime.now(timezone.utc))
@@ -597,14 +673,14 @@ class LadderPosition:
             fee_value = (
                 float(fill_result.fee)
                 if fill_result
-                else self._fee_for_fill(exit_price, exit_qty)
+                else self._fee_for_fill(exit_price, exit_qty, liquidity_role=policy.liquidity_role)
             )
             notional = float(fill_result.notional) if fill_result else self._notional_for_fill(exit_price, exit_qty)
             self._apply_fee_amount(fee_value)
-            fee_metadata = self._fee_metadata_for_fill(fill_result)
+            fee_metadata = self._fee_metadata_for_fill(fill_result, liquidity_role=policy.liquidity_role)
             settlement_payload: ExitSettlementPayload = {
                 "event_type": "EXIT_FILL",
-                "exit_kind": "CLOSE",
+                "exit_kind": policy.exit_kind,
                 "side": side,
                 "base_currency": self.base_currency or "",
                 "quote_currency": self.quote_currency_code or "",
@@ -626,7 +702,7 @@ class LadderPosition:
             }
             events.append(
                 {
-                    "type": "backtest_end",
+                    "type": policy.event_type,
                     "trade_id": self.trade_id,
                     "price": round(exit_price, 4),
                     "time": event_time,
@@ -643,15 +719,17 @@ class LadderPosition:
                     "fee_type": fee_metadata["fee_type"],
                     "fee_source": fee_metadata["fee_source"],
                     "fee_version": fee_metadata["fee_version"],
-                    "reason_code": normalized_reason,
-                    "close_reason": normalized_reason,
+                    "reason_code": policy.reason_code,
+                    "close_reason": policy.reason_code,
+                    "order_type": policy.order_type,
+                    "price_source": policy.price_source,
                     "settlement": settlement_payload,
                 }
             )
 
         if events or all(leg.status != "open" for leg in self.legs):
             self.closed_at = candle.time
-            self.close_reason = normalized_reason
+            self.close_reason = policy.reason_code
             events.append(
                 {
                     "type": "close",
@@ -664,8 +742,8 @@ class LadderPosition:
                     "contracts": sum(max(leg.contracts, 0) for leg in self.legs),
                     "direction": self.direction,
                     "metrics": self._metrics_snapshot(),
-                    "reason_code": normalized_reason,
-                    "close_reason": normalized_reason,
+                    "reason_code": policy.reason_code,
+                    "close_reason": policy.reason_code,
                     "exit_price": round(exit_price_source, 4),
                 }
             )
@@ -704,6 +782,7 @@ class LadderPosition:
             "mae_ticks": round(self.mae_ticks, 4),
             "mfe_ticks": round(self.mfe_ticks, 4),
             "bars_held": self.bars_held,
+            "fixed_horizon_bars": self.fixed_horizon_bars,
             "metrics": self._metrics_snapshot(),
             "position_commit_seq": int(self.position_commit_seq),
             "position_commit_seq_status": "position_scoped",
@@ -754,22 +833,40 @@ class LadderPosition:
             contract_size=self.contract_size,
         )
 
-    def _fee_for_fill(self, price: float, contracts: float) -> float:
+    def _fee_for_fill(self, price: float, contracts: float, *, liquidity_role: object = "taker") -> float:
         return executed_fee(
             price=price,
             quantity=contracts,
             contract_size=self.contract_size,
-            fee_rate=self.taker_fee_rate or 0.0,
+            fee_rate=fee_rate_for_role(
+                role=liquidity_role,
+                maker_fee_rate=self.maker_fee_rate,
+                taker_fee_rate=self.taker_fee_rate,
+            ),
         )
 
-    def _fee_metadata_for_fill(self, fill: Optional[FillResult]) -> Dict[str, Any]:
+    def _fee_metadata_for_fill(
+        self,
+        fill: Optional[FillResult],
+        *,
+        liquidity_role: object = "taker",
+    ) -> Dict[str, Any]:
         fee_rate = getattr(fill, "fee_rate", None) if fill is not None else None
         fee_type = getattr(fill, "fee_role", None) if fill is not None else None
         fee_source = getattr(fill, "fee_source", None) if fill is not None else None
         fee_version = getattr(fill, "fee_version", None) if fill is not None else None
+        fallback_role = normalize_liquidity_role(liquidity_role)
         return {
-            "fee_rate": float(fee_rate if fee_rate is not None else self.taker_fee_rate or 0.0),
-            "fee_type": str(fee_type or "taker"),
+            "fee_rate": float(
+                fee_rate
+                if fee_rate is not None
+                else fee_rate_for_role(
+                    role=fallback_role,
+                    maker_fee_rate=self.maker_fee_rate,
+                    taker_fee_rate=self.taker_fee_rate,
+                )
+            ),
+            "fee_type": str(fee_type or fallback_role),
             "fee_source": str(fee_source or self.fee_source or "template_or_instrument"),
             "fee_version": fee_version if fee_version is not None else self.fee_version,
         }
@@ -811,5 +908,6 @@ class LadderPosition:
             "mae_r": None if mae_r_clean is None else round(mae_r_clean, 6),
             "mfe_r": None if mfe_r_clean is None else round(mfe_r_clean, 6),
             "bars_held": self.bars_held,
+            "fixed_horizon_bars": self.fixed_horizon_bars,
             "pre_entry_context": dict(self.pre_entry_context or {}),
         }

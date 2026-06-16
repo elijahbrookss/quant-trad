@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Optional, TYPE_CHECKING
 
 from utils.log_context import build_log_context, with_log_context
@@ -157,8 +157,12 @@ class EntryExecutionCoordinator:
         request = pending.request
         engine = self._engine
         execution_model = engine._resolve_execution_model()
-        outcome, rejection = execution_model.evaluate(
+        pending_intent = replace(
             pending.intent,
+            metadata={**dict(pending.intent.metadata), "pending_evaluation": True},
+        )
+        outcome, rejection = execution_model.evaluate(
+            pending_intent,
             candle_high=candle.high,
             candle_low=candle.low,
             candle_close=candle.close,

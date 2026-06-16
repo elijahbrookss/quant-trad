@@ -1196,7 +1196,7 @@ class RuntimeExecutionLoopMixin:
                     event_ts = event.get("time")
                     if raw_subtype and event_ts:
                         event_subtype = str(raw_subtype)
-                        if event_subtype in {"target", "stop", "backtest_end", "terminal_liquidation"}:
+                        if event_subtype in {"target", "stop", "fixed_horizon", "backtest_end", "terminal_liquidation"}:
                             execution_events_logged += 1
                             self._emit_exit_filled_event(
                                 series=series,

@@ -84,6 +84,55 @@ Runtime separates source identity from execution modeling:
   It may carry sparse-source classifications into diagnostics, but it must not
   accept a truncated replay as a completed backtest window.
 
+## Position Lifecycle And Order Semantics
+
+ATM templates declare position lifecycle intent; runtime executes that intent.
+The canonical policy fields are:
+
+- `exit_plan.fixed_horizon`: close remaining open legs after `bars` completed
+  position bars at the strategy bar close. This is a market/taker close and
+  emits a `fixed_horizon` exit fill plus a close reason of `FIXED_HORIZON`.
+- `stop_adjustments`: one-time stop movement rules such as move-to-breakeven
+  at a configured R multiple or after a target hit. Runtime accepts both
+  normalized nested template rules and older flattened rules.
+- `breakeven`: direct breakeven activation for simple strategies when explicit
+  stop adjustments are not configured.
+- `trailing`: trailing-stop activation and distance config. A trailing stop may
+  only tighten in the favorable direction; it must never loosen an existing
+  stop.
+
+Runtime maps exit event types to liquidity roles:
+
+- target fills represent resting take-profit limits and use maker fees,
+- stop fills represent stop-market exits and use taker fees,
+- fixed-horizon and terminal closes are market closes and use taker fees.
+
+Limit-maker entries are post-only. If a submitted maker entry would cross the
+current reference price immediately, runtime rejects it with
+`POST_ONLY_WOULD_CROSS`. Once a maker order is accepted as resting, later bars
+may fill it as maker liquidity when price trades through the limit.
+
+Execution profiles remain the fee and instrument authority. Templates may
+request order style and exit behavior, but they must not patch missing
+instrument fee, tick, quantity, or margin fields.
+
+Entry timing beyond current signal-bar execution is not hidden behind a price
+anchor. A true next-bar entry model requires its own pending signal-entry
+lifecycle so reports can distinguish when the signal was known from when the
+order became executable.
+
+## Slippage Modeling Gap
+
+Slippage is not yet empirically calibrated. Runtime has deterministic execution
+hooks, but Quant-Trad does not yet have enough paper/live fill evidence to
+model symbol-, venue-, regime-, order-type-, and size-sensitive slippage with
+confidence.
+
+Until that evidence exists, slippage assumptions must be explicit and bounded.
+They must not be buried inside maker/taker fee logic, stop logic, or report
+summaries. Future slippage models should attach to the execution-policy
+boundary after order type, liquidity role, and fallback behavior are known.
+
 ## Diagram Walkthrough: Runtime Hot Path
 
 [runtime-hot-path.mmd](diagrams/runtime-hot-path.mmd) shows one run:

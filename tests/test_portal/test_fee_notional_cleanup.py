@@ -152,8 +152,9 @@ def test_exit_fee_uses_same_notional_function_and_is_applied_once():
     target = next(event for event in events if event["type"] == "target")
 
     assert target["notional"] == pytest.approx(executed_notional(price=110.0, quantity=5.0, contract_size=2.0))
-    assert target["fee_paid"] == pytest.approx(executed_fee(price=110.0, quantity=5.0, contract_size=2.0, fee_rate=0.001))
-    assert position.fees_paid == pytest.approx(2.1)
+    assert target["fee_paid"] == pytest.approx(executed_fee(price=110.0, quantity=5.0, contract_size=2.0, fee_rate=0.0005))
+    assert target["fee_type"] == "maker"
+    assert position.fees_paid == pytest.approx(1.55)
 
 
 def test_round_trip_fees_are_symmetric_entry_plus_exit():
@@ -164,7 +165,7 @@ def test_round_trip_fees_are_symmetric_entry_plus_exit():
     position.apply_bar(_candle(close=110.0, high=111.0, low=109.0))
 
     expected_entry = executed_fee(price=100.0, quantity=5.0, contract_size=2.0, fee_rate=0.001)
-    expected_exit = executed_fee(price=110.0, quantity=5.0, contract_size=2.0, fee_rate=0.001)
+    expected_exit = executed_fee(price=110.0, quantity=5.0, contract_size=2.0, fee_rate=0.0005)
     assert position.fees_paid == pytest.approx(expected_entry + expected_exit)
     assert position.net_pnl == pytest.approx(position.gross_pnl - position.fees_paid)
 
@@ -370,9 +371,9 @@ def test_wallet_projection_replay_does_not_double_apply_duplicate_fill_events():
             qty=5.0,
             price=110.0,
             notional=1100.0,
-            fee_paid=1.1,
-            fee_rate=0.001,
-            fee_type="taker",
+            fee_paid=0.55,
+            fee_rate=0.0005,
+            fee_type="maker",
             fee_source="instrument",
             realized_pnl=100.0,
             base_currency="BTC",
@@ -382,8 +383,8 @@ def test_wallet_projection_replay_does_not_double_apply_duplicate_fill_events():
             wallet_delta=WalletDelta(
                 collateral_reserved=0.0,
                 collateral_released=500.0,
-                fee_paid=1.1,
-                balance_delta=98.9,
+                fee_paid=0.55,
+                balance_delta=99.45,
             ),
             reason_code=None,
         ),
@@ -393,9 +394,9 @@ def test_wallet_projection_replay_does_not_double_apply_duplicate_fill_events():
 
     state = project_wallet_from_events([init, entry, entry, exit_event, exit_event])
 
-    assert state.balances["USD"] == pytest.approx(1097.9)
+    assert state.balances["USD"] == pytest.approx(1098.45)
     assert state.locked_margin.get("USD", 0.0) == pytest.approx(0.0)
-    assert state.free_collateral["USD"] == pytest.approx(1097.9)
+    assert state.free_collateral["USD"] == pytest.approx(1098.45)
 
 
 def test_margin_reservation_uses_corrected_fee_and_matches_wallet_hold():

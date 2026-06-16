@@ -112,6 +112,21 @@ class LadderRiskEngine:
         self.stop_adjustments_config: List[Dict[str, Any]] = list(self.template.get("stop_adjustments") or [])
         self.execution_mode = str(self.template.get("execution_mode") or "market").lower()
         self.limit_maker_config: Dict[str, Any] = dict(self.template.get("limit_maker") or {})
+        self.exit_plan_config: Dict[str, Any] = (
+            dict(self.template.get("exit_plan") or {})
+            if isinstance(self.template.get("exit_plan"), Mapping)
+            else {}
+        )
+        self.breakeven_config: Dict[str, Any] = (
+            dict(self.template.get("breakeven") or {})
+            if isinstance(self.template.get("breakeven"), Mapping)
+            else {}
+        )
+        self.trailing_config: Dict[str, Any] = (
+            dict(self.template.get("trailing") or {})
+            if isinstance(self.template.get("trailing"), Mapping)
+            else {}
+        )
 
         self.contract_size = float(self.execution_profile.constraints.contract_size)
         if self.contract_size in (None, 0):
@@ -183,6 +198,7 @@ class LadderRiskEngine:
             stop_ticks=self.stop_ticks,
             tick_size=self.tick_size,
             execution_mode=self.execution_mode,
+            fixed_horizon_bars=self._fixed_horizon_bars(),
             instrument_type=self.execution_profile.instrument.instrument_type if self.execution_profile is not None else None,
             accounting_mode=self.execution_profile.accounting_mode if self.execution_profile is not None else None,
             supports_margin=self.execution_profile.capabilities.supports_margin if self.execution_profile is not None else None,
@@ -1031,6 +1047,7 @@ class LadderRiskEngine:
         breakeven_ticks = 0.0 if runtime_stop_adjustments else self._breakeven_threshold(legs, pending.r_ticks)
         trailing_activation_ticks = self._trailing_activation_ticks(legs, pending.r_ticks)
         trailing_distance_ticks = self._trailing_distance_ticks(pending.atr_at_entry)
+        fixed_horizon_bars = self._fixed_horizon_bars()
         position = self._build_position(
             candle=candle,
             entry_price=avg_fill_price,
@@ -1052,6 +1069,7 @@ class LadderRiskEngine:
             breakeven_ticks=breakeven_ticks,
             trailing_activation_ticks=trailing_activation_ticks,
             trailing_distance_ticks=trailing_distance_ticks,
+            fixed_horizon_bars=fixed_horizon_bars,
             runtime_stop_adjustments=runtime_stop_adjustments,
             base_currency=base_currency,
             quote_currency=quote_currency,
@@ -1104,6 +1122,16 @@ class LadderRiskEngine:
     def _breakeven_threshold(self, legs: Sequence[Leg], r_ticks: Optional[float]) -> float:
         if self.stop_adjustments_config:
             return 0.0
+        breakeven_config = self.breakeven_config
+        if isinstance(breakeven_config, Mapping) and breakeven_config:
+            if breakeven_config.get("enabled") is False:
+                return 0.0
+            ticks = coerce_float(breakeven_config.get("ticks"))
+            if ticks not in (None, 0):
+                return max(float(ticks), 0.0)
+            r_multiple = coerce_float(breakeven_config.get("r_multiple"))
+            if r_multiple not in (None, 0) and r_ticks not in (None, 0):
+                return max(float(r_multiple) * float(r_ticks), 0.0)
         breakeven = self.template.get("breakeven_trigger_ticks")
         if breakeven not in (None, "", 0):
             try:
@@ -1116,6 +1144,30 @@ class LadderRiskEngine:
         return max(leg_ticks / 2, 0.0)
 
     def _trailing_activation_ticks(self, legs: Sequence[Leg], r_ticks: Optional[float]) -> Optional[float]:
+        trailing = self.trailing_config if isinstance(self.trailing_config, Mapping) else {}
+        if trailing:
+            if trailing.get("enabled") is False:
+                return None
+            activation_type = str(trailing.get("activation_type") or "r_multiple").lower()
+            if activation_type == "target_hit":
+                target_id = str(trailing.get("target_id") or "").strip()
+                target_index = coerce_float(trailing.get("target_index"))
+                if target_id:
+                    for leg in legs:
+                        if str(leg.leg_id or "") == target_id:
+                            return max(float(leg.ticks or 0), 0.0)
+                if target_index is not None:
+                    idx = max(int(target_index), 0)
+                    if idx < len(legs):
+                        return max(float(legs[idx].ticks or 0), 0.0)
+                return None
+            ticks = coerce_float(trailing.get("ticks"))
+            if ticks not in (None, 0):
+                return max(float(ticks), 0.0)
+            r_multiple = coerce_float(trailing.get("r_multiple"))
+            if r_multiple not in (None, 0) and r_ticks not in (None, 0):
+                return max(float(r_multiple) * float(r_ticks), 0.0)
+
         trailing_activation_config = self.template.get("trailing_activation")
         trailing_activation_ticks = None
         if trailing_activation_config:
@@ -1128,9 +1180,11 @@ class LadderRiskEngine:
         return float(trailing_activation_ticks)
 
     def _trailing_distance_ticks(self, atr_at_entry: Optional[float]) -> Optional[float]:
-        trailing = self.template.get("trailing_stop")
-        if not isinstance(trailing, Mapping):
-            trailing = {}
+        trailing = self.trailing_config if isinstance(self.trailing_config, Mapping) else {}
+        if not trailing:
+            trailing = self.template.get("trailing_stop")
+            if not isinstance(trailing, Mapping):
+                trailing = {}
         trailing_ticks = coerce_float(trailing.get("ticks"))
         trailing_atr_multiple = coerce_float(trailing.get("atr_multiplier"))
         trailing_distance_ticks = None
@@ -1139,6 +1193,16 @@ class LadderRiskEngine:
         elif trailing_ticks not in (None, 0):
             trailing_distance_ticks = float(trailing_ticks)
         return trailing_distance_ticks
+
+    def _fixed_horizon_bars(self) -> Optional[int]:
+        fixed = self.exit_plan_config.get("fixed_horizon")
+        if not isinstance(fixed, Mapping) or fixed.get("enabled") is False:
+            return None
+        try:
+            bars = int(fixed.get("bars") or 0)
+        except (TypeError, ValueError):
+            bars = 0
+        return bars if bars > 0 else None
 
     def _compute_r_ticks(self, candle: Candle) -> float:
         """Compute stop distance in ticks from initial_stop config.
@@ -1175,14 +1239,33 @@ class LadderRiskEngine:
         for entry in self.stop_adjustments_config:
             if not isinstance(entry, Mapping):
                 continue
-            trigger_type = str(entry.get("trigger_type") or "target_id")
+            trigger = entry.get("trigger") if isinstance(entry.get("trigger"), Mapping) else {}
+            action = entry.get("action") if isinstance(entry.get("action"), Mapping) else {}
+            trigger_type = str(
+                entry.get("trigger_type")
+                or trigger.get("type")
+                or "target_id"
+            ).replace("_reached", "")
             trigger_target_id = entry.get("trigger_target_id")
             trigger_ticks = coerce_float(entry.get("trigger_ticks"))
-            action_type = str(entry.get("action_type") or "move_to_breakeven")
+            trigger_value = coerce_float(entry.get("trigger_value"))
+            if trigger_value is None:
+                trigger_value = coerce_float(trigger.get("value"))
+            action_type = str(entry.get("action_type") or action.get("type") or "move_to_breakeven")
             action_r = coerce_float(entry.get("action_r"))
+            if action_r is None:
+                action_r = coerce_float(entry.get("action_value"))
+            if action_r is None:
+                action_r = coerce_float(action.get("value"))
+            if trigger_type == "r_multiple" and trigger_ticks in (None, 0) and trigger_value not in (None, 0) and r_ticks not in (None, 0):
+                trigger_ticks = float(trigger_value) * float(r_ticks)
+            if trigger_type == "target_hit" and not trigger_target_id:
+                trigger_target_id = entry.get("target_id") or entry.get("trigger_value")
+                if trigger_target_id is None:
+                    trigger_target_id = trigger.get("value")
             if trigger_type == "r_multiple" and trigger_ticks in (None, 0):
                 continue
-            if trigger_type != "r_multiple" and not trigger_target_id:
+            if trigger_type not in {"r_multiple"} and not trigger_target_id:
                 continue
             adjustments.append(
                 {
@@ -1208,6 +1291,7 @@ class LadderRiskEngine:
         breakeven_ticks: float,
         trailing_activation_ticks: Optional[float],
         trailing_distance_ticks: Optional[float],
+        fixed_horizon_bars: Optional[int],
         runtime_stop_adjustments: List[Dict[str, Any]],
         base_currency: Optional[str],
         quote_currency: Optional[str],
@@ -1220,9 +1304,6 @@ class LadderRiskEngine:
         use_wallet_execution: bool,
         execution_profile: Optional[SeriesExecutionProfile],
     ) -> LadderPosition:
-        self.trailing_config = (
-            self.template.get("trailing_stop") if isinstance(self.template.get("trailing_stop"), dict) else {}
-        )
         self._last_tp_allocation = None
         trailing_atr_multiple = float(self.trailing_config.get("atr_multiplier") or 0.0)
 
@@ -1263,6 +1344,7 @@ class LadderRiskEngine:
             trailing_activation_ticks=trailing_activation_ticks,
             trailing_distance_ticks=trailing_distance_ticks,
             trailing_atr_multiple=trailing_atr_multiple,
+            fixed_horizon_bars=fixed_horizon_bars,
             pre_entry_context=pre_entry_context,
             stop_adjustments=runtime_stop_adjustments,
             trade_id=trade_id,
@@ -1875,7 +1957,9 @@ class LadderRiskEngine:
             self._trade_material_value(getattr(trade, "stop_price", None)),
             bool(getattr(trade, "moved_to_breakeven", False)),
             bool(getattr(trade, "trailing_active", False)),
+            self._trade_material_value(getattr(trade, "fixed_horizon_bars", None)),
             isoformat(getattr(trade, "closed_at", None)),
+            str(getattr(trade, "close_reason", "") or ""),
             self._trade_material_value(getattr(trade, "gross_pnl", None)),
             self._trade_material_value(getattr(trade, "fees_paid", None)),
             self._trade_material_value(getattr(trade, "net_pnl", None)),

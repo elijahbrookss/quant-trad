@@ -299,6 +299,24 @@ def test_submit_entry_limit_maker_creates_pending_entry():
     assert pending.intent.order_type == "limit_maker"
 
 
+def test_submit_entry_limit_maker_rejects_marketable_post_only_order():
+    limit_maker = {
+        "anchor_price": "signal_price",
+        "offset_type": "ticks",
+        "offset_value": 0,
+        "validity_window": 1,
+        "fallback": "cancel",
+    }
+    engine = _build_spot_engine(execution_mode="limit_maker", limit_maker=limit_maker)
+    candle = _build_candle(close=100.0, atr=2.0)
+
+    position = engine.entry_execution.submit_entry(candle, "long")
+
+    assert position is None
+    assert engine.last_rejection_reason == "POST_ONLY_WOULD_CROSS"
+    assert engine.entry_execution.pending_entry is None
+
+
 def test_submit_entry_margin_capped_uses_request_qty():
     engine = _build_future_engine()
     engine.attach_wallet_gateway(SharedWalletGateway(_wallet_proxy({"USD": 500.0})))
@@ -396,6 +414,154 @@ def test_stop_movement_bumps_trade_revision_without_trade_event():
     assert position.stop_price == 104.0
     assert position.trailing_active is True
     assert engine.trade_revision == revision_after_open + 1
+
+
+def test_trailing_stop_from_normalized_config_only_tightens():
+    engine = _build_spot_engine(
+        base_risk_per_trade=8,
+        take_profit_orders=[{"id": "tp-1", "ticks": 100}],
+        extra_config={
+            "stop_adjustments": [],
+            "trailing": {
+                "enabled": True,
+                "activation_type": "r_multiple",
+                "r_multiple": 1.0,
+                "ticks": 2,
+            },
+        },
+    )
+    _enable_runtime_execution(engine)
+    entry = _build_candle(close=100.0, atr=2.0)
+    position = engine.maybe_enter(entry, "long")
+    assert position is not None
+
+    activate = Candle(
+        time=datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+        open=104.0,
+        high=106.0,
+        low=104.5,
+        close=105.0,
+        atr=2.0,
+    )
+    engine.step(activate)
+    assert position.trailing_active is True
+    assert position.stop_price == 104.0
+
+    lower_high = Candle(
+        time=datetime(2024, 1, 1, 2, tzinfo=timezone.utc),
+        open=104.5,
+        high=105.0,
+        low=104.25,
+        close=104.75,
+        atr=2.0,
+    )
+    engine.step(lower_high)
+    assert position.stop_price == 104.0
+
+    new_high = Candle(
+        time=datetime(2024, 1, 1, 3, tzinfo=timezone.utc),
+        open=107.0,
+        high=110.0,
+        low=106.0,
+        close=109.0,
+        atr=2.0,
+    )
+    engine.step(new_high)
+    assert position.stop_price == 108.0
+
+
+def test_fixed_horizon_exit_closes_after_configured_bars_with_taker_fee():
+    engine = _build_spot_engine(
+        base_risk_per_trade=8,
+        take_profit_orders=[{"id": "tp-1", "ticks": 100}],
+        extra_config={
+            "stop_adjustments": [],
+            "maker_fee_rate": 0.001,
+            "taker_fee_rate": 0.002,
+            "exit_plan": {"fixed_horizon": {"enabled": True, "bars": 2}},
+        },
+    )
+    _enable_runtime_execution(engine)
+    entry = _build_candle(close=100.0, atr=2.0)
+    position = engine.maybe_enter(entry, "long")
+    assert position is not None
+    assert position.fixed_horizon_bars == 2
+
+    first = Candle(
+        time=datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+        open=100.0,
+        high=102.0,
+        low=99.0,
+        close=101.0,
+        atr=2.0,
+    )
+    assert engine.step(first) == []
+    assert position.is_active()
+
+    second = Candle(
+        time=datetime(2024, 1, 1, 2, tzinfo=timezone.utc),
+        open=101.0,
+        high=103.0,
+        low=100.5,
+        close=102.0,
+        atr=2.0,
+    )
+    events = engine.step(second)
+
+    horizon_events = [event for event in events if event["type"] == "fixed_horizon"]
+    assert horizon_events
+    assert any(event["type"] == "close" for event in events)
+    assert engine.active_trade is None
+    assert position.close_reason == "FIXED_HORIZON"
+    assert horizon_events[0]["fee_type"] == "taker"
+    assert horizon_events[0]["order_type"] == "market"
+
+
+def test_target_exit_uses_maker_fee_and_stop_exit_uses_taker_fee():
+    maker_engine = _build_spot_engine(
+        base_risk_per_trade=8,
+        take_profit_orders=[{"id": "tp-1", "ticks": 5}],
+        extra_config={"maker_fee_rate": 0.001, "taker_fee_rate": 0.002},
+    )
+    _enable_runtime_execution(maker_engine)
+    entry = _build_candle(close=100.0, atr=2.0)
+    target_position = maker_engine.maybe_enter(entry, "long")
+    assert target_position is not None
+    target_bar = Candle(
+        time=datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+        open=100.0,
+        high=106.0,
+        low=101.0,
+        close=105.0,
+        atr=2.0,
+    )
+
+    target_events = maker_engine.step(target_bar)
+    target = next(event for event in target_events if event["type"] == "target")
+    assert target["fee_type"] == "maker"
+    assert target["order_type"] == "limit_resting"
+
+    taker_engine = _build_spot_engine(
+        base_risk_per_trade=8,
+        take_profit_orders=[{"id": "tp-1", "ticks": 100}],
+        extra_config={"stop_adjustments": [], "maker_fee_rate": 0.001, "taker_fee_rate": 0.002},
+    )
+    _enable_runtime_execution(taker_engine)
+    stop_position = taker_engine.maybe_enter(entry, "long")
+    assert stop_position is not None
+    stop_bar = Candle(
+        time=datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=95.0,
+        close=96.0,
+        atr=2.0,
+    )
+
+    stop_events = taker_engine.step(stop_bar)
+    stop = next(event for event in stop_events if event["type"] == "stop")
+    assert stop["fee_type"] == "taker"
+    assert stop["order_type"] == "stop_market"
 
 
 def test_target_fill_status_and_quantity_change_bumps_trade_revision():

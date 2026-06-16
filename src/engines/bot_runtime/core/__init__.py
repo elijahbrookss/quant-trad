@@ -24,6 +24,13 @@ from .execution import (
 from .execution_adapter import ExecutionAdapter, SpotExecutionAdapter, DerivativesExecutionAdapter
 from .execution_intent import ExecutionIntent, ExecutionOutcome, LimitParams
 from .execution_model import ExecutionModel
+from .execution_policy import (
+    ExitExecutionPolicy,
+    LiquidityRole,
+    exit_policy_for,
+    fee_rate_for_role,
+    normalize_liquidity_role,
+)
 from .execution_runtime import DeterministicExecutionModel
 from .entry_execution import EntryExecutionCoordinator, PendingEntry
 from .entry_settlement import EntrySettlement, EntrySettlementContext, EntrySettlementService
@@ -107,6 +114,11 @@ __all__ = [
     "ExecutionOutcome",
     "LimitParams",
     "ExecutionModel",
+    "ExitExecutionPolicy",
+    "LiquidityRole",
+    "exit_policy_for",
+    "fee_rate_for_role",
+    "normalize_liquidity_role",
     "DeterministicExecutionModel",
     "EntryExecutionCoordinator",
     "PendingEntry",
