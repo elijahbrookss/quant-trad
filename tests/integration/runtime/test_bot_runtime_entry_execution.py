@@ -294,9 +294,46 @@ def test_submit_entry_limit_maker_creates_pending_entry():
     assert position is None
     pending = engine.entry_execution.pending_entry
     assert pending is not None
-    assert pending.validity_remaining == 1
+    assert pending.validity_remaining == 2
     assert pending.fallback == "convert_to_market"
     assert pending.intent.order_type == "limit_maker"
+
+
+def test_limit_maker_entry_does_not_fill_from_signal_bar_range():
+    limit_maker = {
+        "anchor_price": "signal_price",
+        "offset_type": "ticks",
+        "offset_value": 5,
+        "validity_window": 1,
+        "fallback": "cancel",
+    }
+    engine = _build_spot_engine(execution_mode="limit_maker", limit_maker=limit_maker)
+    signal_bar = Candle(
+        time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=94.0,
+        close=100.0,
+        atr=2.0,
+    )
+
+    position = engine.entry_execution.submit_entry(signal_bar, "long")
+
+    assert position is None
+    assert engine.entry_execution.pending_entry is not None
+
+    next_bar = Candle(
+        time=datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+        open=100.0,
+        high=100.0,
+        low=94.0,
+        close=96.0,
+        atr=2.0,
+    )
+    position = engine.entry_execution.process_pending(next_bar)
+
+    assert position is not None
+    assert position.entry_price == 95.0
 
 
 def test_submit_entry_limit_maker_rejects_marketable_post_only_order():
@@ -315,6 +352,42 @@ def test_submit_entry_limit_maker_rejects_marketable_post_only_order():
     assert position is None
     assert engine.last_rejection_reason == "POST_ONLY_WOULD_CROSS"
     assert engine.entry_execution.pending_entry is None
+
+
+def test_limit_maker_rejects_fake_next_bar_anchor():
+    limit_maker = {
+        "anchor_price": "next_bar_open",
+        "offset_type": "ticks",
+        "offset_value": 5,
+        "validity_window": 1,
+        "fallback": "cancel",
+    }
+
+    try:
+        _build_spot_engine(execution_mode="limit_maker", limit_maker=limit_maker)
+    except ValueError as exc:
+        assert "Next-bar entry requires an explicit pending signal-entry lifecycle" in str(exc)
+    else:
+        raise AssertionError("expected next_bar_open to fail loud")
+
+
+def test_runtime_rejects_unimplemented_stop_adjustment_trail_atr_action():
+    try:
+        _build_spot_engine(
+            extra_config={
+                "stop_adjustments": [
+                    {
+                        "id": "sa-trail",
+                        "trigger": {"type": "r_multiple_reached", "value": 1.0},
+                        "action": {"type": "trail_atr", "atr_period": 14, "atr_multiplier": 1.0},
+                    }
+                ]
+            }
+        )
+    except ValueError as exc:
+        assert "Use top-level trailing config for trailing stops" in str(exc)
+    else:
+        raise AssertionError("expected trail_atr stop adjustment to fail loud")
 
 
 def test_submit_entry_margin_capped_uses_request_qty():
@@ -468,6 +541,101 @@ def test_trailing_stop_from_normalized_config_only_tightens():
     )
     engine.step(new_high)
     assert position.stop_price == 108.0
+
+
+def test_disabled_trailing_config_with_stale_distance_fields_does_not_activate():
+    engine = _build_spot_engine(
+        base_risk_per_trade=8,
+        take_profit_orders=[{"id": "tp-1", "ticks": 100}],
+        extra_config={
+            "stop_adjustments": [],
+            "trailing": {
+                "enabled": False,
+                "activation_type": "r_multiple",
+                "r_multiple": 1.0,
+                "ticks": 2,
+            },
+        },
+    )
+    _enable_runtime_execution(engine)
+    entry = _build_candle(close=100.0, atr=2.0)
+    position = engine.maybe_enter(entry, "long")
+    assert position is not None
+    assert position.trailing_activation_ticks is None
+    assert position.trailing_distance_ticks is None
+
+    favorable = Candle(
+        time=datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+        open=104.0,
+        high=110.0,
+        low=103.0,
+        close=109.0,
+        atr=2.0,
+    )
+    engine.step(favorable)
+
+    assert position.trailing_active is False
+    assert position.stop_price == 96.0
+
+
+def test_flattened_stop_adjustment_rule_executes_after_normalization():
+    engine = _build_spot_engine(
+        base_risk_per_trade=8,
+        take_profit_orders=[{"id": "tp-1", "ticks": 100}],
+        extra_config={
+            "stop_adjustments": [
+                {
+                    "id": "sa-flat",
+                    "trigger_type": "r_multiple",
+                    "trigger_ticks": 5,
+                    "action_type": "move_to_r",
+                    "action_r": 0.5,
+                }
+            ],
+        },
+    )
+    _enable_runtime_execution(engine)
+    entry = _build_candle(close=100.0, atr=2.0)
+    position = engine.maybe_enter(entry, "long")
+    assert position is not None
+    assert position.stop_price == 96.0
+
+    favorable = Candle(
+        time=datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+        open=104.0,
+        high=106.0,
+        low=103.0,
+        close=105.0,
+        atr=2.0,
+    )
+    engine.step(favorable)
+
+    assert position.stop_price == 102.0
+
+
+def test_empty_stop_adjustments_do_not_enable_implicit_breakeven():
+    engine = _build_spot_engine(
+        base_risk_per_trade=8,
+        take_profit_orders=[{"id": "tp-1", "ticks": 10}],
+        extra_config={"stop_adjustments": []},
+    )
+    _enable_runtime_execution(engine)
+    entry = _build_candle(close=100.0, atr=2.0)
+    position = engine.maybe_enter(entry, "long")
+    assert position is not None
+
+    favorable = Candle(
+        time=datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+        open=104.0,
+        high=106.0,
+        low=103.0,
+        close=105.0,
+        atr=2.0,
+    )
+    engine.step(favorable)
+
+    assert position.moved_to_breakeven is False
+    assert position.stop_price == 96.0
 
 
 def test_fixed_horizon_exit_closes_after_configured_bars_with_taker_fee():

@@ -123,24 +123,33 @@ def _normalise_stop_adjustments(payload: Mapping[str, Any]) -> Sequence[Dict[str
         if not isinstance(entry, Mapping):
             continue
 
-        # Schema v2: nested trigger/action format
-        trigger = entry.get("trigger")
-        action = entry.get("action")
+        trigger = entry.get("trigger") if isinstance(entry.get("trigger"), Mapping) else {}
+        action = entry.get("action") if isinstance(entry.get("action"), Mapping) else {}
 
-        if not isinstance(trigger, Mapping) or not isinstance(action, Mapping):
-            continue
-
-        trigger_type = str(trigger.get("type") or "").replace("_reached", "").lower()
+        trigger_type = str(
+            trigger.get("type")
+            or entry.get("trigger_type")
+            or ""
+        ).replace("_reached", "").lower()
         trigger_value = trigger.get("value")
-        action_type = str(action.get("type") or "").lower()
+        if trigger_value is None:
+            trigger_value = (
+                entry.get("trigger_value")
+                or entry.get("trigger_target_id")
+                or entry.get("target_id")
+            )
+        trigger_ticks = _coerce_float(entry.get("trigger_ticks"))
+        action_type = str(action.get("type") or entry.get("action_type") or "").lower()
 
         if trigger_type not in {"r_multiple", "target_hit"}:
             continue
 
         # Validate trigger value
         if trigger_type == "r_multiple":
-            trigger_value = _coerce_float(trigger_value, 0.0)
-            if trigger_value is None or trigger_value <= 0:
+            trigger_value = _coerce_float(trigger_value)
+            if (trigger_value is None or trigger_value <= 0) and (
+                trigger_ticks is None or trigger_ticks <= 0
+            ):
                 continue
         if trigger_type == "target_hit" and trigger_value is None:
             continue
@@ -151,12 +160,26 @@ def _normalise_stop_adjustments(payload: Mapping[str, Any]) -> Sequence[Dict[str
         atr_multiplier = None
 
         if action_type == "move_to_r":
-            action_value = _coerce_float(action.get("value"), 0.0)
+            action_value = _coerce_float(
+                action.get("value")
+                if action.get("value") is not None
+                else entry.get("action_value") or entry.get("action_r")
+            )
             if action_value is None or action_value <= 0:
                 continue
         elif action_type == "trail_atr":
-            atr_period = _coerce_int(action.get("atr_period"), 14)
-            atr_multiplier = _coerce_float(action.get("atr_multiplier"), 1.0)
+            atr_period = _coerce_int(
+                action.get("atr_period")
+                if action.get("atr_period") is not None
+                else entry.get("atr_period"),
+                14,
+            )
+            atr_multiplier = _coerce_float(
+                action.get("atr_multiplier")
+                if action.get("atr_multiplier") is not None
+                else entry.get("atr_multiplier"),
+                1.0,
+            )
         elif action_type != "move_to_breakeven":
             continue
 
@@ -164,6 +187,7 @@ def _normalise_stop_adjustments(payload: Mapping[str, Any]) -> Sequence[Dict[str
             "id": entry.get("id"),
             "trigger_type": trigger_type,
             "trigger_value": trigger_value,
+            "trigger_ticks": trigger_ticks if trigger_ticks and trigger_ticks > 0 else None,
             "action_type": action_type,
             "action_value": action_value,
             "atr_period": atr_period,
@@ -308,6 +332,8 @@ def normalise_template(
         raise ValueError("ATM template must be provided.")
 
     result = deepcopy(base or DEFAULT_ATM_TEMPLATE)
+    if isinstance(result.get("stop_adjustments"), list):
+        result["stop_adjustments"] = list(_normalise_stop_adjustments(result))
     if not template:
         return result
 

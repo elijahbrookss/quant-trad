@@ -16,6 +16,8 @@ from utils.log_context import build_log_context, with_log_context
 from ..execution import FillRejection, FillResult
 from ..execution_adapter import ExecutionAdapter
 from ..events import ExitSettlementPayload
+from ..execution_order import build_fill_order, execute_fill_order
+from ..execution_plan import RuntimeStopAdjustment
 from ..execution_policy import ExitExecutionPolicy, exit_policy_for, fee_rate_for_role, normalize_liquidity_role
 from ..execution_profile import SeriesExecutionProfile
 from ..exit_settlement import ExitSettlement, ExitSettlementService
@@ -41,7 +43,7 @@ class SameBarResolutionPolicy(str, Enum):
     def normalize(cls, value: Optional[object]) -> "SameBarResolutionPolicy":
         if isinstance(value, SameBarResolutionPolicy):
             return value
-        normalized = str(value or cls.TARGET_FIRST.value).strip().lower()
+        normalized = str(value or cls.PESSIMISTIC_STOP.value).strip().lower()
         if normalized in {"pessimistic", "pessimistic_stop", "stop_first", "stop"}:
             return cls.PESSIMISTIC_STOP
         return cls.TARGET_FIRST
@@ -104,7 +106,7 @@ class LadderPosition:
     pre_entry_context: Optional[Dict[str, Optional[float]]] = None
     wallet_fill_metadata: Dict[str, Any] = field(default_factory=dict)
     position_commit_seq: int = 0
-    stop_adjustments: List[Dict[str, Any]] = field(default_factory=list)
+    stop_adjustments: List[RuntimeStopAdjustment] = field(default_factory=list)
     close_reason: Optional[str] = None
 
     def __post_init__(self) -> None:
@@ -131,44 +133,24 @@ class LadderPosition:
         contracts: float,
         side: str,
         *,
-        liquidity_role: object = "taker",
+        policy: ExitExecutionPolicy,
     ) -> Tuple[Optional[FillResult], Optional[FillRejection]]:
-        fee_rate = fee_rate_for_role(
-            role=liquidity_role,
-            maker_fee_rate=self.maker_fee_rate,
-            taker_fee_rate=self.taker_fee_rate,
-        )
-        if self.execution_adapter:
-            fill, rejection = self.execution_adapter.fill_market(
-                side=side,
-                requested_qty=contracts,
-                price=price,
-                fee_rate=fee_rate,
-                enforce_price_tick=False,
-            )
-            return self._fill_with_liquidity_role(fill, liquidity_role), rejection
-        if not self.execution_model:
-            return None, None
-        fill, rejection = self.execution_model.fill_market(
+        order = build_fill_order(
             side=side,
             requested_qty=contracts,
             price=price,
-            fee_rate=fee_rate,
-            enforce_price_tick=False,
+            order_type=policy.order_type,
+            liquidity_role=policy.liquidity_role,
+            price_source=policy.price_source,
+            maker_fee_rate=self.maker_fee_rate,
+            taker_fee_rate=self.taker_fee_rate,
+            metadata={"trade_id": self.trade_id, "direction": self.direction},
         )
-        return self._fill_with_liquidity_role(fill, liquidity_role), rejection
-
-    @staticmethod
-    def _fill_with_liquidity_role(
-        fill: Optional[FillResult],
-        liquidity_role: object,
-    ) -> Optional[FillResult]:
-        if fill is None:
-            return None
-        role = normalize_liquidity_role(liquidity_role)
-        metadata = dict(fill.metadata or {})
-        metadata.setdefault("liquidity_role", role)
-        return replace(fill, fee_role=role, metadata=metadata)
+        if self.execution_adapter:
+            return execute_fill_order(self.execution_adapter, order)
+        if not self.execution_model:
+            return None, None
+        return execute_fill_order(self.execution_model, order)
 
     def _exit_settlement(self) -> ExitSettlement:
         if self.exit_settlement:
@@ -223,7 +205,7 @@ class LadderPosition:
                     leg.target_price,
                     leg.contracts,
                     side=side,
-                    liquidity_role=policy.liquidity_role,
+                    policy=policy,
                 )
                 if rejection:
                     context = build_log_context(
@@ -352,23 +334,23 @@ class LadderPosition:
         triggered_targets = {leg.leg_id for leg in self.legs if leg.status == "target" and leg.leg_id}
 
         for rule in self.stop_adjustments:
-            if rule.get("fired"):
+            if rule.fired:
                 continue
 
-            if rule.get("trigger_type") == "r_multiple":
-                trigger_ticks = rule.get("trigger_ticks")
+            if rule.trigger_type == "r_multiple":
+                trigger_ticks = rule.trigger_ticks
                 if trigger_ticks in (None, 0) or self.mfe_ticks < float(trigger_ticks):
                     continue
             else:
-                target_id = rule.get("trigger_target_id")
+                target_id = rule.trigger_target_id
                 if not target_id or target_id not in triggered_targets:
                     continue
 
             candidate = None
-            if rule.get("action_type") == "move_to_breakeven":
+            if rule.action_type == "move_to_breakeven":
                 candidate = self.entry_price
-            elif rule.get("action_type") == "move_to_r":
-                action_r = rule.get("action_r")
+            elif rule.action_type == "move_to_r":
+                action_r = rule.action_r
                 if action_r not in (None, 0) and self.r_ticks not in (None, 0):
                     r_price = float(self.r_ticks) * float(self.tick_size)
                     candidate = risk_math.price_from_r(
@@ -382,7 +364,7 @@ class LadderPosition:
                 continue
 
             self.stop_price = risk_math.clamp_stop(self.stop_price, candidate, self.direction)
-            rule["fired"] = True
+            rule.fired = True
             if candidate == self.entry_price:
                 self.moved_to_breakeven = True
 
@@ -418,7 +400,7 @@ class LadderPosition:
                         self.stop_price,
                         leg.contracts,
                         side=side,
-                        liquidity_role=policy.liquidity_role,
+                        policy=policy,
                     )
                     if rejection:
                         context = build_log_context(
@@ -546,7 +528,7 @@ class LadderPosition:
         self,
         candle: Candle,
         *,
-        same_bar_policy: SameBarResolutionPolicy | str = SameBarResolutionPolicy.TARGET_FIRST,
+        same_bar_policy: SameBarResolutionPolicy | str = SameBarResolutionPolicy.PESSIMISTIC_STOP,
     ) -> List[Dict[str, Any]]:
         """Advance the position with the latest candle."""
 
@@ -643,7 +625,7 @@ class LadderPosition:
                     exit_price_source,
                     leg.contracts,
                     side=side,
-                    liquidity_role=policy.liquidity_role,
+                    policy=policy,
                 )
                 if rejection:
                     context = build_log_context(

@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 
 from ..core.execution import FillRejection, FillResult
 from ..core.execution_adapter import ExecutionAdapter
+from ..core.execution_order import FillOrder
 from .backtest import BacktestAdapter
 
 
@@ -53,6 +54,12 @@ class PaperAdapter(ExecutionAdapter):
             fee_rate=fee_rate,
             enforce_price_tick=enforce_price_tick,
         )
+
+    def execute_order(
+        self,
+        order: FillOrder,
+    ) -> Tuple[Optional[FillResult], Optional[FillRejection]]:
+        return self._delegate.execute_order(order)
 
 
 __all__ = ["PaperAdapter"]

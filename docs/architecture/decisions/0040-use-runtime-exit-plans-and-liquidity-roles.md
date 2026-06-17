@@ -15,6 +15,8 @@ tags:
 code_paths:
   - src/atm/schema.py
   - src/atm/template.py
+  - src/engines/bot_runtime/core/execution_plan.py
+  - src/engines/bot_runtime/core/execution_order.py
   - src/engines/bot_runtime/core/execution_policy.py
   - src/engines/bot_runtime/core/domain/engine.py
   - src/engines/bot_runtime/core/domain/position.py
@@ -57,8 +59,9 @@ policy fields:
 
 - `exit_plan.fixed_horizon` declares a deterministic hold duration in completed
   bars and closes remaining open legs at bar close with a market/taker exit.
-- `breakeven` and `stop_adjustments` declare one-time stop movement. Runtime
-  consumes both legacy flattened and normalized nested forms.
+- `breakeven` and `stop_adjustments` declare one-time stop movement. ATM
+  normalization accepts nested and flattened compatibility forms, then runtime
+  consumes canonical execution-plan objects.
 - `trailing` declares activation and distance inputs. The active stop only
   tightens in the favorable direction.
 
@@ -71,8 +74,8 @@ Bot runtime maps exit events to explicit order and liquidity-role semantics:
 
 Limit-maker entries are post-only. If a submitted limit-maker entry would cross
 the current reference price immediately, runtime rejects it as
-`POST_ONLY_WOULD_CROSS`. Previously resting pending maker entries can still
-fill as maker orders when later bars trade through their limit price.
+`POST_ONLY_WOULD_CROSS`. Accepted maker entries rest into future bars and fill
+as maker orders only when later bars trade through their limit price.
 
 The execution profile remains the fee authority. Templates declare order and
 exit intent; they do not patch missing instrument fee fields.
@@ -102,6 +105,7 @@ liquidity role must be known before a slippage model adjusts fill price.
 
 ## References
 
+- [ADR 0041: Use Canonical Execution Plans And Order Fill Semantics](0041-use-canonical-execution-plan-and-order-fill-semantics.md)
 - [Execution Runtime Boundary](../execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md)
 - [Execution & Playback Contract](../../contracts/platform/02_execution_playback_contract.md)
 - [Runtime Contract](../../contracts/platform/01_runtime_contract.md)

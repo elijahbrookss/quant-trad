@@ -87,14 +87,21 @@ Runtime separates source identity from execution modeling:
 ## Position Lifecycle And Order Semantics
 
 ATM templates declare position lifecycle intent; runtime executes that intent.
+Template compatibility is handled at the ATM boundary. Runtime compiles the
+normalized template into a `RuntimeExecutionPlan` before opening trades.
+Position state consumes resolved runtime policy objects rather than raw
+template dictionaries.
+
 The canonical policy fields are:
 
 - `exit_plan.fixed_horizon`: close remaining open legs after `bars` completed
   position bars at the strategy bar close. This is a market/taker close and
   emits a `fixed_horizon` exit fill plus a close reason of `FIXED_HORIZON`.
 - `stop_adjustments`: one-time stop movement rules such as move-to-breakeven
-  at a configured R multiple or after a target hit. Runtime accepts both
-  normalized nested template rules and older flattened rules.
+  at a configured R multiple, an absolute trigger tick value, or after a target
+  hit. Runtime accepts normalized nested template rules and flattened
+  compatibility rules at the template edge, then converts them into canonical
+  runtime stop-adjustment objects.
 - `breakeven`: direct breakeven activation for simple strategies when explicit
   stop adjustments are not configured.
 - `trailing`: trailing-stop activation and distance config. A trailing stop may
@@ -109,17 +116,25 @@ Runtime maps exit event types to liquidity roles:
 
 Limit-maker entries are post-only. If a submitted maker entry would cross the
 current reference price immediately, runtime rejects it with
-`POST_ONLY_WOULD_CROSS`. Once a maker order is accepted as resting, later bars
-may fill it as maker liquidity when price trades through the limit.
+`POST_ONLY_WOULD_CROSS`. Limit-maker entries are submitted from the signal
+close and cannot fill from the already-known signal bar range. Once a maker
+order is accepted as resting, later bars may fill it as maker liquidity when
+price trades through the limit for the configured validity window.
 
 Execution profiles remain the fee and instrument authority. Templates may
 request order style and exit behavior, but they must not patch missing
 instrument fee, tick, quantity, or margin fields.
 
-Entry timing beyond current signal-bar execution is not hidden behind a price
-anchor. A true next-bar entry model requires its own pending signal-entry
-lifecycle so reports can distinguish when the signal was known from when the
-order became executable.
+Runtime supports only `signal_price` as the immediate entry anchor. Entry timing
+beyond current signal-close submission is not hidden behind a price anchor. A
+true next-bar entry model requires its own pending signal-entry lifecycle so
+reports can distinguish when the signal was known from when the order became
+executable.
+
+Executable fills use `FillOrder` semantics: side, quantity, price, order type,
+liquidity role, price source, and fee rate are known before the adapter applies
+the fill. The older `fill_market` adapter method remains only as a compatibility
+facade for adapters that have not yet implemented direct order execution.
 
 ## Slippage Modeling Gap
 

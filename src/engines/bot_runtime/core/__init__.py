@@ -24,6 +24,23 @@ from .execution import (
 from .execution_adapter import ExecutionAdapter, SpotExecutionAdapter, DerivativesExecutionAdapter
 from .execution_intent import ExecutionIntent, ExecutionOutcome, LimitParams
 from .execution_model import ExecutionModel
+from .execution_order import (
+    FillOrder,
+    OrderType,
+    build_fill_order,
+    execute_fill_order,
+)
+from .execution_plan import (
+    BreakevenPlan,
+    EntryExecutionPlan,
+    FixedHorizonExitPlan,
+    LimitMakerPlan,
+    RuntimeExecutionPlan,
+    RuntimeStopAdjustment,
+    StopAdjustmentPlanRule,
+    TrailingStopPlan,
+    compile_runtime_execution_plan,
+)
 from .execution_policy import (
     ExitExecutionPolicy,
     LiquidityRole,
@@ -114,6 +131,19 @@ __all__ = [
     "ExecutionOutcome",
     "LimitParams",
     "ExecutionModel",
+    "FillOrder",
+    "OrderType",
+    "build_fill_order",
+    "execute_fill_order",
+    "BreakevenPlan",
+    "EntryExecutionPlan",
+    "FixedHorizonExitPlan",
+    "LimitMakerPlan",
+    "RuntimeExecutionPlan",
+    "RuntimeStopAdjustment",
+    "StopAdjustmentPlanRule",
+    "TrailingStopPlan",
+    "compile_runtime_execution_plan",
     "ExitExecutionPolicy",
     "LiquidityRole",
     "exit_policy_for",

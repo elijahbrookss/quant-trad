@@ -54,8 +54,39 @@ def test_normalise_template_flattens_nested_stop_adjustments() -> None:
             "id": "sa-1",
             "trigger_type": "r_multiple",
             "trigger_value": 1.0,
+            "trigger_ticks": None,
             "action_type": "move_to_breakeven",
             "action_value": None,
+            "atr_period": None,
+            "atr_multiplier": None,
+        }
+    ]
+
+
+def test_normalise_template_preserves_flattened_stop_adjustments() -> None:
+    config = normalise_template(
+        {
+            "name": "Flattened stop adjustment test",
+            "stop_adjustments": [
+                {
+                    "id": "sa-flat",
+                    "trigger_type": "r_multiple",
+                    "trigger_ticks": 12,
+                    "action_type": "move_to_r",
+                    "action_r": 0.5,
+                }
+            ],
+        }
+    )
+
+    assert config["stop_adjustments"] == [
+        {
+            "id": "sa-flat",
+            "trigger_type": "r_multiple",
+            "trigger_value": None,
+            "trigger_ticks": 12.0,
+            "action_type": "move_to_r",
+            "action_value": 0.5,
             "atr_period": None,
             "atr_multiplier": None,
         }

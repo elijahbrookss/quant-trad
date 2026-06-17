@@ -59,3 +59,4 @@ respect.
 | [0038](0038-decouple-visual-overlay-projection-from-runtime-push.md) | Decouple visual overlay projection from runtime push | Accepted |
 | [0039](0039-use-shared-async-jobs-for-research-dispatch.md) | Use shared async jobs for research dispatch | Accepted |
 | [0040](0040-use-runtime-exit-plans-and-liquidity-roles.md) | Use runtime exit plans and liquidity roles | Accepted |
+| [0041](0041-use-canonical-execution-plan-and-order-fill-semantics.md) | Use canonical execution plans and order fill semantics | Accepted |
