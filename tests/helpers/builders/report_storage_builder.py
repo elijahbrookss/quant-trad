@@ -11,14 +11,12 @@ def ensure_report_bot(
     *,
     name: Optional[str] = None,
     strategy_id: Optional[str] = None,
-    status: str = "idle",
 ) -> Dict[str, Any]:
     payload = {
         "id": bot_id,
         "name": name or bot_id,
         "strategy_id": strategy_id,
         "run_type": "backtest",
-        "status": status,
     }
     upsert_bot(payload)
     bot = get_bot(bot_id)
