@@ -389,7 +389,17 @@ class LadderPosition:
         elif self.direction == "short" and candle.high >= self.stop_price:
             triggered = True
         if triggered:
-            tick_distance = round(self._ticks_from_entry(self.stop_price), 4)
+            gap_through = self.opens_at_or_beyond_stop(candle)
+            fill_reference_price = float(candle.open) if gap_through else self.stop_price
+            fill_price_source = (
+                "bar_open_gap_through_stop" if gap_through else policy.price_source
+            )
+            execution_policy = (
+                replace(policy, price_source=fill_price_source)
+                if gap_through
+                else policy
+            )
+            trigger_tick_distance = round(self._ticks_from_entry(self.stop_price), 4)
             for leg in self.legs:
                 if leg.status != "open":
                     continue
@@ -397,10 +407,10 @@ class LadderPosition:
                 side = "sell" if self.direction == "long" else "buy"
                 if self._uses_wallet_execution():
                     fill_result, rejection = self._execute_spot_fill(
-                        self.stop_price,
+                        fill_reference_price,
                         leg.contracts,
                         side=side,
-                        policy=policy,
+                        policy=execution_policy,
                     )
                     if rejection:
                         context = build_log_context(
@@ -408,28 +418,39 @@ class LadderPosition:
                             leg_id=leg.leg_id,
                             leg=leg.name,
                             reason=rejection.reason,
-                            price=round(self.stop_price, 4),
+                            price=round(fill_reference_price, 4),
                             direction=self.direction,
+                            stop_price=round(self.stop_price, 4),
+                            gap_through=gap_through,
                         )
                         logger.warning(with_log_context("spot_stop_rejected", context))
                         events.append(
                             {
                                 "type": "execution_rejected",
                                 "trade_id": self.trade_id,
-                                "price": round(self.stop_price, 4),
+                                "price": round(fill_reference_price, 4),
                                 "time": isoformat(candle.time),
                                 "currency": self.quote_currency,
                                 "leg": leg.name,
                                 "leg_id": leg.leg_id,
                                 "contracts": leg.contracts,
-                                "ticks": tick_distance,
+                                "ticks": round(
+                                    self._ticks_from_entry(fill_reference_price),
+                                    4,
+                                ),
+                                "stop_trigger_price": round(self.stop_price, 4),
+                                "stop_trigger_ticks": trigger_tick_distance,
+                                "gap_through": gap_through,
                                 "direction": self.direction,
                                 "reason": rejection.reason,
                             }
                         )
                         continue
-                exit_price = fill_result.fill_price if fill_result else self.stop_price
+                exit_price = (
+                    fill_result.fill_price if fill_result else fill_reference_price
+                )
                 exit_qty = fill_result.filled_qty if fill_result else leg.contracts
+                fill_tick_distance = round(self._ticks_from_entry(exit_price), 4)
                 pnl = self._pnl_for_exit(exit_price, exit_qty)
                 leg.status = "stop"
                 leg.exit_price = exit_price
@@ -479,7 +500,10 @@ class LadderPosition:
                         "leg_id": leg.leg_id,
                         "contracts": exit_qty,
                         "pnl": round(pnl, 4),
-                        "ticks": tick_distance,
+                        "ticks": fill_tick_distance,
+                        "stop_trigger_price": round(self.stop_price, 4),
+                        "stop_trigger_ticks": trigger_tick_distance,
+                        "gap_through": gap_through,
                         "direction": self.direction,
                         "notional": notional,
                         "fee_paid": fee_value,
@@ -487,9 +511,9 @@ class LadderPosition:
                         "fee_type": fee_metadata["fee_type"],
                         "fee_source": fee_metadata["fee_source"],
                         "fee_version": fee_metadata["fee_version"],
-                        "order_type": policy.order_type,
-                        "price_source": policy.price_source,
-                        "reason_code": policy.reason_code,
+                        "order_type": execution_policy.order_type,
+                        "price_source": execution_policy.price_source,
+                        "reason_code": execution_policy.reason_code,
                         "settlement": settlement_payload,
                     }
                 )
@@ -519,6 +543,27 @@ class LadderPosition:
             return candle.high >= self.stop_price
         return False
 
+    def opens_at_or_beyond_stop(self, candle: Candle) -> bool:
+        """Return whether the first tradable bar price has crossed the stop."""
+
+        if self.direction == "long":
+            return candle.open <= self.stop_price
+        if self.direction == "short":
+            return candle.open >= self.stop_price
+        return False
+
+    def opens_at_or_beyond_target(self, candle: Candle) -> bool:
+        """Return whether the bar open has crossed any resting target."""
+
+        for leg in self.legs:
+            if leg.status != "open":
+                continue
+            if self.direction == "long" and candle.open >= leg.target_price:
+                return True
+            if self.direction == "short" and candle.open <= leg.target_price:
+                return True
+        return False
+
     def hits_target_and_stop(self, candle: Candle) -> bool:
         """Return True when TP and stop are both inside the same bar range."""
 
@@ -535,9 +580,17 @@ class LadderPosition:
         events: List[Dict[str, Any]] = []
         policy = SameBarResolutionPolicy.normalize(same_bar_policy)
         same_bar_target_and_stop = self.hits_target_and_stop(candle)
+        open_hits_stop = self.opens_at_or_beyond_stop(candle)
+        open_hits_target = self.opens_at_or_beyond_target(candle)
         self._update_excursions(candle)
 
-        if policy == SameBarResolutionPolicy.PESSIMISTIC_STOP and same_bar_target_and_stop:
+        if open_hits_stop:
+            stop_events = self._apply_stop(candle)
+        elif (
+            policy == SameBarResolutionPolicy.PESSIMISTIC_STOP
+            and same_bar_target_and_stop
+            and not open_hits_target
+        ):
             stop_events = self._apply_stop(candle)
         else:
             leg_events = self._apply_leg_fills(candle)

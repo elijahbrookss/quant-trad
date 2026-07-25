@@ -153,6 +153,26 @@ def _candles(direction: str, outcome: str) -> list[Candle]:
             atr=ATR,
             volume=10.0,
         )
+    elif direction == "long" and outcome == "gap_stop":
+        exit_bar = Candle(
+            time=start + timedelta(minutes=1),
+            open=94.0,
+            high=95.0,
+            low=90.0,
+            close=92.0,
+            atr=ATR,
+            volume=10.0,
+        )
+    elif direction == "long" and outcome == "gap_target":
+        exit_bar = Candle(
+            time=start + timedelta(minutes=1),
+            open=112.0,
+            high=114.0,
+            low=95.0,
+            close=100.0,
+            atr=ATR,
+            volume=10.0,
+        )
     elif direction == "long":
         exit_bar = Candle(
             time=start + timedelta(minutes=1),
@@ -170,6 +190,26 @@ def _candles(direction: str, outcome: str) -> list[Candle]:
             high=100.0,
             low=90.0,
             close=90.0,
+            atr=ATR,
+            volume=10.0,
+        )
+    elif outcome == "gap_stop":
+        exit_bar = Candle(
+            time=start + timedelta(minutes=1),
+            open=106.0,
+            high=110.0,
+            low=105.0,
+            close=108.0,
+            atr=ATR,
+            volume=10.0,
+        )
+    elif outcome == "gap_target":
+        exit_bar = Candle(
+            time=start + timedelta(minutes=1),
+            open=88.0,
+            high=105.0,
+            low=86.0,
+            close=100.0,
             atr=ATR,
             volume=10.0,
         )
@@ -203,7 +243,11 @@ def _run_reference(
 ) -> dict[str, Any]:
     engine, gateway = _engine(adapter_type)
     candles = _candles(direction, outcome)
-    exit_type = "stop" if outcome == "same_bar" else outcome
+    exit_type = {
+        "same_bar": "stop",
+        "gap_stop": "stop",
+        "gap_target": "target",
+    }.get(outcome, outcome)
     position = engine.maybe_enter(candles[0], direction)
     assert position is not None
     events = engine.step(candles[1])
@@ -286,12 +330,17 @@ def _run_reference(
             "order_type": exit_event["order_type"],
             "price_source": exit_event["price_source"],
             "reason_code": exit_event["reason_code"],
+            "stop_trigger_price": exit_event.get("stop_trigger_price"),
+            "stop_trigger_ticks": exit_event.get("stop_trigger_ticks"),
+            "gap_through": exit_event.get("gap_through"),
         },
         "lifecycle": {
             "transitions": ["ENTRY_OPENED", exit_type.upper(), "CLOSED"],
-            "same_bar_policy": (
-                "pessimistic_stop" if outcome == "same_bar" else "not_applicable"
-            ),
+            "same_bar_policy": {
+                "same_bar": "pessimistic_stop",
+                "gap_stop": "bar_open_stop_precedence",
+                "gap_target": "bar_open_target_precedence",
+            }.get(outcome, "not_applicable"),
             "close_reason": trade.get("close_reason"),
             "closed_at": trade.get("closed_at"),
             "position_commit_seq": trade["position_commit_seq"],
@@ -375,6 +424,46 @@ EXPECTED = {
         "exit_fee_type": "taker",
         "exit_order_type": "stop_market",
     },
+    ("long", "gap_stop"): {
+        "exit_price": 94.0,
+        "gross_pnl": -6.0,
+        "fees": 0.388,
+        "net_pnl": -6.388,
+        "ending_equity": 993.612,
+        "exit_fee_type": "taker",
+        "exit_order_type": "stop_market",
+        "price_source": "bar_open_gap_through_stop",
+    },
+    ("short", "gap_stop"): {
+        "exit_price": 106.0,
+        "gross_pnl": -6.0,
+        "fees": 0.412,
+        "net_pnl": -6.412,
+        "ending_equity": 993.588,
+        "exit_fee_type": "taker",
+        "exit_order_type": "stop_market",
+        "price_source": "bar_open_gap_through_stop",
+    },
+    ("long", "gap_target"): {
+        "exit_price": 110.0,
+        "gross_pnl": 10.0,
+        "fees": 0.31,
+        "net_pnl": 9.69,
+        "ending_equity": 1009.69,
+        "exit_fee_type": "maker",
+        "exit_order_type": "limit_resting",
+        "price_source": "target_price",
+    },
+    ("short", "gap_target"): {
+        "exit_price": 90.0,
+        "gross_pnl": 10.0,
+        "fees": 0.29,
+        "net_pnl": 9.71,
+        "ending_equity": 1009.71,
+        "exit_fee_type": "maker",
+        "exit_order_type": "limit_resting",
+        "price_source": "target_price",
+    },
 }
 
 
@@ -406,11 +495,23 @@ def test_hand_verifiable_reference_scenario(
         "fee_rate": 0.002,
     }
     assert trace["exit_fill"]["price"] == expected["exit_price"]
-    assert trace["exit_fill"]["type"] == (
-        "stop" if outcome == "same_bar" else outcome
-    )
+    assert trace["exit_fill"]["type"] == {
+        "same_bar": "stop",
+        "gap_stop": "stop",
+        "gap_target": "target",
+    }.get(outcome, outcome)
     assert trace["exit_fill"]["fee_type"] == expected["exit_fee_type"]
     assert trace["exit_fill"]["order_type"] == expected["exit_order_type"]
+    assert trace["exit_fill"]["price_source"] == expected.get(
+        "price_source",
+        "stop_price" if trace["exit_fill"]["type"] == "stop" else "target_price",
+    )
+    if outcome == "gap_stop":
+        expected_stop = 96.0 if direction == "long" else 104.0
+        expected_trigger_ticks = -4.0
+        assert trace["exit_fill"]["stop_trigger_price"] == expected_stop
+        assert trace["exit_fill"]["stop_trigger_ticks"] == expected_trigger_ticks
+        assert trace["exit_fill"]["gap_through"] is True
     assert accounting["realized_pnl"] == expected["gross_pnl"]
     assert accounting["fees"] == pytest.approx(expected["fees"])
     assert trace["report"]["net_pnl"] == pytest.approx(expected["net_pnl"])
