@@ -2603,6 +2603,8 @@ def _position_ordering_health(events: Sequence[Mapping[str, Any]]) -> Dict[str, 
         caveats.append("position_commit_seq_status_invalid")
     if duplicates:
         caveats.append("position_ordering_duplicate")
+    if non_monotonic:
+        caveats.append("position_ordering_non_monotonic")
     if open_seq_invalid:
         caveats.append("position_open_seq_invalid")
     status = "ready" if not caveats else "inconsistent"
@@ -4936,7 +4938,6 @@ def _golden_blocking_reasons(
             "position_ordering_missing",
             "position_commit_seq_status_invalid",
             "position_ordering_duplicate",
-            "position_ordering_gap",
             "position_ordering_non_monotonic",
             "position_open_seq_invalid",
             "wallet_runtime_events_unavailable",

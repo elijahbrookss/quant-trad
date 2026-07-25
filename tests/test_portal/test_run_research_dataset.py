@@ -790,6 +790,29 @@ def test_position_ordering_gap_is_informational_for_sparse_trade_events(monkeypa
     assert "position_ordering_gap" not in diagnostic_codes
 
 
+def test_position_ordering_non_monotonic_blocks_golden_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _events()
+    events[4] = _trade_event(6, "TRADE_OPENED", "trade-1", "BTC")
+    events[5] = _trade_event(
+        5,
+        "TRADE_CLOSED",
+        "trade-1",
+        "BTC",
+        close_reason="TARGET",
+    )
+
+    dataset = _build(monkeypatch, events=events)
+
+    position_ordering = dataset["execution"]["position_ordering"]
+    diagnostic_codes = {item["code"] for item in dataset["diagnostics"]["items"]}
+    assert position_ordering["non_monotonic_count"] == 1
+    assert "position_ordering_non_monotonic" in dataset["readiness"]["caveats"]
+    assert "position_ordering_non_monotonic" in dataset["readiness"]["golden_blocking_reasons"]
+    assert "position_ordering_non_monotonic" in diagnostic_codes
+
+
 def test_trade_closed_context_uses_highest_position_commit_seq() -> None:
     closed = _trade_event(6, "TRADE_CLOSED", "trade-1", "BTC", close_reason="TARGET", position_commit_seq=2)
     stale = _trade_event(20, "TRADE_CLOSED", "trade-1", "BTC", close_reason="STALE", position_commit_seq=1)

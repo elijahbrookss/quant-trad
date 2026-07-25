@@ -201,6 +201,10 @@ persistence boundary at canonical append time. `run_seq` starts at 1 for a run
 and is stamped into durable event context with `run_seq_status=runtime_assigned`.
 It is not assigned by frontend, projection, reporting, or export code.
 
+Within one producer/batch `seq`, persistence preserves the producer's semantic
+event order while assigning dense `run_seq` values. Event IDs are idempotency
+keys and never determine replay order.
+
 Runtime event persistence allocates `run_seq` from
 `portal_bot_run_event_seq_allocators` inside the same transaction that inserts
 the committed event rows. Duplicate event ids are removed before allocation, so

@@ -1292,7 +1292,9 @@ def record_bot_runtime_events_batch(
         pending_rows: List[Dict[str, Any]] = []
         with db.session() as session:
             for (bot_id, run_id), rows in grouped.items():
-                rows.sort(key=lambda item: (int(item["seq"]), str(item["event_id"])))
+                # Python's sort is stable: order batches by their producer sequence
+                # while preserving semantic event order inside one fact batch.
+                rows.sort(key=lambda item: int(item["seq"]))
                 unique_rows: List[Dict[str, Any]] = []
                 pending_event_ids: set[str] = set()
                 for row in rows:
