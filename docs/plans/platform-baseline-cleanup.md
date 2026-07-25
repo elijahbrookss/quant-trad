@@ -24,7 +24,7 @@ engineering guidance; this file records only cleanup-specific state.
 | Canonical ATM input schema | `feats/atm-canonical-contract` | Complete | compatibility inventory |
 | Storage repository ownership | `feats/storage-repository-ownership` | Complete | compatibility caller migration |
 | Temporal/config ownership | `feats/config-temporal-ownership` | Complete | storage ownership |
-| Baseline hygiene | `feats/baseline-hygiene` | Pending | structural ownership settled |
+| Baseline hygiene | `feats/baseline-hygiene` | Complete | structural ownership settled |
 | Correctness evidence campaign | `feats/correctness-evidence-campaign` | Pending | all structural cleanup |
 
 ## Canonical Decisions
@@ -73,8 +73,9 @@ retired tables until that explicit hard cutover is complete.
 | Research range, backtest evaluation, indicator warmup, runtime recovery, transport replay | KEEP | These are distinct windows with different clocks, failure policy, and consumers. Similar names are not evidence of duplication. |
 | Continuity, candle catalog, readiness, provenance, diagnostics, confidence, and caveats | KEEP | Created in dataset/report builders, finalized in readiness, persisted with report fingerprints/materializations, exported in report bundles, and displayed through CLI/MCP report resources and research-check results. |
 | Warmup/provider/truncation quality omissions | CONSOLIDATE | Surface warmup shortfall and malformed/empty provider evidence; add an explicit caveat when the 2,000-event observability read truncates. Do not replace the envelope. |
-| Tracked `portal/frontend/.vite/deps` | DELETE | Generated dependency cache, not source; remove tracked files and ignore the directory. |
-| Stale ignored report test and commented changelog workflow experiment | DELETE | The referenced test no longer exists; the commented OpenAI workflow has no executable path. The remote `test` branch still exists, so its CI trigger remains. |
+| Tracked `portal/frontend/.vite/deps` | DELETE | Completed in `7338f56`: the generated cache was removed, ignored, and a repository-wide tracked-artifact audit is clean. |
+| Filename-routed PR profile and stale controller test seam | DELETE | Completed in `35949fe`: the full non-database backend suite replaces the 70-line filename allowlist, and the overlay logging test now fails through the current metadata-service boundary. |
+| Commented changelog workflow experiment | DELETE | Completed in `7338f56`: the workflow had no executable path. The remote `test` branch still exists, so its active CI trigger remains. |
 | CLI operations | KEEP | `qt` is the canonical operator and agent contract. |
 | MCP operations | VERIFY USAGE | All 42 registrations have handlers and no orphan definitions were found. External invocation is not visible in the internal call graph; keep the thin adapter until usage evidence supports tool-level deletion. |
 | Missing bridge-session fallback to `"legacy"` | VERIFY USAGE | Verify every producer supplies a session identity before changing ingestion behavior. |
@@ -90,6 +91,7 @@ retired tables until that explicit hard cutover is complete.
 | 2026-07-25 | `7bb68f4` canonical ATM execution policy | focused ATM/runtime/strategy/reporting: 139 passed; runtime profile: 371 passed, 806 deselected; PR profile: 893 passed, 284 deselected; docs: 2 passed; backend compileall and remaining-reference audit passed; removed multi-template composition, alternative field shapes, implicit target allocation, and ATM-owned instrument economics |
 | 2026-07-25 | `383d75b` storage repository ownership | focused bot/storage/reporting: 139 passed; required-gateway follow-up: 25 passed; PR profile: 893 passed, 284 deselected; docs: 2 passed; backend compileall and remaining-reference audit passed; deleted the wildcard storage facade, emptied aggregate package exports, centralized the bot gateway, and removed optional storage capability fallbacks |
 | 2026-07-25 | `a5ef7de` temporal/config ownership | focused indicator/runtime/config: 105 passed; PR profile: 902 passed, 284 deselected; docs: 2 passed; affected compileall and remaining-reference audit passed; renamed visual replay hints to render-only overlay history, centralized four dispatchers, made malformed bounds fail loudly, and removed playback-to-execution inference |
+| 2026-07-25 | `35949fe` baseline hygiene | formerly hidden controller test: 1 passed; full non-database backend gate: 1,186 passed in 19.61s; docs: 2 passed; runner shell syntax, Make target expansion, whitespace, tracked-artifact, workflow, and retired-profile reference audits passed; frontend checks remain explicit opt-in |
 
 Each child branch must record its focused tests, broader regression profile,
 documentation validation, diff review, and remaining-reference search before
@@ -125,7 +127,7 @@ integration.
 - [x] Malformed canonical execution configuration fails before runtime
 - [x] Proven dead and compatibility-only production paths removed
 - [x] Explicit storage ownership and nonduplicated temporal dispatch
-- [ ] Accurate backend CI with optional frontend checks
+- [x] Accurate backend CI with optional frontend checks
 - [ ] Deterministic reference and repeated backtests
 - [ ] No-lookahead checks
 - [ ] Backtest and paper/runtime replay agreement under equal assumptions
