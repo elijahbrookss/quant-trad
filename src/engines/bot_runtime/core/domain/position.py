@@ -67,7 +67,7 @@ class LadderPosition:
     base_currency: Optional[str] = None
     quote_currency_code: Optional[str] = None
     legs: List[Leg] = field(default_factory=list)
-    breakeven_trigger_ticks: float = 20.0
+    breakeven_trigger_ticks: float = 0.0
     tick_value: float = 1.0
     contract_size: float = 1.0
     maker_fee_rate: float = 0.0
