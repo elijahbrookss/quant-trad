@@ -26,6 +26,7 @@ def test_record_bot_run_lifecycle_checkpoint_persists_canonical_rows_and_updates
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
+    transaction_session = object()
     latest = {
         "event_id": "canonical-event",
         "bot_id": "bot-1",
@@ -44,19 +45,26 @@ def test_record_bot_run_lifecycle_checkpoint_persists_canonical_rows_and_updates
         "live": False,
     }
 
-    def _record(rows, *, context=None):
+    def _record(rows, *, context=None, transactional_projection=None):
         captured["rows"] = [dict(row) for row in rows]
         captured["context"] = dict(context or {})
+        assert transactional_projection is not None
+        transactional_projection(transaction_session)
         return len(rows)
 
-    def _update(payload):
+    def _latest(_run_id, *, session=None):
+        assert session is transaction_session
+        return dict(latest)
+
+    def _project(session, payload):
+        assert session is transaction_session
         captured["summary_payload"] = dict(payload)
         return {"run_id": payload["run_id"], "status": payload["status"]}
 
     monkeypatch.setattr(lifecycle, "db", _db_available())
     monkeypatch.setattr(lifecycle, "record_bot_runtime_events_batch", _record)
-    monkeypatch.setattr(lifecycle, "_latest_canonical_lifecycle_row", lambda _run_id: dict(latest))
-    monkeypatch.setattr(lifecycle, "_update_bot_run_summary_from_lifecycle", _update)
+    monkeypatch.setattr(lifecycle, "_latest_canonical_lifecycle_row", _latest)
+    monkeypatch.setattr(lifecycle, "_project_bot_run_summary_in_session", _project)
 
     result = lifecycle.record_bot_run_lifecycle_checkpoint(
         startup_lifecycle.lifecycle_checkpoint_payload(
@@ -144,6 +152,50 @@ def test_canonical_lifecycle_row_uses_runtime_run_seq_as_visible_seq() -> None:
     assert result["live"] is True
     assert result["checkpoint_at"] == "2026-07-24T12:00:00Z"
     assert result["created_at"] == "2026-07-24T12:00:00Z"
+
+
+def test_lifecycle_summary_projection_failure_propagates_from_event_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transaction_session = object()
+    latest = {
+        "event_id": "canonical-event",
+        "bot_id": "bot-1",
+        "run_id": "run-1",
+        "phase": "container_booting",
+        "status": "starting",
+        "checkpoint_at": "2026-07-24T12:00:00Z",
+    }
+
+    def _record(_rows, *, context=None, transactional_projection=None):
+        assert context is not None
+        assert transactional_projection is not None
+        transactional_projection(transaction_session)
+        return 1
+
+    monkeypatch.setattr(lifecycle, "db", _db_available())
+    monkeypatch.setattr(lifecycle, "record_bot_runtime_events_batch", _record)
+    monkeypatch.setattr(
+        lifecycle,
+        "_latest_canonical_lifecycle_row",
+        lambda _run_id, *, session=None: dict(latest),
+    )
+    monkeypatch.setattr(
+        lifecycle,
+        "_project_bot_run_summary_in_session",
+        lambda _session, _payload: (_ for _ in ()).throw(RuntimeError("summary projection failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="summary projection failed"):
+        lifecycle.record_bot_run_lifecycle_checkpoint(
+            startup_lifecycle.lifecycle_checkpoint_payload(
+                bot_id="bot-1",
+                run_id="run-1",
+                phase=startup_lifecycle.BotLifecyclePhase.CONTAINER_BOOTING.value,
+                owner=startup_lifecycle.LifecycleOwner.CONTAINER.value,
+                message="Container booting.",
+            )
+        )
 
 
 def test_record_bot_run_lifecycle_checkpoint_fails_when_canonical_builder_returns_no_events(
@@ -242,15 +294,8 @@ def test_run_summary_projection_updates_status_and_terminal_timestamp(
         def add(self, _row):
             raise AssertionError("existing run should be updated, not inserted")
 
-    @contextmanager
-    def _session():
-        yield _Session()
-
-    monkeypatch.setattr(lifecycle, "db", SimpleNamespace(available=True, session=_session))
-    monkeypatch.setattr(lifecycle, "_execute_write_with_retry", lambda *, action, **_kwargs: action())
-    monkeypatch.setattr(lifecycle, "_observe_db_write_outcome", lambda **_kwargs: None)
-
-    result = lifecycle._update_bot_run_summary_from_lifecycle(
+    result = lifecycle._project_bot_run_summary_in_session(
+        _Session(),
         {
             "bot_id": "bot-1",
             "run_id": "run-1",
