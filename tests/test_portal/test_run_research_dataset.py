@@ -1445,6 +1445,111 @@ def test_wallet_ledger_state_mismatch_blocks_golden_candidate(monkeypatch: pytes
     assert "wallet_ledger_state_mismatch" in dataset["diagnostics"]["summary"]["blocking_codes"]
 
 
+def test_spot_fills_drive_wallet_replay_and_execution_trace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _events()
+    events.extend(
+        [
+            _event(
+                14,
+                "WALLET_INITIALIZED",
+                {
+                    "currency": "USD",
+                    "wallet_commit_seq": 0,
+                    "wallet_event_order": 0,
+                    "balance_before": 0.0,
+                    "balance_after": 1000.0,
+                    "wallet_after": {
+                        "balances": {"USD": 1000.0},
+                        "locked_margin": {},
+                        "free_collateral": {"USD": 1000.0},
+                        "margin_positions": {},
+                    },
+                },
+            ),
+            _event(
+                15,
+                "ENTRY_FILLED",
+                {
+                    "trade_id": "trade-spot-1",
+                    "bar_time": "2026-03-15T00:00:00Z",
+                    "wallet_commit_seq": 1,
+                    "side": "buy",
+                    "direction": "long",
+                    "qty": 1.0,
+                    "price": 100.0,
+                    "notional": 100.0,
+                    "fee_paid": 1.0,
+                    "fee_rate": 0.01,
+                    "fee_type": "taker",
+                    "fee_source": "test",
+                    "base_currency": "BTC",
+                    "quote_currency": "USD",
+                    "accounting_mode": "spot",
+                    "wallet_delta": {
+                        "collateral_reserved": 0.0,
+                        "collateral_released": 0.0,
+                        "fee_paid": 1.0,
+                    },
+                    "wallet_before": {
+                        "balances": {"USD": 1000.0},
+                        "locked_margin": {},
+                        "free_collateral": {"USD": 1000.0},
+                    },
+                },
+            ),
+            _event(
+                16,
+                "EXIT_FILLED",
+                {
+                    "trade_id": "trade-spot-1",
+                    "bar_time": "2026-03-16T00:00:00Z",
+                    "wallet_commit_seq": 2,
+                    "side": "sell",
+                    "direction": "long",
+                    "qty": 1.0,
+                    "price": 155.0,
+                    "notional": 155.0,
+                    "fee_paid": 1.0,
+                    "fee_rate": 0.01,
+                    "fee_type": "taker",
+                    "fee_source": "test",
+                    "realized_pnl": 55.0,
+                    "exit_kind": "target",
+                    "base_currency": "BTC",
+                    "quote_currency": "USD",
+                    "accounting_mode": "spot",
+                    "wallet_delta": {
+                        "collateral_reserved": 0.0,
+                        "collateral_released": 0.0,
+                        "fee_paid": 1.0,
+                    },
+                    "wallet_before": {
+                        "balances": {"BTC": 1.0, "USD": 899.0},
+                        "locked_margin": {},
+                        "free_collateral": {"BTC": 1.0, "USD": 899.0},
+                    },
+                },
+            ),
+        ]
+    )
+
+    dataset = _build(monkeypatch, events=events)
+
+    assert dataset["wallet_accounting"]["wallet_replay_status"] == "passed"
+    assert dataset["wallet_accounting"]["locked_margin_final"] == {}
+    assert dataset["wallet_accounting"]["wallet_diagnostics"]["replay_projection"]["balances"] == {
+        "BTC": 0.0,
+        "USD": 1053.0,
+    }
+    assert dataset["execution"]["fill_count"] == 2
+    assert [row["event_name"] for row in dataset["execution"]["fills"]] == [
+        "entry_filled",
+        "exit_filled",
+    ]
+
+
 def test_operational_fingerprint_changes_when_runtime_event_order_changes(monkeypatch: pytest.MonkeyPatch) -> None:
     baseline = _build(monkeypatch, events=_events())
     reordered_events = _events()
@@ -1716,6 +1821,67 @@ def test_candle_gap_diagnostics_skip_zero_gap_identity_rows(monkeypatch: pytest.
 
     symbols = [row["symbol"] for row in dataset["candle_gaps"]["gap_counts_by_symbol"]]
     assert "68694ebd-dfa6-4757-99da-9b3a2b4f4aa8|1h" not in symbols
+
+
+def test_producer_terminal_continuity_details_are_canonical_and_transport_is_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = [row for row in _events() if _event_name(row) != "candle_continuity_summary"]
+    events.append(
+        _event(
+            20,
+            "DIAGNOSTIC_RECORDED",
+            {
+                "series_key": "instrument-btc|1h",
+                "instrument_id": "instrument-btc",
+                "symbol": "BTC",
+                "timeframe": "1h",
+                "diagnostic_code": "candle_continuity_summary",
+                "details": {
+                    "series_key": "instrument-btc|1h",
+                    "instrument_id": "instrument-btc",
+                    "symbol": "BTC",
+                    "timeframe": "1h",
+                    "boundary_name": "run_final",
+                    "materiality": "canonical",
+                    "evidence_scope": "canonical_terminal",
+                    "candle_count": 169,
+                    "detected_gap_count": 0,
+                    "missing_candle_estimate": 0,
+                    "gap_count_by_type": {"unknown_gap": 0},
+                },
+            },
+        )
+    )
+    transport = _observer_gap(
+        boundary_name="transport_run_final",
+        pipeline_stage="botlens_run_final",
+        message_kind="lifecycle",
+        detected_gap_count=35,
+    )
+    transport["details"]["diagnostic_scope"] = "transport_continuity"
+
+    dataset = _build(
+        monkeypatch,
+        events=events,
+        observability_events=[transport],
+        candle_summaries={
+            ("instrument-btc", "1h"): {
+                "candle_count": 169,
+                "gap_count": 0,
+                "missing_count": 0,
+                "available_resolutions": ["1h"],
+            }
+        },
+    )
+
+    assert dataset["candle_gaps"]["canonical_evidence_status"] == "present"
+    assert dataset["candle_gaps"]["blocking_gap_count"] == 0
+    assert dataset["candle_gaps"]["facts"][0]["candle_count"] == 169
+    assert dataset["candle_gaps"]["diagnostic_facts"][0]["detected_gap_count"] == 35
+    catalog = next(row for row in dataset["candle_catalog"]["items"] if row["instrument_id"] == "instrument-btc")
+    assert catalog["continuity_status"] == "clean"
+    assert catalog["first_gap_evidence"] is None
 
 
 def test_provider_sparse_candle_gaps_degrade_without_golden_blocker(monkeypatch: pytest.MonkeyPatch) -> None:

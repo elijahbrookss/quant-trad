@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 BOTLENS_FACT_RUNTIME_STATE = "runtime_state_observed"
 BOTLENS_FACT_SERIES_STATE = "series_state_observed"
 BOTLENS_FACT_CANDLE_UPSERTED = "candle_upserted"
+BOTLENS_FACT_CANDLE_CONTINUITY_SUMMARY = "candle_continuity_summary"
 BOTLENS_FACT_OVERLAY_OPS = "overlay_ops_emitted"
 BOTLENS_FACT_SERIES_STATS = "series_stats_updated"
 BOTLENS_FACT_TRADE_OPENED = "trade_opened"
@@ -53,6 +54,7 @@ BOTLENS_FACT_STREAM_SURFACES = (
 )
 BOTLENS_FACT_STREAM_SURFACE_BY_FACT_TYPE = {
     BOTLENS_FACT_CANDLE_UPSERTED: "candles",
+    BOTLENS_FACT_CANDLE_CONTINUITY_SUMMARY: "candles",
     BOTLENS_FACT_OVERLAY_OPS: "overlays",
     BOTLENS_FACT_RUNTIME_STATE: "health_runtime_state",
     BOTLENS_FACT_TRADE_OPENED: "trades",
@@ -1678,6 +1680,9 @@ class RuntimePushStreamMixin:
                     merged_context = dict(artifact_context)
                     merged_context.update({key: value for key, value in context.items() if value not in (None, "", [], {})})
                     context = merged_context
+        accounting_mode = str(context.get("accounting_mode") or "").strip().lower()
+        if name in {"ENTRY_FILLED", "EXIT_FILLED"} and accounting_mode and accounting_mode != "margin":
+            return []
         currency = cls._wallet_currency(context)
         wallet_before = (
             dict(context.get("wallet_before"))
@@ -2725,6 +2730,53 @@ class RuntimePushStreamMixin:
             payload["source_reason"] = "provider_closure"
         return payload
 
+    def _emit_terminal_candle_continuity_facts(self, *, status: str) -> int:
+        """Persist producer-owned complete-series continuity before terminal lifecycle."""
+
+        emitted = 0
+        observed_at = _isoformat(datetime.now(timezone.utc))
+        for series in self._series or []:
+            meta = getattr(series, "meta", {}) or {}
+            summary = meta.get("candle_continuity")
+            if not isinstance(summary, AbcMapping):
+                continue
+            identity = self._series_identity(series)
+            candles = list(getattr(series, "candles", None) or [])
+            last_candle = candles[-1] if candles else None
+            if isinstance(last_candle, AbcMapping):
+                last_candle_time = last_candle.get("time")
+            else:
+                last_candle_time = getattr(last_candle, "time", None)
+            known_at = _isoformat(last_candle_time) if isinstance(last_candle_time, datetime) else last_candle_time
+            payload = {
+                "type": "facts",
+                "event": "terminal_continuity",
+                "known_at": known_at or observed_at,
+                "observed_at": observed_at,
+                "series_key": identity["series_key"],
+                "facts": [
+                    {
+                        "fact_type": BOTLENS_FACT_CANDLE_CONTINUITY_SUMMARY,
+                        **identity,
+                        "summary": {
+                            **dict(summary),
+                            "boundary_name": "run_final",
+                            "evidence_scope": "canonical_terminal",
+                            "materiality": "canonical",
+                            "source_reason": str(status or "completed").strip().lower(),
+                        },
+                    }
+                ],
+            }
+            outcome = self.commit_botlens_fact_payload(
+                payload,
+                batch_kind=BOTLENS_RUNTIME_FACTS_KIND,
+                dispatch=False,
+            )
+            self._canonical_fact_appender.dispatch(outcome.batch)
+            emitted += 1
+        return emitted
+
     def _push_update(
         self,
         event: str,
@@ -2783,55 +2835,6 @@ class RuntimePushStreamMixin:
             subscriber_count = len(self._subscribers)
             logs_count = len(self._logs)
             decisions_count = len(self._decision_events)
-        if subscriber_count <= 0 and event in {"bar", "intrabar"}:
-            dropped_messages = 0
-            build_state_ms = 0.0
-            serialize_ms = 0.0
-            enqueue_ms = 0.0
-            payload_context.update(
-                {
-                    "build_state_ms": build_state_ms,
-                    "delta_build_ms": build_state_ms,
-                    "serialize_ms": serialize_ms,
-                    "delta_serialize_ms": serialize_ms,
-                    "payload_bytes_sampled": False,
-                    "enqueue_ms": enqueue_ms,
-                    "stream_emit_ms": enqueue_ms,
-                    "dispatch_ms": 0.0,
-                    "queue_wait_ms": 0.0,
-                    "subscriber_count": subscriber_count,
-                    "subscribers_count": subscriber_count,
-                    "dropped_messages": dropped_messages,
-                    "stats_reused": isinstance(precomputed_stats, Mapping),
-                    "skip_reason": "no_subscribers",
-                }
-            )
-            if event == "bar":
-                trace_persist_ms = self._record_step_trace(
-                    "step_push_update",
-                    started_at=push_started,
-                    ended_at=datetime.now(timezone.utc),
-                    ok=True,
-                    context=payload_context,
-                )
-            push_duration_ms = max((time.perf_counter() - push_started_perf) * 1000.0, 0.0)
-            return {
-                "duration_ms": push_duration_ms,
-                "build_state_ms": build_state_ms,
-                "delta_build_ms": build_state_ms,
-                "serialize_ms": serialize_ms,
-                "delta_serialize_ms": serialize_ms,
-                "enqueue_ms": enqueue_ms,
-                "stream_emit_ms": enqueue_ms,
-                "dispatch_ms": 0.0,
-                "stats_update_ms": stats_update_ms,
-                "subscriber_count": float(subscriber_count),
-                "subscribers_count": float(subscriber_count),
-                "dropped_messages": float(dropped_messages),
-                "overlay_count": None,
-                "overlay_points": None,
-                "trace_persist_ms": trace_persist_ms,
-            }
         try:
             build_started = time.perf_counter()
             runtime_snapshot: Mapping[str, Any] = {}

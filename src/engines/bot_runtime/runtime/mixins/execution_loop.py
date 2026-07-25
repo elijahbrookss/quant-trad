@@ -338,6 +338,8 @@ class RuntimeExecutionLoopMixin:
         self._flush_persistence_buffer("runtime_loop_complete")
         self._flush_overlay_suppression_logs()
         self._push_update(status)
+        if status == "completed" and not self._live_mode:
+            self._emit_terminal_candle_continuity_facts(status=status)
         self._flush_canonical_fact_appender("runtime_loop_terminal_status", shutdown=True)
         self._flush_step_trace_buffer("runtime_loop_complete", shutdown=True)
         self._runtime_flush_drain_duration_seconds = max((datetime.now(timezone.utc) - drain_started).total_seconds(), 0.0)

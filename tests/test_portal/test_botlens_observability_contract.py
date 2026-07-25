@@ -439,7 +439,9 @@ def test_intake_router_emits_final_per_series_continuity_summary() -> None:
     router._emit_final_continuity_summaries(run_id="run-1", bot_id="bot-1", reason="completed")
 
     event = next(event for event in get_observability_sink().snapshot()["events"] if event["name"] == "candle_continuity_summary")
-    assert event["context"]["boundary_name"] == "run_final"
+    assert event["context"]["boundary_name"] == "transport_run_final"
+    assert event["context"]["materiality"] == "diagnostic"
+    assert event["context"]["diagnostic_scope"] == "transport_continuity"
     assert event["context"]["series_key"] == "instrument-btc|1m"
     assert event["context"]["detected_gap_count"] == 1
     assert event["context"]["gap_count_by_type"]["unknown_gap"] == 1

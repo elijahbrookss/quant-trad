@@ -461,9 +461,11 @@ class IntakeRouter:
                 timeframe=identity.get("timeframe"),
                 message_kind=LIFECYCLE_KIND,
                 source_reason=reason,
-                boundary_name="run_final",
+                boundary_name="transport_run_final",
                 extra={
-                    "scope": "run_final",
+                    "scope": "transport_run_final",
+                    "materiality": "diagnostic",
+                    "diagnostic_scope": "transport_continuity",
                     "final_status": summary.final_status,
                 },
             )

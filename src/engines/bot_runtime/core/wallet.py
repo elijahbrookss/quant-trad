@@ -45,6 +45,9 @@ WALLET_LEDGER_EVENT_ORDER = {
     "POSITION_CLOSED": 40,
     "EQUITY_UPDATED": 50,
 }
+WALLET_REPLAY_EVENT_NAMES = WALLET_LEDGER_EVENT_NAMES | frozenset(
+    {"ENTRY_FILL", "EXIT_FILL"}
+)
 
 
 @dataclass(frozen=True)
@@ -911,7 +914,7 @@ def _wallet_event_order_from_id(value: Any) -> Optional[int]:
 
 def _wallet_ledger_sort_key(index: int, event: RuntimeEvent | Mapping[str, Any]) -> Tuple[int, int, int, int]:
     event_type, payload = _wallet_event_context_for_validation(event)
-    if event_type not in WALLET_LEDGER_EVENT_NAMES:
+    if event_type not in WALLET_REPLAY_EVENT_NAMES:
         return (2, index, 0, index)
     wallet_commit_seq = _wallet_optional_int(payload.get("wallet_commit_seq"))
     if wallet_commit_seq is None:
@@ -920,7 +923,12 @@ def _wallet_ledger_sort_key(index: int, event: RuntimeEvent | Mapping[str, Any])
             f"| event_name={event_type} | event_id={_wallet_projection_event_id(event)}"
         )
     event_id = _wallet_projection_event_id(event)
-    wallet_event_order = int(WALLET_LEDGER_EVENT_ORDER.get(str(event_type or ""), 99))
+    wallet_event_order = int(
+        WALLET_LEDGER_EVENT_ORDER.get(
+            str(event_type or ""),
+            10 if event_type in {"ENTRY_FILL", "EXIT_FILL"} else 99,
+        )
+    )
     for candidate in (
         _wallet_optional_int(payload.get("wallet_event_order")),
         _wallet_event_order_from_id(payload.get("wallet_event_id")),
@@ -1014,7 +1022,7 @@ def _wallet_first_state_issue(events: Iterable[RuntimeEvent | Mapping[str, Any]]
     raw_events = list(events)
     for event in raw_events:
         event_type, payload = _wallet_event_context_for_validation(event)
-        if event_type not in WALLET_LEDGER_EVENT_NAMES:
+        if event_type not in WALLET_REPLAY_EVENT_NAMES:
             continue
         if _wallet_optional_int(payload.get("wallet_commit_seq")) is None:
             return {
@@ -1027,8 +1035,57 @@ def _wallet_first_state_issue(events: Iterable[RuntimeEvent | Mapping[str, Any]]
     ordered_events = canonical_wallet_ledger_events(raw_events)
     for event_index, event in enumerate(ordered_events):
         event_type, payload = _wallet_event_context_for_validation(event)
-        if event_type not in WALLET_LEDGER_EVENT_NAMES:
+        if event_type not in WALLET_REPLAY_EVENT_NAMES:
             prefix.append(event)
+            continue
+        if event_type in {"ENTRY_FILL", "EXIT_FILL"}:
+            missing = [
+                key
+                for key in (
+                    "base_currency",
+                    "quote_currency",
+                    "side",
+                    "qty",
+                    "price",
+                    "notional",
+                    "accounting_mode",
+                    "wallet_delta",
+                    "wallet_before",
+                )
+                if payload.get(key) in (None, "", {}, [])
+            ]
+            if missing:
+                return {
+                    **_wallet_validation_event_identity(event, event_type, payload),
+                    "code": "wallet_fill_state_malformed",
+                    "reason": "missing_fill_replay_fields",
+                    "missing_fields": missing,
+                    "prior_wallet_events": _wallet_issue_prior_events(
+                        ordered_events,
+                        event_index,
+                    ),
+                }
+            before_state = project_wallet_from_events(prefix)
+            wallet_before = _wallet_ledger_balances(payload.get("wallet_before"))
+            replay_before = dict(getattr(before_state, "balances", {}) or {})
+            for currency in sorted(set(wallet_before) | set(replay_before)):
+                persisted = float(wallet_before.get(currency, 0.0))
+                replayed = float(replay_before.get(currency, 0.0))
+                if abs(persisted - replayed) > 0.01:
+                    return {
+                        **_wallet_validation_event_identity(event, event_type, payload),
+                        "code": "wallet_fill_state_mismatch",
+                        "reason": "wallet_before_balance_mismatch",
+                        "currency": currency,
+                        "persisted": persisted,
+                        "replayed": replayed,
+                        "prior_wallet_events": _wallet_issue_prior_events(
+                            ordered_events,
+                            event_index,
+                        ),
+                    }
+            prefix.append(event)
+            project_wallet_from_events(prefix)
             continue
         currency = _wallet_ledger_currency(payload)
         identity = _wallet_validation_event_identity(event, event_type, payload)

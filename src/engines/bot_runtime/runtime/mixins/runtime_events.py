@@ -55,6 +55,68 @@ def _parse_runtime_iso(value: Any) -> Optional[datetime]:
     return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def _fill_accounting_mode(series: Any) -> str:
+    """Return the explicit accounting mode required by persisted fill facts."""
+
+    profile = getattr(series, "execution_profile", None)
+    accounting_mode = str(getattr(profile, "accounting_mode", None) or "").strip().lower()
+    if accounting_mode in {"spot", "margin"}:
+        return accounting_mode
+    if accounting_mode:
+        raise ValueError(f"unsupported fill accounting_mode: {accounting_mode}")
+
+    instrument_contract = getattr(profile, "instrument", None)
+    execution_semantics = str(
+        getattr(instrument_contract, "execution_semantics", None) or ""
+    ).strip().lower()
+    if not execution_semantics:
+        instrument = getattr(series, "instrument", None)
+        if isinstance(instrument, Mapping):
+            execution_semantics = str(instrument.get("execution_semantics") or "").strip().lower()
+    if execution_semantics == "spot":
+        return "spot"
+    raise ValueError(
+        "fill accounting_mode is required; expected explicit margin accounting "
+        "or spot execution semantics"
+    )
+
+
+def _fill_currency_pair(
+    series: Any,
+    *,
+    observed_base: Any = None,
+    observed_quote: Any = None,
+) -> Tuple[str, str]:
+    """Return and validate the execution profile's canonical fill currencies."""
+
+    profile = getattr(series, "execution_profile", None)
+    instrument_contract = getattr(profile, "instrument", None)
+    base_currency = str(getattr(instrument_contract, "base_currency", None) or "").strip().upper()
+    quote_currency = str(getattr(instrument_contract, "quote_currency", None) or "").strip().upper()
+    instrument = getattr(series, "instrument", None)
+    if isinstance(instrument, Mapping):
+        base_currency = base_currency or str(instrument.get("base_currency") or "").strip().upper()
+        quote_currency = quote_currency or str(instrument.get("quote_currency") or "").strip().upper()
+
+    observed_base_text = str(observed_base or "").strip().upper()
+    observed_quote_text = str(observed_quote or "").strip().upper()
+    base_currency = base_currency or observed_base_text
+    quote_currency = quote_currency or observed_quote_text
+    if not base_currency or not quote_currency:
+        raise ValueError("fill base_currency and quote_currency are required")
+    if observed_base_text and observed_base_text != base_currency:
+        raise ValueError(
+            f"fill base_currency conflicts with execution profile: "
+            f"{observed_base_text} != {base_currency}"
+        )
+    if observed_quote_text and observed_quote_text != quote_currency:
+        raise ValueError(
+            f"fill quote_currency conflicts with execution profile: "
+            f"{observed_quote_text} != {quote_currency}"
+        )
+    return base_currency, quote_currency
+
+
 class RuntimeEventsMixin:
     def _wallet_initialization_is_container_owned(self) -> bool:
         return str(self.config.get("wallet_initialization_owner") or "").strip().lower() == "container"
@@ -712,9 +774,7 @@ class RuntimeEventsMixin:
             fee_type = "taker"
         fee_source = str(entry_outcome.get("fee_source") or "template_or_instrument")
         fee_version = entry_outcome.get("fee_version")
-        accounting_mode = None
-        if getattr(series, "execution_profile", None) is not None:
-            accounting_mode = series.execution_profile.accounting_mode
+        accounting_mode = _fill_accounting_mode(series)
         collateral_reserved = 0.0
         if accounting_mode == "margin":
             _currency, _reservation_total, reservation_details = wallet_required_reservation_details(
@@ -741,6 +801,11 @@ class RuntimeEventsMixin:
         )
         if getattr(trade, "position_commit_seq", None) is not None:
             wallet_fill_metadata.setdefault("position_commit_seq", int(getattr(trade, "position_commit_seq") or 0))
+        base_currency, quote_currency = _fill_currency_pair(
+            series,
+            observed_base=getattr(trade, "base_currency", None),
+            observed_quote=getattr(trade, "quote_currency", None),
+        )
         wallet_before_payload = (
             dict(wallet_fill_metadata.get("wallet_before"))
             if isinstance(wallet_fill_metadata.get("wallet_before"), Mapping)
@@ -794,8 +859,8 @@ class RuntimeEventsMixin:
             fee_type=fee_type,
             fee_source=fee_source,
             fee_version=str(fee_version) if fee_version is not None else None,
-            base_currency=str(getattr(trade, "base_currency", "") or ""),
-            quote_currency=str(getattr(trade, "quote_currency", "") or ""),
+            base_currency=base_currency,
+            quote_currency=quote_currency,
             accounting_mode=accounting_mode,
             wallet_delta=WalletDelta(**wallet_delta_payload),
             reservation_id=str(reservation_id) if reservation_id else None,
@@ -879,9 +944,7 @@ class RuntimeEventsMixin:
             fee_type = "taker"
         fee_source = str(event.get("fee_source") or settlement.get("fee_source") or "template_or_instrument")
         fee_version = event.get("fee_version") if event.get("fee_version") is not None else settlement.get("fee_version")
-        accounting_mode = None
-        if getattr(series, "execution_profile", None) is not None:
-            accounting_mode = series.execution_profile.accounting_mode
+        accounting_mode = _fill_accounting_mode(series)
         realized_pnl = float(event.get("pnl") or 0.0)
         if subtype == "close":
             realized_pnl = float(event.get("net_pnl") or 0.0) + fee_paid
@@ -942,6 +1005,11 @@ class RuntimeEventsMixin:
         required_delta = wallet_fill_metadata.get("required_delta")
         event_ts = self._runtime_event_time(event.get("time")) or candle.time
         exit_reason = reason if not missing_parent_hint else ReasonCode.RUNTIME_PARENT_MISSING
+        base_currency, quote_currency = _fill_currency_pair(
+            series,
+            observed_base=getattr(series.risk_engine, "base_currency", None),
+            observed_quote=event.get("currency") or getattr(series.risk_engine, "quote_currency", None),
+        )
         context = ExitFilledContext(
             **self._runtime_context_base(
                 series=series,
@@ -962,8 +1030,8 @@ class RuntimeEventsMixin:
             fee_source=fee_source,
             fee_version=str(fee_version) if fee_version is not None else None,
             realized_pnl=float(realized_pnl),
-            base_currency=str(getattr(series.risk_engine, "base_currency", "") or ""),
-            quote_currency=str(event.get("currency") or getattr(series.risk_engine, "quote_currency", "") or ""),
+            base_currency=base_currency,
+            quote_currency=quote_currency,
             accounting_mode=accounting_mode,
             exit_kind=exit_kind,
             event_impact_pnl=(

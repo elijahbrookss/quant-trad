@@ -63,6 +63,7 @@ EVENT_TYPE_LIFECYCLE = "botlens.lifecycle_event"
 FACT_TYPE_RUNTIME_STATE = "runtime_state_observed"
 FACT_TYPE_SERIES_STATE = "series_state_observed"
 FACT_TYPE_CANDLE_UPSERTED = "candle_upserted"
+FACT_TYPE_CANDLE_CONTINUITY_SUMMARY = "candle_continuity_summary"
 FACT_TYPE_PROVISIONAL_CANDLE_UPDATED = "provisional_candle_updated"
 FACT_TYPE_OVERLAY_OPS = "overlay_ops_emitted"
 FACT_TYPE_SERIES_STATS = "series_stats_updated"
@@ -193,6 +194,7 @@ __all__ = [
     "EVENT_TYPE_RUNTIME_BOOTSTRAP",
     "EVENT_TYPE_RUNTIME_FACTS",
     "FACT_TYPE_CANDLE_UPSERTED",
+    "FACT_TYPE_CANDLE_CONTINUITY_SUMMARY",
     "FACT_TYPE_DECISION_EMITTED",
     "FACT_TYPE_LOG_EMITTED",
     "FACT_TYPE_OVERLAY_OPS",

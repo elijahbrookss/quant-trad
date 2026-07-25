@@ -75,6 +75,122 @@ def test_diagnostic_recorded_uses_structured_fields_without_raw_context_blob() -
     assert "raw" not in payload
 
 
+def test_terminal_candle_continuity_summary_round_trips_as_material_diagnostic() -> None:
+    events = build_botlens_domain_events_from_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        payload={
+            "known_at": "2026-02-01T00:00:00Z",
+            "facts": [
+                {
+                    "fact_type": "candle_continuity_summary",
+                    "series_key": "instrument-btc|1h",
+                    "instrument_id": "instrument-btc",
+                    "symbol": "BTC/USD",
+                    "timeframe": "1h",
+                    "strategy_id": "strategy-1",
+                    "summary": {
+                        "candle_count": 169,
+                        "detected_gap_count": 0,
+                        "defect_gap_count": 0,
+                        "missing_candle_estimate": 0,
+                        "gap_count_by_type": {"unknown_gap": 0},
+                        "final_status": "healthy",
+                        "boundary_name": "run_final",
+                        "evidence_scope": "canonical_terminal",
+                        "materiality": "canonical",
+                    },
+                }
+            ],
+        },
+    )
+
+    event = next(event for event in events if event.event_name.value == "DIAGNOSTIC_RECORDED")
+    payload = serialize_botlens_domain_event(
+        deserialize_botlens_domain_event(serialize_botlens_domain_event(event))
+    )
+
+    assert payload["context"]["diagnostic_code"] == "candle_continuity_summary"
+    assert payload["context"]["component"] == "bot_runtime"
+    assert payload["context"]["details"]["boundary_name"] == "run_final"
+    assert payload["context"]["details"]["candle_count"] == 169
+    assert payload["context"]["details"]["materiality"] == "canonical"
+
+
+def test_spot_entry_fill_round_trips_with_wallet_and_execution_evidence() -> None:
+    events = build_botlens_domain_events_from_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        payload={
+            "known_at": "2026-02-01T00:00:00Z",
+            "facts": [
+                {
+                    "fact_type": "decision_emitted",
+                    "decision": {
+                        "event_id": "runtime-entry-fill-1",
+                        "event_name": "ENTRY_FILLED",
+                        "seq": 12,
+                        "event_ts": "2026-02-01T00:00:00Z",
+                        "correlation_id": "trade:trade-1",
+                        "root_id": "runtime-signal-1",
+                        "parent_id": "runtime-decision-1",
+                        "context": {
+                            "run_id": "run-1",
+                            "bot_id": "bot-1",
+                            "strategy_id": "strategy-1",
+                            "series_key": "instrument-btc|1h",
+                            "instrument_id": "instrument-btc",
+                            "symbol": "BTC/USD",
+                            "timeframe": "1h",
+                            "bar_ts": "2026-02-01T00:00:00Z",
+                            "trade_id": "trade-1",
+                            "wallet_correlation_id": "trade:trade-1",
+                            "side": "buy",
+                            "direction": "long",
+                            "qty": 1.0,
+                            "price": 100.0,
+                            "notional": 100.0,
+                            "fee_paid": 1.0,
+                            "fee_rate": 0.01,
+                            "fee_type": "taker",
+                            "fee_source": "test",
+                            "base_currency": "BTC",
+                            "quote_currency": "USD",
+                            "accounting_mode": "spot",
+                            "wallet_delta": {
+                                "collateral_reserved": 0.0,
+                                "collateral_released": 0.0,
+                                "fee_paid": 1.0,
+                            },
+                            "wallet_before": {
+                                "balances": {"USD": 1000.0},
+                                "locked_margin": {},
+                                "free_collateral": {"USD": 1000.0},
+                            },
+                            "wallet_commit_seq": 1,
+                            "wallet_eval_seq": 0,
+                            "position_commit_seq": 1,
+                        },
+                    },
+                }
+            ],
+        },
+    )
+
+    event = next(event for event in events if event.event_name.value == "ENTRY_FILLED")
+    payload = serialize_botlens_domain_event(
+        deserialize_botlens_domain_event(serialize_botlens_domain_event(event))
+    )
+
+    assert payload["context"]["fill_kind"] == "entry"
+    assert payload["context"]["accounting_mode"] == "spot"
+    assert payload["context"]["base_currency"] == "BTC"
+    assert payload["context"]["quote_currency"] == "USD"
+    assert payload["context"]["wallet_before"]["balances"]["USD"] == 1000.0
+    assert payload["context"]["wallet_delta"]["fee_paid"] == 1.0
+    assert payload["context"]["wallet_commit_seq"] == 1
+
+
 def test_fault_recorded_uses_structured_fields_without_raw_failure_blob() -> None:
     events = build_botlens_domain_events_from_lifecycle(
         bot_id="bot-1",

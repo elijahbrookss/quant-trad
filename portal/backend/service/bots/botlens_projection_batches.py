@@ -20,6 +20,8 @@ _SOURCE_PERSISTED_EVENT_NAMES = frozenset(
         BotLensDomainEventName.RUN_CANCELLED,
         BotLensDomainEventName.SIGNAL_EMITTED,
         BotLensDomainEventName.DECISION_EMITTED,
+        BotLensDomainEventName.ENTRY_FILLED,
+        BotLensDomainEventName.EXIT_FILLED,
         BotLensDomainEventName.TRADE_OPENED,
         BotLensDomainEventName.TRADE_UPDATED,
         BotLensDomainEventName.TRADE_CLOSED,
@@ -37,6 +39,9 @@ _SOURCE_PERSISTED_EVENT_NAMES = frozenset(
 
 
 def is_canonical_fact_event(event: BotLensDomainEvent) -> bool:
+    if event.event_name == BotLensDomainEventName.DIAGNOSTIC_RECORDED:
+        details = getattr(event.context, "details", None)
+        return isinstance(details, Mapping) and str(details.get("materiality") or "").strip().lower() == "canonical"
     return event.event_name in _SOURCE_PERSISTED_EVENT_NAMES
 
 

@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 _CANONICAL_SIMPLE_FACT_TYPES = frozenset(
     {
+        "candle_continuity_summary",
         "trade_opened",
         "trade_updated",
         "trade_closed",
@@ -21,7 +22,14 @@ _CANONICAL_SIMPLE_FACT_TYPES = frozenset(
     }
 )
 _CANONICAL_DECISION_EVENT_NAMES = frozenset(
-    {"SIGNAL_EMITTED", "DECISION_ACCEPTED", "DECISION_REJECTED", "RUNTIME_ERROR"}
+    {
+        "SIGNAL_EMITTED",
+        "DECISION_ACCEPTED",
+        "DECISION_REJECTED",
+        "ENTRY_FILLED",
+        "EXIT_FILLED",
+        "RUNTIME_ERROR",
+    }
 )
 
 

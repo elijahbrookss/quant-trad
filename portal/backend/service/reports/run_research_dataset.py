@@ -1658,6 +1658,10 @@ def _wallet_accounting(
         name = _event_name_key(row)
         context = _context(row)
         if name in _WALLET_EVENT_NAMES:
+            if name in {"entry_filled", "exit_filled"} and str(
+                context.get("accounting_mode") or ""
+            ).strip().lower() == "margin":
+                continue
             wallet_events.append(_payload(row))
     wallet_events_by_decision: Dict[str, List[Dict[str, Any]]] = {}
     for payload in wallet_events:
@@ -1882,9 +1886,41 @@ def _execution_section(
     for key in ("report_warnings", "runtime_warnings", "warnings"):
         warnings.extend(dict(entry) for entry in config.get(key) or [] if isinstance(entry, Mapping))
     fallback_rows: Dict[str, Dict[str, Any]] = {}
+    fill_rows: List[Dict[str, Any]] = []
     for row in events:
         name = _event_name_key(row)
         context = _context(row)
+        if name in {"entry_filled", "exit_filled"}:
+            fill_rows.append(
+                {
+                    "event_id": row.get("event_id") or _payload(row).get("event_id"),
+                    "event_name": name,
+                    "event_time": _payload(row).get("event_ts"),
+                    "known_at": context.get("bar_time") or row.get("known_at"),
+                    "series_key": context.get("series_key"),
+                    "instrument_id": context.get("instrument_id"),
+                    "symbol": context.get("symbol"),
+                    "timeframe": context.get("timeframe"),
+                    "trade_id": context.get("trade_id"),
+                    "side": context.get("side"),
+                    "direction": context.get("direction"),
+                    "qty": context.get("qty"),
+                    "price": context.get("price"),
+                    "notional": context.get("notional"),
+                    "fee_paid": context.get("fee_paid"),
+                    "fee_rate": context.get("fee_rate"),
+                    "fee_type": context.get("fee_type"),
+                    "fee_source": context.get("fee_source"),
+                    "accounting_mode": context.get("accounting_mode"),
+                    "wallet_commit_seq": context.get("wallet_commit_seq"),
+                    "position_commit_seq": context.get("position_commit_seq"),
+                    "exit_kind": context.get("exit_kind"),
+                    "realized_pnl": context.get("realized_pnl"),
+                    "correlation_id": _payload(row).get("correlation_id"),
+                    "root_id": _payload(row).get("root_id"),
+                    "parent_id": _payload(row).get("parent_id"),
+                }
+            )
         if name == "execution_intrabar_fallback_pessimistic":
             event_id = str(row.get("event_id") or _payload(row).get("event_id") or len(fallback_rows))
             fallback_rows[event_id] = {
@@ -1918,6 +1954,8 @@ def _execution_section(
         "intrabar_fallback_count": len(fallback_rows),
         "fallback_reason_distribution": dict(reason_distribution),
         "fallback_bars": list(fallback_rows.values()),
+        "fill_count": len(fill_rows),
+        "fills": fill_rows,
         "fast_full_caveats": fast_full_caveats,
     }
 
@@ -1943,7 +1981,18 @@ def _candle_gaps(
     noncanonical_summary_count = 0
     for row in events:
         context = _context(row)
-        sources.append((row, context if "gap_count_by_type" in context else _mapping(_payload(row).get("details")), _event_name_key(row)))
+        nested_details = _mapping(context.get("details"))
+        sources.append(
+            (
+                row,
+                context
+                if "gap_count_by_type" in context
+                else nested_details
+                if "gap_count_by_type" in nested_details
+                else _mapping(_payload(row).get("details")),
+                _event_name_key(row),
+            )
+        )
     for row in observability_events:
         sources.append((row, _mapping(row.get("details")), str(row.get("event_name") or "").strip().lower()))
     closure_cache: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
@@ -3130,7 +3179,14 @@ def _sections(
             section("diagnostics", available=True, row_count=int(_mapping(diagnostics.get("summary")).get("total") or 0)),
             section("wallet_diagnostics", available=bool(wallet), row_count=int(wallet.get("wallet_event_count") or 0), reason=None if wallet else "wallet_diagnostics_unavailable"),
             section("metrics", available=True),
-            section("execution", available=True, row_count=int(execution.get("intrabar_fallback_count") or 0)),
+            section(
+                "execution",
+                available=True,
+                row_count=(
+                    int(execution.get("intrabar_fallback_count") or 0)
+                    + int(execution.get("fill_count") or 0)
+                ),
+            ),
             section("data_quality", available=True, row_count=len(candle_gaps.get("gap_counts_by_symbol") or []), status=readiness.data_quality_status),
             section("operational_health", available=bool(operational), row_count=len(operational.get("per_stage_latency") or []), reason=None if operational else "operational_health_unavailable"),
             section("export", available=readiness.export_status in {"available", "partial"}, status=readiness.export_status, reason=None if readiness.export_status == "available" else readiness.reason),
@@ -4313,7 +4369,11 @@ def _candle_catalog(
                 "expected_gap_count": semantics.get("expected_gap_count"),
                 "unclassified_gap_count": semantics.get("unclassified_gap_count"),
                 "readiness_impact": semantics.get("readiness_impact"),
-                "first_gap_evidence": next((gap for gap in fact.get("gaps") or [] if isinstance(gap, Mapping)), None),
+                "first_gap_evidence": (
+                    next((gap for gap in fact.get("gaps") or [] if isinstance(gap, Mapping)), None)
+                    if int(gap_count or 0) > 0
+                    else None
+                ),
                 "continuity_status": continuity_status,
                 "available_resolutions": available_resolutions,
                 "storage_source": "market_candles_raw" if stored else "candle_continuity_summary" if fact else "unresolved_instrument",
