@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional,
 
 from ...market import instrument_service
 from ...risk.atm import normalise_template
+from engines.bot_runtime.core.execution_plan import compile_runtime_execution_plan
 from ...indicators.indicator_service import get_instance_meta
 from ...strategy_variant_resolution import EffectiveStrategyConfig, materialize_output_filters, resolve_strategy_variant
 from risk import normalise_risk_config
@@ -64,6 +65,18 @@ upsert_atm_template = persistence.upsert_atm_template
 storage_upsert_strategy_instrument = persistence.upsert_strategy_instrument
 storage_delete_strategy_instrument = persistence.delete_strategy_instrument
 storage_list_strategy_instrument_symbols = persistence.list_strategy_instrument_symbols
+
+
+def _normalise_execution_template(
+    template: Optional[Mapping[str, Any]],
+    *,
+    require_template: bool = False,
+) -> Dict[str, Any]:
+    """Normalize and compile an ATM template before it can be persisted."""
+
+    normalized = normalise_template(template, require_template=require_template)
+    compile_runtime_execution_plan(normalized)
+    return normalized
 
 
 @dataclass
@@ -1012,7 +1025,7 @@ class StrategyRegistry:
         if template_payload is None:
             raise ValueError("ATM template is required when creating a strategy.")
 
-        normalised_template = normalise_template(template_payload, require_template=True)
+        normalised_template = _normalise_execution_template(template_payload, require_template=True)
 
         # Save or get the ATM template ID
         if atm_template_id:
@@ -1088,7 +1101,7 @@ class StrategyRegistry:
         old_datasource = record.datasource
         old_exchange = record.exchange
         if fields.get("atm_template") is not None:
-            normalised_template = normalise_template(fields.get("atm_template"), require_template=True)
+            normalised_template = _normalise_execution_template(fields.get("atm_template"), require_template=True)
             candidate_template_id = fields.get("atm_template_id") or record.atm_template_id
             saved_template = upsert_atm_template(
                 {
@@ -1690,7 +1703,7 @@ def save_atm_template(template: Mapping[str, Any]) -> Dict[str, Any]:
     """Persist a standalone ATM template for reuse."""
 
     payload_template = template.get("template") if isinstance(template, Mapping) else None
-    normalized = normalise_template(payload_template or template, require_template=True)
+    normalized = _normalise_execution_template(payload_template or template, require_template=True)
     name = str(template.get("name") or normalized.get("name") or "ATM template").strip()
     request_payload = {
         "id": template.get("id"),

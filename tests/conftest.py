@@ -215,6 +215,8 @@ def _is_pr_profile_test(path: str, name: str) -> bool:
     if path.startswith("tests/test_indicators/") or path.startswith("tests/test_strategies/"):
         return True
     if path in {
+        "tests/test_atm_template.py",
+        "tests/test_execution_plan_contract.py",
         "tests/test_indicator_engine_overlays.py",
         "tests/test_perf_log.py",
     }:

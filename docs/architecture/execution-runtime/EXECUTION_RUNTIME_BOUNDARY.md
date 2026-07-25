@@ -87,10 +87,16 @@ Runtime separates source identity from execution modeling:
 ## Position Lifecycle And Order Semantics
 
 ATM templates declare position lifecycle intent; runtime executes that intent.
-Template compatibility is handled at the ATM boundary. Runtime compiles the
-normalized template into a `RuntimeExecutionPlan` before opening trades.
-Position state consumes resolved runtime policy objects rather than raw
-template dictionaries.
+Template compatibility is handled at the ATM boundary and cannot silently drop
+malformed fields. Runtime compiles the normalized template once into a
+`RuntimeExecutionPlan` before constructing execution state. The plan owns
+entry, initial-stop, take-profit, fixed-horizon, breakeven, trailing, and
+stop-adjustment semantics. The engine projects target dictionaries only from
+that plan; position state consumes resolved runtime policy objects rather than
+raw template dictionaries.
+
+Strategy and standalone ATM-template write paths compile this same plan before
+persistence so semantically invalid templates cannot wait until run startup to fail.
 
 The canonical policy fields are:
 
@@ -104,9 +110,15 @@ The canonical policy fields are:
   runtime stop-adjustment objects.
 - `breakeven`: direct breakeven activation for simple strategies when explicit
   stop adjustments are not configured.
-- `trailing`: trailing-stop activation and distance config. A trailing stop may
-  only tighten in the favorable direction; it must never loosen an existing
-  stop.
+- `trailing`: trailing-stop activation and distance config. With
+  `activation_type=r_multiple`, `r_multiple` defines activation and `ticks` or
+  `atr_multiplier` defines distance. With `activation_type=target_hit`, the
+  target ID or index must resolve during compilation. A trailing stop may only
+  tighten in the favorable direction; it must never loosen an existing stop.
+
+Unsupported enums, non-finite or out-of-range numbers, contradictory fixed
+horizons, duplicate targets, invalid allocation fractions, unresolved target
+references, and incomplete stop adjustments are admission failures.
 
 Runtime maps exit event types to liquidity roles:
 

@@ -762,6 +762,23 @@ def test_target_fill_status_and_quantity_change_bumps_trade_revision():
     assert engine.trade_revision == revision_after_open + 1
 
 
+def test_take_profit_size_fractions_drive_integer_contract_allocation():
+    engine = _build_spot_engine(
+        base_risk_per_trade=40,
+        take_profit_orders=[
+            {"id": "tp-small", "ticks": 5, "size_fraction": 0.1},
+            {"id": "tp-large", "ticks": 10, "size_fraction": 0.9},
+        ],
+    )
+    _enable_runtime_execution(engine)
+    position = engine.maybe_enter(_build_candle(close=100.0, atr=2.0), "long")
+
+    assert position is not None
+    expected = [("tp-small", 1.0), ("tp-large", 9.0)]
+    assert [(leg.leg_id, leg.contracts) for leg in position.legs] == expected
+    assert sum(leg.contracts for leg in position.legs) == 10.0
+
+
 def test_pre_order_insufficient_margin_rejection_has_entry_request_identity():
     engine = _build_future_engine()
     engine.attach_wallet_gateway(SharedWalletGateway(_wallet_proxy({"USD": 0.0})))

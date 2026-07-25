@@ -19,7 +19,7 @@ engineering guidance; this file records only cleanup-specific state.
 | --- | --- | --- | --- |
 | Candle-continuity extraction | integration baseline | Complete | — |
 | Canonical lifecycle ledger | `feats/lifecycle-canonical-ledger` | Complete | baseline |
-| Strict execution contracts | `feats/execution-contract-strictness` | Pending | lifecycle integration |
+| Strict execution contracts | `feats/execution-contract-strictness` | Validated; pending merge | lifecycle integration |
 | Compatibility/dead-path removal | `feats/compatibility-dead-path-removal` | Pending | strict execution contract ownership |
 | Temporal/config ownership | `feats/config-temporal-ownership` | Pending | compatibility caller migration |
 | Baseline hygiene | `feats/baseline-hygiene` | Pending | structural ownership settled |
@@ -55,6 +55,7 @@ retired tables until that explicit hard cutover is complete.
 | 2026-07-24 | `1724240` candle-continuity extraction | focused continuity/reporting: 54 passed; reporting: 37 passed; PR profile: 851 passed, 286 deselected; docs: 2 passed |
 | 2026-07-24 | integration branch publication | pushed without history rewrite; upstream configured |
 | 2026-07-24 | `94a84a9..617f3ea` canonical lifecycle ledger | focused lifecycle/runtime/bootstrap: 59 passed; PR profile: 856 passed, 287 deselected; docs: 2 passed; isolated TimescaleDB 15 clean/repeated bootstrap, field-equivalent hard cutover, and event/summary rollback all passed |
+| 2026-07-25 | `feats/execution-contract-strictness` | focused execution/ATM/persistence: 57 passed; runtime profile: 371 passed, 798 deselected; PR profile: 882 passed, 287 deselected; docs: 2 passed; normalized-template idempotence, pre-persistence compilation, dormant-rule validation, and deterministic target allocation covered |
 
 Each child branch must record its focused tests, broader regression profile,
 documentation validation, diff review, and remaining-reference search before
@@ -62,8 +63,9 @@ integration.
 
 ## Discovered Risks
 
-- ATM and execution-plan normalization can silently skip or weaken malformed
-  rules.
+- Exported `template_metrics` has no internal callers and still derives its risk
+  output from retired flat stop/contract fields; verify external usage, then
+  delete it in the compatibility/dead-path workstream.
 - Backtest warmup shortfalls and some malformed/empty provider data are not
   always surfaced in quality evidence.
 - Report observability reads can truncate at 2,000 events without a truncation
@@ -78,6 +80,13 @@ integration.
 - Deviations from the initial inventory: none yet.
 - The configured developer database on port 15432 rejected local credentials;
   database validation used an isolated repository-defined TimescaleDB project.
+- Strict execution scope expanded to compile ATM templates at strategy and
+  standalone-template persistence boundaries and to include execution-contract
+- Independent review expanded the strict boundary to reject legacy flat stop
+  input, conflicting target aliases, fractional integer shorthand, and dormant
+  invalid trailing rules, and to honor target fractions during deterministic
+  quantity-step allocation.
+  tests in the PR profile; this closes an admission-timing gap found in review.
 - Frontend checks remain intentionally skipped because frontend is outside the
   cleanup critical path.
 
@@ -85,7 +94,7 @@ integration.
 
 - [x] One canonical lifecycle ledger; no mirrors or fallback reads
 - [x] Explicit, reconstructable, transactionally updated run summary projection
-- [ ] Malformed execution configuration fails before runtime
+- [x] Malformed canonical execution configuration fails before runtime
 - [ ] Proven dead and compatibility-only production paths removed
 - [ ] Explicit storage ownership and nonduplicated temporal dispatch
 - [ ] Accurate backend CI with optional frontend checks
