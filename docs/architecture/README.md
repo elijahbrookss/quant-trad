@@ -75,6 +75,13 @@ SVGs are the quick-reference files to open while reading nearby docs.
 behind the current boundary model. They are explanatory: contracts remain the
 source of truth when there is disagreement.
 
+Baseline cleanup is not complete until durable decisions affecting lifecycle
+truth, accounting, known-at semantics, execution/exit behavior, dataset
+identity/quality, async ownership, agent mutation/promotion, and live-trading
+boundaries are indexed ADRs with explicit invariants and enforcing evidence.
+Incomplete enforcement stays `proposed`; a proposed ADR is not surviving
+implementation.
+
 ## Reading Paths
 
 For the runtime hot path:
@@ -99,6 +106,10 @@ For adding extension points:
 - Heavy debug/history belongs on cold paths.
 - Runtime hot-path payloads stay bounded and typed.
 - Signals are documented inside the decision layer.
+- ADRs record durable architectural or safety choices, not routine file moves
+  or mechanical refactors.
+- Accepted cleanup ADRs identify context, decision, invariants, consequences,
+  rejected alternatives, and enforcing tests/evidence.
 - After changing architecture frontmatter, run:
 
 ```bash

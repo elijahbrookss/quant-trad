@@ -214,6 +214,15 @@ continuity evidence is absent, reporting blocks certification with
 `missing_canonical_continuity_evidence` instead of silently certifying from
 observer facts.
 
+`data_snapshot_hash` identifies exact candle values consumed by every expected
+runtime strategy/instrument/timeframe series. Reporting aggregates only the
+runtime-produced `candle_series_snapshot.v1` evidence carried by canonical
+terminal facts. It does not re-fetch candles or derive material identity from
+catalog counts or gap metadata. Missing snapshot coverage makes the hash
+unavailable and readiness exposes `missing_data_snapshot_hash`. Continuity,
+provenance, warmup, confidence, and caveats continue through the existing
+quality/readiness contract independently of the value hash.
+
 ## What Reporting Publishes
 
 Reporting publishes report API payloads, compare payloads, compact research and
@@ -265,6 +274,10 @@ semantics.
   without reordering gaps or reconstructing candle history.
 - Headless research runs must emit canonical `run_final` continuity evidence
   without requiring BotLens to be opened.
+- A run-level data snapshot hash is available only when exact runtime-produced
+  candle snapshots cover every expected series.
+- Observer continuity and diagnostic gap metadata cannot change exact material
+  candle identity.
 - Strategy rows in report config snapshots must preserve the run-start
   `run_strategy_snapshot`/`effective_strategy_config` when provided by runtime
   series metadata. Worker aggregation must not replace known rules, params, ATM,
@@ -277,6 +290,8 @@ semantics.
 - [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
 - [ADR 0015: Split semantic and operational golden fingerprints](../decisions/0015-split-semantic-and-operational-golden-fingerprints.md)
 - [ADR 0016: Treat runtime event ledger order as operational evidence](../decisions/0016-treat-runtime-event-ledger-order-as-operational-evidence.md)
+- [ADR 0043: Canonical accounting reconciliation](../decisions/0043-reconcile-accounting-from-canonical-fills-and-wallet-ledger.md)
+- [ADR 0046: Exact candle inputs and separate quality](../decisions/0046-fingerprint-exact-candle-inputs-and-keep-quality-separate.md)
 
 ## Known Gaps
 

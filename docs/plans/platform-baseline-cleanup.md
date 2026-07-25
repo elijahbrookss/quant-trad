@@ -26,6 +26,7 @@ engineering guidance; this file records only cleanup-specific state.
 | Temporal/config ownership | `feats/config-temporal-ownership` | Complete | storage ownership |
 | Baseline hygiene | `feats/baseline-hygiene` | In progress | structural ownership settled |
 | Correctness evidence campaign | `feats/correctness-evidence-campaign` | In progress | all structural cleanup |
+| Architecture decision records | integration baseline | Complete | durable cleanup decisions and evidence |
 
 ## Canonical Decisions
 
@@ -54,6 +55,10 @@ engineering guidance; this file records only cleanup-specific state.
   do not aggregate or re-export repository functions.
 - `qt` is the canonical operator/agent workflow. MCP remains a thin optional
   adapter over shared CLI/API/domain contracts.
+- Durable lifecycle, accounting, known-at, execution/exit, dataset
+  identity/quality, async fencing, agent mutation/promotion, and live-trading
+  decisions require indexed ADRs. Incomplete enforcement remains proposed.
+  Routine file movement and mechanical extraction do not require ADRs.
 - Frontend validation is optional for this campaign; tracked Vite cache is not
   source.
 
@@ -159,6 +164,7 @@ retired tables until that explicit hard cutover is complete.
 | 2026-07-25 | `484ad56` execution invariant hardening | affected execution/strategy loader: 137 passed; complete non-database backend gate: 1,281 passed; docs: 2 passed; unknown policies/roles/events/reasons and orphan ATM references now fail before fills |
 | 2026-07-25 | `58ea831` canonical fact ordering | persistence/report/runtime-fact profile: 148 passed; complete non-database backend gate: 1,283 passed; docs: 2 passed; same-batch producer order is durable and non-monotonic trade clocks block golden certification |
 | 2026-07-25 | `00440b2` canonical lifecycle ownership | lifecycle/event/docs profile: 64 passed; complete non-database backend gate: 1,291 passed; clean isolated PostgreSQL profile: 3 passed; repeated Timescale startup and repeated PostgreSQL profile: 3 passed. Direct summary writers, status fallback reads, divergent event-ID retries, backdated/post-terminal checkpoints, and ignored decision-ledger run payloads were removed or rejected. |
+| 2026-07-25 | `3b9e17b` exact runtime candle identity and ADR delivery | exact snapshot/runtime/report/docs profile: 191 passed; complete non-database backend gate with capture disabled: 1,296 passed, 49 pre-existing dependency/deprecation warnings, 24.23s; docs: 2 passed. The repository `backend-check` wrapper hit a pytest temporary-capture `FileNotFoundError` before collection; the identical `QT_OMIT_DB_TESTS=1` scope passed with `-s`. Exact candle values now have fail-loud runtime-produced identity, while quality remains in the existing continuity/readiness contract. ADRs 0042-0049 record accepted and proposed cleanup boundaries without treating incomplete enforcement as complete. |
 
 Each child branch must record its focused tests, broader regression profile,
 documentation validation, diff review, and remaining-reference search before
@@ -180,8 +186,9 @@ integration.
 - Existing persisted repeatability evidence proves matching semantic results,
   not byte-identical operational artifacts; full prefix-truncation no-lookahead
   and credential-free persisted paper replay remain unproven.
-- Runtime provenance is persisted but not exposed consistently in reports, and
-  `data_snapshot_hash` does not yet fingerprint candle values.
+- Exact runtime candle values now feed `data_snapshot_hash`; older runs without
+  terminal snapshot evidence remain explicitly unavailable, and runtime
+  provenance is still not exposed consistently in reports.
 - Long async research jobs have no owner heartbeat/fencing, and abandoned
   report materializations have no stale-build recovery lease.
 - Sampled transport continuity can report apparent gaps even when producer-owned
@@ -226,5 +233,7 @@ integration.
 - [x] Order, fill, position, lifecycle, wallet, fee, P&L, and equity reconciliation
 - [ ] Quality/provenance/readiness/trust evidence preserved end to end
 - [x] Clean and repeated database bootstrap validation
+- [x] Durable cleanup decisions captured in an ADR index with invariants,
+  rejected alternatives, and enforcing evidence
 - [ ] Architecture and operator documentation aligned
 - [ ] Integration branch clean, pushed, and ready for review

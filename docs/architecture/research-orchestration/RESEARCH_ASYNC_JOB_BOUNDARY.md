@@ -56,6 +56,16 @@ Workers call the same `run_research_check` and `sweep_research_checks` service
 functions used by synchronous routes. Job records hold queue status, attempts,
 timestamps, errors, and completed results.
 
+Current ownership is not yet fenced. Claims record `lock_owner` and `locked_at`
+and stale jobs can be reclaimed, but completion/failure does not compare an
+opaque owner token or claim generation. Long jobs also have no owner heartbeat.
+Until [ADR 0047](../decisions/0047-fence-async-job-ownership.md) is accepted and
+implemented, a reclaimed slow worker can race a newer owner; this is an explicit
+cleanup safety gap, not a supported exactly-once guarantee.
+
+The proposed boundary requires claim-generation fencing, bounded heartbeats,
+stale-owner rejection, and idempotent/checkpointed retry behavior.
+
 ## CLI Boundary
 
 Synchronous check commands remain useful for small checks. Add `--dispatch` for

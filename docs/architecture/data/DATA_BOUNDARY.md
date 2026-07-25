@@ -14,6 +14,7 @@ tags:
 code_paths:
   - src/data_providers
   - src/core/candle_continuity.py
+  - src/core/candle_snapshot.py
   - portal/backend/service/providers
   - portal/backend/service/market
   - docs/architecture/data/diagrams/data-boundary-flow.mmd
@@ -83,6 +84,14 @@ Provider-backed candles are source facts. Cache rows are the same source facts
 with persistence provenance. Continuity summaries explain those facts; they do
 not turn missing data into usable market data.
 
+Series construction also records the exact normalized candle values consumed by
+runtime as `candle_series_snapshot.v1`. The snapshot is ordered by timestamp and
+uses a canonical exact numeric representation for OHLC, ATR, and volume.
+Terminal producer-owned continuity facts propagate this identity downstream.
+Continuity, closure, provider, warmup, confidence, and caveat evidence remains
+separate: it describes trust in the source rows but does not replace their
+material value identity.
+
 When source data is incomplete, the data layer keeps the incompleteness visible.
 Runtime can reject, degrade, or fall back according to its own contract, but the
 data layer should not manufacture alternate execution truth.
@@ -122,6 +131,10 @@ data layer should not manufacture alternate execution truth.
   and venue identity in `exchange`, even when the venue is Coinbase. Do not
   collapse that into Coinbase Direct provider identity.
 - Provider credentials flow through credential refs; bot config and runtime config must not transport provider API keys.
+- Exact candle identity and candle quality are separate contracts. Changing a
+  consumed value changes identity; changing diagnostic gap metadata does not.
+- Missing or malformed runtime candle snapshots cannot be represented as valid
+  empty evidence.
 
 ## Related Docs
 
@@ -130,6 +143,7 @@ data layer should not manufacture alternate execution truth.
 - [Execution runtime boundary](../execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md)
 - [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)
 - [Security layer](../security/SECURITY_LAYER.md)
+- [ADR 0046: Exact candle inputs and separate quality](../decisions/0046-fingerprint-exact-candle-inputs-and-keep-quality-separate.md)
 
 ## Known Gaps
 

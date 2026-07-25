@@ -271,6 +271,21 @@ projected viewport changed. Overlay projection pressure degrades BotLens
 overlay freshness; it must not change decisions, fills, wallet effects,
 reports, or execution completion.
 
+## Live-Order Boundary
+
+The current execution runtime supports deterministic simulated fills and
+observe-only paper ingestion. It does not have an authorized production
+exchange-order adapter. `RuntimeMode.LIVE` is a reserved composition seam, and
+the `live` lifecycle phase means the runtime is actively producing facts;
+neither label grants order-submission capability.
+
+Paper mode must not place external orders. Provider credential references are
+not execution authorization, and agent/CLI/MCP contracts cannot turn a
+simulation or observation run into live trading. Live order submission requires
+a separate accepted architecture decision and explicit risk, identity,
+reconciliation, kill-switch, credential-scope, and operator-authorization
+controls.
+
 ## Failure And Recovery
 
 - Invalid config fails before execution.
@@ -288,6 +303,7 @@ reports, or execution completion.
   truth.
 - Shared-wallet and symbol-sharded paths must preserve deterministic ordering.
 - Heavy debug/history reads are cold-path behavior.
+- No current runtime mode submits, amends, or cancels an external order.
 
 ## Related Docs
 
@@ -297,3 +313,7 @@ reports, or execution completion.
 - [Runtime composition root](RUNTIME_COMPOSITION_ROOT.md)
 - [Persistence boundary](../persistence/PERSISTENCE_BOUNDARY.md)
 - [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
+- [ADR 0043: Canonical accounting reconciliation](../decisions/0043-reconcile-accounting-from-canonical-fills-and-wallet-ledger.md)
+- [ADR 0044: Known-at prefix invariance](../decisions/0044-enforce-known-at-prefix-invariance.md)
+- [ADR 0045: Explicit execution and exit policy](../decisions/0045-require-explicit-execution-and-exit-policy.md)
+- [ADR 0049: Keep live order submission closed](../decisions/0049-keep-live-order-submission-closed.md)
