@@ -324,6 +324,7 @@ def _config_hash(config: Mapping[str, Any]) -> Optional[str]:
 
 
 _NON_MATERIAL_CONFIG_KEYS = {
+    "backtest_warmup_evidence",
     "generated_at",
     "report_generated_at",
     "report_warnings",
@@ -440,6 +441,8 @@ def _strategy_config_sections(config: Mapping[str, Any]) -> Dict[str, Any]:
         "slippage_bps": slippage_bps,
     }
     data_config = {
+        "backtest_warmup_bars": config.get("backtest_warmup_bars"),
+        "backtest_warmup_evidence": config.get("backtest_warmup_evidence"),
         "symbols": config.get("symbols"),
         "instrument_ids": config.get("instrument_ids"),
         "timeframe": config.get("timeframe"),
@@ -2231,12 +2234,28 @@ def _diagnostic_summary(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def _observability_events_for_run(run_id: str) -> List[Dict[str, Any]]:
+def _observability_events_for_run(
+    run_id: str,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     try:
-        return [
+        rows = [
             dict(row)
-            for row in list_observability_events(run_id=run_id, limit=2000)
+            for row in list_observability_events(
+                run_id=run_id,
+                limit=report_data.REPORT_OBSERVABILITY_EVENT_LIMIT + 1,
+            )
         ]
+        truncated = len(rows) > report_data.REPORT_OBSERVABILITY_EVENT_LIMIT
+        retained = rows[: report_data.REPORT_OBSERVABILITY_EVENT_LIMIT]
+        return retained, {
+            "schema_version": "observability_event_coverage.v1",
+            "status": "truncated" if truncated else "complete",
+            "retained_count": len(retained),
+            "probe_count": len(rows),
+            "limit": report_data.REPORT_OBSERVABILITY_EVENT_LIMIT,
+            "has_more": truncated,
+            "ordering": "observed_at_desc",
+        }
     except Exception as exc:  # noqa: BLE001 - diagnostics should report source gaps, not fail report builds.
         logger.warning(
             with_log_context(
@@ -2244,7 +2263,16 @@ def _observability_events_for_run(run_id: str) -> List[Dict[str, Any]]:
                 build_log_context(run_id=run_id, error=str(exc)),
             )
         )
-        return []
+        return [], {
+            "schema_version": "observability_event_coverage.v1",
+            "status": "unavailable",
+            "retained_count": 0,
+            "probe_count": 0,
+            "limit": report_data.REPORT_OBSERVABILITY_EVENT_LIMIT,
+            "has_more": None,
+            "ordering": "observed_at_desc",
+            "reason": type(exc).__name__,
+        }
 
 
 def _failure_payload(row: Mapping[str, Any]) -> Dict[str, Any]:
@@ -2578,10 +2606,39 @@ def _report_diagnostics(
     summary: RunResearchSummary,
     position_ordering: Mapping[str, Any],
     observability_events: Sequence[Mapping[str, Any]] = (),
+    observability_coverage: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     run_id = str(run.get("run_id") or "")
     bot_id = str(run.get("bot_id") or "").strip() or None
     items: List[Dict[str, Any]] = []
+
+    coverage = _mapping(observability_coverage)
+    coverage_status = str(coverage.get("status") or "")
+    if coverage_status in {"truncated", "unavailable"}:
+        coverage_code = f"observability_events_{coverage_status}"
+        items.append(
+            _diagnostic(
+                severity="warning",
+                source="observability",
+                code=coverage_code,
+                message=(
+                    "Observability diagnostics were truncated to the newest "
+                    f"{coverage.get('retained_count')} rows."
+                    if coverage_status == "truncated"
+                    else "Observability diagnostics were unavailable."
+                ),
+                affected_identity={
+                    "run_id": run_id,
+                    "bot_id": bot_id,
+                    "coverage": coverage,
+                },
+                readiness_impact="blocks_golden",
+                suggested_next_step=(
+                    "Inspect the complete observability event history before "
+                    "certifying this run."
+                ),
+            )
+        )
 
     if not readiness.results_ready:
         items.append(
@@ -4833,6 +4890,11 @@ def _golden_blocking_reasons(
             "margin_rejection_evidence_incomplete",
             "wallet_margin_rejection_trace_incomplete",
             "wallet_replay_failed",
+            "backtest_warmup_insufficient",
+            "backtest_warmup_evidence_malformed",
+            "backtest_warmup_evidence_unavailable",
+            "observability_events_truncated",
+            "observability_events_unavailable",
         }:
             reasons.append(normalized)
     if any(str(item.get("continuity_status") or "") in {"unknown", "unavailable"} for item in candle_catalog.get("items") or [] if isinstance(item, Mapping)):
@@ -4893,6 +4955,7 @@ def _operational_health(
     sections: Mapping[str, Any],
     diagnostics: Mapping[str, Any],
     observability_events: Sequence[Mapping[str, Any]],
+    observability_coverage: Mapping[str, Any],
 ) -> Dict[str, Any]:
     event_type_counts = Counter(str(row.get("event_type") or "unknown") for row in events)
     event_name_counts = Counter(_event_name_key(row) or "unknown" for row in events)
@@ -4930,6 +4993,12 @@ def _operational_health(
         }
         for item in diagnostics_items
     ]
+    coverage_status = str(observability_coverage.get("status") or "")
+    coverage_caveats = (
+        [f"observability_events_{coverage_status}"]
+        if coverage_status in {"truncated", "unavailable"}
+        else []
+    )
     return {
         "schema_version": "operational_health.v1",
         "run_id": metadata.run_id,
@@ -4945,14 +5014,21 @@ def _operational_health(
             "by_event_type": dict(event_type_counts),
             "by_event_name": dict(event_name_counts),
         },
+        "observability_event_coverage": dict(observability_coverage),
         "rows_produced_by_section": rows_by_section,
         "slow_write_diagnostics": slow_write_rows,
-        "persistence_query_caveats": list(performance.get("performance_caveats") or []),
+        "persistence_query_caveats": [
+            *list(performance.get("performance_caveats") or []),
+            *coverage_caveats,
+        ],
         "symbol_level_runtime_load": dict(symbol_counts),
         "diagnostic_timeline": diagnostic_timeline,
         "event_volume_timeline": [],
         "projection_health_timeline": projection_rows,
-        "caveats": list(performance.get("performance_caveats") or []),
+        "caveats": [
+            *list(performance.get("performance_caveats") or []),
+            *coverage_caveats,
+        ],
     }
 
 
@@ -5109,6 +5185,7 @@ def _finalize_readiness(
     run: Mapping[str, Any],
     events: Sequence[Mapping[str, Any]],
     observability_events: Sequence[Mapping[str, Any]],
+    observability_coverage: Mapping[str, Any],
     readiness: RunResearchReadiness,
     execution: Mapping[str, Any],
     candle_gaps: Mapping[str, Any],
@@ -5146,6 +5223,59 @@ def _finalize_readiness(
         degraded_sections.append("data_quality")
     if execution_quality_status == "degraded":
         degraded_sections.append("execution_quality")
+    warmup_evidence = [
+        dict(row)
+        for row in _mapping(metadata.configuration.get("data")).get(
+            "backtest_warmup_evidence"
+        )
+        or []
+        if isinstance(row, Mapping)
+    ]
+    warmup_caveat: Optional[str] = None
+    if str(metadata.run_type or "").strip().lower() == "backtest":
+        if not warmup_evidence:
+            warmup_caveat = "backtest_warmup_evidence_unavailable"
+        else:
+            evidence_malformed = False
+            evidence_insufficient = False
+            for row in warmup_evidence:
+                try:
+                    requested_bars = int(row.get("requested_bars"))
+                    required_bars = int(row.get("required_bars"))
+                    loaded_bars = int(row.get("loaded_bars"))
+                except (TypeError, ValueError):
+                    evidence_malformed = True
+                    continue
+                if (
+                    isinstance(row.get("requested_bars"), bool)
+                    or isinstance(row.get("required_bars"), bool)
+                    or isinstance(row.get("loaded_bars"), bool)
+                    or requested_bars <= 0
+                    or required_bars <= 0
+                    or loaded_bars < 0
+                ):
+                    evidence_malformed = True
+                    continue
+                expected_status = (
+                    "ready" if loaded_bars >= required_bars else "insufficient"
+                )
+                if str(row.get("status") or "") != expected_status:
+                    evidence_malformed = True
+                if expected_status == "insufficient":
+                    evidence_insufficient = True
+            if evidence_malformed:
+                warmup_caveat = "backtest_warmup_evidence_malformed"
+            elif evidence_insufficient:
+                warmup_caveat = "backtest_warmup_insufficient"
+    if warmup_caveat:
+        if data_quality_status == "clean":
+            data_quality_status = (
+                "degraded"
+                if warmup_caveat == "backtest_warmup_insufficient"
+                else "unknown"
+            )
+        degraded_sections.extend(["data_quality", "indicator_warmup"])
+        caveats.append(warmup_caveat)
     for caveat in candle_caveats:
         normalized = str(caveat or "").strip()
         if not normalized:
@@ -5171,6 +5301,14 @@ def _finalize_readiness(
     if any(str(row.get("event_name") or "").strip() == "run_notification_queue_overflow" for row in observability_events):
         degraded_sections.append("projection_health")
         caveats.append("projection_replay_resolved" if projection_replay_resolved else "run_notification_queue_overflow")
+    observability_coverage_status = str(
+        observability_coverage.get("status") or ""
+    )
+    if observability_coverage_status in {"truncated", "unavailable"}:
+        degraded_sections.append("operational_health")
+        caveats.append(
+            f"observability_events_{observability_coverage_status}"
+        )
     for caveat in wallet_accounting.get("caveats") or []:
         degraded_sections.append("wallet_accounting")
         caveats.append(str(caveat))
@@ -5299,7 +5437,9 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     fee_accounting = _fee_accounting(trades, summary, events=events)
     wallet_accounting = _wallet_accounting(run=run, decisions=decisions, events=events, summary=summary)
     wallet_diagnostics = _mapping(wallet_accounting.get("wallet_diagnostics"))
-    observability_events = _observability_events_for_run(run_id)
+    observability_events, observability_coverage = (
+        _observability_events_for_run(run_id)
+    )
     candle_gaps = _candle_gaps(events, observability_events, metadata=metadata)
     portfolio_metrics = _portfolio_metrics(run=run, trades=trades, summary=summary)
     summary = _summary_with_portfolio_metrics(summary, portfolio_metrics)
@@ -5322,6 +5462,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         run=run,
         events=events,
         observability_events=observability_events,
+        observability_coverage=observability_coverage,
         readiness=readiness,
         execution=execution,
         candle_gaps=candle_gaps,
@@ -5345,6 +5486,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         summary=summary,
         position_ordering=position_ordering,
         observability_events=observability_events,
+        observability_coverage=observability_coverage,
     )
     sections = _sections(
         readiness=readiness,
@@ -5367,6 +5509,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         sections=sections,
         diagnostics=diagnostics,
         observability_events=observability_events,
+        observability_coverage=observability_coverage,
     )
     sections = _sections(
         readiness=readiness,

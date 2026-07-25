@@ -349,29 +349,22 @@ def _decision_compare(left: Sequence[Mapping[str, Any]], right: Sequence[Mapping
     missing_ids = sorted(set(left_by_id) - set(right_by_id))
     extra_ids = sorted(set(right_by_id) - set(left_by_id))
     verdict_changes = []
-    legacy_verdict_changes = []
     for decision_id in sorted(set(left_by_id) & set(right_by_id)):
         left_row = left_by_id[decision_id]
         right_row = right_by_id[decision_id]
         left_verdict = (left_row.get("status"), left_row.get("accepted"), left_row.get("reason_code"))
         right_verdict = (right_row.get("status"), right_row.get("accepted"), right_row.get("reason_code"))
         if left_verdict != right_verdict:
-            legacy_verdict_changes.append({"decision_id": decision_id, "left": left_row, "right": right_row})
             verdict_changes.append(_verdict_change_row(decision_id, left_row, right_row))
     return {
         "left_count": len(left),
         "right_count": len(right),
-        "missing_ids_count": len(missing_ids),
-        "extra_ids_count": len(extra_ids),
         "missing_decision_count": len(missing_ids),
         "extra_decision_count": len(extra_ids),
         "verdict_change_count": len(verdict_changes),
         "missing_decision_ids": missing_ids,
         "extra_decision_ids": extra_ids,
         "verdict_changes": verdict_changes,
-        "first_missing_id": missing_ids[0] if missing_ids else None,
-        "first_extra_id": extra_ids[0] if extra_ids else None,
-        "first_verdict_change": legacy_verdict_changes[0] if legacy_verdict_changes else None,
     }
 
 
@@ -414,6 +407,417 @@ def _first_divergence(
         field = next(iter(diagnostics_diff))
         return {"section": "diagnostics", "field": field, **diagnostics_diff[field]}
     return None
+
+
+def _evidence(value: Any, *, unavailable_reason: str) -> dict[str, Any]:
+    if value is None or value == "" or value == [] or value == {}:
+        return {
+            "availability": "unavailable",
+            "reason": unavailable_reason,
+            "value": None,
+        }
+    return {"availability": "available", "reason": None, "value": value}
+
+
+def _divergence_selector(
+    divergence: Mapping[str, Any] | None,
+    *,
+    side: str,
+) -> dict[str, Any]:
+    if not divergence:
+        return {}
+    side_row = _mapping(divergence.get(side))
+    return {
+        key: side_row.get(key) if side_row.get(key) not in (None, "") else divergence.get(key)
+        for key in (
+            "decision_id",
+            "trade_id",
+            "symbol",
+            "timeframe",
+            "bar_time",
+            "entry_time",
+        )
+        if side_row.get(key) not in (None, "") or divergence.get(key) not in (None, "")
+    }
+
+
+def _row_matches(row: Mapping[str, Any], selector: Mapping[str, Any]) -> bool:
+    context = _decision_context(row)
+    observed_identity = False
+    for key in ("decision_id", "trade_id"):
+        expected = selector.get(key)
+        if expected not in (None, ""):
+            observed = row.get(key) or context.get(key) or (
+                row.get("id") if key == "trade_id" else None
+            )
+            observed_identity = observed_identity or observed not in (None, "")
+            if str(observed or "") == str(expected):
+                return True
+    if observed_identity:
+        return False
+    expected_symbol = str(selector.get("symbol") or "").strip()
+    expected_timeframe = str(selector.get("timeframe") or "").strip()
+    expected_time = str(
+        selector.get("bar_time") or selector.get("entry_time") or ""
+    ).strip()
+    observed_symbol = str(row.get("symbol") or context.get("symbol") or "").strip()
+    observed_timeframe = str(
+        row.get("timeframe") or context.get("timeframe") or ""
+    ).strip()
+    observed_time = str(
+        row.get("bar_time")
+        or row.get("entry_time")
+        or row.get("known_at")
+        or context.get("bar_time")
+        or context.get("known_at")
+        or ""
+    ).strip()
+    return bool(
+        expected_symbol
+        and observed_symbol == expected_symbol
+        and (
+            not expected_timeframe
+            or not observed_timeframe
+            or observed_timeframe == expected_timeframe
+        )
+        and (not expected_time or observed_time == expected_time)
+    )
+
+
+def _selected_row(
+    rows: Sequence[Any],
+    selector: Mapping[str, Any],
+) -> dict[str, Any]:
+    for row in rows:
+        if isinstance(row, Mapping) and _row_matches(row, selector):
+            return dict(row)
+    return {}
+
+
+def _selected_trade(
+    dataset: Mapping[str, Any],
+    *,
+    selector: Mapping[str, Any],
+    decision: Mapping[str, Any],
+) -> dict[str, Any]:
+    context = _decision_context(decision)
+    enriched = dict(selector)
+    for key in ("trade_id", "decision_id", "symbol", "timeframe"):
+        value = decision.get(key) or context.get(key)
+        if value not in (None, ""):
+            enriched[key] = value
+    return _selected_row(dataset.get("trades") or [], enriched)
+
+
+def _candidate_mapping(
+    sources: Sequence[Mapping[str, Any]],
+    keys: Sequence[str],
+) -> dict[str, Any]:
+    for source in sources:
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, Mapping) and value:
+                return dict(value)
+    return {}
+
+
+def _relevant_rows(
+    rows: Sequence[Any],
+    *,
+    selector: Mapping[str, Any],
+    limit: int = 25,
+) -> list[dict[str, Any]]:
+    mapped = [dict(row) for row in rows if isinstance(row, Mapping)]
+    if not selector:
+        return mapped[:limit]
+    selected = [row for row in mapped if _row_matches(row, selector)]
+    return selected[:limit]
+
+
+def _selector_fields(
+    selector: Mapping[str, Any],
+    *keys: str,
+) -> dict[str, Any]:
+    return {
+        key: selector[key]
+        for key in keys
+        if selector.get(key) not in (None, "")
+    }
+
+
+def _run_disagreement_trace(
+    dataset: Mapping[str, Any],
+    *,
+    run_id: str,
+    divergence: Mapping[str, Any],
+    side: str,
+) -> dict[str, Any]:
+    selector = _divergence_selector(divergence, side=side)
+    metadata = _mapping(dataset.get("metadata"))
+    configuration = _mapping(metadata.get("configuration"))
+    config_data = _mapping(configuration.get("data"))
+    config_execution = _mapping(configuration.get("execution"))
+    decision = _selected_row(dataset.get("decisions") or [], selector)
+    decision_context = _decision_context(decision)
+    trade = _selected_trade(dataset, selector=selector, decision=decision)
+    trade_id = (
+        trade.get("trade_id")
+        or trade.get("id")
+        or decision.get("trade_id")
+        or decision_context.get("trade_id")
+    )
+    if trade_id not in (None, ""):
+        selector["trade_id"] = trade_id
+    if decision.get("decision_id") not in (None, ""):
+        selector["decision_id"] = decision.get("decision_id")
+    if decision.get("symbol") not in (None, ""):
+        selector["symbol"] = decision.get("symbol")
+
+    candidate_lifecycle = _mapping(dataset.get("candidate_lifecycle"))
+    lifecycle_rows = _relevant_rows(
+        candidate_lifecycle.get("items") or [],
+        selector=selector,
+    )
+    diagnostics = _mapping(dataset.get("diagnostics"))
+    diagnostic_rows = _relevant_rows(
+        diagnostics.get("items") or [],
+        selector=selector,
+    )
+    candle_catalog = _mapping(dataset.get("candle_catalog"))
+    catalog_rows = _relevant_rows(
+        candle_catalog.get("items") or [],
+        selector=_selector_fields(selector, "symbol", "timeframe"),
+    )
+    candle_gaps = _mapping(dataset.get("candle_gaps"))
+    gap_rows = _relevant_rows(
+        candle_gaps.get("facts") or candle_gaps.get("diagnostic_facts") or [],
+        selector=_selector_fields(selector, "symbol", "timeframe"),
+    )
+    raw_candles = _relevant_rows(
+        dataset.get("candles") or [],
+        selector=_selector_fields(
+            selector,
+            "symbol",
+            "timeframe",
+            "bar_time",
+            "entry_time",
+        ),
+    )
+    normalized_execution_plan = _candidate_mapping(
+        (decision, decision_context, trade),
+        (
+            "normalized_execution_plan",
+            "execution_plan",
+            "compiled_execution_plan",
+        ),
+    )
+    generated_order = _candidate_mapping(
+        (decision, decision_context, trade),
+        (
+            "generated_order",
+            "order_request",
+            "entry_order",
+            "order",
+        ),
+    )
+    fill_decision = _candidate_mapping(
+        (decision, decision_context, trade),
+        (
+            "fill_decision",
+            "entry_outcome",
+            "execution_outcome",
+            "fill",
+        ),
+    )
+    requested_range = (
+        config_data.get("date_range")
+        or metadata.get("simulated_window")
+    )
+    loaded_range = [
+        {
+            "symbol": row.get("symbol"),
+            "instrument_id": row.get("instrument_id"),
+            "timeframe": row.get("timeframe"),
+            "first_candle_at": row.get("first_candle_at")
+            or row.get("loaded_start")
+            or row.get("start"),
+            "last_candle_at": row.get("last_candle_at")
+            or row.get("loaded_end")
+            or row.get("end"),
+            "candle_count": row.get("candle_count")
+            or row.get("loaded_candle_count"),
+            "fingerprint": row.get("fingerprint")
+            or row.get("data_fingerprint")
+            or row.get("snapshot_hash"),
+        }
+        for row in catalog_rows
+    ]
+    known_at = (
+        decision.get("known_at")
+        or decision.get("bar_time")
+        or decision_context.get("known_at")
+        or decision_context.get("bar_time")
+        or selector.get("bar_time")
+    )
+    return {
+        "schema_version": "golden_run_disagreement_trace.v1",
+        "run_id": run_id,
+        "selector": selector,
+        "input_dataset": {
+            "schema_version": dataset.get("schema_version"),
+            "identity": {
+                "run_id": metadata.get("run_id") or run_id,
+                "symbols": metadata.get("symbols") or [],
+                "instrument_ids": metadata.get("instrument_ids") or [],
+                "timeframes": metadata.get("timeframes")
+                or [metadata.get("timeframe")],
+                "provider": metadata.get("provider")
+                or metadata.get("datasource"),
+            },
+            "fingerprints": {
+                "data_snapshot_hash": metadata.get("data_snapshot_hash"),
+                "material_config_hash": metadata.get("material_config_hash"),
+                "strategy_hash": metadata.get("strategy_hash"),
+                "semantic_fingerprint": metadata.get(
+                    "report_semantic_fingerprint"
+                ),
+                "operational_fingerprint": metadata.get(
+                    "report_operational_fingerprint"
+                ),
+            },
+            "requested_range": requested_range,
+            "loaded_ranges": loaded_range,
+        },
+        "known_at_state": _evidence(
+            {
+                "boundary": known_at,
+                "bar_epoch": decision_context.get("bar_epoch"),
+                "run_seq": decision.get("run_seq")
+                or decision_context.get("run_seq"),
+            }
+            if known_at not in (None, "")
+            else None,
+            unavailable_reason="linked decision has no known-at boundary",
+        ),
+        "available_candles": {
+            "availability": "available" if raw_candles else "catalog_only",
+            "reason": (
+                None
+                if raw_candles
+                else "raw candle rows are stored outside the research dataset; catalog evidence is retained"
+            ),
+            "rows": raw_candles,
+            "catalog": catalog_rows,
+        },
+        "gap_and_continuity": {
+            "status": candle_gaps.get("canonical_evidence_status"),
+            "facts": gap_rows,
+            "summary": {
+                "gap_count": candle_gaps.get("gap_count"),
+                "blocking_gap_count": candle_gaps.get(
+                    "blocking_gap_count"
+                ),
+                "provider_gap_count": candle_gaps.get(
+                    "provider_gap_count"
+                ),
+                "caveats": candle_gaps.get("caveats") or [],
+            },
+        },
+        "indicator_readiness_and_source_diagnostics": {
+            "indicator_configuration": configuration.get("indicators"),
+            "candidate_lifecycle": lifecycle_rows,
+            "diagnostics": diagnostic_rows,
+        },
+        "strategy_decision": _evidence(
+            decision or None,
+            unavailable_reason="no decision row linked to the first divergence",
+        ),
+        "normalized_execution_plan": _evidence(
+            normalized_execution_plan or None,
+            unavailable_reason=(
+                "normalized execution plan is not persisted on the linked decision or trade"
+            ),
+        ),
+        "declared_execution_configuration": {
+            "execution": config_execution,
+            "atm": configuration.get("atm"),
+            "risk": configuration.get("risk"),
+        },
+        "generated_order": _evidence(
+            generated_order or None,
+            unavailable_reason="generated order is not persisted on the linked decision or trade",
+        ),
+        "fill_or_rejection_decision": _evidence(
+            fill_decision or None,
+            unavailable_reason="normalized fill or rejection decision is not persisted on the linked row",
+        ),
+        "lifecycle_transitions": {
+            "candidate_events": lifecycle_rows,
+            "trade": trade or None,
+        },
+        "position_changes": _evidence(
+            trade or None,
+            unavailable_reason="no trade or position row is linked to the divergence",
+        ),
+        "accounting_effects": {
+            "trade": trade or None,
+            "wallet": dataset.get("wallet_accounting"),
+            "fees": dataset.get("fee_accounting"),
+            "summary": dataset.get("summary"),
+        },
+        "report_output": {
+            "summary": dataset.get("summary"),
+            "readiness": dataset.get("readiness"),
+            "diagnostics_summary": diagnostics.get("summary"),
+        },
+        "provenance_caveats_and_quality": {
+            "configuration_source": configuration.get("source"),
+            "candle_catalog": catalog_rows,
+            "gap_facts": gap_rows,
+            "readiness": dataset.get("readiness"),
+            "quality_status": {
+                "data": _mapping(dataset.get("readiness")).get(
+                    "data_quality_status"
+                ),
+                "execution": _mapping(dataset.get("readiness")).get(
+                    "execution_quality_status"
+                ),
+            },
+        },
+    }
+
+
+def _disagreement_trace(
+    *,
+    run_ids: Sequence[str],
+    datasets: Sequence[Mapping[str, Any]],
+    divergence: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if not divergence:
+        return {
+            "schema_version": "golden_disagreement_trace.v1",
+            "status": "not_required",
+            "first_divergence": None,
+            "runs": {},
+        }
+    return {
+        "schema_version": "golden_disagreement_trace.v1",
+        "status": "available",
+        "first_divergence": dict(divergence),
+        "runs": {
+            run_id: _run_disagreement_trace(
+                dataset,
+                run_id=run_id,
+                divergence=divergence,
+                side=side,
+            )
+            for run_id, dataset, side in zip(
+                run_ids,
+                datasets,
+                ("left", "right"),
+            )
+        },
+    }
 
 
 def _first_golden_candidate(
@@ -491,6 +895,13 @@ def compare_runs(left_run_id: str, right_run_id: str, *, out_dir: Path, check_pr
         run_ids[1]: _wallet_market_time_overtake_summary(right),
     }
     runtime_ordering = {run_id: _runtime_ordering_summary(run_id) for run_id in run_ids}
+    first_divergence = _first_divergence(
+        material_diff=material_diff,
+        decision_first=decision_first,
+        trade_first=trade_first,
+        summary_diff=summary_diff,
+        diagnostics_diff=diagnostics_diff,
+    )
 
     blocking_codes = set(left_diagnostics["blocking_codes"]) | set(right_diagnostics["blocking_codes"])
     blocking_reasons = set(left_material["golden_blocking_reasons"]) | set(right_material["golden_blocking_reasons"])
@@ -506,8 +917,8 @@ def compare_runs(left_run_id: str, right_run_id: str, *, out_dir: Path, check_pr
     if left_material.get("report_semantic_fingerprint") != right_material.get("report_semantic_fingerprint"):
         fail_reasons.append("semantic_fingerprint_mismatch")
     if (
-        decision_compare["missing_ids_count"]
-        or decision_compare["extra_ids_count"]
+        decision_compare["missing_decision_count"]
+        or decision_compare["extra_decision_count"]
         or decision_compare["verdict_change_count"]
     ):
         fail_reasons.append("decision_verdict_or_id_mismatch")
@@ -546,12 +957,11 @@ def compare_runs(left_run_id: str, right_run_id: str, *, out_dir: Path, check_pr
         "diagnostics": {run_ids[0]: left_diagnostics, run_ids[1]: right_diagnostics},
         "diagnostics_diff": diagnostics_diff,
         "runtime_ordering": runtime_ordering,
-        "first_divergence": _first_divergence(
-            material_diff=material_diff,
-            decision_first=decision_first,
-            trade_first=trade_first,
-            summary_diff=summary_diff,
-            diagnostics_diff=diagnostics_diff,
+        "first_divergence": first_divergence,
+        "disagreement_trace": _disagreement_trace(
+            run_ids=run_ids,
+            datasets=datasets,
+            divergence=first_divergence,
         ),
         "first_golden_candidate": first_candidate,
         "first_golden_candidate_reason": first_candidate_reason,

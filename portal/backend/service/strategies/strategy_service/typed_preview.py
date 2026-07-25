@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from engines.bot_runtime.core.domain import Candle, StrategySignal
+from engines.bot_runtime.core.domain.candle_factory import build_candles_from_dataframe
 from engines.indicator_engine.contracts import configure_indicator_overlay_history
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
 from indicators.config import IndicatorExecutionContext
@@ -41,24 +42,7 @@ def _parse_iso(value: str) -> datetime:
 
 
 def _build_candles(df: Any) -> List[Candle]:
-    import pandas as pd
-
-    if df is None or getattr(df, "empty", False):
-        return []
-    candles: List[Candle] = []
-    timestamps = pd.to_datetime(df.index, utc=True)
-    for timestamp, (_, row) in zip(timestamps, df.iterrows()):
-        candles.append(
-            Candle(
-                time=timestamp.to_pydatetime(),
-                open=float(row["open"]),
-                high=float(row["high"]),
-                low=float(row["low"]),
-                close=float(row["close"]),
-                volume=float(row["volume"]) if row.get("volume") is not None else None,
-            )
-        )
-    return candles
+    return build_candles_from_dataframe(df)
 
 
 def _build_marker(*, artifact: Mapping[str, Any], candle: Candle) -> Dict[str, Any]:

@@ -66,6 +66,12 @@ def _engine_with_position(direction: str = "long"):
     return engine
 
 
+def test_ladder_position_default_does_not_enable_breakeven() -> None:
+    position = _position("long")
+
+    assert position.breakeven_trigger_ticks == 0.0
+
+
 def _runtime_deps(fetch_ohlcv) -> BotRuntimeDeps:
     return BotRuntimeDeps(
         fetch_strategy=lambda _strategy_id: None,

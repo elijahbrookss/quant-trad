@@ -25,7 +25,7 @@ engineering guidance; this file records only cleanup-specific state.
 | Storage repository ownership | `feats/storage-repository-ownership` | Complete | compatibility caller migration |
 | Temporal/config ownership | `feats/config-temporal-ownership` | Complete | storage ownership |
 | Baseline hygiene | `feats/baseline-hygiene` | Complete | structural ownership settled |
-| Correctness evidence campaign | `feats/correctness-evidence-campaign` | Pending | all structural cleanup |
+| Correctness evidence campaign | `feats/correctness-evidence-campaign` | Complete | all structural cleanup |
 
 ## Canonical Decisions
 
@@ -67,18 +67,49 @@ retired tables until that explicit hard cutover is complete.
 | BotLens mailbox aliases and `bot_projection_refresh` | DELETE | No producer or useful caller remains; unknown messages already fail into bounded observability. |
 | Broad `storage.storage` wildcard facade | CONSOLIDATE | Completed in `383d75b`: callers import named repository owners, bot orchestration uses one explicit gateway, package aggregates are empty, and the wildcard facade is deleted. Required gateway operations fail loudly rather than falling back through capability probes. |
 | ATM aliases and nested/flattened stop-adjustment shapes | CONSOLIDATE | Completed in `7bb68f4`: schema v2 snake-case policy is the sole input contract; explicit target IDs/fractions and flattened stable-ID stop rules are required, while wrappers, aliases, implicit allocation, and instrument economics are rejected. |
+| Implicit 20-tick breakeven movement | DELETE | Completed in `66aac0b` and `c5d3c76`: omitted breakeven and stop-adjustment policy compiles to disabled behavior, and the domain position default is zero. Breakeven movement now requires explicit configuration. |
 | Playback `mode` fallback into `execution_mode` | CONSOLIDATE | Completed in `a5ef7de`: execution mode defaults at its own owner, accepts only `fast`/`full`, and rejects playback values. |
 | Indicator overlay-history interface and Candle Stats/Regime implementations | KEEP | Renamed in `a5ef7de` to the explicit `configure_overlay_history` contract. All three definitions mean render-only retention, not research range, evaluation, recovery, or warmup. |
 | Four replay-window dispatch helpers | CONSOLIDATE | Completed in `a5ef7de`: indicator preview, runtime validation, strategy preview, and bot setup use one fail-loud `configure_indicator_overlay_history` owner. |
 | Research range, backtest evaluation, indicator warmup, runtime recovery, transport replay | KEEP | These are distinct windows with different clocks, failure policy, and consumers. Similar names are not evidence of duplication. |
 | Continuity, candle catalog, readiness, provenance, diagnostics, confidence, and caveats | KEEP | Created in dataset/report builders, finalized in readiness, persisted with report fingerprints/materializations, exported in report bundles, and displayed through CLI/MCP report resources and research-check results. |
-| Warmup/provider/truncation quality omissions | CONSOLIDATE | Surface warmup shortfall and malformed/empty provider evidence; add an explicit caveat when the 2,000-event observability read truncates. Do not replace the envelope. |
+| Warmup/provider/truncation quality omissions | CONSOLIDATE | Completed in `38cf782`, `84dbf93`, and `0d8118f`: backtest warmup evidence is explicit, malformed candle frames fail before evaluation, and bounded observability reads expose coverage/truncation caveats. The existing envelope remains canonical. |
 | Tracked `portal/frontend/.vite/deps` | DELETE | Completed in `7338f56`: the generated cache was removed, ignored, and a repository-wide tracked-artifact audit is clean. |
 | Filename-routed PR profile and stale controller test seam | DELETE | Completed in `35949fe`: the full non-database backend suite replaces the 70-line filename allowlist, and the overlay logging test now fails through the current metadata-service boundary. |
 | Commented changelog workflow experiment | DELETE | Completed in `7338f56`: the workflow had no executable path. The remote `test` branch still exists, so its active CI trigger remains. |
-| CLI operations | KEEP | `qt` is the canonical operator and agent contract. |
-| MCP operations | VERIFY USAGE | All 42 registrations have handlers and no orphan definitions were found. External invocation is not visible in the internal call graph; keep the thin adapter until usage evidence supports tool-level deletion. |
+| CLI operations | KEEP | `qt` is the canonical operator contract. Every invocation writes a redacted structured audit by default and API calls record method, URL, status, duration, and byte counts. Direct mutation commands do not consistently require plan/apply/confirm, and `--no-audit-log` can disable the record, so unrestricted CLI access is not yet an agent-safe boundary. |
+| MCP operations | VERIFY USAGE | All 42 registrations have handlers and no orphan definitions were found. Mutating tools require confirmation and usually plan by default; paper/live starts require an additional opt-in. External invocation is not visible in the internal call graph, so retain the thin optional adapter until usage evidence supports tool-level deletion. |
 | Missing bridge-session fallback to `"legacy"` | VERIFY USAGE | Verify every producer supplies a session identity before changing ingestion behavior. |
+
+## Scale and Agent-Safety Audit
+
+| Area | Current protection | Remaining gap |
+| --- | --- | --- |
+| Report materialization | Input fingerprints, cached materializations, and a single-worker executor prevent duplicate concurrent builds. | `run_research_dataset.py` remains a 5,638-line concentration point mixing projection, quality, readiness, metrics, and presentation assembly. |
+| Runtime projection | Bounded transport queues, revision cursors, batched persistence, and explicit overflow/degradation signals protect runtime truth. | `runtime_push_stream.py` is 3,037 lines and mixes event translation, persistence, diagnostics, transport, and lifecycle projection. |
+| Runtime domain | Deterministic policies and reference scenario tests protect entry, exit, fill, lifecycle, and accounting behavior. | `core/domain/engine.py` is 2,028 lines and still combines sizing, admission, order/fill orchestration, position creation, and summary projection. |
+| Setup and research | Async jobs are fingerprinted, partitioned, retryable, and workers use bounded configured pools. | `setup_prepare.py` is 1,913 lines, `research/checks.py` is 2,023 lines, and series-link loading sizes a thread pool directly from eligible-link count. |
+| CLI and MCP | CLI audits by default; MCP delegates to shared CLI/API contracts and guards mutation. | `cli/main.py` is 3,351 lines; CLI audits do not persist response payloads or a uniform validation/caveat envelope, and direct CLI mutations lack uniform confirmation gates. |
+
+## Unsupported or Deferred Workflows
+
+- No standalone `qt backtest` command or credential-free canonical seed workflow
+  exists. End-to-end CLI backtests require persisted instruments, candles,
+  strategies, indicators, and bots.
+- Paper observe-only intake currently supports bounded Coinbase streams. A
+  credential-free paper/runtime replay over a persisted reference dataset is not
+  exposed as an operator workflow.
+- The generic `/api/health` route is an uptime probe, not a database-readiness
+  check; database-backed reads or startup contract logs are required.
+- Margin selection is conservative when session state is unavailable; full
+  session-aware execution is not implemented.
+- Golden disagreement traces expose absent order/fill/accounting evidence as
+  unavailable; they cannot reconstruct facts that a run did not persist.
+- MCP host registration is optional and was not configured in the validated
+  local Codex environment.
+- Frontend modernization, L2/order flow, market-state expansion, options, and
+  live trading remain outside this campaign.
+
 ## Progress and Validation
 
 | Date | Commit/workstream | Evidence |
@@ -92,6 +123,11 @@ retired tables until that explicit hard cutover is complete.
 | 2026-07-25 | `383d75b` storage repository ownership | focused bot/storage/reporting: 139 passed; required-gateway follow-up: 25 passed; PR profile: 893 passed, 284 deselected; docs: 2 passed; backend compileall and remaining-reference audit passed; deleted the wildcard storage facade, emptied aggregate package exports, centralized the bot gateway, and removed optional storage capability fallbacks |
 | 2026-07-25 | `a5ef7de` temporal/config ownership | focused indicator/runtime/config: 105 passed; PR profile: 902 passed, 284 deselected; docs: 2 passed; affected compileall and remaining-reference audit passed; renamed visual replay hints to render-only overlay history, centralized four dispatchers, made malformed bounds fail loudly, and removed playback-to-execution inference |
 | 2026-07-25 | `35949fe` baseline hygiene | formerly hidden controller test: 1 passed; full non-database backend gate: 1,186 passed in 19.61s; docs: 2 passed; runner shell syntax, Make target expansion, whitespace, tracked-artifact, workflow, and retired-profile reference audits passed; frontend checks remain explicit opt-in |
+| 2026-07-25 | `81498a9..84dbf93` deterministic evidence and quality | hand-verifiable long/short, stop/target/same-bar, gap-fill, repeatability, backtest/paper parity, wallet/accounting/lifecycle reconciliation, full disagreement traces, auditable warmup, and observability coverage added; malformed execution and candle inputs fail loudly |
+| 2026-07-25 | `66aac0b..2e80c2f` exit and causal boundaries | implicit breakeven removed; staged/terminal exits reconcile; every strategy input must be a same-bar `RuntimeOutput`; future market-profile facts, research events, and report projections cannot alter prior decisions |
+| 2026-07-25 | `6fb995a` database ownership fixture | opt-in PostgreSQL profile: 3 passed; full suite against TimescaleDB: 1,260 passed, 47 pre-existing dependency/deprecation warnings, 22.55s |
+| 2026-07-25 | clean/repeated TimescaleDB bootstrap | isolated canonical startup and restart both produced 24 tables, 64 indexes, required extensions, and schema fingerprint `3ca3bf80c5b92e7883ecc066c5327495f234ff9eb047fb562a3d95d859544482`; normal empty legacy lifecycle tables were removed through the guarded migration |
+| 2026-07-25 | `c5d3c76` domain breakeven default | affected execution profile: 47 passed; direct `LadderPosition` construction now defaults to disabled breakeven; final full suite with PostgreSQL enabled: 1,261 passed, 47 pre-existing dependency/deprecation warnings, 25.67s |
 
 Each child branch must record its focused tests, broader regression profile,
 documentation validation, diff review, and remaining-reference search before
@@ -99,10 +135,15 @@ integration.
 
 ## Discovered Risks
 
-- Backtest warmup shortfalls and some malformed/empty provider data are not
-  always surfaced in quality evidence.
-- Report observability reads can truncate at 2,000 events without a truncation
-  caveat.
+- There is no repository-defined, credential-free, persisted end-to-end
+  backtest/paper fixture for exercising the complete CLI/API/job path.
+- Direct CLI mutation is audited but is not uniformly plan/apply/confirm gated;
+  agents should use approved wrappers until that boundary is tightened.
+- API uptime health can succeed while database readiness is unavailable.
+- The largest orchestration modules remain costly to reason about and review;
+  extraction should continue only behind the established regression evidence.
+- Session-aware margin behavior and reconstruction of evidence never persisted
+  by a run remain unsupported and must stay explicit in reports.
 
 ## Blockers and Deviations
 
@@ -119,6 +160,8 @@ integration.
   quantity-step allocation.
 - Frontend checks remain intentionally skipped because frontend is outside the
   cleanup critical path.
+- A representative persisted real-strategy run was not fabricated: canonical
+  stores are empty and no approved credential-free seed/ingest command exists.
 
 ## Final Acceptance
 
@@ -128,11 +171,11 @@ integration.
 - [x] Proven dead and compatibility-only production paths removed
 - [x] Explicit storage ownership and nonduplicated temporal dispatch
 - [x] Accurate backend CI with optional frontend checks
-- [ ] Deterministic reference and repeated backtests
-- [ ] No-lookahead checks
-- [ ] Backtest and paper/runtime replay agreement under equal assumptions
-- [ ] Order, fill, position, lifecycle, wallet, fee, P&L, and equity reconciliation
-- [ ] Quality/provenance/readiness/trust evidence preserved end to end
+- [x] Deterministic reference and repeated backtests
+- [x] No-lookahead checks
+- [x] Backtest and paper/runtime replay agreement under equal assumptions
+- [x] Order, fill, position, lifecycle, wallet, fee, P&L, and equity reconciliation
+- [x] Quality/provenance/readiness/trust evidence preserved end to end
 - [x] Clean and repeated database bootstrap validation
-- [ ] Architecture and operator documentation aligned
+- [x] Architecture and operator documentation aligned
 - [ ] Integration branch clean, pushed, and ready for review

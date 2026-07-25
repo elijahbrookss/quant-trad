@@ -150,8 +150,8 @@ def _normalize_artifact(
         strategy_hash_match=_field_match(left_material, right_material, material_diff, "strategy_hash"),
         decision_count_left=_side_value(decision, "left_count", "right_count", reversed_order),
         decision_count_right=_side_value(decision, "right_count", "left_count", reversed_order),
-        missing_decision_count=_side_count(decision, ("missing_decision_count", "missing_ids_count"), ("extra_decision_count", "extra_ids_count"), reversed_order),
-        extra_decision_count=_side_count(decision, ("extra_decision_count", "extra_ids_count"), ("missing_decision_count", "missing_ids_count"), reversed_order),
+        missing_decision_count=_side_value(decision, "missing_decision_count", "extra_decision_count", reversed_order),
+        extra_decision_count=_side_value(decision, "extra_decision_count", "missing_decision_count", reversed_order),
         missing_decision_ids=missing_ids,
         extra_decision_ids=extra_ids,
         decision_diff_full_lists_available=_decision_full_lists_available(decision),
@@ -167,6 +167,10 @@ def _normalize_artifact(
         wallet_market_time_overtake_right=_overtake_count(_mapping(wallet_market_time.get(right_run_id))),
         runtime_ordering_left=_mapping(runtime.get(left_run_id)),
         runtime_ordering_right=_mapping(runtime.get(right_run_id)),
+        disagreement_trace=_normalize_disagreement_trace(
+            payload.get("disagreement_trace"),
+            reversed_order=reversed_order,
+        ),
         first_divergence=first_divergence,
         raw={"artifact_run_ids": artifact_run_ids},
     )
@@ -211,14 +215,6 @@ def _side_value(payload: Mapping[str, Any], normal_key: str, reversed_key: str, 
     return _int_or_none(payload.get(key))
 
 
-def _side_count(payload: Mapping[str, Any], normal_keys: Sequence[str], reversed_keys: Sequence[str], reversed_order: bool) -> Optional[int]:
-    keys = reversed_keys if reversed_order else normal_keys
-    for key in keys:
-        if key in payload:
-            return _int_or_none(payload.get(key))
-    return None
-
-
 def _int_or_none(value: Any) -> Optional[int]:
     if value is None or isinstance(value, bool):
         return None
@@ -243,20 +239,9 @@ def _list_of_strings(value: Any) -> list[str]:
 
 
 def _decision_id_lists(decision: Mapping[str, Any], *, reversed_order: bool) -> tuple[list[str], list[str]]:
-    missing = _list_of_strings(_first_present(decision, ("missing_decision_ids", "missing_ids")))
-    extra = _list_of_strings(_first_present(decision, ("extra_decision_ids", "extra_ids")))
-    if not missing and decision.get("first_missing_id"):
-        missing = [str(decision.get("first_missing_id"))]
-    if not extra and decision.get("first_extra_id"):
-        extra = [str(decision.get("first_extra_id"))]
+    missing = _list_of_strings(decision.get("missing_decision_ids"))
+    extra = _list_of_strings(decision.get("extra_decision_ids"))
     return (extra, missing) if reversed_order else (missing, extra)
-
-
-def _first_present(payload: Mapping[str, Any], keys: Sequence[str]) -> Any:
-    for key in keys:
-        if key in payload:
-            return payload.get(key)
-    return None
 
 
 def _sequence_key_present(payload: Mapping[str, Any], key: str) -> bool:
@@ -265,13 +250,27 @@ def _sequence_key_present(payload: Mapping[str, Any], key: str) -> bool:
 
 
 def _decision_full_lists_available(decision: Mapping[str, Any]) -> bool:
-    return (
-        _sequence_key_present(decision, "missing_decision_ids")
-        and _sequence_key_present(decision, "extra_decision_ids")
-    ) or (
-        _sequence_key_present(decision, "missing_ids")
-        and _sequence_key_present(decision, "extra_ids")
-    )
+    return _sequence_key_present(
+        decision, "missing_decision_ids"
+    ) and _sequence_key_present(decision, "extra_decision_ids")
+
+
+def _normalize_disagreement_trace(
+    value: Any,
+    *,
+    reversed_order: bool,
+) -> dict[str, Any]:
+    trace = _mapping(value)
+    if not reversed_order:
+        return trace
+    divergence = _mapping(trace.get("first_divergence"))
+    if divergence:
+        divergence["left"], divergence["right"] = (
+            divergence.get("right"),
+            divergence.get("left"),
+        )
+        trace["first_divergence"] = divergence
+    return trace
 
 
 def _verdict_changes(decision: Mapping[str, Any], *, reversed_order: bool) -> list[dict[str, Any]]:
@@ -280,9 +279,6 @@ def _verdict_changes(decision: Mapping[str, Any], *, reversed_order: bool) -> li
         normalized = [_maybe_swap_change(_mapping(change), reversed_order=reversed_order) for change in changes if isinstance(change, Mapping)]
     else:
         normalized = []
-    first = _mapping(decision.get("first_verdict_change"))
-    if first and not normalized:
-        normalized = [_maybe_swap_change(first, reversed_order=reversed_order)]
     return normalized
 
 
@@ -361,20 +357,12 @@ def _semantic_clean(payload: Mapping[str, Any]) -> bool:
         str(payload.get("verdict") or "").upper() == "PASS"
         or (
             not any(field in material_diff for field in semantic_material_fields)
-            and not _count_any(decision, ("missing_decision_count", "missing_ids_count"))
-            and not _count_any(decision, ("extra_decision_count", "extra_ids_count"))
+            and not _int_or_none(decision.get("missing_decision_count"))
+            and not _int_or_none(decision.get("extra_decision_count"))
             and not _int_or_none(decision.get("verdict_change_count"))
             and trade.get("equal") is not False
         )
     )
-
-
-def _count_any(payload: Mapping[str, Any], keys: Sequence[str]) -> Optional[int]:
-    for key in keys:
-        count = _int_or_none(payload.get(key))
-        if count is not None:
-            return count
-    return None
 
 
 def _divergence_type(section: str, field: Any) -> str:

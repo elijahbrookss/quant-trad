@@ -110,7 +110,8 @@ The canonical policy fields are:
 - `stop_adjustments`: flattened, stable-ID one-time stop movement rules such as
   move-to-breakeven at a configured R multiple, an absolute trigger tick value,
   or after a target hit. Runtime converts them into resolved stop-adjustment
-  objects before opening a position.
+  objects before opening a position. Omitting this field means no stop
+  adjustment; runtime never inserts a move-to-breakeven rule implicitly.
 - `breakeven`: direct breakeven activation for simple strategies when explicit
   stop adjustments are not configured.
 - `trailing`: trailing-stop activation and distance config. With

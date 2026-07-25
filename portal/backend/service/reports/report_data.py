@@ -29,6 +29,7 @@ BOTLENS_DOMAIN_PREFIX = "botlens_domain."
 BOTLENS_DECISION_EVENT_TYPE = f"{BOTLENS_DOMAIN_PREFIX}decision_emitted"
 BOTLENS_TRADE_OPENED_EVENT_TYPE = f"{BOTLENS_DOMAIN_PREFIX}trade_opened"
 BOTLENS_TRADE_CLOSED_EVENT_TYPE = f"{BOTLENS_DOMAIN_PREFIX}trade_closed"
+REPORT_OBSERVABILITY_EVENT_LIMIT = 2000
 
 
 def list_runs(
@@ -249,7 +250,11 @@ def list_decision_ledger(run_id: str) -> List[Dict[str, Any]]:
     return ledger
 
 
-def list_observability_events(run_id: str, *, limit: int = 2000) -> List[Dict[str, Any]]:
+def list_observability_events(
+    run_id: str,
+    *,
+    limit: int = REPORT_OBSERVABILITY_EVENT_LIMIT,
+) -> List[Dict[str, Any]]:
     """Return operational observability rows for report diagnostics.
 
     Observability rows are diagnostic-only. Callers must not treat them as
@@ -467,6 +472,7 @@ def find_instrument(
 
 
 __all__ = [
+    "REPORT_OBSERVABILITY_EVENT_LIMIT",
     "find_instrument",
     "get_run",
     "get_result_readiness",

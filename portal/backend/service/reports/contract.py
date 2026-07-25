@@ -1201,10 +1201,15 @@ def _wait_watermarks(wait: Mapping[str, Any], *keys: str) -> List[Dict[str, Any]
 
 
 def _coordinator_waits(run_id: str) -> Dict[str, Any]:
+    truncated = False
+    unavailable = False
+    limit = report_data.REPORT_OBSERVABILITY_EVENT_LIMIT
     try:
+        rows = report_data.list_observability_events(run_id, limit=limit + 1)
+        truncated = len(rows) > limit
         events = [
             row
-            for row in report_data.list_observability_events(run_id, limit=2000)
+            for row in rows[:limit]
             if str(row.get("event_name") or "") == "decision_order_top_waits_merged"
         ]
     except Exception as exc:  # noqa: BLE001 - coordinator waits are diagnostic, not material truth.
@@ -1215,12 +1220,17 @@ def _coordinator_waits(run_id: str) -> Dict[str, Any]:
             )
         )
         events = []
+        unavailable = True
     event = _latest_event(events)
     if event is None:
         return {
             "status": "not_available",
             "top_waits": [],
-            "caveats": ["decision_order_top_waits_merged_unavailable"],
+            "caveats": [
+                "decision_order_top_waits_merged_unavailable",
+                *(["observability_events_truncated"] if truncated else []),
+                *(["observability_events_unavailable"] if unavailable else []),
+            ],
         }
     details = _details(event)
     waits = []
@@ -1255,6 +1265,8 @@ def _coordinator_waits(run_id: str) -> Dict[str, Any]:
             }
         )
     caveats = []
+    if truncated:
+        caveats.append("observability_events_truncated")
     if details.get("release_count") is None or details.get("fail_count") is None:
         caveats.append("decision_order_release_fail_counts_unavailable")
     return {

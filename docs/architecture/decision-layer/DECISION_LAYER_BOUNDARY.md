@@ -91,6 +91,10 @@ instrument, intent, direction, and evidence fields. It also emits rejection
 artifacts with stage and reason when a rule path cannot become a trade
 candidate.
 
+Every provided typed output must carry the exact evaluation bar time. The
+evaluator rejects stale or future-dated outputs before evaluating rules or
+advancing bounded history.
+
 Those artifacts are runtime truth candidates, not fills. Runtime still decides
 whether a candidate becomes execution behavior.
 
