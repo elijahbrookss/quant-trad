@@ -68,7 +68,7 @@ def _ohlcv_frame() -> pd.DataFrame:
     )
 
 
-def test_atm_template_strips_execution_profile_fields():
+def test_atm_template_rejects_execution_profile_fields() -> None:
     builder = SeriesBuilder(
         bot_id="bot-1",
         config={},
@@ -82,63 +82,17 @@ def test_atm_template_strips_execution_profile_fields():
         datasource="CCXT",
         exchange="COINBASE",
         atm_template_id=None,
-        atm_template={
-            "tick_size": 0.01,
-            "tick_value": 0.01,
-            "contract_size": 1.0,
-            "maker_fee_rate": 0.0,
-            "taker_fee_rate": 0.0,
-            "quote_currency": "USD",
-            "proxy_derivative_margin_rates": {"overnight": {"long_margin_rate": 0.25}},
-            "proxy_derivative_instrument_fields": {"tick_size": 0.5, "contract_size": 0.1, "tick_value": 0.05},
-            "_meta": {
-                "tick_size_override": True,
-                "tick_value_override": True,
-                "contract_size_override": True,
-                "maker_fee_rate_override": True,
-                "taker_fee_rate_override": True,
-                "quote_currency_override": True,
-            },
-        },
+        atm_template={"tick_size": 0.01},
         risk_config={},
         indicator_links=[],
         instrument_links=[],
     )
 
-    template = builder._build_atm_template_with_instrument(
-        strategy,
-        {
-            "symbol": "ETH/USD",
-            "instrument_type": "spot",
-            "tick_size": 0.01,
-            "tick_value": 0.01,
-            "contract_size": 1.0,
-            "metadata": {
-                "instrument_fields": {
-                    "proxy_derivative_instrument_fields": {
-                        "tick_size": 0.5,
-                        "tick_value": 0.05,
-                        "contract_size": 0.1,
-                    }
-                }
-            },
-        },
-    )
-
-    assert "tick_size" not in template
-    assert "tick_value" not in template
-    assert "contract_size" not in template
-    assert "maker_fee_rate" not in template
-    assert "taker_fee_rate" not in template
-    assert "quote_currency" not in template
-    assert "proxy_derivative_margin_rates" not in template
-    assert "proxy_derivative_instrument_fields" not in template
-    assert "tick_size_override" not in template.get("_meta", {})
-    assert "tick_value_override" not in template.get("_meta", {})
-    assert "contract_size_override" not in template.get("_meta", {})
-    assert "maker_fee_rate_override" not in template.get("_meta", {})
-    assert "taker_fee_rate_override" not in template.get("_meta", {})
-    assert "quote_currency_override" not in template.get("_meta", {})
+    with pytest.raises(
+        ValueError,
+        match="ATM template contains unsupported fields",
+    ):
+        builder._build_atm_template(strategy)
 
 
 def test_incremental_eval_emits_only_current_epoch_and_newer_than_cursor():

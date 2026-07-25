@@ -87,9 +87,11 @@ Runtime separates source identity from execution modeling:
 ## Position Lifecycle And Order Semantics
 
 ATM templates declare position lifecycle intent; runtime executes that intent.
-Template compatibility is handled at the ATM boundary and cannot silently drop
-malformed fields. Runtime compiles the normalized template once into a
-`RuntimeExecutionPlan` before constructing execution state. The plan owns
+The ATM boundary accepts only schema-v2 snake-case policy fields and rejects
+unknown or malformed input. Instrument constraints, fees, currencies, and
+margin evidence belong exclusively to `SeriesExecutionProfile`. Runtime
+compiles the normalized template once into a `RuntimeExecutionPlan` before
+constructing execution state. The plan owns
 entry, initial-stop, take-profit, fixed-horizon, breakeven, trailing, and
 stop-adjustment semantics. The engine projects target dictionaries only from
 that plan; position state consumes resolved runtime policy objects rather than
@@ -103,11 +105,12 @@ The canonical policy fields are:
 - `exit_plan.fixed_horizon`: close remaining open legs after `bars` completed
   position bars at the strategy bar close. This is a market/taker close and
   emits a `fixed_horizon` exit fill plus a close reason of `FIXED_HORIZON`.
-- `stop_adjustments`: one-time stop movement rules such as move-to-breakeven
-  at a configured R multiple, an absolute trigger tick value, or after a target
-  hit. Runtime accepts normalized nested template rules and flattened
-  compatibility rules at the template edge, then converts them into canonical
-  runtime stop-adjustment objects.
+- `take_profit_orders`: stable target IDs, exactly one price expression per
+  target, and explicit `size_fraction` values totaling one.
+- `stop_adjustments`: flattened, stable-ID one-time stop movement rules such as
+  move-to-breakeven at a configured R multiple, an absolute trigger tick value,
+  or after a target hit. Runtime converts them into resolved stop-adjustment
+  objects before opening a position.
 - `breakeven`: direct breakeven activation for simple strategies when explicit
   stop adjustments are not configured.
 - `trailing`: trailing-stop activation and distance config. With

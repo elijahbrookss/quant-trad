@@ -27,7 +27,7 @@ from engines.bot_runtime.core.execution_profile import (
     normalize_execution_semantics,
     normalize_runtime_instrument_type,
 )
-from atm import merge_templates
+from atm import normalise_template
 from risk import normalise_risk_config
 from strategies.compiler import compile_strategy
 from utils.log_context import build_log_context, with_log_context
@@ -157,37 +157,10 @@ class SeriesBuilderConstructionMixin:
             )
         return candles
 
-    def _build_atm_template_with_instrument(
-        self,
-        strategy: Strategy,
-        instrument: Optional[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        """Return the strategy-owned ATM template.
+    def _build_atm_template(self, strategy: Strategy) -> Dict[str, Any]:
+        """Return the canonical strategy-owned execution-policy template."""
 
-        Execution metadata is compiled into ``SeriesExecutionProfile`` and must
-        not be copied into this strategy template.
-        """
-        atm_template = merge_templates(strategy.atm_template)
-        for field_name in (
-            "tick_size",
-            "tick_value",
-            "contract_size",
-            "maker_fee_rate",
-            "taker_fee_rate",
-            "quote_currency",
-            "proxy_derivative_margin_rates",
-            "proxy_derivative_instrument_fields",
-            "proxy_derivative_maker_fee_rate",
-            "proxy_derivative_taker_fee_rate",
-        ):
-            atm_template.pop(field_name, None)
-            meta = atm_template.get("_meta") if isinstance(atm_template.get("_meta"), dict) else {}
-            meta.pop(f"{field_name}_override", None)
-            if meta:
-                atm_template["_meta"] = meta
-            else:
-                atm_template.pop("_meta", None)
-        return atm_template
+        return normalise_template(strategy.atm_template)
 
     @staticmethod
     def _has_proxy_derivative_reference(instrument: Mapping[str, Any]) -> bool:
@@ -447,7 +420,7 @@ class SeriesBuilderConstructionMixin:
         )
         logger.debug(with_log_context("series_instrument_resolved", instrument_context))
 
-        atm_template = self._build_atm_template_with_instrument(strategy, instrument)
+        atm_template = self._build_atm_template(strategy)
         risk_config = self._build_risk_config_for_instrument(strategy, symbol, risk_multiplier)
 
         if risk_multiplier != 1.0:
@@ -462,7 +435,6 @@ class SeriesBuilderConstructionMixin:
         execution_semantics = self._execution_semantics_for_instrument(instrument or {})
         execution_profile = compile_series_execution_profile(
             instrument or {},
-            template=atm_template,
             risk_config=risk_config,
             require_margin_accounting=execution_semantics in {"derivative", "proxy_derivative"},
             execution_semantics=execution_semantics,
@@ -546,8 +518,8 @@ class SeriesBuilderConstructionMixin:
         ready_context = self._strategy_log_context(
             strategy,
             symbol=symbol,
-            contracts=atm_template.get("contracts"),
-            targets=",".join(str(order.get("ticks")) for order in atm_template.get("take_profit_orders", [])),
+            target_count=len(atm_template.get("take_profit_orders", [])),
+            target_ids=",".join(str(order.get("id")) for order in atm_template.get("take_profit_orders", [])),
         )
         logger.info(with_log_context("bot_runtime_series_ready", ready_context))
 

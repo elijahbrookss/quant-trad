@@ -386,9 +386,10 @@ def test_save_atm_template_rejects_unresolved_target_before_persistence(
             {
                 "name": "Invalid target reference",
                 "template": {
-                    "take_profit_orders": [{"id": "tp-1", "ticks": 10}],
+                    "take_profit_orders": [{"id": "tp-1", "ticks": 10, "size_fraction": 1.0}],
                     "stop_adjustments": [
                         {
+                            "id": "sa-missing-target",
                             "trigger_type": "target_hit",
                             "trigger_value": "tp-missing",
                             "action_type": "move_to_breakeven",

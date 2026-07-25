@@ -6,6 +6,19 @@ import math
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence
 
+from atm.schema import (
+    ATM_BREAKEVEN_FIELDS,
+    ATM_EXIT_PLAN_FIELDS,
+    ATM_FIXED_HORIZON_FIELDS,
+    ATM_INITIAL_STOP_FIELDS,
+    ATM_LIMIT_MAKER_FIELDS,
+    ATM_SCHEMA_VERSION,
+    ATM_STOP_ADJUSTMENT_FIELDS,
+    ATM_TAKE_PROFIT_FIELDS,
+    ATM_TEMPLATE_FIELDS,
+    ATM_TRAILING_FIELDS,
+)
+
 
 SUPPORTED_ENTRY_ANCHORS = {"signal_price"}
 SUPPORTED_ENTRY_ORDER_TYPES = {"limit_maker", "market"}
@@ -90,7 +103,7 @@ class TrailingStopPlan:
 class StopAdjustmentPlanRule:
     """Canonical one-time stop movement rule from ATM config."""
 
-    rule_id: Optional[str]
+    rule_id: str
     trigger_type: str
     trigger_value: object
     trigger_ticks: Optional[float]
@@ -129,6 +142,12 @@ def compile_runtime_execution_plan(template: Mapping[str, Any]) -> RuntimeExecut
     if not isinstance(template, Mapping):
         raise ValueError("ATM template must be a mapping")
 
+    _reject_unknown_fields(template, ATM_TEMPLATE_FIELDS, path="ATM template")
+    schema_version = _required_int(template.get("schema_version"), path="schema_version")
+    if schema_version != ATM_SCHEMA_VERSION:
+        raise ValueError(
+            f"schema_version={schema_version} is unsupported; expected {ATM_SCHEMA_VERSION}"
+        )
     take_profits = tuple(_compile_take_profit_plans(template.get("take_profit_orders")))
     target_ids = {target.target_id for target in take_profits}
     return RuntimeExecutionPlan(
@@ -158,6 +177,7 @@ def _compile_entry_plan(template: Mapping[str, Any]) -> EntryExecutionPlan:
         supported=SUPPORTED_ENTRY_ORDER_TYPES,
     )
     limit_maker = _required_mapping(template.get("limit_maker"), path="limit_maker")
+    _reject_unknown_fields(limit_maker, ATM_LIMIT_MAKER_FIELDS, path="limit_maker")
     anchor = str(limit_maker.get("anchor_price") or "").strip().lower()
     if anchor not in SUPPORTED_ENTRY_ANCHORS:
         raise ValueError(
@@ -198,6 +218,7 @@ def _compile_entry_plan(template: Mapping[str, Any]) -> EntryExecutionPlan:
 
 def _compile_initial_stop_plan(template: Mapping[str, Any]) -> InitialStopPlan:
     source = _required_mapping(template.get("initial_stop"), path="initial_stop")
+    _reject_unknown_fields(source, ATM_INITIAL_STOP_FIELDS, path="initial_stop")
     mode = _required_choice(source.get("mode"), path="initial_stop.mode", supported={"atr"})
     atr_period = _required_int(source.get("atr_period"), path="initial_stop.atr_period")
     if atr_period <= 0:
@@ -224,6 +245,7 @@ def _compile_take_profit_plans(source: object) -> list[TakeProfitPlan]:
     for index, raw_entry in enumerate(entries):
         path = f"take_profit_orders[{index}]"
         entry = _required_mapping(raw_entry, path=path)
+        _reject_unknown_fields(entry, ATM_TAKE_PROFIT_FIELDS, path=path)
         target_id = _required_text(entry.get("id"), path=f"{path}.id")
         if target_id in seen_ids:
             raise ValueError(f"{path}.id duplicates target id {target_id!r}")
@@ -269,7 +291,11 @@ def _compile_take_profit_plans(source: object) -> list[TakeProfitPlan]:
 
 def _compile_fixed_horizon_plan(template: Mapping[str, Any]) -> FixedHorizonExitPlan:
     exit_plan = _required_mapping(template.get("exit_plan"), path="exit_plan")
+    _reject_unknown_fields(exit_plan, ATM_EXIT_PLAN_FIELDS, path="exit_plan")
     fixed = _required_mapping(exit_plan.get("fixed_horizon"), path="exit_plan.fixed_horizon")
+    _reject_unknown_fields(
+        fixed, ATM_FIXED_HORIZON_FIELDS, path="exit_plan.fixed_horizon"
+    )
     enabled = _required_bool(fixed.get("enabled"), path="exit_plan.fixed_horizon.enabled")
     bars = _optional_positive_int(fixed.get("bars"), path="exit_plan.fixed_horizon.bars")
     price = _required_choice(
@@ -296,6 +322,7 @@ def _compile_fixed_horizon_plan(template: Mapping[str, Any]) -> FixedHorizonExit
 
 def _compile_breakeven_plan(template: Mapping[str, Any]) -> BreakevenPlan:
     config = _required_mapping(template.get("breakeven"), path="breakeven")
+    _reject_unknown_fields(config, ATM_BREAKEVEN_FIELDS, path="breakeven")
     enabled = _required_bool(config.get("enabled"), path="breakeven.enabled")
     activation_type = _required_choice(
         config.get("activation_type"),
@@ -306,12 +333,6 @@ def _compile_breakeven_plan(template: Mapping[str, Any]) -> BreakevenPlan:
         raise AssertionError("validated breakeven activation unexpectedly changed")
     ticks = _required_non_negative_float(config.get("ticks"), path="breakeven.ticks")
     r_multiple = _optional_positive_float(config.get("r_multiple"), path="breakeven.r_multiple")
-    target_index = _optional_non_negative_int(config.get("target_index"), path="breakeven.target_index")
-    target_id = _optional_text(config.get("target_id"))
-    if target_index is not None or target_id is not None:
-        raise ValueError(
-            "breakeven target_index/target_id are unsupported; use a target_hit stop_adjustment"
-        )
     if enabled and (ticks > 0) == (r_multiple is not None):
         raise ValueError(
             "enabled breakeven must define exactly one trigger: positive ticks or r_multiple"
@@ -330,6 +351,7 @@ def _compile_trailing_plan(
     target_count: int,
 ) -> TrailingStopPlan:
     config = _required_mapping(template.get("trailing"), path="trailing")
+    _reject_unknown_fields(config, ATM_TRAILING_FIELDS, path="trailing")
     enabled = _required_bool(config.get("enabled"), path="trailing.enabled")
     activation_type = _required_choice(
         config.get("activation_type"),
@@ -398,11 +420,17 @@ def _compile_stop_adjustment_rules(
 ) -> list[StopAdjustmentPlanRule]:
     entries = _required_sequence(source, path="stop_adjustments")
     rules: list[StopAdjustmentPlanRule] = []
+    seen_rule_ids: set[str] = set()
     for index, raw_entry in enumerate(entries):
         path = f"stop_adjustments[{index}]"
         entry = _required_mapping(raw_entry, path=path)
+        _reject_unknown_fields(entry, ATM_STOP_ADJUSTMENT_FIELDS, path=path)
+        rule_id = _required_text(entry.get("id"), path=f"{path}.id")
+        if rule_id in seen_rule_ids:
+            raise ValueError(f"{path}.id duplicates stop-adjustment id {rule_id!r}")
+        seen_rule_ids.add(rule_id)
         trigger_type = _required_choice(
-            str(entry.get("trigger_type") or "").replace("_reached", ""),
+            entry.get("trigger_type"),
             path=f"{path}.trigger_type",
             supported=SUPPORTED_STOP_TRIGGERS,
         )
@@ -412,8 +440,6 @@ def _compile_stop_adjustment_rules(
             supported=SUPPORTED_STOP_ACTIONS,
         )
         trigger_value: object = entry.get("trigger_value")
-        if trigger_value is None:
-            trigger_value = entry.get("trigger_target_id")
         trigger_ticks = _optional_positive_float(
             entry.get("trigger_ticks"),
             path=f"{path}.trigger_ticks",
@@ -449,7 +475,7 @@ def _compile_stop_adjustment_rules(
             raise ValueError(f"{path}.action_value is invalid for move_to_breakeven")
         rules.append(
             StopAdjustmentPlanRule(
-                rule_id=_optional_text(entry.get("id")),
+                rule_id=rule_id,
                 trigger_type=trigger_type,
                 trigger_value=trigger_value,
                 trigger_ticks=trigger_ticks,
@@ -464,6 +490,14 @@ def _required_mapping(value: object, *, path: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{path} must be a mapping")
     return value
+
+
+def _reject_unknown_fields(
+    payload: Mapping[str, Any], allowed: frozenset[str], *, path: str
+) -> None:
+    unknown = sorted(set(payload) - set(allowed))
+    if unknown:
+        raise ValueError(f"{path} contains unsupported fields: {unknown!r}")
 
 
 def _required_sequence(value: object, *, path: str) -> Sequence[object]:

@@ -125,7 +125,19 @@ def _run() -> dict[str, Any]:
             "timeframe": "1h",
             "material_config_hash": "material-1",
             "risk_settings": {"risk_per_trade": 0.01, "slippage_bps": 0.0},
-            "atm_template": {"id": "atm-1", "targets": [1, 2, 3]},
+            "strategies": [
+                {
+                    "id": "strategy-1",
+                    "atm_template_id": "atm-1",
+                    "atm_template": {
+                        "schema_version": 2,
+                        "name": "Research fixture ATM",
+                        "take_profit_orders": [
+                            {"id": "tp-1", "r_multiple": 1.0, "size_fraction": 1.0}
+                        ],
+                    },
+                }
+            ],
             "indicators": [{"id": "ind-1", "type": "market_profile"}],
         },
     }
@@ -682,7 +694,9 @@ def test_dataset_includes_execution_mode_and_intrabar_fallback_summary(monkeypat
 
     assert dataset["metadata"]["execution_mode"] == "full"
     assert dataset["metadata"]["configuration"]["risk"]["slippage_bps"] == 0.0
-    assert dataset["metadata"]["configuration"]["atm"]["id"] == "atm-1"
+    atm = dataset["metadata"]["configuration"]["atm"]
+    assert atm["template_id"] == "atm-1"
+    assert atm["template"]["take_profit_orders"][0]["id"] == "tp-1"
     assert dataset["metadata"]["configuration"]["indicators"][0]["type"] == "market_profile"
     assert dataset["execution"]["execution_mode"] == "full"
     assert dataset["execution"]["slippage"]["total_slippage_cost"] == 0.0

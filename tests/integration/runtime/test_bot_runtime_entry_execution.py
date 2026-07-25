@@ -24,13 +24,12 @@ def _build_spot_engine(
     base_risk_per_trade: float = 100,
     take_profit_orders: Optional[list[dict]] = None,
     extra_config: Optional[dict] = None,
+    maker_fee_rate: float = 0.0,
+    taker_fee_rate: float = 0.0,
 ) -> LadderRiskEngine:
     config = {
-        "tick_size": 1.0,
-        "contract_size": 1.0,
-        "tick_value": 1.0,
         "initial_stop": {"atr_multiplier": 2.0},
-        "take_profit_orders": take_profit_orders or [{"id": "tp-1", "ticks": 10}],
+        "take_profit_orders": take_profit_orders or [{"id": "tp-1", "ticks": 10, "size_fraction": 1.0}],
         "execution_mode": execution_mode,
     }
     if limit_maker is not None:
@@ -46,6 +45,8 @@ def _build_spot_engine(
         "min_order_size": 1,
         "base_currency": "BTC",
         "quote_currency": "USD",
+        "maker_fee_rate": maker_fee_rate,
+        "taker_fee_rate": taker_fee_rate,
         "metadata": {
             "info": {"base_increment": "1"},
         },
@@ -59,11 +60,8 @@ def _build_spot_engine(
 
 def _build_future_engine() -> LadderRiskEngine:
     config = {
-        "tick_size": 5.0,
-        "contract_size": 0.01,
-        "tick_value": 0.05,
         "initial_stop": {"atr_multiplier": 1.0},
-        "take_profit_orders": [{"id": "tp-1", "ticks": 10}],
+        "take_profit_orders": [{"id": "tp-1", "ticks": 10, "size_fraction": 1.0}],
         "execution_mode": "market",
     }
     instrument = {
@@ -378,14 +376,15 @@ def test_runtime_rejects_unimplemented_stop_adjustment_trail_atr_action():
                 "stop_adjustments": [
                     {
                         "id": "sa-trail",
-                        "trigger": {"type": "r_multiple_reached", "value": 1.0},
-                        "action": {"type": "trail_atr", "atr_period": 14, "atr_multiplier": 1.0},
+                        "trigger_type": "r_multiple",
+                        "trigger_value": 1.0,
+                        "action_type": "trail_atr",
                     }
                 ]
             }
         )
     except ValueError as exc:
-        assert "Use top-level trailing config for trailing stops" in str(exc)
+        assert "action_type='trail_atr' is unsupported" in str(exc)
     else:
         raise AssertionError("expected trail_atr stop adjustment to fail loud")
 
@@ -492,7 +491,7 @@ def test_stop_movement_bumps_trade_revision_without_trade_event():
 def test_trailing_stop_from_normalized_config_only_tightens():
     engine = _build_spot_engine(
         base_risk_per_trade=8,
-        take_profit_orders=[{"id": "tp-1", "ticks": 100}],
+        take_profit_orders=[{"id": "tp-1", "ticks": 100, "size_fraction": 1.0}],
         extra_config={
             "stop_adjustments": [],
             "trailing": {
@@ -546,7 +545,7 @@ def test_trailing_stop_from_normalized_config_only_tightens():
 def test_disabled_trailing_config_with_stale_distance_fields_does_not_activate():
     engine = _build_spot_engine(
         base_risk_per_trade=8,
-        take_profit_orders=[{"id": "tp-1", "ticks": 100}],
+        take_profit_orders=[{"id": "tp-1", "ticks": 100, "size_fraction": 1.0}],
         extra_config={
             "stop_adjustments": [],
             "trailing": {
@@ -581,7 +580,7 @@ def test_disabled_trailing_config_with_stale_distance_fields_does_not_activate()
 def test_flattened_stop_adjustment_rule_executes_after_normalization():
     engine = _build_spot_engine(
         base_risk_per_trade=8,
-        take_profit_orders=[{"id": "tp-1", "ticks": 100}],
+        take_profit_orders=[{"id": "tp-1", "ticks": 100, "size_fraction": 1.0}],
         extra_config={
             "stop_adjustments": [
                 {
@@ -589,7 +588,7 @@ def test_flattened_stop_adjustment_rule_executes_after_normalization():
                     "trigger_type": "r_multiple",
                     "trigger_ticks": 5,
                     "action_type": "move_to_r",
-                    "action_r": 0.5,
+                    "action_value": 0.5,
                 }
             ],
         },
@@ -616,7 +615,7 @@ def test_flattened_stop_adjustment_rule_executes_after_normalization():
 def test_empty_stop_adjustments_do_not_enable_implicit_breakeven():
     engine = _build_spot_engine(
         base_risk_per_trade=8,
-        take_profit_orders=[{"id": "tp-1", "ticks": 10}],
+        take_profit_orders=[{"id": "tp-1", "ticks": 10, "size_fraction": 1.0}],
         extra_config={"stop_adjustments": []},
     )
     _enable_runtime_execution(engine)
@@ -641,11 +640,11 @@ def test_empty_stop_adjustments_do_not_enable_implicit_breakeven():
 def test_fixed_horizon_exit_closes_after_configured_bars_with_taker_fee():
     engine = _build_spot_engine(
         base_risk_per_trade=8,
-        take_profit_orders=[{"id": "tp-1", "ticks": 100}],
+        take_profit_orders=[{"id": "tp-1", "ticks": 100, "size_fraction": 1.0}],
+        maker_fee_rate=0.001,
+        taker_fee_rate=0.002,
         extra_config={
             "stop_adjustments": [],
-            "maker_fee_rate": 0.001,
-            "taker_fee_rate": 0.002,
             "exit_plan": {"fixed_horizon": {"enabled": True, "bars": 2}},
         },
     )
@@ -688,8 +687,9 @@ def test_fixed_horizon_exit_closes_after_configured_bars_with_taker_fee():
 def test_target_exit_uses_maker_fee_and_stop_exit_uses_taker_fee():
     maker_engine = _build_spot_engine(
         base_risk_per_trade=8,
-        take_profit_orders=[{"id": "tp-1", "ticks": 5}],
-        extra_config={"maker_fee_rate": 0.001, "taker_fee_rate": 0.002},
+        take_profit_orders=[{"id": "tp-1", "ticks": 5, "size_fraction": 1.0}],
+        maker_fee_rate=0.001,
+        taker_fee_rate=0.002,
     )
     _enable_runtime_execution(maker_engine)
     entry = _build_candle(close=100.0, atr=2.0)
@@ -711,8 +711,10 @@ def test_target_exit_uses_maker_fee_and_stop_exit_uses_taker_fee():
 
     taker_engine = _build_spot_engine(
         base_risk_per_trade=8,
-        take_profit_orders=[{"id": "tp-1", "ticks": 100}],
-        extra_config={"stop_adjustments": [], "maker_fee_rate": 0.001, "taker_fee_rate": 0.002},
+        take_profit_orders=[{"id": "tp-1", "ticks": 100, "size_fraction": 1.0}],
+        maker_fee_rate=0.001,
+        taker_fee_rate=0.002,
+        extra_config={"stop_adjustments": []},
     )
     _enable_runtime_execution(taker_engine)
     stop_position = taker_engine.maybe_enter(entry, "long")
@@ -736,8 +738,8 @@ def test_target_fill_status_and_quantity_change_bumps_trade_revision():
     engine = _build_spot_engine(
         base_risk_per_trade=8,
         take_profit_orders=[
-            {"id": "tp-1", "ticks": 5},
-            {"id": "tp-2", "ticks": 10},
+            {"id": "tp-1", "ticks": 5, "size_fraction": 0.5},
+            {"id": "tp-2", "ticks": 10, "size_fraction": 0.5},
         ],
     )
     _enable_runtime_execution(engine)

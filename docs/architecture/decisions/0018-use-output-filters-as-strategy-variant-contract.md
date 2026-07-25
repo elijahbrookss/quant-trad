@@ -53,8 +53,8 @@ That shape creates ambiguity:
 - Indicator tuning params such as confirmation bars, lookbacks, and thresholds
   belong to indicator configuration because they change what the indicator
   emits.
-- ATM templates control sizing, stops, targets, and execution-risk behavior,
-  which is a different research axis from decision eligibility.
+- ATM templates control entry, stop, target-allocation, and exit policy, which
+  is a different research axis from decision eligibility and instrument sizing.
 - Combining decision filters and ATM changes in one variant muddies attribution
   during report comparison.
 
