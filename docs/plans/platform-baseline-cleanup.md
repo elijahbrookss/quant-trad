@@ -20,8 +20,10 @@ engineering guidance; this file records only cleanup-specific state.
 | Candle-continuity extraction | integration baseline | Complete | — |
 | Canonical lifecycle ledger | `feats/lifecycle-canonical-ledger` | Complete | baseline |
 | Strict execution contracts | `feats/execution-contract-strictness` | Complete | lifecycle integration |
-| Compatibility/dead-path removal | `feats/compatibility-dead-path-removal` | Pending | strict execution contract ownership |
-| Temporal/config ownership | `feats/config-temporal-ownership` | Pending | compatibility caller migration |
+| Compatibility/dead-path removal | `feats/compatibility-dead-path-removal` | In progress | strict execution contract ownership |
+| Canonical ATM input schema | `feats/atm-canonical-contract` | Pending | compatibility inventory |
+| Storage repository ownership | `feats/storage-repository-ownership` | Pending | compatibility caller migration |
+| Temporal/config ownership | `feats/config-temporal-ownership` | Pending | storage ownership |
 | Baseline hygiene | `feats/baseline-hygiene` | Pending | structural ownership settled |
 | Correctness evidence campaign | `feats/correctness-evidence-campaign` | Pending | all structural cleanup |
 
@@ -48,6 +50,28 @@ The retired lifecycle bootstrap script was deleted. Existing databases use
 unless legacy rows have field-equivalent canonical events. Startup rejects
 retired tables until that explicit hard cutover is complete.
 
+
+## Evidence Inventory
+
+| Finding | Classification | Evidence / action |
+| --- | --- | --- |
+| Lifecycle models, schema, readers, writers, and tests | KEEP | `portal_bot_run_events` is the sole event ledger; `portal_bot_runs` is only the rebuildable summary. Legacy tables, fallback reads, mirrors, and synchronization code are absent after the validated hard cutover. |
+| Risk service re-exports, `template_metrics`, strategy `evaluate`, provider cache alias | DELETE | Internal callers either use the canonical package already or can import it directly; wrapper-specific tests are not behavioral coverage. |
+| Runtime streaming aggregate, one-thread-per-series runner, Python-version fallback, local `dotenv` shadow | DELETE | No production owners or callers; Python 3.12 and the declared `python-dotenv` dependency are canonical. |
+| BotLens mailbox aliases and `bot_projection_refresh` | DELETE | No producer or useful caller remains; unknown messages already fail into bounded observability. |
+| Broad `storage.storage` wildcard facade | CONSOLIDATE | Migrate each caller to the owning repository module, then delete the facade and narrow package exports. |
+| ATM aliases and nested/flattened stop-adjustment shapes | CONSOLIDATE | Defaults/persisted examples and the strict compiler currently disagree on representation; select one schema and reject all alternative spellings. |
+| Playback `mode` fallback into `execution_mode` | CONSOLIDATE | Playback and execution semantics are independent; remove the cross-domain default and require the execution default at its owner. |
+| Indicator `configure_replay_window` interface and Candle Stats/Regime implementations | KEEP | All three definitions mean visual overlay-history retention, not research range, evaluation, recovery, or warmup. |
+| Four replay-window dispatch helpers | CONSOLIDATE | Indicator preview, runtime validation, strategy preview, and bot setup duplicate dispatch ownership for the same overlay-retention hint. |
+| Research range, backtest evaluation, indicator warmup, runtime recovery, transport replay | KEEP | These are distinct windows with different clocks, failure policy, and consumers. Similar names are not evidence of duplication. |
+| Continuity, candle catalog, readiness, provenance, diagnostics, confidence, and caveats | KEEP | Created in dataset/report builders, finalized in readiness, persisted with report fingerprints/materializations, exported in report bundles, and displayed through CLI/MCP report resources and research-check results. |
+| Warmup/provider/truncation quality omissions | CONSOLIDATE | Surface warmup shortfall and malformed/empty provider evidence; add an explicit caveat when the 2,000-event observability read truncates. Do not replace the envelope. |
+| Tracked `portal/frontend/.vite/deps` | DELETE | Generated dependency cache, not source; remove tracked files and ignore the directory. |
+| Stale ignored report test and commented changelog workflow experiment | DELETE | The referenced test no longer exists; the commented OpenAI workflow has no executable path. The remote `test` branch still exists, so its CI trigger remains. |
+| CLI operations | KEEP | `qt` is the canonical operator and agent contract. |
+| MCP operations | VERIFY USAGE | All 42 registrations have handlers and no orphan definitions were found. External invocation is not visible in the internal call graph; keep the thin adapter until usage evidence supports tool-level deletion. |
+| Missing bridge-session fallback to `"legacy"` | VERIFY USAGE | Verify every producer supplies a session identity before changing ingestion behavior. |
 ## Progress and Validation
 
 | Date | Commit/workstream | Evidence |
@@ -63,9 +87,8 @@ integration.
 
 ## Discovered Risks
 
-- Exported `template_metrics` has no internal callers and still derives its risk
-  output from retired flat stop/contract fields; verify external usage, then
-  delete it in the compatibility/dead-path workstream.
+- ATM defaults and accepted input aliases still permit more than one shape for
+  the same execution responsibility.
 - Backtest warmup shortfalls and some malformed/empty provider data are not
   always surfaced in quality evidence.
 - Report observability reads can truncate at 2,000 events without a truncation
@@ -82,11 +105,11 @@ integration.
   database validation used an isolated repository-defined TimescaleDB project.
 - Strict execution scope expanded to compile ATM templates at strategy and
   standalone-template persistence boundaries and to include execution-contract
+  tests in the PR profile; this closes an admission-timing gap found in review.
 - Independent review expanded the strict boundary to reject legacy flat stop
   input, conflicting target aliases, fractional integer shorthand, and dormant
   invalid trailing rules, and to honor target fractions during deterministic
   quantity-step allocation.
-  tests in the PR profile; this closes an admission-timing gap found in review.
 - Frontend checks remain intentionally skipped because frontend is outside the
   cleanup critical path.
 

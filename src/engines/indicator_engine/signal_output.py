@@ -4,12 +4,8 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
-from typing import Any, Mapping, TypedDict
+from typing import Any, Mapping, NotRequired, TypedDict
 
-try:  # Python <3.11 compatibility
-    from typing import NotRequired
-except ImportError:  # pragma: no cover - executed on Python <3.11
-    from typing_extensions import NotRequired
 
 
 _EXECUTION_FIELDS = (

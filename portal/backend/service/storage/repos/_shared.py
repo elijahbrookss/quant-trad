@@ -39,7 +39,7 @@ from ....db import (
     db,
 )
 from ...observability import BackendObserver, normalize_failure_mode
-from ...risk.atm import normalise_template
+from atm import normalise_template
 
 logger = logging.getLogger(__name__)
 _DATABASE_SETTINGS = get_settings().database

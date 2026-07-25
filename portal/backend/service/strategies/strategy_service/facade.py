@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
 
 from ...market import instrument_service
-from ...risk.atm import normalise_template
+from atm import normalise_template
 from engines.bot_runtime.core.execution_plan import compile_runtime_execution_plan
 from ...indicators.indicator_service import get_instance_meta
 from ...strategy_variant_resolution import EffectiveStrategyConfig, materialize_output_filters, resolve_strategy_variant
@@ -1862,31 +1862,6 @@ def compare_strategy_previews(
         end=end,
         interval=interval,
         cases=summaries,
-    )
-
-
-def evaluate(
-    strategy_id: str,
-    *,
-    start: str,
-    end: str,
-    interval: str,
-    instrument_ids: Optional[List[str]] = None,
-    variant_id: Optional[str] = None,
-    variant_name: Optional[str] = None,
-    config: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Compatibility wrapper for callers that import the facade-level evaluate function."""
-
-    return run_strategy_preview(
-        strategy_id,
-        start=start,
-        end=end,
-        interval=interval,
-        instrument_ids=instrument_ids,
-        variant_id=variant_id,
-        variant_name=variant_name,
-        config=config,
     )
 
 

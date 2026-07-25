@@ -27,6 +27,7 @@ secrets.env
 
 .vscode/
 .pytest_cache/
+portal/frontend/.vite/
 env/
 output/
 logs/

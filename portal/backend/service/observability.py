@@ -72,7 +72,6 @@ _DISALLOWED_METRIC_LABELS = frozenset(
         "raw_payload",
     }
 )
-_DEPRECATED_MESSAGE_KINDS = frozenset({"bot_projection_refresh"})
 _ALLOWED_METRIC_MESSAGE_KINDS = frozenset(
     {
         "bootstrap",
@@ -204,8 +203,6 @@ def normalize_failure_mode(value: Any) -> str:
 
 def normalize_metric_message_kind(value: Any) -> str:
     normalized = normalize_name(value or "unknown")
-    if normalized in _DEPRECATED_MESSAGE_KINDS:
-        return "deprecated"
     if normalized in _ALLOWED_METRIC_MESSAGE_KINDS:
         return normalized
     return "unknown"
