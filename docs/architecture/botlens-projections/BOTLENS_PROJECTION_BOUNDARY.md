@@ -216,9 +216,12 @@ Visual overlays are projection/read-model artifacts. They are not stored on
 `StrategySeries`, do not participate in strategy decisions, and are not built by
 ordinary runtime push updates.
 
-Runtime configures each indicator's visual replay window from
-`bot_runtime.botlens.overlay_window_bars`. Indicator typed outputs still follow
-the normal `initialize -> apply_bar -> snapshot` runtime timeline. Overlay
+Runtime configures each indicator's render-only overlay-history bound from
+`bot_runtime.botlens.overlay_window_bars` through the indicator engine's single
+overlay-history dispatcher. This is not a research range, evaluation range,
+warmup window, runtime recovery window, or transport replay window. Indicator
+typed outputs still follow the normal
+`initialize -> apply_bar -> snapshot` runtime timeline. Overlay
 geometry is requested only through the overlay projection step, which snapshots
 the current indicator visual state without mutating the runtime series model.
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
+import pytest
+
 import engines.indicator_engine.runtime_engine as runtime_engine_module
 from engines.bot_runtime.core.domain import Candle
 from engines.indicator_engine.contracts import (
@@ -15,6 +17,7 @@ from engines.indicator_engine.contracts import (
     RuntimeDetail,
     RuntimeOverlay,
     RuntimeOutput,
+    configure_indicator_overlay_history,
 )
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine, IndicatorGuardConfig
 from indicators.candle_stats.runtime import TypedCandleStatsIndicator
@@ -34,6 +37,12 @@ register_overlay_type(
     renderers={"lightweight": "marker"},
     payload_keys=("markers",),
 )
+
+
+@pytest.mark.parametrize("history_bars", [None, True, 0, -1, 1.5, "10"])
+def test_overlay_history_bound_rejects_malformed_values(history_bars: object) -> None:
+    with pytest.raises(ValueError, match="overlay_history_bars"):
+        configure_indicator_overlay_history([], history_bars=history_bars)
 
 
 class _SourceIndicator(Indicator):
@@ -619,7 +628,7 @@ def test_candle_stats_atr_overlays_do_not_wait_for_full_metric_readiness() -> No
     assert frame.overlays["candle-stats.atr_zscore"].ready is True
 
 
-def test_candle_stats_overlay_history_limit_can_match_replay_window() -> None:
+def test_candle_stats_overlay_history_limit_matches_configured_window() -> None:
     indicator = TypedCandleStatsIndicator(
         indicator_id="candle-stats",
         version="v1",
@@ -638,7 +647,7 @@ def test_candle_stats_overlay_history_limit_can_match_replay_window() -> None:
             "atr_expansion_signal_threshold": 2.0,
         },
     )
-    indicator.configure_replay_window(history_bars=650)
+    indicator.configure_overlay_history(history_bars=650)
     engine = IndicatorExecutionEngine([indicator])
 
     frame = None

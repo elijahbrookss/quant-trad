@@ -27,6 +27,15 @@ def _single_candle_frame() -> pd.DataFrame:
     )
 
 
+def _instrument_record(instrument_id: str) -> dict[str, str]:
+    return {
+        "id": instrument_id,
+        "symbol": "ES",
+        "datasource": "ALPACA",
+        "exchange": "cme",
+    }
+
+
 def test_signal_executor_uses_canonical_candle_service_with_instrument_context(monkeypatch) -> None:
     captured = {}
 
@@ -65,6 +74,11 @@ def test_signal_executor_uses_canonical_candle_service_with_instrument_context(m
             {str(args[0][0]): {"id": str(args[0][0]), "type": "fake_runtime_indicator"}},
             ["indicator"],
         ),
+    )
+    monkeypatch.setattr(
+        signals.instrument_service,
+        "get_instrument_record",
+        _instrument_record,
     )
     monkeypatch.setattr(signals.candle_service, "fetch_ohlcv_for_context", _fake_fetch)
     monkeypatch.setattr(signals, "IndicatorExecutionEngine", _FakeEngine)
@@ -186,7 +200,14 @@ def test_signal_executor_enriches_contract_fields_from_replay_context(monkeypatc
             "id": inst_id,
             "type": "fake_runtime_indicator",
             "runtime_supported": True,
-            "typed_outputs": [{"name": "balance_breakout", "type": "signal", "enabled": True}],
+            "typed_outputs": [
+                {
+                    "name": "balance_breakout",
+                    "type": "signal",
+                    "label": "Balance Breakout",
+                    "enabled": True,
+                }
+            ],
             "datasource": "ALPACA",
             "exchange": "cme",
         },
@@ -198,6 +219,11 @@ def test_signal_executor_enriches_contract_fields_from_replay_context(monkeypatc
             {str(args[0][0]): {"id": str(args[0][0]), "type": "fake_runtime_indicator"}},
             ["indicator"],
         ),
+    )
+    monkeypatch.setattr(
+        signals.instrument_service,
+        "get_instrument_record",
+        _instrument_record,
     )
     monkeypatch.setattr(
         signals.candle_service,
@@ -302,6 +328,11 @@ def test_signal_executor_preserves_event_contract_metadata_when_present(monkeypa
             {str(args[0][0]): {"id": str(args[0][0]), "type": "fake_runtime_indicator"}},
             ["indicator"],
         ),
+    )
+    monkeypatch.setattr(
+        signals.instrument_service,
+        "get_instrument_record",
+        _instrument_record,
     )
     monkeypatch.setattr(
         signals.candle_service,

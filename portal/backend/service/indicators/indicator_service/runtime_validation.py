@@ -8,6 +8,7 @@ from typing import Any, Dict, Mapping, MutableMapping, Optional, Sequence
 
 from core.events import serialize_value
 from engines.bot_runtime.core.domain import Candle
+from engines.indicator_engine.contracts import configure_indicator_overlay_history
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
 from indicators.config import IndicatorExecutionContext
 
@@ -47,13 +48,6 @@ def _build_runtime_candles(df: Any) -> list[Candle]:
             )
         )
     return candles
-
-
-def _configure_replay_window(indicators: Sequence[Any], *, history_bars: int) -> None:
-    for indicator in indicators:
-        configure = getattr(indicator, "configure_replay_window", None)
-        if callable(configure):
-            configure(history_bars=history_bars)
 
 
 def _resolve_market_selection(
@@ -251,7 +245,7 @@ def validate_runtime_for_instance(
     candles = _build_runtime_candles(frame)
     if not candles:
         raise LookupError("No candles available for indicator runtime validation")
-    _configure_replay_window(indicators, history_bars=len(candles))
+    configure_indicator_overlay_history(indicators, history_bars=len(candles))
 
     engine = IndicatorExecutionEngine(indicators)
     declared_output_types = engine.output_types
@@ -502,7 +496,7 @@ def collect_runtime_output_evidence_for_instance(
     candles = _build_runtime_candles(frame)
     if not candles:
         raise LookupError("No candles available for indicator output evidence")
-    _configure_replay_window(indicators, history_bars=len(candles))
+    configure_indicator_overlay_history(indicators, history_bars=len(candles))
 
     engine = IndicatorExecutionEngine(indicators)
     output_types = {str(key): str(value) for key, value in engine.output_types.items()}

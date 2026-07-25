@@ -68,6 +68,9 @@ Playback mode controls pacing/debug visualization only. It must not change which
 ## Contract Exposure
 
 Bot configuration must expose `execution_mode` as `fast` or `full`.
+A missing value defaults to `fast`. Every other value is rejected:
+`instant`, `walk-forward`, and `walkforward` are playback values, not execution
+aliases. Playback configuration must never supply the execution default.
 
 The selected execution mode must flow through:
 - persisted bot config,

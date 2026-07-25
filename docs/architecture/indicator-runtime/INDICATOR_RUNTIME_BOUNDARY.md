@@ -86,8 +86,14 @@ All three can derive from the same indicator-owned state, but only typed outputs
 ## What The Engine Accepts And Publishes
 
 The engine advances indicators from provider-backed candle bars, declared
-dependency outputs by `OutputRef`, runtime specs, params, and replay-window
-hints. It publishes `RuntimeOutput` values typed as `signal`, `context`,
+dependency outputs by `OutputRef`, runtime specs, and params. Preview,
+validation, strategy-preview, and bot-runtime callers configure render-only
+retention through the single `configure_indicator_overlay_history` dispatcher.
+The positive `history_bars` bound may prune overlay geometry, but it must not
+change warmup, source inputs, output readiness, or decision semantics. Runtime
+indicators implement the `configure_overlay_history` contract; a missing or
+malformed contract fails loudly rather than being skipped by capability
+probing. The engine publishes `RuntimeOutput` values typed as `signal`, `context`,
 `metric`, or `lifecycle`, plus output deltas carrying `base_indicator_commit_seq`,
 `indicator_commit_seq`, and `indicator_commit_seq_status=indicator_scoped`.
 Lifecycle outputs are optional public research evidence for stateful candidate

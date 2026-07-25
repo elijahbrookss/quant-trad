@@ -137,7 +137,14 @@ def test_strategy_preview_response_separates_machine_and_ui(monkeypatch) -> None
     monkeypatch.setattr(
         typed_preview,
         "build_runtime_indicator_graph",
-        lambda *args, **kwargs: ({}, ["indicator"]),
+        lambda *args, **kwargs: (
+            {},
+            [
+                SimpleNamespace(
+                    configure_overlay_history=lambda *, history_bars: None
+                )
+            ],
+        ),
     )
     monkeypatch.setattr(typed_preview, "IndicatorExecutionEngine", _FakeEngine)
     monkeypatch.setattr(

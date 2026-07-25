@@ -193,9 +193,32 @@ class Indicator(ABC):
         """Return all declared detail payloads for the current bar."""
         return {}
 
-    def configure_replay_window(self, *, history_bars: int | None = None) -> None:
-        """Allow walk-forward window consumers to provide execution hints."""
-        _ = history_bars
+    def configure_overlay_history(self, *, history_bars: int) -> None:
+        """Bound render-only overlay history without changing indicator inputs."""
+
+        require_overlay_history_bars(history_bars)
+
+
+def require_overlay_history_bars(history_bars: object) -> int:
+    """Return a positive overlay-history bound or fail loudly."""
+
+    if isinstance(history_bars, bool) or not isinstance(history_bars, int):
+        raise ValueError("overlay_history_bars must be a positive integer")
+    if history_bars <= 0:
+        raise ValueError("overlay_history_bars must be a positive integer")
+    return history_bars
+
+
+def configure_indicator_overlay_history(
+    indicators: Sequence[Indicator],
+    *,
+    history_bars: int,
+) -> None:
+    """Apply one render-history bound to a runtime indicator graph."""
+
+    resolved_history_bars = require_overlay_history_bars(history_bars)
+    for indicator in indicators:
+        indicator.configure_overlay_history(history_bars=resolved_history_bars)
 
 
 def output_ref_key(indicator_id: str, output_name: str) -> str:
