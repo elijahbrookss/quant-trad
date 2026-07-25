@@ -33,7 +33,6 @@ from ...bots.botlens_domain_events import (
 from ._shared import (
     BotRecord,
     BotRunEventRecord,
-    BotRunLifecycleRecord,
     BotRunRecord,
     BotRunStepRollupRecord,
     SQLAlchemyError,

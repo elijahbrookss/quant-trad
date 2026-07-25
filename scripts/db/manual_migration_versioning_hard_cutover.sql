@@ -218,12 +218,7 @@ SELECT
     e.reason_code
 FROM public.portal_bot_run_events e;
 
-CREATE OR REPLACE VIEW runtime_state.bot_run_lifecycle AS
-SELECT *
-FROM public.portal_bot_run_lifecycle;
-
-CREATE OR REPLACE VIEW runtime_state.bot_run_lifecycle_events AS
-SELECT *
-FROM public.portal_bot_run_lifecycle_events;
+DROP VIEW IF EXISTS runtime_state.bot_run_lifecycle;
+DROP VIEW IF EXISTS runtime_state.bot_run_lifecycle_events;
 
 COMMIT;

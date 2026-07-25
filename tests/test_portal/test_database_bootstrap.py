@@ -83,8 +83,12 @@ class _Connection:
             self.inspector.indexes.setdefault((schema, name), set()).add(str(index.name))
             return _Result(())
         if "to_regclass" in str(statement):
-            active_ref = str((params or {}).get("active_ref") or "")
-            retired_ref = str((params or {}).get("retired_ref") or "")
+            query_params = params or {}
+            table_ref = str(query_params.get("table_ref") or "")
+            if table_ref:
+                return _Result((self._regclass(table_ref),))
+            active_ref = str(query_params.get("active_ref") or "")
+            retired_ref = str(query_params.get("retired_ref") or "")
             return _Result((self._regclass(active_ref), self._regclass(retired_ref)))
         return _Result(())
 
@@ -163,6 +167,19 @@ def test_bootstrap_fresh_database_creates_current_tables_and_indexes(monkeypatch
     for statement in connection.executed:
         if isinstance(statement, (CreateSchema, CreateTable)):
             assert getattr(statement, "if_not_exists", False) is False
+
+
+def test_bootstrap_fails_loud_when_retired_lifecycle_tables_exist(monkeypatch) -> None:
+    inspector = _Inspector(
+        tables=[(None, "portal_bot_run_lifecycle")],
+    )
+    database, connection = _database_with_fake_engine(monkeypatch, inspector)
+
+    with pytest.raises(RuntimeError, match="Retired table 'public.portal_bot_run_lifecycle'"):
+        database._bootstrap_schema_contract()
+
+    created_tables = [statement for statement in connection.executed if isinstance(statement, CreateTable)]
+    assert created_tables == []
 
 
 def test_bootstrap_existing_valid_tables_repairs_missing_model_indexes(monkeypatch) -> None:
