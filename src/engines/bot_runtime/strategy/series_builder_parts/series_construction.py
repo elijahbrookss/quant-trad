@@ -169,6 +169,7 @@ class SeriesBuilderConstructionMixin:
 
         series_list: List[StrategySeries] = []
         eligible_links: List[Any] = []
+        failures: List[Tuple[str, str, Exception]] = []
 
         for instrument_link in strategy.instrument_links:
             symbol = str(getattr(instrument_link, "symbol", "") or "").strip()
@@ -199,6 +200,13 @@ class SeriesBuilderConstructionMixin:
                             error=str(exc),
                         )
                         logger.exception(with_log_context("series_build_failed", context))
+                        failures.append(
+                            (
+                                str(getattr(instrument_link, "instrument_id", "") or ""),
+                                str(getattr(instrument_link, "symbol", "") or ""),
+                                exc,
+                            )
+                        )
                         continue
                     series_list.append(series)
 
@@ -218,6 +226,19 @@ class SeriesBuilderConstructionMixin:
                             signals=signal_count,
                         )
                         logger.info(with_log_context("series_built", context))
+
+        if failures:
+            failures.sort(key=lambda row: (row[0], row[1], type(row[2]).__name__, str(row[2])))
+            details = "; ".join(
+                f"instrument_id={instrument_id or '<missing>'} "
+                f"symbol={symbol or '<missing>'} "
+                f"error={type(exc).__name__}: {exc}"
+                for instrument_id, symbol, exc in failures
+            )
+            raise RuntimeError(
+                f"Strategy {strategy.id} failed to build {len(failures)} of "
+                f"{len(eligible_links)} eligible series: {details}"
+            ) from failures[0][2]
 
         if not series_list:
             raise RuntimeError(

@@ -20,7 +20,10 @@ from typing import Any, Dict, List, Optional
 
 from utils.log_context import build_log_context, with_log_context
 
-from core.candle_snapshot import aggregate_candle_series_snapshots
+from core.candle_snapshot import (
+    aggregate_candle_series_snapshots,
+    build_expected_candle_series_inventory,
+)
 from ..provenance import REPORT_DATASET_SCHEMA_VERSION
 from ..storage.repos.candles import (
     get_candle_storage_summary,
@@ -654,6 +657,70 @@ def _metadata_timeframes(run: Mapping[str, Any]) -> List[str]:
         if isinstance(strategy, Mapping):
             values.append(strategy.get("timeframe"))
     return _unique_text(values)
+
+
+def _expected_candle_series(run: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    config = _mapping(run.get("config_snapshot"))
+    if "expected_candle_series" in config:
+        explicit = config.get("expected_candle_series")
+        if not isinstance(explicit, list):
+            raise ValueError(
+                "run config expected_candle_series must be a list"
+            )
+        return build_expected_candle_series_inventory(explicit)
+
+    readiness = _mapping(config.get("runtime_readiness"))
+    raw_profiles = readiness.get("profiles") or []
+    if not isinstance(raw_profiles, list):
+        raise ValueError("run config runtime_readiness.profiles must be a list")
+    profiles = list(raw_profiles)
+    if profiles:
+        if any(not isinstance(row, Mapping) for row in profiles):
+            raise ValueError(
+                "run config runtime_readiness.profiles entries must be mappings"
+            )
+        strategy_id = str(run.get("strategy_id") or "").strip()
+        timeframe = (
+            readiness.get("timeframe")
+            or run.get("timeframe")
+            or config.get("timeframe")
+        )
+        return build_expected_candle_series_inventory(
+            {
+                "strategy_id": strategy_id,
+                "instrument_id": row.get("instrument_id"),
+                "symbol": row.get("symbol"),
+                "timeframe": timeframe,
+            }
+            for row in profiles
+        )
+
+    configured: List[Dict[str, Any]] = []
+    for strategy in config.get("strategies") or []:
+        if not isinstance(strategy, Mapping):
+            continue
+        strategy_id = strategy.get("id") or run.get("strategy_id")
+        timeframe = (
+            strategy.get("timeframe")
+            or run.get("timeframe")
+            or config.get("timeframe")
+        )
+        for instrument in strategy.get("instruments") or []:
+            if not isinstance(instrument, Mapping):
+                continue
+            snapshot = _mapping(instrument.get("instrument_snapshot"))
+            configured.append(
+                {
+                    "strategy_id": strategy_id,
+                    "instrument_id": (
+                        instrument.get("instrument_id")
+                        or snapshot.get("id")
+                    ),
+                    "symbol": snapshot.get("symbol") or instrument.get("symbol"),
+                    "timeframe": timeframe,
+                }
+            )
+    return build_expected_candle_series_inventory(configured)
 
 
 def _trade_metrics(trade: Mapping[str, Any]) -> Dict[str, Any]:
@@ -4279,10 +4346,25 @@ def _candle_catalog(
     metadata: RunResearchMetadata,
     traces: Sequence[Mapping[str, Any]],
     candle_gaps: Mapping[str, Any],
+    expected_series: Sequence[Mapping[str, Any]] = (),
 ) -> Dict[str, Any]:
     facts = [dict(row) for row in candle_gaps.get("facts") or [] if isinstance(row, Mapping)]
     gap_by_series = {str(row.get("series_key") or ""): row for row in facts if row.get("series_key")}
     combos: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for row in expected_series:
+        instrument_id = str(row.get("instrument_id") or "").strip()
+        timeframe = str(row.get("timeframe") or "").strip()
+        if not instrument_id or not timeframe:
+            continue
+        combos.setdefault(
+            (instrument_id, timeframe),
+            {
+                "run_id": metadata.run_id,
+                "instrument_id": instrument_id,
+                "symbol": _clean_text(row.get("symbol")),
+                "timeframe": timeframe,
+            },
+        )
     for row in traces:
         instrument_id = str(row.get("instrument_id") or "").strip()
         timeframe = str(row.get("timeframe") or metadata.timeframe or "").strip()
@@ -4411,6 +4493,7 @@ def _data_snapshot_hash(
     candle_catalog: Mapping[str, Any],
     *,
     candle_gaps: Optional[Mapping[str, Any]] = None,
+    expected_series: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> Optional[str]:
     items = [
         item
@@ -4438,23 +4521,48 @@ def _data_snapshot_hash(
             for item in items
             if _mapping(item.get("candle_snapshot"))
         ]
-    expected_series = {
-        (
-            str(item.get("instrument_id") or "").strip(),
-            str(item.get("timeframe") or "").strip().lower(),
+    if expected_series is None:
+        derived_expected: List[Dict[str, Any]] = []
+        for item in items:
+            snapshot = _mapping(item.get("candle_snapshot"))
+            derived_expected.append(
+                {
+                    "strategy_id": item.get("strategy_id") or snapshot.get("strategy_id"),
+                    "instrument_id": item.get("instrument_id") or snapshot.get("instrument_id"),
+                    "symbol": item.get("symbol") or snapshot.get("symbol"),
+                    "timeframe": item.get("timeframe") or snapshot.get("timeframe"),
+                }
+            )
+        try:
+            expected_inventory = build_expected_candle_series_inventory(
+                derived_expected
+            )
+        except ValueError:
+            return None
+    else:
+        expected_inventory = build_expected_candle_series_inventory(
+            expected_series
         )
-        for item in items
-        if str(item.get("instrument_id") or "").strip()
-        and str(item.get("timeframe") or "").strip()
-    }
-    covered_series = {
+    if not snapshots or not expected_inventory:
+        return None
+    covered_inventory = build_expected_candle_series_inventory(snapshots)
+    expected_identities = {
         (
-            str(snapshot.get("instrument_id") or "").strip(),
-            str(snapshot.get("timeframe") or "").strip().lower(),
+            str(row["strategy_id"]),
+            str(row["instrument_id"]),
+            str(row["timeframe"]),
         )
-        for snapshot in snapshots
+        for row in expected_inventory
     }
-    if not snapshots or not expected_series or expected_series != covered_series:
+    covered_identities = {
+        (
+            str(row["strategy_id"]),
+            str(row["instrument_id"]),
+            str(row["timeframe"]),
+        )
+        for row in covered_inventory
+    }
+    if expected_identities != covered_identities:
         return None
     return str(
         aggregate_candle_series_snapshots(snapshots).get("data_snapshot_hash")
@@ -5504,6 +5612,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     trades = _normalize_trades(raw_trades, trade_closed_context_by_id=trade_closed_by_id)
     decisions, signals, trades = _link_trace_rows(decisions=decisions, signals=signals, trades=trades)
     metadata = _metadata(run)
+    expected_candle_series = _expected_candle_series(run)
     trace_rows = [*decisions, *signals, *trades]
     metadata = replace(
         metadata,
@@ -5550,7 +5659,12 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     performance = _performance(run, events)
     context = _context_dataset(metadata=metadata, decisions=decisions, signals=signals, trades=trades)
     candidate_lifecycle = _candidate_lifecycle_dataset(metadata=metadata)
-    candle_catalog = _candle_catalog(metadata=metadata, traces=trace_rows, candle_gaps=candle_gaps)
+    candle_catalog = _candle_catalog(
+        metadata=metadata,
+        traces=trace_rows,
+        candle_gaps=candle_gaps,
+        expected_series=expected_candle_series,
+    )
     position_ordering = _position_ordering_health(events)
     execution = dict(execution)
     execution["position_ordering"] = dict(position_ordering)
@@ -5632,6 +5746,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     data_snapshot_hash = _data_snapshot_hash(
         candle_catalog,
         candle_gaps=candle_gaps,
+        expected_series=expected_candle_series,
     )
     metadata = replace(metadata, data_snapshot_hash=data_snapshot_hash)
     semantic_fingerprint = _report_semantic_fingerprint(

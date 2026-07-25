@@ -7,6 +7,7 @@ import pytest
 from core.candle_snapshot import (
     aggregate_candle_series_snapshots,
     build_candle_series_snapshot,
+    build_expected_candle_series_inventory,
 )
 from engines.bot_runtime.core.domain import Candle
 
@@ -56,6 +57,34 @@ def test_candle_series_snapshot_hashes_exact_material_values() -> None:
     changed = _snapshot(changed_candles)
 
     assert changed["candle_value_hash"] != baseline["candle_value_hash"]
+
+
+def test_expected_candle_series_inventory_rejects_incomplete_or_conflicting_identity() -> None:
+    with pytest.raises(
+        ValueError,
+        match="strategy_id, instrument_id, and timeframe are required",
+    ):
+        build_expected_candle_series_inventory(
+            [{"strategy_id": "strategy-1", "instrument_id": "", "timeframe": "1h"}]
+        )
+
+    with pytest.raises(ValueError, match="conflicting symbols"):
+        build_expected_candle_series_inventory(
+            [
+                {
+                    "strategy_id": "strategy-1",
+                    "instrument_id": "instrument-btc",
+                    "symbol": "BTC",
+                    "timeframe": "1h",
+                },
+                {
+                    "strategy_id": "strategy-1",
+                    "instrument_id": "instrument-btc",
+                    "symbol": "ETH",
+                    "timeframe": "1H",
+                },
+            ]
+        )
 
 
 def test_candle_series_snapshot_is_independent_of_input_row_order() -> None:

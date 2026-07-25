@@ -1725,6 +1725,74 @@ def test_data_snapshot_hash_is_unavailable_when_any_series_lacks_runtime_evidenc
     assert run_research_dataset._data_snapshot_hash(catalog) is None
 
 
+def test_data_snapshot_hash_requires_exact_configured_terminal_snapshot_set() -> None:
+    run = _run()
+    run["config_snapshot"]["expected_candle_series"] = [
+        {
+            "strategy_id": "strategy-1",
+            "instrument_id": "instrument-btc",
+            "symbol": "BTC",
+            "timeframe": "1h",
+        },
+        {
+            "strategy_id": "strategy-1",
+            "instrument_id": "instrument-eth",
+            "symbol": "ETH",
+            "timeframe": "1h",
+        },
+    ]
+    expected = run_research_dataset._expected_candle_series(run)
+    btc_snapshot = {
+        "schema_version": "candle_series_snapshot.v1",
+        "strategy_id": "strategy-1",
+        "instrument_id": "instrument-btc",
+        "symbol": "BTC",
+        "timeframe": "1h",
+        "datasource": "coinbase",
+        "exchange": "cbi",
+        "candle_value_hash": "a" * 64,
+        "candle_count": 10,
+        "warmup_candle_count": 2,
+        "replay_candle_count": 8,
+        "first_ts": "2026-03-01T00:00:00Z",
+        "last_ts": "2026-03-01T09:00:00Z",
+        "fields": ["time", "open", "high", "low", "close", "atr", "volume"],
+    }
+    catalog = {
+        "items": [
+            {
+                "instrument_id": "instrument-btc",
+                "symbol": "BTC",
+                "timeframe": "1h",
+                "candle_snapshot": btc_snapshot,
+            }
+        ]
+    }
+
+    assert run_research_dataset._data_snapshot_hash(
+        catalog,
+        candle_gaps={"facts": [{"candle_snapshot": btc_snapshot}]},
+        expected_series=expected,
+    ) is None
+
+    eth_snapshot = {
+        **btc_snapshot,
+        "instrument_id": "instrument-eth",
+        "symbol": "ETH",
+        "candle_value_hash": "b" * 64,
+    }
+    assert run_research_dataset._data_snapshot_hash(
+        catalog,
+        candle_gaps={
+            "facts": [
+                {"candle_snapshot": btc_snapshot},
+                {"candle_snapshot": eth_snapshot},
+            ]
+        },
+        expected_series=expected,
+    )
+
+
 def test_observer_continuity_facts_do_not_change_material_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     baseline = _build(monkeypatch, events=_events(), observability_events=[])
     observed = _build(

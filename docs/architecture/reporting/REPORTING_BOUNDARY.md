@@ -218,7 +218,10 @@ observer facts.
 runtime strategy/instrument/timeframe series. Reporting aggregates only the
 runtime-produced `candle_series_snapshot.v1` evidence carried by canonical
 terminal facts. It does not re-fetch candles or derive material identity from
-catalog counts or gap metadata. Missing snapshot coverage makes the hash
+catalog counts, successful traces, or gap metadata. The backend preflight
+inventory is persisted in run configuration evidence and preserved across
+worker aggregation independently of worker success. It must equal the terminal
+snapshot inventory exactly. Missing snapshot coverage makes the hash
 unavailable and readiness exposes `missing_data_snapshot_hash`. Continuity,
 provenance, warmup, confidence, and caveats continue through the existing
 quality/readiness contract independently of the value hash.

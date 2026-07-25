@@ -50,7 +50,11 @@ through the existing runtime event, BotLens diagnostic, and report paths.
 Reporting aggregates every required runtime series snapshot into
 `candle_data_snapshot.v1`. Snapshot ordering is canonical. Missing evidence for
 any expected series makes `data_snapshot_hash` unavailable and readiness
-surfaces `missing_data_snapshot_hash`.
+surfaces `missing_data_snapshot_hash`. The expected
+strategy/instrument/timeframe inventory comes from backend preflight planning,
+is preserved across worker aggregation independently of worker success and
+decision, signal, or trade traces, and must equal the terminal snapshot
+inventory exactly.
 
 Continuity gaps, provider provenance, confidence, caveats, warmup, and
 truncation remain separate quality evidence. They may block or degrade a run,
@@ -95,8 +99,16 @@ contract. Older runs without value snapshots cannot claim a complete data hash.
 - `tests/test_portal/test_botlens_domain_events.py` verifies the evidence
   survives the durable diagnostic projection.
 - `tests/test_portal/test_run_research_dataset.py` verifies gap metadata is
-  non-material, missing series block the hash, and observer diagnostics do not
-  alter material identity.
+  non-material, configured/terminal series sets must match exactly, missing
+  series block the hash, and observer diagnostics do not alter material
+  identity.
+- `tests/test_portal/test_series_builder_incremental.py` verifies one failed
+  eligible configured series aborts the whole multi-instrument build.
+- `tests/test_portal/test_report_artifact_bundle_workers.py` verifies
+  multi-worker run metadata retains the complete planned inventory even when
+  the available worker series are partial.
+- `tests/test_portal/test_container_runtime_transport.py` verifies container
+  worker planning consumes the backend preflight instrument inventory.
 
 ## References
 

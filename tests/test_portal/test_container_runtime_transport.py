@@ -26,6 +26,45 @@ def _wait_until(predicate, *, timeout_s: float = 1.0) -> None:
     raise AssertionError("timed out waiting for background transport worker")
 
 
+def test_planned_candle_inventory_comes_from_backend_preflight_metadata() -> None:
+    inventory = runtime_mod._planned_candle_series_inventory(
+        {
+            "timeframe": "1h",
+            "config_snapshot": {
+                "runtime_readiness": {
+                    "timeframe": "1h",
+                    "profiles": [
+                        {
+                            "instrument_id": "instrument-btc",
+                            "symbol": "BTC",
+                        },
+                        {
+                            "instrument_id": "instrument-eth",
+                            "symbol": "ETH",
+                        },
+                    ],
+                }
+            },
+        },
+        strategy_id="strategy-1",
+    )
+
+    assert inventory == [
+        {
+            "strategy_id": "strategy-1",
+            "instrument_id": "instrument-btc",
+            "symbol": "BTC",
+            "timeframe": "1h",
+        },
+        {
+            "strategy_id": "strategy-1",
+            "instrument_id": "instrument-eth",
+            "symbol": "ETH",
+            "timeframe": "1h",
+        },
+    ]
+
+
 def test_persist_lifecycle_phase_uses_canonical_checkpoint_for_non_terminal_phase(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Sequence
 
+from core.candle_snapshot import build_expected_candle_series_inventory
 from core.settings import get_settings
 from engines.bot_runtime.runtime.runtime import BotRuntime
 from engines.bot_runtime.core.runtime_events import (
@@ -524,6 +525,52 @@ def _runtime_readiness_from_run_or_strategy(run: Mapping[str, Any], strategy: An
         "timeframe": getattr(strategy, "timeframe", None),
         "symbols": [str(getattr(link, "symbol", "") or "").strip().upper() for link in getattr(strategy, "instrument_links", []) or []],
     }
+
+
+def _planned_candle_series_inventory(
+    run: Mapping[str, Any],
+    *,
+    strategy_id: str,
+) -> List[Dict[str, Any]]:
+    config_snapshot = (
+        dict(run.get("config_snapshot") or {})
+        if isinstance(run.get("config_snapshot"), Mapping)
+        else {}
+    )
+    planned = config_snapshot.get("expected_candle_series")
+    if planned is not None:
+        if not isinstance(planned, list):
+            raise ValueError(
+                "run config expected_candle_series must be a list"
+            )
+        return build_expected_candle_series_inventory(planned)
+
+    readiness = (
+        dict(config_snapshot.get("runtime_readiness") or {})
+        if isinstance(config_snapshot.get("runtime_readiness"), Mapping)
+        else {}
+    )
+    profiles = readiness.get("profiles") or []
+    if not isinstance(profiles, list):
+        raise ValueError("run config runtime_readiness.profiles must be a list")
+    if any(not isinstance(row, Mapping) for row in profiles):
+        raise ValueError(
+            "run config runtime_readiness.profiles entries must be mappings"
+        )
+    timeframe = (
+        readiness.get("timeframe")
+        or run.get("timeframe")
+        or config_snapshot.get("timeframe")
+    )
+    return build_expected_candle_series_inventory(
+        {
+            "strategy_id": strategy_id,
+            "instrument_id": row.get("instrument_id"),
+            "symbol": row.get("symbol"),
+            "timeframe": timeframe,
+        }
+        for row in profiles
+    )
 
 
 def _duration_seconds_from_runtime_snapshot(bot: Mapping[str, Any], run: Mapping[str, Any]) -> float | None:
@@ -1493,6 +1540,12 @@ def load_container_startup_context(
     strategy_id = str(bot.get("strategy_id") or "").strip()
     if not strategy_id:
         raise RuntimeError(f"Bot {bot_id} has no strategy_id configured")
+    planned_candle_series = _planned_candle_series_inventory(
+        run_snapshot or {},
+        strategy_id=strategy_id,
+    )
+    if planned_candle_series:
+        runtime_bot_config["expected_candle_series"] = planned_candle_series
     _persist_lifecycle_phase(
         bot_id=bot_id,
         run_id=run_id,

@@ -138,6 +138,53 @@ def _stable_hash(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def build_expected_candle_series_inventory(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[Dict[str, Any]]:
+    """Return the canonical configured runtime-series identity inventory."""
+
+    by_identity: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    for raw in rows:
+        if not isinstance(raw, Mapping):
+            raise ValueError(
+                "candle_series_inventory_invalid: each series identity must be a mapping"
+            )
+        strategy_id = str(raw.get("strategy_id") or "").strip()
+        instrument_id = str(raw.get("instrument_id") or "").strip()
+        timeframe = str(raw.get("timeframe") or "").strip().lower()
+        symbol = str(raw.get("symbol") or "").strip().upper() or None
+        if not strategy_id or not instrument_id or not timeframe:
+            raise ValueError(
+                "candle_series_inventory_invalid: strategy_id, instrument_id, "
+                "and timeframe are required"
+            )
+        key = (strategy_id, instrument_id, timeframe)
+        normalized = {
+            "strategy_id": strategy_id,
+            "instrument_id": instrument_id,
+            "symbol": symbol,
+            "timeframe": timeframe,
+        }
+        existing = by_identity.get(key)
+        if existing is not None:
+            existing_symbol = str(existing.get("symbol") or "").strip()
+            if existing_symbol and symbol and existing_symbol != symbol:
+                raise ValueError(
+                    "candle_series_inventory_invalid: conflicting symbols for "
+                    f"strategy_id={strategy_id} instrument_id={instrument_id} "
+                    f"timeframe={timeframe}"
+                )
+            if not existing_symbol and symbol:
+                existing["symbol"] = symbol
+            continue
+        by_identity[key] = normalized
+
+    return [
+        by_identity[key]
+        for key in sorted(by_identity)
+    ]
+
+
 def build_candle_series_snapshot(
     candles: Iterable[Any],
     *,

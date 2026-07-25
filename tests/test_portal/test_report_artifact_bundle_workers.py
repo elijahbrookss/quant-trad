@@ -179,6 +179,40 @@ def test_record_indicator_frame_uses_current_frame_overlays_not_stale_state(monk
     assert not (bundle._series_spool_dir(series) / "overlays").exists()
 
 
+def test_config_snapshot_preserves_planned_inventory_when_worker_series_are_partial(
+    monkeypatch,
+) -> None:
+    storage = _FakeStorage()
+    monkeypatch.setattr(artifacts, "_storage", lambda: storage)
+    planned = [
+        {
+            "strategy_id": "strategy-1",
+            "instrument_id": "BTC-instrument",
+            "symbol": "BTC",
+            "timeframe": "1h",
+        },
+        {
+            "strategy_id": "strategy-1",
+            "instrument_id": "ETH-instrument",
+            "symbol": "ETH",
+            "timeframe": "1h",
+        },
+    ]
+    series_snapshot, _ = artifacts._build_series_snapshot(
+        [_series("BTC", "strategy-1", "indicator-1")]
+    )
+
+    config_snapshot = artifacts._build_config_snapshot_from_series_snapshot(
+        {
+            **_worker_config("worker-1"),
+            "expected_candle_series": planned,
+        },
+        series_snapshot,
+    )
+
+    assert config_snapshot["expected_candle_series"] == planned
+
+
 def test_finalize_run_artifact_bundle_from_workers_aggregates_worker_outputs(monkeypatch, tmp_path: Path) -> None:
     storage = _FakeStorage()
     _configure_artifact_settings(monkeypatch, tmp_path, storage)
@@ -240,3 +274,17 @@ def test_finalize_run_artifact_bundle_from_workers_aggregates_worker_outputs(mon
     assert config_snapshot["backtest_warmup_bars"] == 100
     assert len(config_snapshot["backtest_warmup_evidence"]) == 2
     assert config_snapshot["backtest_warmup_evidence"][0]["status"] == "ready"
+    assert config_snapshot["expected_candle_series"] == [
+        {
+            "strategy_id": "strategy-1",
+            "instrument_id": "BTC-instrument",
+            "symbol": "BTC",
+            "timeframe": "1h",
+        },
+        {
+            "strategy_id": "strategy-1",
+            "instrument_id": "ETH-instrument",
+            "symbol": "ETH",
+            "timeframe": "1h",
+        },
+    ]

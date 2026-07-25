@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -118,6 +119,61 @@ def test_atm_template_rejects_execution_profile_fields() -> None:
         match="ATM template contains unsupported fields",
     ):
         builder._build_atm_template(strategy)
+
+
+def test_multi_instrument_build_fails_if_any_eligible_series_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    links = [
+        StrategyInstrumentLink(
+            id="link-btc",
+            strategy_id="strategy-1",
+            instrument_id="instrument-btc",
+            instrument_snapshot={"symbol": "BTC"},
+        ),
+        StrategyInstrumentLink(
+            id="link-eth",
+            strategy_id="strategy-1",
+            instrument_id="instrument-eth",
+            instrument_snapshot={"symbol": "ETH"},
+        ),
+    ]
+    strategy = Strategy(
+        id="strategy-1",
+        name="Strategy 1",
+        timeframe="1h",
+        datasource="COINBASE",
+        exchange="coinbase",
+        atm_template_id=None,
+        atm_template={},
+        risk_config={},
+        indicator_links=[],
+        instrument_links=links,
+        rules={},
+    )
+    builder = SeriesBuilder(
+        bot_id="bot-1",
+        config={},
+        run_type="backtest",
+        deps=_builder_deps(),
+    )
+
+    def _build_one(_strategy: Strategy, link: StrategyInstrumentLink):
+        if link.instrument_id == "instrument-eth":
+            raise RuntimeError("provider unavailable")
+        return SimpleNamespace(symbol=link.symbol, signals=[object()], candles=[])
+
+    monkeypatch.setattr(builder, "_build_single_series", _build_one)
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"Strategy strategy-1 failed to build 1 of 2 eligible series: "
+            r"instrument_id=instrument-eth symbol=ETH "
+            r"error=RuntimeError: provider unavailable"
+        ),
+    ):
+        builder._build_series_for_strategy(strategy)
 
 
 def test_incremental_eval_emits_only_current_epoch_and_newer_than_cursor():

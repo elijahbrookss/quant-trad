@@ -12,6 +12,7 @@ import shutil
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from core.candle_snapshot import build_expected_candle_series_inventory
 from core.settings import get_settings
 from utils.log_context import build_log_context, with_log_context
 from ..storage.repos.indicators import get_indicator
@@ -274,12 +275,95 @@ def _stream_zip_bytes(root: Path) -> bytes:
     return buffer.getvalue()
 
 
+def _runtime_series_candle_identity(entry: Any) -> Dict[str, Any]:
+    if isinstance(entry, Mapping):
+        strategy_id = entry.get("strategy_id")
+        symbol = entry.get("symbol")
+        timeframe = entry.get("timeframe")
+        instrument = entry.get("instrument")
+        meta = dict(entry)
+    else:
+        strategy_id = getattr(entry, "strategy_id", None)
+        symbol = getattr(entry, "symbol", None)
+        timeframe = getattr(entry, "timeframe", None)
+        instrument = getattr(entry, "instrument", None)
+        meta = dict(getattr(entry, "meta", {}) or {})
+
+    candle_snapshot = (
+        dict(meta.get("candle_snapshot") or {})
+        if isinstance(meta.get("candle_snapshot"), Mapping)
+        else {}
+    )
+    instrument_id = (
+        entry.get("instrument_id")
+        if isinstance(entry, Mapping)
+        else None
+    )
+    instrument_id = instrument_id or candle_snapshot.get("instrument_id")
+    if not instrument_id and isinstance(instrument, Mapping):
+        instrument_id = instrument.get("id") or instrument.get("instrument_id")
+
+    if not instrument_id:
+        links = list(meta.get("instrument_links") or meta.get("instruments") or [])
+        normalized_symbol = str(symbol or "").strip().upper()
+        matching_ids: list[str] = []
+        fallback_ids: list[str] = []
+        for link in links:
+            if not isinstance(link, Mapping):
+                continue
+            candidate_id = str(link.get("instrument_id") or link.get("id") or "").strip()
+            if not candidate_id:
+                continue
+            fallback_ids.append(candidate_id)
+            link_snapshot = (
+                dict(link.get("instrument_snapshot") or {})
+                if isinstance(link.get("instrument_snapshot"), Mapping)
+                else {}
+            )
+            link_symbol = str(
+                link_snapshot.get("symbol") or link.get("symbol") or ""
+            ).strip().upper()
+            if normalized_symbol and link_symbol == normalized_symbol:
+                matching_ids.append(candidate_id)
+        if len(set(matching_ids)) == 1:
+            instrument_id = matching_ids[0]
+        elif len(set(fallback_ids)) == 1:
+            instrument_id = fallback_ids[0]
+
+    return build_expected_candle_series_inventory(
+        [
+            {
+                "strategy_id": strategy_id or candle_snapshot.get("strategy_id"),
+                "instrument_id": instrument_id,
+                "symbol": symbol or candle_snapshot.get("symbol"),
+                "timeframe": timeframe or candle_snapshot.get("timeframe"),
+            }
+        ]
+    )[0]
+
+
+def _expected_candle_series(
+    *,
+    config: Mapping[str, Any],
+    series: Sequence[Any],
+) -> list[Dict[str, Any]]:
+    planned = config.get("expected_candle_series")
+    if planned is not None:
+        if not isinstance(planned, list):
+            raise ValueError("expected_candle_series must be a list")
+        return build_expected_candle_series_inventory(planned)
+    return build_expected_candle_series_inventory(
+        [_runtime_series_candle_identity(entry) for entry in series]
+    )
+
+
 def _build_series_snapshot(series: Sequence[Any]) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     snapshots: list[dict[str, Any]] = []
     indicator_meta_by_id: dict[str, dict[str, Any]] = {}
     storage = _storage()
     for entry in series:
         meta = dict(getattr(entry, "meta", {}) or {})
+        candle_identity = _runtime_series_candle_identity(entry)
         indicator_links = list(meta.get("indicator_links") or [])
         compiled_strategy = meta.get("compiled_strategy")
         strategy_hash = (
@@ -308,6 +392,7 @@ def _build_series_snapshot(series: Sequence[Any]) -> tuple[list[dict[str, Any]],
         snapshots.append(
             {
                 "strategy_id": getattr(entry, "strategy_id", None),
+                "instrument_id": candle_identity["instrument_id"],
                 "name": getattr(entry, "name", None),
                 "symbol": getattr(entry, "symbol", None),
                 "timeframe": getattr(entry, "timeframe", None),
@@ -421,6 +506,10 @@ def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> 
         "timeframe": timeframe,
         "datasource": datasource,
         "exchange": exchange,
+        "expected_candle_series": _expected_candle_series(
+            config=config,
+            series=series,
+        ),
         "fee_model": (config.get("risk") or {}).get("fee_model"),
         "slippage_model": (config.get("risk") or {}).get("slippage_model"),
         "strategies": strategies,
@@ -995,6 +1084,10 @@ def _build_config_snapshot_from_series_snapshot(
         "timeframe": timeframe,
         "datasource": datasource,
         "exchange": exchange,
+        "expected_candle_series": _expected_candle_series(
+            config=config,
+            series=series_snapshot,
+        ),
         "fee_model": (config.get("risk") or {}).get("fee_model"),
         "slippage_model": (config.get("risk") or {}).get("slippage_model"),
         "strategies": strategies,
