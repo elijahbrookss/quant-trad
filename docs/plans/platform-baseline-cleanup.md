@@ -18,7 +18,7 @@ engineering guidance; this file records only cleanup-specific state.
 | Workstream | Child branch | Status | Depends on |
 | --- | --- | --- | --- |
 | Candle-continuity extraction | integration baseline | Complete | — |
-| Canonical lifecycle ledger | `feats/lifecycle-canonical-ledger` | In progress | baseline |
+| Canonical lifecycle ledger | `feats/lifecycle-canonical-ledger` | Complete | baseline |
 | Strict execution contracts | `feats/execution-contract-strictness` | Pending | lifecycle integration |
 | Compatibility/dead-path removal | `feats/compatibility-dead-path-removal` | Pending | strict execution contract ownership |
 | Temporal/config ownership | `feats/config-temporal-ownership` | Pending | compatibility caller migration |
@@ -42,10 +42,11 @@ engineering guidance; this file records only cleanup-specific state.
 
 ## Schema Strategy
 
-Lifecycle migration artifacts must be classified before editing as clean
-bootstrap input, active upgrade path, or historical record. The lifecycle
-workstream will choose and document one coherent hard-cutover strategy. Runtime
-bootstrap changes require a demonstrated clean-start or idempotency defect.
+Fresh bootstrap creates only the canonical runtime-event ledger and run summary.
+The retired lifecycle bootstrap script was deleted. Existing databases use
+`manual_migration_canonical_lifecycle_ledger_v1.sql`, which refuses deletion
+unless legacy rows have field-equivalent canonical events. Startup rejects
+retired tables until that explicit hard cutover is complete.
 
 ## Progress and Validation
 
@@ -53,6 +54,7 @@ bootstrap changes require a demonstrated clean-start or idempotency defect.
 | --- | --- | --- |
 | 2026-07-24 | `1724240` candle-continuity extraction | focused continuity/reporting: 54 passed; reporting: 37 passed; PR profile: 851 passed, 286 deselected; docs: 2 passed |
 | 2026-07-24 | integration branch publication | pushed without history rewrite; upstream configured |
+| 2026-07-24 | `94a84a9..617f3ea` canonical lifecycle ledger | focused lifecycle/runtime/bootstrap: 59 passed; PR profile: 856 passed, 287 deselected; docs: 2 passed; isolated TimescaleDB 15 clean/repeated bootstrap, field-equivalent hard cutover, and event/summary rollback all passed |
 
 Each child branch must record its focused tests, broader regression profile,
 documentation validation, diff review, and remaining-reference search before
@@ -60,8 +62,6 @@ integration.
 
 ## Discovered Risks
 
-- Lifecycle truth is duplicated across the canonical event ledger and two
-  legacy mirror tables; fleet/latest reads still depend on a mirror.
 - ATM and execution-plan normalization can silently skip or weaken malformed
   rules.
 - Backtest warmup shortfalls and some malformed/empty provider data are not
@@ -76,13 +76,15 @@ integration.
 
 - Blockers: none.
 - Deviations from the initial inventory: none yet.
-- Database clean-start and repeated-bootstrap validation is intentionally
-  deferred until structural schema cleanup is integrated.
+- The configured developer database on port 15432 rejected local credentials;
+  database validation used an isolated repository-defined TimescaleDB project.
+- Frontend checks remain intentionally skipped because frontend is outside the
+  cleanup critical path.
 
 ## Final Acceptance
 
-- [ ] One canonical lifecycle ledger; no mirrors or fallback reads
-- [ ] Explicit, reconstructable run summary projection
+- [x] One canonical lifecycle ledger; no mirrors or fallback reads
+- [x] Explicit, reconstructable, transactionally updated run summary projection
 - [ ] Malformed execution configuration fails before runtime
 - [ ] Proven dead and compatibility-only production paths removed
 - [ ] Explicit storage ownership and nonduplicated temporal dispatch
@@ -92,6 +94,6 @@ integration.
 - [ ] Backtest and paper/runtime replay agreement under equal assumptions
 - [ ] Order, fill, position, lifecycle, wallet, fee, P&L, and equity reconciliation
 - [ ] Quality/provenance/readiness/trust evidence preserved end to end
-- [ ] Clean and repeated database bootstrap validation
+- [x] Clean and repeated database bootstrap validation
 - [ ] Architecture and operator documentation aligned
 - [ ] Integration branch clean, pushed, and ready for review
