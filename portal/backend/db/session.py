@@ -18,7 +18,6 @@ from .models import (
     REQUIRED_BOT_RUN_INDEXES,
     REQUIRED_BOT_RUN_EVENT_INDEXES,
     REQUIRED_BOT_RUN_LEASE_INDEXES,
-    REQUIRED_BOT_RUN_LIFECYCLE_INDEXES,
     REQUIRED_PROVIDER_CREDENTIAL_INDEXES,
     REQUIRED_REPORT_MATERIALIZATION_INDEXES,
     REQUIRED_RESEARCH_ITEM_INDEXES,
@@ -45,6 +44,11 @@ _HARD_CUTOVER_TABLE_RENAMES = {
     ("observability_events", "botlens_backend_events"): "botlens_backend_events_v1",
     ("observability_metrics", "botlens_backend_metric_rollups"): "botlens_backend_metric_rollups_v1",
 }
+
+_RETIRED_TABLES = (
+    (None, "portal_bot_run_lifecycle"),
+    (None, "portal_bot_run_lifecycle_events"),
+)
 
 
 def _redact_dsn_for_log(dsn: Optional[str]) -> str:
@@ -177,6 +181,7 @@ class Database:
             conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _SCHEMA_LOCK_KEY})
             try:
                 self._create_missing_schemas(conn)
+                self._assert_retired_tables_absent(conn)
                 self._create_missing_tables(conn)
                 self._assert_columns(conn)
                 self._create_missing_indexes(conn)
@@ -202,6 +207,24 @@ class Database:
             conn.execute(CreateSchema(schema_name))
             logger.info("portal_db_schema_created | schema=%s", schema_name)
             existing_schemas.add(schema_name)
+
+    def _assert_retired_tables_absent(self, conn) -> None:
+        """Fail loud until explicit lifecycle hard-cutover cleanup is applied."""
+
+        for schema, name in _RETIRED_TABLES:
+            table_ref = f"{schema or 'public'}.{name}"
+            (existing,) = conn.execute(
+                text("SELECT to_regclass(:table_ref)"),
+                {"table_ref": table_ref},
+            ).one()
+            if existing is None:
+                continue
+            logger.error("portal_db_retired_table_present | table=%s", table_ref)
+            raise RuntimeError(
+                f"Retired table '{table_ref}' is still present. "
+                "Run scripts/db/manual_migration_canonical_lifecycle_ledger_v1.sql "
+                "after verifying canonical lifecycle coverage."
+            )
 
     def _create_missing_tables(self, conn) -> None:
         """Create metadata tables that are missing from the configured database."""
@@ -333,7 +356,6 @@ class Database:
         assert_required_indexes("portal_bot_run_events", REQUIRED_BOT_RUN_EVENT_INDEXES)
         assert_required_indexes("portal_bot_runs", REQUIRED_BOT_RUN_INDEXES)
         assert_required_indexes("portal_report_materializations", REQUIRED_REPORT_MATERIALIZATION_INDEXES)
-        assert_required_indexes("portal_bot_run_lifecycle", REQUIRED_BOT_RUN_LIFECYCLE_INDEXES)
         assert_required_indexes("portal_bot_run_leases", REQUIRED_BOT_RUN_LEASE_INDEXES)
         assert_required_indexes("portal_research_items", REQUIRED_RESEARCH_ITEM_INDEXES)
         assert_required_indexes("portal_research_links", REQUIRED_RESEARCH_LINK_INDEXES)
