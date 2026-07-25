@@ -78,28 +78,18 @@ def build_fill_order(
 
 
 def execute_fill_order(
-    executor: object,
+    executor: OrderFillExecutor,
     order: FillOrder,
 ) -> Tuple[Optional[FillResult], Optional[FillRejection]]:
-    """Execute an order through the new order surface or an older fill facade."""
+    """Execute an order through the canonical typed order surface."""
 
     execute_order = getattr(executor, "execute_order", None)
-    if callable(execute_order):
-        fill, rejection = execute_order(order)
-    else:
-        fill_market = getattr(executor, "fill_market", None)
-        if not callable(fill_market):
-            raise RuntimeError(
-                "execution adapter does not implement execute_order or fill_market "
-                f"order_type={order.order_type} liquidity_role={order.liquidity_role}"
-            )
-        fill, rejection = fill_market(
-            side=order.side,
-            requested_qty=order.requested_qty,
-            price=order.price,
-            fee_rate=order.fee_rate,
-            enforce_price_tick=order.enforce_price_tick,
+    if not callable(execute_order):
+        raise RuntimeError(
+            "execution adapter does not implement execute_order "
+            f"order_type={order.order_type} liquidity_role={order.liquidity_role}"
         )
+    fill, rejection = execute_order(order)
     return annotate_fill_order(fill, order), rejection
 
 

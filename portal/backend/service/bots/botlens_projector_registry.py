@@ -564,15 +564,12 @@ async def _fanout_delivery_loop(
             break
 
         try:
-            if isinstance(item, FanoutEnvelope):
-                envelope = item
-            else:
-                envelope = FanoutEnvelope(
-                    run_id=run_id,
-                    item=item,
-                    message_kind="legacy",
-                    payload_bytes=0,
+            if not isinstance(item, FanoutEnvelope):
+                raise TypeError(
+                    "fanout channel accepts FanoutEnvelope only "
+                    f"run_id={run_id} item_type={type(item).__name__}"
                 )
+            envelope = item
             queue_wait_ms = max((time.monotonic() - envelope.enqueued_monotonic) * 1000.0, 0.0)
             deliver_started = time.perf_counter()
 

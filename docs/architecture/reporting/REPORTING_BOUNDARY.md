@@ -168,11 +168,10 @@ inventing values or silently treating missing ratios as zero.
   section availability, candle continuity evidence, and run-instance/runtime
   identifiers. Differences here are useful audit evidence but do not by
   themselves prove trading-behavior divergence.
-- `material_fingerprint`: compatibility alias for `semantic_fingerprint`.
 
 Boolean fields such as `dataset_ready`, `results_ready`, and `safe_to_compare`
-are compatibility summaries. Consumers should prefer the status fields for new
-workflows.
+are derived decision conveniences. The status fields remain the canonical
+readiness contract.
 
 `safe_to_compare=true` does not certify a golden run. Golden certification is a
 stricter reporting surface for reproducible run validation and must block on

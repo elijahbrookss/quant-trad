@@ -1557,7 +1557,10 @@ def test_runtime_rows_use_domain_event_time_as_known_at_for_trade_events() -> No
         run_id="run-1",
         bot_id="bot-1",
         symbol_key="instrument-btc|1m",
-        payload={"known_at": "2026-04-25T07:36:35Z"},
+        payload={
+            "known_at": "2026-04-25T07:36:35Z",
+            "bridge_session_id": "bridge-1",
+        },
         events=events,
         seq=1,
     )
@@ -1567,6 +1570,19 @@ def test_runtime_rows_use_domain_event_time_as_known_at_for_trade_events() -> No
 
     assert trade_row["event_time"] == "2026-02-01T00:05:00Z"
     assert trade_row["known_at"] == "2026-02-01T00:05:00Z"
+
+
+def test_projection_batch_rejects_missing_bridge_session_id() -> None:
+    with pytest.raises(ValueError, match="bridge_session_id is required"):
+        projection_batch_from_payload(
+            batch_kind="botlens_runtime_facts",
+            run_id="run-1",
+            bot_id="bot-1",
+            symbol_key="instrument-btc|1m",
+            payload={"known_at": "2026-04-25T07:36:35Z"},
+            events=(),
+            seq=1,
+        )
 
 
 def test_runtime_state_health_event_id_is_stable_when_only_warning_repeat_metadata_changes() -> None:

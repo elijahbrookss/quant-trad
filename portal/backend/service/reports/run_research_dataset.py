@@ -113,7 +113,6 @@ class RunResearchMetadata:
     config_hash: Optional[str]
     material_config_hash: Optional[str]
     data_snapshot_hash: Optional[str]
-    report_material_fingerprint: Optional[str]
     report_semantic_fingerprint: Optional[str]
     report_operational_fingerprint: Optional[str]
     dataset_schema_version: str
@@ -141,7 +140,6 @@ class RunResearchReadiness:
     golden_candidate_status: str = "unknown"
     golden_blocking_reasons: List[str] = field(default_factory=list)
     repeatability_status: str = "unknown"
-    material_fingerprint: Optional[str] = None
     semantic_fingerprint: Optional[str] = None
     operational_fingerprint: Optional[str] = None
 
@@ -4921,8 +4919,8 @@ def _golden_blocking_reasons(
         reasons.append("missing_material_config_hash")
     if not metadata.data_snapshot_hash:
         reasons.append("missing_data_snapshot_hash")
-    if not readiness.material_fingerprint:
-        reasons.append("missing_material_fingerprint")
+    if not readiness.semantic_fingerprint:
+        reasons.append("missing_semantic_fingerprint")
     for caveat in readiness.caveats:
         normalized = str(caveat or "").strip()
         if normalized in {
@@ -4986,7 +4984,6 @@ def _with_golden_status(
 ) -> RunResearchReadiness:
     staged = replace(
         readiness,
-        material_fingerprint=semantic_fingerprint,
         semantic_fingerprint=semantic_fingerprint,
         operational_fingerprint=operational_fingerprint,
     )
@@ -5194,7 +5191,6 @@ def _metadata(run: Mapping[str, Any]) -> RunResearchMetadata:
         config_hash=explicit_hash or _config_hash(config),
         material_config_hash=material_hash,
         data_snapshot_hash=str(run.get("data_snapshot_hash") or "").strip() or None,
-        report_material_fingerprint=None,
         report_semantic_fingerprint=None,
         report_operational_fingerprint=None,
         dataset_schema_version=DATASET_SCHEMA_VERSION,
@@ -5611,7 +5607,6 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     )
     metadata = replace(
         metadata,
-        report_material_fingerprint=semantic_fingerprint,
         report_semantic_fingerprint=semantic_fingerprint,
         report_operational_fingerprint=operational_fingerprint,
     )

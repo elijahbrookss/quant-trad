@@ -120,10 +120,9 @@ Readiness uses explicit sectioned status, not a single ready boolean:
 - `operational_fingerprint`: runtime evidence fingerprint over diagnostics,
   section availability, candle continuity evidence, generated IDs, and other
   operational traces.
-- `material_fingerprint`: compatibility alias for `semantic_fingerprint`.
 
-The legacy booleans remain as summary flags for existing clients, but the
-status fields are the reporting contract. Candle gaps, intrabar fallback,
+The boolean readiness fields are derived decision conveniences; the status
+fields are the reporting contract. Candle gaps, intrabar fallback,
 missing indicator/world-state context, unavailable lifecycle rows, and
 unsupported metrics must appear as caveats, degraded sections, unavailable
 sections, or diagnostics.

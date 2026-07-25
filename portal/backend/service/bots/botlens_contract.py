@@ -131,13 +131,10 @@ def normalize_ingest_kind(value: Any) -> str:
 
 
 def normalize_bridge_session_id(payload: Mapping[str, Any]) -> str:
-    session_id = str(
-        payload.get("bridge_session_id")
-        or payload.get("stream_session_id")
-        or payload.get("session_id")
-        or "legacy"
-    ).strip()
-    return session_id or "legacy"
+    session_id = str(payload.get("bridge_session_id") or "").strip()
+    if not session_id:
+        raise ValueError("bridge_session_id is required for BotLens bridge batches")
+    return session_id
 
 
 def normalize_bridge_seq(payload: Mapping[str, Any]) -> int:

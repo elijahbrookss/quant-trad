@@ -1563,12 +1563,11 @@ def test_operational_fingerprint_changes_when_runtime_event_order_changes(monkey
 
     reordered = _build(monkeypatch, events=reordered_events)
 
-    assert reordered["readiness"]["material_fingerprint"] == baseline["readiness"]["material_fingerprint"]
     assert reordered["readiness"]["semantic_fingerprint"] == baseline["readiness"]["semantic_fingerprint"]
     assert reordered["readiness"]["operational_fingerprint"] != baseline["readiness"]["operational_fingerprint"]
 
 
-def test_material_fingerprint_changes_when_runtime_context_evidence_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_semantic_fingerprint_changes_when_runtime_context_evidence_changes(monkeypatch: pytest.MonkeyPatch) -> None:
     def signal_event(*, bias: str) -> dict[str, Any]:
         return _event(
             1,
@@ -1607,7 +1606,7 @@ def test_material_fingerprint_changes_when_runtime_context_evidence_changes(monk
     baseline = _build(monkeypatch, events=[signal_event(bias="long")], trades=[])
     changed = _build(monkeypatch, events=[signal_event(bias="short")], trades=[])
 
-    assert changed["readiness"]["material_fingerprint"] != baseline["readiness"]["material_fingerprint"]
+    assert changed["readiness"]["semantic_fingerprint"] != baseline["readiness"]["semantic_fingerprint"]
 
 
 def test_semantic_fingerprint_ignores_run_instance_identifiers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1628,7 +1627,6 @@ def test_semantic_fingerprint_ignores_run_instance_identifiers(monkeypatch: pyte
     changed = _build(monkeypatch, events=changed_events, trades=changed_trades)
 
     assert changed["readiness"]["semantic_fingerprint"] == baseline["readiness"]["semantic_fingerprint"]
-    assert changed["readiness"]["material_fingerprint"] == baseline["readiness"]["material_fingerprint"]
     assert changed["metadata"]["report_semantic_fingerprint"] == baseline["metadata"]["report_semantic_fingerprint"]
     assert changed["readiness"]["operational_fingerprint"] != baseline["readiness"]["operational_fingerprint"]
     assert changed["metadata"]["report_operational_fingerprint"] != baseline["metadata"]["report_operational_fingerprint"]
@@ -1665,7 +1663,6 @@ def test_observer_continuity_facts_do_not_change_material_identity(monkeypatch: 
 
     assert observed["metadata"]["data_snapshot_hash"] == baseline["metadata"]["data_snapshot_hash"]
     assert observed["readiness"]["semantic_fingerprint"] == baseline["readiness"]["semantic_fingerprint"]
-    assert observed["readiness"]["material_fingerprint"] == baseline["readiness"]["material_fingerprint"]
     assert observed["readiness"]["golden_candidate_status"] == baseline["readiness"]["golden_candidate_status"]
     assert observed["readiness"]["golden_blocking_reasons"] == baseline["readiness"]["golden_blocking_reasons"]
     assert observed["candle_gaps"]["noncanonical_fact_count"] == 2

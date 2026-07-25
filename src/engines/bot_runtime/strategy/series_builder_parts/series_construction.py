@@ -17,7 +17,6 @@ from engines.bot_runtime.core.domain import (
     LadderRiskEngine,
     StrategySignal,
     isoformat,
-    normalize_epoch,
     timeframe_duration,
 )
 from engines.bot_runtime.core.domain.candle_factory import build_candles_from_dataframe
@@ -63,30 +62,6 @@ class SeriesBuilderConstructionMixin:
             queued.append(StrategySignal.from_decision_artifact(artifact))
         queued.sort(key=lambda signal: signal.epoch)
         return deque(queued)
-
-    @staticmethod
-    def _normalise_epoch(value: Any) -> Optional[int]:
-        if value in (None, ""):
-            return None
-        if isinstance(value, (int, float)):
-            try:
-                return int(float(value))
-            except (TypeError, ValueError):
-                return None
-        text = str(value).strip()
-        if not text:
-            return None
-        if text.endswith("Z"):
-            text = f"{text[:-1]}+00:00"
-        try:
-            parsed = datetime.fromisoformat(text)
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            else:
-                parsed = parsed.astimezone(timezone.utc)
-            return int(parsed.timestamp())
-        except ValueError:
-            return normalize_epoch(value)
 
     @staticmethod
     def _build_candles(df: Any, timeframe: Optional[str] = None) -> List[Candle]:

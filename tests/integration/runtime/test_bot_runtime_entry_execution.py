@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import threading
 from typing import Optional
 
-from engines.bot_runtime.core import CandleSnapshot, EntryFill, EntryFillResult, PendingEntry
+from engines.bot_runtime.core import CandleSnapshot, EntryFill, EntryFillResult, FillOrder, PendingEntry
 from engines.bot_runtime.core.domain import Candle, EntryRequest, EntryValidation, LadderRiskEngine
 from engines.bot_runtime.core.execution import FillRejection, FillResult
 from engines.bot_runtime.core.execution_intent import ExecutionIntent, ExecutionOutcome
@@ -105,25 +105,21 @@ def _build_candle(*, close: float, atr: float) -> Candle:
 
 
 class _FillAdapter:
-    def fill_market(
-        self,
-        *,
-        side: str,
-        requested_qty: float,
-        price: float,
-        fee_rate: float,
-        enforce_price_tick: bool,
-    ):
-        _ = enforce_price_tick
-        notional = executed_notional(price=price, quantity=requested_qty, contract_size=1.0)
+    def execute_order(self, order: FillOrder):
+        notional = executed_notional(price=order.price, quantity=order.requested_qty, contract_size=1.0)
         return (
             FillResult(
-                filled_qty=float(requested_qty),
-                fill_price=float(price),
+                filled_qty=float(order.requested_qty),
+                fill_price=float(order.price),
                 notional=notional,
-                fee=executed_fee(price=price, quantity=requested_qty, contract_size=1.0, fee_rate=fee_rate),
-                fee_rate=float(fee_rate or 0.0),
-                side=side,
+                fee=executed_fee(
+                    price=order.price,
+                    quantity=order.requested_qty,
+                    contract_size=1.0,
+                    fee_rate=order.fee_rate,
+                ),
+                fee_rate=float(order.fee_rate or 0.0),
+                side=order.side,
                 metadata={"source": "test"},
             ),
             None,

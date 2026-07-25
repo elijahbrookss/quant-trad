@@ -7,6 +7,7 @@ import portal.backend.service.bots.botlens_canonical_facts as canonical_mod
 
 def _fact_payload() -> dict[str, Any]:
     return {
+        "bridge_session_id": "bridge-1",
         "series_key": "instrument-btc|1m",
         "known_at": "2026-04-19T12:00:00Z",
         "event_time": "2026-04-19T12:00:00Z",

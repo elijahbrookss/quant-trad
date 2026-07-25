@@ -137,8 +137,6 @@ def _material(dataset: Mapping[str, Any]) -> dict[str, Any]:
     semantic_fingerprint = (
         metadata.get("report_semantic_fingerprint")
         or readiness.get("semantic_fingerprint")
-        or metadata.get("report_material_fingerprint")
-        or readiness.get("material_fingerprint")
     )
     operational_fingerprint = (
         metadata.get("report_operational_fingerprint")
@@ -148,7 +146,6 @@ def _material(dataset: Mapping[str, Any]) -> dict[str, Any]:
         "strategy_hash": metadata.get("strategy_hash"),
         "material_config_hash": metadata.get("material_config_hash"),
         "data_snapshot_hash": metadata.get("data_snapshot_hash"),
-        "report_material_fingerprint": metadata.get("report_material_fingerprint"),
         "report_semantic_fingerprint": semantic_fingerprint,
         "report_operational_fingerprint": operational_fingerprint,
         "golden_candidate_status": readiness.get("golden_candidate_status"),

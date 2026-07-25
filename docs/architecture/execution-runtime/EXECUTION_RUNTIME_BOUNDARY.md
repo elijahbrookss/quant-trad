@@ -147,10 +147,10 @@ true next-bar entry model requires its own pending signal-entry lifecycle so
 reports can distinguish when the signal was known from when the order became
 executable.
 
-Executable fills use `FillOrder` semantics: side, quantity, price, order type,
-liquidity role, price source, and fee rate are known before the adapter applies
-the fill. The older `fill_market` adapter method remains only as a compatibility
-facade for adapters that have not yet implemented direct order execution.
+Executable fills use the sole adapter contract, `execute_order(FillOrder)`, so
+side, quantity, price, order type, liquidity role, price source, and fee rate
+are known before the adapter applies the fill. Adapters that do not implement
+the typed order surface fail before a fill can be produced.
 
 ## Slippage Modeling Gap
 
