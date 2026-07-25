@@ -324,6 +324,7 @@ def _config_hash(config: Mapping[str, Any]) -> Optional[str]:
 
 
 _NON_MATERIAL_CONFIG_KEYS = {
+    "backtest_warmup_evidence",
     "generated_at",
     "report_generated_at",
     "report_warnings",
@@ -440,6 +441,8 @@ def _strategy_config_sections(config: Mapping[str, Any]) -> Dict[str, Any]:
         "slippage_bps": slippage_bps,
     }
     data_config = {
+        "backtest_warmup_bars": config.get("backtest_warmup_bars"),
+        "backtest_warmup_evidence": config.get("backtest_warmup_evidence"),
         "symbols": config.get("symbols"),
         "instrument_ids": config.get("instrument_ids"),
         "timeframe": config.get("timeframe"),
@@ -4833,6 +4836,9 @@ def _golden_blocking_reasons(
             "margin_rejection_evidence_incomplete",
             "wallet_margin_rejection_trace_incomplete",
             "wallet_replay_failed",
+            "backtest_warmup_insufficient",
+            "backtest_warmup_evidence_malformed",
+            "backtest_warmup_evidence_unavailable",
         }:
             reasons.append(normalized)
     if any(str(item.get("continuity_status") or "") in {"unknown", "unavailable"} for item in candle_catalog.get("items") or [] if isinstance(item, Mapping)):
@@ -5146,6 +5152,59 @@ def _finalize_readiness(
         degraded_sections.append("data_quality")
     if execution_quality_status == "degraded":
         degraded_sections.append("execution_quality")
+    warmup_evidence = [
+        dict(row)
+        for row in _mapping(metadata.configuration.get("data")).get(
+            "backtest_warmup_evidence"
+        )
+        or []
+        if isinstance(row, Mapping)
+    ]
+    warmup_caveat: Optional[str] = None
+    if str(metadata.run_type or "").strip().lower() == "backtest":
+        if not warmup_evidence:
+            warmup_caveat = "backtest_warmup_evidence_unavailable"
+        else:
+            evidence_malformed = False
+            evidence_insufficient = False
+            for row in warmup_evidence:
+                try:
+                    requested_bars = int(row.get("requested_bars"))
+                    required_bars = int(row.get("required_bars"))
+                    loaded_bars = int(row.get("loaded_bars"))
+                except (TypeError, ValueError):
+                    evidence_malformed = True
+                    continue
+                if (
+                    isinstance(row.get("requested_bars"), bool)
+                    or isinstance(row.get("required_bars"), bool)
+                    or isinstance(row.get("loaded_bars"), bool)
+                    or requested_bars <= 0
+                    or required_bars <= 0
+                    or loaded_bars < 0
+                ):
+                    evidence_malformed = True
+                    continue
+                expected_status = (
+                    "ready" if loaded_bars >= required_bars else "insufficient"
+                )
+                if str(row.get("status") or "") != expected_status:
+                    evidence_malformed = True
+                if expected_status == "insufficient":
+                    evidence_insufficient = True
+            if evidence_malformed:
+                warmup_caveat = "backtest_warmup_evidence_malformed"
+            elif evidence_insufficient:
+                warmup_caveat = "backtest_warmup_insufficient"
+    if warmup_caveat:
+        if data_quality_status == "clean":
+            data_quality_status = (
+                "degraded"
+                if warmup_caveat == "backtest_warmup_insufficient"
+                else "unknown"
+            )
+        degraded_sections.extend(["data_quality", "indicator_warmup"])
+        caveats.append(warmup_caveat)
     for caveat in candle_caveats:
         normalized = str(caveat or "").strip()
         if not normalized:

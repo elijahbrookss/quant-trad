@@ -369,6 +369,7 @@ class SeriesBuilderConstructionMixin:
         # Determine time window. Backtests now seed with bounded warmup and then execute walk-forward event-by-event.
         replay_start_index = 0
         window_start_iso: Optional[str] = None
+        backtest_warmup_evidence: Optional[Dict[str, Any]] = None
         if self.run_type == "backtest":
             configured_start = self.config.get("backtest_start")
             configured_end = self.config.get("backtest_end")
@@ -376,8 +377,30 @@ class SeriesBuilderConstructionMixin:
                 raise RuntimeError("Backtest runtime requires both backtest_start and backtest_end")
             start_iso = str(configured_start)
             end_iso = str(configured_end)
-            warmup_bars = self._resolve_backtest_warmup_bars(strategy, timeframe)
-            candles, replay_start_index, window_start_iso, candle_gap_classification = self._build_backtest_candles_with_warmup(
+            indicator_warmup_requirements = (
+                self._indicator_warmup_requirements(strategy)
+            )
+            warmup_bars = self._resolve_backtest_warmup_bars(
+                strategy,
+                timeframe,
+                indicator_requirements=indicator_warmup_requirements,
+            )
+            required_warmup_bars = max(
+                [
+                    100,
+                    *[
+                        int(row["required_bars"])
+                        for row in indicator_warmup_requirements
+                    ],
+                ]
+            )
+            (
+                candles,
+                replay_start_index,
+                window_start_iso,
+                candle_gap_classification,
+                backtest_warmup_evidence,
+            ) = self._build_backtest_candles_with_warmup(
                 symbol=symbol,
                 timeframe=timeframe,
                 datasource=datasource,
@@ -387,6 +410,8 @@ class SeriesBuilderConstructionMixin:
                 backtest_start_iso=start_iso,
                 backtest_end_iso=end_iso,
                 warmup_bars=warmup_bars,
+                required_warmup_bars=required_warmup_bars,
+                indicator_warmup_requirements=indicator_warmup_requirements,
             )
         else:
             start_iso, end_iso = self._resolve_live_window()
@@ -492,6 +517,8 @@ class SeriesBuilderConstructionMixin:
             series_meta["research_market_role"] = execution_profile.instrument.research_market_role
         series_meta["atm_template"] = atm_template
         series_meta["risk_config"] = deepcopy(risk_config)
+        if backtest_warmup_evidence is not None:
+            series_meta["backtest_warmup"] = backtest_warmup_evidence
         if candle_gap_classification:
             series_meta["candle_gap_classification"] = candle_gap_classification
         continuity_summary = self._runtime_series_candle_continuity(
@@ -557,8 +584,10 @@ class SeriesBuilderConstructionMixin:
         backtest_start_iso: str,
         backtest_end_iso: str,
         warmup_bars: int = 100,
+        required_warmup_bars: Optional[int] = None,
+        indicator_warmup_requirements: Sequence[Mapping[str, Any]] = (),
         instrument_id: Optional[str] = None,
-    ) -> Tuple[List[Candle], int, str, Optional[Any]]:
+    ) -> Tuple[List[Candle], int, str, Optional[Any], Dict[str, Any]]:
         import pandas as pd
 
         start_ts = pd.to_datetime(backtest_start_iso, utc=True)
@@ -572,33 +601,72 @@ class SeriesBuilderConstructionMixin:
         tf_delta = timeframe_duration(timeframe)
         if tf_delta is None or tf_delta.total_seconds() <= 0:
             raise RuntimeError(f"Unsupported timeframe '{timeframe}' for warmup fetch")
-        safe_warmup_bars = max(int(warmup_bars or 100), 1)
+        if isinstance(warmup_bars, bool):
+            raise RuntimeError("backtest warmup bars must be a positive integer")
+        try:
+            safe_warmup_bars = int(warmup_bars)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("backtest warmup bars must be a positive integer") from exc
+        if safe_warmup_bars <= 0:
+            raise RuntimeError("backtest warmup bars must be a positive integer")
+        required_bars = int(required_warmup_bars or safe_warmup_bars)
+        if required_bars <= 0:
+            raise RuntimeError("required backtest warmup bars must be positive")
         warmup_start_ts = start_ts - (tf_delta * safe_warmup_bars)
 
-        warmup_candles: List[Candle] = []
         gap_classification: List[Any] = []
-        try:
-            warmup_df = self._fetch_ohlcv_data(
-                symbol=symbol,
-                start_iso=isoformat(warmup_start_ts.to_pydatetime()),
-                end_iso=backtest_start_iso,
-                timeframe=timeframe,
-                datasource=datasource,
-                exchange=exchange,
-                strategy_id=strategy_id,
-                instrument_id=instrument_id,
-            )
-            warmup_candles = [
-                candle for candle in self._build_candles(warmup_df, timeframe)
-                if candle.time <= start_ts.to_pydatetime()
-            ]
-            if getattr(warmup_df, "attrs", {}).get("gap_classification"):
-                gap_classification.extend(warmup_df.attrs["gap_classification"])
-        except RuntimeError:
-            # Warmup is bounded and best-effort; walk-forward candles remain mandatory.
-            warmup_candles = []
+        warmup_df = self._fetch_ohlcv_data(
+            symbol=symbol,
+            start_iso=isoformat(warmup_start_ts.to_pydatetime()),
+            end_iso=backtest_start_iso,
+            timeframe=timeframe,
+            datasource=datasource,
+            exchange=exchange,
+            strategy_id=strategy_id,
+            instrument_id=instrument_id,
+        )
+        warmup_candles = [
+            candle
+            for candle in self._build_candles(warmup_df, timeframe)
+            if candle.time < start_ts.to_pydatetime()
+        ]
+        if getattr(warmup_df, "attrs", {}).get("gap_classification"):
+            gap_classification.extend(warmup_df.attrs["gap_classification"])
         if len(warmup_candles) > safe_warmup_bars:
             warmup_candles = warmup_candles[-safe_warmup_bars:]
+        loaded_warmup_bars = len(warmup_candles)
+        warmup_evidence = {
+            "schema_version": "backtest_warmup_evidence.v1",
+            "status": (
+                "ready"
+                if loaded_warmup_bars >= required_bars
+                else "insufficient"
+            ),
+            "requested_bars": safe_warmup_bars,
+            "required_bars": required_bars,
+            "loaded_bars": loaded_warmup_bars,
+            "missing_bars": max(required_bars - loaded_warmup_bars, 0),
+            "request_satisfies_requirements": safe_warmup_bars >= required_bars,
+            "indicator_requirements": [
+                dict(row) for row in indicator_warmup_requirements
+            ],
+            "requested_range": {
+                "start": isoformat(warmup_start_ts.to_pydatetime()),
+                "end_exclusive": backtest_start_iso,
+            },
+            "loaded_range": {
+                "start": (
+                    isoformat(warmup_candles[0].time)
+                    if warmup_candles
+                    else None
+                ),
+                "end": (
+                    isoformat(warmup_candles[-1].time)
+                    if warmup_candles
+                    else None
+                ),
+            },
+        }
 
         replay_df = self._fetch_ohlcv_data(
             symbol=symbol,
@@ -629,21 +697,104 @@ class SeriesBuilderConstructionMixin:
             if candle.time >= start_ts.to_pydatetime():
                 replay_start_index = idx
                 break
-        return ordered, replay_start_index, isoformat(warmup_start_ts.to_pydatetime()), gap_classification or None
+        warmup_evidence["replay_start_index"] = replay_start_index
+        return (
+            ordered,
+            replay_start_index,
+            isoformat(warmup_start_ts.to_pydatetime()),
+            gap_classification or None,
+            warmup_evidence,
+        )
 
-    def _resolve_backtest_warmup_bars(self, strategy: Strategy, timeframe: str) -> int:
+    def _indicator_warmup_requirements(
+        self,
+        strategy: Strategy,
+    ) -> List[Dict[str, Any]]:
+        requirements: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for indicator_id in strategy.indicator_ids:
+            normalized_id = str(indicator_id or "").strip()
+            if not normalized_id or normalized_id in seen:
+                continue
+            seen.add(normalized_id)
+            try:
+                meta = self._deps.indicator_get_instance_meta(
+                    normalized_id,
+                    ctx=self._indicator_ctx,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "Indicator warmup metadata failed for "
+                    f"strategy={strategy.id} indicator={normalized_id}: {exc}"
+                ) from exc
+            if not isinstance(meta, Mapping):
+                raise RuntimeError(
+                    "Indicator warmup metadata must be a mapping for "
+                    f"strategy={strategy.id} indicator={normalized_id}"
+                )
+            params = meta.get("params")
+            if not isinstance(params, Mapping) or "warmup_bars" not in params:
+                continue
+            raw_bars = params.get("warmup_bars")
+            if isinstance(raw_bars, bool):
+                raise RuntimeError(
+                    "Indicator warmup_bars must be a positive integer for "
+                    f"strategy={strategy.id} indicator={normalized_id}"
+                )
+            try:
+                required_bars = int(raw_bars)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "Indicator warmup_bars must be a positive integer for "
+                    f"strategy={strategy.id} indicator={normalized_id}"
+                ) from exc
+            if required_bars <= 0:
+                raise RuntimeError(
+                    "Indicator warmup_bars must be a positive integer for "
+                    f"strategy={strategy.id} indicator={normalized_id}"
+                )
+            requirements.append(
+                {
+                    "indicator_id": normalized_id,
+                    "indicator_type": meta.get("type"),
+                    "required_bars": required_bars,
+                }
+            )
+        return requirements
+
+    def _resolve_backtest_warmup_bars(
+        self,
+        strategy: Strategy,
+        timeframe: str,
+        *,
+        indicator_requirements: Sequence[Mapping[str, Any]] = (),
+    ) -> int:
         # Strategy/runtime warmup is intentionally separate from indicator-
         # specific fetch windows (e.g. indicator days_back settings).
-        default_bars = 100
+        _ = strategy, timeframe
+        default_bars = max(
+            [
+                100,
+                *[
+                    int(row.get("required_bars") or 0)
+                    for row in indicator_requirements
+                ],
+            ]
+        )
         configured = self.config.get("backtest_warmup_bars")
-        if configured is not None:
-            try:
-                parsed = int(configured)
-                if parsed > 0:
-                    return parsed
-            except (TypeError, ValueError):
-                pass
-        return default_bars
+        if configured is None:
+            return default_bars
+        if isinstance(configured, bool):
+            raise ValueError("backtest_warmup_bars must be a positive integer")
+        try:
+            parsed = int(configured)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "backtest_warmup_bars must be a positive integer"
+            ) from exc
+        if parsed <= 0:
+            raise ValueError("backtest_warmup_bars must be a positive integer")
+        return parsed
 
     def evaluate_incremental_for_bar(
         self,
@@ -776,9 +927,16 @@ class SeriesBuilderConstructionMixin:
         for link in links:
             indicator_id = str(link.get("indicator_id") or link.get("id") or "").strip()
             if not indicator_id:
-                continue
+                raise RuntimeError(
+                    "Indicator runtime link is missing indicator_id for "
+                    f"strategy={series.strategy_id} symbol={series.symbol} "
+                    f"timeframe={series.timeframe}"
+                )
             try:
-                indicator_meta = self._deps.indicator_get_instance_meta(indicator_id, ctx=self._indicator_ctx)
+                self._deps.indicator_get_instance_meta(
+                    indicator_id,
+                    ctx=self._indicator_ctx,
+                )
                 runtime_plan = self._deps.indicator_runtime_input_plan_for_instance(
                     indicator_id,
                     strategy_interval=str(series.timeframe),
@@ -787,28 +945,29 @@ class SeriesBuilderConstructionMixin:
                     ctx=self._indicator_ctx,
                 )
             except Exception as exc:
-                logger.warning(
-                    with_log_context(
-                        "indicator_runtime_input_plan_skipped",
-                        self._runtime_log_context(
-                            strategy_id=series.strategy_id,
-                            symbol=series.symbol,
-                            timeframe=series.timeframe,
-                            indicator_id=indicator_id,
-                            error=str(exc),
-                        ),
-                    )
+                raise RuntimeError(
+                    "Indicator runtime input plan failed for "
+                    f"strategy={series.strategy_id} indicator={indicator_id} "
+                    f"symbol={series.symbol} timeframe={series.timeframe}: {exc}"
+                ) from exc
+            if not isinstance(runtime_plan, Mapping):
+                raise RuntimeError(
+                    "Indicator runtime input plan must be a mapping for "
+                    f"strategy={series.strategy_id} indicator={indicator_id} "
+                    f"symbol={series.symbol} timeframe={series.timeframe}"
                 )
-                continue
             if not bool(runtime_plan.get("incremental_eval", False)):
                 continue
             source_timeframe = str(runtime_plan.get("source_timeframe") or series.timeframe)
             override_start = str(runtime_plan.get("start") or start_iso)
-            try:
-                source_delta = timeframe_duration(source_timeframe)
-                source_seconds = int(source_delta.total_seconds()) if source_delta else 0
-            except Exception:
-                source_seconds = 0
+            source_delta = timeframe_duration(source_timeframe)
+            source_seconds = int(source_delta.total_seconds()) if source_delta else 0
+            if source_seconds <= 0:
+                raise RuntimeError(
+                    "Indicator runtime input plan has unsupported source_timeframe "
+                    f"'{source_timeframe}' for strategy={series.strategy_id} "
+                    f"indicator={indicator_id} symbol={series.symbol}"
+                )
             if source_seconds > 0:
                 end_ts = pd.Timestamp(end_iso)
                 if end_ts.tzinfo is None:

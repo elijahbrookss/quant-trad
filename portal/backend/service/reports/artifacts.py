@@ -315,6 +315,7 @@ def _build_series_snapshot(series: Sequence[Any]) -> tuple[list[dict[str, Any]],
                 "exchange": getattr(entry, "exchange", None),
                 "window_start": getattr(entry, "window_start", None),
                 "window_end": getattr(entry, "window_end", None),
+                "backtest_warmup": dict(meta.get("backtest_warmup") or {}),
                 "indicator_ids": indicator_ids,
                 "strategy_hash": strategy_hash,
                 "variant_id": meta.get("variant_id"),
@@ -339,6 +340,7 @@ def _build_series_snapshot(series: Sequence[Any]) -> tuple[list[dict[str, Any]],
 def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> dict[str, Any]:
     symbols: list[str] = []
     strategies: list[dict[str, Any]] = []
+    warmup_evidence: list[dict[str, Any]] = []
     strategy_ids_seen: set[str] = set()
     storage = _storage()
     for entry in series:
@@ -346,10 +348,20 @@ def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> 
         if symbol and symbol not in symbols:
             symbols.append(symbol)
         strategy_id = str(getattr(entry, "strategy_id", "") or "").strip()
+        meta = dict(getattr(entry, "meta", {}) or {})
+        evidence = dict(meta.get("backtest_warmup") or {})
+        if evidence:
+            warmup_evidence.append(
+                {
+                    "strategy_id": strategy_id,
+                    "symbol": symbol or None,
+                    "timeframe": getattr(entry, "timeframe", None),
+                    **evidence,
+                }
+            )
         if not strategy_id or strategy_id in strategy_ids_seen:
             continue
         strategy_ids_seen.add(strategy_id)
-        meta = dict(getattr(entry, "meta", {}) or {})
         indicator_links = list(meta.get("indicator_links") or [])
         indicator_params = []
         for link in indicator_links:
@@ -396,7 +408,7 @@ def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> 
     timeframe = getattr(series[0], "timeframe", None) if series else None
     datasource = getattr(series[0], "datasource", None) if series else None
     exchange = getattr(series[0], "exchange", None) if series else None
-    return {
+    snapshot = {
         "execution_mode": _execution_mode_from_config(config),
         "request_id": str(config.get("request_id") or config.get("_runtime_request_id") or "").strip() or None,
         "wallet_start": dict(config.get("wallet_config") or {}),
@@ -413,6 +425,13 @@ def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> 
         "slippage_model": (config.get("risk") or {}).get("slippage_model"),
         "strategies": strategies,
     }
+    if warmup_evidence:
+        if config.get("backtest_warmup_bars") is not None:
+            snapshot["backtest_warmup_bars"] = int(
+                config["backtest_warmup_bars"]
+            )
+        snapshot["backtest_warmup_evidence"] = warmup_evidence
+    return snapshot
 
 
 class RunArtifactBundle:
@@ -917,6 +936,7 @@ def _build_config_snapshot_from_series_snapshot(
     storage = _storage()
     symbols: list[str] = []
     strategies: list[dict[str, Any]] = []
+    warmup_evidence: list[dict[str, Any]] = []
     strategy_ids_seen: set[str] = set()
     timeframe = None
     datasource = None
@@ -929,6 +949,16 @@ def _build_config_snapshot_from_series_snapshot(
         datasource = datasource or entry.get("datasource")
         exchange = exchange or entry.get("exchange")
         strategy_id = str(entry.get("strategy_id") or "").strip()
+        evidence = dict(entry.get("backtest_warmup") or {})
+        if evidence:
+            warmup_evidence.append(
+                {
+                    "strategy_id": strategy_id or None,
+                    "symbol": symbol or None,
+                    "timeframe": entry.get("timeframe"),
+                    **evidence,
+                }
+            )
         if not strategy_id or strategy_id in strategy_ids_seen:
             continue
         strategy_ids_seen.add(strategy_id)
@@ -964,7 +994,7 @@ def _build_config_snapshot_from_series_snapshot(
                 "instruments": list(entry.get("instruments") or []),
             }
         )
-    return {
+    snapshot = {
         "execution_mode": _execution_mode_from_config(config),
         "request_id": str(config.get("request_id") or config.get("_runtime_request_id") or "").strip() or None,
         "wallet_start": dict(config.get("wallet_config") or {}),
@@ -981,6 +1011,13 @@ def _build_config_snapshot_from_series_snapshot(
         "slippage_model": (config.get("risk") or {}).get("slippage_model"),
         "strategies": strategies,
     }
+    if warmup_evidence:
+        if config.get("backtest_warmup_bars") is not None:
+            snapshot["backtest_warmup_bars"] = int(
+                config["backtest_warmup_bars"]
+            )
+        snapshot["backtest_warmup_evidence"] = warmup_evidence
+    return snapshot
 
 
 def _aggregate_worker_artifact(

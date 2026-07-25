@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from ._shared import BotRunRecord, SQLAlchemyError, _json_safe, _parse_optional_timestamp, _utcnow, db, logger, select
 
 _NON_MATERIAL_CONFIG_KEYS = {
+    "backtest_warmup_evidence",
     "generated_at",
     "report_generated_at",
     "report_warnings",

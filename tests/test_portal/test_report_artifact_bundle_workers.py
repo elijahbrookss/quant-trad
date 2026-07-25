@@ -109,6 +109,16 @@ def _series(symbol: str, strategy_id: str, indicator_id: str):
             "atm_template": {"name": "ATM 1"},
             "rules": {"rule-1": {"id": "rule-1", "intent": "enter_long"}},
             "instrument_links": [{"instrument_id": f"{symbol}-instrument", "symbol": symbol}],
+            "backtest_warmup": {
+                "schema_version": "backtest_warmup_evidence.v1",
+                "status": "ready",
+                "requested_bars": 100,
+                "required_bars": 100,
+                "loaded_bars": 100,
+                "missing_bars": 0,
+                "request_satisfies_requirements": True,
+                "indicator_requirements": [],
+            },
         },
     )
 
@@ -121,6 +131,7 @@ def _worker_config(worker_id: str) -> dict:
         "report_artifact_role": "worker",
         "wallet_config": {"balances": {"USD": 1000}},
         "risk": {},
+        "backtest_warmup_bars": 100,
         "backtest_start": "2026-01-01T00:00:00Z",
         "backtest_end": "2026-01-02T00:00:00Z",
     }
@@ -226,3 +237,6 @@ def test_finalize_run_artifact_bundle_from_workers_aggregates_worker_outputs(mon
     assert strategy_snapshot["run_strategy_snapshot"]["effective_params"] == {}
     assert strategy_snapshot["rules"] == {"rule-1": {"id": "rule-1", "intent": "enter_long"}}
     assert strategy_snapshot["atm_template"] == {"name": "ATM 1"}
+    assert config_snapshot["backtest_warmup_bars"] == 100
+    assert len(config_snapshot["backtest_warmup_evidence"]) == 2
+    assert config_snapshot["backtest_warmup_evidence"][0]["status"] == "ready"

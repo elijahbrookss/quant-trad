@@ -120,6 +120,20 @@ def _run() -> dict[str, Any]:
         "config_snapshot": {
             "execution_mode": "full",
             "playback_mode": "instant",
+            "backtest_warmup_bars": 100,
+            "backtest_warmup_evidence": [
+                {
+                    "schema_version": "backtest_warmup_evidence.v1",
+                    "strategy_id": "strategy-1",
+                    "symbol": "BTC",
+                    "timeframe": "1h",
+                    "status": "ready",
+                    "requested_bars": 100,
+                    "required_bars": 100,
+                    "loaded_bars": 100,
+                    "missing_bars": 0,
+                }
+            ],
             "wallet_start": {"balances": {"USDC": 1000}},
             "date_range": {
                 "start": "2026-03-01T00:00:00Z",
@@ -499,6 +513,7 @@ def _install(monkeypatch: pytest.MonkeyPatch, storage: _ResearchDatasetStorage) 
 def _build(
     monkeypatch: pytest.MonkeyPatch,
     *,
+    run=None,
     events=None,
     trades=None,
     observability_events=None,
@@ -507,7 +522,7 @@ def _build(
     candles=None,
 ):
     fake_storage = _ResearchDatasetStorage(
-        run=_run(),
+        run=_run() if run is None else run,
         events=_events() if events is None else events,
         trades=_trades() if trades is None else trades,
         steps=_steps(),
@@ -537,6 +552,81 @@ def test_dataset_builds_from_db_truth_without_artifact_directory(monkeypatch: py
     assert dataset["context"]["schema_version"] == "report_context.v1"
     assert dataset["candle_catalog"]["schema_version"] == "candle_catalog.v1"
     assert dataset["operational_health"]["schema_version"] == "operational_health.v1"
+
+
+def test_dataset_surfaces_insufficient_backtest_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _run()
+    run["config_snapshot"]["backtest_warmup_bars"] = 100
+    run["config_snapshot"]["backtest_warmup_evidence"] = [
+        {
+            "schema_version": "backtest_warmup_evidence.v1",
+            "strategy_id": "strategy-1",
+            "symbol": "BTC",
+            "timeframe": "1h",
+            "status": "insufficient",
+            "requested_bars": 100,
+            "required_bars": 100,
+            "loaded_bars": 72,
+            "missing_bars": 28,
+        }
+    ]
+
+    dataset = _build(monkeypatch, run=run)
+
+    data_config = dataset["metadata"]["configuration"]["data"]
+    assert data_config["backtest_warmup_bars"] == 100
+    assert data_config["backtest_warmup_evidence"][0]["loaded_bars"] == 72
+    assert dataset["readiness"]["data_quality_status"] == "degraded"
+    assert "indicator_warmup" in dataset["readiness"]["degraded_sections"]
+    assert "backtest_warmup_insufficient" in dataset["readiness"]["caveats"]
+    assert (
+        "backtest_warmup_insufficient"
+        in dataset["readiness"]["golden_blocking_reasons"]
+    )
+
+
+def test_loaded_warmup_evidence_is_operational_not_material_configuration() -> None:
+    left = {
+        "backtest_warmup_bars": 100,
+        "backtest_warmup_evidence": [
+            {"symbol": "BTC", "requested_bars": 100, "loaded_bars": 100}
+        ],
+    }
+    right = {
+        "backtest_warmup_bars": 100,
+        "backtest_warmup_evidence": [
+            {"symbol": "BTC", "requested_bars": 100, "loaded_bars": 72}
+        ],
+    }
+
+    assert run_research_dataset._config_hash(left) != (
+        run_research_dataset._config_hash(right)
+    )
+    assert run_research_dataset._material_config_hash(left) == (
+        run_research_dataset._material_config_hash(right)
+    )
+
+
+def test_dataset_marks_missing_backtest_warmup_evidence_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _run()
+    run["config_snapshot"].pop("backtest_warmup_evidence")
+
+    dataset = _build(monkeypatch, run=run)
+
+    assert dataset["readiness"]["data_quality_status"] != "clean"
+    assert "indicator_warmup" in dataset["readiness"]["degraded_sections"]
+    assert (
+        "backtest_warmup_evidence_unavailable"
+        in dataset["readiness"]["caveats"]
+    )
+    assert (
+        "backtest_warmup_evidence_unavailable"
+        in dataset["readiness"]["golden_blocking_reasons"]
+    )
 
 
 def test_dataset_exposes_candidate_lifecycle_from_report_indicator_artifacts(monkeypatch: pytest.MonkeyPatch) -> None:

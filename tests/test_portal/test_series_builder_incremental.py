@@ -10,7 +10,11 @@ import pandas as pd
 
 from engines.bot_runtime.core.domain import Candle, StrategySignal, isoformat
 from engines.bot_runtime.deps import BotRuntimeDeps
-from engines.bot_runtime.strategy.models import Strategy, StrategyInstrumentLink
+from engines.bot_runtime.strategy.models import (
+    Strategy,
+    StrategyIndicatorLink,
+    StrategyInstrumentLink,
+)
 from engines.bot_runtime.strategy.series_builder import SeriesBuilder, StrategySeries
 
 
@@ -31,6 +35,8 @@ def _builder_deps(
     fetch_ohlcv_by_instrument=None,
     get_instrument_record=None,
     resolve_instrument=None,
+    indicator_get_instance_meta=None,
+    indicator_runtime_input_plan_for_instance=None,
 ) -> BotRuntimeDeps:
     return BotRuntimeDeps(
         fetch_strategy=lambda _strategy_id: None,
@@ -40,10 +46,15 @@ def _builder_deps(
         resolve_instrument=resolve_instrument or (lambda _datasource, _exchange, _symbol: None),
         strategy_evaluate=lambda *args, **kwargs: {},
         strategy_run_preview=lambda *args, **kwargs: {},
-        indicator_get_instance_meta=lambda *args, **kwargs: {},
+        indicator_get_instance_meta=(
+            indicator_get_instance_meta or (lambda *args, **kwargs: {})
+        ),
         indicator_build_runtime_graph=lambda *args, **kwargs: ({}, []),
         indicator_build_runtime_instance=lambda *args, **kwargs: None,
-        indicator_runtime_input_plan_for_instance=lambda *args, **kwargs: {},
+        indicator_runtime_input_plan_for_instance=(
+            indicator_runtime_input_plan_for_instance
+            or (lambda *args, **kwargs: {})
+        ),
         build_indicator_context=lambda *_args, **_kwargs: None,
         record_bot_runtime_event=lambda _payload: None,
         record_bot_runtime_events_batch=lambda _payloads: 0,
@@ -65,6 +76,20 @@ def _ohlcv_frame() -> pd.DataFrame:
             "volume": [10.0],
         },
         index=index,
+    )
+
+
+def _ohlcv_frame_at(*timestamps: datetime) -> pd.DataFrame:
+    values = [100.0 + idx for idx, _ in enumerate(timestamps)]
+    return pd.DataFrame(
+        {
+            "open": values,
+            "high": [value + 1.0 for value in values],
+            "low": [value - 1.0 for value in values],
+            "close": [value + 0.5 for value in values],
+            "volume": [10.0 for _ in values],
+        },
+        index=pd.DatetimeIndex(timestamps),
     )
 
 
@@ -366,3 +391,194 @@ def test_build_signals_from_decision_artifacts_ignores_non_selected_entries() ->
     ]
     out = SeriesBuilder._build_signals_from_decision_artifacts(artifacts)
     assert len(out) == 0
+
+
+@pytest.mark.parametrize("configured", [True, 0, -1, "invalid"])
+def test_backtest_warmup_rejects_malformed_explicit_configuration(
+    configured,
+) -> None:
+    builder = SeriesBuilder(
+        bot_id="bot-1",
+        config={"backtest_warmup_bars": configured},
+        run_type="backtest",
+        deps=_builder_deps(),
+    )
+
+    with pytest.raises(ValueError, match="positive integer"):
+        builder._resolve_backtest_warmup_bars(None, "1h")
+
+
+def test_backtest_warmup_is_strictly_pre_window_and_auditable() -> None:
+    start = datetime(2026, 1, 1, 2, tzinfo=timezone.utc)
+    end = datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
+    warmup = _ohlcv_frame_at(
+        start - timedelta(hours=2),
+        start - timedelta(hours=1),
+        start,
+    )
+    replay = _ohlcv_frame_at(start, start + timedelta(hours=1), end)
+    builder = SeriesBuilder(
+        bot_id="bot-1",
+        config={"backtest_warmup_bars": 2},
+        run_type="backtest",
+        deps=_builder_deps(),
+    )
+    builder._fetch_ohlcv_data = (  # type: ignore[method-assign]
+        lambda *_args, **kwargs: (
+            warmup if kwargs["end_iso"] == isoformat(start) else replay
+        )
+    )
+
+    candles, replay_index, _, _, evidence = (
+        builder._build_backtest_candles_with_warmup(
+            symbol="BTC/USD",
+            timeframe="1h",
+            datasource="COINBASE",
+            exchange="coinbase",
+            strategy_id="strategy-1",
+            instrument_id="inst-1",
+            backtest_start_iso=isoformat(start),
+            backtest_end_iso=isoformat(end),
+            warmup_bars=2,
+        )
+    )
+
+    assert [candle.time for candle in candles] == [
+        start - timedelta(hours=2),
+        start - timedelta(hours=1),
+        start,
+        start + timedelta(hours=1),
+        end,
+    ]
+    assert replay_index == 2
+    assert evidence == {
+        "schema_version": "backtest_warmup_evidence.v1",
+        "status": "ready",
+        "requested_bars": 2,
+        "required_bars": 2,
+        "loaded_bars": 2,
+        "missing_bars": 0,
+        "request_satisfies_requirements": True,
+        "indicator_requirements": [],
+        "requested_range": {
+            "start": isoformat(start - timedelta(hours=2)),
+            "end_exclusive": isoformat(start),
+        },
+        "loaded_range": {
+            "start": isoformat(start - timedelta(hours=2)),
+            "end": isoformat(start - timedelta(hours=1)),
+        },
+        "replay_start_index": 2,
+    }
+
+
+def test_default_backtest_warmup_covers_indicator_requirement() -> None:
+    strategy = Strategy(
+        id="strategy-1",
+        name="Strategy",
+        timeframe="1h",
+        datasource="COINBASE",
+        exchange="coinbase",
+        atm_template_id=None,
+        atm_template={},
+        risk_config={},
+        indicator_links=[
+            StrategyIndicatorLink(
+                id="link-1",
+                strategy_id="strategy-1",
+                indicator_id="candle-stats-1",
+            )
+        ],
+        instrument_links=[],
+    )
+    builder = SeriesBuilder(
+        bot_id="bot-1",
+        config={},
+        run_type="backtest",
+        deps=_builder_deps(
+            indicator_get_instance_meta=lambda *_args, **_kwargs: {
+                "id": "candle-stats-1",
+                "type": "candle_stats",
+                "params": {"warmup_bars": 200},
+            }
+        ),
+    )
+
+    requirements = builder._indicator_warmup_requirements(strategy)
+    resolved = builder._resolve_backtest_warmup_bars(
+        strategy,
+        "1h",
+        indicator_requirements=requirements,
+    )
+
+    assert requirements == [
+        {
+            "indicator_id": "candle-stats-1",
+            "indicator_type": "candle_stats",
+            "required_bars": 200,
+        }
+    ]
+    assert resolved == 200
+
+
+def test_backtest_warmup_provider_failure_is_not_swallowed() -> None:
+    builder = SeriesBuilder(
+        bot_id="bot-1",
+        config={},
+        run_type="backtest",
+        deps=_builder_deps(),
+    )
+
+    def _provider_failure(*_args, **_kwargs):
+        raise RuntimeError("provider_fetch_exception")
+
+    builder._fetch_ohlcv_data = _provider_failure  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="provider_fetch_exception"):
+        builder._build_backtest_candles_with_warmup(
+            symbol="BTC/USD",
+            timeframe="1h",
+            datasource="COINBASE",
+            exchange="coinbase",
+            strategy_id="strategy-1",
+            instrument_id="inst-1",
+            backtest_start_iso="2026-01-01T02:00:00Z",
+            backtest_end_iso="2026-01-01T04:00:00Z",
+        )
+
+
+def test_indicator_runtime_input_plan_failure_is_not_skipped() -> None:
+    def _malformed_plan(*_args, **_kwargs):
+        raise ValueError("malformed indicator plan")
+
+    builder = SeriesBuilder(
+        bot_id="bot-1",
+        config={"indicator_runtime_incremental_eval": True},
+        run_type="backtest",
+        deps=_builder_deps(
+            indicator_runtime_input_plan_for_instance=_malformed_plan
+        ),
+    )
+    series = StrategySeries(
+        strategy_id="strategy-1",
+        name="Strategy",
+        symbol="BTC/USD",
+        timeframe="1h",
+        datasource="COINBASE",
+        exchange="coinbase",
+        candles=[],
+        meta={"indicator_links": [{"indicator_id": "indicator-1"}]},
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "strategy=strategy-1 indicator=indicator-1 "
+            "symbol=BTC/USD timeframe=1h"
+        ),
+    ):
+        builder._indicator_runtime_eval_config(
+            series=series,
+            start_iso="2026-01-01T00:00:00Z",
+            end_iso="2026-01-01T01:00:00Z",
+        )
