@@ -165,6 +165,7 @@ retired tables until that explicit hard cutover is complete.
 | 2026-07-25 | `58ea831` canonical fact ordering | persistence/report/runtime-fact profile: 148 passed; complete non-database backend gate: 1,283 passed; docs: 2 passed; same-batch producer order is durable and non-monotonic trade clocks block golden certification |
 | 2026-07-25 | `00440b2` canonical lifecycle ownership | lifecycle/event/docs profile: 64 passed; complete non-database backend gate: 1,291 passed; clean isolated PostgreSQL profile: 3 passed; repeated Timescale startup and repeated PostgreSQL profile: 3 passed. Direct summary writers, status fallback reads, divergent event-ID retries, backdated/post-terminal checkpoints, and ignored decision-ledger run payloads were removed or rejected. |
 | 2026-07-25 | `3b9e17b` exact runtime candle identity and ADR delivery | exact snapshot/runtime/report/docs profile: 191 passed; complete non-database backend gate with capture disabled: 1,296 passed, 49 pre-existing dependency/deprecation warnings, 24.23s; docs: 2 passed. The repository `backend-check` wrapper hit a pytest temporary-capture `FileNotFoundError` before collection; the identical `QT_OMIT_DB_TESTS=1` scope passed with `-s`. Exact candle values now have fail-loud runtime-produced identity, while quality remains in the existing continuity/readiness contract. ADRs 0042-0049 record accepted and proposed cleanup boundaries without treating incomplete enforcement as complete. |
+| 2026-07-25 | known-at and terminal lifecycle proof | runtime/domain profile: 128 passed with 14 pre-existing dependency warnings; complete non-database backend gate: 1,303 passed with 49 pre-existing dependency/deprecation warnings in 25.33s; docs: 2 passed; affected compileall and whitespace checks passed. Appending adversarial future candles cannot alter the consumed-prefix fingerprint, indicator truth/projections, decisions, orders, fills, lifecycle, or wallet accounting under either adapter. Position state now owns terminal reason and weighted exit price; incomplete closed facts and rejected-exit false closure fail loudly. Persisted CLI/job/report truncation and a credential-free paper runner remain open. |
 
 Each child branch must record its focused tests, broader regression profile,
 documentation validation, diff review, and remaining-reference search before
@@ -184,8 +185,9 @@ integration.
 - Margin accounting still has two persisted representations: raw fills for
   execution evidence and derived ledger events for wallet truth.
 - Existing persisted repeatability evidence proves matching semantic results,
-  not byte-identical operational artifacts; full prefix-truncation no-lookahead
-  and credential-free persisted paper replay remain unproven.
+  not byte-identical operational artifacts. Runtime-domain prefix invariance is
+  now protected through accounting, but persisted CLI/job/report truncation and
+  credential-free persisted paper replay remain unproven.
 - Exact runtime candle values now feed `data_snapshot_hash`; older runs without
   terminal snapshot evidence remain explicitly unavailable, and runtime
   provenance is still not exposed consistently in reports.

@@ -126,6 +126,16 @@ class _FillAdapter:
         )
 
 
+class _RejectSellAdapter(_FillAdapter):
+    def execute_order(self, order: FillOrder):
+        if order.side == "sell":
+            return None, FillRejection(
+                reason="TEST_EXIT_REJECTED",
+                metadata={"order_type": order.order_type},
+            )
+        return super().execute_order(order)
+
+
 def _enable_runtime_execution(engine: LadderRiskEngine) -> None:
     engine.attach_wallet_gateway(SharedWalletGateway(_wallet_proxy({"USD": 1_000_000.0})))
     engine.attach_execution_adapter(_FillAdapter())
@@ -727,6 +737,38 @@ def test_target_exit_uses_maker_fee_and_stop_exit_uses_taker_fee():
     stop = next(event for event in stop_events if event["type"] == "stop")
     assert stop["fee_type"] == "taker"
     assert stop["order_type"] == "stop_market"
+
+
+def test_rejected_stop_fill_keeps_position_open_without_terminal_metadata():
+    engine = _build_spot_engine(
+        base_risk_per_trade=8,
+        take_profit_orders=[{"id": "tp-1", "ticks": 100, "size_fraction": 1.0}],
+        extra_config={"stop_adjustments": []},
+    )
+    engine.attach_wallet_gateway(
+        SharedWalletGateway(_wallet_proxy({"USD": 1_000_000.0}))
+    )
+    engine.attach_execution_adapter(_RejectSellAdapter())
+    entry = _build_candle(close=100.0, atr=2.0)
+    position = engine.maybe_enter(entry, "long")
+    assert position is not None
+    stop_bar = Candle(
+        time=datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=95.0,
+        close=96.0,
+        atr=2.0,
+    )
+
+    events = engine.step(stop_bar)
+
+    assert [event["type"] for event in events] == ["execution_rejected"]
+    assert engine.active_trade is position
+    assert position.is_active()
+    assert position.close_reason is None
+    assert position.reason_code is None
+    assert position.serialize()["closed_at"] is None
 
 
 def test_target_fill_status_and_quantity_change_bumps_trade_revision():

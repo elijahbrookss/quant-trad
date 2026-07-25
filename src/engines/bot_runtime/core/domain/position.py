@@ -112,6 +112,7 @@ class LadderPosition:
     position_commit_seq: int = 0
     stop_adjustments: List[RuntimeStopAdjustment] = field(default_factory=list)
     close_reason: Optional[str] = None
+    reason_code: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.best_price = self.entry_price
@@ -521,10 +522,50 @@ class LadderPosition:
                         "settlement": settlement_payload,
                     }
                 )
+        if all(leg.status != "open" for leg in self.legs):
             self.closed_at = candle.time
-        elif all(leg.status != "open" for leg in self.legs):
-            self.closed_at = candle.time
+            self._set_terminal_reason_from_legs()
         return events
+
+    def _set_terminal_reason_from_legs(self) -> None:
+        statuses = {
+            str(leg.status or "").strip().lower()
+            for leg in self.legs
+            if str(leg.status or "").strip().lower() != "open"
+        }
+        if not statuses:
+            raise RuntimeError(
+                f"position_close_invalid: no closed legs trade_id={self.trade_id}"
+            )
+        if statuses <= {"target"}:
+            self.close_reason = "TARGET"
+            self.reason_code = exit_policy_for("target").reason_code
+            return
+        if statuses <= {"stop"}:
+            self.close_reason = "STOP"
+            self.reason_code = exit_policy_for("stop").reason_code
+            return
+        if statuses <= {"target", "stop"}:
+            self.close_reason = "MIXED"
+            self.reason_code = "EXEC_EXIT_CLOSE"
+            return
+        raise RuntimeError(
+            "position_close_invalid: unsupported terminal leg statuses "
+            f"trade_id={self.trade_id} statuses={sorted(statuses)}"
+        )
+
+    def _weighted_exit_price(self) -> Optional[float]:
+        weighted_price = 0.0
+        contracts_total = 0.0
+        for leg in self.legs:
+            if leg.status == "open" or leg.exit_price is None:
+                continue
+            contracts = max(float(leg.contracts or 0.0), 0.0)
+            weighted_price += float(leg.exit_price) * contracts
+            contracts_total += contracts
+        if contracts_total <= 0.0:
+            return None
+        return weighted_price / contracts_total
 
     def hits_open_target(self, candle: Candle) -> bool:
         """Return True when the bar range reaches any open take-profit target."""
@@ -610,6 +651,17 @@ class LadderPosition:
             if fixed_horizon_events:
                 events.extend(fixed_horizon_events)
         if not self.is_active() and not any(event.get("type") == "close" for event in events):
+            if not self.close_reason or not self.reason_code:
+                raise RuntimeError(
+                    "position_close_invalid: terminal reason missing "
+                    f"trade_id={self.trade_id}"
+                )
+            exit_price = self._weighted_exit_price()
+            if exit_price is None:
+                raise RuntimeError(
+                    "position_close_invalid: terminal exit price missing "
+                    f"trade_id={self.trade_id}"
+                )
             events.append(
                 {
                     "type": "close",
@@ -622,6 +674,9 @@ class LadderPosition:
                     "contracts": sum(max(leg.contracts, 0) for leg in self.legs),
                     "direction": self.direction,
                     "metrics": self._metrics_snapshot(),
+                    "reason_code": self.reason_code,
+                    "close_reason": self.close_reason,
+                    "exit_price": round(exit_price, 4),
                 }
             )
         return events
@@ -772,6 +827,13 @@ class LadderPosition:
         if events or all(leg.status != "open" for leg in self.legs):
             self.closed_at = candle.time
             self.close_reason = policy.reason_code
+            self.reason_code = policy.reason_code
+            terminal_exit_price = self._weighted_exit_price()
+            if terminal_exit_price is None:
+                raise RuntimeError(
+                    "position_close_invalid: terminal exit price missing "
+                    f"trade_id={self.trade_id}"
+                )
             events.append(
                 {
                     "type": "close",
@@ -786,7 +848,7 @@ class LadderPosition:
                     "metrics": self._metrics_snapshot(),
                     "reason_code": policy.reason_code,
                     "close_reason": policy.reason_code,
-                    "exit_price": round(exit_price_source, 4),
+                    "exit_price": round(terminal_exit_price, 4),
                 }
             )
         return events
@@ -829,22 +891,22 @@ class LadderPosition:
             "position_commit_seq": int(self.position_commit_seq),
             "position_commit_seq_status": "position_scoped",
         }
-        if self.close_reason:
+        if self.closed_at is not None:
+            if not self.close_reason or not self.reason_code:
+                raise RuntimeError(
+                    "position_serialize_invalid: closed position missing terminal reason "
+                    f"trade_id={self.trade_id}"
+                )
             payload["close_reason"] = self.close_reason
-            payload["reason_code"] = self.close_reason
+            payload["reason_code"] = self.reason_code
             payload["exit_time"] = isoformat(self.closed_at)
-            closed_legs = [leg for leg in self.legs if leg.status != "open" and leg.exit_price is not None]
-            if closed_legs:
-                total_contracts = sum(max(float(leg.contracts or 0.0), 0.0) for leg in closed_legs)
-                if total_contracts > 0:
-                    weighted_exit = sum(
-                        float(leg.exit_price or 0.0) * max(float(leg.contracts or 0.0), 0.0)
-                        for leg in closed_legs
-                    )
-                    payload["exit_price"] = round(
-                        weighted_exit / total_contracts,
-                        4,
-                    )
+            exit_price = self._weighted_exit_price()
+            if exit_price is None:
+                raise RuntimeError(
+                    "position_serialize_invalid: closed position missing terminal exit price "
+                    f"trade_id={self.trade_id}"
+                )
+            payload["exit_price"] = round(exit_price, 4)
         return payload
 
     def _pnl_for_exit(self, exit_price: float, contracts: float) -> float:

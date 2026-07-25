@@ -55,6 +55,10 @@ contradictory rules fail before they can influence a fill.
 - Targets have stable IDs and explicit allocations totaling one.
 - Target, stop, fixed-horizon, and terminal exits carry explicit event type,
   reason, price source, and liquidity role.
+- The position domain owns terminal `close_reason`, canonical `reason_code`,
+  and weighted `exit_price`; projection layers reject missing terminal evidence
+  instead of deriving it from leg state.
+- A rejected exit fill leaves the position open and cannot emit a close event.
 - Instrument economics come from the execution profile, never from ATM policy.
 
 ## Consequences
@@ -78,7 +82,13 @@ inspectable and a missing field cannot activate a hidden risk rule.
   disabled domain-level breakeven default.
 - `tests/integration/runtime/test_bot_runtime_entry_execution.py` covers
   explicit stop adjustment, omitted-adjustment behavior, maker timing,
-  post-only rejection, trailing monotonicity, fees, and target allocation.
+  post-only rejection, rejected-stop lifecycle, trailing monotonicity, fees,
+  and target allocation.
+- `tests/integration/runtime/test_reference_execution_scenarios.py` covers
+  domain-owned target, stop, mixed, fixed-horizon, and terminal close evidence,
+  including weighted exit price and backtest/paper equality.
+- `tests/integration/runtime/test_runtime_push_stream.py` rejects closed domain
+  snapshots missing terminal price or reasons.
 - Cleanup commits `66aac0b` and `c5d3c76` remove implicit breakeven defaults.
 - Cleanup commit `484ad56` makes malformed execution invariants fail loudly.
 

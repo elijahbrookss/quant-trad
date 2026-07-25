@@ -3,13 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
 
 from engines.bot_runtime.adapters import BacktestAdapter, PaperAdapter
-from engines.bot_runtime.core.domain import Candle, LadderRiskEngine
+from engines.bot_runtime.core.domain import Candle, LadderRiskEngine, StrategySignal
 from engines.bot_runtime.core.runtime_events import (
     RuntimeEventName,
     WalletInitializedContext,
@@ -18,6 +19,11 @@ from engines.bot_runtime.core.runtime_events import (
 )
 from engines.bot_runtime.core.wallet_gateway import SharedWalletGateway
 from engines.bot_runtime.runtime.components.settlement import SettlementApplier
+from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
+from indicators.candle_stats.definition import CandleStatsIndicator
+from indicators.candle_stats.runtime import TypedCandleStatsIndicator
+from strategies.compiler import compile_strategy
+from strategies.evaluator import DecisionEvaluationState, evaluate_strategy_bar
 
 
 STARTING_CASH = 1_000.0
@@ -239,6 +245,278 @@ def _dataset_fingerprint(candles: list[Candle]) -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def _known_at_fixture_candles() -> tuple[list[Candle], list[Candle]]:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    price_ranges = [
+        (100.0, 0.5),
+        (100.5, 0.5),
+        (101.0, 5.0),
+        (111.0, 5.0),
+        (111.5, 0.5),
+        (112.0, 0.5),
+        (1_000.0, 500.0),
+    ]
+    candles = [
+        Candle(
+            time=start + timedelta(minutes=index),
+            open=close,
+            high=close + half_range,
+            low=close - half_range,
+            close=close,
+            atr=ATR,
+            volume=1_000.0,
+        )
+        for index, (close, half_range) in enumerate(price_ranges)
+    ]
+    return candles[:4], candles[4:]
+
+
+def _known_at_indicator() -> TypedCandleStatsIndicator:
+    params = CandleStatsIndicator.resolve_config(
+        {
+            "atr_short_window": 1,
+            "atr_long_window": 3,
+            "atr_z_window": 3,
+            "directional_efficiency_window": 1,
+            "slope_window": 1,
+            "range_window": 1,
+            "expansion_window": 1,
+            "volume_window": 1,
+            "overlap_window": 1,
+            "slope_stability_lookback": 1,
+            "warmup_bars": 3,
+            "atr_expansion_signal_threshold": 0.5,
+        },
+        strict_unknown=True,
+    )
+    return TypedCandleStatsIndicator(
+        indicator_id="known-at-stats",
+        version="v1",
+        params=params,
+    )
+
+
+def _position_semantics(engine: LadderRiskEngine) -> dict[str, Any] | None:
+    if not engine.trades:
+        return None
+    payload = engine.trades[-1].serialize()
+    semantics = {
+        key: deepcopy(payload.get(key))
+        for key in (
+            "entry_time",
+            "bar_time",
+            "strategy_id",
+            "signal_id",
+            "decision_id",
+            "entry_price",
+            "direction",
+            "stop_price",
+            "moved_to_breakeven",
+            "closed_at",
+            "gross_pnl",
+            "fees_paid",
+            "net_pnl",
+            "atr_at_entry",
+            "r_value",
+            "r_ticks",
+            "mae_ticks",
+            "mfe_ticks",
+            "bars_held",
+            "position_commit_seq",
+            "close_reason",
+            "reason_code",
+            "exit_price",
+        )
+    }
+    semantics["legs"] = [
+        {
+            key: deepcopy(leg.get(key))
+            for key in (
+                "name",
+                "ticks",
+                "target_price",
+                "status",
+                "exit_price",
+                "exit_time",
+                "contracts",
+                "pnl",
+                "id",
+            )
+        }
+        for leg in payload.get("legs") or []
+    ]
+    return semantics
+
+
+def _execution_event_semantics(event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: deepcopy(event.get(key))
+        for key in (
+            "type",
+            "leg",
+            "price",
+            "contracts",
+            "pnl",
+            "fee_paid",
+            "fee_type",
+            "order_type",
+            "price_source",
+            "reason_code",
+            "close_reason",
+            "exit_price",
+            "gross_pnl",
+            "fees_paid",
+            "net_pnl",
+            "stop_trigger_price",
+            "stop_trigger_ticks",
+            "gap_through",
+        )
+        if key in event
+    }
+
+
+def _run_known_at_pipeline(
+    candles: list[Candle],
+    *,
+    adapter_type: type[BacktestAdapter] | type[PaperAdapter],
+) -> list[dict[str, Any]]:
+    indicator_engine = IndicatorExecutionEngine([_known_at_indicator()])
+    compiled_strategy = compile_strategy(
+        strategy_id="known-at-strategy",
+        timeframe="1m",
+        rules=[
+            {
+                "id": "atr-expansion-entry",
+                "name": "Enter on known ATR expansion",
+                "intent": "enter_long",
+                "priority": 10,
+                "trigger": {
+                    "type": "signal_match",
+                    "indicator_id": "known-at-stats",
+                    "output_name": "atr_expansion",
+                    "event_key": "atr_expansion_long",
+                },
+                "guards": [],
+            }
+        ],
+        attached_indicator_ids=["known-at-stats"],
+        indicator_meta_getter=lambda _indicator_id: {
+            "typed_outputs": [
+                {
+                    "name": "atr_expansion",
+                    "type": "signal",
+                    "event_keys": ["atr_expansion_long"],
+                }
+            ]
+        },
+    )
+    decision_state = DecisionEvaluationState()
+    risk_engine, gateway = _engine(adapter_type)
+    risk_engine.strategy_id = compiled_strategy.strategy_id
+    trace: list[dict[str, Any]] = []
+
+    for index, candle in enumerate(candles):
+        execution_events = risk_engine.step(candle)
+        if execution_events:
+            SettlementApplier(obs_enabled=False).apply(
+                execution_events,
+                risk_engine.exit_settlement,
+                execution_profile=risk_engine.execution_profile,
+            )
+
+        frame = indicator_engine.step(
+            bar=candle,
+            bar_time=candle.time,
+            include_overlays=True,
+            include_details=False,
+        )
+        decision_result = evaluate_strategy_bar(
+            compiled_strategy=compiled_strategy,
+            state=decision_state,
+            outputs=frame.outputs,
+            output_types=indicator_engine.output_types,
+            instrument_id="known-at-instrument",
+            symbol="KNOWN-AT-PERP",
+            timeframe="1m",
+            bar_time=candle.time,
+            minimal_decision_details=True,
+        )
+
+        signal = None
+        new_position = None
+        if decision_result.selected_artifact is not None:
+            signal = StrategySignal.from_decision_artifact(
+                decision_result.selected_artifact,
+                source_type="simulation",
+                source_id="known-at-prefix-fixture",
+            )
+            risk_engine.last_signal_id = signal.signal_id
+            risk_engine.last_decision_id = signal.decision_id
+            new_position = risk_engine.maybe_enter(candle, signal.direction)
+
+        wallet = gateway.project()
+        trace.append(
+            {
+                "input_dataset": {
+                    "identity": "known-at-prefix-fixture-v1",
+                    "consumed_fingerprint": _dataset_fingerprint(candles[: index + 1]),
+                    "consumed_candles": index + 1,
+                    "current_candle": candle.serialize(),
+                },
+                "known_at": {
+                    "boundary": candle.time.isoformat(),
+                    "available_candle_count": index + 1,
+                },
+                "indicator_outputs": {
+                    key: {
+                        "bar_time": output.bar_time.isoformat(),
+                        "ready": output.ready,
+                        "value": deepcopy(output.value),
+                    }
+                    for key, output in sorted(frame.outputs.items())
+                },
+                "indicator_overlays": {
+                    key: {
+                        "bar_time": overlay.bar_time.isoformat(),
+                        "ready": overlay.ready,
+                        "value": deepcopy(overlay.value),
+                    }
+                    for key, overlay in sorted(frame.overlays.items())
+                },
+                "strategy_decisions": deepcopy(decision_result.artifacts),
+                "selected_signal": signal.to_dict() if signal is not None else None,
+                "generated_order": (
+                    {
+                        key: deepcopy((new_position.entry_order or {}).get(key))
+                        for key in (
+                            "side",
+                            "qty",
+                            "symbol",
+                            "order_type",
+                            "requested_price",
+                        )
+                    }
+                    if new_position is not None
+                    else None
+                ),
+                "execution_events": [
+                    _execution_event_semantics(event)
+                    for event in execution_events
+                ],
+                "lifecycle_and_accounting": {
+                    "position": _position_semantics(risk_engine),
+                    "wallet": {
+                        "balances": dict(wallet.balances),
+                        "locked_margin": dict(wallet.locked_margin),
+                        "free_collateral": dict(wallet.free_collateral),
+                    },
+                },
+            }
+        )
+
+    return trace
+
+
 def _run_reference(
     *,
     adapter_type: type[BacktestAdapter] | type[PaperAdapter],
@@ -369,6 +647,9 @@ def _run_reference(
             "gross_pnl": close_event["gross_pnl"],
             "fees_paid": close_event["fees_paid"],
             "net_pnl": close_event["net_pnl"],
+            "reason_code": close_event["reason_code"],
+            "close_reason": close_event["close_reason"],
+            "exit_price": close_event["exit_price"],
         },
     }
 
@@ -510,6 +791,16 @@ def test_hand_verifiable_reference_scenario(
         "price_source",
         "stop_price" if trace["exit_fill"]["type"] == "stop" else "target_price",
     )
+    expected_close_reason = (
+        "STOP"
+        if outcome in {"stop", "same_bar", "gap_stop"}
+        else "TARGET"
+    )
+    expected_reason_code = f"EXEC_EXIT_{expected_close_reason}"
+    assert trace["lifecycle"]["close_reason"] == expected_close_reason
+    assert trace["close_event"]["close_reason"] == expected_close_reason
+    assert trace["close_event"]["reason_code"] == expected_reason_code
+    assert trace["close_event"]["exit_price"] == expected["exit_price"]
     if outcome == "gap_stop":
         expected_stop = 96.0 if direction == "long" else 104.0
         expected_trigger_ticks = -4.0
@@ -535,6 +826,9 @@ def test_hand_verifiable_reference_scenario(
         "gross_pnl": expected["gross_pnl"],
         "fees_paid": pytest.approx(expected["fees"]),
         "net_pnl": pytest.approx(expected["net_pnl"]),
+        "reason_code": expected_reason_code,
+        "close_reason": expected_close_reason,
+        "exit_price": expected["exit_price"],
     }
 
 
@@ -570,6 +864,66 @@ def test_reference_trace_is_repeatable_for_identical_inputs() -> None:
     )
 
     assert second == first
+
+
+@pytest.mark.parametrize("adapter_type", [BacktestAdapter, PaperAdapter])
+def test_known_at_pipeline_is_invariant_to_future_candle_suffix(
+    adapter_type: type[BacktestAdapter] | type[PaperAdapter],
+) -> None:
+    prefix, future_suffix = _known_at_fixture_candles()
+
+    prefix_trace = _run_known_at_pipeline(
+        prefix,
+        adapter_type=adapter_type,
+    )
+    extended_trace = _run_known_at_pipeline(
+        [*prefix, *future_suffix],
+        adapter_type=adapter_type,
+    )
+
+    assert extended_trace[: len(prefix_trace)] == prefix_trace
+    assert prefix_trace[2]["selected_signal"]["event_key"] == "atr_expansion_long"
+    assert prefix_trace[2]["generated_order"] == {
+        "side": "buy",
+        "qty": 1.0,
+        "symbol": "REFERENCE-PERP",
+        "order_type": "market",
+        "requested_price": 101.0,
+    }
+    assert [
+        event["type"]
+        for event in prefix_trace[3]["execution_events"]
+    ] == ["target", "close"]
+    assert extended_trace[-1]["selected_signal"]["event_key"] == "atr_expansion_long"
+
+    terminal_position = prefix_trace[-1]["lifecycle_and_accounting"]["position"]
+    terminal_wallet = prefix_trace[-1]["lifecycle_and_accounting"]["wallet"]
+    assert terminal_position["close_reason"] == "TARGET"
+    assert terminal_position["reason_code"] == "EXEC_EXIT_TARGET"
+    assert terminal_position["exit_price"] == 111.0
+    assert terminal_position["moved_to_breakeven"] is False
+    assert terminal_wallet["locked_margin"].get("USD", 0.0) == pytest.approx(0.0)
+    assert terminal_wallet["balances"]["USD"] == pytest.approx(
+        STARTING_CASH
+        + terminal_position["gross_pnl"]
+        - terminal_position["fees_paid"]
+    )
+
+
+def test_known_at_pipeline_backtest_and_paper_semantics_agree() -> None:
+    prefix, future_suffix = _known_at_fixture_candles()
+    candles = [*prefix, *future_suffix]
+
+    backtest = _run_known_at_pipeline(
+        candles,
+        adapter_type=BacktestAdapter,
+    )
+    paper = _run_known_at_pipeline(
+        candles,
+        adapter_type=PaperAdapter,
+    )
+
+    assert paper == backtest
 
 
 def _run_multiple_target_reference(
@@ -812,6 +1166,77 @@ def test_multiple_target_reference_has_backtest_paper_parity_and_repeatability(
 
     assert second == first
     assert paper == first
+
+
+@pytest.mark.parametrize("adapter_type", [BacktestAdapter, PaperAdapter])
+def test_partial_target_then_stop_has_explicit_mixed_terminal_reason(
+    adapter_type: type[BacktestAdapter] | type[PaperAdapter],
+) -> None:
+    engine, gateway = _engine(
+        adapter_type,
+        base_risk_per_trade=8.0,
+        take_profit_orders=[
+            {"id": "tp-1", "ticks": 5, "size_fraction": 0.5},
+            {"id": "tp-2", "ticks": 10, "size_fraction": 0.5},
+        ],
+    )
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    entry = Candle(
+        time=start,
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        atr=ATR,
+        volume=10.0,
+    )
+    target_bar = Candle(
+        time=start + timedelta(minutes=1),
+        open=100.0,
+        high=105.0,
+        low=100.0,
+        close=105.0,
+        atr=ATR,
+        volume=10.0,
+    )
+    stop_bar = Candle(
+        time=start + timedelta(minutes=2),
+        open=100.0,
+        high=105.0,
+        low=96.0,
+        close=96.0,
+        atr=ATR,
+        volume=10.0,
+    )
+
+    position = engine.maybe_enter(entry, "long")
+    assert position is not None
+    first_events = engine.step(target_bar)
+    SettlementApplier(obs_enabled=False).apply(
+        first_events,
+        engine.exit_settlement,
+        execution_profile=engine.execution_profile,
+    )
+    terminal_events = engine.step(stop_bar)
+    SettlementApplier(obs_enabled=False).apply(
+        terminal_events,
+        engine.exit_settlement,
+        execution_profile=engine.execution_profile,
+    )
+
+    close_event = next(event for event in terminal_events if event["type"] == "close")
+    trade = position.serialize()
+    wallet = gateway.project()
+    assert [leg["status"] for leg in trade["legs"]] == ["target", "stop"]
+    assert trade["close_reason"] == "MIXED"
+    assert trade["reason_code"] == "EXEC_EXIT_CLOSE"
+    assert trade["exit_price"] == pytest.approx(100.5)
+    assert close_event["close_reason"] == "MIXED"
+    assert close_event["reason_code"] == "EXEC_EXIT_CLOSE"
+    assert close_event["exit_price"] == pytest.approx(100.5)
+    assert wallet.balances["USD"] == pytest.approx(
+        STARTING_CASH + trade["gross_pnl"] - trade["fees_paid"]
+    )
 
 
 def _run_terminal_reference(

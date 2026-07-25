@@ -1844,6 +1844,7 @@ class LadderRiskEngine:
             self._trade_material_value(getattr(trade, "fixed_horizon_bars", None)),
             isoformat(getattr(trade, "closed_at", None)),
             str(getattr(trade, "close_reason", "") or ""),
+            str(getattr(trade, "reason_code", "") or ""),
             self._trade_material_value(getattr(trade, "gross_pnl", None)),
             self._trade_material_value(getattr(trade, "fees_paid", None)),
             self._trade_material_value(getattr(trade, "net_pnl", None)),

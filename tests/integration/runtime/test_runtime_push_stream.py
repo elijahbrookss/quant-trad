@@ -458,6 +458,9 @@ def test_botlens_bootstrap_payload_emits_fact_batch_for_selected_series() -> Non
                 "status": "closed",
                 "entry_time": "2026-04-09T13:00:00Z",
                 "closed_at": "2026-04-09T13:30:00Z",
+                "exit_price": 100.0,
+                "close_reason": "STOP",
+                "reason_code": "EXEC_EXIT_STOP",
                 "direction": "short",
                 "position_commit_seq": 2,
             },
@@ -1341,6 +1344,8 @@ def test_trade_facts_emit_open_before_close_when_first_observed_already_closed()
         "status": "closed",
         "entry_time": "2026-04-09T13:55:00Z",
         "closed_at": "2026-04-09T14:00:00Z",
+        "exit_price": 101.0,
+        "close_reason": "BACKTEST_END",
         "direction": "long",
         "reason_code": "BACKTEST_END",
         "position_commit_seq": 2,
@@ -1370,6 +1375,9 @@ def test_trade_facts_same_bar_open_close_emits_deterministic_lifecycle_order() -
         "status": "closed",
         "entry_time": "2026-04-09T14:00:00Z",
         "closed_at": "2026-04-09T14:00:00Z",
+        "exit_price": 105.0,
+        "close_reason": "TARGET",
+        "reason_code": "EXEC_EXIT_TARGET",
         "direction": "long",
         "position_commit_seq": 2,
     }
@@ -1392,6 +1400,9 @@ def test_trade_facts_do_not_duplicate_open_for_previously_opened_trade() -> None
         "status": "closed",
         "entry_time": "2026-04-09T13:00:00Z",
         "closed_at": "2026-04-09T14:00:00Z",
+        "exit_price": 105.0,
+        "close_reason": "TARGET",
+        "reason_code": "EXEC_EXIT_TARGET",
         "direction": "long",
         "position_commit_seq": 2,
     }
@@ -1425,6 +1436,25 @@ def test_trade_facts_reject_missing_position_commit_seq() -> None:
         runtime._trade_facts(series=series, cache={})
 
 
+def test_trade_facts_reject_closed_snapshot_missing_terminal_evidence() -> None:
+    runtime = _runtime()
+    trade_payload = {
+        "trade_id": "trade-1",
+        "status": "closed",
+        "entry_time": "2026-04-09T13:00:00Z",
+        "closed_at": "2026-04-09T14:00:00Z",
+        "direction": "long",
+        "position_commit_seq": 2,
+    }
+    series = _trade_series(trade_payload, revision=1)
+
+    with pytest.raises(
+        RuntimeError,
+        match="domain snapshot missing terminal fields.*exit_price,close_reason,reason_code",
+    ):
+        runtime._trade_facts(series=series, cache={})
+
+
 def test_trade_facts_build_domain_events_with_required_lifecycle_and_simulated_times() -> None:
     runtime = _runtime()
     trade_payload = {
@@ -1432,6 +1462,9 @@ def test_trade_facts_build_domain_events_with_required_lifecycle_and_simulated_t
         "status": "closed",
         "entry_time": "2026-04-09T13:55:00Z",
         "closed_at": "2026-04-09T14:00:00Z",
+        "exit_price": 105.0,
+        "close_reason": "TARGET",
+        "reason_code": "EXEC_EXIT_TARGET",
         "direction": "long",
         "strategy_id": "strategy-1",
         "signal_id": "signal-1",
@@ -1589,6 +1622,9 @@ def test_trade_facts_use_engine_cursor_changes_without_full_trade_serialization(
                     "status": "closed",
                     "entry_time": "2026-02-01T00:05:00Z",
                     "closed_at": "2026-02-01T01:00:00Z",
+                    "exit_price": 105.0,
+                    "close_reason": "TARGET",
+                    "reason_code": "EXEC_EXIT_TARGET",
                     "direction": "long",
                     "position_commit_seq": 2,
                 }

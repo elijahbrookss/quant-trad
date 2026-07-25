@@ -86,8 +86,14 @@ promoted as trustworthy research inputs.
 - `tests/integration/runtime/test_bot_runtime_entry_execution.py::
   test_limit_maker_entry_does_not_fill_from_signal_bar_range` protects the
   signal-close boundary.
+- `tests/integration/runtime/test_reference_execution_scenarios.py::
+  test_known_at_pipeline_is_invariant_to_future_candle_suffix` compares exact
+  consumed candle fingerprints, indicator outputs and overlays, decisions,
+  generated orders, fills, position lifecycle, and wallet accounting through
+  the original cutoff for both backtest and paper adapters.
 - The cleanup acceptance plan still requires persisted end-to-end
-  prefix-truncation coverage before this invariant is considered fully proved.
+  CLI/job/report prefix-truncation coverage before this invariant is considered
+  fully proved.
 
 ## References
 

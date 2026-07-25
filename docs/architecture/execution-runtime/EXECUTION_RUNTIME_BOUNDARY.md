@@ -271,6 +271,18 @@ projected viewport changed. Overlay projection pressure degrades BotLens
 overlay freshness; it must not change decisions, fills, wallet effects,
 reports, or execution completion.
 
+## Terminal Trade Facts
+
+`LadderPosition` is the canonical owner of terminal trade state. When all legs
+close, it records market-time `closed_at`, quantity-weighted `exit_price`, a
+composition-level `close_reason` (`TARGET`, `STOP`, or `MIXED`), and the
+canonical execution `reason_code`. Fixed-horizon and terminal liquidation
+retain their explicit policy reason.
+
+A rejected exit fill leaves its leg and position open. Closed-trade fact
+projection requires all terminal fields and fails loudly when the domain
+snapshot is incomplete; it does not infer reasons or prices from legs.
+
 ## Live-Order Boundary
 
 The current execution runtime supports deterministic simulated fills and

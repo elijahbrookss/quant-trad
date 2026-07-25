@@ -548,39 +548,6 @@ class RuntimePushStreamMixin:
             observed = True
         return total if observed else None
 
-    @classmethod
-    def _weighted_exit_price_from_legs(cls, legs: Sequence[Mapping[str, Any]]) -> Optional[float]:
-        weighted = 0.0
-        contracts_total = 0.0
-        for leg in legs:
-            exit_price = cls._finite_trade_float(leg.get("exit_price"))
-            contracts = cls._finite_trade_float(leg.get("contracts"))
-            if exit_price is None or contracts is None:
-                continue
-            contracts = max(contracts, 0.0)
-            weighted += exit_price * contracts
-            contracts_total += contracts
-        if contracts_total <= 0:
-            return None
-        return weighted / contracts_total
-
-    @staticmethod
-    def _close_reason_from_legs(legs: Sequence[Mapping[str, Any]]) -> Optional[str]:
-        statuses = {
-            str(leg.get("status") or "").strip().lower()
-            for leg in legs
-            if str(leg.get("status") or "").strip().lower() and str(leg.get("status") or "").strip().lower() != "open"
-        }
-        if not statuses:
-            return None
-        if statuses <= {"target"}:
-            return "TARGET"
-        if statuses <= {"stop"}:
-            return "STOP"
-        if statuses <= {"backtest_end"}:
-            return "BACKTEST_END"
-        return "MIXED"
-
     @staticmethod
     def _open_trade_payload_from_closed_trade(trade_payload: Mapping[str, Any]) -> Dict[str, Any]:
         opened = dict(trade_payload)
@@ -705,15 +672,17 @@ class RuntimePushStreamMixin:
         exit_time = self._trade_payload_timestamp(enriched, "exit_time", "closed_at")
         if exit_time not in (None, ""):
             enriched.setdefault("exit_time", exit_time)
-        if fact_type == BOTLENS_FACT_TRADE_CLOSED and not enriched.get("exit_price"):
-            weighted_exit = self._weighted_exit_price_from_legs(legs)
-            if weighted_exit is not None:
-                enriched["exit_price"] = round(weighted_exit, 4)
-        if fact_type == BOTLENS_FACT_TRADE_CLOSED and not enriched.get("close_reason"):
-            close_reason = str(enriched.get("reason_code") or "").strip().upper() or self._close_reason_from_legs(legs)
-            if close_reason:
-                enriched["close_reason"] = close_reason
-                enriched.setdefault("reason_code", close_reason)
+        if not self._trade_payload_is_open(enriched):
+            missing_terminal_fields = [
+                field
+                for field in ("exit_price", "close_reason", "reason_code")
+                if enriched.get(field) in (None, "")
+            ]
+            if missing_terminal_fields:
+                raise RuntimeError(
+                    "bot_runtime_trade_close_fact_invalid: domain snapshot missing terminal fields "
+                    f"trade_id={trade_id or 'unknown'} fields={','.join(missing_terminal_fields)}"
+                )
         if legs:
             enriched["legs"] = [
                 {
