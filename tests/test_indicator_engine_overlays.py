@@ -540,6 +540,7 @@ def test_candle_stats_atr_overlays_are_emitted_in_their_declared_panes() -> None
             "overlap_window": 8,
             "slope_stability_lookback": 150,
             "warmup_bars": 200,
+            "atr_expansion_signal_threshold": 2.0,
         },
     )
     engine = IndicatorExecutionEngine([indicator])
@@ -593,6 +594,7 @@ def test_candle_stats_atr_overlays_do_not_wait_for_full_metric_readiness() -> No
             "overlap_window": 8,
             "slope_stability_lookback": 150,
             "warmup_bars": 200,
+            "atr_expansion_signal_threshold": 2.0,
         },
     )
     engine = IndicatorExecutionEngine([indicator])
@@ -633,6 +635,7 @@ def test_candle_stats_overlay_history_limit_can_match_replay_window() -> None:
             "overlap_window": 8,
             "slope_stability_lookback": 150,
             "warmup_bars": 200,
+            "atr_expansion_signal_threshold": 2.0,
         },
     )
     indicator.configure_replay_window(history_bars=650)
@@ -703,6 +706,7 @@ def _candle_stats(indicator_id: str = "stats-1") -> TypedCandleStatsIndicator:
             "overlap_window": 2,
             "slope_stability_lookback": 3,
             "warmup_bars": 6,
+            "atr_expansion_signal_threshold": 2.0,
         },
     )
 
