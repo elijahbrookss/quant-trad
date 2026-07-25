@@ -62,8 +62,10 @@ The removed bot-row fields are `status`, `last_run_at`, `last_stats`,
 
 Watchdog recovery and container ownership checks read active or expired
 `portal_bot_run_leases`, then join to the matching run and latest canonical
-lifecycle event. Startup and runtime control append lifecycle events and update
-the explicit run summary projection.
+lifecycle event. Startup and runtime control append lifecycle events; the same
+database transaction updates the explicit run summary projection. Direct
+status/timestamp writes through the run repository are rejected, and the
+projection can be rebuilt explicitly from ordered lifecycle events.
 
 ## Consequences
 

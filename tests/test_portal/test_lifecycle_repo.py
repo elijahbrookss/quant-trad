@@ -63,7 +63,11 @@ def test_record_bot_run_lifecycle_checkpoint_persists_canonical_rows_and_updates
 
     monkeypatch.setattr(lifecycle, "db", _db_available())
     monkeypatch.setattr(lifecycle, "record_bot_runtime_events_batch", _record)
-    monkeypatch.setattr(lifecycle, "_latest_canonical_lifecycle_row", _latest)
+    monkeypatch.setattr(
+        lifecycle,
+        "_validated_latest_lifecycle_in_session",
+        lambda session, run_id: _latest(run_id, session=session),
+    )
     monkeypatch.setattr(lifecycle, "_project_bot_run_summary_in_session", _project)
 
     result = lifecycle.record_bot_run_lifecycle_checkpoint(
@@ -177,8 +181,8 @@ def test_lifecycle_summary_projection_failure_propagates_from_event_transaction(
     monkeypatch.setattr(lifecycle, "record_bot_runtime_events_batch", _record)
     monkeypatch.setattr(
         lifecycle,
-        "_latest_canonical_lifecycle_row",
-        lambda _run_id, *, session=None: dict(latest),
+        "_validated_latest_lifecycle_in_session",
+        lambda session, run_id: dict(latest),
     )
     monkeypatch.setattr(
         lifecycle,
@@ -310,6 +314,71 @@ def test_run_summary_projection_updates_status_and_terminal_timestamp(
     assert run.ended_at == checkpoint
 
 
+def test_rebuild_bot_run_lifecycle_summary_restores_status_and_timestamps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_checkpoint = datetime(2026, 7, 24, 12, 0, 0)
+    final_checkpoint = datetime(2026, 7, 24, 12, 5, 0)
+    run = lifecycle.BotRunRecord(
+        run_id="run-1",
+        bot_id="bot-1",
+        status="idle",
+        run_type="backtest",
+        created_at=first_checkpoint,
+        updated_at=first_checkpoint,
+    )
+
+    class _Session:
+        def get(self, model, identity):
+            assert model is lifecycle.BotRunRecord
+            assert identity == "run-1"
+            return run
+
+    session = _Session()
+
+    @contextmanager
+    def _session_scope():
+        yield session
+
+    fake_db = SimpleNamespace(available=True, session=_session_scope)
+    rows = [
+        {
+            "event_id": "event-1",
+            "run_id": "run-1",
+            "bot_id": "bot-1",
+            "phase": "start_requested",
+            "status": "starting",
+            "checkpoint_at": first_checkpoint.isoformat() + "Z",
+        },
+        {
+            "event_id": "event-2",
+            "run_id": "run-1",
+            "bot_id": "bot-1",
+            "phase": "completed",
+            "status": "completed",
+            "checkpoint_at": final_checkpoint.isoformat() + "Z",
+        },
+    ]
+
+    def _project(_session, payload):
+        run.status = payload["status"]
+        return run.to_dict()
+
+    monkeypatch.setattr(lifecycle, "db", fake_db)
+    monkeypatch.setattr(
+        lifecycle,
+        "_canonical_lifecycle_rows_in_session",
+        lambda _session, _run_id: list(rows),
+    )
+    monkeypatch.setattr(lifecycle, "_project_bot_run_summary_in_session", _project)
+
+    result = lifecycle.rebuild_bot_run_lifecycle_summary("run-1")
+
+    assert result["status"] == "completed"
+    assert run.started_at == first_checkpoint
+    assert run.ended_at == final_checkpoint
+
+
 def test_lifecycle_checkpoint_payload_rejects_status_phase_mismatch() -> None:
     with pytest.raises(ValueError, match="status must match phase"):
         startup_lifecycle.lifecycle_checkpoint_payload(
@@ -319,4 +388,66 @@ def test_lifecycle_checkpoint_payload_rejects_status_phase_mismatch() -> None:
             status="running",
             owner="runtime",
             message="done",
+        )
+
+
+def test_canonical_lifecycle_rows_reject_unknown_phase() -> None:
+    with pytest.raises(ValueError, match="unknown canonical lifecycle phase"):
+        lifecycle._validate_canonical_lifecycle_rows(
+            [
+                {
+                    "event_id": "event-1",
+                    "run_id": "run-1",
+                    "phase": "mystery",
+                    "status": "idle",
+                    "checkpoint_at": "2026-07-24T12:00:00Z",
+                }
+            ],
+            run_id="run-1",
+        )
+
+
+def test_canonical_lifecycle_rows_reject_backdated_checkpoint() -> None:
+    with pytest.raises(ValueError, match="chronology regression"):
+        lifecycle._validate_canonical_lifecycle_rows(
+            [
+                {
+                    "event_id": "event-1",
+                    "run_id": "run-1",
+                    "phase": "container_booting",
+                    "status": "starting",
+                    "checkpoint_at": "2026-07-24T12:00:01Z",
+                },
+                {
+                    "event_id": "event-2",
+                    "run_id": "run-1",
+                    "phase": "loading_bot_config",
+                    "status": "starting",
+                    "checkpoint_at": "2026-07-24T12:00:00Z",
+                },
+            ],
+            run_id="run-1",
+        )
+
+
+def test_canonical_lifecycle_rows_reject_post_terminal_checkpoint() -> None:
+    with pytest.raises(ValueError, match="cannot append after terminal state"):
+        lifecycle._validate_canonical_lifecycle_rows(
+            [
+                {
+                    "event_id": "event-1",
+                    "run_id": "run-1",
+                    "phase": "completed",
+                    "status": "completed",
+                    "checkpoint_at": "2026-07-24T12:00:00Z",
+                },
+                {
+                    "event_id": "event-2",
+                    "run_id": "run-1",
+                    "phase": "stopped",
+                    "status": "stopped",
+                    "checkpoint_at": "2026-07-24T12:00:01Z",
+                },
+            ],
+            run_id="run-1",
         )

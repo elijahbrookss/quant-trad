@@ -119,7 +119,6 @@ def _default_container_state(bot_id: str) -> Dict[str, Any]:
 def _resolve_status(
     *,
     lifecycle_status: str,
-    run_status: str,
     engine_status: str,
     container_status: str,
     container_running: bool,
@@ -132,8 +131,6 @@ def _resolve_status(
         if lifecycle_status in _ACTIVE_STATUSES and container_status in {"exited", "dead"}:
             return "crashed"
         return lifecycle_status
-    if run_status in _ACTIVE_STATUSES | _TERMINAL_STATUSES:
-        return run_status
     if container_running and engine_status:
         return engine_status
     if container_status in {"exited", "dead"}:
@@ -410,16 +407,11 @@ def project_bot_state(
     )
     engine_status = _normalize_status(snapshot_runtime.get("status"), default="") if has_run_snapshot else ""
     lifecycle_status = _normalize_status(lifecycle_row.get("status"), default="")
-    run_status = _normalize_status(selected_run.get("status"), default="")
-    claimed_active = bool(selected_run_id) and (
-        lifecycle_status in _ACTIVE_STATUSES
-        or run_status in _ACTIVE_STATUSES
-    )
+    claimed_active = bool(selected_run_id) and lifecycle_status in _ACTIVE_STATUSES
     lease_payload = _lease_projection(_mapping(lease), claimed_active=claimed_active)
     container = dict(container_state or _default_container_state(bot_id))
     status = _resolve_status(
         lifecycle_status=lifecycle_status,
-        run_status=run_status,
         engine_status=engine_status,
         container_status=str(container.get("status") or ""),
         container_running=bool(container.get("running")),

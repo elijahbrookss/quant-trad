@@ -144,12 +144,8 @@ class _FakeStorage:
         row = dict(payload)
         assert str(row["run_id"]) in self.runs, "lifecycle checkpoints require an existing run row"
         self.lifecycle.setdefault(str(row["bot_id"]), []).append(row)
+        self.runs[str(row["run_id"])]["status"] = row["status"]
         return row
-
-    def update_bot_runtime_status(self, *, bot_id, run_id, status, telemetry_degraded=False):
-        _ = bot_id, telemetry_degraded
-        if str(run_id) in self.runs:
-            self.runs[str(run_id)]["status"] = status
 
 
 class _RecordingRunner:

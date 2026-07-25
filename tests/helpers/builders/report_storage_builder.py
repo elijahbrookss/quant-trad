@@ -4,6 +4,12 @@ from typing import Any, Dict, Optional
 
 from portal.backend.service.storage.repos.bots import get_bot, upsert_bot
 from portal.backend.service.storage.repos.instruments import upsert_instrument
+from portal.backend.service.storage.repos.lifecycle import record_bot_run_lifecycle_checkpoint
+from portal.backend.service.bots.startup_lifecycle import (
+    BotLifecyclePhase,
+    LifecycleOwner,
+    lifecycle_checkpoint_payload,
+)
 
 
 def ensure_report_bot(
@@ -55,8 +61,6 @@ def build_run_payload(
     timeframe: str = "1h",
     backtest_start: str = "2024-01-01T00:00:00Z",
     backtest_end: str = "2024-01-31T00:00:00Z",
-    started_at: Optional[str] = None,
-    ended_at: Optional[str] = None,
     datasource: Optional[str] = None,
     exchange: Optional[str] = None,
     summary: Optional[Dict[str, Any]] = None,
@@ -69,15 +73,12 @@ def build_run_payload(
         "strategy_id": strategy_id,
         "strategy_name": strategy_name,
         "run_type": "backtest",
-        "status": "completed",
         "timeframe": timeframe,
         "datasource": datasource,
         "exchange": exchange,
         "symbols": [symbol],
         "backtest_start": backtest_start,
         "backtest_end": backtest_end,
-        "started_at": started_at or backtest_start,
-        "ended_at": ended_at or backtest_end,
         "summary": dict(summary or {}),
         "config_snapshot": dict(
             config_snapshot
@@ -93,6 +94,35 @@ def build_run_payload(
             }
         ),
     }
+
+
+def record_completed_run_lifecycle(
+    *,
+    run_id: str,
+    bot_id: str,
+    started_at: str,
+    ended_at: str,
+) -> None:
+    record_bot_run_lifecycle_checkpoint(
+        lifecycle_checkpoint_payload(
+            bot_id=bot_id,
+            run_id=run_id,
+            phase=BotLifecyclePhase.START_REQUESTED.value,
+            owner=LifecycleOwner.BACKEND.value,
+            message="Test report run started.",
+            checkpoint_at=started_at,
+        )
+    )
+    record_bot_run_lifecycle_checkpoint(
+        lifecycle_checkpoint_payload(
+            bot_id=bot_id,
+            run_id=run_id,
+            phase=BotLifecyclePhase.COMPLETED.value,
+            owner=LifecycleOwner.RUNTIME.value,
+            message="Test report run completed.",
+            checkpoint_at=ended_at,
+        )
+    )
 
 
 def build_trade_payload(

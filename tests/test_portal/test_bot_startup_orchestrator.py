@@ -93,11 +93,6 @@ class _FakeStorage:
         self.lifecycle.append(dict(persisted))
         return persisted
 
-    def update_bot_runtime_status(self, *, bot_id, run_id, status, telemetry_degraded=False):
-        _ = bot_id, run_id, status, telemetry_degraded
-        self.order.append(f"status:{status}")
-
-
 class _FakeRunner:
     def __init__(self, order: list[str]) -> None:
         self.order = order
@@ -149,7 +144,7 @@ def test_startup_orchestrator_creates_run_before_container_launch():
     ]
     assert storage.lifecycle[-1]["phase"] == BotLifecyclePhase.AWAITING_CONTAINER_BOOT.value
     assert storage.lifecycle[0]["metadata"]["run_lease"]["runner_id"] == "runner-test"
-    assert [entry for entry in order if entry.startswith("status:")] == ["status:starting"]
+    assert {row["status"] for row in storage.lifecycle} == {"starting"}
 
 
 def test_startup_orchestrator_persists_startup_failed_phase():
@@ -180,7 +175,4 @@ def test_startup_orchestrator_persists_startup_failed_phase():
     assert storage.released_leases[-1]["status"] == "released"
     assert storage.lifecycle[-1]["phase"] == BotLifecyclePhase.STARTUP_FAILED.value
     assert "docker launch failed" in storage.lifecycle[-1]["message"]
-    assert [entry for entry in order if entry.startswith("status:")] == [
-        "status:starting",
-        "status:startup_failed",
-    ]
+    assert storage.lifecycle[-1]["status"] == "startup_failed"

@@ -869,11 +869,11 @@ def test_record_bot_runtime_events_batch_counts_same_batch_event_id_duplicates(
                 "payload": {
                     "schema_version": 1,
                     "event_id": "evt-dup",
-                    "event_ts": "2026-02-01T00:00:01Z",
+                    "event_ts": "2026-02-01T00:00:00Z",
                     "event_name": "HEALTH_STATUS_REPORTED",
                     "root_id": "evt-dup",
                     "parent_id": None,
-                    "correlation_id": "corr-2",
+                    "correlation_id": "corr-1",
                         "context": {"run_id": "run-1", "bot_id": "bot-1", "status": "running", "warning_types": ["runtime"]},
                 },
             },
@@ -888,6 +888,81 @@ def test_record_bot_runtime_events_batch_counts_same_batch_event_id_duplicates(
     assert outcome.duplicate_rows == 1
     assert outcome.duplicate_reasons == {"same_batch_event_id_duplicate": 1}
     assert observed["error"] is None
+
+
+def test_runtime_event_idempotency_rejects_divergent_payload() -> None:
+    existing = {
+        "event_id": "evt-1",
+        "bot_id": "bot-1",
+        "run_id": "run-1",
+        "event_type": "botlens_domain.health_status_reported",
+        "critical": False,
+        "schema_version": 1,
+        "event_time": "2026-02-01T00:00:00Z",
+        "payload": {
+            "event_id": "evt-1",
+            "event_name": "HEALTH_STATUS_REPORTED",
+            "context": {
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "status": "running",
+                "run_seq": 7,
+                "run_seq_status": "runtime_assigned",
+            },
+        },
+    }
+    retry = {
+        **existing,
+        "payload": {
+            "event_id": "evt-1",
+            "event_name": "HEALTH_STATUS_REPORTED",
+            "context": {
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "status": "degraded",
+            },
+        },
+    }
+
+    with pytest.raises(ValueError, match="divergent event material"):
+        runtime_events._assert_equivalent_runtime_event_id(existing, retry)
+
+
+def test_runtime_event_idempotency_ignores_allocator_owned_order_fields() -> None:
+    existing = {
+        "event_id": "evt-1",
+        "bot_id": "bot-1",
+        "run_id": "run-1",
+        "event_type": "botlens_domain.health_status_reported",
+        "critical": False,
+        "schema_version": 1,
+        "event_time": "2026-02-01T00:00:00Z",
+        "payload": {
+            "event_id": "evt-1",
+            "event_name": "HEALTH_STATUS_REPORTED",
+            "context": {
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "status": "running",
+                "run_seq": 7,
+                "run_seq_status": "runtime_assigned",
+            },
+        },
+    }
+    retry = {
+        **existing,
+        "payload": {
+            "event_id": "evt-1",
+            "event_name": "HEALTH_STATUS_REPORTED",
+            "context": {
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "status": "running",
+            },
+        },
+    }
+
+    runtime_events._assert_equivalent_runtime_event_id(existing, retry)
 
 
 def test_record_bot_runtime_events_batch_skips_existing_event_ids_before_run_seq_allocation(

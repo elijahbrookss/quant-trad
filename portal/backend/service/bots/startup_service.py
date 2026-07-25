@@ -112,7 +112,6 @@ class StartupStorage(Protocol):
     ) -> Dict[str, Any] | None: ...
     def upsert_bot_run(self, payload: Mapping[str, Any]) -> Dict[str, Any]: ...
     def record_bot_run_lifecycle_checkpoint(self, payload: Mapping[str, Any]) -> Dict[str, Any]: ...
-    def update_bot_runtime_status(self, *, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None: ...
 
 
 @dataclass
@@ -220,7 +219,6 @@ class BotStartupOrchestrator:
                 BotLifecyclePhase.STAMPING_STARTING_STATE.value,
                 message="Stamping backend-owned starting state before container launch.",
             )
-            self._stamp_starting_state(ctx)
             self._record_phase(
                 ctx,
                 BotLifecyclePhase.LAUNCHING_CONTAINER.value,
@@ -273,8 +271,6 @@ class BotStartupOrchestrator:
                 "bot_name": ctx.bot_record.get("name"),
                 "strategy_id": ctx.strategy_id or None,
                 "run_type": ctx.bot_record.get("run_type") or "backtest",
-                "status": BotLifecycleStatus.STARTING.value,
-                "started_at": ctx.started_at,
                 "config_snapshot": {
                     "request_id": ctx.request_id or None,
                     "start_request": {
@@ -377,14 +373,12 @@ class BotStartupOrchestrator:
                 "strategy_id": ctx.strategy_id or None,
                 "strategy_name": getattr(strategy, "name", None),
                 "run_type": ctx.bot_record.get("run_type") or "backtest",
-                "status": BotLifecycleStatus.STARTING.value,
                 "timeframe": getattr(strategy, "timeframe", None),
                 "datasource": getattr(strategy, "datasource", None),
                 "exchange": getattr(strategy, "exchange", None),
                 "symbols": list(ctx.runtime_dependency_metadata.get("symbols") or []),
                 "backtest_start": ctx.bot_record.get("backtest_start"),
                 "backtest_end": ctx.bot_record.get("backtest_end"),
-                "started_at": ctx.started_at,
                 "config_snapshot": {
                     "execution_mode": execution_mode,
                     "execution_behavior": execution_behavior,
@@ -405,13 +399,6 @@ class BotStartupOrchestrator:
                 "runtime_image": _BOT_RUNTIME_SETTINGS.image,
                 "storage_schema_version": RUNTIME_STORAGE_SCHEMA_VERSION,
             }
-        )
-
-    def _stamp_starting_state(self, ctx: BotStartupContext) -> None:
-        self.storage.update_bot_runtime_status(
-            bot_id=ctx.bot_id,
-            run_id=ctx.run_id,
-            status=BotLifecycleStatus.STARTING.value,
         )
 
     def _record_phase(
@@ -476,14 +463,5 @@ class BotStartupOrchestrator:
             )
         except Exception:  # noqa: BLE001
             logger.exception("bot_startup_failure_lifecycle_persist_failed | bot_id=%s | run_id=%s", ctx.bot_id, ctx.run_id)
-        try:
-            self.storage.update_bot_runtime_status(
-                bot_id=ctx.bot_id,
-                run_id=ctx.run_id,
-                status=BotLifecycleStatus.STARTUP_FAILED.value,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("bot_startup_failure_status_persist_failed | bot_id=%s | run_id=%s", ctx.bot_id, ctx.run_id)
-
 
 __all__ = ["BotStartupOrchestrator"]

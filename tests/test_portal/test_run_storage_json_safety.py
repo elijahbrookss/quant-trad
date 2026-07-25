@@ -4,6 +4,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Iterator
 
+import pytest
+
 from portal.backend.service.storage.repos import runs
 
 
@@ -40,9 +42,7 @@ def test_upsert_bot_run_json_sanitizes_nested_runtime_snapshot(monkeypatch) -> N
             "bot_name": "Bot 1",
             "strategy_id": "strategy-1",
             "run_type": "backtest",
-            "status": "starting",
             "symbols": ["BTCUSD"],
-            "started_at": datetime(2026, 5, 17, 7, 45, tzinfo=timezone.utc),
             "config_snapshot": {
                 "started_at": datetime(2026, 5, 17, 7, 45, tzinfo=timezone.utc),
                 "bot": {"updated_at": datetime(2026, 5, 17, 7, 46)},
@@ -55,3 +55,17 @@ def test_upsert_bot_run_json_sanitizes_nested_runtime_snapshot(monkeypatch) -> N
     assert result["config_hash"]
     assert result["material_config_hash"]
     assert "decision_ledger" not in result
+
+
+def test_upsert_bot_run_rejects_lifecycle_owned_fields(monkeypatch) -> None:
+    monkeypatch.setattr(runs, "db", _FakeDb())
+
+    with pytest.raises(ValueError, match="lifecycle fields are ledger-owned"):
+        runs.upsert_bot_run(
+            {
+                "run_id": "run-1",
+                "status": "completed",
+                "started_at": "2026-05-17T07:45:00Z",
+                "ended_at": "2026-05-17T07:46:00Z",
+            }
+        )

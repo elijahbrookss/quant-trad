@@ -291,7 +291,7 @@ def _bot_run_context(bot: Mapping[str, Any]) -> Dict[str, Any]:
     latest_run = _latest_run_for_bot(bot_id, lifecycle_map) if bot_id else {}
     latest_run_map = _as_mapping(latest_run)
     latest_run_id = _clean_text(latest_run_map.get("run_id")) or _clean_text(lifecycle_map.get("run_id"))
-    status = _clean_text(lifecycle_map.get("status")) or _clean_text(latest_run_map.get("status")) or "unknown"
+    status = _clean_text(lifecycle_map.get("status")) or "unknown"
     phase = _clean_text(lifecycle_map.get("phase"))
     active_run_id = latest_run_id if is_active_run_state(status=status, phase=phase) else None
     strategy_snapshot = _run_strategy_snapshot(latest_run_map)
@@ -349,7 +349,7 @@ def _bot_run_context(bot: Mapping[str, Any]) -> Dict[str, Any]:
         },
         "latest_run": {
             "run_id": latest_run_id,
-            "status": latest_run_map.get("status") or status,
+            "status": status,
             "started_at": latest_run_map.get("started_at"),
             "ended_at": latest_run_map.get("ended_at"),
             "summary": _metric_subset(summary),
@@ -384,7 +384,7 @@ def get_bot_run_status(bot_id: str, run_id: str) -> Dict[str, Any]:
         raise KeyError(f"run {normalized_run_id!r} does not belong to bot {bot_id!r}")
     if not run and not lifecycle:
         raise KeyError(normalized_run_id)
-    status = _clean_text(lifecycle.get("status")) or _clean_text(run.get("status")) or "unknown"
+    status = _clean_text(lifecycle.get("status")) or "unknown"
     phase = _clean_text(lifecycle.get("phase"))
     report_status = _report_status(normalized_run_id)
     terminal = is_terminal_run_state(status=status, phase=phase)

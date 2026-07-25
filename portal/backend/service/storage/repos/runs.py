@@ -18,6 +18,7 @@ _NON_MATERIAL_CONFIG_KEYS = {
     "updated_at",
     "warnings",
 }
+_LIFECYCLE_OWNED_RUN_FIELDS = frozenset({"status", "started_at", "ended_at"})
 
 
 def _merge_symbols(existing: Any, incoming: Any) -> list[str]:
@@ -53,10 +54,20 @@ def _material_config_payload(value: Any) -> Any:
 
 
 def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Insert or update a bot run snapshot."""
+    """Insert or update non-lifecycle run identity, provenance, and report data."""
 
     if not db.available:
         raise RuntimeError("Database not available for run persistence")
+    forbidden = sorted(
+        field
+        for field in _LIFECYCLE_OWNED_RUN_FIELDS
+        if field in payload
+    )
+    if forbidden:
+        raise ValueError(
+            "bot run lifecycle fields are ledger-owned; "
+            f"record a lifecycle checkpoint instead: {', '.join(forbidden)}"
+        )
     run_id = str(payload.get("run_id") or "").strip()
     if not run_id:
         raise ValueError("run_id is required for bot run persistence")
@@ -64,7 +75,7 @@ def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
         record = session.get(BotRunRecord, run_id)
         now = _utcnow()
         if record is None:
-            record = BotRunRecord(run_id=run_id)
+            record = BotRunRecord(run_id=run_id, status="idle")
             record.created_at = now
             session.add(record)
         record.bot_id = payload.get("bot_id") or record.bot_id
@@ -72,7 +83,6 @@ def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
         record.strategy_id = payload.get("strategy_id") or record.strategy_id
         record.strategy_name = payload.get("strategy_name") or record.strategy_name
         record.run_type = payload.get("run_type") or record.run_type or "backtest"
-        record.status = payload.get("status") or record.status or "completed"
         record.timeframe = payload.get("timeframe") or record.timeframe
         record.datasource = payload.get("datasource") or record.datasource
         record.exchange = payload.get("exchange") or record.exchange
@@ -81,8 +91,6 @@ def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
             record.symbols = _merge_symbols(record.symbols, symbols)
         record.backtest_start = _parse_optional_timestamp(payload.get("backtest_start")) or record.backtest_start
         record.backtest_end = _parse_optional_timestamp(payload.get("backtest_end")) or record.backtest_end
-        record.started_at = _parse_optional_timestamp(payload.get("started_at")) or record.started_at
-        record.ended_at = _parse_optional_timestamp(payload.get("ended_at")) or record.ended_at
         if payload.get("summary") is not None:
             record.summary = dict(_json_safe(payload.get("summary") or {}))
         if payload.get("config_snapshot") is not None:
@@ -158,6 +166,7 @@ def list_latest_bot_runs_by_bot_ids(bot_ids: List[str]) -> Dict[str, Dict[str, A
                     BotRunRecord.started_at.desc().nullslast(),
                     BotRunRecord.updated_at.desc().nullslast(),
                     BotRunRecord.created_at.desc().nullslast(),
+                    BotRunRecord.run_id.desc(),
                 )
             )
             .scalars()

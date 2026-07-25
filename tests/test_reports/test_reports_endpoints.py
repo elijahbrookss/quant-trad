@@ -14,6 +14,7 @@ from tests.helpers.builders.report_storage_builder import (
     build_run_payload,
     build_trade_payload,
     ensure_report_bot,
+    record_completed_run_lifecycle,
 )
 
 
@@ -39,6 +40,12 @@ def test_bot_run_config_snapshot_is_json_safe():
                 "bot": {"updated_at": datetime(2026, 5, 17, 7, 46)},
             },
         )
+    )
+    record_completed_run_lifecycle(
+        run_id=run_id,
+        bot_id=bot_id,
+        started_at="2024-01-01T00:00:00Z",
+        ended_at="2024-01-31T00:00:00Z",
     )
 
     persisted = get_bot_run(run_id)
@@ -71,6 +78,12 @@ def test_reports_list_and_fetch():
             backtest_end=_iso("2024-01-31T00:00:00Z"),
             summary=summary,
         )
+    )
+    record_completed_run_lifecycle(
+        run_id=run_id,
+        bot_id=bot_id,
+        started_at="2024-01-01T00:00:00Z",
+        ended_at="2024-01-31T00:00:00Z",
     )
     record_bot_trade(
         build_trade_payload(
@@ -176,6 +189,12 @@ def test_compare_returns_blocked_result_when_runs_are_not_ready():
                 timeframe="1h",
                 summary={"net_pnl": pnl, "total_trades": 0},
             )
+        )
+        record_completed_run_lifecycle(
+            run_id=run_id,
+            bot_id=bot_id,
+            started_at="2024-01-01T00:00:00Z",
+            ended_at="2024-01-31T00:00:00Z",
         )
 
     client = TestClient(app)

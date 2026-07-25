@@ -3354,7 +3354,7 @@ def build_botlens_domain_events_from_lifecycle(
     )
     lifecycle_event = _new_event(
         event_name=event_name,
-        event_id=f"botlens:{_event_hash('lifecycle', run_id, event_name.value, context.phase, context.status, checkpoint_at, context.component, context.message)}",
+        event_id=f"botlens:{_event_hash('lifecycle', run_id, event_name.value, context.phase, context.status, checkpoint_at, context.component, context.message, context.live, context.metadata, context.failure)}",
         event_ts=checkpoint_at,
         correlation_id=_correlation_id(
             run_id=run_id,

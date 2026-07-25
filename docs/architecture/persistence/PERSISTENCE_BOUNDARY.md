@@ -203,7 +203,10 @@ It is not assigned by frontend, projection, reporting, or export code.
 
 Within one producer/batch `seq`, persistence preserves the producer's semantic
 event order while assigning dense `run_seq` values. Event IDs are idempotency
-keys and never determine replay order.
+keys and never determine replay order. Reusing an event ID is a no-op only when
+the bot, run, event type, schema, criticality, event time, and semantic payload
+match. Allocator-owned `run_seq` fields are excluded from that comparison;
+divergent event material fails loudly.
 
 Runtime event persistence allocates `run_seq` from
 `portal_bot_run_event_seq_allocators` inside the same transaction that inserts
@@ -220,7 +223,14 @@ current-run summary projection. No lifecycle-specific history or current-state
 mirror is part of the schema contract.
 The canonical lifecycle append and run-summary projection commit in one
 database transaction; a projection failure rolls back both so terminal state
-cannot leave a permanently stale summary.
+cannot leave a permanently stale summary. Non-lifecycle run upserts reject
+`status`, `started_at`, and `ended_at`; startup, runtime control, reporting, and
+artifact writers cannot bypass the lifecycle ledger. Lifecycle admission
+rejects unknown phase/status/owner values, phase/status mismatches, backdated
+checkpoints, and checkpoints after a terminal state. The explicit
+`rebuild_bot_run_lifecycle_summary` operation restores projected status and
+timestamps from the ordered ledger while preserving independently stored run
+configuration, provenance, and report summary data.
 
 Runtime fact transport and durable persistence must not compete to write the
 same event id. Source-owned canonical facts, including wallet ledger facts, are

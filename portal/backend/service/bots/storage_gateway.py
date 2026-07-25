@@ -9,6 +9,7 @@ from ..storage.repos.lifecycle import (
     get_bot_run_lifecycle,
     get_latest_bot_run_lifecycle,
     list_latest_bot_run_lifecycles,
+    rebuild_bot_run_lifecycle_summary,
     record_bot_run_lifecycle_checkpoint,
 )
 from ..storage.repos.report_materializations import (
@@ -30,7 +31,6 @@ from ..storage.repos.runs import (
 )
 from ..storage.repos.runtime_events import (
     get_latest_bot_runtime_run_id,
-    update_bot_runtime_status,
 )
 
 
@@ -116,14 +116,10 @@ class BotStorageGateway(Protocol):
         payload: Mapping[str, Any],
     ) -> Dict[str, Any]: ...
 
-    def update_bot_runtime_status(
+    def rebuild_bot_run_lifecycle_summary(
         self,
-        *,
-        bot_id: str,
         run_id: str,
-        status: str,
-        telemetry_degraded: bool = False,
-    ) -> None: ...
+    ) -> Dict[str, Any]: ...
 
     def list_bot_runs(
         self,
@@ -257,20 +253,11 @@ class RepositoryBotStorageGateway:
     ) -> Dict[str, Any]:
         return record_bot_run_lifecycle_checkpoint(dict(payload))
 
-    def update_bot_runtime_status(
+    def rebuild_bot_run_lifecycle_summary(
         self,
-        *,
-        bot_id: str,
         run_id: str,
-        status: str,
-        telemetry_degraded: bool = False,
-    ) -> None:
-        update_bot_runtime_status(
-            bot_id=str(bot_id),
-            run_id=str(run_id),
-            status=str(status),
-            telemetry_degraded=bool(telemetry_degraded),
-        )
+    ) -> Dict[str, Any]:
+        return rebuild_bot_run_lifecycle_summary(str(run_id))
 
     def list_bot_runs(
         self,

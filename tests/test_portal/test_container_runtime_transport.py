@@ -26,20 +26,13 @@ def _wait_until(predicate, *, timeout_s: float = 1.0) -> None:
     raise AssertionError("timed out waiting for background transport worker")
 
 
-def test_persist_lifecycle_phase_does_not_write_status_for_non_terminal_phase(
+def test_persist_lifecycle_phase_uses_canonical_checkpoint_for_non_terminal_phase(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    status_calls: list[dict[str, object]] = []
-
     monkeypatch.setattr(
         runtime_mod,
         "record_bot_run_lifecycle_checkpoint",
         lambda payload: {**dict(payload), "status": "running"},
-    )
-    monkeypatch.setattr(
-        runtime_mod,
-        "update_bot_runtime_status",
-        lambda **kwargs: status_calls.append(dict(kwargs)),
     )
     monkeypatch.setattr(runtime_mod, "_notify_backend_lifecycle_event", lambda **kwargs: True)
 
@@ -54,23 +47,15 @@ def test_persist_lifecycle_phase_does_not_write_status_for_non_terminal_phase(
     )
 
     assert result["status"] == "running"
-    assert status_calls == []
 
 
-def test_persist_lifecycle_phase_writes_status_for_terminal_phase(
+def test_persist_lifecycle_phase_uses_canonical_checkpoint_for_terminal_phase(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    status_calls: list[dict[str, object]] = []
-
     monkeypatch.setattr(
         runtime_mod,
         "record_bot_run_lifecycle_checkpoint",
         lambda payload: {**dict(payload), "status": "completed"},
-    )
-    monkeypatch.setattr(
-        runtime_mod,
-        "update_bot_runtime_status",
-        lambda **kwargs: status_calls.append(dict(kwargs)),
     )
     monkeypatch.setattr(runtime_mod, "_notify_backend_lifecycle_event", lambda **kwargs: True)
 
@@ -85,30 +70,15 @@ def test_persist_lifecycle_phase_writes_status_for_terminal_phase(
     )
 
     assert result["status"] == "completed"
-    assert status_calls == [
-        {
-            "bot_id": "bot-1",
-            "run_id": "run-1",
-            "status": "completed",
-            "telemetry_degraded": False,
-        }
-    ]
 
 
-def test_persist_lifecycle_phase_writes_status_for_startup_failed_phase(
+def test_persist_lifecycle_phase_uses_canonical_checkpoint_for_startup_failed_phase(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    status_calls: list[dict[str, object]] = []
-
     monkeypatch.setattr(
         runtime_mod,
         "record_bot_run_lifecycle_checkpoint",
         lambda payload: {**dict(payload), "status": "startup_failed"},
-    )
-    monkeypatch.setattr(
-        runtime_mod,
-        "update_bot_runtime_status",
-        lambda **kwargs: status_calls.append(dict(kwargs)),
     )
     monkeypatch.setattr(runtime_mod, "_notify_backend_lifecycle_event", lambda **kwargs: True)
 
@@ -123,14 +93,6 @@ def test_persist_lifecycle_phase_writes_status_for_startup_failed_phase(
     )
 
     assert result["status"] == "startup_failed"
-    assert status_calls == [
-        {
-            "bot_id": "bot-1",
-            "run_id": "run-1",
-            "status": "startup_failed",
-            "telemetry_degraded": False,
-        }
-    ]
 
 
 def test_handle_worker_terminal_event_records_explicit_terminal_statuses() -> None:
@@ -263,7 +225,7 @@ def test_persist_paper_market_stream_run_summary_merges_existing_summary(
 
     assert len(persisted) == 1
     assert persisted[0]["run_id"] == "run-1"
-    assert persisted[0]["status"] == "completed"
+    assert "status" not in persisted[0]
     summary = persisted[0]["summary"]
     assert summary["existing_metric"] == 7
     assert summary["paper_market_stream"]["totals"]["event_counts"] == {

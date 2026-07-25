@@ -296,6 +296,93 @@ def _runtime_event_row_to_dict(row: BotRunEventRecord | Mapping[str, Any]) -> Di
     return _project_runtime_event_row(result)
 
 
+def _idempotency_payload(payload: Mapping[str, Any] | None) -> Dict[str, Any]:
+    normalized = _json_safe(dict(payload or {}))
+    context = normalized.get("context")
+    if isinstance(context, Mapping):
+        semantic_context = dict(context)
+        semantic_context.pop("run_seq", None)
+        semantic_context.pop("run_seq_status", None)
+        normalized["context"] = semantic_context
+    return normalized
+
+
+def _runtime_event_raw_mapping(
+    row: BotRunEventRecord | Mapping[str, Any],
+) -> Dict[str, Any]:
+    if isinstance(row, Mapping):
+        return dict(row)
+    to_dict = getattr(row, "to_dict", None)
+    if callable(to_dict):
+        return dict(to_dict())
+    return {}
+
+
+def _runtime_event_has_idempotency_material(row: BotRunEventRecord | Mapping[str, Any]) -> bool:
+    if isinstance(row, BotRunEventRecord):
+        return True
+    raw = _runtime_event_raw_mapping(row)
+    return all(
+        field in raw
+        for field in (
+            "event_id",
+            "bot_id",
+            "run_id",
+            "event_type",
+            "critical",
+            "schema_version",
+            "payload",
+            "event_time",
+        )
+    )
+
+
+def _runtime_event_idempotency_material(
+    row: BotRunEventRecord | Mapping[str, Any],
+) -> Dict[str, Any]:
+    if isinstance(row, BotRunEventRecord):
+        raw = {
+            "event_id": row.event_id,
+            "bot_id": row.bot_id,
+            "run_id": row.run_id,
+            "event_type": row.event_type,
+            "critical": row.critical,
+            "schema_version": row.schema_version,
+            "payload": row.payload,
+            "event_time": row.event_time,
+        }
+    else:
+        raw = _runtime_event_raw_mapping(row)
+    event_time = _parse_optional_timestamp(raw.get("event_time"))
+    return {
+        "event_id": str(raw.get("event_id") or "").strip(),
+        "bot_id": str(raw.get("bot_id") or "").strip(),
+        "run_id": str(raw.get("run_id") or "").strip(),
+        "event_type": str(raw.get("event_type") or "").strip(),
+        "critical": bool(raw.get("critical", False)),
+        "schema_version": int(raw.get("schema_version") or 1),
+        "payload": _idempotency_payload(
+            raw.get("payload") if isinstance(raw.get("payload"), Mapping) else {}
+        ),
+        "event_time": event_time.isoformat() if event_time is not None else None,
+    }
+
+
+def _assert_equivalent_runtime_event_id(
+    existing: BotRunEventRecord | Mapping[str, Any],
+    incoming: Mapping[str, Any],
+) -> None:
+    if not _runtime_event_has_idempotency_material(existing):
+        return
+    existing_material = _runtime_event_idempotency_material(existing)
+    incoming_material = _runtime_event_idempotency_material(incoming)
+    if existing_material != incoming_material:
+        raise ValueError(
+            "runtime event_id collision with divergent event material "
+            f"event_id={incoming_material['event_id']}"
+        )
+
+
 _WRITE_SOURCE_VALUES = frozenset({"ingest", "producer", "replay", "retry", "bootstrap", "projector", "transport", "unknown"})
 
 
@@ -1061,6 +1148,16 @@ def record_bot_runtime_event(payload: Dict[str, Any]) -> Dict[str, Any]:
                 else None
             )
             if existing_by_id is not None:
+                _assert_equivalent_runtime_event_id(existing_by_id, {
+                    "event_id": event_id,
+                    "bot_id": bot_id,
+                    "run_id": run_id,
+                    "event_type": event_type,
+                    "critical": bool(payload.get("critical", False)),
+                    "schema_version": schema_version,
+                    "payload": persisted_payload,
+                    "event_time": _parse_optional_timestamp(payload.get("event_time")),
+                })
                 db_round_trip_ms["value"] = max((time.perf_counter() - write_started) * 1000.0, 0.0)
                 return StorageWriteOutcome(
                     result=_runtime_event_row_to_dict(existing_by_id),
@@ -1296,10 +1393,14 @@ def record_bot_runtime_events_batch(
                 # while preserving semantic event order inside one fact batch.
                 rows.sort(key=lambda item: int(item["seq"]))
                 unique_rows: List[Dict[str, Any]] = []
-                pending_event_ids: set[str] = set()
+                pending_by_event_id: Dict[str, Dict[str, Any]] = {}
                 for row in rows:
                     event_id = str(row["event_id"])
-                    if event_id in pending_event_ids:
+                    if event_id in pending_by_event_id:
+                        _assert_equivalent_runtime_event_id(
+                            pending_by_event_id[event_id],
+                            row,
+                        )
                         duplicate_skips += 1
                         _increment_reason(
                             duplicate_reason_counts,
@@ -1307,7 +1408,7 @@ def record_bot_runtime_events_batch(
                         )
                         continue
                     unique_rows.append(row)
-                    pending_event_ids.add(event_id)
+                    pending_by_event_id[event_id] = row
                 _lock_run_seq_allocator(session, run_id=run_id)
                 existing_by_event_id = _existing_runtime_event_rows_for_event_ids(
                     session,
@@ -1317,6 +1418,10 @@ def record_bot_runtime_events_batch(
                 for row in unique_rows:
                     event_id = str(row["event_id"])
                     if event_id in existing_by_event_id:
+                        _assert_equivalent_runtime_event_id(
+                            existing_by_event_id[event_id],
+                            row,
+                        )
                         duplicate_skips += 1
                         _increment_reason(
                             duplicate_reason_counts,
@@ -1592,6 +1697,7 @@ def get_latest_bot_runtime_run_id(bot_id: str) -> Optional[str]:
                     func.coalesce(BotRunRecord.started_at, BotRunRecord.updated_at, BotRunRecord.created_at).desc(),
                     BotRunRecord.updated_at.desc(),
                     BotRunRecord.created_at.desc(),
+                    BotRunRecord.run_id.desc(),
                 )
                 .limit(1)
             )
@@ -1629,68 +1735,3 @@ def get_latest_bot_runtime_event(
             if row
             else None
         )
-
-
-def update_bot_runtime_status(*, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None:
-    if not db.available:
-        raise RuntimeError("database is required for bot status persistence")
-    started = time.perf_counter()
-    payloads = {
-        "portal_bot_runs": payload_size_bytes({"status": status, "telemetry_degraded": telemetry_degraded}),
-    }
-
-    def _write() -> StorageWriteOutcome:
-        with db.session() as session:
-            bot = session.get(BotRecord, bot_id)
-            if bot is None:
-                raise KeyError(f"Bot {bot_id} was not found")
-            run = session.get(BotRunRecord, run_id)
-            if run is None:
-                run = BotRunRecord(
-                    run_id=run_id,
-                    bot_id=bot_id,
-                    bot_name=bot.name,
-                    strategy_id=bot.strategy_id,
-                    run_type=bot.run_type or "backtest",
-                    status=status,
-                    started_at=_utcnow(),
-                    backtest_start=bot.backtest_start,
-                    backtest_end=bot.backtest_end,
-                )
-                session.add(run)
-            if not run.bot_name:
-                run.bot_name = bot.name
-            if not run.strategy_id:
-                run.strategy_id = bot.strategy_id
-            if not run.run_type:
-                run.run_type = bot.run_type or "backtest"
-            if run.backtest_start is None:
-                run.backtest_start = bot.backtest_start
-            if run.backtest_end is None:
-                run.backtest_end = bot.backtest_end
-            run.status = "telemetry_degraded" if telemetry_degraded else status
-            run.updated_at = _utcnow()
-            if status in {"stopped", "failed", "startup_failed", "crashed", "completed", "canceled", "cancelled", "degraded_terminal"}:
-                run.ended_at = _utcnow()
-        return StorageWriteOutcome(
-            result=None,
-            rows_written=1,
-            payload_bytes=sum(payloads.values()),
-        )
-
-    outcome = _execute_write_with_retry(
-        operation="update_bot_runtime_status",
-        storage_target="portal_bot_runs",
-        context={"run_id": run_id, "bot_id": bot_id, "status": status},
-        action=_write,
-    )
-    _observe_db_write_outcome(
-        storage_target="portal_bot_runs",
-        context={"run_id": run_id, "bot_id": bot_id, "status": status},
-        started=started,
-        outcome=StorageWriteOutcome(
-            result=None,
-            rows_written=1,
-            payload_bytes=payloads["portal_bot_runs"],
-        ),
-    )

@@ -1810,6 +1810,28 @@ def test_lifecycle_domain_event_carries_runtime_observability_metadata() -> None
     assert context["metadata"]["runtime_observability"]["degraded"]["reason_code"] == "subscriber_gap"
 
 
+def test_lifecycle_event_id_changes_when_metadata_changes() -> None:
+    base = {
+        "phase": "degraded",
+        "status": "degraded",
+        "owner": "runtime",
+        "message": "Runtime continuity degraded.",
+        "checkpoint_at": "2026-02-01T00:00:00Z",
+    }
+    first = build_botlens_domain_events_from_lifecycle(
+        bot_id="bot-1",
+        run_id="run-1",
+        lifecycle={**base, "metadata": {"reason_code": "provider_gap"}},
+    )[0]
+    second = build_botlens_domain_events_from_lifecycle(
+        bot_id="bot-1",
+        run_id="run-1",
+        lifecycle={**base, "metadata": {"reason_code": "runtime_churn"}},
+    )[0]
+
+    assert first.event_id != second.event_id
+
+
 def test_lifecycle_fault_event_preserves_runtime_transition_rejection_fields() -> None:
     events = build_botlens_domain_events_from_lifecycle(
         bot_id="bot-1",

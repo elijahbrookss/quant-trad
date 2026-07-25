@@ -13,6 +13,12 @@ from ...bots.botlens_domain_events import (
     build_botlens_domain_events_from_lifecycle,
 )
 from ...bots.botlens_projection_batches import projection_batch_from_payload, runtime_event_rows_from_batch
+from ...bots.startup_lifecycle import (
+    BotLifecyclePhase,
+    LifecycleOwner,
+    TERMINAL_PHASES,
+    status_for_phase,
+)
 from ._shared import (
     BotRecord,
     BotRunEventRecord,
@@ -43,6 +49,8 @@ _CANONICAL_LIFECYCLE_EVENT_NAMES = tuple(
         BotLensDomainEventName.RUN_CANCELLED,
     )
 )
+_CANONICAL_LIFECYCLE_PHASES = frozenset(phase.value for phase in BotLifecyclePhase)
+_CANONICAL_LIFECYCLE_OWNERS = frozenset(owner.value for owner in LifecycleOwner)
 
 
 def _truncate_lifecycle_message(value: Any) -> Optional[str]:
@@ -106,25 +114,92 @@ def _latest_canonical_lifecycle_row(run_id: str, *, session: Any | None = None) 
         return _canonical_lifecycle_row_from_runtime_row(row) if row is not None else None
 
 
+def _canonical_lifecycle_rows_in_session(session: Any, run_id: str) -> List[Dict[str, Any]]:
+    rows = (
+        session.execute(
+            select(BotRunEventRecord)
+            .where(BotRunEventRecord.run_id == str(run_id))
+            .where(BotRunEventRecord.event_name.in_(_CANONICAL_LIFECYCLE_EVENT_NAMES))
+            .order_by(
+                func.coalesce(BotRunEventRecord.run_seq, BotRunEventRecord.seq).asc(),
+                BotRunEventRecord.id.asc(),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [_canonical_lifecycle_row_from_runtime_row(row) for row in rows]
+
+
+def _validate_canonical_lifecycle_rows(
+    rows: List[Mapping[str, Any]],
+    *,
+    run_id: str,
+) -> None:
+    if not rows:
+        raise RuntimeError(f"canonical lifecycle ledger is empty run_id={run_id}")
+
+    previous_checkpoint = None
+    terminal_event_id = None
+    for index, row in enumerate(rows):
+        row_run_id = str(row.get("run_id") or "").strip()
+        phase = str(row.get("phase") or "").strip()
+        status = str(row.get("status") or "").strip()
+        event_id = str(row.get("event_id") or "").strip()
+        if row_run_id != run_id:
+            raise RuntimeError(
+                "canonical lifecycle run mismatch "
+                f"expected_run_id={run_id} row_run_id={row_run_id or '<missing>'}"
+            )
+        if phase not in _CANONICAL_LIFECYCLE_PHASES:
+            raise ValueError(
+                f"unknown canonical lifecycle phase run_id={run_id} phase={phase or '<missing>'}"
+            )
+        expected_status = status_for_phase(phase)
+        if status != expected_status:
+            raise ValueError(
+                "canonical lifecycle phase/status mismatch "
+                f"run_id={run_id} phase={phase} status={status or '<missing>'} "
+                f"expected_status={expected_status}"
+            )
+        checkpoint = _parse_optional_timestamp(row.get("checkpoint_at"))
+        if checkpoint is None:
+            raise ValueError(
+                f"canonical lifecycle checkpoint_at is required run_id={run_id} event_id={event_id}"
+            )
+        if previous_checkpoint is not None and checkpoint < previous_checkpoint:
+            raise ValueError(
+                "canonical lifecycle checkpoint chronology regression "
+                f"run_id={run_id} event_id={event_id} checkpoint_at={checkpoint.isoformat()} "
+                f"previous_checkpoint_at={previous_checkpoint.isoformat()}"
+            )
+        if terminal_event_id is not None:
+            raise ValueError(
+                "canonical lifecycle cannot append after terminal state "
+                f"run_id={run_id} terminal_event_id={terminal_event_id} event_id={event_id}"
+            )
+        if index == 0 and _lifecycle_event_name(phase=phase, status=status) == BotLensDomainEventName.RUN_READY:
+            raise RuntimeError(
+                "canonical lifecycle requires prior durable startup truth before RUN_READY "
+                f"run_id={run_id}"
+            )
+        if phase in TERMINAL_PHASES or status in _TERMINAL_LIFECYCLE_STATUSES:
+            terminal_event_id = event_id
+        previous_checkpoint = checkpoint
+
+
+def _validated_latest_lifecycle_in_session(session: Any, run_id: str) -> Dict[str, Any]:
+    rows = _canonical_lifecycle_rows_in_session(session, run_id)
+    _validate_canonical_lifecycle_rows(rows, run_id=run_id)
+    return dict(rows[-1])
+
+
 def _list_canonical_lifecycle_rows(run_id: str) -> List[Dict[str, Any]]:
     normalized_run_id = str(run_id or "").strip()
     if not normalized_run_id or not db.available:
         return []
     with db.session() as session:
-        rows = (
-            session.execute(
-                select(BotRunEventRecord)
-                .where(BotRunEventRecord.run_id == normalized_run_id)
-                .where(BotRunEventRecord.event_name.in_(_CANONICAL_LIFECYCLE_EVENT_NAMES))
-                .order_by(
-                    func.coalesce(BotRunEventRecord.run_seq, BotRunEventRecord.seq).asc(),
-                    BotRunEventRecord.id.asc(),
-                )
-            )
-            .scalars()
-            .all()
-        )
-        return [_canonical_lifecycle_row_from_runtime_row(row) for row in rows]
+        return _canonical_lifecycle_rows_in_session(session, normalized_run_id)
 
 
 def _latest_canonical_lifecycle_rows(run_ids: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -245,6 +320,16 @@ def record_bot_run_lifecycle_checkpoint(payload: Mapping[str, Any]) -> Dict[str,
     owner = str(payload.get("owner") or "").strip()
     if not bot_id or not run_id or not phase or not status or not owner:
         raise ValueError("bot_id, run_id, phase, status, and owner are required for bot lifecycle persistence")
+    if phase not in _CANONICAL_LIFECYCLE_PHASES:
+        raise ValueError(f"unknown bot lifecycle phase: {phase}")
+    expected_status = status_for_phase(phase)
+    if status != expected_status:
+        raise ValueError(
+            "bot lifecycle status must match phase "
+            f"phase={phase} status={status} expected_status={expected_status}"
+        )
+    if owner not in _CANONICAL_LIFECYCLE_OWNERS:
+        raise ValueError(f"unknown bot lifecycle owner: {owner}")
 
     message = _truncate_lifecycle_message(payload.get("message"))
     metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), Mapping) else {}
@@ -302,12 +387,7 @@ def record_bot_run_lifecycle_checkpoint(payload: Mapping[str, Any]) -> Dict[str,
 
     def _project_lifecycle_summary(session: Any) -> None:
         nonlocal lifecycle_state
-        lifecycle_state = _latest_canonical_lifecycle_row(run_id, session=session)
-        if lifecycle_state is None:
-            raise RuntimeError(
-                "canonical lifecycle append did not produce readable lifecycle truth "
-                f"run_id={run_id} event_id={canonical_lifecycle_event_id}"
-            )
+        lifecycle_state = _validated_latest_lifecycle_in_session(session, run_id)
         _project_bot_run_summary_in_session(session, lifecycle_state)
 
     record_bot_runtime_events_batch(
@@ -327,6 +407,38 @@ def record_bot_run_lifecycle_checkpoint(payload: Mapping[str, Any]) -> Dict[str,
     if lifecycle_state is None:
         raise RuntimeError("canonical lifecycle transactional projection did not run")
     return lifecycle_state
+
+
+def rebuild_bot_run_lifecycle_summary(run_id: str) -> Dict[str, Any]:
+    """Rebuild lifecycle-owned run summary fields from the canonical ledger."""
+
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        raise ValueError("run_id is required for lifecycle summary rebuild")
+    if not db.available:
+        raise RuntimeError("database is required for lifecycle summary rebuild")
+
+    with db.session() as session:
+        rows = _canonical_lifecycle_rows_in_session(session, normalized_run_id)
+        _validate_canonical_lifecycle_rows(rows, run_id=normalized_run_id)
+        first = dict(rows[0])
+        latest = dict(rows[-1])
+        _project_bot_run_summary_in_session(session, latest)
+        run_row = session.get(BotRunRecord, normalized_run_id)
+        if run_row is None:
+            raise RuntimeError(
+                f"lifecycle summary rebuild produced no run row run_id={normalized_run_id}"
+            )
+        run_row.started_at = _parse_optional_timestamp(first.get("checkpoint_at"))
+        if (
+            str(latest.get("phase") or "") in TERMINAL_PHASES
+            or str(latest.get("status") or "") in _TERMINAL_LIFECYCLE_STATUSES
+        ):
+            run_row.ended_at = _parse_optional_timestamp(latest.get("checkpoint_at"))
+        else:
+            run_row.ended_at = None
+        run_row.updated_at = _utcnow()
+        return run_row.to_dict()
 
 
 def get_bot_run_lifecycle(run_id: str) -> Optional[Dict[str, Any]]:
@@ -394,5 +506,6 @@ __all__ = [
     "get_latest_bot_run_lifecycle",
     "list_bot_run_lifecycle_events",
     "list_latest_bot_run_lifecycles",
+    "rebuild_bot_run_lifecycle_summary",
     "record_bot_run_lifecycle_checkpoint",
 ]

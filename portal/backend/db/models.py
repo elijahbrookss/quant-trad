@@ -693,7 +693,7 @@ class BotTradeEventRecord(Base):
 
 
 class BotRunRecord(Base):
-    """Database row representing a completed bot run report snapshot."""
+    """Database row representing run identity and lifecycle-derived summary state."""
 
     __tablename__ = "portal_bot_runs"
     __table_args__ = (
@@ -707,7 +707,7 @@ class BotRunRecord(Base):
     strategy_id = Column(String(64), nullable=True)
     strategy_name = Column(String(255), nullable=True)
     run_type = Column(String(32), nullable=False, default="backtest")
-    status = Column(String(32), nullable=False, default="completed")
+    status = Column(String(32), nullable=False, default="idle")
     timeframe = Column(String(32), nullable=True)
     datasource = Column(String(64), nullable=True)
     exchange = Column(String(64), nullable=True)

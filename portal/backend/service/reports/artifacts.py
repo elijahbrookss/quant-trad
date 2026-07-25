@@ -759,10 +759,6 @@ class RunArtifactBundle:
         self._upsert_run_index(
             config_snapshot=config_snapshot,
             summary=summary,
-            status=runtime_status,
-            started_at=artifact.get("started_at"),
-            ended_at=artifact.get("ended_at"),
-            decision_trace=list(artifact.get("decision_trace") or []),
         )
         if self.spool_dir.exists():
             shutil.rmtree(self.spool_dir)
@@ -857,10 +853,6 @@ class RunArtifactBundle:
         *,
         config_snapshot: Mapping[str, Any],
         summary: Mapping[str, Any],
-        status: str,
-        started_at: Any,
-        ended_at: Any,
-        decision_trace: Sequence[Mapping[str, Any]],
     ) -> None:
         strategy = next(iter(config_snapshot.get("strategies") or []), {})
         _storage().upsert_bot_run(
@@ -871,18 +863,14 @@ class RunArtifactBundle:
                 "strategy_id": strategy.get("id"),
                 "strategy_name": strategy.get("name"),
                 "run_type": self.run_type,
-                "status": status,
                 "timeframe": config_snapshot.get("timeframe"),
                 "datasource": config_snapshot.get("datasource"),
                 "exchange": config_snapshot.get("exchange"),
                 "symbols": list(config_snapshot.get("symbols") or []),
                 "backtest_start": self.config.get("backtest_start"),
                 "backtest_end": self.config.get("backtest_end"),
-                "started_at": started_at,
-                "ended_at": ended_at,
                 "summary": dict(summary or {}),
                 "config_snapshot": dict(config_snapshot or {}),
-                "decision_ledger": list(decision_trace or []),
             }
         )
 
@@ -1319,18 +1307,14 @@ def finalize_run_artifact_bundle_from_workers(
             "strategy_id": next(iter(config_snapshot.get("strategies") or []), {}).get("id"),
             "strategy_name": next(iter(config_snapshot.get("strategies") or []), {}).get("name"),
             "run_type": run_type,
-            "status": runtime_status,
             "timeframe": config_snapshot.get("timeframe"),
             "datasource": config_snapshot.get("datasource"),
             "exchange": config_snapshot.get("exchange"),
             "symbols": list(config_snapshot.get("symbols") or []),
             "backtest_start": config.get("backtest_start"),
             "backtest_end": config.get("backtest_end"),
-            "started_at": aggregate_artifact.get("started_at"),
-            "ended_at": aggregate_artifact.get("ended_at"),
             "summary": dict(summary or {}),
             "config_snapshot": dict(config_snapshot or {}),
-            "decision_ledger": decision_trace,
         }
     )
     if spool_dir.exists():

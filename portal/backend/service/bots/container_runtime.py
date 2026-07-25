@@ -77,9 +77,6 @@ from portal.backend.service.storage.repos.lifecycle import (
     record_bot_run_lifecycle_checkpoint,
 )
 from portal.backend.service.storage.repos.runs import get_bot_run, upsert_bot_run
-from portal.backend.service.storage.repos.runtime_events import (
-    update_bot_runtime_status,
-)
 
 logger = logging.getLogger(__name__)
 _OBSERVER = BackendObserver(component="container_runtime", event_logger=logger)
@@ -570,22 +567,6 @@ def _persist_lifecycle_phase(
     )
     lifecycle_state = record_bot_run_lifecycle_checkpoint(checkpoint)
     resolved_status = str(lifecycle_state.get("status") or checkpoint["status"]).strip()
-    if resolved_status in {
-        BotLifecycleStatus.STOPPED.value,
-        "failed",
-        BotLifecycleStatus.FAILED.value,
-        BotLifecycleStatus.STARTUP_FAILED.value,
-        BotLifecycleStatus.CRASHED.value,
-        BotLifecycleStatus.COMPLETED.value,
-        BotLifecycleStatus.CANCELED.value,
-        BotLifecycleStatus.DEGRADED_TERMINAL.value,
-    }:
-        update_bot_runtime_status(
-            bot_id=bot_id,
-            run_id=run_id,
-            status=resolved_status,
-            telemetry_degraded=resolved_status == BotLifecycleStatus.TELEMETRY_DEGRADED.value,
-        )
     lifecycle_event_delivered = _notify_backend_lifecycle_event(
         lifecycle_state={
             **dict(lifecycle_state or {}),
@@ -1138,7 +1119,6 @@ def _persist_paper_market_stream_run_summary(ctx: ContainerStartupContext) -> No
         {
             "run_id": ctx.run_id,
             "bot_id": ctx.bot_id,
-            "status": ctx.terminal_status_value or run.get("status") or BotLifecycleStatus.STOPPED.value,
             "summary": summary,
         }
     )
@@ -3480,8 +3460,6 @@ def run_observe_only_container_runtime(
             {
                 "run_id": run_id,
                 "bot_id": bot_id,
-                "status": BotLifecycleStatus.FAILED.value,
-                "ended_at": utc_now_iso(),
                 "summary": {
                     "execution_behavior": OBSERVE_ONLY_BEHAVIOR,
                     "error": message,

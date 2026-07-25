@@ -290,17 +290,12 @@ class BotRuntimeControlService:
                 "failure": dict(failure or {}),
             }
         )
-        self._storage_gateway().update_bot_runtime_status(
-            bot_id=bot_id,
-            run_id=run_id,
-            status=checkpoint["status"],
-        )
         return lifecycle_state
 
     @staticmethod
     def _reconciled_failure_phase(lifecycle: Mapping[str, Any] | None, run: Mapping[str, Any] | None) -> str:
         phase = str((lifecycle or {}).get("phase") or "").strip().lower()
-        status = str((run or {}).get("status") or (lifecycle or {}).get("status") or "").strip().lower()
+        status = str((lifecycle or {}).get("status") or "").strip().lower()
         if phase in {"live", "degraded", "telemetry_degraded", "awaiting_first_snapshot"}:
             return BotLifecyclePhase.CRASHED.value
         if status in {"running", "degraded", "telemetry_degraded"}:
@@ -510,8 +505,10 @@ class BotRuntimeControlService:
         latest_run_id = storage.get_latest_bot_runtime_run_id(bot_id)
         if latest_run_id and runner is not None:
             latest_lifecycle = storage.get_bot_run_lifecycle(latest_run_id)
-            latest_run = storage.get_bot_run(latest_run_id) or {}
-            if is_terminal_run_state(status=latest_run.get("status"), phase=(latest_lifecycle or {}).get("phase")):
+            if is_terminal_run_state(
+                status=(latest_lifecycle or {}).get("status"),
+                phase=(latest_lifecycle or {}).get("phase"),
+            ):
                 self._cleanup_terminal_container_before_start(bot_id=bot_id, run_id=latest_run_id, runner=runner)
         if runner is None:
             raise RuntimeError("docker runner resolution failed for bot start")
@@ -607,7 +604,7 @@ class BotRuntimeControlService:
         if str(run.get("bot_id") or lifecycle.get("bot_id") or bot_id) != str(bot_id):
             raise RuntimeError(f"run {target_run_id} does not belong to bot {bot_id}")
 
-        if is_terminal_run_state(status=run.get("status"), phase=lifecycle.get("phase")) or is_terminal_run_state(
+        if is_terminal_run_state(
             status=lifecycle.get("status"),
             phase=lifecycle.get("phase"),
         ):
