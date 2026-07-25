@@ -74,6 +74,6 @@ BEGIN
 END;
 $$;
 
-ALTER TABLE public.portal_bot_run_step_rollups_v1
+ALTER TABLE public.portal_bot_run_step_rollups
     ADD COLUMN IF NOT EXISTS histogram_bounds JSONB NOT NULL DEFAULT '[]'::jsonb,
     ADD COLUMN IF NOT EXISTS histogram_counts JSONB NOT NULL DEFAULT '[]'::jsonb;

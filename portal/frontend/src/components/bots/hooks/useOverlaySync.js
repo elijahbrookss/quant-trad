@@ -1,7 +1,6 @@
 import { useCallback, useRef } from 'react'
 import { collectActivePaneKeys } from '../../../chart/panes/registry.js'
 import { projectOverlayPayloads } from '../../../chart/overlays/projectOverlayPayloads.js'
-import { suppressLegacyTradeOverlays } from '../botlensOverlayFilters.js'
 import { BOTLENS_DEBUG, coalesce, toFiniteNumber, toSec } from '../chartDataUtils.js'
 
 const toRgba = (hex, alpha = 0.16) => {
@@ -36,10 +35,7 @@ export const useOverlaySync = ({
       const boxesByPane = { price: [...tradeRegions] }
       const tradeSegments = []
       const priceLines = [...tradePriceLines]
-      const renderableOverlayPayloads = suppressLegacyTradeOverlays(overlayPayloads)
-      const suppressedLegacyTradeOverlayCount = Array.isArray(overlayPayloads)
-        ? overlayPayloads.length - renderableOverlayPayloads.length
-        : 0
+      const renderableOverlayPayloads = Array.isArray(overlayPayloads) ? overlayPayloads : []
 
       const firstSeriesTime = candleData[0]?.time ?? null
       const lastSeriesTime = candleData[candleData.length - 1]?.time ?? null
@@ -149,13 +145,6 @@ export const useOverlaySync = ({
           })
         },
       })
-      if (BOTLENS_DEBUG && suppressedLegacyTradeOverlayCount > 0) {
-        console.debug('[BotLensChart] legacy_trade_overlay_suppressed', {
-          count: suppressedLegacyTradeOverlayCount,
-          reason: 'trade_visuals_project_from_runtime_trade_facts',
-        })
-      }
-
       const overlayMarkersByPane = projected.markersByPane
       const touchPointsByPane = projected.touchPointsByPane
       const segmentsByPane = projected.segmentsByPane

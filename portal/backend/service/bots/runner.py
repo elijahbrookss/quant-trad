@@ -82,6 +82,9 @@ class DockerBotRunner:
         run_lease_runner_id: str | None = None,
     ) -> Dict[str, str]:
         env_map = {key: str(value) for key, value in os.environ.items() if key.startswith("QT_")}
+        source_revision = str(os.getenv("SOURCE_REVISION") or "").strip()
+        if source_revision:
+            env_map["SOURCE_REVISION"] = source_revision
         if _DATABASE_SETTINGS.dsn:
             env_map["PG_DSN"] = str(_DATABASE_SETTINGS.dsn)
         provider_key = str(_SECURITY_SETTINGS.provider_credential_key or "").strip()

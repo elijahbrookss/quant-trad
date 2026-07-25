@@ -26,8 +26,8 @@
           "type": "postgres",
           "uid": "quanttrad-postgres"
         },
-        "query": "SELECT DISTINCT bot_id AS __value, bot_id AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE bot_id <> '' ORDER BY 1;",
-        "definition": "SELECT DISTINCT bot_id AS __value, bot_id AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE bot_id <> '' ORDER BY 1;",
+        "query": "SELECT DISTINCT bot_id AS __value, bot_id AS __text FROM public.portal_bot_run_step_rollups WHERE bot_id <> '' ORDER BY 1;",
+        "definition": "SELECT DISTINCT bot_id AS __value, bot_id AS __text FROM public.portal_bot_run_step_rollups WHERE bot_id <> '' ORDER BY 1;",
         "refresh": 2,
         "sort": 1,
         "includeAll": true,
@@ -47,8 +47,8 @@
           "type": "postgres",
           "uid": "quanttrad-postgres"
         },
-        "query": "SELECT DISTINCT run_id AS __value, run_id AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') ORDER BY 1 DESC LIMIT 1000;",
-        "definition": "SELECT DISTINCT run_id AS __value, run_id AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') ORDER BY 1 DESC LIMIT 1000;",
+        "query": "SELECT DISTINCT run_id AS __value, run_id AS __text FROM public.portal_bot_run_step_rollups WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') ORDER BY 1 DESC LIMIT 1000;",
+        "definition": "SELECT DISTINCT run_id AS __value, run_id AS __text FROM public.portal_bot_run_step_rollups WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') ORDER BY 1 DESC LIMIT 1000;",
         "refresh": 2,
         "sort": 1,
         "includeAll": true,
@@ -68,8 +68,8 @@
           "type": "postgres",
           "uid": "quanttrad-postgres"
         },
-        "query": "SELECT DISTINCT symbol AS __value, symbol AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE symbol <> '' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
-        "definition": "SELECT DISTINCT symbol AS __value, symbol AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE symbol <> '' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
+        "query": "SELECT DISTINCT symbol AS __value, symbol AS __text FROM public.portal_bot_run_step_rollups WHERE symbol <> '' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
+        "definition": "SELECT DISTINCT symbol AS __value, symbol AS __text FROM public.portal_bot_run_step_rollups WHERE symbol <> '' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
         "refresh": 2,
         "sort": 1,
         "includeAll": true,
@@ -89,8 +89,8 @@
           "type": "postgres",
           "uid": "quanttrad-postgres"
         },
-        "query": "SELECT DISTINCT step_name AS __value, step_name AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
-        "definition": "SELECT DISTINCT step_name AS __value, step_name AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
+        "query": "SELECT DISTINCT step_name AS __value, step_name AS __text FROM public.portal_bot_run_step_rollups WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
+        "definition": "SELECT DISTINCT step_name AS __value, step_name AS __text FROM public.portal_bot_run_step_rollups WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
         "refresh": 2,
         "sort": 1,
         "includeAll": true,
@@ -110,8 +110,8 @@
           "type": "postgres",
           "uid": "quanttrad-postgres"
         },
-        "query": "SELECT DISTINCT metric_name AS __value, metric_name AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
-        "definition": "SELECT DISTINCT metric_name AS __value, metric_name AS __text FROM public.portal_bot_run_step_rollups_v1 WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
+        "query": "SELECT DISTINCT metric_name AS __value, metric_name AS __text FROM public.portal_bot_run_step_rollups WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
+        "definition": "SELECT DISTINCT metric_name AS __value, metric_name AS __text FROM public.portal_bot_run_step_rollups WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
         "refresh": 2,
         "sort": 1,
         "includeAll": true,
@@ -161,7 +161,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), step_name AS metric, max(p95_value)::double precision AS value FROM public.portal_bot_run_step_rollups_v1 WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') AND metric_name='duration_ms' GROUP BY 1,2 ORDER BY 1;"
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), step_name AS metric, max(p95_value)::double precision AS value FROM public.portal_bot_run_step_rollups WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') AND metric_name='duration_ms' GROUP BY 1,2 ORDER BY 1;"
         }
       ],
       "fieldConfig": {
@@ -201,7 +201,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), metric_name AS metric, max(p95_value)::double precision AS value FROM public.portal_bot_run_step_rollups_v1 WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') AND metric_name <> 'duration_ms' GROUP BY 1,2 ORDER BY 1;"
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), metric_name AS metric, max(p95_value)::double precision AS value FROM public.portal_bot_run_step_rollups WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') AND metric_name <> 'duration_ms' GROUP BY 1,2 ORDER BY 1;"
         }
       ],
       "fieldConfig": {
@@ -241,7 +241,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), step_name AS metric, sum(sample_count)::double precision AS value FROM public.portal_bot_run_step_rollups_v1 WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') GROUP BY 1,2 ORDER BY 1;"
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), step_name AS metric, sum(sample_count)::double precision AS value FROM public.portal_bot_run_step_rollups WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') GROUP BY 1,2 ORDER BY 1;"
         }
       ],
       "fieldConfig": {
@@ -281,7 +281,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), metric_name AS metric, max(p95_value)::double precision AS value FROM public.portal_bot_run_step_rollups_v1 WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') AND metric_name IN ('canonical_append_ms','canonical_fact_persist_batch_ms','canonical_fact_persist_lag_ms','canonical_fact_queue_depth','step_trace_persist_batch_ms','step_trace_persist_lag_ms','step_trace_queue_depth','step_trace_dropped_count') GROUP BY 1,2 ORDER BY 1;"
+          "rawSql": "SELECT $__timeGroupAlias(bucket_start, $__interval), metric_name AS metric, max(p95_value)::double precision AS value FROM public.portal_bot_run_step_rollups WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') AND metric_name IN ('canonical_append_ms','canonical_fact_persist_batch_ms','canonical_fact_persist_lag_ms','canonical_fact_queue_depth','step_trace_persist_batch_ms','step_trace_persist_lag_ms','step_trace_queue_depth','step_trace_dropped_count') GROUP BY 1,2 ORDER BY 1;"
         }
       ],
       "fieldConfig": {
@@ -321,7 +321,7 @@
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT bucket_start AS time, run_id, step_name, metric_name, NULLIF(symbol, '') AS symbol, sample_count, round(p95_value::numeric, 2)::double precision AS p95_value, round(value_max::numeric, 2)::double precision AS max_value FROM public.portal_bot_run_step_rollups_v1 WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') ORDER BY value_max DESC, p95_value DESC LIMIT 100;"
+          "rawSql": "SELECT bucket_start AS time, run_id, step_name, metric_name, NULLIF(symbol, '') AS symbol, sample_count, round(p95_value::numeric, 2)::double precision AS p95_value, round(value_max::numeric, 2)::double precision AS max_value FROM public.portal_bot_run_step_rollups WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') ORDER BY value_max DESC, p95_value DESC LIMIT 100;"
         }
       ],
       "fieldConfig": {
@@ -361,7 +361,7 @@
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT step_name, metric_name, NULLIF(symbol, '') AS symbol, sum(sample_count) AS samples, round((sum(value_sum) / NULLIF(sum(sample_count), 0))::numeric, 2)::double precision AS avg_value, round(max(p95_value)::numeric, 2)::double precision AS p95_value, round(max(value_max)::numeric, 2)::double precision AS max_value, sum(error_count) AS errors FROM public.portal_bot_run_step_rollups_v1 WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') GROUP BY step_name, metric_name, symbol ORDER BY max_value DESC NULLS LAST, samples DESC LIMIT 200;"
+          "rawSql": "SELECT step_name, metric_name, NULLIF(symbol, '') AS symbol, sum(sample_count) AS samples, round((sum(value_sum) / NULLIF(sum(sample_count), 0))::numeric, 2)::double precision AS avg_value, round(max(p95_value)::numeric, 2)::double precision AS p95_value, round(max(value_max)::numeric, 2)::double precision AS max_value, sum(error_count) AS errors FROM public.portal_bot_run_step_rollups WHERE $__timeFilter(bucket_start) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') AND ('${metric_name:raw}'='__all' OR metric_name='${metric_name:raw}') GROUP BY step_name, metric_name, symbol ORDER BY max_value DESC NULLS LAST, samples DESC LIMIT 200;"
         }
       ],
       "fieldConfig": {

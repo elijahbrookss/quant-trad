@@ -13,7 +13,6 @@ import {
   Loader2,
 } from "lucide-react";
 import VisibilityToggle from "./ui/VisibilityToggle";
-import { buildSignalOutputEnabledMap } from "../utils/indicatorOutputs.js";
 
 // Keys to hide from param display
 const HIDE_KEYS = new Set([
@@ -75,10 +74,7 @@ const formatParamKey = (key) => {
 
 const enabledSignalOutputs = (indicator) => (
   Array.isArray(indicator?.typed_outputs)
-    ? indicator.typed_outputs.filter((entry) => {
-        if (entry?.type !== "signal" || !entry?.name) return false;
-        return buildSignalOutputEnabledMap(indicator)[String(entry.name).trim()] !== false;
-      })
+    ? indicator.typed_outputs.filter((entry) => entry?.type === "signal" && entry?.name)
     : []
 );
 

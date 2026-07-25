@@ -74,7 +74,7 @@ BEGIN
 END;
 $$;
 
-CREATE TABLE IF NOT EXISTS public.portal_bot_run_step_rollups_v1 (
+CREATE TABLE IF NOT EXISTS public.portal_bot_run_step_rollups (
     id SERIAL PRIMARY KEY,
     bucket_start TIMESTAMP NOT NULL,
     bucket_seconds INTEGER NOT NULL DEFAULT 10,
@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS public.portal_bot_run_step_rollups_v1 (
     error_count INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_portal_bot_run_step_rollups_v1_bucket_identity UNIQUE (
+    CONSTRAINT uq_portal_bot_run_step_rollups_bucket_identity UNIQUE (
         bucket_start,
         bucket_seconds,
         run_id,
@@ -115,14 +115,14 @@ CREATE TABLE IF NOT EXISTS public.portal_bot_run_step_rollups_v1 (
     )
 );
 
-CREATE INDEX IF NOT EXISTS ix_portal_bot_run_step_rollups_v1_run_bucket
-    ON public.portal_bot_run_step_rollups_v1 (run_id, bucket_start);
+CREATE INDEX IF NOT EXISTS ix_portal_bot_run_step_rollups_run_bucket
+    ON public.portal_bot_run_step_rollups (run_id, bucket_start);
 
-CREATE INDEX IF NOT EXISTS ix_portal_bot_run_step_rollups_v1_run_step_metric_bucket
-    ON public.portal_bot_run_step_rollups_v1 (run_id, step_name, metric_name, bucket_start);
+CREATE INDEX IF NOT EXISTS ix_portal_bot_run_step_rollups_run_step_metric_bucket
+    ON public.portal_bot_run_step_rollups (run_id, step_name, metric_name, bucket_start);
 
-CREATE INDEX IF NOT EXISTS ix_portal_bot_run_step_rollups_v1_bot_bucket
-    ON public.portal_bot_run_step_rollups_v1 (bot_id, bucket_start);
+CREATE INDEX IF NOT EXISTS ix_portal_bot_run_step_rollups_bot_bucket
+    ON public.portal_bot_run_step_rollups (bot_id, bucket_start);
 
 DROP TABLE IF EXISTS public.portal_bot_run_steps CASCADE;
 DROP TABLE IF EXISTS public.portal_bot_run_snapshots CASCADE;

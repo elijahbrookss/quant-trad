@@ -99,9 +99,15 @@ docs/architecture/
 
 ## Diagram Model
 
-Every boundary folder that needs diagrams owns a local `diagrams/` folder. A diagram should clarify a boundary, lifecycle, event flow, state model, projection path, or identity relationship. It should not exist only for decoration.
+Every boundary folder that needs diagrams owns a local `diagrams/` folder. A
+diagram should clarify a boundary, lifecycle, event flow, state model,
+projection path, or identity relationship. It should not exist only for
+decoration, and not every boundary needs one.
 
-Diagram sources are Mermaid `.mmd` files. SVG generation is deferred until Mermaid CLI is available in the environment.
+Diagram sources are Mermaid `.mmd` files. Generated SVGs should be rendered
+through `make architecture-svgs`, which writes each SVG beside its `.mmd` source
+in the local `diagrams/` folder. The source `.mmd` files remain canonical; the
+nearby SVGs are for quick reference while reading.
 
 ## Entry Points
 
@@ -130,13 +136,16 @@ Important current facts from those files were preserved in the relevant boundary
 - Paper/live runtime mode behavior is documented only as a composition seam because backtest is the implemented runtime shape today.
 - Identity keys are spread across strategy, runtime events, database rows, and projection code. The new identity doc explains current relationships, but the code does not yet have a single identity registry.
 - Provider session/calendar truth is still limited. Unknown gaps should remain unknown until explicit session evidence exists.
-- SVG diagram assets are not generated until Mermaid tooling is available.
+- SVG diagram assets are generated only when Mermaid tooling is available.
 
 ## Maintenance Rules
 
 - Keep contracts authoritative.
 - Prefer boundary docs over package docs.
 - Keep docs short enough to read, but complete enough to debug ownership and flow.
+- Keep explanatory docs intent-first. Avoid template sections that make a page
+  look organized without making the system easier to understand.
+- Add diagrams lightly. They should reduce cognitive load, not decorate a page.
 - Use ADRs for durable cross-boundary decisions; keep operational or incident-specific narratives in incident docs.
 - Link to source paths through frontmatter `code_paths`.
 - Rebuild [ARCHITECTURE_COMPONENT_INDEX.md](ARCHITECTURE_COMPONENT_INDEX.md) after frontmatter changes.

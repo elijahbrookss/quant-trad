@@ -123,24 +123,33 @@ def _normalise_stop_adjustments(payload: Mapping[str, Any]) -> Sequence[Dict[str
         if not isinstance(entry, Mapping):
             continue
 
-        # Schema v2: nested trigger/action format
-        trigger = entry.get("trigger")
-        action = entry.get("action")
+        trigger = entry.get("trigger") if isinstance(entry.get("trigger"), Mapping) else {}
+        action = entry.get("action") if isinstance(entry.get("action"), Mapping) else {}
 
-        if not isinstance(trigger, Mapping) or not isinstance(action, Mapping):
-            continue
-
-        trigger_type = str(trigger.get("type") or "").replace("_reached", "").lower()
+        trigger_type = str(
+            trigger.get("type")
+            or entry.get("trigger_type")
+            or ""
+        ).replace("_reached", "").lower()
         trigger_value = trigger.get("value")
-        action_type = str(action.get("type") or "").lower()
+        if trigger_value is None:
+            trigger_value = (
+                entry.get("trigger_value")
+                or entry.get("trigger_target_id")
+                or entry.get("target_id")
+            )
+        trigger_ticks = _coerce_float(entry.get("trigger_ticks"))
+        action_type = str(action.get("type") or entry.get("action_type") or "").lower()
 
         if trigger_type not in {"r_multiple", "target_hit"}:
             continue
 
         # Validate trigger value
         if trigger_type == "r_multiple":
-            trigger_value = _coerce_float(trigger_value, 0.0)
-            if trigger_value is None or trigger_value <= 0:
+            trigger_value = _coerce_float(trigger_value)
+            if (trigger_value is None or trigger_value <= 0) and (
+                trigger_ticks is None or trigger_ticks <= 0
+            ):
                 continue
         if trigger_type == "target_hit" and trigger_value is None:
             continue
@@ -151,12 +160,26 @@ def _normalise_stop_adjustments(payload: Mapping[str, Any]) -> Sequence[Dict[str
         atr_multiplier = None
 
         if action_type == "move_to_r":
-            action_value = _coerce_float(action.get("value"), 0.0)
+            action_value = _coerce_float(
+                action.get("value")
+                if action.get("value") is not None
+                else entry.get("action_value") or entry.get("action_r")
+            )
             if action_value is None or action_value <= 0:
                 continue
         elif action_type == "trail_atr":
-            atr_period = _coerce_int(action.get("atr_period"), 14)
-            atr_multiplier = _coerce_float(action.get("atr_multiplier"), 1.0)
+            atr_period = _coerce_int(
+                action.get("atr_period")
+                if action.get("atr_period") is not None
+                else entry.get("atr_period"),
+                14,
+            )
+            atr_multiplier = _coerce_float(
+                action.get("atr_multiplier")
+                if action.get("atr_multiplier") is not None
+                else entry.get("atr_multiplier"),
+                1.0,
+            )
         elif action_type != "move_to_breakeven":
             continue
 
@@ -164,6 +187,7 @@ def _normalise_stop_adjustments(payload: Mapping[str, Any]) -> Sequence[Dict[str
             "id": entry.get("id"),
             "trigger_type": trigger_type,
             "trigger_value": trigger_value,
+            "trigger_ticks": trigger_ticks if trigger_ticks and trigger_ticks > 0 else None,
             "action_type": action_type,
             "action_value": action_value,
             "atr_period": atr_period,
@@ -193,9 +217,11 @@ def _normalise_breakeven(
 
     legacy_ticks = _coerce_int(payload.get("breakeven_trigger_ticks"))
     if legacy_ticks is not None:
+        config["enabled"] = legacy_ticks > 0
         config["ticks"] = max(legacy_ticks, 0)
     legacy_target = _coerce_int(payload.get("breakeven_target_index"))
     if legacy_target is not None:
+        config["enabled"] = True
         config["target_index"] = max(legacy_target, 0)
     return config
 
@@ -206,6 +232,8 @@ def _normalise_trailing(
 ) -> Dict[str, Any]:
     config = dict(base)
     source = payload.get("trailing")
+    if source is None:
+        source = payload.get("trailing_stop")
     if isinstance(source, Mapping):
         if "enabled" in source:
             config["enabled"] = bool(source.get("enabled"))
@@ -238,13 +266,57 @@ def _normalise_trailing(
         config["activation_type"] = "target_hit"
     legacy_ticks = _coerce_int(payload.get("trail_after_ticks"))
     if legacy_ticks is not None:
+        config["enabled"] = legacy_ticks > 0
         config["ticks"] = max(legacy_ticks, 0)
     legacy_multiplier = _coerce_float(payload.get("trail_atr_multiplier"))
     if legacy_multiplier is not None:
+        config["enabled"] = legacy_multiplier > 0
         config["atr_multiplier"] = float(legacy_multiplier)
     legacy_period = _coerce_int(payload.get("trail_atr_period"))
     if legacy_period is not None:
         config["atr_period"] = max(legacy_period, 1)
+    return config
+
+
+def _normalise_exit_plan(
+    payload: Mapping[str, Any],
+    base: Mapping[str, Any],
+) -> Dict[str, Any]:
+    config = deepcopy(dict(base))
+    source = payload.get("exit_plan")
+    if not isinstance(source, Mapping):
+        source = {}
+
+    fixed_base = config.get("fixed_horizon")
+    fixed_config = dict(fixed_base) if isinstance(fixed_base, Mapping) else {}
+    fixed_source = source.get("fixed_horizon") or source.get("fixedHorizon")
+    if fixed_source is None:
+        fixed_source = payload.get("fixed_horizon")
+    if isinstance(fixed_source, Mapping):
+        if "enabled" in fixed_source:
+            fixed_config["enabled"] = bool(fixed_source.get("enabled"))
+        bars = _coerce_int(fixed_source.get("bars") or fixed_source.get("hold_bars"))
+        if bars is not None:
+            fixed_config["bars"] = max(bars, 0) or None
+            if bars > 0 and "enabled" not in fixed_source:
+                fixed_config["enabled"] = True
+        if fixed_source.get("price") is not None:
+            fixed_config["price"] = str(fixed_source.get("price") or "close").lower()
+        if fixed_source.get("order_type") is not None:
+            fixed_config["order_type"] = str(fixed_source.get("order_type") or "market").lower()
+    else:
+        legacy_bars = _coerce_int(payload.get("fixed_horizon_bars") or payload.get("hold_bars"))
+        if legacy_bars is not None:
+            fixed_config["bars"] = max(legacy_bars, 0) or None
+            fixed_config["enabled"] = legacy_bars > 0
+
+    if fixed_config.get("price") not in {"close"}:
+        fixed_config["price"] = "close"
+    if fixed_config.get("order_type") not in {"market"}:
+        fixed_config["order_type"] = "market"
+    if not fixed_config.get("bars"):
+        fixed_config["enabled"] = False
+    config["fixed_horizon"] = fixed_config
     return config
 
 
@@ -260,6 +332,8 @@ def normalise_template(
         raise ValueError("ATM template must be provided.")
 
     result = deepcopy(base or DEFAULT_ATM_TEMPLATE)
+    if isinstance(result.get("stop_adjustments"), list):
+        result["stop_adjustments"] = list(_normalise_stop_adjustments(result))
     if not template:
         return result
 
@@ -332,6 +406,20 @@ def normalise_template(
             result["initial_stop"]["atr_period"] = max(_coerce_int(initial_stop_config.get("atr_period"), 14) or 14, 1)
         if initial_stop_config.get("atr_multiplier") is not None:
             result["initial_stop"]["atr_multiplier"] = float(initial_stop_config.get("atr_multiplier") or 1.0)
+
+    result["exit_plan"] = _normalise_exit_plan(
+        payload,
+        result.get("exit_plan") if isinstance(result.get("exit_plan"), Mapping) else {},
+    )
+    result["breakeven"] = _normalise_breakeven(
+        payload,
+        result.get("breakeven") if isinstance(result.get("breakeven"), Mapping) else {},
+    )
+    result["trailing"] = _normalise_trailing(
+        payload,
+        result.get("trailing") if isinstance(result.get("trailing"), Mapping) else {},
+    )
+
     entries = _extract_take_profits(payload)
     if entries:
         orders, total_contracts = _normalise_take_profits(entries, result.get("contracts"))
@@ -363,7 +451,9 @@ def normalise_template(
 
     # Handle stop adjustments
     stop_adjustments = list(_normalise_stop_adjustments(payload))
-    if stop_adjustments:
+    if "stop_adjustments" in payload:
+        result["stop_adjustments"] = stop_adjustments
+    elif stop_adjustments:
         result["stop_adjustments"] = stop_adjustments
     elif not isinstance(result.get("stop_adjustments"), list):
         result["stop_adjustments"] = []

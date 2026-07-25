@@ -1,6 +1,7 @@
 import inspect
 import math
 import datetime as dt
+import time
 from typing import Optional, Tuple, Union, Dict, Any
 
 import pandas as pd
@@ -370,6 +371,43 @@ class CCXTProvider(BaseDataProvider):
         return mapping.get(self._exchange_id)
 
     @staticmethod
+    def _is_retryable_fetch_error(exc: Exception) -> bool:
+        retryable_types = [
+            getattr(ccxt, name, None)
+            for name in (
+                "RateLimitExceeded",
+                "DDoSProtection",
+                "RequestTimeout",
+                "ExchangeNotAvailable",
+                "NetworkError",
+            )
+        ]
+        retryable_types = [item for item in retryable_types if isinstance(item, type)]
+        if retryable_types and isinstance(exc, tuple(retryable_types)):
+            return True
+
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in (
+                "429",
+                "too many requests",
+                "rate limit",
+                "ratelimit",
+                "temporarily unavailable",
+                "request timeout",
+            )
+        )
+
+    def _retry_delay_seconds(self, attempt_index: int) -> float:
+        raw_rate_limit = getattr(self._exchange, "rateLimit", None)
+        try:
+            base = float(raw_rate_limit) / 1000.0 if raw_rate_limit else 0.5
+        except (TypeError, ValueError):
+            base = 0.5
+        return min(8.0, max(0.25, base) * (2 ** max(attempt_index, 0)))
+
+    @staticmethod
     def _parse_datetime(value: Union[dt.datetime, str]) -> pd.Timestamp:
         ts = pd.to_datetime(value, utc=True)
         if ts.tzinfo is None:
@@ -449,17 +487,35 @@ class CCXTProvider(BaseDataProvider):
                 capped_end = min(until_ms, cursor + request_limit * step_ms)
                 fetch_kwargs["params"] = {end_param: capped_end}
 
-            try:
-                batch = self._exchange.fetch_ohlcv(symbol, **fetch_kwargs)
-            except TypeError as exc:
-                if "params" in fetch_kwargs and "unexpected keyword" in str(exc):
-                    supports_params = False
-                    fetch_kwargs.pop("params", None)
+            max_attempts = 5
+            for attempt_index in range(max_attempts):
+                try:
                     batch = self._exchange.fetch_ohlcv(symbol, **fetch_kwargs)
-                else:
+                    break
+                except TypeError as exc:
+                    if "params" in fetch_kwargs and "unexpected keyword" in str(exc):
+                        supports_params = False
+                        fetch_kwargs.pop("params", None)
+                        batch = self._exchange.fetch_ohlcv(symbol, **fetch_kwargs)
+                        break
                     raise
-            except Exception as exc:  # pragma: no cover - network interaction
-                raise RuntimeError(f"CCXT fetch failed for {self._exchange_id}:{symbol} -> {exc}") from exc
+                except Exception as exc:  # pragma: no cover - network interaction
+                    if attempt_index >= max_attempts - 1 or not self._is_retryable_fetch_error(exc):
+                        raise RuntimeError(f"CCXT fetch failed for {self._exchange_id}:{symbol} -> {exc}") from exc
+                    delay_seconds = self._retry_delay_seconds(attempt_index)
+                    logger.warning(
+                        "ccxt_fetch_retry | exchange=%s | symbol=%s | timeframe=%s | attempt=%s | max_attempts=%s | delay_seconds=%.3f | error=%s",
+                        self._exchange_id,
+                        symbol,
+                        interval,
+                        attempt_index + 1,
+                        max_attempts,
+                        delay_seconds,
+                        exc,
+                    )
+                    time.sleep(delay_seconds)
+            else:  # pragma: no cover - defensive guard
+                raise RuntimeError(f"CCXT fetch failed for {self._exchange_id}:{symbol}: retry loop exhausted")
 
             if not batch:
                 break

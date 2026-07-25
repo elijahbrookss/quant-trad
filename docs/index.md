@@ -1,29 +1,40 @@
 # Quant-Trad Documentation
 
-Quant-Trad documentation is layered so readers do not have to start in deep architecture notes. Use this page as the portal, then move into contracts or component docs when you need source-of-truth detail.
+These docs are meant to help a competent engineer rebuild the system model in
+their head without pretending they remember every detail. Start with the intent,
+then drop into contracts or component notes only when the exact behavior
+matters.
 
 ## Start Here
 
-- [Overview](overview.md): what Quant-Trad is, why it exists, and how the main layers fit together.
-- [Getting started](getting-started.md): local setup, stack commands, endpoints, and common checks.
-- [README](../README.md): short project portal.
+- [Overview](overview.md): the shortest explanation of what the system is trying
+  to preserve.
+- [Getting started](getting-started.md): local setup, stack commands, endpoints,
+  and first checks.
+- [README](../README.md): project portal and capability summary.
 
 ## Core Concepts
 
-- [Runtime timeline](concepts/runtime-timeline.md): the `initialize -> apply_bar -> snapshot` model, known-at timing, and why runtime snapshots are the source of truth.
+The concept pages explain the normal shape before the edge cases. Read these
+when behavior feels surprising and you want to know what the system intended.
+
+- [Runtime timeline](concepts/runtime-timeline.md): `initialize -> apply_bar -> snapshot`, known-at timing, and runtime truth.
 - [Execution model](concepts/execution-model.md): FAST/FULL execution, pessimistic same-bar handling, intrabar fallback, and playback separation.
 - [Strategies and signals](concepts/strategies-and-signals.md): how typed indicator outputs become strategy decisions.
-- [BotLens](concepts/botlens.md): playback and runtime inspection as debugging surfaces.
+- [BotLens](concepts/botlens.md): runtime inspection and playback as projection surfaces, not execution engines.
 - [Reporting datasets](concepts/reporting-datasets.md): RunResearchDataset v1 and report/compare views.
 
 ## Engineering Architecture
+
+Architecture docs explain ownership: what owns truth, what is only a view, and
+which identifiers carry meaning across boundaries.
 
 - [Architecture overview](engineering/architecture.md): backend, runtime, frontend, storage, and observability relationships.
 - [Runtime engine](engineering/runtime-engine.md): concise runtime internals summary with links to deep design docs.
 - [Data layer](engineering/data-layer.md): provider adapters, candle cache, sparse candles, and gap classification.
 - [Observability](engineering/observability.md): logs, metrics, runtime events, BotLens diagnostics, Grafana, and Loki.
 - [Security layer](architecture/security/SECURITY_LAYER.md): credential handling, trust boundaries, known gaps, and post-quantum risk points.
-- [Engineering standards](engineering/README.md): testing, CI, observability doctrine, and documentation standards.
+- [Engineering standards](engineering/README.md): testing, CI, observability doctrine, and documentation writing guidance.
 
 ## Guides
 
@@ -35,7 +46,9 @@ Quant-Trad documentation is layered so readers do not have to start in deep arch
 
 ## Contracts
 
-Contracts are normative. If code or explanatory docs disagree with these files, the contract wins until corrected.
+Contracts are normative. If code or explanatory docs disagree with these files,
+the contract wins until corrected. Use them when you need the exact rule, not as
+the first page for learning the system.
 
 - [Contracts README](contracts/README.md)
 - [System contract](contracts/platform/00_system_contract.md)
@@ -45,7 +58,9 @@ Contracts are normative. If code or explanatory docs disagree with these files, 
 
 ## Deep Architecture
 
-Deep architecture docs describe implementation boundaries and component-specific rules. They are not the first read for most contributors.
+Deep architecture docs are for the moments when the concept is clear but the
+boundary matters. They should explain the current intent and source paths
+without becoming a pile of disconnected requirements.
 
 - [Architecture folder guide](architecture/README.md)
 - [System architecture model](architecture/system/SYSTEM_MODEL.md)
@@ -63,6 +78,7 @@ Deep architecture docs describe implementation boundaries and component-specific
 Quant-Trad is in active development. Keep docs precise and honest:
 
 - Document behavior that exists or is explicitly contracted.
-- Link to deep notes instead of copying large sections.
-- Keep unfinished areas as short caveats or deferred work, not broad tutorials.
+- Explain the system intent before listing exceptions.
+- Link to deep notes instead of copying large sections across files.
+- Keep unfinished areas as short caveats, not broad future tutorials.
 - Update contracts and architecture docs in the same pass when runtime, provider, storage, reporting, or observability behavior materially changes.

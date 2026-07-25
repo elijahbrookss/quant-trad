@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple
 
 from .amount_constraints import AmountConstraints, normalize_qty_with_constraints
@@ -145,6 +145,18 @@ class SpotExecutionModel:
             None,
         )
 
+    def execute_order(self, order) -> Tuple[Optional[FillResult], Optional[FillRejection]]:
+        """Execute a canonical runtime order through the deterministic fill model."""
+
+        fill, rejection = self.fill_market(
+            side=order.side,
+            requested_qty=order.requested_qty,
+            price=order.price,
+            fee_rate=order.fee_rate,
+            enforce_price_tick=order.enforce_price_tick,
+        )
+        return _annotate_execution_order(fill, order), rejection
+
     def _apply_slippage(self, price: float, side: str) -> float:
         if not self.slippage_bps:
             return float(price)
@@ -244,6 +256,18 @@ class DerivativesExecutionModel:
             None,
         )
 
+    def execute_order(self, order) -> Tuple[Optional[FillResult], Optional[FillRejection]]:
+        """Execute a canonical runtime order through the deterministic fill model."""
+
+        fill, rejection = self.fill_market(
+            side=order.side,
+            requested_qty=order.requested_qty,
+            price=order.price,
+            fee_rate=order.fee_rate,
+            enforce_price_tick=order.enforce_price_tick,
+        )
+        return _annotate_execution_order(fill, order), rejection
+
     def _apply_slippage(self, price: float, side: str) -> float:
         if not self.slippage_bps:
             return float(price)
@@ -255,6 +279,26 @@ class DerivativesExecutionModel:
         if tick in (None, 0):
             return float(price)
         return float(int((price + 1e-12) / tick)) * float(tick)
+
+
+def _annotate_execution_order(fill: Optional[FillResult], order) -> Optional[FillResult]:
+    if fill is None:
+        return None
+    role = str(getattr(order, "liquidity_role", "") or "taker").strip().lower()
+    role = "maker" if role == "maker" else "taker"
+    metadata = dict(fill.metadata or {})
+    order_metadata = getattr(order, "metadata", None)
+    if isinstance(order_metadata, dict):
+        metadata.update(order_metadata)
+    metadata["order_type"] = getattr(order, "order_type", None)
+    metadata["liquidity_role"] = role
+    metadata["price_source"] = getattr(order, "price_source", None)
+    return replace(
+        fill,
+        fee_role=role,
+        fee_rate=float(getattr(order, "fee_rate", fill.fee_rate) or 0.0),
+        metadata=metadata,
+    )
 
 
 __all__ = [

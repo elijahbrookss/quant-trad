@@ -8,6 +8,31 @@ Bot runtime owns:
 - risk and protection behavior
 - execution metrics
 
+## Position Exit Contract
+
+Position exits are runtime execution semantics.
+
+Supported runtime exit policies include:
+- target exits: resting take-profit limit fills using maker fee semantics,
+- stop exits: stop-market fills using taker fee semantics,
+- fixed-horizon exits: close remaining open legs after a configured number of
+  completed position bars using market/taker semantics,
+- terminal backtest closes: final market/taker close of otherwise open legs.
+
+Stop movement must be monotonic:
+- stop-to-breakeven and stop-adjustment rules may tighten the stop only,
+- trailing stops may activate only from known-at bar evidence and may tighten
+  only in the favorable direction,
+- no stop policy may loosen protection to keep a trade alive.
+
+Maker/taker classification belongs to execution outcomes. Reports and playback
+must consume the runtime-emitted `fee_type`, `fee_rate`, `order_type`, and
+`reason_code` fields instead of inferring liquidity from event names.
+
+Slippage remains an explicit modeling gap until paper/live fill evidence is
+available for calibration. Runtime must not hide unvalidated slippage
+assumptions inside fee or exit summaries.
+
 ## Playback Contract
 
 Playback is an audit/debug surface for execution semantics.

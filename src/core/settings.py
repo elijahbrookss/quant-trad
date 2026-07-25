@@ -61,11 +61,19 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_WAIT_TIMEOUT_SECONDS", ("async_jobs", "quantlab_job_wait_timeout_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_POLL_INTERVAL_SECONDS", ("async_jobs", "quantlab_job_poll_interval_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_RESULT_CACHE_TTL_SECONDS", ("async_jobs", "quantlab_result_cache_ttl_seconds")),
+    ("QT_ASYNC_JOBS_RECLAIM_INTERVAL_SECONDS", ("async_jobs", "reclaim_interval_seconds")),
     ("QT_WORKERS_INDICATORS_PROCESSES", ("workers", "indicators", "processes")),
     ("QT_WORKERS_INDICATORS_INDEX", ("workers", "indicators", "index")),
     ("QT_WORKERS_INDICATORS_TOTAL", ("workers", "indicators", "total")),
     ("QT_WORKERS_INDICATORS_IDLE_SLEEP_SECONDS", ("workers", "indicators", "idle_sleep_seconds")),
+    ("QT_WORKERS_INDICATORS_IDLE_SLEEP_MAX_SECONDS", ("workers", "indicators", "idle_sleep_max_seconds")),
     ("QT_WORKERS_INDICATORS_DB_WAIT_TIMEOUT_SECONDS", ("workers", "indicators", "db_wait_timeout_seconds")),
+    ("QT_WORKERS_RESEARCH_PROCESSES", ("workers", "research", "processes")),
+    ("QT_WORKERS_RESEARCH_INDEX", ("workers", "research", "index")),
+    ("QT_WORKERS_RESEARCH_TOTAL", ("workers", "research", "total")),
+    ("QT_WORKERS_RESEARCH_IDLE_SLEEP_SECONDS", ("workers", "research", "idle_sleep_seconds")),
+    ("QT_WORKERS_RESEARCH_IDLE_SLEEP_MAX_SECONDS", ("workers", "research", "idle_sleep_max_seconds")),
+    ("QT_WORKERS_RESEARCH_DB_WAIT_TIMEOUT_SECONDS", ("workers", "research", "db_wait_timeout_seconds")),
     ("QT_BOT_RUNTIME_MODE", ("bot_runtime", "mode")),
     ("QT_BOT_RUNTIME_TARGET", ("bot_runtime", "target")),
     ("QT_BOT_RUNTIME_IMAGE", ("bot_runtime", "image")),
@@ -116,6 +124,8 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_BOT_RUNTIME_BOTLENS_MAX_CANDLES", ("bot_runtime", "botlens", "max_candles")),
     ("QT_BOT_RUNTIME_BOTLENS_MAX_OVERLAYS", ("bot_runtime", "botlens", "max_overlays")),
     ("QT_BOT_RUNTIME_BOTLENS_MAX_OVERLAY_POINTS", ("bot_runtime", "botlens", "max_overlay_points")),
+    ("QT_BOT_RUNTIME_BOTLENS_OVERLAY_WINDOW_BARS", ("bot_runtime", "botlens", "overlay_window_bars")),
+    ("QT_BOT_RUNTIME_BOTLENS_OVERLAY_EMIT_EVERY_BARS", ("bot_runtime", "botlens", "overlay_emit_every_bars")),
     ("QT_BOT_RUNTIME_BOTLENS_MAX_CLOSED_TRADES", ("bot_runtime", "botlens", "max_closed_trades")),
     ("QT_BOT_RUNTIME_BOTLENS_MAX_LOGS", ("bot_runtime", "botlens", "max_logs")),
     ("QT_BOT_RUNTIME_BOTLENS_MAX_DECISIONS", ("bot_runtime", "botlens", "max_decisions")),
@@ -168,6 +178,14 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_REPORTS_ARTIFACTS_INCLUDE_OVERLAYS", ("reports", "artifacts", "include_overlays")),
     ("QT_REPORTS_ARTIFACTS_CAPTURE_BACKTEST", ("reports", "artifacts", "capture_backtest")),
     ("QT_REPORTS_ARTIFACTS_CAPTURE_LIVE", ("reports", "artifacts", "capture_live")),
+    (
+        "QT_REPORTS_MATERIALIZATION_TERMINAL_AUTO_ENQUEUE_ENABLED",
+        ("reports", "materialization", "terminal_auto_enqueue_enabled"),
+    ),
+    (
+        "QT_REPORTS_MATERIALIZATION_TERMINAL_AUTO_ENQUEUE_DELAY_SECONDS",
+        ("reports", "materialization", "terminal_auto_enqueue_delay_seconds"),
+    ),
 ]
 
 
@@ -424,6 +442,7 @@ class AsyncJobSettings:
     quantlab_job_wait_timeout_seconds: float
     quantlab_job_poll_interval_seconds: float
     quantlab_result_cache_ttl_seconds: float
+    reclaim_interval_seconds: float
 
 
 @dataclass(frozen=True)
@@ -432,12 +451,14 @@ class WorkerGroupSettings:
     index: int
     total: int
     idle_sleep_seconds: float
+    idle_sleep_max_seconds: float
     db_wait_timeout_seconds: float
 
 
 @dataclass(frozen=True)
 class WorkersSettings:
     indicators: WorkerGroupSettings
+    research: WorkerGroupSettings
 
 
 @dataclass(frozen=True)
@@ -472,6 +493,8 @@ class BotlensSettings:
     max_candles: int
     max_overlays: int
     max_overlay_points: int
+    overlay_window_bars: int
+    overlay_emit_every_bars: int
     max_closed_trades: int
     max_logs: int
     max_decisions: int
@@ -622,8 +645,15 @@ class ReportArtifactSettings:
 
 
 @dataclass(frozen=True)
+class ReportMaterializationSettings:
+    terminal_auto_enqueue_enabled: bool
+    terminal_auto_enqueue_delay_seconds: float
+
+
+@dataclass(frozen=True)
 class ReportSettings:
     artifacts: ReportArtifactSettings
+    materialization: ReportMaterializationSettings
 
 
 @dataclass(frozen=True)
@@ -650,6 +680,7 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
     async_jobs_payload = _coerce_mapping(payload.get("async_jobs"))
     workers_payload = _coerce_mapping(payload.get("workers"))
     indicator_workers_payload = _coerce_mapping(workers_payload.get("indicators"))
+    research_workers_payload = _coerce_mapping(workers_payload.get("research"))
     bot_runtime_payload = _coerce_mapping(payload.get("bot_runtime"))
     snapshot_payload = _coerce_mapping(bot_runtime_payload.get("snapshot"))
     push_payload = _coerce_mapping(bot_runtime_payload.get("push"))
@@ -670,6 +701,7 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
     frontend_botlens_payload = _coerce_mapping(frontend_payload.get("botlens"))
     reports_payload = _coerce_mapping(payload.get("reports"))
     report_artifacts_payload = _coerce_mapping(reports_payload.get("artifacts"))
+    report_materialization_payload = _coerce_mapping(reports_payload.get("materialization"))
 
     default_origins = [
         "http://localhost",
@@ -757,6 +789,9 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             quantlab_result_cache_ttl_seconds=_coerce_float(
                 async_jobs_payload.get("quantlab_result_cache_ttl_seconds"), 300.0, minimum=0.0
             ),
+            reclaim_interval_seconds=_coerce_float(
+                async_jobs_payload.get("reclaim_interval_seconds"), 30.0, minimum=0.0
+            ),
         ),
         workers=WorkersSettings(
             indicators=WorkerGroupSettings(
@@ -766,8 +801,25 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                 idle_sleep_seconds=_coerce_float(
                     indicator_workers_payload.get("idle_sleep_seconds"), 0.2, minimum=0.05
                 ),
+                idle_sleep_max_seconds=_coerce_float(
+                    indicator_workers_payload.get("idle_sleep_max_seconds"), 1.5, minimum=0.05
+                ),
                 db_wait_timeout_seconds=_coerce_float(
                     indicator_workers_payload.get("db_wait_timeout_seconds"), 120.0, minimum=0.5
+                ),
+            ),
+            research=WorkerGroupSettings(
+                processes=_coerce_int(research_workers_payload.get("processes"), 2, minimum=1),
+                index=_coerce_int(research_workers_payload.get("index"), 0, minimum=0),
+                total=_coerce_int(research_workers_payload.get("total"), 1, minimum=1),
+                idle_sleep_seconds=_coerce_float(
+                    research_workers_payload.get("idle_sleep_seconds"), 0.2, minimum=0.05
+                ),
+                idle_sleep_max_seconds=_coerce_float(
+                    research_workers_payload.get("idle_sleep_max_seconds"), 2.0, minimum=0.05
+                ),
+                db_wait_timeout_seconds=_coerce_float(
+                    research_workers_payload.get("db_wait_timeout_seconds"), 120.0, minimum=0.5
                 ),
             ),
         ),
@@ -835,6 +887,8 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                 max_candles=_coerce_int(botlens_payload.get("max_candles"), 320, minimum=50),
                 max_overlays=_coerce_int(botlens_payload.get("max_overlays"), 400, minimum=50),
                 max_overlay_points=_coerce_int(botlens_payload.get("max_overlay_points"), 160, minimum=20),
+                overlay_window_bars=_coerce_int(botlens_payload.get("overlay_window_bars"), 640, minimum=20),
+                overlay_emit_every_bars=_coerce_int(botlens_payload.get("overlay_emit_every_bars"), 25, minimum=1),
                 max_closed_trades=_coerce_int(botlens_payload.get("max_closed_trades"), 240, minimum=20),
                 max_logs=_coerce_int(botlens_payload.get("max_logs"), 300, minimum=50),
                 max_decisions=_coerce_int(botlens_payload.get("max_decisions"), 600, minimum=100),
@@ -848,7 +902,7 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             step_trace=StepTraceSettings(
                 queue_max=_coerce_int(step_trace_payload.get("queue_max"), 8192, minimum=1),
                 batch_size=_coerce_int(step_trace_payload.get("batch_size"), 512, minimum=1),
-                flush_interval_ms=_coerce_int(step_trace_payload.get("flush_interval_ms"), 500, minimum=1),
+                flush_interval_ms=_coerce_int(step_trace_payload.get("flush_interval_ms"), 5000, minimum=1),
                 overflow_policy=_coerce_str(step_trace_payload.get("overflow_policy"), "drop_oldest"),
             ),
             telemetry=TelemetrySettings(
@@ -1003,6 +1057,14 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                 capture_backtest=_coerce_bool(report_artifacts_payload.get("capture_backtest"), True),
                 capture_live=_coerce_bool(report_artifacts_payload.get("capture_live"), False),
             ),
+            materialization=ReportMaterializationSettings(
+                terminal_auto_enqueue_enabled=_coerce_bool(
+                    report_materialization_payload.get("terminal_auto_enqueue_enabled"), False
+                ),
+                terminal_auto_enqueue_delay_seconds=_coerce_float(
+                    report_materialization_payload.get("terminal_auto_enqueue_delay_seconds"), 0.0, minimum=0.0
+                ),
+            ),
         ),
     )
 
@@ -1048,6 +1110,7 @@ __all__ = [
     "ObservabilitySettings",
     "ProviderRuntimeSettings",
     "ReportArtifactSettings",
+    "ReportMaterializationSettings",
     "ReportSettings",
     "SecuritySettings",
     "TelemetrySettings",

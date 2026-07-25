@@ -61,7 +61,7 @@ The current provider loads these from the encrypted provider credential store.
 loading provider credentials.
 
 ```bash
-python -m cli.main providers credentials add --provider COINBASE --venue COINBASE_DIRECT
+qt setup provider coinbase
 ```
 
 Recommended permission posture:
@@ -464,8 +464,7 @@ The first run is an operational stability test, not a profitability test.
 
 1. Create or verify Coinbase API credentials if authenticated metadata is
    required.
-2. Save credentials through `python -m cli.main providers credentials add` for
-   `COINBASE` / `COINBASE_DIRECT`.
+2. Save credentials through `qt setup provider coinbase`.
 3. Verify product metadata for the target symbols, starting with
    `BIP-20DEC30-CDE`, `ETP-20DEC30-CDE`, and `XPP-20DEC30-CDE`.
 4. Connect to `wss://advanced-trade-ws.coinbase.com`.

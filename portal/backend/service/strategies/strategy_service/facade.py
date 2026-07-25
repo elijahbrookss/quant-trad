@@ -14,18 +14,14 @@ from ...market import instrument_service
 from ...risk.atm import normalise_template
 from ...indicators.indicator_service import get_instance_meta
 from ...strategy_variant_resolution import EffectiveStrategyConfig, materialize_output_filters, resolve_strategy_variant
-from engines.bot_runtime.core.execution_profile import compile_runtime_profile_or_error
 from risk import normalise_risk_config
 from strategies.contracts import CompiledStrategySpec, DecisionRuleSpec
 from strategies.compiler import compile_strategy, normalize_rule_intent
 from . import persistence
-from .typed_preview import evaluate_strategy_preview
+from .typed_preview import build_strategy_preview_compare, build_strategy_preview_summary, evaluate_strategy_preview
 
 
 logger = logging.getLogger(__name__)
-_RUNTIME_ALLOWED_DERIVATIVE_TYPES = {"future", "futures", "perp", "perps"}
-
-
 def _utcnow() -> datetime:
     """Return a naive UTC timestamp for metadata fields."""
 
@@ -47,8 +43,6 @@ def _parse_timestamp(value: Any) -> datetime:
             except ValueError:
                 continue
     return _utcnow()
-_LEGACY_TYPED_RULE_V1 = "typed_rule_v1"
-
 storage_load_strategies = persistence.load_strategies
 storage_upsert_strategy = persistence.upsert_strategy
 storage_delete_strategy = persistence.delete_strategy
@@ -99,10 +93,14 @@ class InstrumentSlot:
         if isinstance(value, InstrumentSlot):
             return value
         if isinstance(value, Mapping):
+            metadata = dict(value.get("metadata") or {})
+            for field_name in ("instrument_id", "datasource", "exchange", "provider_id", "venue_id"):
+                if value.get(field_name) is not None and not metadata.get(field_name):
+                    metadata[field_name] = value.get(field_name)
             return InstrumentSlot(
                 symbol=str(value.get("symbol") or "").strip(),
                 risk_multiplier=float(value["risk_multiplier"]) if value.get("risk_multiplier") is not None else None,
-                metadata=dict(value.get("metadata") or {}),
+                metadata=metadata,
             )
         return InstrumentSlot(symbol=str(value or "").strip())
 
@@ -125,15 +123,18 @@ def _serialize_context_value(value: Any) -> Any:
 def _serialize_guard(guard: Mapping[str, Any]) -> Dict[str, Any]:
     guard_type = str(guard.get("type") or "").strip().lower()
     if guard_type == "context_match":
-        return {
+        payload = {
             "type": "context_match",
             "indicator_id": str(guard.get("indicator_id") or "").strip(),
             "output_name": str(guard.get("output_name") or "").strip(),
             "field": str(guard.get("field") or "").strip(),
             "value": _serialize_context_value(guard.get("value")),
         }
+        if isinstance(guard.get("source"), Mapping):
+            payload["source"] = dict(guard["source"])
+        return payload
     if guard_type == "metric_match":
-        return {
+        payload = {
             "type": "metric_match",
             "indicator_id": str(guard.get("indicator_id") or "").strip(),
             "output_name": str(guard.get("output_name") or "").strip(),
@@ -141,6 +142,9 @@ def _serialize_guard(guard: Mapping[str, Any]) -> Dict[str, Any]:
             "operator": str(guard.get("operator") or "").strip(),
             "value": float(guard.get("value")),
         }
+        if isinstance(guard.get("source"), Mapping):
+            payload["source"] = dict(guard["source"])
+        return payload
     if guard_type == "holds_for_bars":
         inner = guard.get("guard")
         return {
@@ -350,20 +354,202 @@ def _serialize_compiled_strategy_payload(
     }
 
 
-def _legacy_rule_payload(rule_entry: Mapping[str, Any]) -> Dict[str, Any]:
-    raw_conditions = rule_entry.get("conditions")
-    if isinstance(raw_conditions, Mapping) and str(raw_conditions.get("kind") or "").strip() == _LEGACY_TYPED_RULE_V1:
-        raw_when = raw_conditions.get("when")
-        payload: Dict[str, Any] = {
-            "id": rule_entry.get("id"),
-            "name": rule_entry.get("name"),
-            "intent": normalize_rule_intent(rule_entry.get("action", "buy")),
-            "description": rule_entry.get("description"),
-            "enabled": bool(rule_entry.get("enabled", True)),
+def _catalog_output_counts(outputs: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
+    counts = {"signal": 0, "context": 0, "metric": 0, "other": 0}
+    for output in outputs:
+        output_type = str(output.get("type") or "").strip()
+        if output_type in counts:
+            counts[output_type] += 1
+        else:
+            counts["other"] += 1
+    return counts
+
+
+def _indicator_catalog_entry(indicator_id: str) -> Dict[str, Any]:
+    try:
+        meta = get_instance_meta(indicator_id)
+    except KeyError:
+        return {
+            "indicator_id": indicator_id,
+            "status": "missing",
+            "type": None,
+            "name": None,
+            "runtime_supported": False,
+            "compute_supported": False,
+            "outputs": [],
+            "output_counts": {"signal": 0, "context": 0, "metric": 0, "other": 0},
         }
-        if isinstance(raw_when, Mapping):
-            payload["when"] = raw_when
-        return payload
+    outputs = [dict(output) for output in (meta.get("typed_outputs") or []) if isinstance(output, Mapping)]
+    return {
+        "indicator_id": indicator_id,
+        "status": "active",
+        "type": meta.get("type"),
+        "name": meta.get("name"),
+        "runtime_supported": bool(meta.get("runtime_supported", False)),
+        "compute_supported": bool(meta.get("compute_supported", False)),
+        "outputs": outputs,
+        "output_counts": _catalog_output_counts(outputs),
+    }
+
+
+def _input_key(indicator_id: str, output_name: str, member: str = "") -> str:
+    key = f"{indicator_id}.{output_name}"
+    return f"{key}.{member}" if member else key
+
+
+def _source_payload(*, kind: str, rule: Mapping[str, Any] | None = None, guard: Mapping[str, Any] | None = None) -> Dict[str, Any]:
+    payload = {"kind": kind}
+    if rule:
+        payload.update(
+            {
+                "rule_id": rule.get("id"),
+                "rule_name": rule.get("name"),
+                "intent": rule.get("intent"),
+            }
+        )
+    if guard:
+        source = guard.get("source")
+        if isinstance(source, Mapping):
+            payload["source"] = dict(source)
+    return payload
+
+
+def _append_source(bucket: MutableMapping[str, List[Dict[str, Any]]], key: str, source: Mapping[str, Any]) -> None:
+    bucket.setdefault(key, []).append(dict(source))
+
+
+def _collect_decision_input_sources(rules: Sequence[Mapping[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    selected_by: Dict[str, List[Dict[str, Any]]] = {}
+
+    def visit_guard(guard: Mapping[str, Any], rule: Mapping[str, Any]) -> None:
+        guard_type = str(guard.get("type") or "").strip()
+        if guard_type == "holds_for_bars":
+            nested = guard.get("guard")
+            if isinstance(nested, Mapping):
+                visit_guard(nested, rule)
+            return
+        indicator_id = str(guard.get("indicator_id") or "").strip()
+        output_name = str(guard.get("output_name") or "").strip()
+        if not indicator_id or not output_name:
+            return
+        if guard_type in {"context_match", "metric_match"}:
+            field = str(guard.get("field") or "").strip()
+            key = _input_key(indicator_id, output_name, field)
+            _append_source(selected_by, key, _source_payload(kind=guard_type, rule=rule, guard=guard))
+            return
+        if guard_type in {"signal_seen_within_bars", "signal_absent_within_bars"}:
+            event_key = str(guard.get("event_key") or "").strip()
+            key = _input_key(indicator_id, output_name, event_key)
+            _append_source(selected_by, key, _source_payload(kind=guard_type, rule=rule, guard=guard))
+
+    for rule in rules:
+        trigger = rule.get("trigger")
+        if isinstance(trigger, Mapping):
+            indicator_id = str(trigger.get("indicator_id") or "").strip()
+            output_name = str(trigger.get("output_name") or "").strip()
+            event_key = str(trigger.get("event_key") or "").strip()
+            if indicator_id and output_name and event_key:
+                _append_source(
+                    selected_by,
+                    _input_key(indicator_id, output_name, event_key),
+                    _source_payload(kind="rule_trigger", rule=rule),
+                )
+        guards = rule.get("guards")
+        if isinstance(guards, Sequence) and not isinstance(guards, (str, bytes)):
+            for guard in guards:
+                if isinstance(guard, Mapping):
+                    visit_guard(guard, rule)
+    return selected_by
+
+
+def _decision_input_catalog(
+    strategy: "StrategyDefinition",
+    *,
+    compiled_strategy: CompiledStrategySpec,
+    selected_variant: Mapping[str, Any],
+    effective_config: EffectiveStrategyConfig,
+) -> Dict[str, Any]:
+    compiled_rules = [_serialize_compiled_rule(rule) for rule in compiled_strategy.rules]
+    selected_by = _collect_decision_input_sources(compiled_rules)
+    indicators = [_indicator_catalog_entry(indicator_id) for indicator_id in strategy.indicator_ids]
+    triggers: List[Dict[str, Any]] = []
+    context_fields: List[Dict[str, Any]] = []
+    metric_fields: List[Dict[str, Any]] = []
+
+    for indicator in indicators:
+        indicator_id = str(indicator.get("indicator_id") or "").strip()
+        for output in indicator.get("outputs") or []:
+            if not isinstance(output, Mapping):
+                continue
+            output_name = str(output.get("name") or "").strip()
+            output_type = str(output.get("type") or "").strip()
+            base = {
+                "indicator_id": indicator_id,
+                "indicator_type": indicator.get("type"),
+                "indicator_name": indicator.get("name"),
+                "output_name": output_name,
+                "output_label": output.get("label"),
+            }
+            if output_type == "signal":
+                for event_key in output.get("event_keys") or []:
+                    key = _input_key(indicator_id, output_name, str(event_key))
+                    triggers.append(
+                        {
+                            **base,
+                            "event_key": str(event_key),
+                            "selected": bool(selected_by.get(key)),
+                            "selected_by": selected_by.get(key, []),
+                        }
+                    )
+            elif output_type == "context":
+                for field_name in output.get("state_keys") or []:
+                    key = _input_key(indicator_id, output_name, str(field_name))
+                    context_fields.append(
+                        {
+                            **base,
+                            "field": str(field_name),
+                            "selected": bool(selected_by.get(key)),
+                            "selected_by": selected_by.get(key, []),
+                        }
+                    )
+            elif output_type == "metric":
+                for field_name in output.get("fields") or []:
+                    key = _input_key(indicator_id, output_name, str(field_name))
+                    metric_fields.append(
+                        {
+                            **base,
+                            "field": str(field_name),
+                            "selected": bool(selected_by.get(key)),
+                            "selected_by": selected_by.get(key, []),
+                        }
+                    )
+
+    return {
+        "schema_version": "strategy_decision_inputs.v1",
+        "strategy_id": strategy.id,
+        "strategy_name": strategy.name,
+        "timeframe": compiled_strategy.timeframe,
+        "strategy_hash": compiled_strategy.strategy_hash,
+        "variant": _serialize_variant_payload(selected_variant),
+        "effective_strategy_config": effective_config.to_effective_strategy_config(),
+        "indicators": indicators,
+        "triggers": triggers,
+        "context_fields": context_fields,
+        "metric_fields": metric_fields,
+        "summary": {
+            "indicator_count": len(indicators),
+            "trigger_count": len(triggers),
+            "context_field_count": len(context_fields),
+            "metric_field_count": len(metric_fields),
+            "selected_trigger_count": sum(1 for item in triggers if item.get("selected")),
+            "selected_context_field_count": sum(1 for item in context_fields if item.get("selected")),
+            "selected_metric_field_count": sum(1 for item in metric_fields if item.get("selected")),
+        },
+    }
+
+
+def _stored_rule_payload(rule_entry: Mapping[str, Any]) -> Dict[str, Any]:
+    raw_conditions = rule_entry.get("conditions")
     if isinstance(raw_conditions, Mapping):
         payload = dict(raw_conditions)
         payload.setdefault("id", rule_entry.get("id"))
@@ -701,7 +887,7 @@ class StrategyRegistry:
                 if not rule_id:
                     continue
                 try:
-                    normalized_rule = _normalize_rule_contract(base, _legacy_rule_payload(rule_entry))
+                    normalized_rule = _normalize_rule_contract(base, _stored_rule_payload(rule_entry))
                 except Exception as exc:
                     logger.warning(
                         "strategy_rule_skipped | strategy_id=%s rule_id=%s error=%s",
@@ -731,11 +917,23 @@ class StrategyRegistry:
 
         record.instrument_messages = []
         for slot in record.instruments:
-            instrument_rec, error = instrument_service.validate_instrument(
-                record.datasource,
-                record.exchange,
-                slot.symbol,
-            )
+            metadata = slot.metadata if isinstance(slot.metadata, dict) else {}
+            instrument_rec = None
+            error = None
+            inst_id = str(metadata.get("instrument_id") or "").strip()
+            if inst_id:
+                try:
+                    instrument_rec = instrument_service.get_instrument_record(inst_id)
+                except Exception as exc:
+                    error = f"Instrument {inst_id} was not found: {exc}"
+            if instrument_rec is None:
+                slot_datasource = metadata.get("datasource") or record.datasource
+                slot_exchange = metadata.get("exchange") or record.exchange
+                instrument_rec, error = instrument_service.validate_instrument(
+                    slot_datasource,
+                    slot_exchange,
+                    slot.symbol,
+                )
             if instrument_rec:
                 inst_id = str(instrument_rec.get("id") or "").strip()
                 if inst_id:
@@ -746,10 +944,7 @@ class StrategyRegistry:
                     }
                 symbol = slot.symbol
                 try:
-                    compile_runtime_profile_or_error(
-                        instrument_rec,
-                        allowed_derivative_types=_RUNTIME_ALLOWED_DERIVATIVE_TYPES,
-                    )
+                    instrument_service.instrument_runtime_profile(instrument_rec)
                 except ValueError as exc:
                     record.instrument_messages.append(
                         {
@@ -922,39 +1117,45 @@ class StrategyRegistry:
         try:
             # Resolve previous instrument ids
             def _resolve_slot_id(slot: InstrumentSlot, datasource: Optional[str], exchange: Optional[str]) -> Optional[str]:
-                if isinstance(slot.metadata, dict) and slot.metadata.get("instrument_id"):
-                    return str(slot.metadata.get("instrument_id"))
+                metadata = slot.metadata if isinstance(slot.metadata, dict) else {}
+                if metadata.get("instrument_id"):
+                    return str(metadata.get("instrument_id"))
+                slot_datasource = metadata.get("datasource") or datasource
+                slot_exchange = metadata.get("exchange") or exchange
                 try:
-                    rec = instrument_service.resolve_instrument(datasource, exchange, slot.symbol)
+                    rec = instrument_service.resolve_instrument(slot_datasource, slot_exchange, slot.symbol)
                     return rec.get("id") if rec else None
                 except Exception as exc:
                     logger.warning(
-                        "strategy_instrument_resolution_failed | strategy_id=%s symbol=%s datasource=%s exchange=%s error=%s",
-                        strategy_id,
-                        slot.symbol,
-                        datasource,
-                        exchange,
-                        exc,
-                    )
+                            "strategy_instrument_resolution_failed | strategy_id=%s symbol=%s datasource=%s exchange=%s error=%s",
+                            strategy_id,
+                            slot.symbol,
+                            slot_datasource,
+                            slot_exchange,
+                            exc,
+                        )
                     return None
 
             old_ids = {i for i in (_resolve_slot_id(s, old_datasource, old_exchange) for s in old_slots) if i}
             new_ids = set()
             for slot in record.instruments:
                 inst_id = None
-                if isinstance(slot.metadata, dict) and slot.metadata.get("instrument_id"):
-                    inst_id = str(slot.metadata.get("instrument_id"))
+                metadata = slot.metadata if isinstance(slot.metadata, dict) else {}
+                if metadata.get("instrument_id"):
+                    inst_id = str(metadata.get("instrument_id"))
                 else:
+                    slot_datasource = metadata.get("datasource") or record.datasource
+                    slot_exchange = metadata.get("exchange") or record.exchange
                     try:
-                        rec = instrument_service.resolve_instrument(record.datasource, record.exchange, slot.symbol)
+                        rec = instrument_service.resolve_instrument(slot_datasource, slot_exchange, slot.symbol)
                         inst_id = rec.get("id") if rec else None
                     except Exception as exc:
                         logger.warning(
                             "strategy_instrument_resolution_failed | strategy_id=%s symbol=%s datasource=%s exchange=%s error=%s",
                             strategy_id,
                             slot.symbol,
-                            record.datasource,
-                            record.exchange,
+                            slot_datasource,
+                            slot_exchange,
                             exc,
                         )
                         inst_id = None
@@ -1209,6 +1410,35 @@ class StrategyRegistry:
         )
         _PREVIEW_RESULTS.put(payload)
         return payload
+
+    def evaluate_summary(
+        self,
+        strategy_id: str,
+        *,
+        start: str,
+        end: str,
+        interval: str,
+        instrument_ids: Optional[List[str]] = None,
+        variant_id: Optional[str] = None,
+        variant_name: Optional[str] = None,
+        max_examples: int = 5,
+        include_signals: bool = False,
+    ) -> Dict[str, Any]:
+        """Run a preview and return the compact read model."""
+        payload = self.evaluate(
+            strategy_id,
+            start=start,
+            end=end,
+            interval=interval,
+            instrument_ids=instrument_ids,
+            variant_id=variant_id,
+            variant_name=variant_name,
+        )
+        return build_strategy_preview_summary(
+            payload,
+            max_examples=max_examples,
+            include_signals=include_signals,
+        )
 
 
 @dataclass(frozen=True)
@@ -1550,6 +1780,78 @@ def run_strategy_preview(
     )
 
 
+def run_strategy_preview_summary(
+    strategy_id: str,
+    *,
+    start: str,
+    end: str,
+    interval: str,
+    instrument_ids: Optional[List[str]] = None,
+    variant_id: Optional[str] = None,
+    variant_name: Optional[str] = None,
+    max_examples: int = 5,
+    include_signals: bool = False,
+) -> Dict[str, Any]:
+    """Run a strategy preview and return its compact summary read model."""
+
+    return _REGISTRY.evaluate_summary(
+        strategy_id,
+        start=start,
+        end=end,
+        interval=interval,
+        instrument_ids=instrument_ids,
+        variant_id=variant_id,
+        variant_name=variant_name,
+        max_examples=max_examples,
+        include_signals=include_signals,
+    )
+
+
+def compare_strategy_previews(
+    *,
+    start: str,
+    end: str,
+    interval: str,
+    cases: Sequence[Mapping[str, Any]],
+    max_examples: int = 5,
+    include_signals: bool = False,
+) -> Dict[str, Any]:
+    """Run multiple strategy preview summaries and compare their signal surfaces."""
+
+    if not cases:
+        raise ValueError("strategy_preview_compare_invalid: at least one case is required")
+    summaries: List[Dict[str, Any]] = []
+    for index, case in enumerate(cases):
+        strategy_id = str(case.get("strategy_id") or "").strip()
+        if not strategy_id:
+            raise ValueError(f"strategy_preview_compare_invalid: case {index + 1} missing strategy_id")
+        instrument_ids = [str(item).strip() for item in case.get("instrument_ids") or [] if str(item).strip()]
+        if not instrument_ids:
+            raise ValueError(f"strategy_preview_compare_invalid: case {index + 1} missing instrument_ids")
+        summaries.append(
+            {
+                "label": str(case.get("label") or "").strip(),
+                "summary": run_strategy_preview_summary(
+                    strategy_id,
+                    start=start,
+                    end=end,
+                    interval=interval,
+                    instrument_ids=instrument_ids,
+                    variant_id=case.get("variant_id"),
+                    variant_name=case.get("variant_name"),
+                    max_examples=max_examples,
+                    include_signals=include_signals,
+                ),
+            }
+        )
+    return build_strategy_preview_compare(
+        start=start,
+        end=end,
+        interval=interval,
+        cases=summaries,
+    )
+
+
 def evaluate(
     strategy_id: str,
     *,
@@ -1590,6 +1892,47 @@ def compile_strategy_contract(
         variant_name=variant_name,
     )
     return _serialize_compiled_strategy_payload(
+        record,
+        compiled_strategy=compiled_strategy,
+        selected_variant=selected_variant,
+        effective_config=effective_config,
+    )
+
+
+def get_effective_strategy_contract(
+    strategy_id: str,
+    *,
+    variant_id: Optional[str] = None,
+    variant_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return the runtime-effective strategy contract for read workflows."""
+
+    payload = compile_strategy_contract(
+        strategy_id,
+        variant_id=variant_id,
+        variant_name=variant_name,
+    )
+    return {
+        "schema_version": "effective_strategy.v1",
+        **payload,
+    }
+
+
+def get_strategy_decision_inputs(
+    strategy_id: str,
+    *,
+    variant_id: Optional[str] = None,
+    variant_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return all attached indicator decision inputs and their effective rule references."""
+
+    record = _REGISTRY.get(strategy_id)
+    compiled_strategy, selected_variant, effective_config = _compile_strategy_definition(
+        record,
+        variant_id=variant_id,
+        variant_name=variant_name,
+    )
+    return _decision_input_catalog(
         record,
         compiled_strategy=compiled_strategy,
         selected_variant=selected_variant,

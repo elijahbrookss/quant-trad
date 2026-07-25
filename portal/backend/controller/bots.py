@@ -94,7 +94,7 @@ class BotBase(BaseModel):
     market_data_stream_policy: Dict[str, Any] = Field(default_factory=dict)
     snapshot_interval_ms: int = Field(..., gt=0)
     bot_env: Dict[str, str] = Field(default_factory=dict)
-    instrument_type: Optional[str] = None
+    execution_semantics: Optional[str] = None
 
 
 class BotCreateRequest(BotBase):
@@ -124,7 +124,7 @@ class BotUpdateRequest(BaseModel):
     market_data_stream_policy: Optional[Dict[str, Any]] = None
     snapshot_interval_ms: Optional[int] = Field(default=None, gt=0)
     bot_env: Optional[Dict[str, str]] = None
-    instrument_type: Optional[str] = None
+    execution_semantics: Optional[str] = None
 
 
 class BotStartRequest(BaseModel):
@@ -151,9 +151,6 @@ class BotResponse(BotBase):
 
     id: str
     status: str
-    last_run_at: Optional[str] = None
-    last_stats: Dict[str, Any] = Field(default_factory=dict)
-    last_run_artifact: Dict[str, Any] = Field(default_factory=dict)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     runtime: Optional[Dict[str, Any]] = None

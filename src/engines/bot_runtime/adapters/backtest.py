@@ -13,6 +13,7 @@ from ..core.execution import (
     SpotExecutionModel,
 )
 from ..core.execution_adapter import ExecutionAdapter
+from ..core.execution_order import FillOrder
 
 
 class BacktestAdapter(ExecutionAdapter):
@@ -72,6 +73,12 @@ class BacktestAdapter(ExecutionAdapter):
             fee_rate=fee_rate,
             enforce_price_tick=enforce_price_tick,
         )
+
+    def execute_order(
+        self,
+        order: FillOrder,
+    ) -> Tuple[Optional[FillResult], Optional[FillRejection]]:
+        return self._model.execute_order(order)
 
 
 __all__ = ["BacktestAdapter"]

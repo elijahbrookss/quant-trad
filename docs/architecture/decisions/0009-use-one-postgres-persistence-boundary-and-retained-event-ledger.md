@@ -45,9 +45,17 @@ context. High-volume live UI/projection transport and raw observability samples
 are bounded, summarized, aggregated, or kept live-only according to retention
 policy.
 
-Schema changes use clean definitions or explicit manual migrations. Missing
-tables may be provisioned once with a warning; missing required columns fail
-loud.
+Schema changes use clean definitions or explicit out-of-band migrations. Fresh
+database bootstrap creates the current model-declared schemas, tables, and
+indexes from `portal/backend/db/models.py`; provider market-data persistence
+uses its own explicit SQLAlchemy table contract for configured candle,
+derivative-state, and closure tables. Bootstrap inspects before creating and
+does not use blanket `IF NOT EXISTS` DDL as the contract. Missing tables may be
+provisioned once with a warning, missing model-declared indexes are provisioned
+during bootstrap, and missing required indexes after bootstrap fail loud.
+Missing required columns fail loud instead of being patched by runtime code.
+Provider credential helpers validate `portal_provider_credential_refs`; they do
+not own a duplicate table-creation path.
 
 ## Consequences
 
@@ -64,4 +72,3 @@ loud.
 - [Persistence boundary](../persistence/PERSISTENCE_BOUNDARY.md)
 - [Engineering contract](../../contracts/platform/03_engineering_contract.md)
 - [Runtime contract](../../contracts/platform/01_runtime_contract.md)
-

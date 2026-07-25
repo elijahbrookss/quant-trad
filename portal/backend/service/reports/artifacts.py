@@ -84,6 +84,13 @@ def _run_directory(bot_id: str, run_id: str) -> Path:
     return _artifact_root() / f"bot_id={_sanitize_segment(bot_id)}" / f"run_id={_sanitize_segment(run_id)}"
 
 
+def _resolve_run_directory(bot_id: str | None, run_id: str) -> Optional[Path]:
+    if bot_id:
+        candidate = _run_directory(str(bot_id), str(run_id))
+        return candidate if candidate.exists() else find_run_directory(str(run_id))
+    return find_run_directory(str(run_id))
+
+
 def _manifest_path(run_dir: Path) -> Path:
     return run_dir / "manifest.json"
 
@@ -184,6 +191,34 @@ def _write_tabular(path: Path, rows: Sequence[Mapping[str, Any]], *, output_form
     frame = pd.DataFrame(clean_rows)
     frame.to_parquet(path, index=False)
     return len(clean_rows)
+
+
+def _read_tabular(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            return [dict(row) for row in csv.DictReader(handle)]
+    if suffix == ".parquet":
+        import pandas as pd
+
+        frame = pd.read_parquet(path)
+        rows: list[dict[str, Any]] = []
+        for row in frame.to_dict(orient="records"):
+            rows.append({str(key): (None if pd.isna(value) else value) for key, value in row.items()})
+        return rows
+    raise RuntimeError(f"report_artifacts_unsupported_tabular_format: {path}")
+
+
+def _series_identity_from_artifact_path(path: str) -> Dict[str, Any]:
+    identity: Dict[str, Any] = {}
+    for part in Path(str(path or "")).parts:
+        if part.startswith("symbol="):
+            identity["symbol"] = part.removeprefix("symbol=")
+        elif part.startswith("timeframe="):
+            identity["timeframe"] = part.removeprefix("timeframe=")
+    return identity
 
 
 def _stream_zip_bytes(root: Path) -> bytes:
@@ -444,6 +479,8 @@ class RunArtifactBundle:
         series = getattr(state, "series", None)
         if series is None:
             return
+        instrument = getattr(series, "instrument", None)
+        instrument_id = instrument.get("id") if isinstance(instrument, Mapping) else None
         series_spool = self._series_spool_dir(series)
         if self.settings.include_indicator_outputs:
             outputs = dict(getattr(state, "indicator_outputs", {}) or {})
@@ -459,6 +496,11 @@ class RunArtifactBundle:
                 _append_jsonl(
                     series_spool / "indicators" / f"{_sanitize_segment(indicator_id)}.jsonl",
                     {
+                        "run_id": self.run_id,
+                        "bot_id": self.bot_id,
+                        "symbol": getattr(series, "symbol", None),
+                        "timeframe": getattr(series, "timeframe", None),
+                        "instrument_id": instrument_id,
                         "bar_time": getattr(runtime_output, "bar_time", None),
                         "known_at": getattr(runtime_output, "bar_time", None),
                         "indicator_id": indicator_id,
@@ -1243,11 +1285,7 @@ def finalize_run_artifact_bundle_from_workers(
 
 
 def run_artifact_readiness(bot_id: str | None, run_id: str) -> Dict[str, Any]:
-    if bot_id:
-        candidate = _run_directory(str(bot_id), str(run_id))
-        run_dir = candidate if candidate.exists() else find_run_directory(str(run_id))
-    else:
-        run_dir = find_run_directory(str(run_id))
+    run_dir = _resolve_run_directory(bot_id, run_id)
     if run_dir is None:
         return {
             "ready": False,
@@ -1287,6 +1325,86 @@ def run_artifact_readiness(bot_id: str | None, run_id: str) -> Dict[str, Any]:
     }
 
 
+def list_run_indicator_output_rows(
+    run_id: str,
+    *,
+    bot_id: str | None = None,
+    output_type: str | None = None,
+) -> Dict[str, Any]:
+    run_dir = _resolve_run_directory(bot_id, run_id)
+    if run_dir is None:
+        return {
+            "schema_version": "indicator_output_artifact_rows.v1",
+            "run_id": run_id,
+            "available": False,
+            "reason": "artifact_directory_missing",
+            "source_files": [],
+            "items": [],
+        }
+    manifest_path = _manifest_path(run_dir)
+    if not manifest_path.exists():
+        return {
+            "schema_version": "indicator_output_artifact_rows.v1",
+            "run_id": run_id,
+            "available": False,
+            "reason": "artifact_manifest_missing",
+            "source_files": [],
+            "items": [],
+        }
+    manifest = _read_json(manifest_path)
+    files = [dict(entry) for entry in manifest.get("files") or [] if isinstance(entry, Mapping)]
+    indicator_files = [
+        entry
+        for entry in files
+        if str(entry.get("kind") or "").strip() == "indicator_outputs"
+        and str(entry.get("path") or "").strip()
+    ]
+    if not indicator_files:
+        return {
+            "schema_version": "indicator_output_artifact_rows.v1",
+            "run_id": run_id,
+            "available": False,
+            "reason": "indicator_output_artifacts_missing",
+            "source_files": [],
+            "items": [],
+        }
+    target_output_type = str(output_type or "").strip().lower()
+    rows: list[dict[str, Any]] = []
+    source_files: list[dict[str, Any]] = []
+    for entry in indicator_files:
+        rel_path = str(entry.get("path") or "").strip()
+        path = run_dir / rel_path
+        source_files.append({"path": rel_path, "rows": entry.get("rows")})
+        identity = _series_identity_from_artifact_path(rel_path)
+        for row in _read_tabular(path):
+            output_type_value = str(row.get("output_type") or "").strip().lower()
+            if target_output_type and output_type_value != target_output_type:
+                continue
+            enriched = {
+                "run_id": run_id,
+                "source_path": rel_path,
+                **identity,
+                **dict(row),
+            }
+            rows.append(enriched)
+    rows.sort(
+        key=lambda row: (
+            str(row.get("bar_time") or row.get("known_at") or ""),
+            str(row.get("indicator_id") or ""),
+            str(row.get("output_name") or ""),
+            str(row.get("source_path") or ""),
+        )
+    )
+    return {
+        "schema_version": "indicator_output_artifact_rows.v1",
+        "run_id": run_id,
+        "available": True,
+        "reason": None,
+        "source_files": source_files,
+        "items": rows,
+    }
+
+
 def build_run_archive(run_id: str) -> tuple[bytes, str]:
     run_dir = find_run_directory(run_id)
     if run_dir is None:
@@ -1314,5 +1432,6 @@ __all__ = [
     "build_run_artifact_bundle",
     "finalize_run_artifact_bundle_from_workers",
     "find_run_directory",
+    "list_run_indicator_output_rows",
     "run_artifact_readiness",
 ]

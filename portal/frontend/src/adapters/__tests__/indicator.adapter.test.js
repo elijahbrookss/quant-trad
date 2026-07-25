@@ -12,14 +12,13 @@ test('normalizeIndicatorRead flattens whole-indicator document for UI consumers'
       params: { period: 14 },
       dependencies: [],
       enabled: true,
-      output_prefs: { crossover_up: { enabled: false } },
     },
     manifest: {
       label: 'Relative Strength Index',
       description: 'Momentum oscillator',
     },
     outputs: {
-      typed: [{ name: 'crossover_up', type: 'signal', enabled: true }],
+      typed: [{ name: 'crossover_up', type: 'signal' }],
       overlays: [{ name: 'rsi_line', type: 'line' }],
     },
     capabilities: {

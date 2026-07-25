@@ -137,6 +137,11 @@ Latency is hierarchical:
 
 **Why**: Without per-stage latency, you can't answer "which stage is slow?" Only end-to-end latency hides the problem.
 
+For BotLens investigations, use the component-level flow in
+`docs/architecture/botlens-projections/BOTLENS_MESSAGE_FLOW_TROUBLESHOOTING.md`
+so runtime, backend projection, fanout, and frontend application are analyzed
+as separate hops.
+
 ### 3.7 Payload Boundaries Must Expose Size
 
 Whenever a payload crosses an operational boundary, emit its size:

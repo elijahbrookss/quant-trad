@@ -16,6 +16,8 @@ code_paths:
   - portal/backend/service/strategies
   - portal/backend/service/bots/config_service.py
   - portal/backend/controller/strategies.py
+  - cli/main.py
+  - cli/experiments/instrument_matrix.py
   - src/engines/bot_runtime/strategy
   - portal/backend/service/bots/strategy_loader.py
   - docs/architecture/decision-layer/diagrams/decision-flow.mmd
@@ -80,28 +82,28 @@ Rejected decisions matter. A missed trade should be inspectable through an artif
 
 `signal_id` and `decision_id` are intentionally different identifiers. Do not alias them for legacy compatibility.
 
-## Inputs
+## What A Decision Carries Forward
 
-- `CompiledStrategySpec` including strategy ID, strategy hash, timeframe, rules, and history needs.
-- Typed indicator outputs for the current bar.
-- Bounded output history.
-- Instrument/series context from runtime.
+The evaluator starts with a `CompiledStrategySpec`, typed indicator outputs for
+the current bar, bounded output history, and instrument/series context from
+runtime. It emits decision artifacts with stable decision, strategy, rule,
+instrument, intent, direction, and evidence fields. It also emits rejection
+artifacts with stage and reason when a rule path cannot become a trade
+candidate.
 
-## Outputs
+Those artifacts are runtime truth candidates, not fills. Runtime still decides
+whether a candidate becomes execution behavior.
 
-- Decision artifacts with `decision_id`, `strategy_id`, `strategy_hash`, `instrument_id`, rule ID, intent, direction, and evidence.
-- Compact `referenced_outputs` snapshots for the typed outputs that caused or gated the decision. These snapshots carry output identity, type, readiness, bar time, and indicator commit sequence, but not overlays, details, debug blobs, or full indicator state.
-- Compact `output_filter_trace` records when variant output filters were
-  materialized into guards. These traces report output ref, field, operator,
-  expected value, actual value, readiness, and match result for audit only.
-- Rejection artifacts with stage and reason.
-- Runtime-facing provenance fields for event emission.
+The decision record keeps compact provenance for the typed outputs that caused
+or gated the decision. `referenced_outputs` carry output identity, type,
+readiness, bar time, and indicator commit sequence. They do not copy overlays,
+details, debug blobs, or full indicator state. `output_filter_trace` records
+variant filters as audit evidence from the same guard evaluation result, not as
+a second rule-evaluation path.
 
-## State And Truth
-
-Decision artifacts are runtime truth candidates. They are not fills. Runtime decides whether an artifact can become execution behavior.
-
-The decision layer can remember bounded output history because some guards ask whether a condition held or a signal was seen/absent within a window. That history must be built from known-at outputs only.
+The decision layer may remember bounded output history because some guards ask
+whether a condition held, appeared, or stayed absent within a window. That
+history is built from known-at outputs only.
 
 Strategy variants are named diffs against a strategy/default variant. Preview,
 bot config, runtime loading, and report metadata must resolve the same
@@ -110,12 +112,45 @@ carry the resulting `effective_strategy_config` and `run_strategy_snapshot` as
 provenance only; these fields must not change evaluator, wallet, order, fee, or
 trade semantics.
 
+Strategy read contracts are split by concern:
+
+- `strategy_inventory.v1` lists thin strategy rows and counts.
+- `strategy_definition.v1` returns the core strategy definition and readiness
+  context.
+- `strategy_bindings.v1` returns compact instrument and indicator bindings
+  without embedding full indicator manifests in inventory rows.
+- `strategy_rules.v1` returns stored decision rules.
+- `strategy_variants.v1` returns saved variant rows.
+- `effective_strategy.v1` returns the compiled, runtime-effective strategy for
+  the selected/default variant.
+- `strategy_decision_inputs.v1` returns attached indicator signal, context, and
+  metric inputs and marks which effective rules or variant filters reference
+  them.
+- `strategy_preview_summary.v1` returns the compact agent-facing answer for a
+  preview: evaluated bars, decision artifact counts, signal counts, first/last
+  signal times, event/rule breakdowns, examples, and empty-preview diagnostics.
+- `strategy_preview_compare.v1` compares multiple compact preview summaries
+  over one requested window. Cases are explicit strategy/instrument selections
+  so cross-symbol and cross-variant research does not depend on hidden defaults.
+
+The split read surface is for agents, CLI, MCP, and UI inspection. Runtime truth
+still comes from compiled strategy specs and run snapshots, not from frontend
+state or ad hoc route joins.
+
+The full preview artifact remains the inspection surface. CLI and agent
+workflows should default to `strategy_preview_summary.v1`; consumers should ask
+for the full preview only when they need machine decisions, overlays, or signal
+audit detail. Preview summaries and comparisons must be derived from the same
+walk-forward preview artifact and must not re-run rules through another path.
+
 ## Failure And Recovery
 
 - Missing typed outputs make dependent rules false or rejected with context.
 - Invalid strategy specs fail at compile/load time.
 - Runtime rejections should include explicit reason codes and blocking context.
 - Strategy previews must not use a different semantic path than runtime decisions.
+- Preview summaries and comparisons must not become a second strategy
+  evaluator; they are read models over canonical preview results.
 
 ## Invariants
 
@@ -126,6 +161,9 @@ trade semantics.
 - Variant resolution is shared across preview, bot config, runtime loading, and
   report metadata. A selected variant must not have one effective param map in
   preview and another at runtime.
+- Agent-facing readers must use split strategy read contracts instead of
+  bundled detail payloads when they only need inventory, bindings, rules,
+  variants, effective config, or decision inputs.
 - Output-filter traces are derived from the same guard evaluation result used
   by the decision. They must not trigger a second rule evaluation path.
 - Bounded history never includes future bars.

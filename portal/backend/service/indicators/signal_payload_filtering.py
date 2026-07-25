@@ -3,30 +3,31 @@ from __future__ import annotations
 from typing import Any, Dict, List, Mapping, Sequence, Set
 
 
-def enabled_signal_output_names_from_meta(meta: Mapping[str, Any]) -> Set[str]:
-    enabled: Set[str] = set()
-    for output in meta.get("typed_outputs") or []:
-        if not isinstance(output, Mapping):
-            continue
-        if str(output.get("type") or "").strip() != "signal":
-            continue
-        output_name = str(output.get("name") or "").strip()
-        if not output_name:
-            continue
-        if output.get("enabled", True) is False:
-            continue
-        enabled.add(output_name)
-    return enabled
+def normalise_signal_output_names(config: Mapping[str, Any]) -> Set[str] | None:
+    requested = config.get("output_names")
+    if requested is None:
+        return None
+    if isinstance(requested, (str, bytes)):
+        candidates: Sequence[Any] = [requested]
+    elif isinstance(requested, Sequence):
+        candidates = list(requested)
+    else:
+        candidates = []
+    return {
+        str(item).strip()
+        for item in candidates
+        if str(item).strip()
+    }
 
 
-def normalise_enabled_event_keys(config: Mapping[str, Any]) -> Set[str]:
-    enabled = config.get("enabled_event_keys")
-    if enabled is None:
+def normalise_signal_event_keys(config: Mapping[str, Any]) -> Set[str]:
+    requested = config.get("event_keys")
+    if requested is None:
         return set()
-    if isinstance(enabled, (str, bytes)):
-        candidates: Sequence[Any] = [enabled]
-    elif isinstance(enabled, Sequence):
-        candidates = list(enabled)
+    if isinstance(requested, (str, bytes)):
+        candidates: Sequence[Any] = [requested]
+    elif isinstance(requested, Sequence):
+        candidates = list(requested)
     else:
         candidates = []
     return {
@@ -39,8 +40,8 @@ def normalise_enabled_event_keys(config: Mapping[str, Any]) -> Set[str]:
 def filter_signal_payload(
     payload: Mapping[str, Any],
     *,
-    enabled_output_names: Set[str],
-    enabled_event_keys: Set[str],
+    output_names: Set[str] | None,
+    event_keys: Set[str],
 ) -> Dict[str, Any]:
     filtered = dict(payload)
     filtered.pop("signals", None)
@@ -56,9 +57,9 @@ def filter_signal_payload(
             continue
         output_name = str(signal.get("output_name") or "").strip()
         event_key = str(signal.get("event_key") or "").strip().lower()
-        if output_name not in enabled_output_names:
+        if output_names is not None and output_name not in output_names:
             continue
-        if enabled_event_keys and event_key not in enabled_event_keys:
+        if event_keys and event_key not in event_keys:
             continue
         copied = dict(signal)
         retained_signals.append(copied)
@@ -78,7 +79,7 @@ def filter_signal_payload(
             retained_overlays.append(dict(overlay))
             continue
         overlay_name = str(overlay.get("overlay_name") or "").strip()
-        if overlay_name not in enabled_output_names:
+        if output_names is not None and overlay_name not in output_names:
             continue
         overlay_payload = dict(overlay.get("payload") or {})
         raw_bubbles = overlay_payload.get("bubbles")
@@ -119,7 +120,7 @@ def filter_signal_payload(
 
 
 __all__ = [
-    "enabled_signal_output_names_from_meta",
     "filter_signal_payload",
-    "normalise_enabled_event_keys",
+    "normalise_signal_event_keys",
+    "normalise_signal_output_names",
 ]

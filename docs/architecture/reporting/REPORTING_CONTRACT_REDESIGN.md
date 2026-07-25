@@ -37,7 +37,7 @@ analysis tools.
 `RunResearchDataset v1` is the canonical report payload. Frontend-shaped report
 payloads are not part of the contract.
 
-`RunReportDTO v2` is the typed frontend/MCP-safe view over the canonical
+RunReportDTO contract (`run_report.v2`) is the typed frontend/MCP-safe view over the canonical
 dataset. It groups deterministic facts into research trust, performance,
 behavior, wallet, symbol breakdown, coordinator-wait, and operational
 diagnostic sections without making raw internals the primary UX contract.
@@ -78,7 +78,7 @@ supporting/internal sources. They are not the reporting contract.
 | `GET /api/reports/{run_id}` | `RunResearchDataset` | Canonical complete dataset. |
 | `GET /api/reports/{run_id}/run-report` | `RunReportDTO` or materialization status | Typed research cockpit contract over the canonical dataset. Terminal runs return a ready materialized artifact when available, enqueue materialization and return `202` when building, and reject active runs. |
 | `GET /api/reports/{run_id}/run-report/status` | `ReportMaterializationStatusDTO` | Materialized report artifact lifecycle (`not_started`, `building`, `ready`, `failed`, `stale`) for UI actions and automation. |
-| `GET /api/reports/compare?left_run_id=...&right_run_id=...` | `RunComparisonDTO` | Frontend comparison contract over ready materialized `RunReportDTO v2` artifacts. It returns structured blocked states when either artifact is unavailable, reads existing golden evidence when available, and does not enqueue cold report or golden builds by default. |
+| `GET /api/reports/compare?left_run_id=...&right_run_id=...` | `RunComparisonDTO` | Frontend comparison contract over ready materialized RunReportDTO contract (`run_report.v2`) artifacts. It returns structured blocked states when either artifact is unavailable, reads existing golden evidence when available, and does not enqueue cold report or golden builds by default. |
 | `GET /api/reports/{run_id}/readiness` | `ReportReadiness` | Cheap readiness/status read. |
 | `GET /api/reports/{run_id}/summary` | `RunReportSummary` | Compact run summary. |
 | `GET /api/reports/{run_id}/sections` | `ReportSections` | Section availability, row counts, and unsupported states. |
@@ -181,7 +181,7 @@ Consumers should not have to recompute these metrics to render standard report
 views. Raw trade rows remain available so external analysis tools can audit or
 recompute metrics independently.
 
-`RunReportDTO v2` wraps display-facing metrics in `MetricValueDTO` so ratios and
+RunReportDTO contract (`run_report.v2`) wraps display-facing metrics in `MetricValueDTO` so ratios and
 caveated values are never exposed as naked numbers. Each metric carries value,
 validity, unit, method, source, method metadata, sample counts, minimum sample
 count, invalid reason, and caveats. Missing or unsupported fields such as
@@ -197,7 +197,7 @@ fill/fee events when those facts exist.
 ## Materialized Run Comparison
 
 `RunComparisonDTO` compares exactly two ready terminal report artifacts from
-`portal_report_materializations_v1`. The comparison endpoint checks
+`portal_report_materializations`. The comparison endpoint checks
 materialization status first and returns a blocked contract for
 `run_not_terminal`, `left_report_not_ready`, `right_report_not_ready`,
 `left_report_building`, `right_report_building`, `left_report_failed`, or
@@ -384,7 +384,7 @@ does not block unrelated event-loop requests.
 
 The report contract service also keeps a short-lived per-process
 `RunResearchDataset` cache with in-flight request coalescing. This complements
-the terminal `RunReportDTO v2` materialization table; the cache only absorbs
+the terminal RunReportDTO contract (`run_report.v2`) materialization table; the cache only absorbs
 bursts where clients request
 readiness, summary, sections, diagnostics, table pages, manifest, or full
 dataset for the same run in quick succession. The canonical contract and route

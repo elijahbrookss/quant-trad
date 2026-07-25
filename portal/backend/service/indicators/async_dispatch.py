@@ -147,7 +147,7 @@ def quantlab_request_fingerprint(
     )
     return _request_fingerprint(
         {
-            "request_contract_version": "quantlab_request_v2",
+            "request_contract_version": "quantlab_request.v2",
             "job_type": str(job_type),
             "indicator_id": str(indicator_id),
             "indicator_updated_at": str(indicator_updated_at or ""),

@@ -264,6 +264,62 @@ class BaseDataProvider(ProviderInterface):
     def _write_dataframe(self, df: pd.DataFrame, ctx: DataContext) -> int:
         return self._persistence.write_dataframe(df, ctx)
 
+    def _acquire_ingest_lock(
+        self,
+        ctx: DataContext,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ) -> Any | None:
+        locker = getattr(self._persistence, "acquire_ingest_lock", None)
+        if not callable(locker):
+            return None
+        return locker(ctx, self.get_datasource(), start, end)
+
+    def _release_ingest_lock(self, handle: Any | None) -> None:
+        releaser = getattr(self._persistence, "release_ingest_lock", None)
+        if callable(releaser):
+            releaser(handle)
+
+    def _fetch_cached_window(
+        self,
+        ctx: DataContext,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ) -> pd.DataFrame:
+        try:
+            cached = self._persistence.fetch_ohlcv(ctx, self.get_datasource())
+        except SQLAlchemyError as exc:
+            logger.warning(
+                "candle_cache_recheck_failed | datasource=%s symbol=%s interval=%s start=%s end=%s error=%s",
+                self.get_datasource(),
+                ctx.symbol,
+                ctx.interval,
+                start.isoformat(),
+                end.isoformat(),
+                exc,
+            )
+            return pd.DataFrame()
+
+        if cached is None or cached.empty or "timestamp" not in cached.columns:
+            return pd.DataFrame()
+
+        window = cached.copy()
+        timestamps = pd.to_datetime(window["timestamp"], utc=True)
+        window["timestamp"] = timestamps
+        return window[(timestamps >= start) & (timestamps < end)].copy()
+
+    @staticmethod
+    def _missing_ranges_for_cached_window(
+        cached_window: pd.DataFrame,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+        interval: str,
+    ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+        if cached_window is None or cached_window.empty or "timestamp" not in cached_window.columns:
+            return [(start, end)]
+        timestamps = pd.to_datetime(cached_window["timestamp"], utc=True)
+        return utils.collect_missing_ranges(timestamps, start, end, interval)
+
     def _history_segment_target(self) -> int:
         return max(1, int(self._settings.history_segment_points))
 
@@ -394,29 +450,69 @@ class BaseDataProvider(ProviderInterface):
             logger.warning("Unable to connect to database, deferred to API.")
             return self._fetch_and_format(ctx)
 
+        try:
+            requested_start = pd.to_datetime(ctx.start, utc=True)
+            requested_end = pd.to_datetime(ctx.end, utc=True)
+        except Exception as exc:
+            logger.exception(
+                "Cached OHLCV request has invalid timestamps for %s [%s]: %s",
+                ctx.symbol,
+                ctx.interval,
+                exc,
+            )
+            return df
+
         if df.empty:
-            logger.warning("No rows found for %s [%s] from %s to %s. Attempting auto-ingestion...",
-                           ctx.symbol, ctx.interval, ctx.start, ctx.end)
+            logger.warning(
+                "No rows found for %s [%s] from %s to %s. Attempting auto-ingestion...",
+                ctx.symbol,
+                ctx.interval,
+                ctx.start,
+                ctx.end,
+            )
+            lock_handle = self._acquire_ingest_lock(ctx, requested_start, requested_end)
             try:
-                logger.info(
-                    "Auto-ingestion requesting %s [%s] candles via API from %s to %s.",
-                    ctx.symbol,
-                    ctx.interval,
-                    ctx.start,
-                    ctx.end,
-                )
-                self.ingest_history(ctx)
-                df = self._persistence.fetch_ohlcv(ctx, self.get_datasource())
+                if lock_handle is not None:
+                    cached_window = self._fetch_cached_window(ctx, requested_start, requested_end)
+                    if not cached_window.empty:
+                        remaining = self._missing_ranges_for_cached_window(
+                            cached_window,
+                            requested_start,
+                            requested_end,
+                            ctx.interval,
+                        )
+                        if not remaining:
+                            logger.info(
+                                "candle_cache_recheck_filled | datasource=%s symbol=%s interval=%s start=%s end=%s rows=%d",
+                                self.get_datasource(),
+                                ctx.symbol,
+                                ctx.interval,
+                                requested_start.isoformat(),
+                                requested_end.isoformat(),
+                                len(cached_window),
+                            )
+                            df = cached_window
+
                 if df.empty:
-                    logger.error("Auto-ingestion attempted but still no data found.")
-                    return df
+                    logger.info(
+                        "Auto-ingestion requesting %s [%s] candles via API from %s to %s.",
+                        ctx.symbol,
+                        ctx.interval,
+                        ctx.start,
+                        ctx.end,
+                    )
+                    self.ingest_history(ctx)
+                    df = self._persistence.fetch_ohlcv(ctx, self.get_datasource())
+                    if df.empty:
+                        logger.error("Auto-ingestion attempted but still no data found.")
+                        return df
             except Exception as e:
                 logger.exception("Auto-ingestion failed: %s", e)
                 return df
+            finally:
+                self._release_ingest_lock(lock_handle)
 
         if not df.empty:
-            requested_start = pd.to_datetime(ctx.start, utc=True)
-            requested_end = pd.to_datetime(ctx.end, utc=True)
             timestamps = pd.to_datetime(df["timestamp"], utc=True)
             missing_ranges = self._collect_missing_ranges(
                 timestamps,
@@ -452,126 +548,167 @@ class BaseDataProvider(ProviderInterface):
                 if end <= start:
                     continue
 
-                logger.info(
-                    "Partial cache miss for %s [%s]; fetching %s to %s via API.",
-                    ctx.symbol,
-                    ctx.interval,
-                    start.isoformat(),
-                    end.isoformat(),
-                )
-
+                fetch_ranges = [(start, end)]
+                lock_handle = self._acquire_ingest_lock(ctx, start, end)
                 try:
-                    segment = self.fetch_from_api(ctx.symbol, start, end, ctx.interval)
-                except Exception as exc:
-                    logger.exception(
-                        "Failed to fetch %s [%s] for partial range %s -> %s: %s",
-                        ctx.symbol,
-                        ctx.interval,
-                        start.isoformat(),
-                        end.isoformat(),
-                        exc,
-                    )
-                    gap_classification.append(
-                        _provider_gap_classification_entry(
+                    if lock_handle is not None:
+                        cached_window = self._fetch_cached_window(ctx, start, end)
+                        if not cached_window.empty:
+                            supplemental_frames.append(
+                                cached_window[
+                                    [
+                                        "timestamp",
+                                        "open",
+                                        "high",
+                                        "low",
+                                        "close",
+                                        "volume",
+                                    ]
+                                ]
+                            )
+                        fetch_ranges = self._missing_ranges_for_cached_window(
+                            cached_window,
                             start,
                             end,
-                            classification=INGESTION_FAILURE,
-                            reason_code="provider_fetch_exception",
-                            evidence="provider_api_exception",
-                            provider=self.get_datasource(),
-                            symbol=ctx.symbol,
-                            interval=ctx.interval,
-                            exception=exc,
+                            ctx.interval,
                         )
-                    )
-                    continue
+                        if not fetch_ranges:
+                            logger.info(
+                                "candle_partial_cache_recheck_filled | datasource=%s symbol=%s interval=%s start=%s end=%s rows=%d",
+                                self.get_datasource(),
+                                ctx.symbol,
+                                ctx.interval,
+                                start.isoformat(),
+                                end.isoformat(),
+                                len(cached_window),
+                            )
+                            continue
 
-                if segment is None or segment.empty:
-                    metadata = _provider_gap_evidence_metadata(
-                        provider=self.get_datasource(),
-                        symbol=ctx.symbol,
-                        interval=ctx.interval,
-                        reason_code="provider_response_empty",
-                        evidence="provider_api_empty_response",
-                        segment=segment,
-                    )
-                    logger.info(
-                        "Partial fetch for %s [%s] returned no rows for %s to %s; caching closure.",
-                        ctx.symbol,
-                        ctx.interval,
-                        start.isoformat(),
-                        end.isoformat(),
-                    )
-                    self._record_closure_range(ctx, start, end, metadata=metadata)
-                    gap_classification.append(
-                        _provider_gap_classification_entry(
-                            start,
-                            end,
-                            reason_code="provider_response_empty",
-                            evidence="provider_api_empty_response",
-                            provider=self.get_datasource(),
-                            symbol=ctx.symbol,
-                            interval=ctx.interval,
-                            metadata=metadata,
+                    for fetch_start, fetch_end in fetch_ranges:
+                        if fetch_end <= fetch_start:
+                            continue
+                        logger.info(
+                            "Partial cache miss for %s [%s]; fetching %s to %s via API.",
+                            ctx.symbol,
+                            ctx.interval,
+                            fetch_start.isoformat(),
+                            fetch_end.isoformat(),
                         )
-                    )
-                    continue
 
-                segment = segment.copy()
-                segment_ts = pd.to_datetime(segment["timestamp"], utc=True)
-                segment["timestamp"] = segment_ts
-                in_window = segment[(segment_ts >= start) & (segment_ts < end)]
-                if in_window.empty:
-                    metadata = _provider_gap_evidence_metadata(
-                        provider=self.get_datasource(),
-                        symbol=ctx.symbol,
-                        interval=ctx.interval,
-                        reason_code="provider_response_out_of_window",
-                        evidence="provider_api_out_of_window_response",
-                        segment=segment,
-                    )
-                    logger.info(
-                        "Partial fetch for %s [%s] produced data outside %s -> %s; caching closure.",
-                        ctx.symbol,
-                        ctx.interval,
-                        start.isoformat(),
-                        end.isoformat(),
-                    )
-                    self._record_closure_range(ctx, start, end, metadata=metadata)
-                    gap_classification.append(
-                        _provider_gap_classification_entry(
-                            start,
-                            end,
-                            reason_code="provider_response_out_of_window",
-                            evidence="provider_api_out_of_window_response",
-                            provider=self.get_datasource(),
-                            symbol=ctx.symbol,
-                            interval=ctx.interval,
-                            metadata=metadata,
+                        try:
+                            segment = self.fetch_from_api(ctx.symbol, fetch_start, fetch_end, ctx.interval)
+                        except Exception as exc:
+                            logger.exception(
+                                "Failed to fetch %s [%s] for partial range %s -> %s: %s",
+                                ctx.symbol,
+                                ctx.interval,
+                                fetch_start.isoformat(),
+                                fetch_end.isoformat(),
+                                exc,
+                            )
+                            gap_classification.append(
+                                _provider_gap_classification_entry(
+                                    fetch_start,
+                                    fetch_end,
+                                    classification=INGESTION_FAILURE,
+                                    reason_code="provider_fetch_exception",
+                                    evidence="provider_api_exception",
+                                    provider=self.get_datasource(),
+                                    symbol=ctx.symbol,
+                                    interval=ctx.interval,
+                                    exception=exc,
+                                )
+                            )
+                            continue
+
+                        if segment is None or segment.empty:
+                            metadata = _provider_gap_evidence_metadata(
+                                provider=self.get_datasource(),
+                                symbol=ctx.symbol,
+                                interval=ctx.interval,
+                                reason_code="provider_response_empty",
+                                evidence="provider_api_empty_response",
+                                segment=segment,
+                            )
+                            logger.info(
+                                "Partial fetch for %s [%s] returned no rows for %s to %s; caching closure.",
+                                ctx.symbol,
+                                ctx.interval,
+                                fetch_start.isoformat(),
+                                fetch_end.isoformat(),
+                            )
+                            self._record_closure_range(ctx, fetch_start, fetch_end, metadata=metadata)
+                            gap_classification.append(
+                                _provider_gap_classification_entry(
+                                    fetch_start,
+                                    fetch_end,
+                                    reason_code="provider_response_empty",
+                                    evidence="provider_api_empty_response",
+                                    provider=self.get_datasource(),
+                                    symbol=ctx.symbol,
+                                    interval=ctx.interval,
+                                    metadata=metadata,
+                                )
+                            )
+                            continue
+
+                        segment = segment.copy()
+                        segment_ts = pd.to_datetime(segment["timestamp"], utc=True)
+                        segment["timestamp"] = segment_ts
+                        in_window = segment[(segment_ts >= fetch_start) & (segment_ts < fetch_end)]
+                        if in_window.empty:
+                            metadata = _provider_gap_evidence_metadata(
+                                provider=self.get_datasource(),
+                                symbol=ctx.symbol,
+                                interval=ctx.interval,
+                                reason_code="provider_response_out_of_window",
+                                evidence="provider_api_out_of_window_response",
+                                segment=segment,
+                            )
+                            logger.info(
+                                "Partial fetch for %s [%s] produced data outside %s -> %s; caching closure.",
+                                ctx.symbol,
+                                ctx.interval,
+                                fetch_start.isoformat(),
+                                fetch_end.isoformat(),
+                            )
+                            self._record_closure_range(ctx, fetch_start, fetch_end, metadata=metadata)
+                            gap_classification.append(
+                                _provider_gap_classification_entry(
+                                    fetch_start,
+                                    fetch_end,
+                                    reason_code="provider_response_out_of_window",
+                                    evidence="provider_api_out_of_window_response",
+                                    provider=self.get_datasource(),
+                                    symbol=ctx.symbol,
+                                    interval=ctx.interval,
+                                    metadata=metadata,
+                                )
+                            )
+                            continue
+
+                        segment.sort_values("timestamp", inplace=True)
+
+                        try:
+                            self._write_dataframe(segment, ctx)
+                        except SQLAlchemyError:
+                            # _write_dataframe already logged the failure.
+                            pass
+
+                        supplemental_frames.append(
+                            segment[
+                                [
+                                    "timestamp",
+                                    "open",
+                                    "high",
+                                    "low",
+                                    "close",
+                                    "volume",
+                                ]
+                            ]
                         )
-                    )
-                    continue
-
-                segment.sort_values("timestamp", inplace=True)
-
-                try:
-                    self._write_dataframe(segment, ctx)
-                except SQLAlchemyError:
-                    # _write_dataframe already logged the failure.
-                    pass
-
-                supplemental_frames.append(
-                    segment[
-                        [
-                            "timestamp",
-                            "open",
-                            "high",
-                            "low",
-                            "close",
-                            "volume",
-                        ]
-                    ]
-                )
+                finally:
+                    self._release_ingest_lock(lock_handle)
 
             if supplemental_frames:
                 combined = pd.concat([df] + supplemental_frames, ignore_index=True)

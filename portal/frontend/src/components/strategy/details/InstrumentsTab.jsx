@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react'
 import { formatInstrumentNumber } from '../../../utils'
-import { symbolsFromInstrumentSlots } from '../../../utils/instrumentSymbols.js'
+import { symbolsFromStrategy } from '../../../utils/instrumentSymbols.js'
 import { Button } from '../../ui'
 import { computeInstrumentRow } from '../utils/instrumentRows.js'
 
@@ -52,7 +52,7 @@ export const InstrumentsTab = ({
   const toggleExpand = (key) => {
     setExpanded((prev) => (prev === key ? null : key))
   }
-  const instruments = useMemo(() => symbolsFromInstrumentSlots(strategy.instrument_slots), [strategy.instrument_slots])
+  const instruments = useMemo(() => symbolsFromStrategy(strategy), [strategy])
 
   const statusBadge = (status) => {
     if (status === 'valid') return { label: 'Valid', className: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100' }

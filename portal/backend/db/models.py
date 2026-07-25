@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-"""ORM models backing the portal persistence layer."""
-
-from datetime import datetime
 from datetime import datetime
 from typing import Any, Dict
 
@@ -39,6 +36,54 @@ REQUIRED_BOT_RUN_EVENT_INDEXES = frozenset(
         "ix_portal_bot_run_events_bot_run_root_seq_id",
         "ix_portal_bot_run_events_bot_run_bar_time_seq_id",
         "uq_portal_bot_run_events_run_seq",
+    }
+)
+
+REQUIRED_BOT_RUN_LIFECYCLE_INDEXES = frozenset(
+    {
+        "ix_portal_bot_run_lifecycle_bot_checkpoint_updated",
+    }
+)
+
+REQUIRED_BOT_RUN_LEASE_INDEXES = frozenset(
+    {
+        "ix_portal_bot_run_leases_bot_status_expires",
+        "ix_portal_bot_run_leases_runner_status",
+        "ix_portal_bot_run_leases_runner_status_expires",
+        "ix_portal_bot_run_leases_status_expires",
+    }
+)
+
+REQUIRED_BOT_RUN_INDEXES = frozenset(
+    {
+        "ix_portal_bot_runs_report_list",
+        "ix_portal_bot_runs_bot_report_list",
+    }
+)
+
+REQUIRED_REPORT_MATERIALIZATION_INDEXES = frozenset(
+    {
+        "ix_portal_report_materializations_input_fingerprint",
+    }
+)
+
+REQUIRED_RESEARCH_ITEM_INDEXES = frozenset(
+    {
+        "ix_portal_research_items_kind_status_updated",
+        "ix_portal_research_items_symbol_timeframe",
+    }
+)
+
+REQUIRED_RESEARCH_LINK_INDEXES = frozenset(
+    {
+        "ix_portal_research_links_source_relation",
+        "ix_portal_research_links_target",
+    }
+)
+
+REQUIRED_PROVIDER_CREDENTIAL_INDEXES = frozenset(
+    {
+        "ix_provider_credential_refs_provider_venue",
     }
 )
 
@@ -295,6 +340,16 @@ class ProviderCredentialRefRecord(Base):
     last_used_at = Column(DateTime, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
 
+    __table_args__ = (
+        Index(
+            "ix_provider_credential_refs_provider_venue",
+            "provider_id",
+            "venue_id",
+            "environment",
+            postgresql_where=revoked_at.is_(None),
+        ),
+    )
+
 
 class SymbolPresetRecord(Base):
     """Persisted combination of datasource, exchange, timeframe, and symbol."""
@@ -324,6 +379,101 @@ class SymbolPresetRecord(Base):
             "exchange": self.exchange,
             "timeframe": self.timeframe,
             "symbol": self.symbol,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class ResearchItemRecord(Base):
+    """Research-memory item for observations, checks, hypotheses, and studies."""
+
+    __tablename__ = "portal_research_items"
+    __table_args__ = (
+        Index("ix_portal_research_items_kind_status_updated", "kind", "status", "updated_at"),
+        Index("ix_portal_research_items_symbol_timeframe", "symbol", "timeframe"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    kind = Column(String(32), nullable=False)
+    status = Column(String(32), nullable=False, default="draft")
+    title = Column(String(255), nullable=False)
+    body = Column(String(8192), nullable=True)
+    instrument_id = Column(String(64), nullable=True)
+    symbol = Column(String(64), nullable=True)
+    timeframe = Column(String(32), nullable=True)
+    datasource = Column(String(64), nullable=True)
+    exchange = Column(String(64), nullable=True)
+    window_start = Column(DateTime, nullable=True)
+    window_end = Column(DateTime, nullable=True)
+    tags = Column(JSONB, nullable=False, default=list)
+    payload = Column(JSONB, nullable=False, default=dict)
+    source_revision = Column(String(128), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return the research item as an API payload."""
+
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "status": self.status,
+            "title": self.title,
+            "body": self.body,
+            "instrument_id": self.instrument_id,
+            "symbol": self.symbol,
+            "timeframe": self.timeframe,
+            "datasource": self.datasource,
+            "exchange": self.exchange,
+            "window_start": (self.window_start.isoformat() + "Z") if self.window_start else None,
+            "window_end": (self.window_end.isoformat() + "Z") if self.window_end else None,
+            "tags": list(self.tags or []),
+            "payload": dict(self.payload or {}),
+            "source_revision": self.source_revision,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class ResearchLinkRecord(Base):
+    """Directed research-memory link to another research item or platform artifact."""
+
+    __tablename__ = "portal_research_links"
+    __table_args__ = (
+        Index("ix_portal_research_links_source_relation", "source_item_id", "relation"),
+        Index("ix_portal_research_links_target", "target_type", "target_id"),
+        UniqueConstraint(
+            "source_item_id",
+            "target_type",
+            "target_id",
+            "relation",
+            name="uq_research_link_identity",
+        ),
+    )
+
+    id = Column(String(96), primary_key=True)
+    source_item_id = Column(
+        String(64),
+        ForeignKey("portal_research_items.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    target_type = Column(String(64), nullable=False)
+    target_id = Column(String(255), nullable=False)
+    relation = Column(String(64), nullable=False)
+    link_metadata = Column("metadata", JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return the research link as an API payload."""
+
+        return {
+            "id": self.id,
+            "source_item_id": self.source_item_id,
+            "target_type": self.target_type,
+            "target_id": self.target_id,
+            "relation": self.relation,
+            "metadata": dict(self.link_metadata or {}),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
@@ -397,7 +547,7 @@ class InstrumentRecord(Base):
 
 
 class BotRecord(Base):
-    """Database row describing a persisted bot configuration."""
+    """Database row describing a persisted bot definition."""
 
     __tablename__ = "portal_bots"
 
@@ -419,13 +569,6 @@ class BotRecord(Base):
     market_data_stream_policy = Column(JSON, nullable=False, default=dict)
     snapshot_interval_ms = Column(Integer, nullable=False, default=250)
     bot_env = Column(JSON, nullable=False, default=dict)
-    status = Column(String(32), nullable=False, default="idle")
-    last_run_at = Column(DateTime, nullable=True)
-    last_stats = Column(JSON, nullable=False, default=dict)
-    last_run_artifact = Column(JSON, nullable=True)
-    # Heartbeat fields for orphan detection (BotWatchdog)
-    runner_id = Column(String(128), nullable=True)
-    heartbeat_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -439,7 +582,7 @@ class BotRecord(Base):
         execution_behavior = str(risk_payload.get("execution_behavior") or "simulated").strip().lower().replace("_", "-")
         if execution_behavior not in {"simulated", "observe-only"}:
             execution_behavior = "simulated"
-        return {
+        payload = {
             "id": self.id,
             "name": self.name,
             "strategy_id": self.strategy_id,
@@ -460,15 +603,10 @@ class BotRecord(Base):
             "market_data_stream_policy": dict(self.market_data_stream_policy or {}),
             "snapshot_interval_ms": int(self.snapshot_interval_ms or 0),
             "bot_env": dict(self.bot_env or {}),
-            "status": self.status,
-            "last_run_at": (self.last_run_at.isoformat() + "Z") if self.last_run_at else None,
-            "last_stats": dict(self.last_stats or {}),
-            "last_run_artifact": dict(self.last_run_artifact or {}),
-            "runner_id": self.runner_id,
-            "heartbeat_at": (self.heartbeat_at.isoformat() + "Z") if self.heartbeat_at else None,
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
+        return payload
 
 class BotTradeRecord(Base):
     """Database row representing a laddered trade generated by a bot."""
@@ -564,6 +702,10 @@ class BotRunRecord(Base):
     """Database row representing a completed bot run report snapshot."""
 
     __tablename__ = "portal_bot_runs"
+    __table_args__ = (
+        Index("ix_portal_bot_runs_report_list", "run_type", "status", "ended_at", "started_at", "run_id"),
+        Index("ix_portal_bot_runs_bot_report_list", "bot_id", "run_type", "status", "ended_at", "started_at", "run_id"),
+    )
 
     run_id = Column(String(64), primary_key=True)
     bot_id = Column(String(64), ForeignKey("portal_bots.id", ondelete="SET NULL"), nullable=True)
@@ -582,7 +724,14 @@ class BotRunRecord(Base):
     ended_at = Column(DateTime, nullable=True)
     summary = Column(JSON, nullable=True)
     config_snapshot = Column(JSON, nullable=True)
-    decision_ledger = Column(JSON, nullable=True)
+    config_hash = Column(String(64), nullable=True)
+    material_config_hash = Column(String(64), nullable=True)
+    strategy_hash = Column(String(64), nullable=True)
+    data_snapshot_hash = Column(String(64), nullable=True)
+    runtime_contract_version = Column(String(64), nullable=True)
+    runtime_source_revision = Column(String(128), nullable=True)
+    runtime_image = Column(String(255), nullable=True)
+    storage_schema_version = Column(String(64), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -630,7 +779,14 @@ class BotRunRecord(Base):
             "execution_mode": execution_mode,
             "execution_behavior": execution_behavior,
             "config_snapshot": config_snapshot,
-            "decision_ledger": list(self.decision_ledger or []),
+            "config_hash": self.config_hash,
+            "material_config_hash": self.material_config_hash,
+            "strategy_hash": self.strategy_hash,
+            "data_snapshot_hash": self.data_snapshot_hash,
+            "runtime_contract_version": self.runtime_contract_version,
+            "runtime_source_revision": self.runtime_source_revision,
+            "runtime_image": self.runtime_image,
+            "storage_schema_version": self.storage_schema_version,
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
@@ -639,14 +795,27 @@ class BotRunRecord(Base):
 class ReportMaterializationRecord(Base):
     """Persisted RunReportDTO artifact and build status for one run."""
 
-    __tablename__ = "portal_report_materializations_v1"
+    __tablename__ = "portal_report_materializations"
+    __table_args__ = (
+        Index("ix_portal_report_materializations_input_fingerprint", "input_fingerprint"),
+    )
 
     run_id = Column(String(64), ForeignKey("portal_bot_runs.run_id", ondelete="CASCADE"), primary_key=True)
-    contract_version = Column(String(64), nullable=False, default="run_report_v2")
+    contract_version = Column(String(64), nullable=False, default="run_report.v2")
+    report_schema_version = Column(String(64), nullable=True)
+    dataset_schema_version = Column(String(64), nullable=True)
+    builder_source_revision = Column(String(128), nullable=True)
+    storage_schema_version = Column(String(64), nullable=True)
     status = Column(String(32), nullable=False, default="not_started")
     artifact_id = Column(String(160), nullable=True)
     artifact = Column(JSONB, nullable=True)
     cache_key = Column(String(255), nullable=True)
+    input_fingerprint = Column(String(64), nullable=True)
+    input_fingerprint_payload = Column(JSONB, nullable=True)
+    source_event_count = Column(Integer, nullable=False, default=0)
+    source_event_high_water_run_seq = Column(Integer, nullable=False, default=0)
+    source_trade_count = Column(Integer, nullable=False, default=0)
+    source_run_updated_at = Column(DateTime, nullable=True)
     stale_reason = Column(String(512), nullable=True)
     error = Column(String(2048), nullable=True)
     started_at = Column(DateTime, nullable=True)
@@ -668,6 +837,10 @@ class ReportMaterializationRecord(Base):
             "run_id": self.run_id,
             "status": effective_status,
             "contract_version": self.contract_version,
+            "report_schema_version": self.report_schema_version,
+            "dataset_schema_version": self.dataset_schema_version,
+            "builder_source_revision": self.builder_source_revision,
+            "storage_schema_version": self.storage_schema_version,
             "artifact_id": self.artifact_id,
             "artifact_path": None,
             "built_at": (self.built_at.isoformat() + "Z") if self.built_at else None,
@@ -676,6 +849,12 @@ class ReportMaterializationRecord(Base):
             "error": self.error,
             "stale_reason": self.stale_reason or ("missing_artifact" if effective_status == "stale" else None),
             "cache_key": self.cache_key,
+            "input_fingerprint": self.input_fingerprint,
+            "input_fingerprint_payload": dict(self.input_fingerprint_payload or {}),
+            "source_event_count": int(self.source_event_count or 0),
+            "source_event_high_water_run_seq": int(self.source_event_high_water_run_seq or 0),
+            "source_trade_count": int(self.source_trade_count or 0),
+            "source_run_updated_at": (self.source_run_updated_at.isoformat() + "Z") if self.source_run_updated_at else None,
             "can_view": can_view,
             "can_build": can_build,
             "can_retry": can_retry,
@@ -686,6 +865,9 @@ class BotRunLifecycleRecord(Base):
     """Current durable lifecycle state for one bot run."""
 
     __tablename__ = "portal_bot_run_lifecycle"
+    __table_args__ = (
+        Index("ix_portal_bot_run_lifecycle_bot_checkpoint_updated", "bot_id", "checkpoint_at", "updated_at"),
+    )
 
     run_id = Column(String(64), ForeignKey("portal_bot_runs.run_id", ondelete="CASCADE"), primary_key=True)
     bot_id = Column(String(64), ForeignKey("portal_bots.id", ondelete="CASCADE"), nullable=False)
@@ -763,6 +945,8 @@ class BotRunLeaseRecord(Base):
     __table_args__ = (
         Index("ix_portal_bot_run_leases_bot_status_expires", "bot_id", "status", "expires_at"),
         Index("ix_portal_bot_run_leases_runner_status", "runner_id", "status"),
+        Index("ix_portal_bot_run_leases_runner_status_expires", "runner_id", "status", "expires_at"),
+        Index("ix_portal_bot_run_leases_status_expires", "status", "expires_at"),
     )
 
     run_id = Column(String(64), ForeignKey("portal_bot_runs.run_id", ondelete="CASCADE"), primary_key=True)
@@ -800,7 +984,7 @@ class BotRunLeaseRecord(Base):
 class BotRunStepRollupRecord(Base):
     """Bucketed runtime step profiler metric rollup."""
 
-    __tablename__ = "portal_bot_run_step_rollups_v1"
+    __tablename__ = "portal_bot_run_step_rollups"
     __table_args__ = (
         UniqueConstraint(
             "bucket_start",
@@ -813,22 +997,22 @@ class BotRunStepRollupRecord(Base):
             "symbol",
             "timeframe",
             "status",
-            name="uq_portal_bot_run_step_rollups_v1_bucket_identity",
+            name="uq_portal_bot_run_step_rollups_bucket_identity",
         ),
-        Index("ix_portal_bot_run_step_rollups_v1_run_bucket", "run_id", "bucket_start"),
+        Index("ix_portal_bot_run_step_rollups_run_bucket", "run_id", "bucket_start"),
         Index(
-            "ix_portal_bot_run_step_rollups_v1_run_step_metric_bucket",
+            "ix_portal_bot_run_step_rollups_run_step_metric_bucket",
             "run_id",
             "step_name",
             "metric_name",
             "bucket_start",
         ),
-        Index("ix_portal_bot_run_step_rollups_v1_bot_bucket", "bot_id", "bucket_start"),
+        Index("ix_portal_bot_run_step_rollups_bot_bucket", "bot_id", "bucket_start"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     bucket_start = Column(DateTime, nullable=False)
-    bucket_seconds = Column(Integer, nullable=False, default=10)
+    bucket_seconds = Column(Integer, nullable=False, default=60)
     first_seen = Column(DateTime, nullable=False)
     last_seen = Column(DateTime, nullable=False)
     run_id = Column(String(64), nullable=False)
@@ -1030,11 +1214,11 @@ class BotRunEventSeqAllocatorRecord(Base):
 class BotlensBackendEventRecord(Base):
     """Durable backend observability event row for BotLens/Grafana queries."""
 
-    __tablename__ = "botlens_backend_events_v1"
+    __tablename__ = "botlens_backend_events"
     __table_args__ = (
-        Index("ix_botlens_backend_events_v1_observed_at", "observed_at"),
-        Index("ix_botlens_backend_events_v1_event_name_observed_at", "event_name", "observed_at"),
-        Index("ix_botlens_backend_events_v1_run_id_observed_at", "run_id", "observed_at"),
+        Index("ix_botlens_backend_events_observed_at", "observed_at"),
+        Index("ix_botlens_backend_events_event_name_observed_at", "event_name", "observed_at"),
+        Index("ix_botlens_backend_events_run_id_observed_at", "run_id", "observed_at"),
         {"schema": "observability_events"},
     )
 
@@ -1095,7 +1279,7 @@ class BotlensBackendEventRecord(Base):
 class BotlensBackendMetricRollupRecord(Base):
     """Bucketed durable backend observability metric rollup row."""
 
-    __tablename__ = "botlens_backend_metric_rollups_v1"
+    __tablename__ = "botlens_backend_metric_rollups"
     __table_args__ = (
         UniqueConstraint(
             "bucket_start",
@@ -1115,15 +1299,15 @@ class BotlensBackendMetricRollupRecord(Base):
             "storage_target",
             "failure_mode",
             "label_hash",
-            name="uq_botlens_backend_metric_rollups_v1_bucket_identity",
+            name="uq_botlens_backend_metric_rollups_bucket_identity",
         ),
-        Index("ix_botlens_backend_metric_rollups_v1_bucket_start", "bucket_start"),
+        Index("ix_botlens_backend_metric_rollups_bucket_start", "bucket_start"),
         Index(
-            "ix_botlens_backend_metric_rollups_v1_metric_bucket",
+            "ix_botlens_backend_metric_rollups_metric_bucket",
             "metric_name",
             "bucket_start",
         ),
-        Index("ix_botlens_backend_metric_rollups_v1_run_bucket", "run_id", "bucket_start"),
+        Index("ix_botlens_backend_metric_rollups_run_bucket", "run_id", "bucket_start"),
         {"schema": "observability_metrics"},
     )
 

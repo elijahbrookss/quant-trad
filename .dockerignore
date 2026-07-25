@@ -1,0 +1,47 @@
+.git
+.gitignore
+.dockerignore
+
+# Local Python state
+.venv/
+env/
+quant-env/
+*.egg-info/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+
+# Local env, secrets, and runtime data
+.env
+.env.*
+secrets.env
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+# Local runtime artifacts
+logs/
+output/
+artifacts/
+.pids/
+
+# Frontend local/build state
+portal/frontend/node_modules/
+portal/frontend/dist/
+portal/frontend/.vite/
+portal/frontend/.npm-cache/
+
+# Local editor/agent state
+.claude/
+.codex/
+.codex
+.vscode/

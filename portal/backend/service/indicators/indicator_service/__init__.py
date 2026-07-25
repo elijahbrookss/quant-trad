@@ -18,6 +18,7 @@ from .api import (
     runtime_input_plan_for_instance,
     set_instance_enabled,
     update_instance,
+    validate_instance_config,
 )
 from .context import IndicatorServiceContext
 from .runtime_graph import (
@@ -25,6 +26,7 @@ from .runtime_graph import (
     build_runtime_indicator_instance,
     collect_runtime_indicator_metas,
 )
+from .runtime_validation import validate_runtime_for_instance
 
 IndicatorService = type(default_service)
 
@@ -51,4 +53,6 @@ __all__ = [
     "runtime_input_plan_for_instance",
     "set_instance_enabled",
     "update_instance",
+    "validate_instance_config",
+    "validate_runtime_for_instance",
 ]

@@ -1,125 +1,90 @@
 # Getting Started
 
-This page covers a local stack run. It does not replace the platform contracts or provider-specific setup details.
+This is the local onboarding path. Make owns Python dependency installation and
+local infra. `qt setup` owns readiness checks, local operator env values, and
+provider onboarding.
 
 ## Prerequisites
 
 - Docker
 - GNU Make
-- Python 3.12+ for local tooling outside Docker
+- Python 3.12+
 
-## Local Secrets
+## First Setup
 
-Create the local secrets file:
-
-```bash
-cp secrets.env.example secrets.env
-```
-
-Fill the local values required by the stack:
+From the repo root:
 
 ```bash
-POSTGRES_DB=quanttrad
-POSTGRES_USER=quanttrad
-POSTGRES_PASSWORD=<local-db-password>
-PGADMIN_DEFAULT_PASSWORD=<local-pgadmin-password>
-```
-
-If you plan to save provider credentials, also set a credential encryption key:
-
-```bash
-QT_SECURITY_PROVIDER_CREDENTIAL_KEY=<fernet-key>
-```
-
-Generate one with:
-
-```bash
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
-
-Provider credentials and operator overrides belong in `secrets.env` or the
-encrypted provider credential store, not in tracked defaults.
-
-## Start Core Services
-
-```bash
+make deps
+./scripts/qt setup env
 make up BUILD=1 STACK_PROFILES=core
+./scripts/qt setup doctor
 ```
 
-Core endpoints:
-
-- Frontend: `http://localhost:5173`
-- Backend API: `http://localhost:8000`
-- TimescaleDB: `localhost:15432`
-- pgAdmin: `http://localhost:8080`
-
-## Add Observability
+`./scripts/qt` is only a dispatcher. After `make deps`, keep using
+`./scripts/qt` from an unactivated shell, or activate the venv and use `qt`
+directly:
 
 ```bash
-make up BUILD=1 STACK_PROFILES=all
+source .venv/bin/activate
+qt setup doctor
 ```
 
-Observability endpoints:
-
-- Grafana: `http://localhost:3000`
-- Loki: `http://localhost:3100`
-
-## Coinbase Credentials
-
-Coinbase Direct is the active provider-backed paper/streaming path. Backtests
-from local or cached data do not require Coinbase credentials, but provider
-streaming and authenticated provider calls do.
-
-After the core stack is running and `QT_SECURITY_PROVIDER_CREDENTIAL_KEY` is
-set, store Coinbase credentials with:
+If Python 3.12 is not the default interpreter:
 
 ```bash
-qt providers credentials schema --provider COINBASE --venue COINBASE_DIRECT
-qt providers credentials add --provider COINBASE --venue COINBASE_DIRECT
+make deps PY=python3.12
 ```
 
-Required Coinbase credential fields:
+If an old unsupported `.venv` already exists:
 
-```text
-COINBASE_API_KEY
-COINBASE_API_SECRET
+```bash
+mv .venv .venv.old
+make deps PY=python3.12
 ```
+
+## Provider Credentials
+
+Backtests from local or cached data do not require Coinbase credentials.
+Provider-backed paper/streaming workflows do.
+
+After the core stack is running:
+
+```bash
+./scripts/qt setup provider coinbase
+```
+
+For non-interactive setup, pass secrets from environment variables:
+
+```bash
+LOCAL_COINBASE_KEY=... LOCAL_COINBASE_SECRET=... \
+./scripts/qt setup provider coinbase \
+  --secret-env COINBASE_API_KEY=LOCAL_COINBASE_KEY \
+  --secret-env COINBASE_API_SECRET=LOCAL_COINBASE_SECRET \
+  --no-input
+```
+
+Secret values are written through the backend provider credential API into the
+encrypted credential-ref store. They are not stored directly in `secrets.env`.
 
 ## Useful Commands
 
 ```bash
+./scripts/qt setup doctor
+./scripts/qt providers credentials list
+./scripts/qt providers stream-smoke --provider COINBASE --venue COINBASE_DIRECT --symbol <symbol> --auth-mode authenticated
 make help
-make ps
 make logs SERVICE=backend
-make restart BUILD=1
 make test
-make check
 make down
 ```
 
-Use `qt` for normal bot, provider, report, and experiment workflows. Use
-`qt mcp serve` when an MCP host needs the same workflow boundary over stdio.
+## Boundaries
 
-## Configuration Notes
-
-- `.env`: tracked local defaults for Python tooling and tests.
-- `.env.test`: Docker test defaults.
-- `secrets.env`: private credentials and operator overrides.
-- `portal/frontend/.env`: frontend Vite defaults.
+- `make deps`: local Python venv and editable install.
+- `qt setup`: readiness checks, local operator env values, and provider onboarding.
+- `qt providers`: provider metadata, credential refs, and provider smoke checks.
+- `make`: Docker stack, tests, logs, docs sync, DB helpers, and forensics.
 - `PG_DSN`: the single runtime persistence DSN.
-
-## Docs Sync
-
-After updating docs in this repo, run:
-
-```bash
-make sync-docs
-```
-
-If no sync destination is configured, the target exits cleanly after explaining what to set.
-
-## Next
-
-- Read [overview](overview.md) for the project model.
-- Read [data layer](engineering/data-layer.md) before changing providers.
-- Read [observability](engineering/observability.md) before adding logs or metrics.
+- `secrets.env`: the one local operator env file for infrastructure values and
+  the provider credential encryption key.

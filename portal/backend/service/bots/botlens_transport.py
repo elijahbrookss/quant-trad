@@ -70,6 +70,8 @@ def _runtime_payload(health_state: Mapping[str, Any] | None) -> Dict[str, Any]:
     }
     if warning_types:
         payload["warning_types"] = warning_types
+    if isinstance(source.get("warning_summary"), Mapping) and source.get("warning_summary"):
+        payload["warning_summary"] = dict(source.get("warning_summary"))
     highest_warning_severity = str(source.get("highest_warning_severity") or "").strip().lower() or None
     if highest_warning_severity:
         payload["highest_warning_severity"] = highest_warning_severity
@@ -96,6 +98,18 @@ def _runtime_payload(health_state: Mapping[str, Any] | None) -> Dict[str, Any]:
     return payload
 
 
+def _symbol_warning_summary_payload(
+    *,
+    health_state: Mapping[str, Any] | None,
+    symbol_key: str,
+) -> Dict[str, Any]:
+    health = health_state if isinstance(health_state, Mapping) else {}
+    summary = health.get("warning_summary") if isinstance(health.get("warning_summary"), Mapping) else {}
+    by_symbol = summary.get("by_symbol") if isinstance(summary.get("by_symbol"), Mapping) else {}
+    symbol_summary = by_symbol.get(symbol_key) if isinstance(by_symbol.get(symbol_key), Mapping) else {}
+    return dict(symbol_summary) if symbol_summary else {"symbol_key": symbol_key, "count": 0, "event_count": 0}
+
+
 def _symbol_identity_payload(state: SymbolProjectionSnapshot) -> Dict[str, Any]:
     identity = state.identity.to_dict()
     symbol_key = normalize_series_key(identity.get("symbol_key") or state.symbol_key)
@@ -113,9 +127,19 @@ def _symbol_identity_payload(state: SymbolProjectionSnapshot) -> Dict[str, Any]:
 def _symbol_overlay_cursor_payload(state: SymbolProjectionSnapshot) -> Dict[str, Any]:
     overlay_commit_seq = max(0, int(state.overlays.overlay_commit_seq or 0))
     overlay_commit_seq_status = str(state.overlays.overlay_commit_seq_status or "").strip() or None
-    return {
+    payload = {
         "overlay_commit_seq": overlay_commit_seq,
         "overlay_commit_seq_status": overlay_commit_seq_status,
+        "overlay_projection": (
+            dict(state.overlays.overlay_projection)
+            if isinstance(state.overlays.overlay_projection, Mapping)
+            else None
+        ),
+    }
+    return {
+        key: value
+        for key, value in payload.items()
+        if value not in (None, "", [], {})
     }
 
 
@@ -182,6 +206,7 @@ def _run_catalog_entry_payload(
     timeframe = str(identity.get("timeframe") or "").strip().lower()
     open_trade_list = [dict(entry) for entry in open_trades if isinstance(entry, Mapping)]
     readiness = dict(identity.get("readiness") or {}) if isinstance(identity.get("readiness"), Mapping) else {}
+    warning_summary = _symbol_warning_summary_payload(health_state=health_state, symbol_key=symbol_key)
     return {
         "symbol_key": symbol_key,
         "identity": {
@@ -206,6 +231,7 @@ def _run_catalog_entry_payload(
             "count": len(open_trade_list),
         },
         "stats": dict(identity.get("stats") or {}) if isinstance(identity.get("stats"), Mapping) else {},
+        "warning_summary": warning_summary,
         "readiness": {
             "catalog_discovered": True,
             "snapshot_ready": bool(readiness.get("snapshot_ready")),
@@ -226,6 +252,7 @@ def _live_symbol_summary_payload(
     timeframe = str(identity.get("timeframe") or "").strip().lower()
     open_trade_list = [dict(entry) for entry in open_trades if isinstance(entry, Mapping)]
     readiness = dict(identity.get("readiness") or {}) if isinstance(identity.get("readiness"), Mapping) else {}
+    warning_summary = _symbol_warning_summary_payload(health_state=health_state, symbol_key=symbol_key)
     return {
         "symbol_key": symbol_key,
         "instrument_id": identity.get("instrument_id"),
@@ -244,6 +271,7 @@ def _live_symbol_summary_payload(
         "last_trade_at": identity.get("last_trade_at"),
         "last_activity_at": identity.get("last_activity_at"),
         "stats": dict(identity.get("stats") or {}) if isinstance(identity.get("stats"), Mapping) else {},
+        "warning_summary": warning_summary,
         "readiness": {
             "catalog_discovered": True,
             "snapshot_ready": bool(readiness.get("snapshot_ready")),
@@ -716,7 +744,17 @@ class BotLensTransport:
                     "overlay_commit_seq": delta.overlay_ops.get("overlay_commit_seq"),
                     "base_overlay_commit_seq": delta.overlay_ops.get("base_overlay_commit_seq"),
                     "overlay_commit_seq_status": delta.overlay_ops.get("overlay_commit_seq_status"),
+                    "projection": (
+                        dict(delta.overlay_ops.get("projection"))
+                        if isinstance(delta.overlay_ops.get("projection"), Mapping)
+                        else None
+                    ),
                     "ops": [dict(entry) for entry in delta.overlay_ops.get("ops", []) if isinstance(entry, Mapping)],
+                }
+                overlay_payload = {
+                    key: value
+                    for key, value in overlay_payload.items()
+                    if value not in (None, "", [], {})
                 }
                 prepared.append(
                     self._build_prepared(

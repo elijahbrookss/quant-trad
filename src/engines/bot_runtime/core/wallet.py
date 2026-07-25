@@ -313,6 +313,38 @@ def _execution_profile_instrument_type(execution_profile: Optional[SeriesExecuti
     return execution_profile.instrument.instrument_type
 
 
+def _instrument_fields(instrument: Optional[Mapping[str, Any]]) -> Mapping[str, Any]:
+    if not isinstance(instrument, Mapping):
+        return {}
+    metadata = instrument.get("metadata") if isinstance(instrument.get("metadata"), Mapping) else {}
+    fields = metadata.get("instrument_fields") if isinstance(metadata.get("instrument_fields"), Mapping) else {}
+    return fields
+
+
+def _wallet_order_contract_size(
+    *,
+    instrument: Optional[Mapping[str, Any]],
+    execution_profile: Optional[SeriesExecutionProfile],
+) -> float:
+    if execution_profile is not None:
+        contract_size = _coerce_float(execution_profile.constraints.contract_size, 1.0)
+        return contract_size if contract_size > 0.0 else 1.0
+    if isinstance(instrument, Mapping):
+        contract_size = _coerce_float(instrument.get("contract_size"), 0.0)
+        if contract_size <= 0.0:
+            contract_size = _coerce_float(_instrument_fields(instrument).get("contract_size"), 0.0)
+        return contract_size if contract_size > 0.0 else 1.0
+    return 1.0
+
+
+def _wallet_order_price(*, notional: float, qty: float, contract_size: float) -> float:
+    quantity = abs(float(qty or 0.0))
+    multiplier = abs(float(contract_size or 0.0))
+    if quantity <= 0.0 or multiplier <= 0.0:
+        return 0.0
+    return max(float(notional or 0.0), 0.0) / (quantity * multiplier)
+
+
 def _wallet_requirement_payload(
     requirement: MarginRequirement,
     *,
@@ -381,14 +413,19 @@ def _requirement_for_wallet_order(
     del calculator
     resolved_side = str(side or "").strip().lower()
     direction = "long" if resolved_side in {"buy", "long"} else "short"
+    contract_size = _wallet_order_contract_size(
+        instrument=instrument,
+        execution_profile=execution_profile,
+    )
+    price = _wallet_order_price(notional=notional, qty=qty, contract_size=contract_size)
     requirement = calculate_margin_requirement(
         notional=notional,
         entry_fee=fee,
         side=resolved_side,
         direction=direction,
         quantity=qty,
-        price=0.0,
-        contract_size=1.0,
+        price=price,
+        contract_size=contract_size,
         instrument=instrument,
         execution_profile=execution_profile,
         include_exit_fee_buffer=True,

@@ -267,6 +267,8 @@ export function ChartPanel({
   const centerView = getChart(RUNTIME_CHART_ID)?.handles?.centerView
   const canRefocus = model.candles.length > 0 && typeof centerView === 'function'
   const barCount = Array.isArray(model.candles) ? model.candles.length : 0
+  const overlayProjection = model.overlayProjection || {}
+  const overlayCount = Number(overlayProjection.overlays || 0) || 0
 
   useEffect(() => {
     if (!isFullscreen) return undefined
@@ -290,6 +292,12 @@ export function ChartPanel({
             ) : null}
             {model.historyStatus === 'loading' ? (
               <span className="text-xs text-slate-500">Loading older bars</span>
+            ) : null}
+            {overlayCount > 0 ? (
+              <span className="text-xs text-slate-500">
+                {overlayCount} {overlayCount === 1 ? 'overlay' : 'overlays'}
+                {overlayProjection.mode ? ` · ${overlayProjection.mode}` : ''}
+              </span>
             ) : null}
           </div>
           <p className="mt-1 truncate text-xs text-slate-500">

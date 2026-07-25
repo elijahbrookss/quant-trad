@@ -14,8 +14,14 @@ def test_settings_applies_single_underscore_env_overrides(monkeypatch, request):
     monkeypatch.setenv("QT_BOT_RUNTIME_BOTLENS_PERSIST_OBSERVER_CONTINUITY", "true")
     monkeypatch.setenv("QT_WORKERS_INDICATORS_INDEX", "2")
     monkeypatch.setenv("QT_WORKERS_INDICATORS_TOTAL", "7")
+    monkeypatch.setenv("QT_WORKERS_INDICATORS_IDLE_SLEEP_MAX_SECONDS", "3.5")
+    monkeypatch.setenv("QT_WORKERS_RESEARCH_PROCESSES", "3")
+    monkeypatch.setenv("QT_WORKERS_RESEARCH_INDEX", "1")
+    monkeypatch.setenv("QT_WORKERS_RESEARCH_TOTAL", "3")
+    monkeypatch.setenv("QT_ASYNC_JOBS_RECLAIM_INTERVAL_SECONDS", "45")
     monkeypatch.setenv("QT_BOT_RUNTIME_WATCHDOG_CLOCK_GAP_THRESHOLD_SECONDS", "42")
     monkeypatch.setenv("QT_REPORTS_ARTIFACTS_OUTPUT_FORMAT", "csv")
+    monkeypatch.setenv("QT_REPORTS_MATERIALIZATION_TERMINAL_AUTO_ENQUEUE_ENABLED", "true")
     monkeypatch.setenv("PG_DSN", "postgresql://example/test")
 
     settings = get_settings(force_reload=True)
@@ -24,8 +30,14 @@ def test_settings_applies_single_underscore_env_overrides(monkeypatch, request):
     assert settings.bot_runtime.botlens.persist_observer_continuity is True
     assert settings.workers.indicators.index == 2
     assert settings.workers.indicators.total == 7
+    assert settings.workers.indicators.idle_sleep_max_seconds == 3.5
+    assert settings.workers.research.processes == 3
+    assert settings.workers.research.index == 1
+    assert settings.workers.research.total == 3
+    assert settings.async_jobs.reclaim_interval_seconds == 45.0
     assert settings.bot_runtime.watchdog.clock_gap_threshold_seconds == 42.0
     assert settings.reports.artifacts.output_format == "csv"
+    assert settings.reports.materialization.terminal_auto_enqueue_enabled is True
     assert settings.database.dsn == "postgresql://example/test"
 
 

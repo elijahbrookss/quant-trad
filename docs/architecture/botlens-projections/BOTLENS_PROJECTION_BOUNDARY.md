@@ -17,6 +17,7 @@ code_paths:
   - portal/backend/service/bots/botlens_canonical_facts.py
   - portal/backend/service/bots/botlens_domain_events.py
   - portal/backend/service/bots/botlens_event_retention.py
+  - portal/backend/service/bots/botlens_intake_router.py
   - portal/backend/service/bots/botlens_projector_registry.py
   - portal/backend/service/bots/botlens_run_projector.py
   - portal/backend/service/bots/botlens_symbol_projector.py
@@ -27,12 +28,21 @@ code_paths:
   - portal/backend/service/bots/container_runtime.py
   - portal/backend/service/bots/container_runtime_telemetry.py
   - portal/backend/service/bots/paper_market_stream.py
+  - src/core/settings.py
   - src/engines/bot_runtime/live_market.py
+  - src/engines/bot_runtime/runtime/components/canonical_facts.py
   - src/engines/bot_runtime/runtime/components/chart_state.py
   - src/engines/bot_runtime/runtime/components/overlay_delta.py
+  - src/engines/bot_runtime/runtime/mixins/setup_prepare.py
+  - src/engines/bot_runtime/runtime/mixins/execution_loop.py
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
+  - src/engines/bot_runtime/runtime/mixins/runtime_projection.py
+  - src/engines/bot_runtime/strategy/series_builder_parts/models.py
   - portal/frontend/src/features/bots/botlens
   - portal/frontend/src/components/bots/BotLensChart.jsx
+  - portal/frontend/src/components/bots/botlensProjection.js
+  - portal/frontend/src/features/bots/botlens/buildBotLensRuntimeViewModel.js
+  - portal/frontend/src/features/bots/botlens/components/ChartPanel.jsx
   - docs/architecture/botlens-projections/diagrams/botlens-projection-flow.mmd
 ---
 # BotLens Projection Boundary
@@ -50,8 +60,9 @@ BotLens owns:
 - run projection snapshots,
 - symbol projection snapshots,
 - selected-symbol read models,
-- trade overlays,
+- trade markers and trade visual projections built from trade facts,
 - decision/runtime event overlays,
+- bounded visual overlay projections,
 - live deltas and stream continuity,
 - cold-path forensics reads.
 
@@ -97,7 +108,8 @@ Symbol projection owns symbol-level state:
 
 - candles,
 - display-only provisional candle,
-- overlays,
+- bounded overlays,
+- overlay projection metadata,
 - decisions,
 - trades and markers,
 - runtime diagnostics,
@@ -105,154 +117,170 @@ Symbol projection owns symbol-level state:
 
 The frontend should treat these as projections keyed by runtime IDs, not as local execution state.
 
-## State And Truth
+Symbol fact intake drains in bounded batches. A symbol projector may apply many
+ready fact envelopes in one drain turn, preserving event order while emitting a
+single run-summary notification and a single fanout package for the drain. This
+keeps burst pressure from multiplying scheduler turns and downstream messages
+without changing canonical runtime truth.
 
-BotLens state is rebuildable from runtime/domain events and supporting durable facts. It can cache, compact, and window state for the UI. It cannot invent missing decisions or reinterpret fills.
+Run health warnings are run-level state. Run health carries one warning summary
+with per-symbol buckets and grouped warning conditions. Symbol views may render
+the matching bucket as a badge or compact runtime summary, but they must not
+copy the entire run warning list into every symbol runtime panel.
 
-BotLens consumes more live facts than the permanent runtime ledger keeps. Raw
-per-bar candles, overlay deltas, repeated health state, and runtime step
-telemetry are live/debug projection inputs. They may be streamed, compacted,
-aggregated, or retained in bounded observability storage, but they are not
-canonical run truth. Required replay and reporting surfaces rebuild from Tier 1
-material truth plus compact Tier 2 context such as series metadata, candle
-continuity summaries, selected decision evidence, and source candle/catalog
-references. Cold chart-history reads use source candle storage/catalog
-references when raw `CANDLE_OBSERVED` runtime rows are absent.
+## Rebuilding From Runtime Facts
 
-Live transport is a projection path. When the runtime owns canonical fact
-persistence, including wallet ledger facts, the ingest side uses those events
-for projection and skips duplicate durable writes. Source-owned canonical facts
-may arrive over live transport before their async source-side DB batch has
-completed, but the run is not finalized until that buffer drains; projection
-does not become canonical truth by seeing the live message first.
-Transport-only derived facts may be persisted by ingest, but repeated stable
-event ids should be filtered before DB access and still remain protected by
-storage uniqueness.
+BotLens state is rebuildable from runtime/domain events and supporting durable
+facts. It can cache, compact, and window that state for the UI, but it cannot
+invent missing decisions or reinterpret fills.
 
-Runtime lifecycle and bootstrap/control messages use the telemetry control lane.
-The control lane is still projection input, not execution truth, but shutdown
-must attempt a bounded flush before ordinary live/debug telemetry is abandoned.
-If that flush cannot prove delivery, the runtime emits WARN-level diagnostics
-and may attempt a bounded direct websocket fallback.
+BotLens sees more live/debug material than the permanent runtime ledger keeps:
+raw per-bar candles, overlay deltas, repeated health state, provisional candles,
+runtime step telemetry, and disposable websocket deltas. Those facts may be
+streamed, compacted, aggregated, or retained in bounded observability storage.
+They are still projection inputs, not canonical run truth.
 
-Paper market streams may emit `provisional_candle_updated` facts from provider
-ticker/candle updates. These facts travel through the existing
-`botlens_runtime_facts` telemetry path and are retained as Tier 4 live
-transport only. They update the selected-symbol chart display by replacing the
-latest visual candle for the in-progress bar, but they stay separate from
-canonical `CANDLE_OBSERVED` candles. When a closed candle is observed for the
-same bar, the provisional candle projection is cleared. This keeps the live UI
-responsive without changing indicator, strategy, wallet, order, trade, report,
-or replay semantics.
+Replay and reports rebuild from material runtime truth plus compact context:
+series metadata, candle-continuity summaries, selected decision evidence, and
+source candle/catalog references. Cold chart-history reads use source candle
+storage and catalog references when raw `CANDLE_OBSERVED` runtime rows are not
+retained.
 
-The runtime-to-portal fact stream is viewer-blind. Runtime must not inspect
-BotLens panes, websocket subscribers, selected symbols, chart state, or any
-other UI demand signal. It emits the same canonical facts and bounded
-projection/debug facts for the same run inputs regardless of whether anyone is
-watching. Viewer demand can never change strategy timing, execution timing,
-wallet timing, canonical fact emission, or run finalization.
+## Live Handoff Without Execution Authority
 
-BotLens read endpoints may compute selected-symbol continuity diagnostics for
-the response they return, but ordinary reads do not durably persist observer
-continuity facts. Durable observer continuity writes require the explicit debug
-configuration `QT_BOT_RUNTIME_BOTLENS_PERSIST_OBSERVER_CONTINUITY=true` and
-must be labeled diagnostic/non-material. These rows remain operational evidence
-only; report/golden material identity accepts terminal `run_final` continuity
-evidence from the canonical run path, not BotLens viewer/bootstrap facts.
+Live transport starts after runtime has produced or accepted a fact. The
+runtime-to-portal fact stream is viewer-blind: runtime must not inspect BotLens
+panes, websocket subscribers, selected symbols, chart state, or any other UI
+demand signal. The same run inputs must emit the same canonical facts and
+bounded projection/debug facts whether anyone is watching or not.
 
-The fact stream is also source-compacted before it reaches backend projectors.
-`runtime_state_observed` carries only compact health/runtime fields, not the
-full runtime snapshot or aggregate stats blob. `series_state_observed` carries
-routing identity only. `series_stats_updated` carries the compact reportable
-summary, not risk-engine debug curves. `overlay_ops_emitted` carries bounded
-render overlays with payload summaries and overlay clocks, not unbounded
-indicator history. This compaction is invariant across viewer state and is the
-normal runtime contract, not a live-UI optimization.
+When runtime owns canonical persistence, including wallet ledger facts, ingest
+uses those events for projection and skips duplicate durable writes.
+Source-owned canonical facts may arrive over live transport before their async
+DB batch has completed, but the run is not finalized until that source-side
+buffer drains. Seeing a live message first does not make projection state
+canonical.
 
-The live websocket stream is a bounded viewport transport, not a full
-replicated runtime database. Bootstrap snapshots send the latest configured
-candle window and bounded debug context. Live updates are delta-only fact
-batches derived from backend projections. When logs, decisions, overlay
-geometry, or historical candles exceed the runtime fact-stream budget, runtime
-may truncate debug-only fact-stream entries and expose the truncation in step
-context; material trade, wallet, series, and candle facts remain the priority.
-Older history belongs to cold chart-history and forensic reads.
+Producer-side fanout is a bounded projection handoff after sequence assignment.
+Execution enqueues the committed live payload and keeps walking forward; the
+dispatcher owns websocket/subscriber pressure and drains during terminal runtime
+flush. Subscriber failures, queue overflow, or drain timeout degrade BotLens
+projection and require resync. Canonical persistence remains fail-loud.
 
-Live transport is demand-aware only after runtime ingestion. Backend projectors
-continue to ingest canonical facts and maintain rebuildable run/symbol
-projections, but fanout only builds websocket payloads for active run viewers
-and selected-symbol viewers. If there is no matching viewer, disposable live
-deltas are dropped with `live_transport_dropped_stale_count` and the next
-viewer hydrates from the cold snapshot/ledger path instead of replaying every
-skipped UI payload.
+Runtime lifecycle, bootstrap, and shutdown messages use the telemetry control
+lane. The control lane is still projection input, but shutdown must attempt a
+bounded control flush before ordinary live/debug telemetry is abandoned. If the
+flush cannot prove delivery, runtime emits WARN-level diagnostics and may try a
+bounded direct websocket fallback.
+
+## Bounded Hot Views
+
+The live websocket stream is a bounded viewport transport, not a replicated
+runtime database. Bootstrap snapshots send the latest configured candle window
+and bounded debug context. Live updates are delta-only fact batches derived from
+backend projections. Older history belongs to cold chart-history and forensic
+reads.
+
+The fact stream is compacted before it reaches backend projectors.
+`runtime_state_observed` carries compact health/runtime fields, not the full
+runtime snapshot. `series_state_observed` carries routing identity only.
+`series_stats_updated` carries the compact reportable summary.
+`overlay_ops_emitted` carries bounded render overlays with overlay clocks, not
+unbounded indicator history. Wallet ledger and diagnostic facts keep full
+canonical payloads on the producer-side canonical append path while live
+transport drops repeated wallet snapshots and raw diagnostic context that the
+hot view does not need.
+
+Paper market streams may emit `provisional_candle_updated` facts. They update
+the selected-symbol chart by replacing the latest visual candle for the
+in-progress bar, then clear when the closed candle arrives. They remain Tier 4
+live transport only: useful for a responsive chart, irrelevant to indicator,
+strategy, wallet, order, trade, report, or replay semantics.
+
+Runtime bootstrap must assemble the selected series directly from runtime
+state. It uses the chart state builder for the configured candle window,
+projected overlays already in the overlay projection cache, selected series
+stats, wallet/debug facts, and a bounded closed-trade tail plus open trades.
+Full multi-series chart composition and historical aggregate trade lists belong
+to explicit chart/debug reads.
+
+Chart/debug payloads use the same bounded visual-trade contract. Runtime asks
+the risk engine for a configured trade window instead of serializing every
+trade and slicing afterward. Live trade deltas use `trade_revision`: if the
+cursor is too old for the retained change log, runtime warns and emits the
+available current trade batch as a projection resync boundary.
+
+## Bounded Visual Overlay Projection
+
+Visual overlays are projection/read-model artifacts. They are not stored on
+`StrategySeries`, do not participate in strategy decisions, and are not built by
+ordinary runtime push updates.
+
+Runtime configures each indicator's visual replay window from
+`bot_runtime.botlens.overlay_window_bars`. Indicator typed outputs still follow
+the normal `initialize -> apply_bar -> snapshot` runtime timeline. Overlay
+geometry is requested only through the overlay projection step, which snapshots
+the current indicator visual state without mutating the runtime series model.
+
+The ordinary runtime push update emits compact BotLens facts for candles,
+series state, health, decisions, trades, wallet, logs, and stats. After a bar is
+finalized, a separate `overlay_projection` step may build visible overlay
+geometry, diff it against the overlay projection cache, and emit
+`overlay_ops_emitted` only when there are changed overlay operations.
+
+Overlay projection cadence is bar based, not wall-clock based. The cadence is
+controlled by `bot_runtime.botlens.overlay_emit_every_bars`, with terminal bars
+forcing a final projection. Projection deltas carry a `projection` object with
+`mode`, `window_bars`, `emit_every_bars`, and `bar_index` so the backend and
+frontend can display the overlay viewport as bounded projection state.
+
+Trade visuals follow the trade-fact path. Runtime no longer registers or emits
+a runtime-owned trade overlay type. The frontend may draw trade markers,
+regions, segments, and price lines from projected trade facts, but those are
+not indicator overlays and not execution truth.
+
+## Projection Clocks And Resync
 
 Overlay live deltas use their own viewport clock:
 `overlay_commit_seq`, `base_overlay_commit_seq`, and
 `overlay_commit_seq_status=overlay_scoped`. This clock orders changed overlay
 transport operations only. It is separate from the selected-symbol websocket
-`base_seq` replay cursor and separate from the durable run `run_seq` spine.
-Overlay entries may carry source `indicator_commit_seq` for provenance, but
-that provenance must not force unchanged overlay geometry to emit a new delta.
-Selected-symbol snapshots must include the current `overlay_commit_seq` and
-status beside the bounded overlay payload so a reconnect or symbol handoff seeds
-the frontend overlay cursor from the exact snapshot state. The next overlay
-delta must advance that cursor and declare the matching `base_overlay_commit_seq`;
-otherwise the frontend treats it as stale projection transport, advances the
-stream cursor, and does not mutate overlay state.
+`base_seq` replay cursor and from durable `run_seq`.
 
-Runtime bootstrap is not allowed to build the full chart payload as an
-intermediate shape. It must assemble the selected series directly from runtime
-state, using the chart state builder for the configured candle window, selected
-series overlays, selected series stats, wallet/debug facts, and a bounded
-closed-trade tail plus any open trades. Full multi-series chart composition and
-historical aggregate trade lists belong to explicit chart/debug reads, not the
-runtime-to-BotLens hot bootstrap path.
+Selected-symbol snapshots carry the current overlay cursor beside the bounded
+overlay payload. The next overlay delta must advance that cursor and declare
+the matching `base_overlay_commit_seq`; otherwise the frontend treats the delta
+as stale projection transport, advances the stream cursor, and does not mutate
+overlay state.
 
-Chart/debug payloads use the same bounded visual-trade contract. Runtime
-projection asks the risk engine for a configured trade window instead of asking
-for every serialized trade and slicing afterward. The engine window keeps open
-trades plus the recent closed-trade tail, so omitted history is never serialized
-for hot visual payloads. Canonical trade truth remains in runtime events, trade
-rows, and cold forensic/reporting paths.
+Symbol-to-run notifications are live projection transport. A newer pending
+notification may replace an older one for the same run and symbol, keeping the
+latest symbol/runtime summary and folding trade upsert/removal deltas to their
+net state. If notification pressure causes coalescing or overflow, the durable
+runtime ledger remains the recovery source.
 
-Live trade facts use a revision cursor contract. The runtime cache stores the
-last observed trade revision per series, and asks the risk engine for material
-trade changes after that revision. The risk engine owns the mutation timeline:
-it records which trade IDs changed when `trade_revision` advances, then
-serializes only those changed trades for the fact batch. If the cursor is too
-old for the retained change log, runtime logs a warning and emits the available
-current trade batch as a projection resync boundary rather than silently
-assuming the cursor delta is complete.
+The durable ingest path follows the same retention budget as source-side
+persistence. Source-persisted material facts are not written again by ingest.
+Transport-owned facts are persisted only when they are compact research context
+or material diagnostics. Live-only facts continue through projectors and fanout
+without becoming permanent runtime-event rows.
 
-Symbol-to-run notifications are live projection transport. A pending
-notification for the same run and symbol may be replaced by a newer one before
-the run projector consumes it. Replacement keeps the latest symbol/runtime
-summary and folds trade upsert/removal deltas to their net state so live
-projection does not accumulate repeated stale summaries. The durable runtime
-ledger remains the recovery source when notification pressure causes coalescing
-or overflow.
+A completed run projection that still has open trades must replay from the
+durable runtime event ledger before publishing terminal projection truth. Replay
+enumerates durable facts through typed `run_seq`, then uses scoped causal clocks
+for domain ordering. Position/trade lifecycle facts use
+`trade_id, position_commit_seq`, so a durable close tombstone dominates a stale
+open notification even when batch arrival crosses append order. Rows without
+runtime-assigned `run_seq` are forensic evidence, not certification-grade replay
+truth.
 
-The durable ingest path now applies the same retention budget as source-side
-persistence. Source-persisted material facts are not written again by ingest;
-transport-owned facts are persisted only when they are compact research context
-or material diagnostics. Live-only facts continue through the projectors and
-fanout channels without becoming permanent runtime-event rows.
-
-The canonical replay source for run projection reconciliation is the durable
-runtime event ledger. A completed run projection that still has open trades must
-replay from that ledger before publishing terminal projection truth. If replay
-proves the trades are closed, the projection may be marked reconciled; if replay
-is unavailable or still disagrees with the ledger, projection health remains
-degraded and golden-run certification must stay blocked.
-
-Projection replay uses the typed ledger `run_seq` spine to enumerate durable
-facts, then uses scoped causal clocks for domain ordering. Position/trade
-lifecycle facts with `position_commit_seq` are ordered by
-`trade_id, position_commit_seq` when projecting trade state; this lets a durable
-close tombstone dominate a stale open notification even if append/run sequence
-arrival crosses batches. Rows without runtime-assigned `run_seq` are not
-certification-grade replay truth and may only be used by explicit forensic
-tools, but `run_seq` itself must not override a valid scoped position clock.
+BotLens read endpoints may compute selected-symbol continuity diagnostics for a
+response, but ordinary reads do not persist observer continuity facts. Durable
+observer continuity writes require
+`QT_BOT_RUNTIME_BOTLENS_PERSIST_OBSERVER_CONTINUITY=true` and must be labeled
+diagnostic/non-material. Report and golden material identity accept terminal
+`run_final` continuity evidence from the canonical run path, not BotLens viewer
+or bootstrap facts.
 
 ## Failure And Recovery
 
@@ -260,7 +288,12 @@ tools, but `run_seq` itself must not override a valid scoped position clock.
 - Stale selected-symbol snapshots are rejected or refreshed.
 - Stream continuity uses sequence/cursor fields.
 - Rebuild failures surface bounded operational faults.
+- Visual overlay projection failure records `overlay_projection` diagnostics
+  and degrades BotLens overlay freshness without rewriting execution truth.
 - Forensics can page the ledger when live projection is insufficient.
+- Symbol fact queue pressure is handled by bounded batch drains first; if
+  projection still falls behind, projection state is degraded/resync-required
+  rather than promoted into runtime truth.
 - Run-notification queue overflow is a projection-health event. The queue may
   coalesce or drop older notifications to keep the latest notification moving,
   but overflow requires canonical ledger replay before projection state can be

@@ -845,6 +845,8 @@ class RuntimeEventsMixin:
         elif subtype == "stop":
             exit_kind = ExitKind.STOP
             reason = ReasonCode.EXEC_EXIT_STOP
+        elif subtype == "fixed_horizon":
+            reason = ReasonCode.FIXED_HORIZON
         elif subtype == "backtest_end":
             reason = ReasonCode.BACKTEST_END
         elif subtype == "terminal_liquidation":
@@ -964,7 +966,11 @@ class RuntimeEventsMixin:
             quote_currency=str(event.get("currency") or getattr(series.risk_engine, "quote_currency", "") or ""),
             accounting_mode=accounting_mode,
             exit_kind=exit_kind,
-            event_impact_pnl=float(event.get("pnl") or 0.0) if subtype in {"target", "stop"} else None,
+            event_impact_pnl=(
+                float(event.get("pnl") or 0.0)
+                if subtype in {"target", "stop", "fixed_horizon", "backtest_end", "terminal_liquidation"}
+                else None
+            ),
             trade_net_pnl=float(event.get("net_pnl") or 0.0) if subtype == "close" else None,
             wallet_delta=WalletDelta(**wallet_delta_payload),
             reservation_id=str(reservation_id) if reservation_id else None,
@@ -1120,7 +1126,6 @@ class RuntimeEventsMixin:
             return
 
         artifact = self._run_artifact_payload(status)
-        self._deps.update_bot_run_artifact(self.bot_id, artifact)
         if self._report_artifact_bundle is not None:
             self._report_artifact_bundle.finalize(runtime_status=status, artifact=artifact)
 

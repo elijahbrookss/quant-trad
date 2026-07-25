@@ -9,10 +9,15 @@ tags:
   - runtime
   - typed-outputs
   - overlays
+  - research-validation
   - known-at
 code_paths:
   - src/engines/indicator_engine
   - src/indicators
+  - portal/backend/controller/indicators.py
+  - portal/backend/service/indicators/indicator_factory.py
+  - portal/backend/service/indicators/signal_payload_filtering.py
+  - portal/backend/service/indicators/indicator_service/runtime_validation.py
   - docs/architecture/indicator-runtime/diagrams/indicator-runtime-contract.mmd
   - docs/architecture/indicator-runtime/diagrams/indicator-surfaces.mmd
 ---
@@ -36,11 +41,21 @@ after it has applied the bar and validated the declared snapshot surface.
 
 | Surface | Consumer | Contract |
 | --- | --- | --- |
-| `snapshot()` | decision layer, runtime | canonical strategy-visible typed outputs |
+| `snapshot()` | decision layer, runtime, research | canonical public typed outputs |
 | `overlay_snapshot()` | BotLens, charts, previews | visual projection of indicator state |
 | `detail_snapshot()` | operator/debug views | diagnostic payload, not a strategy input |
 
-Strategies consume typed outputs only. They do not inspect overlays, details, helper caches, or mutable indicator internals.
+Strategies consume signal, context, and metric typed outputs only. They do not
+inspect lifecycle outputs, overlays, details, helper caches, or mutable
+indicator internals.
+
+Indicator output catalogs describe every public typed output the indicator may
+emit. A catalog entry may describe signal event keys, context state keys, or
+metric fields, but it must not carry persisted enable/disable preferences.
+Output selection belongs to consumers such as strategy rules, strategy variants,
+research checks, signal preview requests, or UI visibility state. Persisting a
+disabled output on the indicator would turn a consumer choice into indicator
+truth and make reports, replay, and observation mining incomplete.
 
 ## Diagram Walkthrough: Runtime Contract
 
@@ -68,23 +83,58 @@ This is the indicator-specific form of `initialize -> apply_bar -> snapshot`.
 
 All three can derive from the same indicator-owned state, but only typed outputs are part of the decision contract.
 
-## Inputs
+## What The Engine Accepts And Publishes
 
-- Provider-backed candle bars.
-- Declared dependency outputs by `OutputRef`.
-- Indicator runtime specs, params, and replay-window hints.
+The engine advances indicators from provider-backed candle bars, declared
+dependency outputs by `OutputRef`, runtime specs, params, and replay-window
+hints. It publishes `RuntimeOutput` values typed as `signal`, `context`,
+`metric`, or `lifecycle`, plus output deltas carrying `base_indicator_commit_seq`,
+`indicator_commit_seq`, and `indicator_commit_seq_status=indicator_scoped`.
+Lifecycle outputs are optional public research evidence for stateful candidate
+funnels such as setup, eligible, touched, confirmed, invalidated, or expired.
+They are not decision inputs. A lifecycle candidate should reference the
+earliest public typed output that formed the candidate. It should not wait for a
+later confirmation signal unless that confirmation is truly the source fact for
+the candidate family.
 
-## Outputs
+Visual and debug surfaces leave through separate projection payloads:
+`RuntimeOverlay` for charts and `RuntimeDetail` for inspection. Guard metrics,
+payload warnings, and source-fact diagnostics can explain expensive or invalid
+projection/output behavior, but they do not become strategy inputs.
 
-- `RuntimeOutput` values typed as `signal`, `context`, or `metric`.
-- `RuntimeOutputDelta` `set` operations carrying
-  `base_indicator_commit_seq`, `indicator_commit_seq`, and
-  `indicator_commit_seq_status=indicator_scoped`.
-- `RuntimeOverlay` values for visual inspection.
-- `RuntimeDetail` values for debug inspection.
-- Guard metrics and warnings when output/projection payloads are expensive or invalid.
+## Runtime Validation Surface
 
-## State And Lifecycle
+The backend indicator runtime validation endpoint and output evidence collector
+are the research-facing proof surfaces for agent-visible indicators. They build
+the same runtime graph as normal indicator execution and advance the engine one
+candle at a time through:
+
+```text
+initialize -> apply_bar -> snapshot
+```
+
+For each bar, validation requires every declared typed output to be present in
+the engine frame. Readiness is measured separately: warmup windows may produce
+`ready=false`, but missing outputs are invalid. The validation result summarizes
+per-output presence, first/last readiness, ready bar counts, signal/lifecycle
+event counts, observed metric/context/lifecycle fields, commit sequence provenance, guard
+warnings, source-fact diagnostics, and optional assertions such as
+`require_ready_by_end` or `min_ready_bars`. The evidence collector exposes the
+same declared output rows alongside aligned source candles so research checks
+can test indicator-produced facts without inspecting indicator internals.
+
+This surface is intentionally a validator, not an alternate runtime. It must not
+reconstruct indicator state from overlays, details, mutable internals, or MCP
+payloads.
+
+Research signal audits also use this evidence surface. If an audit needs to
+distinguish one semantic group from another, such as a session, regime, pivot,
+or active reference id, that grouping fact must be exposed as a public typed
+output field. Research checks may name those fields in their expectation
+contracts, but they must not import indicator-family code or read private
+indicator state.
+
+## How Indicator State Advances
 
 Indicators should have one internal timeline:
 
@@ -111,7 +161,13 @@ or unordered mapping iteration.
 - Indicators never predict or backfill future state.
 - Dependency outputs are read through declared refs.
 - Signal, context, and metric outputs are typed contracts, not arbitrary blobs.
+- Public output catalogs are complete; consumers select outputs without mutating
+  indicator identity.
+- Lifecycle outputs describe optional candidate/setup research facts. They are
+  public and known-at, but strategies do not consume them.
 - Overlays and details are projections.
+- Runtime validation must validate declared output presence on every bar and
+  report readiness separately from presence.
 - Indicator commit sequence is engine-owned; indicator implementations must not
   fabricate or persist alternate clocks.
 - Indicator-specific docs should exist only when an indicator family has architecture behavior beyond ordinary authoring guidance.

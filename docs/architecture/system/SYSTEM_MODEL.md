@@ -83,28 +83,19 @@ event ledger / trade rows -> BotLens forensics -> reports -> compare -> export
 
 Cold paths may page history, assemble heavy debug payloads, or produce analyst summaries. They must not feed back into execution for the same historical bar.
 
-## Canonical Truth
+## What Counts As Run Evidence
 
-Canonical truth includes:
+Run evidence begins with provider-backed candle facts, then moves through
+known-at indicator outputs, strategy decision artifacts, accepted and rejected
+decision events, trade lifecycle rows, runtime/domain events, and wallet, fee,
+margin, and settlement effects. Those are the facts other layers must explain
+from.
 
-- provider-backed candle facts,
-- indicator typed outputs at their known-at time,
-- strategy decision artifacts,
-- accepted and rejected decision events,
-- trade lifecycle rows,
-- runtime/domain events,
-- wallet, fee, margin, and settlement effects.
-
-Projection/cache/view state includes:
-
-- indicator overlays and details,
-- BotLens selected-symbol projections,
-- frontend status cards,
-- report summaries,
-- narrative insight text,
-- observability dashboards.
-
-Projection failure should produce unavailable/degraded state. It should not produce fabricated valid execution state.
+Overlays, details, BotLens selected-symbol projections, frontend status cards,
+report summaries, narrative insight text, and observability dashboards are
+views over that evidence. They are useful, but they can be late, partial,
+rebuilt, or unavailable. Projection failure should produce unavailable or
+degraded state, not fabricated valid execution state.
 
 ## System Invariants
 

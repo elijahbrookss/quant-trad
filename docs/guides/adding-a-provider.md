@@ -27,16 +27,13 @@ Provider credentials must use the provider credential-reference boundary:
 CLI setup should work without exposing secrets in logs:
 
 ```bash
-python -m cli.main providers credentials schema --provider COINBASE --venue COINBASE_DIRECT
-python -m cli.main providers credentials add --provider COINBASE --venue COINBASE_DIRECT
+qt setup provider coinbase
 ```
 
 For agent/automation workflows, prefer stdin or env-var mapping:
 
 ```bash
-python -m cli.main providers credentials add \
-  --provider COINBASE \
-  --venue COINBASE_DIRECT \
+qt setup provider coinbase \
   --secrets-json - \
   --no-input
 ```

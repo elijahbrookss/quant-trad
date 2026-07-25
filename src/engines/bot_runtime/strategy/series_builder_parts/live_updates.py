@@ -6,6 +6,7 @@ import logging
 from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping, Optional
 
+from core.candle_continuity import INGESTION_FAILURE
 from utils.log_context import with_log_context
 from utils.perf_log import perf_log
 
@@ -14,6 +15,50 @@ from .models import StrategySeries
 logger = logging.getLogger(__name__)
 
 class SeriesBuilderLiveUpdatesMixin:
+    def _raise_for_fetch_gap_failures(
+        self,
+        df: Any,
+        *,
+        strategy_id: Optional[str],
+        symbol: Optional[str],
+        timeframe: Optional[str],
+        datasource: Optional[str],
+        exchange: Optional[str],
+        instrument_id: Optional[str] = None,
+    ) -> None:
+        gap_classification = getattr(df, "attrs", {}).get("gap_classification") if df is not None else None
+        if not gap_classification:
+            return
+        failures = [
+            entry
+            for entry in gap_classification
+            if isinstance(entry, Mapping) and str(entry.get("classification") or "") == INGESTION_FAILURE
+        ]
+        if not failures:
+            return
+        first = failures[0]
+        provider_evidence = first.get("provider_evidence") if isinstance(first.get("provider_evidence"), Mapping) else {}
+        context = self._runtime_log_context(
+            strategy_id=strategy_id,
+            symbol=symbol,
+            timeframe=timeframe,
+            datasource=datasource,
+            exchange=exchange,
+            instrument_id=instrument_id,
+            gap_failures=len(failures),
+            reason_code=first.get("reason_code"),
+            evidence=first.get("evidence"),
+            gap_start=first.get("start"),
+            gap_end=first.get("end"),
+            exception_type=provider_evidence.get("exception_type"),
+            exception_message=provider_evidence.get("exception_message"),
+        )
+        logger.error(with_log_context("bot_runtime_candle_ingestion_failed", context))
+        raise RuntimeError(
+            "OHLCV fetch returned ingestion failures for "
+            f"{symbol} {timeframe}: {first.get('reason_code') or 'unknown_reason'}"
+        )
+
     def append_series_updates(self, series: StrategySeries, start_iso: str, end_iso: str) -> bool:
         series_context = self._series_log_context(series)
         with perf_log(
@@ -25,17 +70,31 @@ class SeriesBuilderLiveUpdatesMixin:
             start_iso=start_iso,
             end_iso=end_iso,
         ) as perf:
-            df = self._deps.fetch_ohlcv(
-                series.symbol,
-                start_iso,
-                end_iso,
-                series.timeframe,
-                datasource=series.datasource,
-                exchange=series.exchange,
-            )
+            instrument_id = series.instrument.get("id") if isinstance(series.instrument, Mapping) else None
+            fetch_by_instrument = getattr(self._deps, "fetch_ohlcv_by_instrument", None)
+            if instrument_id and fetch_by_instrument is not None:
+                df = fetch_by_instrument(str(instrument_id), start_iso, end_iso, series.timeframe)
+            else:
+                df = self._deps.fetch_ohlcv(
+                    series.symbol,
+                    start_iso,
+                    end_iso,
+                    series.timeframe,
+                    datasource=series.datasource,
+                    exchange=series.exchange,
+                )
             perf.add_fields(rows_returned=len(df) if df is not None else 0)
         if df is None or getattr(df, "empty", False):
             return False
+        self._raise_for_fetch_gap_failures(
+            df,
+            strategy_id=series.strategy_id,
+            symbol=series.symbol,
+            timeframe=series.timeframe,
+            datasource=series.datasource,
+            exchange=series.exchange,
+            instrument_id=instrument_id,
+        )
         self._maybe_emit_data_limit_warning(
             df,
             start_iso,
@@ -112,11 +171,9 @@ class SeriesBuilderLiveUpdatesMixin:
                     perf.add_fields(
                         decision_artifacts_count=len(decision_artifacts),
                     )
-            series.overlays = [dict(entry) for entry in evaluation.get("overlays") or [] if isinstance(entry, Mapping)]
             marker_context = self._series_log_context(
                 series,
                 decision_artifacts=len(decision_artifacts),
-                overlays=len(series.overlays),
             )
             logger.debug(with_log_context("append_series_updates_preview_result", marker_context))
             signals = self._build_signals_from_decision_artifacts(decision_artifacts)
@@ -146,6 +203,7 @@ class SeriesBuilderLiveUpdatesMixin:
         datasource: Optional[str],
         exchange: Optional[str],
         strategy_id: Optional[str] = None,
+        instrument_id: Optional[str] = None,
     ):
         """Fetch and validate OHLCV dataframe for strategy."""
 
@@ -156,6 +214,7 @@ class SeriesBuilderLiveUpdatesMixin:
                 timeframe=timeframe,
                 datasource=datasource,
                 exchange=exchange,
+                instrument_id=instrument_id,
             )
             with perf_log(
                 "bot_runtime_fetch_ohlcv",
@@ -166,14 +225,18 @@ class SeriesBuilderLiveUpdatesMixin:
                 start_iso=start_iso,
                 end_iso=end_iso,
             ) as perf:
-                df = self._deps.fetch_ohlcv(
-                    symbol,
-                    start_iso,
-                    end_iso,
-                    timeframe,
-                    datasource=datasource,
-                    exchange=exchange,
-                )
+                fetch_by_instrument = getattr(self._deps, "fetch_ohlcv_by_instrument", None)
+                if instrument_id and fetch_by_instrument is not None:
+                    df = fetch_by_instrument(str(instrument_id), start_iso, end_iso, timeframe)
+                else:
+                    df = self._deps.fetch_ohlcv(
+                        symbol,
+                        start_iso,
+                        end_iso,
+                        timeframe,
+                        datasource=datasource,
+                        exchange=exchange,
+                    )
                 perf.add_fields(rows_returned=len(df) if df is not None else 0)
         except Exception as exc:
             message = f"Failed to fetch OHLCV data: {exc}"
@@ -187,9 +250,19 @@ class SeriesBuilderLiveUpdatesMixin:
                 timeframe=timeframe,
                 datasource=datasource,
                 exchange=exchange,
+                instrument_id=instrument_id,
             )
             logger.error(with_log_context("bot_runtime_no_candles", context))
             raise RuntimeError(message)
+        self._raise_for_fetch_gap_failures(
+            df,
+            strategy_id=strategy_id,
+            symbol=symbol,
+            timeframe=timeframe,
+            datasource=datasource,
+            exchange=exchange,
+            instrument_id=instrument_id,
+        )
 
         # Warn if dataframe is not sorted
         if not df.index.is_monotonic_increasing:
@@ -201,6 +274,7 @@ class SeriesBuilderLiveUpdatesMixin:
                 timeframe=timeframe,
                 datasource=datasource,
                 exchange=exchange,
+                instrument_id=instrument_id,
                 first=first_idx,
                 second=second_idx,
                 rows=len(df.index),

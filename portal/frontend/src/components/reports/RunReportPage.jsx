@@ -806,7 +806,7 @@ export function RunReportPage({ runId, onBack }) {
     return (
       <ErrorState
         title="Unsupported report contract"
-        message={`Expected run_report_v2, received ${view?.contractVersion || 'unknown'}.`}
+        message={`Expected run_report.v2, received ${view?.contractVersion || 'unknown'}.`}
         onBack={onBack}
         onRetry={() => loadReport({ force: true })}
       />

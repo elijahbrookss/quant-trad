@@ -11,14 +11,16 @@ Use the surfaces by role:
 
 | Surface | Role |
 | --- | --- |
+| `qt setup` | Canonical local readiness and provider-onboarding surface. Use it for env setup, setup doctor checks, and provider onboarding flows. |
 | `qt` CLI | Primary agent/tool workflow and operation entrypoint. Use it for bot runs, experiments, provider checks, report summaries, report exports, and comparisons. |
 | `qt mcp serve` | MCP protocol adapter for agent hosts. Use it when the host expects MCP resources/tools instead of direct shell commands. |
 | UI | Human visualization and inspection surface. Use it to inspect charts, BotLens, fleets, strategies, reports, and playback. Do not treat UI state as workflow truth. |
 | Makefile | Local development and forensic support index. Use it for Docker, DB, validation, tests, logs, git helpers, and direct local diagnostics. |
 
-Start with `qt` when a task asks an agent to operate the system through normal
-backend contracts. Use Make when the task is about the local stack, direct DB
-inspection, tests, or forensic diagnostics.
+Start with `make deps` for local Python dependencies and `qt setup` for
+readiness/provider onboarding. Start with `qt` when a task asks an agent to
+operate the system through normal backend contracts. Use Make when the task is
+about the local stack, direct DB inspection, tests, or forensic diagnostics.
 
 Use `qt mcp serve` only as the MCP transport for agent hosts. It should expose
 the same workflow boundary as `qt`, not a separate source of runtime, report, or
@@ -26,13 +28,29 @@ experiment truth.
 
 Common agent/tool workflow commands:
 
+- `qt setup doctor`
+- `qt setup provider coinbase`
 - `qt bots list`
 - `qt bots get <bot_id>`
 - `qt bots start <bot_id> --request-id <request_id>`
 - `qt runs wait <bot_id> <run_id>`
 - `qt reports summary <run_id>`
+- `qt reports instruments <run_id>`
+- `qt reports symbol-summary <run_id>`
+- `qt reports trades <run_id> --symbol <symbol>`
+- `qt reports decisions <run_id> --state rejected`
 - `qt reports export <run_id>`
 - `qt reports compare <baseline_run_id> <variant_run_id>`
+- `qt indicators types`
+- `qt indicators validate-config --type <type> --params-json '<json>'`
+- `qt indicators validate-runtime <indicator_id> --instrument-id <instrument_id> --start <iso> --end <iso> --interval <timeframe>`
+- `qt data coverage --instrument-id <instrument_id> --start <iso> --end <iso> --timeframe <timeframe>`
+- `qt research check sweep --check-family <family> --indicator-id <indicator_id> --instrument-id <instrument_id> --start <iso> --end <iso> --timeframe <timeframe> --detector-json '<json>' --variant <id[:key=value]> --rank-by <metric.path> --rank-direction <asc|desc>`
+- `qt research check sweep ... --dispatch`
+- `qt research jobs status <job_id>`
+- `qt research jobs result <job_id> --format table`
+- `qt instruments list`
+- `qt instruments profile <instrument_id> --execution-semantics proxy_derivative`
 - `qt experiments validate-plan <plan>`
 - `qt experiments run-plan <plan> --experiment-id <experiment_id>`
 - `qt experiments resume <experiment_id>`
@@ -52,6 +70,7 @@ launch the stdio server so stdin/stdout are connected to that host.
 
 Use the root `Makefile` as the support command index:
 
+- `make deps` owns local Python venv creation and editable install.
 - `make help` lists repo-native commands.
 - `make status` shows compose service status.
 - `make logs` tails the selected compose stack.

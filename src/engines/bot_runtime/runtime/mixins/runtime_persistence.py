@@ -153,56 +153,6 @@ class RuntimePersistenceMixin:
             )
             raise
 
-    def _canonical_fact_metrics(self) -> Dict[str, float]:
-        appender = getattr(self, "_canonical_fact_appender", None)
-        if appender is None:
-            return {
-                "canonical_fact_queue_depth": 0.0,
-                "canonical_fact_persist_lag_ms": 0.0,
-                "canonical_fact_persist_batch_ms": 0.0,
-                "canonical_fact_persist_error_count": 0.0,
-                "canonical_fact_overflow_count": 0.0,
-            }
-        try:
-            metrics = appender.metrics_snapshot()
-            return {
-                "canonical_fact_queue_depth": float(metrics.get("queue_depth") or 0.0),
-                "canonical_fact_queued_count": float(metrics.get("queued_count") or 0.0),
-                "canonical_fact_persisted_row_count": float(metrics.get("persisted_row_count") or 0.0),
-                "canonical_fact_persisted_batch_count": float(metrics.get("persisted_batch_count") or 0.0),
-                "canonical_fact_persist_lag_ms": float(metrics.get("persist_lag_ms") or 0.0),
-                "canonical_fact_persist_batch_ms": float(metrics.get("persist_batch_ms") or 0.0),
-                "canonical_fact_persist_error_count": float(metrics.get("persist_error_count") or 0.0),
-                "canonical_fact_overflow_count": float(metrics.get("overflow_count") or 0.0),
-            }
-        except Exception:
-            return {
-                "canonical_fact_queue_depth": 0.0,
-                "canonical_fact_persist_lag_ms": 0.0,
-                "canonical_fact_persist_batch_ms": 0.0,
-                "canonical_fact_persist_error_count": 0.0,
-                "canonical_fact_overflow_count": 0.0,
-            }
-
-    def _step_trace_metrics(self) -> Dict[str, float]:
-        try:
-            metrics = self._step_trace_buffer.metrics_snapshot()
-            return {
-                "step_trace_queue_depth": float(metrics.get("queue_depth") or 0.0),
-                "step_trace_dropped_count": float(metrics.get("dropped_count") or 0.0),
-                "step_trace_persist_lag_ms": float(metrics.get("persist_lag_ms") or 0.0),
-                "step_trace_persist_batch_ms": float(metrics.get("persist_batch_ms") or 0.0),
-                "step_trace_persist_error_count": float(metrics.get("persist_error_count") or 0.0),
-            }
-        except Exception:
-            return {
-                "step_trace_queue_depth": 0.0,
-                "step_trace_dropped_count": 0.0,
-                "step_trace_persist_lag_ms": 0.0,
-                "step_trace_persist_batch_ms": 0.0,
-                "step_trace_persist_error_count": 0.0,
-            }
-
     def _record_step_trace(
         self,
         step_name: str,
@@ -222,8 +172,6 @@ class RuntimePersistenceMixin:
         duration_ms = max((ended_at - started_at).total_seconds() * 1000.0, 0.0)
         try:
             payload_context = dict(context or {})
-            payload_context.update(self._step_trace_metrics())
-            payload_context.update(self._canonical_fact_metrics())
             enqueue_ms = self._step_trace_buffer.record(
                 {
                     "run_id": run_id,

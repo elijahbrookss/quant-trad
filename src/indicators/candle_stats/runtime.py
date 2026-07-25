@@ -32,6 +32,16 @@ def _as_positive_int(name: str, value: Any) -> int:
     return parsed
 
 
+def _as_positive_float(name: str, value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"candle_stats_config_invalid: {name} must be float") from exc
+    if parsed <= 0 or not math.isfinite(parsed):
+        raise RuntimeError(f"candle_stats_config_invalid: {name} must be > 0")
+    return parsed
+
+
 def _safe_div(numerator: float, denominator: float) -> float:
     if denominator == 0 or not math.isfinite(numerator) or not math.isfinite(denominator):
         return 0.0
@@ -113,6 +123,10 @@ class TypedCandleStatsIndicator(Indicator):
             params.get("slope_stability_lookback"),
         )
         self._warmup_bars = _as_positive_int("warmup_bars", params.get("warmup_bars"))
+        self._atr_expansion_signal_threshold = _as_positive_float(
+            "atr_expansion_signal_threshold",
+            params.get("atr_expansion_signal_threshold"),
+        )
         self._bars: list[Candle] = []
         self._true_ranges: list[float] = []
         self._atr_short_history: list[float] = []
@@ -128,6 +142,7 @@ class TypedCandleStatsIndicator(Indicator):
         self._overlay_history_limit_bars = HISTORY_LIMIT
         self._current_bar_time = datetime.min
         self._output = RuntimeOutput(bar_time=datetime.min, ready=False, value={})
+        self._atr_expansion_signal = RuntimeOutput(bar_time=datetime.min, ready=False, value={})
 
     def configure_replay_window(self, *, history_bars: int | None = None) -> None:
         if history_bars is None:
@@ -214,13 +229,23 @@ class TypedCandleStatsIndicator(Indicator):
 
         if not self._is_ready():
             self._output = RuntimeOutput(bar_time=bar.time, ready=False, value={})
+            self._atr_expansion_signal = RuntimeOutput(bar_time=bar.time, ready=False, value={})
             return
 
         metrics = self._build_metrics(bar)
+        events = self._build_atr_expansion_events(bar=bar, metrics=metrics)
         self._output = RuntimeOutput(bar_time=bar.time, ready=True, value=metrics)
+        self._atr_expansion_signal = RuntimeOutput(
+            bar_time=bar.time,
+            ready=True,
+            value={"events": events},
+        )
 
     def snapshot(self) -> Mapping[str, RuntimeOutput]:
-        return {"candle_stats": self._output}
+        return {
+            "candle_stats": self._output,
+            "atr_expansion": self._atr_expansion_signal,
+        }
 
     def overlay_snapshot(self) -> Mapping[str, RuntimeOverlay]:
         return {
@@ -357,6 +382,36 @@ class TypedCandleStatsIndicator(Indicator):
             "volume_zscore": _zscore(recent_volumes),
             "volume_vs_median": _safe_div(recent_volumes[-1], _median(recent_volumes)),
         }
+
+    def _build_atr_expansion_events(self, *, bar: Candle, metrics: Mapping[str, float]) -> list[dict[str, Any]]:
+        if len(self._atr_zscore_history) < 2:
+            return []
+        current_zscore = float(metrics.get("atr_zscore") or 0.0)
+        previous_zscore = float(self._atr_zscore_history[-2])
+        threshold = self._atr_expansion_signal_threshold
+        if previous_zscore > threshold or current_zscore <= threshold:
+            return []
+        return [
+            {
+                "key": "atr_expansion_long",
+                "direction": "long",
+                "known_at": int(bar.time.timestamp()),
+                "metadata": {
+                    "signal_style": "threshold_cross",
+                    "trigger_price": float(bar.close),
+                    "threshold": threshold,
+                    "atr_zscore": current_zscore,
+                    "previous_atr_zscore": previous_zscore,
+                    "atr_short": float(metrics.get("atr_short") or 0.0),
+                    "atr_long": float(metrics.get("atr_long") or 0.0),
+                    "atr_ratio": float(metrics.get("atr_ratio") or 0.0),
+                    "directional_efficiency": float(metrics.get("directional_efficiency") or 0.0),
+                    "slope": float(metrics.get("slope") or 0.0),
+                    "volume_zscore": float(metrics.get("volume_zscore") or 0.0),
+                    "range_position": float(metrics.get("range_position") or 0.0),
+                },
+            }
+        ]
 
     @staticmethod
     def _append_point(

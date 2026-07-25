@@ -74,6 +74,7 @@ class SymbolOverlaysState:
     overlays: Tuple[Dict[str, Any], ...]
     overlay_commit_seq: int = 0
     overlay_commit_seq_status: Optional[str] = None
+    overlay_projection: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +170,7 @@ class RunHealthState:
     worker_count: int
     active_workers: int
     warning_types: Tuple[str, ...] = ()
+    warning_summary: Dict[str, Any] = field(default_factory=dict)
     highest_warning_severity: Optional[str] = None
     trigger_event: Optional[str] = None
     runtime_state: Optional[str] = None
@@ -192,6 +194,8 @@ class RunHealthState:
         }
         if self.warning_types:
             payload["warning_types"] = list(self.warning_types)
+        if self.warning_summary:
+            payload["warning_summary"] = dict(self.warning_summary)
         if self.highest_warning_severity:
             payload["highest_warning_severity"] = self.highest_warning_severity
         if self.trigger_event:
@@ -490,6 +494,136 @@ def _highest_warning_severity(entries: Iterable[Mapping[str, Any]]) -> Optional[
     return min(normalized, key=lambda value: (_warning_severity_rank(value), value))
 
 
+def _warning_summary(entries: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
+    normalized = [dict(entry) for entry in entries if isinstance(entry, Mapping)]
+    if not normalized:
+        return {}
+
+    def _entry_count(entry: Mapping[str, Any]) -> int:
+        try:
+            return max(int(entry.get("count") or 1), 1)
+        except (TypeError, ValueError):
+            return 1
+
+    def _higher_severity(left: Any, right: Any) -> str:
+        left_value = str(left or "").strip().lower()
+        right_value = str(right or "warning").strip().lower() or "warning"
+        if not left_value:
+            return right_value
+        return min((left_value, right_value), key=lambda value: (_warning_severity_rank(value), value))
+
+    def _symbol_bucket_key(entry: Mapping[str, Any]) -> str:
+        symbol_key = normalize_series_key(entry.get("symbol_key"))
+        return symbol_key or "__run__"
+
+    def _group_key(entry: Mapping[str, Any]) -> str:
+        parts = (
+            str(entry.get("warning_type") or "").strip().lower(),
+            str(entry.get("indicator_id") or "").strip(),
+            str(entry.get("source") or "").strip().lower(),
+            str(entry.get("title") or "").strip(),
+        )
+        return "|".join(parts)
+
+    by_symbol: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+    groups: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+    event_count = 0
+    for entry in normalized:
+        count = _entry_count(entry)
+        event_count += count
+        warning_type = str(entry.get("warning_type") or "").strip().lower()
+        severity = str(entry.get("severity") or "warning").strip().lower() or "warning"
+        symbol_key = _symbol_bucket_key(entry)
+
+        symbol_bucket = by_symbol.setdefault(
+            symbol_key,
+            {
+                "symbol_key": None if symbol_key == "__run__" else symbol_key,
+                "symbol": str(entry.get("symbol") or "").strip().upper() or None,
+                "timeframe": str(entry.get("timeframe") or "").strip().lower() or None,
+                "count": 0,
+                "event_count": 0,
+                "warning_types": set(),
+                "highest_severity": None,
+            },
+        )
+        if not symbol_bucket.get("symbol"):
+            symbol_bucket["symbol"] = str(entry.get("symbol") or "").strip().upper() or None
+        if not symbol_bucket.get("timeframe"):
+            symbol_bucket["timeframe"] = str(entry.get("timeframe") or "").strip().lower() or None
+        symbol_bucket["count"] = int(symbol_bucket["count"]) + 1
+        symbol_bucket["event_count"] = int(symbol_bucket["event_count"]) + count
+        if warning_type:
+            symbol_bucket["warning_types"].add(warning_type)
+        symbol_bucket["highest_severity"] = _higher_severity(symbol_bucket.get("highest_severity"), severity)
+
+        group_key = _group_key(entry)
+        group_bucket = groups.setdefault(
+            group_key,
+            {
+                "warning_type": warning_type or None,
+                "indicator_id": str(entry.get("indicator_id") or "").strip() or None,
+                "source": str(entry.get("source") or "").strip() or None,
+                "title": str(entry.get("title") or "").strip() or None,
+                "count": 0,
+                "event_count": 0,
+                "highest_severity": None,
+                "symbols": OrderedDict(),
+            },
+        )
+        group_bucket["count"] = int(group_bucket["count"]) + 1
+        group_bucket["event_count"] = int(group_bucket["event_count"]) + count
+        group_bucket["highest_severity"] = _higher_severity(group_bucket.get("highest_severity"), severity)
+        group_symbols = group_bucket["symbols"]
+        if isinstance(group_symbols, OrderedDict):
+            group_symbol = group_symbols.setdefault(
+                symbol_key,
+                {
+                    "symbol_key": None if symbol_key == "__run__" else symbol_key,
+                    "symbol": str(entry.get("symbol") or "").strip().upper() or None,
+                    "timeframe": str(entry.get("timeframe") or "").strip().lower() or None,
+                    "count": 0,
+                    "event_count": 0,
+                },
+            )
+            group_symbol["count"] = int(group_symbol["count"]) + 1
+            group_symbol["event_count"] = int(group_symbol["event_count"]) + count
+
+    symbol_payload = {
+        key: {
+            **{field: value for field, value in bucket.items() if field != "warning_types"},
+            "warning_types": sorted(bucket.get("warning_types") or ()),
+        }
+        for key, bucket in by_symbol.items()
+    }
+    group_payload = []
+    for group_key, bucket in groups.items():
+        symbols = bucket.get("symbols")
+        group_payload.append(
+            {
+                "group_key": group_key,
+                **{field: value for field, value in bucket.items() if field != "symbols"},
+                "symbols": list(symbols.values()) if isinstance(symbols, OrderedDict) else [],
+            }
+        )
+    group_payload.sort(
+        key=lambda entry: (
+            _warning_severity_rank(entry.get("highest_severity")),
+            -int(entry.get("count") or 0),
+            str(entry.get("group_key") or ""),
+        )
+    )
+
+    return {
+        "count": len(normalized),
+        "event_count": event_count,
+        "warning_types": list(_warning_types_summary(normalized)),
+        "highest_severity": _highest_warning_severity(normalized),
+        "by_symbol": symbol_payload,
+        "groups": group_payload[:_MAX_WARNINGS],
+    }
+
+
 def _merge_run_health_warnings(
     current: Tuple[Dict[str, Any], ...],
     incoming: Any,
@@ -603,6 +737,7 @@ def _build_run_health_state(
     next_recent_transitions = state.recent_transitions if recent_transitions is _UNSET else _transition_history(recent_transitions)
     next_terminal = dict(state.terminal) if terminal is _UNSET else _mapping_copy(terminal)
     next_warning_types = _warning_types_summary(next_warnings)
+    next_warning_summary = _warning_summary(next_warnings)
     next_highest_warning_severity = _highest_warning_severity(next_warnings)
     resolved_warning_count = (
         max(int(next_warning_count or 0), len(next_warnings))
@@ -618,6 +753,7 @@ def _build_run_health_state(
         worker_count=next_worker_count,
         active_workers=next_active_workers,
         warning_types=next_warning_types,
+        warning_summary=next_warning_summary,
         highest_warning_severity=next_highest_warning_severity,
         trigger_event=next_trigger_event,
         runtime_state=next_runtime_state,
@@ -765,6 +901,28 @@ def apply_overlay_delta(overlays: Any, delta: Any) -> Tuple[Dict[str, Any], ...]
             continue
         if op_name == "remove":
             overlay_map.pop(key, None)
+            continue
+        if op_name == "patch":
+            existing = overlay_map.get(key)
+            patch = op.get("payload_patch") if isinstance(op.get("payload_patch"), Mapping) else {}
+            if not isinstance(existing, Mapping) or not patch:
+                continue
+            normalized = dict(existing)
+            payload = dict(normalized.get("payload") or {}) if isinstance(normalized.get("payload"), Mapping) else {}
+            for remove_key in patch.get("remove") if isinstance(patch.get("remove"), list) else []:
+                payload.pop(str(remove_key), None)
+            replace = patch.get("replace") if isinstance(patch.get("replace"), Mapping) else {}
+            for replace_key, replace_value in replace.items():
+                payload[str(replace_key)] = replace_value
+            normalized["payload"] = payload
+            payload_summary = patch.get("payload_summary") if isinstance(patch.get("payload_summary"), Mapping) else None
+            if payload_summary is not None:
+                normalized["payload_summary"] = dict(payload_summary)
+            normalized["overlay_id"] = key
+            normalized["overlay_revision"] = overlay_revision(
+                {entry_key: entry_value for entry_key, entry_value in normalized.items() if entry_key != "overlay_revision"}
+            )
+            overlay_map[key] = normalized
             continue
         if op_name != "upsert":
             continue
@@ -1034,6 +1192,7 @@ def empty_run_health_state() -> RunHealthState:
         worker_count=0,
         active_workers=0,
         warning_types=(),
+        warning_summary={},
         highest_warning_severity=None,
         trigger_event=None,
         runtime_state=None,
@@ -1126,6 +1285,11 @@ def read_symbol_projection_snapshot(payload: Any, *, symbol_key: str) -> SymbolP
                 str(_mapping(concerns.get("overlays")).get("overlay_commit_seq_status") or "").strip()
                 or None
             ),
+            overlay_projection=(
+                dict(_mapping(concerns.get("overlays")).get("overlay_projection"))
+                if isinstance(_mapping(concerns.get("overlays")).get("overlay_projection"), Mapping)
+                else None
+            ),
         ),
         signals=SymbolSignalsState(signals=_copy_entries(entry for entry in _mapping(concerns.get("signals")).get("items", []) if isinstance(entry, Mapping))),
         decisions=SymbolDecisionsState(decisions=_copy_entries(entry for entry in _mapping(concerns.get("decisions")).get("items", []) if isinstance(entry, Mapping))),
@@ -1203,6 +1367,7 @@ def read_run_projection_snapshot(payload: Any, *, bot_id: str, run_id: str) -> R
                 if str(entry).strip()
             )
             or _warning_types_summary(warnings),
+            warning_summary=_warning_summary(warnings),
             highest_warning_severity=(
                 str(health_payload.get("highest_warning_severity") or "").strip().lower() or None
             )
@@ -1251,9 +1416,18 @@ def serialize_symbol_projection_snapshot(state: SymbolProjectionSnapshot) -> Dic
                     )
                 },
                 "overlays": {
-                    "items": [dict(entry) for entry in state.overlays.overlays],
-                    "overlay_commit_seq": int(state.overlays.overlay_commit_seq or 0),
-                    "overlay_commit_seq_status": state.overlays.overlay_commit_seq_status,
+                    key: value
+                    for key, value in {
+                        "items": [dict(entry) for entry in state.overlays.overlays],
+                        "overlay_commit_seq": int(state.overlays.overlay_commit_seq or 0),
+                        "overlay_commit_seq_status": state.overlays.overlay_commit_seq_status,
+                        "overlay_projection": (
+                            dict(state.overlays.overlay_projection)
+                            if isinstance(state.overlays.overlay_projection, Mapping)
+                            else None
+                        ),
+                    }.items()
+                    if key == "items" or value not in (None, "", [], {})
                 },
                 "signals": {"items": [dict(entry) for entry in state.signals.signals]},
                 "decisions": {"items": [dict(entry) for entry in state.decisions.decisions]},
@@ -1553,6 +1727,7 @@ def apply_symbol_overlay_projector(
         if event.event_name != BotLensDomainEventName.OVERLAY_STATE_CHANGED:
             continue
         overlay_ops = _mapping(event.context.to_dict().get("overlay_delta"))
+        overlay_projection = _mapping(overlay_ops.get("projection"))
         next_state = SymbolOverlaysState(
             overlays=apply_overlay_delta(next_state.overlays, overlay_ops),
             overlay_commit_seq=_overlay_clock_int(
@@ -1565,6 +1740,7 @@ def apply_symbol_overlay_projector(
                 or ""
             ).strip()
             or None,
+            overlay_projection=dict(overlay_projection) if overlay_projection else next_state.overlay_projection,
         )
         deltas.append(
             OverlayDelta(

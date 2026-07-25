@@ -10,6 +10,7 @@ from typing import Any, Dict, Mapping, Protocol
 
 from core.settings import get_settings
 
+from ..provenance import RUNTIME_CONTRACT_VERSION, RUNTIME_STORAGE_SCHEMA_VERSION, source_revision
 from .botlens_lifecycle_bridge import emit_lifecycle_event
 from .execution_behavior import execution_behavior_from_bot
 from .startup_lifecycle import (
@@ -43,6 +44,11 @@ def _duration_seconds_from_bot(bot: Mapping[str, Any]) -> float | None:
     return duration if duration > 0 else None
 
 
+def _clean_hash(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
 def _bot_run_config_snapshot(bot: Mapping[str, Any]) -> Dict[str, Any]:
     """Return only run-effective bot config, not mutable operational state."""
 
@@ -67,7 +73,7 @@ def _bot_run_config_snapshot(bot: Mapping[str, Any]) -> Dict[str, Any]:
         "backtest_end",
         "snapshot_interval_ms",
         "bot_env",
-        "instrument_type",
+        "execution_semantics",
         "duration_seconds",
     )
     snapshot: Dict[str, Any] = {}
@@ -104,7 +110,6 @@ class StartupStorage(Protocol):
         status: str = "released",
         metadata: Mapping[str, Any] | None = None,
     ) -> Dict[str, Any] | None: ...
-    def upsert_bot(self, payload: Mapping[str, Any]) -> None: ...
     def upsert_bot_run(self, payload: Mapping[str, Any]) -> Dict[str, Any]: ...
     def record_bot_run_lifecycle_checkpoint(self, payload: Mapping[str, Any]) -> Dict[str, Any]: ...
     def update_bot_runtime_status(self, *, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None: ...
@@ -154,7 +159,7 @@ class BotStartupOrchestrator:
             ctx,
             BotLifecyclePhase.START_REQUESTED.value,
             message="Backend accepted bot start request.",
-            metadata={"bot_status": str(bot.get("status") or "").strip().lower() or "idle"},
+            metadata={"bot_id": ctx.bot_id},
         )
         try:
             self._record_phase(
@@ -258,10 +263,7 @@ class BotStartupOrchestrator:
             raise
 
     def _load_bot(self, bot_id: str) -> Dict[str, Any]:
-        bots = {str(bot["id"]): dict(bot) for bot in self.config_service.list_bots()}
-        if bot_id not in bots:
-            raise KeyError(f"Bot {bot_id} was not found")
-        return bots[bot_id]
+        return dict(self.config_service.get_bot(bot_id))
 
     def _ensure_run_record(self, ctx: BotStartupContext) -> None:
         self.storage.upsert_bot_run(
@@ -280,6 +282,10 @@ class BotStartupOrchestrator:
                         "config_hash": ctx.config_hash or None,
                     },
                 },
+                "runtime_contract_version": RUNTIME_CONTRACT_VERSION,
+                "runtime_source_revision": source_revision(),
+                "runtime_image": _BOT_RUNTIME_SETTINGS.image,
+                "storage_schema_version": RUNTIME_STORAGE_SCHEMA_VERSION,
             }
         )
 
@@ -355,6 +361,11 @@ class BotStartupOrchestrator:
             start_request_overrides["duration_seconds"] = duration_seconds
         if isinstance(ctx.bot_record.get("market_data_stream_policy"), Mapping):
             start_request_overrides["market_data_stream_policy"] = dict(ctx.bot_record["market_data_stream_policy"])
+        strategy_hash = (
+            _clean_hash(strategy_payload.get("strategy_hash"))
+            or _clean_hash(run_strategy_snapshot.get("strategy_hash"))
+            or _clean_hash(effective_strategy_config.get("strategy_hash"))
+        )
         self.storage.upsert_bot_run(
             {
                 "run_id": ctx.run_id,
@@ -385,25 +396,15 @@ class BotStartupOrchestrator:
                     "run_strategy_snapshot": run_strategy_snapshot,
                     "effective_strategy_config": effective_strategy_config,
                 },
+                "strategy_hash": strategy_hash,
+                "runtime_contract_version": RUNTIME_CONTRACT_VERSION,
+                "runtime_source_revision": source_revision(),
+                "runtime_image": _BOT_RUNTIME_SETTINGS.image,
+                "storage_schema_version": RUNTIME_STORAGE_SCHEMA_VERSION,
             }
         )
 
     def _stamp_starting_state(self, ctx: BotStartupContext) -> None:
-        payload = dict(ctx.persisted_bot_record or ctx.bot_record)
-        payload["wallet_config"] = dict(ctx.wallet_config)
-        payload["status"] = BotLifecycleStatus.STARTING.value
-        payload["runner_id"] = self.watchdog.runner_id
-        payload["last_run_at"] = ctx.started_at
-        payload["last_run_artifact"] = {
-            "startup": {
-                "run_id": ctx.run_id,
-                "request_id": ctx.request_id or None,
-                "phase": ctx.current_phase,
-                "message": "Backend stamped starting state.",
-                "at": ctx.started_at,
-            }
-        }
-        self.storage.upsert_bot(payload)
         self.storage.update_bot_runtime_status(
             bot_id=ctx.bot_id,
             run_id=ctx.run_id,
@@ -480,15 +481,6 @@ class BotStartupOrchestrator:
             )
         except Exception:  # noqa: BLE001
             logger.exception("bot_startup_failure_status_persist_failed | bot_id=%s | run_id=%s", ctx.bot_id, ctx.run_id)
-        payload = dict(ctx.persisted_bot_record or ctx.bot_record)
-        payload["status"] = BotLifecycleStatus.STARTUP_FAILED.value
-        payload["runner_id"] = None
-        payload["last_run_at"] = ctx.started_at
-        payload["last_run_artifact"] = {"error": failure}
-        try:
-            self.storage.upsert_bot(payload)
-        except Exception:  # noqa: BLE001
-            logger.exception("bot_startup_failure_bot_persist_failed | bot_id=%s | run_id=%s", ctx.bot_id, ctx.run_id)
 
 
 __all__ = ["BotStartupOrchestrator"]

@@ -16,6 +16,40 @@ from ._shared import (
 )
 from ....service.bots.startup_lifecycle import build_failure_payload
 
+_BOT_LIST_COLUMNS = (
+    BotRecord.id,
+    BotRecord.name,
+    BotRecord.strategy_id,
+    BotRecord.strategy_variant_id,
+    BotRecord.strategy_variant_name,
+    BotRecord.atm_template_id,
+    BotRecord.resolved_params,
+    BotRecord.risk_config,
+    BotRecord.mode,
+    BotRecord.run_type,
+    BotRecord.playback_speed,
+    BotRecord.backtest_start,
+    BotRecord.backtest_end,
+    BotRecord.risk,
+    BotRecord.wallet_config,
+    BotRecord.market_data_stream_policy,
+    BotRecord.snapshot_interval_ms,
+    BotRecord.bot_env,
+    BotRecord.created_at,
+    BotRecord.updated_at,
+)
+
+_REMOVED_RUNTIME_FIELDS = frozenset(
+    {
+        "status",
+        "last_run_at",
+        "last_stats",
+        "last_run_artifact",
+        "runner_id",
+        "heartbeat_at",
+    }
+)
+
 
 def _watchdog_reason_code(reason: str) -> str:
     normalized = str(reason or "").strip().lower()
@@ -23,8 +57,8 @@ def _watchdog_reason_code(reason: str) -> str:
         return "startup_container_ambiguous"
     if normalized.startswith("container_not_running:"):
         return "container_not_running"
-    if normalized.startswith("stale_heartbeat:"):
-        return "stale_heartbeat"
+    if normalized.startswith("stale_run_lease:"):
+        return "stale_run_lease"
     if normalized.startswith("server_restart:"):
         return "server_restart"
     return "watchdog_orphaned"
@@ -32,7 +66,7 @@ def _watchdog_reason_code(reason: str) -> str:
 
 def _watchdog_recoverable(reason: str) -> bool:
     normalized = str(reason or "").strip().lower()
-    return normalized.startswith("stale_heartbeat:") or normalized.startswith("startup_container_ambiguous:")
+    return normalized.startswith("stale_run_lease:") or normalized.startswith("startup_container_ambiguous:")
 
 
 def _row_value(row: Any, key: str) -> Any:
@@ -82,19 +116,60 @@ def _watchdog_terminal_metadata(
     return metadata
 
 
+def _iso_timestamp(value: Any) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat() + "Z" if hasattr(value, "isoformat") else str(value)
+
+
+def _bot_mapping_to_dict(row: Mapping[str, Any]) -> Dict[str, Any]:
+    risk_payload = dict(row.get("risk") or {})
+    execution_mode = str(risk_payload.get("execution_mode") or "fast").strip().lower()
+    if execution_mode not in {"fast", "full"}:
+        execution_mode = "fast"
+    execution_behavior = str(risk_payload.get("execution_behavior") or "simulated").strip().lower().replace("_", "-")
+    if execution_behavior not in {"simulated", "observe-only"}:
+        execution_behavior = "simulated"
+    return {
+        "id": row.get("id"),
+        "name": row.get("name"),
+        "strategy_id": row.get("strategy_id"),
+        "strategy_variant_id": row.get("strategy_variant_id"),
+        "strategy_variant_name": row.get("strategy_variant_name"),
+        "atm_template_id": row.get("atm_template_id"),
+        "resolved_params": dict(row.get("resolved_params") or {}),
+        "risk_config": dict(row.get("risk_config") or {}),
+        "mode": row.get("mode"),
+        "execution_mode": execution_mode,
+        "execution_behavior": execution_behavior,
+        "run_type": row.get("run_type"),
+        "playback_speed": float(row.get("playback_speed") if row.get("playback_speed") is not None else 0.0),
+        "backtest_start": _iso_timestamp(row.get("backtest_start")),
+        "backtest_end": _iso_timestamp(row.get("backtest_end")),
+        "risk": risk_payload,
+        "wallet_config": dict(row.get("wallet_config") or {}),
+        "market_data_stream_policy": dict(row.get("market_data_stream_policy") or {}),
+        "snapshot_interval_ms": int(row.get("snapshot_interval_ms") or 0),
+        "bot_env": dict(row.get("bot_env") or {}),
+        "created_at": _iso_timestamp(row.get("created_at")),
+        "updated_at": _iso_timestamp(row.get("updated_at")),
+    }
+
+
 def load_bots() -> List[Dict[str, Any]]:
     """Return all persisted bot configurations."""
 
     if not db.available:
         return []
     with db.session() as session:
-        rows = session.execute(select(BotRecord)).scalars().all()
+        rows = session.execute(select(*_BOT_LIST_COLUMNS)).mappings().all()
         if not rows:
             return []
         payload: List[Dict[str, Any]] = []
         for row in rows:
-            record = row.to_dict()
-            record["strategy_ids"] = [row.strategy_id] if row.strategy_id else []
+            record = _bot_mapping_to_dict(row)
+            strategy_id = row.get("strategy_id")
+            record["strategy_ids"] = [strategy_id] if strategy_id else []
             payload.append(record)
         return payload
 
@@ -104,9 +179,15 @@ def load_bots() -> List[Dict[str, Any]]:
 def upsert_bot(payload: Dict[str, Any]) -> None:
     """Persist a bot configuration row."""
 
+    bot_id = payload["id"]
+    runtime_fields = sorted(_REMOVED_RUNTIME_FIELDS.intersection(payload))
+    if runtime_fields:
+        raise ValueError(
+            "portal_bots is definition-only; runtime fields belong to run/lifecycle/lease/report tables: "
+            + ", ".join(runtime_fields)
+        )
     if not db.available:
         return
-    bot_id = payload["id"]
     try:
         with db.session() as session:
             record = session.get(BotRecord, bot_id)
@@ -168,15 +249,6 @@ def upsert_bot(payload: Dict[str, Any]) -> None:
                 record.bot_env = dict(payload.get("bot_env") or {})
             record.backtest_start = _parse_optional_timestamp(payload.get("backtest_start")) or record.backtest_start
             record.backtest_end = _parse_optional_timestamp(payload.get("backtest_end")) or record.backtest_end
-            record.status = payload.get("status") or record.status
-            record.last_run_at = _parse_optional_timestamp(payload.get("last_run_at")) or record.last_run_at
-            record.last_stats = dict(payload.get("last_stats") or record.last_stats or {})
-            if "last_run_artifact" in payload:
-                record.last_run_artifact = dict(payload.get("last_run_artifact") or {})
-            if "runner_id" in payload:
-                record.runner_id = payload.get("runner_id")
-            if "heartbeat_at" in payload:
-                record.heartbeat_at = _parse_optional_timestamp(payload.get("heartbeat_at"))
             record.updated_at = now
             if record.created_at is None:
                 record.created_at = now
@@ -184,42 +256,12 @@ def upsert_bot(payload: Dict[str, Any]) -> None:
         logger.warning("bot_persist_failed | id=%s | error=%s", bot_id, exc)
 
 
-def update_bot_run_artifact(bot_id: str, artifact: Dict[str, Any]) -> None:
-    """Persist last run artifact on the bot record (fail loud)."""
-
-    if not db.available:
-        raise RuntimeError("Database not available for run artifact persistence")
-    with db.session() as session:
-        record = session.get(BotRecord, bot_id)
-        if record is None:
-            raise KeyError(f"Bot {bot_id} was not found")
-        record.last_run_artifact = dict(artifact or {})
-        record.updated_at = _utcnow()
-
-
-def update_bot_heartbeat(bot_id: str, runner_id: str) -> None:
-    """Update heartbeat timestamp for a running bot (BotWatchdog)."""
-
-    if not db.available:
-        return
-    try:
-        with db.session() as session:
-            record = session.get(BotRecord, bot_id)
-            if record is None:
-                return
-            now = _utcnow()
-            record.heartbeat_at = now
-            record.runner_id = runner_id
-    except SQLAlchemyError as exc:
-        logger.warning("bot_heartbeat_failed | id=%s | error=%s", bot_id, exc)
-
-
 def mark_bot_crashed(
     bot_id: str,
     reason: str = "orphaned",
     diagnostics: Optional[Mapping[str, Any]] = None,
 ) -> bool:
-    """Mark a bot as crashed and clear its runner ownership (BotWatchdog).
+    """Record a watchdog crash/degradation checkpoint for the bot's latest run.
 
     Returns True if the bot was updated, False otherwise.
     """
@@ -230,61 +272,65 @@ def mark_bot_crashed(
     try:
         from ....service.bots.startup_lifecycle import BotLifecyclePhase, BotLifecycleStatus, LifecycleOwner
         from .lifecycle import get_latest_bot_run_lifecycle, record_bot_run_lifecycle_checkpoint
+        from .run_leases import get_bot_run_lease
 
         with db.session() as session:
             record = session.get(BotRecord, bot_id)
             if record is None:
                 return False
-            previous_runner = record.runner_id
-            latest_lifecycle = get_latest_bot_run_lifecycle(bot_id)
-            latest_run_id = str(_row_value(latest_lifecycle, "run_id") or "").strip()
-            latest_phase = str(_row_value(latest_lifecycle, "phase") or "").strip().lower()
-            latest_status = str(_row_value(latest_lifecycle, "status") or "").strip().lower()
-            if latest_phase in {
-                BotLifecyclePhase.COMPLETED.value,
-                BotLifecyclePhase.STOPPED.value,
-                BotLifecyclePhase.STARTUP_FAILED.value,
-                BotLifecyclePhase.CRASHED.value,
-            } or latest_status in {
-                BotLifecycleStatus.COMPLETED.value,
-                BotLifecycleStatus.STOPPED.value,
-                BotLifecycleStatus.STARTUP_FAILED.value,
-                BotLifecycleStatus.CRASHED.value,
-            }:
-                logger.info(
-                    "bot_mark_crashed_skipped_terminal | id=%s | reason=%s | phase=%s | status=%s",
-                    bot_id,
-                    reason,
-                    latest_phase or None,
-                    latest_status or None,
-                )
-                return False
-            if not latest_run_id:
-                logger.error(
-                    "bot_mark_crashed_missing_run_context | id=%s | reason=%s | previous_runner=%s",
-                    bot_id,
-                    reason,
-                    previous_runner,
-                )
-                return False
-            recoverable_watchdog_condition = _watchdog_recoverable(reason)
-            record.runner_id = None
-            record.heartbeat_at = None
-            record.updated_at = _utcnow()
-            if recoverable_watchdog_condition:
-                logger.warning(
-                    "bot_watchdog_recoverable_condition_recorded | id=%s | reason=%s | previous_runner=%s",
-                    bot_id,
-                    reason,
-                    previous_runner,
-                )
-            else:
-                logger.info(
-                    "bot_marked_crashed | id=%s | reason=%s | previous_runner=%s",
-                    bot_id,
-                    reason,
-                    previous_runner,
-                )
+        latest_lifecycle = get_latest_bot_run_lifecycle(bot_id)
+        latest_run_id = str(_row_value(latest_lifecycle, "run_id") or "").strip()
+        latest_phase = str(_row_value(latest_lifecycle, "phase") or "").strip().lower()
+        latest_status = str(_row_value(latest_lifecycle, "status") or "").strip().lower()
+        lease = get_bot_run_lease(latest_run_id) if latest_run_id else None
+        diagnostics_runner = (
+            diagnostics.get("previous_runner")
+            if isinstance(diagnostics, Mapping)
+            else None
+        )
+        previous_runner = str(diagnostics_runner or (lease or {}).get("runner_id") or "").strip() or None
+        if latest_phase in {
+            BotLifecyclePhase.COMPLETED.value,
+            BotLifecyclePhase.STOPPED.value,
+            BotLifecyclePhase.STARTUP_FAILED.value,
+            BotLifecyclePhase.CRASHED.value,
+        } or latest_status in {
+            BotLifecycleStatus.COMPLETED.value,
+            BotLifecycleStatus.STOPPED.value,
+            BotLifecycleStatus.STARTUP_FAILED.value,
+            BotLifecycleStatus.CRASHED.value,
+        }:
+            logger.info(
+                "bot_mark_crashed_skipped_terminal | id=%s | reason=%s | phase=%s | status=%s",
+                bot_id,
+                reason,
+                latest_phase or None,
+                latest_status or None,
+            )
+            return False
+        if not latest_run_id:
+            logger.error(
+                "bot_mark_crashed_missing_run_context | id=%s | reason=%s | previous_runner=%s",
+                bot_id,
+                reason,
+                previous_runner,
+            )
+            return False
+        recoverable_watchdog_condition = _watchdog_recoverable(reason)
+        if recoverable_watchdog_condition:
+            logger.warning(
+                "bot_watchdog_recoverable_condition_recorded | id=%s | reason=%s | previous_runner=%s",
+                bot_id,
+                reason,
+                previous_runner,
+            )
+        else:
+            logger.info(
+                "bot_marked_crashed | id=%s | reason=%s | previous_runner=%s",
+                bot_id,
+                reason,
+                previous_runner,
+            )
         if latest_run_id:
             recoverable_watchdog_condition = _watchdog_recoverable(reason)
             terminal_metadata = (
@@ -292,7 +338,7 @@ def mark_bot_crashed(
                     "watchdog_condition": _watchdog_reason_code(reason),
                     "watchdog_classification": "recoverable",
                     "recoverable": True,
-                    "watchdog_reason_text": str(reason or "").strip() or "stale_heartbeat",
+                    "watchdog_reason_text": str(reason or "").strip() or "stale_run_lease",
                 }
                 if recoverable_watchdog_condition
                 else _watchdog_terminal_metadata(bot_id, reason, diagnostics)
@@ -342,66 +388,6 @@ def mark_bot_crashed(
         logger.warning("bot_mark_crashed_failed | id=%s | error=%s", bot_id, exc)
         return False
 
-
-def find_orphaned_bots(
-    stale_threshold_seconds: float,
-    runner_id: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    """Find bots that appear to be orphaned (BotWatchdog).
-
-    Args:
-        stale_threshold_seconds: Consider a bot orphaned if heartbeat is older than this
-        runner_id: If provided, only check bots owned by this runner
-
-    Returns:
-        List of bot dicts that are orphaned (running/paused but stale heartbeat)
-    """
-
-    if not db.available:
-        return []
-    try:
-        from datetime import timedelta
-        with db.session() as session:
-            cutoff = _utcnow() - timedelta(seconds=stale_threshold_seconds)
-            query = select(BotRecord).where(
-                BotRecord.status.in_(["running", "paused", "starting", "degraded", "telemetry_degraded"])
-            )
-            if runner_id:
-                query = query.where(BotRecord.runner_id == runner_id)
-            rows = session.execute(query).scalars().all()
-            orphaned = []
-            for row in rows:
-                # Consider orphaned if:
-                # 1. No heartbeat ever recorded, OR
-                # 2. Heartbeat is older than threshold
-                if row.heartbeat_at is None or row.heartbeat_at < cutoff:
-                    record = row.to_dict()
-                    record["strategy_ids"] = [row.strategy_id] if row.strategy_id else []
-                    orphaned.append(record)
-            return orphaned
-    except SQLAlchemyError as exc:
-        logger.warning("find_orphaned_bots_failed | error=%s", exc)
-        return []
-
-
-def clear_bot_runner(bot_id: str) -> None:
-    """Clear runner ownership when a bot stops normally (BotWatchdog)."""
-
-    if not db.available:
-        return
-    try:
-        with db.session() as session:
-            record = session.get(BotRecord, bot_id)
-            if record is None:
-                return
-            record.runner_id = None
-            record.heartbeat_at = None
-    except SQLAlchemyError as exc:
-        logger.warning("clear_bot_runner_failed | id=%s | error=%s", bot_id, exc)
-
-
-
-
 def get_bot(bot_id: str) -> Optional[Dict[str, Any]]:
     """Return a persisted bot configuration."""
 
@@ -410,8 +396,17 @@ def get_bot(bot_id: str) -> Optional[Dict[str, Any]]:
     if not bot_id:
         return None
     with db.session() as session:
-        record = session.get(BotRecord, bot_id)
-        return record.to_dict() if record else None
+        row = (
+            session.execute(select(*_BOT_LIST_COLUMNS).where(BotRecord.id == str(bot_id)))
+            .mappings()
+            .first()
+        )
+        if not row:
+            return None
+        record = _bot_mapping_to_dict(row)
+        strategy_id = row.get("strategy_id")
+        record["strategy_ids"] = [strategy_id] if strategy_id else []
+        return record
 
 
 

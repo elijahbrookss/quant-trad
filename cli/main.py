@@ -7,16 +7,21 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+from urllib.parse import quote
 
 from .api import ApiClient, ApiError, filename_from_content_disposition
 from .audit import CliAuditLog, experiment_dir, report_export_dir, safe_path_part
 from .experiments.data_preflight import data_preflight_requires_proceed, run_plan_data_preflight
 from .experiments.doctor import doctor_experiment
 from .experiments.event_log import read_events
+from .experiments.instrument_matrix import prepare_instrument_matrix_experiment
 from .experiments.plan_loader import load_plan, plan_preview
 from .experiments.runner import ExperimentRunner
 from .experiments.state_store import ExperimentStateStore, find_experiment_dir
+from .experiments.summarize import summarize_experiment, write_experiment_summary
+from .logs import DEFAULT_LOKI_URL, LokiClient, doctor_log_payload, query_log_payload, run_log_payload
+from .setup import setup_doctor_payload, setup_env_payload
 
 
 TERMINAL_STATUSES = {
@@ -80,6 +85,20 @@ def _read_json_object_arg(value: str | None, *, label: str) -> dict[str, Any]:
         raise ValueError(f"invalid JSON object for {label}: {exc}") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"{label} must be a JSON object")
+    return payload
+
+
+def _read_json_array_or_object_arg(value: str | None, *, label: str) -> Any:
+    if not value:
+        return None
+    text = str(value).strip()
+    raw = sys.stdin.read() if text == "-" else text if text.startswith(("{", "[")) else Path(text).expanduser().read_text(encoding="utf-8")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON for {label}: {exc}") from exc
+    if not isinstance(payload, (dict, list)):
+        raise ValueError(f"{label} must be a JSON object or array")
     return payload
 
 
@@ -424,7 +443,7 @@ def _bot_write_payload(args: argparse.Namespace, *, require_name: bool = False) 
         "backtest_start": "backtest_start",
         "backtest_end": "backtest_end",
         "snapshot_interval_ms": "snapshot_interval_ms",
-        "instrument_type": "instrument_type",
+        "execution_semantics": "execution_semantics",
     }
     for arg_name, payload_name in fields.items():
         value = getattr(args, arg_name, None)
@@ -515,13 +534,106 @@ def _cmd_runs_wait(args: argparse.Namespace) -> int:
     return code
 
 
+def _loki_client(args: argparse.Namespace) -> LokiClient:
+    return LokiClient(str(getattr(args, "loki_url", None) or DEFAULT_LOKI_URL), timeout=float(args.timeout))
+
+
+def _cmd_logs_run(args: argparse.Namespace) -> int:
+    payload = run_log_payload(
+        client=_loki_client(args),
+        run_id=args.run_id,
+        bot_id=getattr(args, "bot_id", None),
+        start=getattr(args, "start", None),
+        end=getattr(args, "end", None),
+        lookback_hours=float(getattr(args, "lookback_hours", 6.0)),
+        limit=int(getattr(args, "limit", 500)),
+    )
+    _print_json(payload)
+    return 0
+
+
+def _cmd_logs_query(args: argparse.Namespace) -> int:
+    payload = query_log_payload(
+        client=_loki_client(args),
+        logql=args.logql,
+        start=getattr(args, "start", None),
+        end=getattr(args, "end", None),
+        lookback_hours=float(getattr(args, "lookback_hours", 6.0)),
+        limit=int(getattr(args, "limit", 500)),
+    )
+    _print_json(payload)
+    return 0
+
+
+def _cmd_logs_doctor(args: argparse.Namespace) -> int:
+    payload = doctor_log_payload(
+        client=_loki_client(args),
+        start=getattr(args, "start", None),
+        end=getattr(args, "end", None),
+        lookback_hours=float(getattr(args, "lookback_hours", 24.0)),
+    )
+    _print_json(payload)
+    return 0
+
+
 def _cmd_strategies_list(args: argparse.Namespace) -> int:
     _print_json(_client(args).request_json("GET", "/api/strategies/"))
     return 0
 
 
+def _cmd_strategies_create(args: argparse.Namespace) -> int:
+    payload = _read_json_object_arg(args.payload_json, label="--payload-json")
+    _print_json(_client(args).request_json("POST", "/api/strategies/", payload=payload))
+    return 0
+
+
 def _cmd_strategies_get(args: argparse.Namespace) -> int:
     _print_json(_client(args).request_json("GET", f"/api/strategies/{args.strategy_id}"))
+    return 0
+
+
+def _cmd_strategies_bindings(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/strategies/{args.strategy_id}/bindings"))
+    return 0
+
+
+def _cmd_strategies_rules(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/strategies/{args.strategy_id}/rules"))
+    return 0
+
+
+def _cmd_strategies_rule_create(args: argparse.Namespace) -> int:
+    payload = _read_json_object_arg(args.payload_json, label="--payload-json")
+    _print_json(_client(args).request_json("POST", f"/api/strategies/{args.strategy_id}/rules", payload=payload))
+    return 0
+
+
+def _variant_query(args: argparse.Namespace) -> str:
+    params: list[str] = []
+    if getattr(args, "variant_id", None):
+        params.append(f"variant_id={quote(str(args.variant_id), safe='')}")
+    if getattr(args, "variant_name", None):
+        params.append(f"variant_name={quote(str(args.variant_name), safe='')}")
+    return f"?{'&'.join(params)}" if params else ""
+
+
+def _cmd_strategies_effective(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/strategies/{args.strategy_id}/effective{_variant_query(args)}",
+        )
+    )
+    return 0
+
+
+def _cmd_strategies_decision_inputs(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/strategies/{args.strategy_id}/decision-inputs{_variant_query(args)}",
+        )
+    )
     return 0
 
 
@@ -535,7 +647,7 @@ def _cmd_strategies_compile(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_strategies_preview(args: argparse.Namespace) -> int:
+def _strategy_preview_request_payload(args: argparse.Namespace) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "start": args.start,
         "end": args.end,
@@ -546,7 +658,126 @@ def _cmd_strategies_preview(args: argparse.Namespace) -> int:
         payload["variant_id"] = args.variant_id
     if args.variant_name:
         payload["variant_name"] = args.variant_name
-    _print_json(_client(args).request_json("POST", f"/api/strategies/{args.strategy_id}/preview", payload=payload))
+    return payload
+
+
+def _strategy_preview_signals_view(summary: Mapping[str, Any]) -> dict[str, Any]:
+    signals: list[dict[str, Any]] = []
+    instruments = summary.get("instruments")
+    if not isinstance(instruments, dict):
+        raise ValueError("strategy preview summary is missing instruments")
+    for instrument in instruments.values():
+        if not isinstance(instrument, dict):
+            continue
+        rows = instrument.get("signals_detail")
+        if isinstance(rows, list):
+            signals.extend(dict(row) for row in rows if isinstance(row, dict))
+        else:
+            signals.extend(dict(row) for row in instrument.get("examples") or [] if isinstance(row, dict))
+    signals.sort(key=lambda row: (int(row.get("bar_epoch") or 0), str(row.get("signal_id") or "")))
+    return {
+        "schema_version": "strategy_preview_signals.v1",
+        "preview_id": summary.get("preview_id"),
+        "strategy_id": summary.get("strategy_id"),
+        "strategy_name": summary.get("strategy_name"),
+        "total": len(signals),
+        "signals": signals,
+    }
+
+
+def _strategy_preview_empty_view(summary: Mapping[str, Any]) -> dict[str, Any]:
+    instruments = summary.get("instruments")
+    if not isinstance(instruments, dict):
+        raise ValueError("strategy preview summary is missing instruments")
+    return {
+        "schema_version": "strategy_preview_empty_diagnostics.v1",
+        "preview_id": summary.get("preview_id"),
+        "strategy_id": summary.get("strategy_id"),
+        "strategy_name": summary.get("strategy_name"),
+        "instruments": {
+            str(instrument_id): {
+                "instrument_id": instrument.get("instrument_id"),
+                "symbol": instrument.get("symbol"),
+                "signals": instrument.get("signals"),
+                "why_empty": list(instrument.get("why_empty") or []),
+            }
+            for instrument_id, instrument in instruments.items()
+            if isinstance(instrument, dict)
+        },
+    }
+
+
+def _cmd_strategies_preview(args: argparse.Namespace) -> int:
+    if args.full and (args.signals or args.why_empty):
+        raise ValueError("--full cannot be combined with --signals or --why-empty")
+    payload = _strategy_preview_request_payload(args)
+    if args.full:
+        _print_json(_client(args).request_json("POST", f"/api/strategies/{args.strategy_id}/preview", payload=payload))
+        return 0
+    payload["max_examples"] = args.examples
+    payload["include_signals"] = bool(args.signals)
+    summary = _client(args).request_json("POST", f"/api/strategies/{args.strategy_id}/preview/summary", payload=payload)
+    if args.signals:
+        _print_json(_strategy_preview_signals_view(summary))
+    elif args.why_empty:
+        _print_json(_strategy_preview_empty_view(summary))
+    else:
+        _print_json(summary)
+    return 0
+
+
+def _parse_strategy_preview_case(raw: str) -> dict[str, Any]:
+    text = str(raw or "").strip()
+    if not text:
+        raise ValueError("--case cannot be empty")
+    label = None
+    body = text
+    if "=" in text:
+        label, body = text.split("=", 1)
+        label = label.strip() or None
+    if ":" not in body:
+        raise ValueError("--case must look like LABEL=STRATEGY_ID:INSTRUMENT_ID[,INSTRUMENT_ID]")
+    strategy_id, instruments_raw = body.split(":", 1)
+    instrument_ids = [item.strip() for item in instruments_raw.split(",") if item.strip()]
+    if not strategy_id.strip() or not instrument_ids:
+        raise ValueError("--case requires strategy_id and at least one instrument_id")
+    payload: dict[str, Any] = {
+        "strategy_id": strategy_id.strip(),
+        "instrument_ids": instrument_ids,
+    }
+    if label:
+        payload["label"] = label
+    return payload
+
+
+def _strategy_preview_compare_cases(args: argparse.Namespace) -> list[dict[str, Any]]:
+    cases: list[dict[str, Any]] = []
+    for raw in args.case or []:
+        cases.append(_parse_strategy_preview_case(raw))
+    for raw_json in args.case_json or []:
+        payload = _read_json_array_or_object_arg(raw_json, label="--case-json")
+        if isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    raise ValueError("--case-json array items must be JSON objects")
+                cases.append(item)
+        elif isinstance(payload, dict):
+            cases.append(payload)
+    if not cases:
+        raise ValueError("at least one --case or --case-json is required")
+    return cases
+
+
+def _cmd_strategies_preview_compare(args: argparse.Namespace) -> int:
+    payload: dict[str, Any] = {
+        "start": args.start,
+        "end": args.end,
+        "interval": args.interval,
+        "cases": _strategy_preview_compare_cases(args),
+        "max_examples": args.examples,
+        "include_signals": bool(args.signals),
+    }
+    _print_json(_client(args).request_json("POST", "/api/strategies/preview/compare", payload=payload))
     return 0
 
 
@@ -595,6 +826,247 @@ def _cmd_variants_delete(args: argparse.Namespace) -> int:
     return 0
 
 
+def _indicator_payload_from_args(args: argparse.Namespace, base: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = dict(base or {})
+    payload.update(_read_json_object_arg(getattr(args, "payload_json", None), label="--payload-json"))
+    if getattr(args, "type", None) is not None:
+        payload["type"] = args.type
+    if getattr(args, "name", None) is not None:
+        payload["name"] = args.name
+    if getattr(args, "params_json", None) is not None:
+        payload["params"] = _read_json_object_arg(args.params_json, label="--params-json")
+    params = _key_value_map(getattr(args, "param", None))
+    if params:
+        payload.setdefault("params", {})
+        if not isinstance(payload["params"], dict):
+            raise ValueError("indicator params must be a JSON object")
+        payload["params"].update(params)
+    if getattr(args, "dependencies_json", None) is not None:
+        raw_dependencies = sys.stdin.read() if args.dependencies_json == "-" else (
+            args.dependencies_json
+            if str(args.dependencies_json).strip().startswith("[")
+            else Path(args.dependencies_json).expanduser().read_text(encoding="utf-8")
+        )
+        try:
+            dependencies = json.loads(raw_dependencies)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid JSON array for --dependencies-json: {exc}") from exc
+        if not isinstance(dependencies, list):
+            raise ValueError("--dependencies-json must be a JSON array")
+        payload["dependencies"] = dependencies
+    for key in ("color", "color_palette"):
+        value = getattr(args, key, None)
+        if value is not None:
+            payload[key] = value
+    if "type" not in payload or not str(payload.get("type") or "").strip():
+        raise ValueError("indicator type is required")
+    payload.setdefault("params", {})
+    if not isinstance(payload.get("params"), dict):
+        raise ValueError("indicator params must be a JSON object")
+    return payload
+
+
+def _cmd_indicators_types(args: argparse.Namespace) -> int:
+    _print_json({"schema_version": "qt_indicator_types.v1", "items": _client(args).request_json("GET", "/api/indicators/types")})
+    return 0
+
+
+def _cmd_indicators_type(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/indicators/types/{args.type_id}"))
+    return 0
+
+
+def _cmd_indicators_list(args: argparse.Namespace) -> int:
+    _print_json({"schema_version": "qt_indicators_list.v1", "items": _client(args).request_json("GET", "/api/indicators/")})
+    return 0
+
+
+def _cmd_indicators_get(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/indicators/{args.indicator_id}"))
+    return 0
+
+
+def _cmd_indicators_strategies(args: argparse.Namespace) -> int:
+    _print_json(
+        {
+            "schema_version": "qt_indicator_strategies.v1",
+            "indicator_id": args.indicator_id,
+            "items": _client(args).request_json("GET", f"/api/indicators/{args.indicator_id}/strategies"),
+        }
+    )
+    return 0
+
+
+def _cmd_indicators_validate_config(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("POST", "/api/indicators/validate-config", payload=_indicator_payload_from_args(args)))
+    return 0
+
+
+def _cmd_indicators_create(args: argparse.Namespace) -> int:
+    payload = _indicator_payload_from_args(args)
+    normalized = _client(args).request_json("POST", "/api/indicators/validate-config", payload=payload)
+    if not bool(args.apply):
+        _print_json(
+            {
+                "schema_version": "qt_planned_mutation.v1",
+                "operation": "create_indicator",
+                "apply": False,
+                "payload": payload,
+                "normalized": normalized,
+            }
+        )
+        return 0
+    if not bool(args.confirm):
+        raise ValueError("create indicator requires --confirm when --apply is set")
+    _print_json(_client(args).request_json("POST", "/api/indicators/", payload=payload))
+    return 0
+
+
+def _indicator_payload_from_read(read_payload: dict[str, Any]) -> dict[str, Any]:
+    instance = read_payload.get("instance") if isinstance(read_payload.get("instance"), dict) else {}
+    return {
+        "type": instance.get("type"),
+        "name": instance.get("name"),
+        "params": dict(instance.get("params") or {}),
+        "dependencies": list(instance.get("dependencies") or []),
+        "color": instance.get("color"),
+        "color_palette": instance.get("color_palette"),
+    }
+
+
+def _indicator_material_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": payload.get("type"),
+        "params": dict(payload.get("params") or {}),
+        "dependencies": list(payload.get("dependencies") or []),
+    }
+
+
+def _cmd_indicators_clone(args: argparse.Namespace) -> int:
+    client = _client(args)
+    source = client.request_json("GET", f"/api/indicators/{args.indicator_id}")
+    base = _indicator_payload_from_read(source)
+    base["name"] = args.name or f"{base.get('name') or base.get('type')} Copy"
+    payload = _indicator_payload_from_args(args, base=base)
+    if payload.get("type") != base.get("type"):
+        raise ValueError("indicator clone cannot change type; create a new indicator instead")
+    normalized = client.request_json("POST", "/api/indicators/validate-config", payload=payload)
+    if not bool(args.apply):
+        _print_json(
+            {
+                "schema_version": "qt_planned_mutation.v1",
+                "operation": "clone_indicator",
+                "apply": False,
+                "source_indicator_id": args.indicator_id,
+                "payload": payload,
+                "normalized": normalized,
+            }
+        )
+        return 0
+    if not bool(args.confirm):
+        raise ValueError("clone indicator requires --confirm when --apply is set")
+    _print_json(client.request_json("POST", "/api/indicators/", payload=payload))
+    return 0
+
+
+def _cmd_indicators_edit(args: argparse.Namespace) -> int:
+    client = _client(args)
+    current = client.request_json("GET", f"/api/indicators/{args.indicator_id}")
+    before = _indicator_payload_from_read(current)
+    payload = _indicator_payload_from_args(args, base=before)
+    if payload.get("type") != before.get("type"):
+        raise ValueError("indicator type cannot be edited; create a new indicator instead")
+    normalized = client.request_json("POST", "/api/indicators/validate-config", payload=payload)
+    material_changed = _indicator_material_payload(before) != _indicator_material_payload(payload)
+    if bool(args.apply) and material_changed:
+        strategies = client.request_json("GET", f"/api/indicators/{args.indicator_id}/strategies")
+        if strategies:
+            raise ValueError("strategy-bound indicator params/dependencies cannot be edited; clone instead")
+    if not bool(args.apply):
+        _print_json(
+            {
+                "schema_version": "qt_planned_mutation.v1",
+                "operation": "edit_indicator",
+                "apply": False,
+                "indicator_id": args.indicator_id,
+                "material_changed": material_changed,
+                "before": before,
+                "payload": payload,
+                "normalized": normalized,
+            }
+        )
+        return 0
+    if not bool(args.confirm):
+        raise ValueError("edit indicator requires --confirm when --apply is set")
+    _print_json(client.request_json("PUT", f"/api/indicators/{args.indicator_id}", payload=payload))
+    return 0
+
+
+def _cmd_indicators_rm(args: argparse.Namespace) -> int:
+    if not bool(args.confirm):
+        raise ValueError("rm indicator requires --confirm")
+    _client(args).request_bytes("DELETE", f"/api/indicators/{args.indicator_id}")
+    _print_json({"deleted": True, "indicator_id": args.indicator_id})
+    return 0
+
+
+def _cmd_indicators_toggle(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "PATCH",
+            f"/api/indicators/{args.indicator_id}/enabled",
+            payload={"enabled": bool(args.enabled)},
+        )
+    )
+    return 0
+
+
+def _indicator_window_payload(args: argparse.Namespace) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "start": args.start,
+        "end": args.end,
+        "interval": args.interval,
+    }
+    for key in ("symbol", "datasource", "exchange", "instrument_id"):
+        value = getattr(args, key, None)
+        if value is not None:
+            payload[key] = value
+    return payload
+
+
+def _cmd_indicators_validate_runtime(args: argparse.Namespace) -> int:
+    payload = _indicator_window_payload(args)
+    payload["require_ready_by_end"] = bool(args.require_ready_by_end)
+    if args.min_ready_bars is not None:
+        payload["min_ready_bars"] = args.min_ready_bars
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/indicators/{args.indicator_id}/runtime-validation",
+            payload=payload,
+        )
+    )
+    return 0
+
+
+def _cmd_indicators_overlays(args: argparse.Namespace) -> int:
+    payload = _indicator_window_payload(args)
+    for key in ("visibility_epoch", "cursor_epoch", "cursor_time"):
+        value = getattr(args, key, None)
+        if value is not None:
+            payload[key] = value
+    _print_json(_client(args).request_json("POST", f"/api/indicators/{args.indicator_id}/overlays", payload=payload))
+    return 0
+
+
+def _cmd_indicators_signals(args: argparse.Namespace) -> int:
+    payload = _indicator_window_payload(args)
+    if getattr(args, "config_json", None):
+        payload["config"] = _read_json_object_arg(args.config_json, label="--config-json")
+    _print_json(_client(args).request_json("POST", f"/api/indicators/{args.indicator_id}/signals", payload=payload))
+    return 0
+
+
 def _cmd_reports_list(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
@@ -628,10 +1100,17 @@ def _cmd_report_get(args: argparse.Namespace) -> int:
         "operational-health": f"/api/reports/{args.run_id}/operational-health",
         "run-report": f"/api/reports/{args.run_id}/run-report",
         "run-report-status": f"/api/reports/{args.run_id}/run-report/status",
+        "instruments": f"/api/reports/{args.run_id}/instruments",
+        "symbol-summary": f"/api/reports/{args.run_id}/symbol-summary",
     }
     params: dict[str, Any] = {}
     if args.report_section == "run-report":
-        params = {"build": args.build, "force_rebuild": args.force_rebuild}
+        if bool(args.build or args.force_rebuild):
+            _ensure_run_report_materialized(
+                _client(args),
+                args.run_id,
+                force_rebuild=bool(args.force_rebuild),
+            )
     _print_json(_client(args).request_json("GET", paths[args.report_section], params=params))
     return 0
 
@@ -673,6 +1152,732 @@ def _cmd_reports_compare(args: argparse.Namespace) -> int:
             },
         )
     )
+    return 0
+
+
+def _cmd_reports_page(args: argparse.Namespace) -> int:
+    section = str(args.report_page_section)
+    path = f"/api/reports/{args.run_id}/{section}"
+    params: dict[str, Any] = {
+        "limit": args.limit,
+        "offset": args.offset,
+        "symbol": getattr(args, "symbol", None),
+        "instrumentId": getattr(args, "instrument_id", None),
+    }
+    if section == "decisions":
+        params["state"] = args.state
+    _print_json(_client(args).request_json("GET", path, params=params))
+    return 0
+
+
+def _cmd_reports_candle_catalog(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/reports/{args.run_id}/candles/catalog"))
+    return 0
+
+
+def _cmd_reports_candles(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/reports/{args.run_id}/candles",
+            params={
+                "instrument_id": args.instrument_id,
+                "timeframe": args.timeframe,
+                "start": args.start,
+                "end": args.end,
+                "limit": args.limit,
+                "offset": args.offset,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_coverage(args: argparse.Namespace) -> int:
+    payload = {
+        "instrument_id": args.instrument_id,
+        "symbol": args.symbol,
+        "datasource": args.datasource,
+        "exchange": args.exchange,
+        "start": args.start,
+        "end": args.end,
+        "timeframe": args.timeframe,
+    }
+    if not payload["instrument_id"] and not payload["symbol"]:
+        raise ValueError("--instrument-id or --symbol is required")
+    result = _client(args).request_json("POST", "/api/candles/coverage", payload=payload)
+    _print_json(result)
+    status = str(result.get("status") or "").lower()
+    if status in {"ok", "info"}:
+        return 0
+    if status == "warning" and not bool(args.fail_on_warning):
+        return 0
+    return 1
+
+
+def _cmd_research_items_list(args: argparse.Namespace) -> int:
+    payload = _client(args).request_json(
+        "GET",
+        "/api/research/items",
+        params={
+            "kind": args.kind,
+            "status": args.status,
+            "symbol": args.symbol,
+            "timeframe": args.timeframe,
+            "limit": args.limit,
+        },
+    )
+    _print_json(payload)
+    return 0
+
+
+def _cmd_research_items_get(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/research/items/{args.item_id}"))
+    return 0
+
+
+def _research_item_payload(
+    args: argparse.Namespace,
+    *,
+    default_kind: str | None = None,
+    default_status: str | None = None,
+) -> dict[str, Any]:
+    payload = _read_json_object_arg(getattr(args, "payload_json", None), label="--payload-json")
+    if default_kind:
+        payload.setdefault("kind", default_kind)
+    if default_status:
+        payload.setdefault("status", default_status)
+    for key in (
+        "kind",
+        "status",
+        "title",
+        "body",
+        "instrument_id",
+        "symbol",
+        "timeframe",
+        "datasource",
+        "exchange",
+        "window_start",
+        "window_end",
+    ):
+        value = getattr(args, key, None)
+        if value is not None:
+            payload[key] = value
+    tags = list(getattr(args, "tag", None) or [])
+    if tags:
+        payload["tags"] = tags
+    if getattr(args, "payload", None):
+        payload["payload"] = _read_json_object_arg(args.payload, label="--payload")
+    if not str(payload.get("kind") or "").strip():
+        raise ValueError("kind is required")
+    if not str(payload.get("title") or "").strip():
+        raise ValueError("title is required")
+    payload.setdefault("status", "draft")
+    return payload
+
+
+def _cmd_research_items_create(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("POST", "/api/research/items", payload=_research_item_payload(args)))
+    return 0
+
+
+def _cmd_research_observe_create(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            "/api/research/items",
+            payload=_research_item_payload(args, default_kind="observation", default_status="active"),
+        )
+    )
+    return 0
+
+
+def _cmd_research_links_create(args: argparse.Namespace) -> int:
+    payload = _read_json_object_arg(getattr(args, "payload_json", None), label="--payload-json")
+    for key in ("source_item_id", "target_type", "target_id", "relation"):
+        value = getattr(args, key, None)
+        if value is not None:
+            payload[key] = value
+    if getattr(args, "metadata_json", None):
+        payload["metadata"] = _read_json_object_arg(args.metadata_json, label="--metadata-json")
+    _print_json(_client(args).request_json("POST", "/api/research/links", payload=payload))
+    return 0
+
+
+def _cmd_research_links_list(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/research/items/{args.item_id}/links",
+            params={"include_inbound": args.include_inbound},
+        )
+    )
+    return 0
+
+
+def _research_scope_from_args(args: argparse.Namespace, *, include_indicator: bool = False, include_run: bool = False) -> dict[str, Any]:
+    scope: dict[str, Any] = {}
+    for key in ("instrument_id", "symbol", "datasource", "exchange", "timeframe", "start", "end"):
+        value = getattr(args, key, None)
+        if value is not None:
+            scope[key] = value
+    if include_indicator:
+        scope["indicator_id"] = args.indicator_id
+    if include_run:
+        scope["run_id"] = args.run_id
+    return scope
+
+
+def _research_outcomes_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    outcomes: dict[str, Any] = {}
+    if getattr(args, "forward_bars", None):
+        outcomes["forward_bars"] = [int(item.strip()) for item in str(args.forward_bars).split(",") if item.strip()]
+    if getattr(args, "entry_lag_bars", None) is not None:
+        outcomes["entry_lag_bars"] = args.entry_lag_bars
+    if getattr(args, "direction", None):
+        outcomes["direction"] = args.direction
+    if getattr(args, "min_sample_count", None) is not None:
+        outcomes["min_sample_count"] = args.min_sample_count
+    if getattr(args, "min_edge_pct", None) is not None:
+        outcomes["min_edge_pct"] = args.min_edge_pct
+    if getattr(args, "bucket_by", None):
+        outcomes["bucket_by"] = [item.strip() for item in str(args.bucket_by).split(",") if item.strip()]
+    if getattr(args, "max_examples", None) is not None:
+        outcomes["max_examples"] = args.max_examples
+    return outcomes
+
+
+def _research_check_request_base(args: argparse.Namespace, *, title: str, check_family: str) -> dict[str, Any]:
+    payload = _read_json_object_arg(getattr(args, "request_json", None), label="--request-json")
+    payload.setdefault("title", title)
+    payload["check_family"] = check_family
+    if getattr(args, "title", None):
+        payload["title"] = args.title
+    if getattr(args, "body", None):
+        payload["body"] = args.body
+    if getattr(args, "observation_id", None):
+        payload["observation_id"] = args.observation_id
+    tags = list(getattr(args, "tag", None) or [])
+    if tags:
+        payload["tags"] = tags
+    return payload
+
+
+def _post_research_check(args: argparse.Namespace, payload: dict[str, Any]) -> int:
+    if getattr(args, "dispatch", False):
+        result = _client(args).request_json("POST", "/api/research/jobs/checks/run", payload=payload)
+        _print_research_job_dispatch(result)
+        return 0
+    _print_json(_client(args).request_json("POST", "/api/research/checks/run", payload=payload))
+    return 0
+
+
+def _cmd_research_check_raw(args: argparse.Namespace) -> int:
+    detector = _read_json_object_arg(getattr(args, "detector_json", None), label="--detector-json")
+    if not detector:
+        if not getattr(args, "field", None):
+            raise ValueError("raw check requires --field or --detector-json")
+        detector = {
+            "type": "raw_condition",
+            "field": args.field,
+            "operator": args.operator or "lt",
+        }
+        if getattr(args, "value_field", None):
+            detector["value_field"] = args.value_field
+        elif getattr(args, "value", None) is not None:
+            detector["value"] = _json_value(str(args.value))
+        else:
+            raise ValueError("--value or --value-field is required with --field")
+    payload = _research_check_request_base(
+        args,
+        title=f"Raw {detector.get('field')} {detector.get('operator', 'eq')} check",
+        check_family="raw_forward_outcome",
+    )
+    payload["scope"] = {**dict(payload.get("scope") or {}), **_research_scope_from_args(args)}
+    payload["detector"] = detector
+    outcomes = {**dict(payload.get("outcomes") or {}), **_research_outcomes_from_args(args)}
+    if outcomes:
+        payload["outcomes"] = outcomes
+    return _post_research_check(args, payload)
+
+
+def _cmd_research_check_signal(args: argparse.Namespace) -> int:
+    detector = _read_json_object_arg(getattr(args, "detector_json", None), label="--detector-json")
+    if not detector:
+        detector = {"type": "run_signal_match"}
+        for attr, key in (
+            ("output_name", "output_name"),
+            ("event_key", "event_key"),
+            ("symbol", "symbol"),
+            ("direction", "direction"),
+        ):
+            value = getattr(args, attr, None)
+            if value is not None:
+                detector[key] = value
+        if len(detector) == 1:
+            raise ValueError("signal check requires --output-name, --event-key, --symbol, --direction, or --detector-json")
+    payload = _research_check_request_base(
+        args,
+        title=f"Run signal check: {detector.get('output_name') or detector.get('event_key') or args.run_id}",
+        check_family="run_signal_summary",
+    )
+    payload["scope"] = {**dict(payload.get("scope") or {}), **_research_scope_from_args(args, include_run=True)}
+    payload["detector"] = detector
+    outcomes = {**dict(payload.get("outcomes") or {}), **_research_outcomes_from_args(args)}
+    if outcomes:
+        payload["outcomes"] = outcomes
+    return _post_research_check(args, payload)
+
+
+def _cmd_research_check_decision(args: argparse.Namespace) -> int:
+    detector = _read_json_object_arg(getattr(args, "detector_json", None), label="--detector-json")
+    if not detector:
+        detector = {"type": "run_decision_match"}
+        if getattr(args, "state", None):
+            detector["decision_state"] = args.state
+        if getattr(args, "reason_code", None):
+            detector["reason_code"] = args.reason_code
+        if getattr(args, "symbol", None):
+            detector["symbol"] = args.symbol
+        if len(detector) == 1:
+            raise ValueError("decision check requires --state, --reason-code, --symbol, or --detector-json")
+    payload = _research_check_request_base(
+        args,
+        title=f"Run decision check: {detector.get('decision_state') or detector.get('reason_code') or args.run_id}",
+        check_family="run_decision_trade_comparison",
+    )
+    payload["scope"] = {**dict(payload.get("scope") or {}), **_research_scope_from_args(args, include_run=True)}
+    payload["detector"] = detector
+    outcomes = {**dict(payload.get("outcomes") or {}), **_research_outcomes_from_args(args)}
+    if outcomes:
+        payload["outcomes"] = outcomes
+    return _post_research_check(args, payload)
+
+
+def _cmd_research_check_indicator(args: argparse.Namespace) -> int:
+    detector = _read_json_object_arg(getattr(args, "detector_json", None), label="--detector-json")
+    if not detector:
+        if not getattr(args, "output", None):
+            raise ValueError("indicator check requires --output or --detector-json")
+        if getattr(args, "field", None):
+            detector = {
+                "type": "indicator_output_match",
+                "output_name": args.output,
+                "field": args.field,
+                "operator": args.operator or "eq",
+            }
+            if getattr(args, "value_field", None):
+                detector["value_field"] = args.value_field
+            elif getattr(args, "value", None) is not None:
+                detector["value"] = _json_value(str(args.value))
+            else:
+                raise ValueError("--value or --value-field is required with --field")
+        else:
+            detector = {
+                "type": "indicator_event_match",
+                "output_name": args.output,
+            }
+            if getattr(args, "event_key", None):
+                detector["event_key"] = args.event_key
+    payload = _research_check_request_base(
+        args,
+        title=f"Indicator check: {detector.get('output_name') or args.indicator_id}",
+        check_family="indicator_forward_outcome",
+    )
+    payload["scope"] = {**dict(payload.get("scope") or {}), **_research_scope_from_args(args, include_indicator=True)}
+    payload["detector"] = detector
+    outcomes = {**dict(payload.get("outcomes") or {}), **_research_outcomes_from_args(args)}
+    if outcomes:
+        payload["outcomes"] = outcomes
+    return _post_research_check(args, payload)
+
+
+def _cmd_research_check_audit(args: argparse.Namespace) -> int:
+    detector = _read_json_object_arg(getattr(args, "detector_json", None), label="--detector-json")
+    if not detector:
+        for field in ("source_output", "source_field", "signal_output", "event_key"):
+            if not getattr(args, field, None):
+                raise ValueError(f"audit check requires --{field.replace('_', '-')} or --detector-json")
+        expectation_type = args.expectation_type or "transition"
+        detector = {
+            "type": "signal_audit",
+            "expectation_type": expectation_type,
+            "source_output": args.source_output,
+            "source_field": args.source_field,
+            "signal_output": args.signal_output,
+            "event_key": args.event_key,
+        }
+        if args.name:
+            detector["name"] = args.name
+        if args.same_group_by:
+            detector["same_group_by"] = [item.strip() for item in str(args.same_group_by).split(",") if item.strip()]
+        if expectation_type == "transition":
+            if getattr(args, "from_value", None) is None or getattr(args, "to_value", None) is None:
+                raise ValueError("transition audit check requires --from and --to")
+            detector["from"] = _json_value(str(args.from_value))
+            detector["to"] = _json_value(str(args.to_value))
+        else:
+            detector["operator"] = args.operator or "eq"
+            if getattr(args, "value_field", None):
+                detector["value_field"] = args.value_field
+            elif getattr(args, "value", None) is not None:
+                detector["value"] = _json_value(str(args.value))
+            elif str(detector["operator"]).lower() not in {"is_true", "true"}:
+                raise ValueError("condition audit check requires --value or --value-field")
+    payload = _research_check_request_base(
+        args,
+        title=f"Signal audit: {detector.get('event_key') or args.indicator_id}",
+        check_family="signal_audit",
+    )
+    payload["scope"] = {**dict(payload.get("scope") or {}), **_research_scope_from_args(args, include_indicator=True)}
+    payload["detector"] = detector
+    outcomes = {**dict(payload.get("outcomes") or {}), **_research_outcomes_from_args(args)}
+    if outcomes:
+        payload["outcomes"] = outcomes
+    return _post_research_check(args, payload)
+
+
+def _cmd_research_check_lifecycle(args: argparse.Namespace) -> int:
+    detector = _read_json_object_arg(getattr(args, "detector_json", None), label="--detector-json")
+    if not detector:
+        detector = {"type": "candidate_lifecycle"}
+        for attr, key in (
+            ("output_name", "output_name"),
+            ("family", "family"),
+            ("side", "side"),
+            ("stage", "stage"),
+            ("status", "status"),
+            ("signal_output", "signal_output"),
+            ("signal_event_key", "signal_event_key"),
+        ):
+            value = getattr(args, attr, None)
+            if value is not None:
+                detector[key] = value
+        for attr, key in (
+            ("funnel_stages", "funnel_stages"),
+            ("terminal_stages", "terminal_stages"),
+            ("signal_stages", "signal_stages"),
+        ):
+            value = getattr(args, attr, None)
+            if value:
+                detector[key] = [item.strip() for item in str(value).split(",") if item.strip()]
+    payload = _research_check_request_base(
+        args,
+        title=f"Lifecycle check: {detector.get('family') or detector.get('output_name') or args.indicator_id}",
+        check_family="candidate_lifecycle",
+    )
+    payload["scope"] = {**dict(payload.get("scope") or {}), **_research_scope_from_args(args, include_indicator=True)}
+    payload["detector"] = detector
+    outcomes = {**dict(payload.get("outcomes") or {}), **_research_outcomes_from_args(args)}
+    if outcomes:
+        payload["outcomes"] = outcomes
+    return _post_research_check(args, payload)
+
+
+def _research_sweep_variants_from_args(args: argparse.Namespace) -> list[dict[str, Any]]:
+    variants: list[dict[str, Any]] = []
+    for raw in getattr(args, "variant_json", None) or []:
+        variants.append(_read_json_object_arg(raw, label="--variant-json"))
+    for raw in getattr(args, "variant", None) or []:
+        spec = str(raw or "").strip()
+        if not spec:
+            continue
+        variant_id, _, raw_params = spec.partition(":")
+        variant_id = variant_id.strip()
+        if not variant_id:
+            raise ValueError("--variant requires a non-empty variant id")
+        param_overrides: dict[str, Any] = {}
+        for item in [part.strip() for part in raw_params.split(",") if part.strip()]:
+            if "=" not in item:
+                raise ValueError(f"expected key=value in --variant params, got {item!r}")
+            key, value = item.split("=", 1)
+            key = key.strip()
+            if not key:
+                raise ValueError(f"expected non-empty key in --variant params, got {item!r}")
+            param_overrides[key] = _json_value(value)
+        variants.append({"id": variant_id, "param_overrides": param_overrides})
+    return variants
+
+
+def _cmd_research_check_sweep(args: argparse.Namespace) -> int:
+    payload = _read_json_object_arg(getattr(args, "request_json", None), label="--request-json")
+    if getattr(args, "title", None):
+        payload["title"] = args.title
+    if getattr(args, "check_family", None):
+        payload["check_family"] = args.check_family
+    if getattr(args, "detector_json", None):
+        payload["detector"] = _read_json_object_arg(args.detector_json, label="--detector-json")
+    if getattr(args, "outcomes_json", None):
+        payload["outcomes"] = {
+            **dict(payload.get("outcomes") or {}),
+            **_read_json_object_arg(args.outcomes_json, label="--outcomes-json"),
+        }
+    outcomes = {**dict(payload.get("outcomes") or {}), **_research_outcomes_from_args(args)}
+    if outcomes:
+        payload["outcomes"] = outcomes
+    scope_args = _research_scope_from_args(args, include_indicator=bool(getattr(args, "indicator_id", None)))
+    if scope_args:
+        if payload.get("scopes") not in (None, ""):
+            raise ValueError("--scope flags cannot be combined with request.scopes")
+        payload["scope"] = {**dict(payload.get("scope") or {}), **scope_args}
+    variants = _research_sweep_variants_from_args(args)
+    if variants:
+        payload["variants"] = variants
+    display_metrics = [str(item).strip() for item in getattr(args, "display_metric", None) or [] if str(item).strip()]
+    ranking = dict(payload.get("ranking") or {})
+    if getattr(args, "rank_by", None):
+        ranking["rank_by"] = args.rank_by
+    if getattr(args, "rank_direction", None):
+        ranking["direction"] = args.rank_direction
+    if display_metrics:
+        ranking["display_metrics"] = display_metrics
+    if ranking:
+        payload["ranking"] = ranking
+
+    missing = [key for key in ("check_family", "detector", "variants", "ranking") if key not in payload]
+    if missing:
+        raise ValueError(f"research check sweep missing required fields: {', '.join(missing)}")
+    if "scope" not in payload and "scopes" not in payload:
+        raise ValueError("research check sweep requires scope flags, request.scope, or request.scopes")
+
+    if getattr(args, "dispatch", False):
+        result = _client(args).request_json("POST", "/api/research/jobs/checks/sweep", payload=payload)
+        _print_research_job_dispatch(result)
+        return 0
+
+    result = _client(args).request_json("POST", "/api/research/checks/sweep", payload=payload)
+    if str(getattr(args, "format", "json") or "json") == "table":
+        _print_research_leaderboard_table(result)
+    else:
+        _print_json(result)
+    return 0
+
+
+def _print_research_job_dispatch(payload: dict[str, Any]) -> None:
+    job_id = str(payload.get("job_id") or "")
+    status = str(payload.get("status") or "")
+    job_type = str(payload.get("job_type") or "")
+    reused = bool(payload.get("reused"))
+    print(f"Research job {status}.", flush=True)
+    print(f"Job id: {job_id}", flush=True)
+    print(f"Type: {job_type}", flush=True)
+    if reused:
+        print("Reused existing in-flight job.", flush=True)
+    print("", flush=True)
+    print("Next:", flush=True)
+    print(f"  ./scripts/qt research jobs status {job_id}", flush=True)
+    print(f"  ./scripts/qt research jobs result {job_id} --format table", flush=True)
+
+
+def _print_research_job_status(payload: dict[str, Any], *, show_next: bool = True) -> None:
+    job_id = str(payload.get("job_id") or "")
+    status = str(payload.get("status") or "")
+    print(f"Research job: {job_id}", flush=True)
+    print(f"Status: {status}", flush=True)
+    print(f"Type: {payload.get('job_type') or ''}", flush=True)
+    print(f"Attempts: {payload.get('attempts')}/{payload.get('max_attempts')}", flush=True)
+    for label, key in (("Created", "created_at"), ("Started", "started_at"), ("Finished", "finished_at")):
+        if payload.get(key):
+            print(f"{label}: {payload[key]}", flush=True)
+    if payload.get("error"):
+        print(f"Error: {payload['error']}", flush=True)
+    summary = payload.get("result_summary") if isinstance(payload.get("result_summary"), dict) else {}
+    if summary:
+        result_type = str(summary.get("result_type") or "")
+        print(f"Result: {result_type}", flush=True)
+        if summary.get("evaluation_count") is not None:
+            print(f"Evaluations: {summary.get('evaluation_count')}", flush=True)
+        if summary.get("sample_count") is not None:
+            print(f"Samples: {summary.get('sample_count')}", flush=True)
+        if summary.get("recommendation"):
+            print(f"Recommendation: {summary.get('recommendation')}", flush=True)
+    if not show_next:
+        return
+    if status != "succeeded":
+        print("", flush=True)
+        print("Next:", flush=True)
+        print(f"  ./scripts/qt research jobs status {job_id}", flush=True)
+    else:
+        print("", flush=True)
+        print("Next:", flush=True)
+        print(f"  ./scripts/qt research jobs result {job_id} --format table", flush=True)
+
+
+def _cmd_research_job_status(args: argparse.Namespace) -> int:
+    payload = _client(args).request_json("GET", f"/api/research/jobs/{args.job_id}")
+    if getattr(args, "json", False):
+        _print_json(payload)
+    else:
+        _print_research_job_status(payload)
+    return 0
+
+
+def _cmd_research_job_result(args: argparse.Namespace) -> int:
+    payload = _client(args).request_json("GET", f"/api/research/jobs/{args.job_id}/result")
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    output_format = str(getattr(args, "format", "auto") or "auto")
+    result_schema = str(result.get("schema_version") or "")
+    if output_format == "json":
+        _print_json(result or payload)
+    elif (output_format in {"auto", "table"}) and result_schema == "research_check_sweep.v1":
+        _print_research_leaderboard_table(result)
+    else:
+        _print_research_job_status(payload, show_next=False)
+    return 0
+
+
+def _print_research_leaderboard_table(payload: dict[str, Any]) -> None:
+    leaderboard = payload.get("leaderboard") if isinstance(payload.get("leaderboard"), dict) else {}
+    rows = leaderboard.get("rows") if isinstance(leaderboard.get("rows"), list) else []
+    rank_by = str(leaderboard.get("rank_by") or "")
+    display_paths = [str(item) for item in leaderboard.get("display_metrics") or []]
+    headers = ["rank", "variant", "scope", "status", "samples", rank_by, *display_paths, "recommendation", "caveats"]
+    table_rows: list[list[str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        display_by_path = {
+            str(item.get("path")): item.get("value")
+            for item in row.get("display_metrics") or []
+            if isinstance(item, dict)
+        }
+        table_rows.append(
+            [
+                str(row.get("rank") or ""),
+                str(row.get("variant_label") or row.get("variant_id") or ""),
+                str(row.get("scope_id") or ""),
+                str(row.get("status") or ""),
+                str(row.get("sample_count") or ""),
+                _format_metric_value((row.get("rank_metric") or {}).get("value")),
+                *[_format_metric_value(display_by_path.get(path)) for path in display_paths],
+                str(row.get("recommendation") or ""),
+                str(row.get("caveat_count") or 0),
+            ]
+        )
+    if not table_rows:
+        print("No ranked rows.", flush=True)
+        return
+    widths = [
+        max(len(str(header)), *(len(row[index]) for row in table_rows))
+        for index, header in enumerate(headers)
+    ]
+    print("  ".join(str(header).ljust(widths[index]) for index, header in enumerate(headers)), flush=True)
+    print("  ".join("-" * width for width in widths), flush=True)
+    for row in table_rows:
+        print("  ".join(value.ljust(widths[index]) for index, value in enumerate(row)), flush=True)
+
+
+def _format_metric_value(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{number:.6g}"
+
+
+def _cmd_research_trail(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/research/items/{args.item_id}/trail"))
+    return 0
+
+
+def _cmd_research_run(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/research/runs/{args.run_id}/evidence"))
+    return 0
+
+
+def _cmd_research_compare(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/research/checks/compare",
+            params={"left_check_id": args.left_check_id, "right_check_id": args.right_check_id},
+        )
+    )
+    return 0
+
+
+def _cmd_instruments_list(args: argparse.Namespace) -> int:
+    payload = _client(args).request_json("GET", "/api/instruments/")
+    items = list(payload or [])
+    if args.datasource:
+        items = [row for row in items if str(row.get("datasource") or "").lower() == str(args.datasource).lower()]
+    if args.exchange:
+        items = [row for row in items if str(row.get("exchange") or "").lower() == str(args.exchange).lower()]
+    if args.symbol:
+        needle = str(args.symbol).upper()
+        items = [row for row in items if needle in str(row.get("symbol") or "").upper()]
+    _print_json({"schema_version": "qt_instruments_list.v1", "items": items, "total": len(items)})
+    return 0
+
+
+def _cmd_instruments_get(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request_json("GET", f"/api/instruments/{args.instrument_id}"))
+    return 0
+
+
+def _cmd_instruments_resolve(args: argparse.Namespace) -> int:
+    payload = {
+        "symbol": args.symbol,
+        "datasource": args.datasource,
+        "exchange": args.exchange,
+        "provider_id": args.provider,
+        "venue_id": args.venue,
+        "force_refresh": args.force_refresh,
+    }
+    _print_json(_client(args).request_json("POST", "/api/instruments/resolve", payload=payload))
+    return 0
+
+
+def _cmd_instruments_profile(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/instruments/{args.instrument_id}/runtime-profile",
+            params={"execution_semantics": args.execution_semantics},
+        )
+    )
+    return 0
+
+
+def _cmd_instruments_health(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/instruments/health",
+            params={"datasource": args.datasource, "exchange": args.exchange},
+        )
+    )
+    return 0
+
+
+def _optional_bool_arg(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y"}:
+        return True
+    if normalized in {"0", "false", "no", "n"}:
+        return False
+    raise ValueError(f"invalid boolean value: {value}")
+
+
+def _cmd_instruments_coverage_matrix(args: argparse.Namespace) -> int:
+    payload = {
+        "start": args.start,
+        "end": args.end,
+        "timeframe": args.timeframe,
+        "instrument_ids": list(args.instrument_id or []),
+        "symbol": args.symbol,
+        "datasource": args.datasource,
+        "exchange": args.exchange,
+        "instrument_type": args.instrument_type,
+        "runtime_ready": _optional_bool_arg(args.runtime_ready),
+        "research_ready": _optional_bool_arg(args.research_ready),
+        "execution_semantics": args.execution_semantics,
+    }
+    _print_json(_client(args).request_json("POST", "/api/instruments/coverage-matrix", payload=payload))
     return 0
 
 
@@ -836,6 +2041,100 @@ def _cmd_provider_credentials_revoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_setup_doctor(args: argparse.Namespace) -> int:
+    payload = setup_doctor_payload(
+        venv=args.venv,
+        api_url=args.api_url,
+        timeout=min(float(args.timeout), float(args.backend_timeout)),
+        include_backend=not args.no_backend,
+    )
+    _print_json(payload)
+    return 0 if payload.get("status") in {"ok", "degraded"} else 1
+
+
+def _cmd_setup_env(args: argparse.Namespace) -> int:
+    code, payload = setup_env_payload()
+    _print_json(payload)
+    return code
+
+
+def _cmd_setup_provider_coinbase(args: argparse.Namespace) -> int:
+    provider = "COINBASE"
+    venue = "COINBASE_DIRECT"
+    client = _client(args)
+    schema = client.request_json(
+        "GET",
+        "/api/providers/credentials/schema",
+        params={
+            "provider_id": provider,
+            "venue_id": venue,
+            "environment": args.environment,
+        },
+    )
+    if not isinstance(schema, dict):
+        raise ApiError("GET credential schema returned an unexpected payload")
+
+    credentials = _collect_credential_values(args, schema)
+    save_payload = {
+        "provider_id": provider,
+        "venue_id": venue,
+        "credential_ref": args.ref or schema.get("default_credential_ref"),
+        "environment": schema.get("environment") or args.environment,
+        "display_name": args.display_name,
+        "credentials": credentials,
+    }
+    saved = client.request_json("POST", "/api/providers/credentials", payload=save_payload)
+    credential_ref = (
+        ((saved.get("credential") or {}) if isinstance(saved, dict) else {}).get("credential_ref")
+        or args.ref
+        or schema.get("default_credential_ref")
+    )
+    validation = client.request_json("POST", f"/api/providers/credentials/{credential_ref}/validate")
+
+    result: dict[str, Any] = {
+        "schema_version": "qt_setup_provider.v1",
+        "operation": "provider",
+        "provider": provider,
+        "venue": venue,
+        "environment": schema.get("environment") or args.environment,
+        "status": "ok",
+        "credential_ref": credential_ref,
+        "credential": saved.get("credential") if isinstance(saved, dict) else saved,
+        "validation": validation.get("credential") if isinstance(validation, dict) else validation,
+        "secrets_are_returned": False,
+        "next_steps": [
+            "Use this credential_ref in provider-backed paper/live workflows when a ref is required.",
+            "Run `./scripts/qt providers stream-smoke --provider COINBASE --venue COINBASE_DIRECT --symbol <symbol> --auth-mode authenticated` when you want a live provider smoke check.",
+        ],
+    }
+
+    if args.stream_smoke:
+        if not args.symbol:
+            raise ValueError("--symbol is required with --stream-smoke")
+        smoke_payload = {
+            "provider_id": provider,
+            "venue_id": venue,
+            "symbol": args.symbol,
+            "product_id": args.product_id,
+            "channels": args.channel or None,
+            "timeframe": args.timeframe,
+            "auth_mode": args.auth_mode,
+            "duration_seconds": args.duration,
+            "sample_limit": args.sample_limit,
+        }
+        smoke_client = ApiClient(
+            args.api_url,
+            timeout=max(float(args.timeout), float(args.duration) + 10.0),
+        )
+        smoke = smoke_client.request_json("POST", "/api/providers/stream-smoke", payload=smoke_payload)
+        result["stream_smoke"] = smoke
+        if str(smoke.get("status") or "").lower() != "completed":
+            result["status"] = "needs_attention"
+
+    _print_json(result)
+    return 0 if result.get("status") == "ok" else 1
+
+
 def _ensure_run_report_materialized(client: ApiClient, run_id: str, *, force_rebuild: bool = False) -> dict[str, Any]:
     payload = client.request_json(
         "POST",
@@ -997,6 +2296,20 @@ def _cmd_experiments_run_plan(args: argparse.Namespace) -> int:
     return 0 if state.get("status") == "COMPLETED" else 1
 
 
+def _cmd_experiments_prepare_instrument_matrix(args: argparse.Namespace) -> int:
+    request = _read_json_object_arg(args.request_json, label="--request-json")
+    payload = prepare_instrument_matrix_experiment(
+        client=_client(args),
+        request=request,
+        log_root=_experiment_root(args),
+        out_path=args.out,
+        apply=bool(args.apply),
+        confirm=bool(args.confirm),
+    )
+    _print_json(payload)
+    return 0
+
+
 def _cmd_experiments_resume(args: argparse.Namespace) -> int:
     runner = ExperimentRunner(client=_client(args), log_root=_experiment_root(args))
     store, plan, state = runner.resume(args.ref)
@@ -1059,6 +2372,16 @@ def _cmd_experiments_doctor(args: argparse.Namespace) -> int:
     return 0 if payload.get("status") == "ok" else 1
 
 
+def _cmd_experiments_summarize(args: argparse.Namespace) -> int:
+    payload = summarize_experiment(_experiment_root(args), args.ref)
+    if args.out:
+        path = Path(args.out).expanduser()
+        payload = {**payload, "paths": {**dict(payload.get("paths") or {}), "summary": str(path)}}
+        write_experiment_summary(path, payload)
+    _print_json(payload)
+    return 0
+
+
 def _cmd_experiments_collect(args: argparse.Namespace) -> int:
     record = _load_experiment_record(args, args.ref, bot_id=args.bot_id)
     code, result = _collect_experiment(args, _client(args), record)
@@ -1095,6 +2418,43 @@ def build_parser() -> argparse.ArgumentParser:
     _add_global_args(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    setup = subparsers.add_parser("setup", help="Canonical local onboarding and readiness checks.")
+    setup_sub = setup.add_subparsers(dest="setup_command", required=True)
+    setup_doctor = setup_sub.add_parser("doctor", help="Check local setup readiness.")
+    setup_doctor.add_argument("--venv", default=".venv", help="Virtualenv path. Defaults to .venv.")
+    setup_doctor.add_argument("--backend-timeout", type=float, default=2.0, help="Bounded backend probe timeout.")
+    setup_doctor.add_argument("--no-backend", action="store_true", help="Skip the optional backend health probe.")
+    setup_doctor.set_defaults(func=_cmd_setup_doctor)
+    setup_env = setup_sub.add_parser("env", help="Create or repair the local operator secrets.env file.")
+    setup_env.set_defaults(func=_cmd_setup_env)
+    setup_provider = setup_sub.add_parser("provider", help="Provider-specific onboarding through canonical provider APIs.")
+    setup_provider_sub = setup_provider.add_subparsers(dest="setup_provider_command", required=True)
+    setup_coinbase = setup_provider_sub.add_parser("coinbase", help="Store and validate Coinbase Direct credential refs.")
+    setup_coinbase.add_argument("--environment", default="paper")
+    setup_coinbase.add_argument("--ref", help="Credential reference. Defaults to provider-venue-environment.")
+    setup_coinbase.add_argument("--display-name")
+    setup_coinbase.add_argument(
+        "--secrets-json",
+        help="Secret JSON object as a path, inline object, or '-' for stdin. Prefer '-' so secrets do not enter shell history.",
+    )
+    setup_coinbase.add_argument(
+        "--secret-env",
+        action="append",
+        default=[],
+        help="Map a credential key to an environment variable, e.g. COINBASE_API_KEY=QT_COINBASE_KEY.",
+    )
+    setup_coinbase.add_argument("--from-env", action="store_true", help="Read accepted credential keys from matching environment variables.")
+    setup_coinbase.add_argument("--no-input", action="store_true", help="Fail instead of prompting for missing required secrets.")
+    setup_coinbase.add_argument("--stream-smoke", action="store_true", help="Run a bounded provider stream smoke check after saving credentials.")
+    setup_coinbase.add_argument("--symbol", help="Required with --stream-smoke.")
+    setup_coinbase.add_argument("--product-id", help="Provider product id. Defaults to --symbol.")
+    setup_coinbase.add_argument("--channel", action="append", default=[], help="Provider channel. Repeat for multiple channels.")
+    setup_coinbase.add_argument("--timeframe")
+    setup_coinbase.add_argument("--auth-mode", default="authenticated")
+    setup_coinbase.add_argument("--duration", type=float, default=10.0, help="Smoke duration in seconds.")
+    setup_coinbase.add_argument("--sample-limit", type=int, default=10)
+    setup_coinbase.set_defaults(func=_cmd_setup_provider_coinbase)
+
     health = subparsers.add_parser("health", help="Check backend API health.")
     health.set_defaults(func=_cmd_health)
 
@@ -1118,7 +2478,7 @@ def build_parser() -> argparse.ArgumentParser:
     bots_create.add_argument("--backtest-start")
     bots_create.add_argument("--backtest-end")
     bots_create.add_argument("--snapshot-interval-ms", type=int)
-    bots_create.add_argument("--instrument-type")
+    bots_create.add_argument("--execution-semantics", choices=["spot", "derivative", "proxy_derivative"])
     bots_create.add_argument("--wallet-json", help="wallet_config JSON object path, inline object, or '-'.")
     bots_create.add_argument(
         "--market-data-stream-policy-json",
@@ -1147,7 +2507,7 @@ def build_parser() -> argparse.ArgumentParser:
     bots_update.add_argument("--backtest-start")
     bots_update.add_argument("--backtest-end")
     bots_update.add_argument("--snapshot-interval-ms", type=int)
-    bots_update.add_argument("--instrument-type")
+    bots_update.add_argument("--execution-semantics", choices=["spot", "derivative", "proxy_derivative"])
     bots_update.add_argument("--wallet-json", help="wallet_config JSON object path, inline object, or '-'.")
     bots_update.add_argument(
         "--market-data-stream-policy-json",
@@ -1198,13 +2558,63 @@ def build_parser() -> argparse.ArgumentParser:
     runs_wait.add_argument("--allow-non-completed", action="store_true")
     runs_wait.set_defaults(func=_cmd_runs_wait)
 
+    logs = subparsers.add_parser("logs", help="Structured Loki log inspection helpers.")
+    logs.add_argument("--loki-url", default=os.environ.get("QT_LOKI_URL", DEFAULT_LOKI_URL))
+    logs_sub = logs.add_subparsers(dest="logs_command", required=True)
+    logs_run = logs_sub.add_parser("run", help="Fetch structured Loki logs for a run and nearby bot lifecycle.")
+    logs_run.add_argument("run_id")
+    logs_run.add_argument("--bot-id", help="Include nearby bot lifecycle logs when the run id is absent from those lines.")
+    logs_run.add_argument("--start", help="RFC3339 start time. Defaults to --lookback-hours.")
+    logs_run.add_argument("--end", help="RFC3339 end time. Defaults to now.")
+    logs_run.add_argument("--lookback-hours", type=float, default=6.0)
+    logs_run.add_argument("--limit", type=int, default=500)
+    logs_run.set_defaults(func=_cmd_logs_run)
+    logs_query = logs_sub.add_parser("query", help="Run a raw LogQL query and parse Quant-Trad structured lines.")
+    logs_query.add_argument("logql")
+    logs_query.add_argument("--start", help="RFC3339 start time. Defaults to --lookback-hours.")
+    logs_query.add_argument("--end", help="RFC3339 end time. Defaults to now.")
+    logs_query.add_argument("--lookback-hours", type=float, default=6.0)
+    logs_query.add_argument("--limit", type=int, default=500)
+    logs_query.set_defaults(func=_cmd_logs_query)
+    logs_doctor = logs_sub.add_parser("doctor", help="Check Loki/Promtail label visibility for Quant-Trad logs.")
+    logs_doctor.add_argument("--start", help="RFC3339 start time. Defaults to --lookback-hours.")
+    logs_doctor.add_argument("--end", help="RFC3339 end time. Defaults to now.")
+    logs_doctor.add_argument("--lookback-hours", type=float, default=24.0)
+    logs_doctor.set_defaults(func=_cmd_logs_doctor)
+
     strategies = subparsers.add_parser("strategies", help="Strategy, variant, compile, and preview commands.")
     strategies_sub = strategies.add_subparsers(dest="strategies_command", required=True)
     strategies_list = strategies_sub.add_parser("list", help="List strategies.")
     strategies_list.set_defaults(func=_cmd_strategies_list)
-    strategies_get = strategies_sub.add_parser("get", help="Get a strategy detail payload.")
+    strategies_create = strategies_sub.add_parser("create", help="Create a strategy from the backend strategy JSON contract.")
+    strategies_create.add_argument("--payload-json", required=True, help="Strategy create JSON object, path to JSON, or '-' for stdin.")
+    strategies_create.set_defaults(func=_cmd_strategies_create)
+    strategies_get = strategies_sub.add_parser("get", help="Get a strategy definition payload.")
     strategies_get.add_argument("strategy_id")
     strategies_get.set_defaults(func=_cmd_strategies_get)
+    strategies_bindings = strategies_sub.add_parser("bindings", help="Get strategy instrument and indicator bindings.")
+    strategies_bindings.add_argument("strategy_id")
+    strategies_bindings.set_defaults(func=_cmd_strategies_bindings)
+    strategies_rules = strategies_sub.add_parser("rules", help="Get stored strategy rules.")
+    strategies_rules.add_argument("strategy_id")
+    strategies_rules.set_defaults(func=_cmd_strategies_rules)
+    strategies_rule_create = strategies_sub.add_parser("rule-create", help="Create a strategy rule from the backend rule JSON contract.")
+    strategies_rule_create.add_argument("strategy_id")
+    strategies_rule_create.add_argument("--payload-json", required=True, help="Strategy rule create JSON object, path to JSON, or '-' for stdin.")
+    strategies_rule_create.set_defaults(func=_cmd_strategies_rule_create)
+    strategies_effective = strategies_sub.add_parser("effective", help="Get the runtime-effective strategy contract.")
+    strategies_effective.add_argument("strategy_id")
+    strategies_effective.add_argument("--variant-id")
+    strategies_effective.add_argument("--variant-name")
+    strategies_effective.set_defaults(func=_cmd_strategies_effective)
+    strategies_decision_inputs = strategies_sub.add_parser(
+        "decision-inputs",
+        help="Get attached indicator decision inputs and effective rule references.",
+    )
+    strategies_decision_inputs.add_argument("strategy_id")
+    strategies_decision_inputs.add_argument("--variant-id")
+    strategies_decision_inputs.add_argument("--variant-name")
+    strategies_decision_inputs.set_defaults(func=_cmd_strategies_decision_inputs)
     strategies_compile = strategies_sub.add_parser("compile", help="Compile a strategy with the default or selected variant.")
     strategies_compile.add_argument("strategy_id")
     strategies_compile.add_argument("--variant-id")
@@ -1218,7 +2628,30 @@ def build_parser() -> argparse.ArgumentParser:
     strategies_preview.add_argument("--instrument-id", action="append", default=[])
     strategies_preview.add_argument("--variant-id")
     strategies_preview.add_argument("--variant-name")
+    strategies_preview.add_argument("--examples", type=int, default=5, help="Maximum compact signal examples in summary output.")
+    strategies_preview.add_argument("--signals", action="store_true", help="Print compact signal rows instead of the summary.")
+    strategies_preview.add_argument("--why-empty", action="store_true", help="Print empty-preview diagnostics instead of the summary.")
+    strategies_preview.add_argument("--full", action="store_true", help="Print the full preview artifact.")
     strategies_preview.set_defaults(func=_cmd_strategies_preview)
+    strategies_preview_compare = strategies_sub.add_parser("preview-compare", help="Compare compact strategy previews.")
+    strategies_preview_compare.add_argument("--start", required=True)
+    strategies_preview_compare.add_argument("--end", required=True)
+    strategies_preview_compare.add_argument("--interval", required=True)
+    strategies_preview_compare.add_argument(
+        "--case",
+        action="append",
+        default=[],
+        help="Preview case as LABEL=STRATEGY_ID:INSTRUMENT_ID[,INSTRUMENT_ID].",
+    )
+    strategies_preview_compare.add_argument(
+        "--case-json",
+        action="append",
+        default=[],
+        help="Preview case JSON object/array, inline or path.",
+    )
+    strategies_preview_compare.add_argument("--examples", type=int, default=5, help="Maximum compact signal examples per case.")
+    strategies_preview_compare.add_argument("--signals", action="store_true", help="Include compact signal rows inside case summaries.")
+    strategies_preview_compare.set_defaults(func=_cmd_strategies_preview_compare)
 
     variants = strategies_sub.add_parser("variants", help="Strategy variant commands.")
     variants_sub = variants.add_subparsers(dest="variants_command", required=True)
@@ -1264,6 +2697,95 @@ def build_parser() -> argparse.ArgumentParser:
     variants_delete.add_argument("variant_id")
     variants_delete.set_defaults(func=_cmd_variants_delete)
 
+    indicators = subparsers.add_parser("indicators", help="Indicator catalog, config, and runtime validation commands.")
+    indicators_sub = indicators.add_subparsers(dest="indicators_command", required=True)
+    indicators_types = indicators_sub.add_parser("types", help="List registered indicator types.")
+    indicators_types.set_defaults(func=_cmd_indicators_types)
+    indicators_type = indicators_sub.add_parser("type", help="Fetch one indicator type manifest.")
+    indicators_type.add_argument("type_id")
+    indicators_type.set_defaults(func=_cmd_indicators_type)
+    indicators_list = indicators_sub.add_parser("list", help="List persisted indicator instances.")
+    indicators_list.set_defaults(func=_cmd_indicators_list)
+    indicators_get = indicators_sub.add_parser("get", help="Fetch one indicator instance.")
+    indicators_get.add_argument("indicator_id")
+    indicators_get.set_defaults(func=_cmd_indicators_get)
+    indicators_strategies = indicators_sub.add_parser("strategies", help="List strategies that reference an indicator.")
+    indicators_strategies.add_argument("indicator_id")
+    indicators_strategies.set_defaults(func=_cmd_indicators_strategies)
+
+    def add_indicator_payload_args(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--payload-json", help="JSON object path, inline object, or '-' for the full indicator payload.")
+        command.add_argument("--type")
+        command.add_argument("--name")
+        command.add_argument("--params-json", help="Indicator params JSON object path, inline object, or '-'.")
+        command.add_argument("--param", action="append", default=[], help="Indicator param as key=value. JSON scalar values are accepted.")
+        command.add_argument("--dependencies-json", help="Indicator dependencies JSON array path, inline array, or '-'.")
+        command.add_argument("--color")
+        command.add_argument("--color-palette", dest="color_palette")
+
+    indicators_validate_config = indicators_sub.add_parser(
+        "validate-config",
+        help="Validate and normalize an indicator config without persisting it.",
+    )
+    add_indicator_payload_args(indicators_validate_config)
+    indicators_validate_config.set_defaults(func=_cmd_indicators_validate_config)
+    indicators_create = indicators_sub.add_parser("create", help="Plan or apply indicator creation.")
+    add_indicator_payload_args(indicators_create)
+    indicators_create.add_argument("--apply", action="store_true")
+    indicators_create.add_argument("--confirm", action="store_true")
+    indicators_create.set_defaults(func=_cmd_indicators_create)
+    indicators_clone = indicators_sub.add_parser("clone", help="Plan or apply a cloned indicator instance.")
+    indicators_clone.add_argument("indicator_id")
+    add_indicator_payload_args(indicators_clone)
+    indicators_clone.add_argument("--apply", action="store_true")
+    indicators_clone.add_argument("--confirm", action="store_true")
+    indicators_clone.set_defaults(func=_cmd_indicators_clone)
+    indicators_edit = indicators_sub.add_parser("edit", help="Plan or apply an indicator edit.")
+    indicators_edit.add_argument("indicator_id")
+    add_indicator_payload_args(indicators_edit)
+    indicators_edit.add_argument("--apply", action="store_true")
+    indicators_edit.add_argument("--confirm", action="store_true")
+    indicators_edit.set_defaults(func=_cmd_indicators_edit)
+    indicators_rm = indicators_sub.add_parser("rm", help="Remove an indicator instance.")
+    indicators_rm.add_argument("indicator_id")
+    indicators_rm.add_argument("--confirm", action="store_true")
+    indicators_rm.set_defaults(func=_cmd_indicators_rm)
+    indicators_on = indicators_sub.add_parser("on", help="Enable an indicator instance.")
+    indicators_on.add_argument("indicator_id")
+    indicators_on.set_defaults(func=_cmd_indicators_toggle, enabled=True)
+    indicators_off = indicators_sub.add_parser("off", help="Disable an indicator instance.")
+    indicators_off.add_argument("indicator_id")
+    indicators_off.set_defaults(func=_cmd_indicators_toggle, enabled=False)
+
+    def add_indicator_window_args(command: argparse.ArgumentParser) -> None:
+        command.add_argument("indicator_id")
+        command.add_argument("--start", required=True)
+        command.add_argument("--end", required=True)
+        command.add_argument("--interval", required=True)
+        command.add_argument("--instrument-id")
+        command.add_argument("--symbol")
+        command.add_argument("--datasource")
+        command.add_argument("--exchange")
+
+    indicators_validate_runtime = indicators_sub.add_parser(
+        "validate-runtime",
+        help="Replay a persisted indicator over a market window and validate typed outputs.",
+    )
+    add_indicator_window_args(indicators_validate_runtime)
+    indicators_validate_runtime.add_argument("--require-ready-by-end", action="store_true")
+    indicators_validate_runtime.add_argument("--min-ready-bars", type=int)
+    indicators_validate_runtime.set_defaults(func=_cmd_indicators_validate_runtime)
+    indicators_overlays = indicators_sub.add_parser("overlays", help="Compute indicator overlays for a window.")
+    add_indicator_window_args(indicators_overlays)
+    indicators_overlays.add_argument("--visibility-epoch", type=int)
+    indicators_overlays.add_argument("--cursor-epoch", type=int)
+    indicators_overlays.add_argument("--cursor-time")
+    indicators_overlays.set_defaults(func=_cmd_indicators_overlays)
+    indicators_signals = indicators_sub.add_parser("signals", help="Compute indicator signals for a window.")
+    add_indicator_window_args(indicators_signals)
+    indicators_signals.add_argument("--config-json", help="Signal config JSON object path, inline object, or '-'.")
+    indicators_signals.set_defaults(func=_cmd_indicators_signals)
+
     reports = subparsers.add_parser("reports", help="Report, export, and comparison commands.")
     reports_sub = reports.add_subparsers(dest="reports_command", required=True)
     reports_list = reports_sub.add_parser("list", help="List completed report summaries.")
@@ -1288,11 +2810,14 @@ def build_parser() -> argparse.ArgumentParser:
         "operational-health",
         "run-report",
         "run-report-status",
+        "instruments",
+        "symbol-summary",
     ):
         command = reports_sub.add_parser(section, help=f"Fetch report {section}.")
         command.add_argument("run_id")
         if section == "run-report":
-            command.add_argument("--no-build", dest="build", action="store_false", default=True)
+            command.add_argument("--build", dest="build", action="store_true", default=False)
+            command.add_argument("--no-build", dest="build", action="store_false")
             command.add_argument("--force-rebuild", action="store_true")
         command.set_defaults(func=_cmd_report_get, report_section=section)
     manifest = reports_sub.add_parser("manifest", help="Fetch report export manifest.")
@@ -1312,6 +2837,310 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--no-golden", action="store_true")
     compare.add_argument("--require-golden", action="store_true")
     compare.set_defaults(func=_cmd_reports_compare)
+    for section in ("trades", "decisions", "signals"):
+        page = reports_sub.add_parser(section, help=f"Fetch report {section}.")
+        page.add_argument("run_id")
+        page.add_argument("--limit", type=int, default=100)
+        page.add_argument("--offset", type=int, default=0)
+        page.add_argument("--symbol")
+        page.add_argument("--instrument-id")
+        if section == "decisions":
+            page.add_argument("--state", choices=["accepted", "rejected"])
+        page.set_defaults(func=_cmd_reports_page, report_page_section=section)
+    candle_catalog = reports_sub.add_parser("candle-catalog", help="Fetch the report candle catalog.")
+    candle_catalog.add_argument("run_id")
+    candle_catalog.set_defaults(func=_cmd_reports_candle_catalog)
+    candles = reports_sub.add_parser("candles", help="Fetch bounded report candles.")
+    candles.add_argument("run_id")
+    candles.add_argument("--instrument-id", required=True)
+    candles.add_argument("--timeframe", required=True)
+    candles.add_argument("--start", required=True)
+    candles.add_argument("--end", required=True)
+    candles.add_argument("--limit", type=int, default=1000)
+    candles.add_argument("--offset", type=int, default=0)
+    candles.set_defaults(func=_cmd_reports_candles)
+
+    data = subparsers.add_parser("data", help="Market data coverage and availability commands.")
+    data_sub = data.add_subparsers(dest="data_command", required=True)
+    data_coverage = data_sub.add_parser("coverage", help="Check candle coverage for a canonical instrument/window.")
+    data_coverage.add_argument("--instrument-id")
+    data_coverage.add_argument("--symbol")
+    data_coverage.add_argument("--datasource")
+    data_coverage.add_argument("--exchange")
+    data_coverage.add_argument("--start", required=True)
+    data_coverage.add_argument("--end", required=True)
+    data_coverage.add_argument("--timeframe", required=True)
+    data_coverage.add_argument("--fail-on-warning", action="store_true")
+    data_coverage.set_defaults(func=_cmd_data_coverage)
+
+    research = subparsers.add_parser("research", help="Research memory and lightweight historical checks.")
+    research_sub = research.add_subparsers(dest="research_command", required=True)
+    research_items = research_sub.add_parser("items", help="Research memory item commands.")
+    research_items_sub = research_items.add_subparsers(dest="research_items_command", required=True)
+    research_items_list = research_items_sub.add_parser("list", help="List research memory items.")
+    research_items_list.add_argument("--kind", choices=["observation", "research_check", "hypothesis", "study"])
+    research_items_list.add_argument("--status")
+    research_items_list.add_argument("--symbol")
+    research_items_list.add_argument("--timeframe")
+    research_items_list.add_argument("--limit", type=int, default=100)
+    research_items_list.set_defaults(func=_cmd_research_items_list)
+    research_items_get = research_items_sub.add_parser("get", help="Fetch one research memory item.")
+    research_items_get.add_argument("item_id")
+    research_items_get.set_defaults(func=_cmd_research_items_get)
+    research_items_create = research_items_sub.add_parser("create", help="Create a research memory item.")
+    research_items_create.add_argument("--payload-json", help="JSON object path, inline object, or '-' for the full item payload.")
+    research_items_create.add_argument("--kind", choices=["observation", "research_check", "hypothesis", "study"])
+    research_items_create.add_argument("--status")
+    research_items_create.add_argument("--title")
+    research_items_create.add_argument("--body")
+    research_items_create.add_argument("--instrument-id")
+    research_items_create.add_argument("--symbol")
+    research_items_create.add_argument("--timeframe")
+    research_items_create.add_argument("--datasource")
+    research_items_create.add_argument("--exchange")
+    research_items_create.add_argument("--window-start")
+    research_items_create.add_argument("--window-end")
+    research_items_create.add_argument("--tag", action="append", default=[])
+    research_items_create.add_argument("--payload", help="Item payload JSON object path, inline object, or '-'.")
+    research_items_create.set_defaults(func=_cmd_research_items_create)
+
+    research_observe = research_sub.add_parser("observe", help="Observation capture commands.")
+    research_observe_sub = research_observe.add_subparsers(dest="research_observe_command", required=True)
+    research_observe_create = research_observe_sub.add_parser("create", help="Capture a market observation.")
+    research_observe_create.add_argument("--payload-json", help="JSON object path, inline object, or '-' for the full item payload.")
+    research_observe_create.add_argument("--status")
+    research_observe_create.add_argument("--title")
+    research_observe_create.add_argument("--body")
+    research_observe_create.add_argument("--instrument-id")
+    research_observe_create.add_argument("--symbol")
+    research_observe_create.add_argument("--timeframe")
+    research_observe_create.add_argument("--datasource")
+    research_observe_create.add_argument("--exchange")
+    research_observe_create.add_argument("--window-start")
+    research_observe_create.add_argument("--window-end")
+    research_observe_create.add_argument("--tag", action="append", default=[])
+    research_observe_create.add_argument("--payload", help="Observation payload JSON object path, inline object, or '-'.")
+    research_observe_create.set_defaults(func=_cmd_research_observe_create)
+
+    research_links = research_sub.add_parser("links", help="Research memory link commands.")
+    research_links_sub = research_links.add_subparsers(dest="research_links_command", required=True)
+    research_links_create = research_links_sub.add_parser("create", help="Create or update a research memory link.")
+    research_links_create.add_argument("--payload-json", help="JSON object path, inline object, or '-' for the full link payload.")
+    research_links_create.add_argument("--source-item-id")
+    research_links_create.add_argument("--target-type")
+    research_links_create.add_argument("--target-id")
+    research_links_create.add_argument("--relation")
+    research_links_create.add_argument("--metadata-json", help="Link metadata JSON object path, inline object, or '-'.")
+    research_links_create.set_defaults(func=_cmd_research_links_create)
+    research_links_list = research_links_sub.add_parser("list", help="List links connected to a research item.")
+    research_links_list.add_argument("item_id")
+    research_links_list.add_argument("--outbound-only", action="store_false", dest="include_inbound")
+    research_links_list.set_defaults(func=_cmd_research_links_list)
+
+    research_jobs = research_sub.add_parser("jobs", help="Asynchronous research check job commands.")
+    research_jobs_sub = research_jobs.add_subparsers(dest="research_jobs_command", required=True)
+    research_jobs_status = research_jobs_sub.add_parser("status", help="Show a dispatched research job status.")
+    research_jobs_status.add_argument("job_id")
+    research_jobs_status.add_argument("--json", action="store_true", help="Print the machine-readable status payload.")
+    research_jobs_status.set_defaults(func=_cmd_research_job_status)
+    research_jobs_result = research_jobs_sub.add_parser("result", help="Print a completed research job result.")
+    research_jobs_result.add_argument("job_id")
+    research_jobs_result.add_argument("--format", choices=["auto", "json", "table", "summary"], default="auto")
+    research_jobs_result.set_defaults(func=_cmd_research_job_result)
+
+    def add_research_check_base_args(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--request-json", help="research_check_request.v1 JSON object path, inline object, or '-'.")
+        command.add_argument("--title")
+        command.add_argument("--body")
+        command.add_argument("--observation-id")
+        command.add_argument("--detector-json", help="Detector JSON object path, inline object, or '-'.")
+        command.add_argument("--min-sample-count", type=int)
+        command.add_argument("--bucket-by", help="Comma-separated bucket fields.")
+        command.add_argument("--max-examples", type=int)
+        command.add_argument("--tag", action="append", default=[])
+        command.add_argument("--dispatch", action="store_true", help="Queue the check as an async research job and return the job id.")
+
+    def add_research_window_args(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--instrument-id")
+        command.add_argument("--symbol")
+        command.add_argument("--datasource")
+        command.add_argument("--exchange")
+        command.add_argument("--timeframe", required=True)
+        command.add_argument("--start", required=True)
+        command.add_argument("--end", required=True)
+
+    def add_forward_outcome_args(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--forward-bars")
+        command.add_argument("--entry-lag-bars", type=int)
+        command.add_argument("--direction", choices=["long", "short"])
+        command.add_argument("--min-edge-pct", type=float)
+
+    research_check = research_sub.add_parser("check", help="Run and persist lightweight analytical checks.")
+    research_check_sub = research_check.add_subparsers(dest="research_check_command", required=True)
+    research_check_raw = research_check_sub.add_parser("raw", help="Check raw OHLCV conditions against forward outcomes.")
+    add_research_check_base_args(research_check_raw)
+    add_research_window_args(research_check_raw)
+    add_forward_outcome_args(research_check_raw)
+    research_check_raw.add_argument("--field", help="Raw field: open, high, low, close, volume, or previous_*.")
+    research_check_raw.add_argument("--operator", default="lt", help="Detector operator, e.g. lt, lte, gt, gte, eq, between.")
+    research_check_raw.add_argument("--value", help="Detector comparison value. JSON scalar/list values are accepted.")
+    research_check_raw.add_argument("--value-field", help="Compare detector field to another raw field.")
+    research_check_raw.set_defaults(func=_cmd_research_check_raw)
+
+    research_check_indicator = research_check_sub.add_parser("indicator", help="Check persisted indicator output events against forward outcomes.")
+    add_research_check_base_args(research_check_indicator)
+    add_research_window_args(research_check_indicator)
+    add_forward_outcome_args(research_check_indicator)
+    research_check_indicator.add_argument("--indicator-id", required=True)
+    research_check_indicator.add_argument("--output", help="Indicator output name.")
+    research_check_indicator.add_argument("--event-key")
+    research_check_indicator.add_argument("--field", help="Indicator output value field.")
+    research_check_indicator.add_argument("--operator", default="eq")
+    research_check_indicator.add_argument("--value")
+    research_check_indicator.add_argument("--value-field")
+    research_check_indicator.set_defaults(func=_cmd_research_check_indicator)
+
+    research_check_audit = research_check_sub.add_parser("audit", help="Audit signal emissions against public indicator output expectations.")
+    add_research_check_base_args(research_check_audit)
+    add_research_window_args(research_check_audit)
+    research_check_audit.add_argument("--indicator-id", required=True)
+    research_check_audit.add_argument("--name")
+    research_check_audit.add_argument("--expectation-type", choices=["transition", "condition"], default="transition")
+    research_check_audit.add_argument("--source-output")
+    research_check_audit.add_argument("--source-field")
+    research_check_audit.add_argument("--from", dest="from_value")
+    research_check_audit.add_argument("--to", dest="to_value")
+    research_check_audit.add_argument("--same-group-by", help="Comma-separated source-output fields that must stay equal across a transition.")
+    research_check_audit.add_argument("--signal-output")
+    research_check_audit.add_argument("--event-key")
+    research_check_audit.add_argument("--operator", default="eq")
+    research_check_audit.add_argument("--value")
+    research_check_audit.add_argument("--value-field")
+    research_check_audit.set_defaults(func=_cmd_research_check_audit)
+
+    research_check_lifecycle = research_check_sub.add_parser("lifecycle", help="Audit generic indicator candidate lifecycle funnels.")
+    add_research_check_base_args(research_check_lifecycle)
+    add_research_window_args(research_check_lifecycle)
+    research_check_lifecycle.add_argument("--indicator-id", required=True)
+    research_check_lifecycle.add_argument("--output-name", help="Lifecycle output name.")
+    research_check_lifecycle.add_argument("--family")
+    research_check_lifecycle.add_argument("--side")
+    research_check_lifecycle.add_argument("--stage")
+    research_check_lifecycle.add_argument("--status")
+    research_check_lifecycle.add_argument("--signal-output")
+    research_check_lifecycle.add_argument("--signal-event-key")
+    research_check_lifecycle.add_argument("--funnel-stages", help="Comma-separated ordered lifecycle stages for funnel reporting.")
+    research_check_lifecycle.add_argument("--terminal-stages", help="Comma-separated stages that close a candidate.")
+    research_check_lifecycle.add_argument("--signal-stages", help="Comma-separated lifecycle stages that should reconcile to emitted signals.")
+    research_check_lifecycle.set_defaults(func=_cmd_research_check_lifecycle)
+
+    research_check_sweep = research_check_sub.add_parser("sweep", help="Run non-persisted indicator research check variants and rank emitted metrics.")
+    research_check_sweep.add_argument("--request-json", help="research_check_sweep.v1 JSON object path, inline object, or '-'.")
+    research_check_sweep.add_argument("--title")
+    research_check_sweep.add_argument("--check-family", choices=["indicator_forward_outcome", "signal_audit", "candidate_lifecycle"])
+    research_check_sweep.add_argument("--indicator-id")
+    research_check_sweep.add_argument("--instrument-id")
+    research_check_sweep.add_argument("--symbol")
+    research_check_sweep.add_argument("--datasource")
+    research_check_sweep.add_argument("--exchange")
+    research_check_sweep.add_argument("--timeframe")
+    research_check_sweep.add_argument("--start")
+    research_check_sweep.add_argument("--end")
+    research_check_sweep.add_argument("--detector-json", help="Detector JSON object path, inline object, or '-'.")
+    research_check_sweep.add_argument("--outcomes-json", help="Outcomes JSON object path, inline object, or '-'.")
+    research_check_sweep.add_argument("--forward-bars")
+    research_check_sweep.add_argument("--entry-lag-bars", type=int)
+    research_check_sweep.add_argument("--direction", choices=["long", "short"])
+    research_check_sweep.add_argument("--min-sample-count", type=int)
+    research_check_sweep.add_argument("--min-edge-pct", type=float)
+    research_check_sweep.add_argument("--bucket-by", help="Comma-separated bucket fields.")
+    research_check_sweep.add_argument("--max-examples", type=int)
+    research_check_sweep.add_argument(
+        "--variant",
+        action="append",
+        default=[],
+        help="Variant id with optional param overrides, e.g. base or tol04:touch=0.4,window=12.",
+    )
+    research_check_sweep.add_argument("--variant-json", action="append", default=[], help="Variant JSON object path, inline object, or '-'.")
+    research_check_sweep.add_argument("--rank-by", help="Explicit numeric result path used for ranking.")
+    research_check_sweep.add_argument("--rank-direction", choices=["asc", "desc"], help="Ranking direction for --rank-by.")
+    research_check_sweep.add_argument("--display-metric", action="append", default=[], help="Additional numeric result path to include in the leaderboard.")
+    research_check_sweep.add_argument("--format", choices=["json", "table"], default="json")
+    research_check_sweep.add_argument("--dispatch", action="store_true", help="Queue the sweep as an async research job and return the job id.")
+    research_check_sweep.set_defaults(func=_cmd_research_check_sweep)
+
+    research_check_signal = research_check_sub.add_parser("signal", help="Check completed run signal evidence.")
+    add_research_check_base_args(research_check_signal)
+    research_check_signal.add_argument("--run-id", required=True)
+    research_check_signal.add_argument("--output-name")
+    research_check_signal.add_argument("--event-key")
+    research_check_signal.add_argument("--symbol")
+    research_check_signal.add_argument("--direction")
+    research_check_signal.set_defaults(func=_cmd_research_check_signal)
+
+    research_check_decision = research_check_sub.add_parser("decision", help="Check completed run decision/trade evidence.")
+    add_research_check_base_args(research_check_decision)
+    research_check_decision.add_argument("--run-id", required=True)
+    research_check_decision.add_argument("--state")
+    research_check_decision.add_argument("--reason-code")
+    research_check_decision.add_argument("--symbol")
+    research_check_decision.set_defaults(func=_cmd_research_check_decision)
+
+    research_trail = research_sub.add_parser("trail", help="Inspect the reasoning trail around a research item.")
+    research_trail.add_argument("item_id")
+    research_trail.set_defaults(func=_cmd_research_trail)
+
+    research_run = research_sub.add_parser("run", help="Inspect available research evidence for a completed run.")
+    research_run.add_argument("run_id")
+    research_run.set_defaults(func=_cmd_research_run)
+
+    research_compare = research_sub.add_parser("compare", help="Compare two persisted research checks.")
+    research_compare.add_argument("left_check_id")
+    research_compare.add_argument("right_check_id")
+    research_compare.set_defaults(func=_cmd_research_compare)
+
+    instruments = subparsers.add_parser("instruments", help="Instrument metadata and runtime profiles.")
+    instruments_sub = instruments.add_subparsers(dest="instruments_command", required=True)
+    instruments_list = instruments_sub.add_parser("list", help="List canonical instruments.")
+    instruments_list.add_argument("--datasource")
+    instruments_list.add_argument("--exchange")
+    instruments_list.add_argument("--symbol")
+    instruments_list.set_defaults(func=_cmd_instruments_list)
+    instruments_get = instruments_sub.add_parser("get", help="Fetch one canonical instrument.")
+    instruments_get.add_argument("instrument_id")
+    instruments_get.set_defaults(func=_cmd_instruments_get)
+    instruments_resolve = instruments_sub.add_parser("resolve", help="Validate and persist an instrument through the provider layer.")
+    instruments_resolve.add_argument("--symbol", required=True)
+    instruments_resolve.add_argument("--datasource")
+    instruments_resolve.add_argument("--exchange")
+    instruments_resolve.add_argument("--provider")
+    instruments_resolve.add_argument("--venue")
+    instruments_resolve.add_argument("--force-refresh", action="store_true")
+    instruments_resolve.set_defaults(func=_cmd_instruments_resolve)
+    instruments_profile = instruments_sub.add_parser("profile", help="Compile an instrument runtime execution profile.")
+    instruments_profile.add_argument("instrument_id")
+    instruments_profile.add_argument("--execution-semantics", choices=["spot", "derivative", "proxy_derivative"])
+    instruments_profile.set_defaults(func=_cmd_instruments_profile)
+    instruments_health = instruments_sub.add_parser("health", help="Check stored instrument metadata readiness.")
+    instruments_health.add_argument("--datasource")
+    instruments_health.add_argument("--exchange")
+    instruments_health.set_defaults(func=_cmd_instruments_health)
+    instruments_coverage_matrix = instruments_sub.add_parser(
+        "coverage-matrix",
+        help="Check candle coverage across a filtered instrument set.",
+    )
+    instruments_coverage_matrix.add_argument("--start", required=True)
+    instruments_coverage_matrix.add_argument("--end", required=True)
+    instruments_coverage_matrix.add_argument("--timeframe", required=True)
+    instruments_coverage_matrix.add_argument("--instrument-id", action="append", default=[])
+    instruments_coverage_matrix.add_argument("--symbol")
+    instruments_coverage_matrix.add_argument("--datasource")
+    instruments_coverage_matrix.add_argument("--exchange")
+    instruments_coverage_matrix.add_argument("--instrument-type")
+    instruments_coverage_matrix.add_argument("--runtime-ready", choices=["true", "false", "yes", "no", "1", "0"])
+    instruments_coverage_matrix.add_argument("--research-ready", choices=["true", "false", "yes", "no", "1", "0"])
+    instruments_coverage_matrix.add_argument("--execution-semantics", choices=["spot", "derivative", "proxy_derivative"])
+    instruments_coverage_matrix.set_defaults(func=_cmd_instruments_coverage_matrix)
 
     providers = subparsers.add_parser("providers", help="Provider metadata and stream checks.")
     providers_sub = providers.add_subparsers(dest="providers_command", required=True)
@@ -1368,6 +3197,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     experiments = subparsers.add_parser("experiments", help="Small API-composed research workflows.")
     experiments_sub = experiments.add_subparsers(dest="experiments_command", required=True)
+    prepare_matrix = experiments_sub.add_parser(
+        "prepare-instrument-matrix",
+        help="Prepare solo strategy/bot cases and an experiment plan for instrument comparisons.",
+    )
+    prepare_matrix.add_argument(
+        "--request-json",
+        required=True,
+        help="instrument_matrix_experiment_request.v1 JSON object as a path, inline object, or '-' for stdin.",
+    )
+    prepare_matrix.add_argument("--out", help="Plan path to write when --apply is set. Defaults under logs/experiments/plans.")
+    prepare_matrix.add_argument("--apply", action="store_true", help="Create strategies/bots and write the experiment plan.")
+    prepare_matrix.add_argument("--confirm", action="store_true", help="Required with --apply.")
+    prepare_matrix.set_defaults(func=_cmd_experiments_prepare_instrument_matrix)
     validate_plan = experiments_sub.add_parser("validate-plan", help="Validate and preview a sequential experiment plan.")
     validate_plan.add_argument("plan", help="YAML or JSON experiment plan path, or '-' for stdin.")
     validate_plan.add_argument("--skip-data-preflight", action="store_true", help="Skip backend candle coverage checks.")
@@ -1416,6 +3258,10 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = experiments_sub.add_parser("doctor", help="Check local plan-based experiment state and artifact refs.")
     doctor.add_argument("ref", help="Experiment id, state path, or experiment directory.")
     doctor.set_defaults(func=_cmd_experiments_doctor)
+    summarize = experiments_sub.add_parser("summarize", help="Summarize local plan-based experiment artifacts.")
+    summarize.add_argument("ref", help="Experiment id, state path, or experiment directory.")
+    summarize.add_argument("--out", help="Optional path to write the compact experiment_summary.v1 artifact.")
+    summarize.set_defaults(func=_cmd_experiments_summarize)
     collect = experiments_sub.add_parser("collect", help="Collect report export and optional comparison for a tracked experiment.")
     collect.add_argument("ref", help="Experiment record path, experiment id, request id, or run id.")
     collect.add_argument("--bot-id", help="Required when ref is a raw run id with no local experiment record.")

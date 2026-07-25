@@ -2,8 +2,16 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
+import portal.backend.service.bots.startup_service as startup_mod
 from portal.backend.service.bots.startup_lifecycle import BotLifecyclePhase
 from portal.backend.service.bots.startup_service import BotStartupOrchestrator
+
+
+@pytest.fixture(autouse=True)
+def _disable_lifecycle_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(startup_mod, "emit_lifecycle_event", lambda _payload: None)
 
 
 class _FakeConfig:
@@ -15,8 +23,12 @@ class _FakeConfig:
             "wallet_config": {"balances": {"USDC": 100.0}},
             "snapshot_interval_ms": 1000,
             "run_type": "backtest",
-            "status": "idle",
         }
+
+    def get_bot(self, bot_id):
+        if bot_id != self._bot["id"]:
+            raise KeyError(bot_id)
+        return dict(self._bot)
 
     def list_bots(self):
         return [dict(self._bot)]
@@ -47,7 +59,6 @@ class _FakeStorage:
         self.leases = []
         self.released_leases = []
         self.lifecycle = []
-        self.bots = []
         self._next_lifecycle_seq = 1
 
     def acquire_bot_run_lease(self, **kwargs):
@@ -68,10 +79,6 @@ class _FakeStorage:
         self.order.append("release_bot_run_lease")
         self.released_leases.append(dict(kwargs))
         return dict(kwargs)
-
-    def upsert_bot(self, payload):
-        self.order.append("upsert_bot")
-        self.bots.append(dict(payload))
 
     def upsert_bot_run(self, payload):
         self.order.append("upsert_bot_run")
@@ -142,8 +149,6 @@ def test_startup_orchestrator_creates_run_before_container_launch():
     ]
     assert storage.lifecycle[-1]["phase"] == BotLifecyclePhase.AWAITING_CONTAINER_BOOT.value
     assert storage.lifecycle[0]["metadata"]["run_lease"]["runner_id"] == "runner-test"
-    assert storage.bots[-1]["status"] == "starting"
-    assert storage.bots[-1]["last_run_artifact"]["startup"]["run_id"] == ctx.run_id
     assert [entry for entry in order if entry.startswith("status:")] == ["status:starting"]
 
 
@@ -175,7 +180,6 @@ def test_startup_orchestrator_persists_startup_failed_phase():
     assert storage.released_leases[-1]["status"] == "released"
     assert storage.lifecycle[-1]["phase"] == BotLifecyclePhase.STARTUP_FAILED.value
     assert "docker launch failed" in storage.lifecycle[-1]["message"]
-    assert storage.bots[-1]["status"] == "startup_failed"
     assert [entry for entry in order if entry.startswith("status:")] == [
         "status:starting",
         "status:startup_failed",

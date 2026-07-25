@@ -5,11 +5,12 @@ SHELL := /bin/bash
 -include .sync-docs.mk
 
 PYTHONPATH ?= .:src
-PY          ?= python3
+PY          ?= python3.12
 VENV        ?= .venv
 VENV_PYTHON := $(VENV)/bin/python
 PYTHON      := PYTHONPATH=$(PYTHONPATH) $(VENV_PYTHON)
 PIP         := $(VENV)/bin/pip
+UV          ?= uv
 REQ         ?= requirements.txt
 DEV_REQ     ?= requirements-dev.txt
 REQS_HASH   := $(VENV)/.reqs.sha256
@@ -24,6 +25,9 @@ COMPOSE_FILE ?= docker/docker-compose.yml
 COMPOSE_CMD  ?= docker compose -f $(COMPOSE_FILE)
 COMPOSE_BAKE ?= false
 export COMPOSE_BAKE
+
+SOURCE_REVISION ?= $(shell git rev-parse --verify HEAD 2>/dev/null)
+export SOURCE_REVISION
 
 BOTS_COMPOSE_FILE ?= docker/docker-compose.bots.yml
 BOTS_COMPOSE_CMD  ?= docker compose -f $(BOTS_COMPOSE_FILE)
@@ -51,6 +55,19 @@ STACK_PROFILE_DISPLAY    := $(if $(STACK_PROFILE_WORDS),$(subst $(space),$(comma
 
 # Allow "make stack-up BUILD=1" to trigger docker compose --build
 STACK_BUILD_FLAG := $(if $(filter 1 true yes on,$(BUILD)),--build,)
+COMPOSE_STATUS_RE := ^([[:space:]]+(✔|⠿)|Container)
+COMPOSE_DOWN_STATUS_RE := ^([[:space:]]+(✔|⠿)|Container|Network)
+
+define RUN_COMPOSE_FILTERED
+	@tmp="$$(mktemp)"; \
+	if ! $(1) >"$$tmp" 2>&1; then \
+		cat "$$tmp"; \
+		rm -f "$$tmp"; \
+		exit 1; \
+	fi; \
+	grep -E '$(2)' "$$tmp" || true; \
+	rm -f "$$tmp"
+endef
 
 PID_DIR     ?= .pids
 LOG_DIR     ?= logs
@@ -158,24 +175,36 @@ sync-docs: ## Sync ./docs to external path via rsync (set SYNC_DOCS_DEST or OBSI
 	"$(SYNC_DOCS_RSYNC)" $(SYNC_DOCS_RSYNC_FLAGS) $(SYNC_DOCS_DELETE_FLAG) "$$src" "$$dest"; \
 	echo "✓ Docs synced"
 
-architecture-svgs: mermaid-svgs ## Render docs/architecture .mmd files to sibling .svg files
+architecture-svgs: mermaid-svgs ## Render docs/architecture .mmd files to nearby SVG files
 
-mermaid-svgs: ## Render .mmd files to sibling .svg files (MERMAID_SRC=path)
+mermaid-svgs: ## Render .mmd files to nearby SVG files (MERMAID_SRC=path)
 	@$(PY) scripts/docs/render_mermaid_svgs.py --root "$(MERMAID_SRC)" --mmdc "$(MERMAID_CLI)" $(MERMAID_RENDER_ARGS) $(if $(strip $(MERMAID_CLI_ARGS)),-- $(MERMAID_CLI_ARGS),)
 
 ## ============================ BOOTSTRAP ================================= ##
-.PHONY: deps venv _deps_hash _ensure_python _ensure_dirs
+.PHONY: deps venv _deps_hash _ensure_python _ensure_venv_python _ensure_dirs
 
 deps: _ensure_python _deps_hash ## Install Python dependencies
 	@if [ ! -x "$(VENV_PYTHON)" ]; then \
 		echo "► Creating venv at $(VENV)"; \
-		$(PY) -m venv $(VENV); \
+		if command -v "$(UV)" >/dev/null 2>&1; then \
+			$(UV) venv --python "$(PY)" "$(VENV)"; \
+		else \
+			$(PY) -m venv $(VENV); \
+		fi; \
 	fi
-	@if [ "$$(cat $(REQS_HASH).new)" != "$$(cat $(REQS_HASH) 2>/dev/null || echo _none_)" ]; then \
+	@$(MAKE) --no-print-directory _ensure_venv_python
+	@if [ "$$(cat $(REQS_HASH).new)" != "$$(cat $(REQS_HASH) 2>/dev/null || echo _none_)" ] || [ ! -x "$(VENV)/bin/qt" ]; then \
 		echo "► Installing Python deps..."; \
-		$(PIP) install --upgrade pip setuptools wheel; \
-		[ -f "$(REQ)" ] && $(PIP) install -r $(REQ) || true; \
-		[ -f "$(DEV_REQ)" ] && $(PIP) install -r $(DEV_REQ) || true; \
+		if command -v "$(UV)" >/dev/null 2>&1; then \
+			[ -f "$(REQ)" ] && $(UV) pip install --python "$(VENV_PYTHON)" -r "$(REQ)" || true; \
+			[ -f "$(DEV_REQ)" ] && $(UV) pip install --python "$(VENV_PYTHON)" -r "$(DEV_REQ)" || true; \
+			$(UV) pip install --python "$(VENV_PYTHON)" -e .; \
+		else \
+			$(PIP) install --upgrade pip setuptools wheel; \
+			[ -f "$(REQ)" ] && $(PIP) install -r $(REQ) || true; \
+			[ -f "$(DEV_REQ)" ] && $(PIP) install -r $(DEV_REQ) || true; \
+			$(PIP) install -e .; \
+		fi; \
 		mv -f $(REQS_HASH).new $(REQS_HASH); \
 	else \
 		echo "✓ Dependencies unchanged"; \
@@ -185,11 +214,18 @@ deps: _ensure_python _deps_hash ## Install Python dependencies
 venv: deps ## Ensure virtualenv and Python dependencies
 
 _deps_hash:
-	@{ cat $(REQ) 2>/dev/null || true; echo; cat $(DEV_REQ) 2>/dev/null || true; } \
+	@mkdir -p "$(VENV)"
+	@{ cat pyproject.toml 2>/dev/null || true; echo; cat $(REQ) 2>/dev/null || true; echo; cat $(DEV_REQ) 2>/dev/null || true; } \
 	| sha256sum | awk '{print $$1}' > $(REQS_HASH).new
 
 _ensure_python:
 	@command -v $(PY) >/dev/null 2>&1 || { echo "✗ $(PY) not found on PATH"; exit 1; }
+
+_ensure_venv_python:
+	@$(VENV_PYTHON) -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' || { \
+		echo "✗ $(VENV) uses unsupported Python. Move it aside and rerun: mv $(VENV) $(VENV).old && make deps PY=$(PY)"; \
+		exit 1; \
+	}
 
 _ensure_dirs:
 	@mkdir -p $(PID_DIR) $(LOG_DIR)
@@ -200,7 +236,7 @@ _ensure_dirs:
 
 stack-up: ## Start selected docker compose profiles (STACK_PROFILES=all|core|database|observability)
 	@echo "► Starting stack [$(STACK_PROFILE_DISPLAY)]"
-	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) -d 2>&1 | grep -E '^(\s+(✔|⠿)|Container)' || true
+	$(call RUN_COMPOSE_FILTERED,$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) -d,$(COMPOSE_STATUS_RE))
 	@profiles="$(STACK_PROFILE_WORDS)"; \
 		endpoints=""; \
 		if echo "$$profiles" | grep -qw core; then \
@@ -218,17 +254,17 @@ stack-up: ## Start selected docker compose profiles (STACK_PROFILES=all|core|dat
 
 stack-stop: ## Stop running services for selected profiles (containers remain)
 	@echo "► Stopping stack [$(STACK_PROFILE_DISPLAY)]"
-	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) stop 2>&1 | grep -E '^(\s+(✔|⠿)|Container)' || true
+	$(call RUN_COMPOSE_FILTERED,$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) stop,$(COMPOSE_STATUS_RE))
 	@echo "✓ Stack stopped"
 
 stack-down: ## Remove containers for selected profiles
 	@echo "► Removing stack [$(STACK_PROFILE_DISPLAY)]"
-	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) down --remove-orphans 2>&1 | grep -E '^(\s+(✔|⠿)|Container|Network)' || true
+	$(call RUN_COMPOSE_FILTERED,$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) down --remove-orphans,$(COMPOSE_DOWN_STATUS_RE))
 	@echo "✓ Stack removed"
 
 stack-restart: ## Restart services for selected profiles (use BUILD=1 to rebuild)
 	@echo "► Restarting stack [$(STACK_PROFILE_DISPLAY)]"
-	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) --force-recreate -d 2>&1 | grep -E '^(\s+(✔|⠿)|Container)' || true
+	$(call RUN_COMPOSE_FILTERED,$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) --force-recreate -d,$(COMPOSE_STATUS_RE))
 	@echo "✓ Stack restarted"
 
 stack-logs: ## Follow logs for selected profiles (SERVICE=name to filter)
@@ -297,9 +333,10 @@ mcp-register-codex: venv ## Register the Quant-Trad MCP stdio server with Codex 
 .PHONY: status logs-backend logs-bots backend-shell bot-shell dbshell db-query db-file \
 	forensic-run-ordering forensic-run-throughput forensic-run-event-summary forensic-run-storage-budget \
 	forensic-run-seq-gaps forensic-run-write-latency forensic-observability-storage-budget \
+	forensic-run-logs forensic-logs-doctor \
 	forensic-botlens-check forensic-wallet-diagnostics forensic-golden-compare \
 	test-reporting test-reporting-api test-botlens test-runtime validate-docs frontend-test frontend-build frontend-check \
-	git-status git-diff git-check check commit
+	git-status git-diff git-check check
 
 status: ## Show service status without docker compose ps sandbox friction
 	@echo "Core stack:"
@@ -384,6 +421,15 @@ forensic-observability-storage-budget: venv ## Forensic: summarize durable obser
 	$(LOCAL_PG_ENV); \
 	$(PYTHON) scripts/reporting/runtime_event_diagnostics.py observability-storage-budget $(if $(strip $(run)),--run-id "$(run)",) $(if $(strip $(limit)),--limit "$(limit)",)
 
+forensic-run-logs: venv ## Forensic: fetch structured Loki logs for a run (run=<run_id> bot=<optional_bot_id>)
+	@set -euo pipefail; \
+	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
+	$(VENV_PYTHON) -m cli.main --no-audit-log logs $(if $(strip $(loki)),--loki-url "$(loki)",) run "$(run)" $(if $(strip $(bot)),--bot-id "$(bot)",) $(if $(strip $(start)),--start "$(start)",) $(if $(strip $(end)),--end "$(end)",) $(if $(strip $(hours)),--lookback-hours "$(hours)",) $(if $(strip $(limit)),--limit "$(limit)",)
+
+forensic-logs-doctor: venv ## Forensic: check Loki/Promtail visibility for Quant-Trad logs
+	@set -euo pipefail; \
+	$(VENV_PYTHON) -m cli.main --no-audit-log logs $(if $(strip $(loki)),--loki-url "$(loki)",) doctor $(if $(strip $(start)),--start "$(start)",) $(if $(strip $(end)),--end "$(end)",) $(if $(strip $(hours)),--lookback-hours "$(hours)",)
+
 forensic-botlens-check: venv ## Forensic: replay BotLens projection state from ledger (run=<run_id> symbol=<optional>)
 	@set -euo pipefail; \
 	if [ -z "$(strip $(run))" ]; then echo "✗ run=<run_id> is required"; exit 1; fi; \
@@ -437,20 +483,6 @@ git-check: ## Show status and run git diff whitespace checks
 	@git diff --check
 
 check: git-check validate-docs test-reporting test-botlens frontend-check ## Run standard developer/audit checks
-
-commit: ## Stage all repo changes and commit (msg="area: core change")
-	@set -euo pipefail; \
-	msg="$(msg)"; \
-	if [ -z "$$msg" ]; then echo '✗ msg="area: core change" is required'; exit 1; fi; \
-	if [[ "$$msg" == *$$'\n'* || "$$msg" == *$$'\r'* ]]; then echo "✗ commit message must be one line"; exit 1; fi; \
-	if [[ ! "$$msg" =~ ^[^:\ ]([^:]*)?:\ .+ ]]; then echo '✗ commit message must match "<area>: <core change>"'; exit 1; fi; \
-	if [ "$${#msg}" -gt 72 ]; then echo "✗ commit message is $${#msg} chars; keep it at 72 or less"; exit 1; fi; \
-	git diff --check; \
-	git add -A; \
-	if git diff --cached --quiet; then echo "✗ no changes staged for commit"; exit 1; fi; \
-	git diff --cached --check; \
-	git commit -m "$$msg"; \
-	echo "✓ commit $$(git rev-parse --short HEAD)"
 
 ## =============================== QUALITY ================================ ##
 .PHONY: test clean

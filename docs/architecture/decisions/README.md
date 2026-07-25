@@ -45,3 +45,18 @@ respect.
 | [0024](0024-use-provider-credential-references.md) | Use provider credential references | Accepted |
 | [0025](0025-use-per-run-leases.md) | Use per-run leases | Accepted |
 | [0026](0026-use-control-plane-telemetry-flush.md) | Use control-plane telemetry flush | Accepted |
+| [0027](0027-use-execution-profiles-as-runtime-instrument-authority.md) | Use execution profiles as runtime instrument authority | Accepted |
+| [0028](0028-use-bounded-projection-dispatch-for-botlens-live-facts.md) | Use bounded projection dispatch for BotLens live facts | Accepted |
+| [0029](0029-batch-and-degrade-botlens-projection-drain.md) | Batch and degrade BotLens projection drain | Accepted |
+| [0030](0030-keep-portal-bots-definition-only.md) | Keep portal bots definition only | Accepted |
+| [0031](0031-fingerprint-reports-and-slim-runtime-storage.md) | Fingerprint reports and slim runtime storage | Accepted |
+| [0032](0032-use-field-owned-version-and-provenance-contracts.md) | Use field-owned version and provenance contracts | Accepted |
+| [0033](0033-use-promtail-as-runtime-loki-ingress.md) | Use Promtail as runtime Loki ingress | Accepted |
+| [0034](0034-use-research-checks-as-analytical-memory-evidence.md) | Use research checks as analytical memory evidence | Accepted |
+| [0035](0035-use-complete-output-catalogs-and-split-strategy-read-contracts.md) | Use complete output catalogs and split strategy read contracts | Accepted |
+| [0036](0036-anchor-market-profile-retests-on-raw-breakouts.md) | Anchor Market Profile retests on raw breakouts | Accepted |
+| [0037](0037-keep-research-presentations-metric-contract-driven.md) | Keep research presentations metric-contract driven | Accepted |
+| [0038](0038-decouple-visual-overlay-projection-from-runtime-push.md) | Decouple visual overlay projection from runtime push | Accepted |
+| [0039](0039-use-shared-async-jobs-for-research-dispatch.md) | Use shared async jobs for research dispatch | Accepted |
+| [0040](0040-use-runtime-exit-plans-and-liquidity-roles.md) | Use runtime exit plans and liquidity roles | Accepted |
+| [0041](0041-use-canonical-execution-plan-and-order-fill-semantics.md) | Use canonical execution plans and order fill semantics | Accepted |

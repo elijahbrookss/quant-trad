@@ -8,6 +8,7 @@ tags:
   - mcp
   - cli
   - experiments
+  - indicators
   - agent
   - reporting
   - api
@@ -17,6 +18,12 @@ code_paths:
   - cli/api.py
   - cli/audit.py
   - cli/experiments
+  - portal/backend/controller/candles.py
+  - portal/backend/controller/indicators.py
+  - portal/backend/controller/instruments.py
+  - portal/backend/controller/strategies.py
+  - portal/backend/service/market/candle_service.py
+  - portal/backend/service/indicators/indicator_service
   - pyproject.toml
   - docs/architecture/research-orchestration/RESEARCH_ORCHESTRATION_BOUNDARY.md
   - docs/engineering/developer-audit-workflow.md
@@ -55,6 +62,12 @@ The MCP server sits on top of the same contracts as the `qt` CLI:
 
 - read-only resources call backend API routes or local experiment state files,
 - report and comparison tools call backend reporting routes,
+- indicator resources read backend indicator contracts,
+- indicator and data-coverage tools delegate to `qt indicators ...` and
+  `qt data coverage ...`,
+- research check/read tools delegate to `qt research ...` and backend research
+  routes,
+- instrument tools delegate to `qt instruments ...`,
 - experiment tools delegate to `qt experiments ...`,
 - controlled mutation tools call backend write routes only after explicit
   guardrails are satisfied.
@@ -76,7 +89,19 @@ state through `quanttrad://` URIs:
 - `quanttrad://bots/{bot_id}/active-run`
 - `quanttrad://strategies`
 - `quanttrad://strategies/{strategy_id}`
+- `quanttrad://strategies/{strategy_id}/bindings`
+- `quanttrad://strategies/{strategy_id}/rules`
 - `quanttrad://strategies/{strategy_id}/variants`
+- `quanttrad://strategies/{strategy_id}/effective?variant_id={variant_id}&variant_name={variant_name}`
+- `quanttrad://strategies/{strategy_id}/decision-inputs?variant_id={variant_id}&variant_name={variant_name}`
+- `quanttrad://indicators`
+- `quanttrad://indicators/{indicator_id}`
+- `quanttrad://indicators/{indicator_id}/strategies`
+- `quanttrad://indicators/types`
+- `quanttrad://indicators/types/{type_id}`
+- `quanttrad://instruments`
+- `quanttrad://instruments/{instrument_id}`
+- `quanttrad://instruments/{instrument_id}/runtime-profile?execution_semantics={execution_semantics}`
 - `quanttrad://providers`
 - `quanttrad://reports`
 - `quanttrad://reports/{run_id}/summary`
@@ -84,6 +109,7 @@ state through `quanttrad://` URIs:
 - `quanttrad://reports/{run_id}/metrics`
 - `quanttrad://reports/{run_id}/run-report-status`
 - `quanttrad://experiments/{experiment_id}/state`
+- `quanttrad://experiments/{experiment_id}/summary`
 - `quanttrad://experiments/{experiment_id}/events?tail={tail}`
 
 These resources are read-only. They should remain compact and contract-shaped so
@@ -102,11 +128,43 @@ Read tools:
 - `get_active_run`
 - `list_strategies`
 - `get_strategy`
+- `get_strategy_bindings`
+- `get_strategy_rules`
 - `list_strategy_variants`
+- `get_effective_strategy`
+- `get_strategy_decision_inputs`
+- `list_indicator_types`
+- `get_indicator_type`
+- `list_indicators`
+- `get_indicator`
+- `list_indicator_strategies`
 - `list_reports`
 - `get_report_section`
 - `compare_reports`
 - `list_providers`
+- `list_instruments`
+- `get_instrument`
+- `get_instrument_runtime_profile`
+
+Indicator validation tools:
+
+- `validate_indicator_config`
+- `validate_indicator_runtime`
+- `check_data_coverage`
+
+`validate_indicator_config` resolves the same manifest-backed params,
+dependencies, color, and public output catalog as create, but does not persist
+an instance. `validate_indicator_runtime` runs the indicator through the backend
+runtime graph over the requested candle window. It validates that every declared
+output is present on every bar, then summarizes readiness and optional
+assertions such as "ready by end" or minimum ready bars. Warmup bars are allowed
+to return `ready=false`; missing outputs are not. `check_data_coverage` calls
+`qt data coverage` to run the same pre-run candle coverage contract used by
+experiment planning against an explicit instrument/window.
+
+For wider scout-window planning, `qt instruments coverage-matrix` calls the
+backend instrument coverage matrix and combines instrument readiness with candle
+coverage for a filtered instrument set.
 
 Experiment tools:
 
@@ -117,7 +175,9 @@ Experiment tools:
 - `get_experiment_status`
 - `get_experiment_events`
 - `doctor_experiment`
+- `summarize_experiment`
 - `collect_experiment`
+- `prepare_instrument_matrix_experiment`
 
 Controlled mutation tools:
 
@@ -127,11 +187,30 @@ Controlled mutation tools:
 - `set_bot_strategy_variant`
 - `create_strategy_variant`
 - `update_strategy_variant`
+- `create_indicator`
 
 Actual run-starting or write operations require `confirm=true`. Tools that can
 be usefully previewed default to planned mutations with `apply=false`; applying
 them requires both `apply=true` and `confirm=true`. Paper/live starts are
 blocked unless the caller also passes `allow_non_backtest=true`.
+`create_indicator` follows the same pattern: it validates the config first,
+returns a planned mutation by default, and persists only when both `apply=true`
+and `confirm=true` are supplied. CLI indicator edits use the same guarded
+contract and require clone-first for strategy-bound parameter/dependency
+changes.
+
+`prepare_instrument_matrix_experiment` follows the same guarded shape for
+mixed-instrument research. Dry runs return the solo strategy/bot mutations and
+normal experiment plan that would be produced. Applying creates one
+single-instrument strategy and bot per case, validates the requested execution
+profile for each instrument, writes an `experiment_plan.v1`, and leaves runtime
+truth to bot execution and report materialization.
+
+`summarize_experiment` delegates to `qt experiments summarize` and returns the
+compact `experiment_summary.v1` read model for a suite. It is safe for agents to
+call after a run because it reads local suite artifacts: run records, research
+summaries, comparison summaries, pass gates, and data preflight. It does not
+rebuild reports or inspect runtime internals.
 
 ## Invariants
 
@@ -139,7 +218,12 @@ blocked unless the caller also passes `allow_non_backtest=true`.
   report semantics.
 - MCP resources are read views over backend contracts or local experiment
   artifacts.
-- MCP tools use backend API routes or `qt experiments` workflows.
+- MCP tools use backend API routes or `qt` workflows; any tool-level workflow
+  exposed for agents should also have a matching `qt` command.
+- Indicator runtime validation must use the backend runtime graph and engine
+  timeline, not MCP-side reconstruction.
+- Research checks must keep their evidence boundary explicit: raw source data,
+  persisted indicator runtime outputs, or completed report datasets.
 - Long-running experiment tools may block until the underlying `qt` command
   finishes or times out.
 - Mutations must fail loud when required IDs, confirmations, or allowed run

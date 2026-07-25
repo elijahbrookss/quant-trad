@@ -21,6 +21,7 @@ from .runtime_contract import assert_engine_signal_runtime_path
 from .runtime_graph import (
     build_runtime_indicator_graph,
     build_runtime_indicator_instance,
+    collect_runtime_indicator_diagnostics,
 )
 from .signals import IndicatorSignalExecutor
 from .utils import (
@@ -190,12 +191,25 @@ def create_instance(
     dependencies: Optional[Sequence[Dict[str, Any]]] = None,
     color: Optional[str] = None,
     color_palette: Optional[str] = None,
-    output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
     *,
     ctx: IndicatorServiceContext = _context,
 ) -> Dict[str, Any]:
     creator = IndicatorInstanceCreator(ctx)
-    return creator.create(type_str, name, params, dependencies, color, color_palette, output_prefs)
+    return creator.create(type_str, name, params, dependencies, color, color_palette)
+
+
+def validate_instance_config(
+    type_str: str,
+    name: Optional[str],
+    params: Dict[str, Any],
+    dependencies: Optional[Sequence[Dict[str, Any]]] = None,
+    color: Optional[str] = None,
+    color_palette: Optional[str] = None,
+    *,
+    ctx: IndicatorServiceContext = _context,
+) -> Dict[str, Any]:
+    creator = IndicatorInstanceCreator(ctx)
+    return creator.validate(type_str, name, params, dependencies, color, color_palette)
 
 
 def update_instance(
@@ -204,7 +218,6 @@ def update_instance(
     params: Dict[str, Any],
     name: Optional[str],
     dependencies: Optional[Sequence[Dict[str, Any]]] = None,
-    output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
     *,
     color: Optional[str] = None,
     color_provided: bool = False,
@@ -219,7 +232,6 @@ def update_instance(
         params,
         name,
         dependencies,
-        output_prefs,
         color=color,
         color_provided=color_provided,
         color_palette=color_palette,
@@ -330,6 +342,7 @@ def overlays_for_instance(
         ctx=ctx,
         preloaded_metas={inst_id: meta},
     )
+    diagnostics = collect_runtime_indicator_diagnostics(indicators)
     engine = IndicatorExecutionEngine(indicators)
     graph_duration_ms = (perf_counter() - t_graph_start) * 1000.0
 
@@ -374,7 +387,7 @@ def overlays_for_instance(
         )
         return {
             "indicator_id": inst_id,
-            "runtime_path": "typed_indicator_engine_v1",
+            "runtime_path": "typed_indicator_engine.v1",
             "overlay_state": {
                 "mode": "latest",
                 "cursor_epoch": None,
@@ -384,6 +397,9 @@ def overlays_for_instance(
                 "start": start,
                 "end": end,
                 "interval": interval,
+            },
+            "diagnostics": {
+                "indicators": diagnostics,
             },
             "overlays": [],
         }
@@ -479,7 +495,7 @@ def overlays_for_instance(
     )
     return {
         "indicator_id": inst_id,
-        "runtime_path": "typed_indicator_engine_v1",
+        "runtime_path": "typed_indicator_engine.v1",
         "overlay_state": {
             "mode": overlay_state_mode,
             "cursor_epoch": overlay_epoch,
@@ -490,6 +506,9 @@ def overlays_for_instance(
             "start": start,
             "end": end,
             "interval": interval,
+        },
+        "diagnostics": {
+            "indicators": diagnostics,
         },
         "overlays": overlays,
     }
@@ -575,9 +594,27 @@ class IndicatorService:
         dependencies: Optional[Sequence[Dict[str, Any]]] = None,
         color: Optional[str] = None,
         color_palette: Optional[str] = None,
-        output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        return create_instance(type_str, name, params, dependencies, color, color_palette, output_prefs, ctx=self._ctx)
+        return create_instance(type_str, name, params, dependencies, color, color_palette, ctx=self._ctx)
+
+    def validate_instance_config(
+        self,
+        type_str: str,
+        name: Optional[str],
+        params: Dict[str, Any],
+        dependencies: Optional[Sequence[Dict[str, Any]]] = None,
+        color: Optional[str] = None,
+        color_palette: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return validate_instance_config(
+            type_str,
+            name,
+            params,
+            dependencies,
+            color,
+            color_palette,
+            ctx=self._ctx,
+        )
 
     def update_instance(
         self,
@@ -586,7 +623,6 @@ class IndicatorService:
         params: Dict[str, Any],
         name: Optional[str],
         dependencies: Optional[Sequence[Dict[str, Any]]] = None,
-        output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
         *,
         color: Optional[str] = None,
         color_provided: bool = False,
@@ -599,7 +635,6 @@ class IndicatorService:
             params,
             name,
             dependencies,
-            output_prefs,
             color=color,
             color_provided=color_provided,
             color_palette=color_palette,
@@ -694,4 +729,5 @@ __all__ = [
     "get_type_details",
     "list_types",
     "default_service",
+    "validate_instance_config",
 ]

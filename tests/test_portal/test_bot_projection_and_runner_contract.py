@@ -16,8 +16,6 @@ def test_project_bot_state_is_pure_and_preserves_lifecycle_metadata(monkeypatch)
         {
             "id": "bot-1",
             "name": "Bot 1",
-            "status": "starting",
-            "runner_id": "runner-test",
         },
         run={"run_id": "run-1", "status": "starting", "started_at": "2026-01-01T00:00:00Z"},
         lifecycle={
@@ -38,7 +36,14 @@ def test_project_bot_state_is_pure_and_preserves_lifecycle_metadata(monkeypatch)
                 }
             },
         },
-        view_row=None,
+        lease={
+            "run_id": "run-1",
+            "bot_id": "bot-1",
+            "runner_id": "runner-test",
+            "status": "active",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "released_at": None,
+        },
         container_state={
             "name": "quant-trad-bots-bot-1",
             "status": "running",
@@ -55,6 +60,7 @@ def test_project_bot_state_is_pure_and_preserves_lifecycle_metadata(monkeypatch)
     assert projected["lifecycle"]["phase"] == "awaiting_container_boot"
     assert projected["lifecycle"]["message"] == "Awaiting container bootstrap checkpoints."
     assert projected["lifecycle"]["metadata"]["series_progress"]["workers_spawned"] == 1
+    assert projected["lifecycle"]["lease"]["state"] == "fresh"
     assert projected["runtime"]["phase"] == "awaiting_container_boot"
 
 
@@ -141,9 +147,6 @@ def test_project_bot_state_prefers_active_runtime_over_stale_startup_failed_life
         {
             "id": "bot-1",
             "name": "Bot 1",
-            "status": "telemetry_degraded",
-            "runner_id": "runner-test",
-            "heartbeat_at": "2026-01-01T00:00:02Z",
         },
         run={"run_id": "run-1", "status": "running", "started_at": "2026-01-01T00:00:00Z"},
         lifecycle={
@@ -152,6 +155,14 @@ def test_project_bot_state_prefers_active_runtime_over_stale_startup_failed_life
             "status": "startup_failed",
             "owner": "runtime",
             "message": "Worker failed before initial lifecycle reconciliation.",
+        },
+        lease={
+            "run_id": "run-1",
+            "bot_id": "bot-1",
+            "runner_id": "runner-test",
+            "status": "active",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "released_at": None,
         },
         run_snapshot=run_snapshot,
         container_state={
@@ -178,9 +189,6 @@ def test_project_bot_state_keeps_terminal_run_available_without_active_run_id():
         {
             "id": "bot-1",
             "name": "Bot 1",
-            "status": "canceled",
-            "runner_id": None,
-            "heartbeat_at": None,
         },
         run={"run_id": "run-canceled-1", "status": "canceled", "started_at": "2026-01-01T00:00:00Z"},
         lifecycle={
@@ -217,9 +225,6 @@ def test_project_bot_state_marks_runtime_telemetry_unavailable_without_snapshot(
         {
             "id": "bot-1",
             "name": "Bot 1",
-            "status": "running",
-            "runner_id": "runner-test",
-            "heartbeat_at": "2026-01-01T00:00:02Z",
         },
         run={"run_id": "run-1", "status": "running", "started_at": "2026-01-01T00:00:00Z"},
         lifecycle={
@@ -228,6 +233,14 @@ def test_project_bot_state_marks_runtime_telemetry_unavailable_without_snapshot(
             "status": "running",
             "owner": "runtime",
             "message": "Runtime is live.",
+        },
+        lease={
+            "run_id": "run-1",
+            "bot_id": "bot-1",
+            "runner_id": "runner-test",
+            "status": "active",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "released_at": None,
         },
         container_state={
             "name": "quant-trad-bots-bot-1",
@@ -307,7 +320,6 @@ def test_project_bot_state_aggregates_runtime_symbol_stats_for_fleet_payload():
         {
             "id": "bot-1",
             "name": "Bot 1",
-            "status": "running",
             "wallet_config": {"balances": {"USD": 1000.0}},
             "backtest_start": "2026-01-01T00:00:00Z",
         },

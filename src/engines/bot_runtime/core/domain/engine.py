@@ -19,6 +19,7 @@ from ..entry_settlement import EntrySettlement, EntrySettlementContext, EntrySet
 from ..execution_adapter import ExecutionAdapter
 from ..execution_intent import ExecutionIntent, LimitParams
 from ..execution_model import ExecutionModel
+from ..execution_plan import RuntimeStopAdjustment, compile_runtime_execution_plan
 from ..execution_profile import SeriesExecutionProfile, compile_series_execution_profile
 from ..execution_runtime import DeterministicExecutionModel
 from ..exit_settlement import ExitSettlement, ExitSettlementService
@@ -36,7 +37,7 @@ from .models import (
     Leg,
 )
 from .position import LadderPosition, SameBarResolutionPolicy
-from .time_utils import coalesce_numeric, coerce_float, isoformat
+from .time_utils import coerce_float, isoformat
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,6 @@ class LadderRiskEngine:
             self.instrument,
             template=self.template,
             risk_config=self.risk_config,
-            runtime_requires_derivatives=False,
         )
         self._runtime_log_context = build_log_context(
             strategy_id=self.template.get("strategy_id"),
@@ -84,24 +84,21 @@ class LadderRiskEngine:
             instrument_type=(
                 self.execution_profile.instrument.instrument_type if self.execution_profile is not None else None
             ),
+            source_instrument_type=(
+                self.execution_profile.instrument.source_instrument_type if self.execution_profile is not None else None
+            ),
+            execution_semantics=(
+                self.execution_profile.instrument.execution_semantics if self.execution_profile is not None else None
+            ),
         )
 
         # Always validate - same for all modes (backtest, sim_trade, paper, live)
         self._validate_template(self.template)
         self._validate_instrument(self.instrument)
 
-        # Resolve tick_size (required)
-        config_tick = coerce_float(provided_template.get("tick_size"))
-        instrument_tick = coerce_float(self.instrument.get("tick_size"))
-        profile_tick = (
-            self.execution_profile.constraints.tick_size
-            if self.execution_profile is not None
-            else None
-        )
-        tick_size = coalesce_numeric(config_tick, instrument_tick, profile_tick, default=0.0)
-        if tick_size == 0:
-            raise ValueError("tick_size required from either template or instrument configuration")
-        self.tick_size = tick_size
+        self.tick_size = float(self.execution_profile.constraints.tick_size)
+        if self.tick_size == 0:
+            raise ValueError("tick_size required from compiled execution profile")
 
         self.stop_ticks = max(int(self.template.get("stop_ticks") or 0), 0)
 
@@ -113,39 +110,15 @@ class LadderRiskEngine:
         self.base_risk_per_trade = coerce_float(self.execution_profile.risk.base_risk_per_trade)
         self.stop_r_multiple = coerce_float(self.template.get("stop_r_multiple"))
 
-        self.stop_adjustments_config: List[Dict[str, Any]] = list(self.template.get("stop_adjustments") or [])
-        self.execution_mode = str(self.template.get("execution_mode") or "market").lower()
-        self.limit_maker_config: Dict[str, Any] = dict(self.template.get("limit_maker") or {})
+        self.execution_plan = compile_runtime_execution_plan(self.template)
+        self.execution_mode = self.execution_plan.entry.order_type
 
-        # Resolve contract_size (config > instrument > 1.0)
-        config_contract = coerce_float(self.template.get("contract_size"))
-        instrument_contract = coerce_float(self.instrument.get("contract_size"))
-        profile_contract = (
-            self.execution_profile.constraints.contract_size
-            if self.execution_profile is not None
-            else None
-        )
-        self.contract_size = coalesce_numeric(config_contract, instrument_contract, profile_contract, default=0.0)
+        self.contract_size = float(self.execution_profile.constraints.contract_size)
         if self.contract_size in (None, 0):
-            raise ValueError("contract_size required from either template or instrument configuration")
-        # Resolve tick_value (config > instrument > calculated from tick_size * contract_size)
-        config_tick_value = coerce_float(self.template.get("tick_value"))
-        instrument_tick_value = coerce_float(self.instrument.get("tick_value"))
-        calculated_tick_value = self.tick_size * self.contract_size
-        profile_tick_value = (
-            self.execution_profile.constraints.tick_value
-            if self.execution_profile is not None
-            else None
-        )
-        self.tick_value = coalesce_numeric(
-            config_tick_value,
-            instrument_tick_value,
-            profile_tick_value,
-            calculated_tick_value,
-            default=0.0,
-        )
+            raise ValueError("contract_size required from compiled execution profile")
+        self.tick_value = float(self.execution_profile.constraints.tick_value)
         if self.tick_value in (None, 0):
-            raise ValueError("tick_value required from either template or instrument configuration")
+            raise ValueError("tick_value required from compiled execution profile")
 
         risk_mode = str(initial_stop_config.get("mode") or "atr").lower()
         self.risk_unit_mode = risk_mode if risk_mode in {"atr", "ticks"} else "atr"
@@ -183,29 +156,15 @@ class LadderRiskEngine:
 
         self.orders = self._orders_from_template()
         self.targets = [int(order.get("ticks") or 0) for order in self.orders]
-        # Resolve quote currency
-        quote_value = (
-            self.template.get("quote_currency")
-            or self.instrument.get("quote_currency")
-            or self.execution_profile.instrument.quote_currency
-            or "USD"
-        )
-        self.quote_currency = str(quote_value).upper()
-
-        # Resolve fee rates (config > instrument > 0.0, allow_zero since 0% fees are valid)
-        config_maker = coerce_float(self.template.get("maker_fee_rate"))
-        instrument_maker = coerce_float(self.instrument.get("maker_fee_rate"))
-        self.maker_fee = coalesce_numeric(config_maker, instrument_maker, default=0.0, allow_zero=True)
-
-        config_taker = coerce_float(self.template.get("taker_fee_rate"))
-        instrument_taker = coerce_float(self.instrument.get("taker_fee_rate"))
-        self.taker_fee = coalesce_numeric(config_taker, instrument_taker, default=0.0, allow_zero=True)
+        self.quote_currency = str(self.execution_profile.instrument.quote_currency or "USD").upper()
+        self.maker_fee = float(self.execution_profile.fees.maker_fee_rate)
+        self.taker_fee = float(self.execution_profile.fees.taker_fee_rate)
         self.execution_intent_model: ExecutionModel = DeterministicExecutionModel(
             FeeResolver(
                 FeeSchedule(
                     maker_rate=float(self.maker_fee or 0.0),
                     taker_rate=float(self.taker_fee or 0.0),
-                    source="template_or_instrument",
+                    source=self.execution_profile.fees.source,
                 )
             )
         )
@@ -224,6 +183,7 @@ class LadderRiskEngine:
             stop_ticks=self.stop_ticks,
             tick_size=self.tick_size,
             execution_mode=self.execution_mode,
+            fixed_horizon_bars=self._fixed_horizon_bars(),
             instrument_type=self.execution_profile.instrument.instrument_type if self.execution_profile is not None else None,
             accounting_mode=self.execution_profile.accounting_mode if self.execution_profile is not None else None,
             supports_margin=self.execution_profile.capabilities.supports_margin if self.execution_profile is not None else None,
@@ -336,12 +296,6 @@ class LadderRiskEngine:
         """Validate that instrument configuration is complete."""
         if not instrument:
             raise ValueError("Instrument configuration is required. Cannot proceed without instrument metadata.")
-
-        if not instrument.get("tick_size"):
-            raise ValueError(
-                "Instrument configuration must include tick_size. "
-                "This is required for accurate position sizing and PnL calculation."
-            )
 
     def _orders_from_template(self) -> List[Dict[str, Any]]:
         orders: List[Dict[str, Any]] = []
@@ -563,10 +517,11 @@ class LadderRiskEngine:
         anchor: str,
     ) -> float:
         anchor = str(anchor or "signal_price").lower()
-        if anchor == "next_bar_open":
-            return float(candle.open)
-        if anchor == "prior_close":
-            return float(candle.close)
+        if anchor != "signal_price":
+            raise ValueError(
+                f"Unsupported entry anchor {anchor!r}. "
+                "Only signal_price is supported by the immediate entry lifecycle."
+            )
         return float(candle.close)
 
     def _resolve_limit_offset(
@@ -595,11 +550,10 @@ class LadderRiskEngine:
         direction: str,
         r_value: Optional[float],
     ) -> LimitParams:
-        anchor_price = str(self.limit_maker_config.get("anchor_price") or "signal_price").lower()
-        offset_type = str(self.limit_maker_config.get("offset_type") or "ticks").lower()
-        offset_value = float(self.limit_maker_config.get("offset_value") or 0.0)
-        validity_window = int(self.limit_maker_config.get("validity_window") or 1)
-        fallback = str(self.limit_maker_config.get("fallback") or "cancel").lower()
+        plan = self.execution_plan.entry.limit_maker
+        anchor_price = plan.anchor_price
+        offset_type = plan.offset_type
+        offset_value = float(plan.offset_value or 0.0)
         anchor_value = self._resolve_anchor_price(candle, anchor=anchor_price)
         offset = self._resolve_limit_offset(
             candle,
@@ -615,8 +569,8 @@ class LadderRiskEngine:
             anchor_price=anchor_price,
             offset_type=offset_type,
             offset_value=float(offset_value),
-            validity_window=max(validity_window, 1),
-            fallback=fallback,
+            validity_window=max(int(plan.validity_window), 1),
+            fallback=plan.fallback,
             limit_price=float(limit_price),
         )
 
@@ -1078,6 +1032,7 @@ class LadderRiskEngine:
         breakeven_ticks = 0.0 if runtime_stop_adjustments else self._breakeven_threshold(legs, pending.r_ticks)
         trailing_activation_ticks = self._trailing_activation_ticks(legs, pending.r_ticks)
         trailing_distance_ticks = self._trailing_distance_ticks(pending.atr_at_entry)
+        fixed_horizon_bars = self._fixed_horizon_bars()
         position = self._build_position(
             candle=candle,
             entry_price=avg_fill_price,
@@ -1099,6 +1054,7 @@ class LadderRiskEngine:
             breakeven_ticks=breakeven_ticks,
             trailing_activation_ticks=trailing_activation_ticks,
             trailing_distance_ticks=trailing_distance_ticks,
+            fixed_horizon_bars=fixed_horizon_bars,
             runtime_stop_adjustments=runtime_stop_adjustments,
             base_currency=base_currency,
             quote_currency=quote_currency,
@@ -1149,43 +1105,51 @@ class LadderRiskEngine:
         return True
 
     def _breakeven_threshold(self, legs: Sequence[Leg], r_ticks: Optional[float]) -> float:
-        if self.stop_adjustments_config:
+        if self.execution_plan.stop_adjustments:
             return 0.0
-        breakeven = self.template.get("breakeven_trigger_ticks")
-        if breakeven not in (None, "", 0):
-            try:
-                return float(breakeven)
-            except (TypeError, ValueError):
-                return 0.0
-        leg_ticks = min((leg.ticks for leg in legs if leg.ticks), default=None)
-        if leg_ticks is None:
+        breakeven = self.execution_plan.breakeven
+        if not breakeven.enabled:
             return 0.0
-        return max(leg_ticks / 2, 0.0)
+        if breakeven.ticks not in (None, 0):
+            return max(float(breakeven.ticks), 0.0)
+        if breakeven.r_multiple not in (None, 0) and r_ticks not in (None, 0):
+            return max(float(breakeven.r_multiple) * float(r_ticks), 0.0)
+        return 0.0
 
     def _trailing_activation_ticks(self, legs: Sequence[Leg], r_ticks: Optional[float]) -> Optional[float]:
-        trailing_activation_config = self.template.get("trailing_activation")
-        trailing_activation_ticks = None
-        if trailing_activation_config:
-            try:
-                trailing_activation_ticks = float(trailing_activation_config)
-            except (TypeError, ValueError):
-                trailing_activation_ticks = None
-        if trailing_activation_ticks in (None, 0):
+        trailing = self.execution_plan.trailing
+        if not trailing.enabled:
             return None
-        return float(trailing_activation_ticks)
+        if trailing.activation_type == "target_hit":
+            target_id = str(trailing.target_id or "").strip()
+            if target_id:
+                for leg in legs:
+                    if str(leg.leg_id or "") == target_id:
+                        return max(float(leg.ticks or 0), 0.0)
+            if trailing.target_index is not None:
+                idx = max(int(trailing.target_index), 0)
+                if idx < len(legs):
+                    return max(float(legs[idx].ticks or 0), 0.0)
+            return None
+        if trailing.ticks not in (None, 0):
+            return max(float(trailing.ticks), 0.0)
+        if trailing.r_multiple not in (None, 0) and r_ticks not in (None, 0):
+            return max(float(trailing.r_multiple) * float(r_ticks), 0.0)
+        return None
 
     def _trailing_distance_ticks(self, atr_at_entry: Optional[float]) -> Optional[float]:
-        trailing = self.template.get("trailing_stop")
-        if not isinstance(trailing, Mapping):
-            trailing = {}
-        trailing_ticks = coerce_float(trailing.get("ticks"))
-        trailing_atr_multiple = coerce_float(trailing.get("atr_multiplier"))
-        trailing_distance_ticks = None
-        if trailing_atr_multiple not in (None, 0) and self._has_valid_atr(atr_at_entry):
-            trailing_distance_ticks = float(trailing_atr_multiple) * float(atr_at_entry) / float(self.tick_size or 1)
-        elif trailing_ticks not in (None, 0):
-            trailing_distance_ticks = float(trailing_ticks)
-        return trailing_distance_ticks
+        trailing = self.execution_plan.trailing
+        if not trailing.enabled:
+            return None
+        if trailing.atr_multiplier not in (None, 0) and self._has_valid_atr(atr_at_entry):
+            return float(trailing.atr_multiplier) * float(atr_at_entry) / float(self.tick_size or 1)
+        if trailing.ticks not in (None, 0):
+            return float(trailing.ticks)
+        return None
+
+    def _fixed_horizon_bars(self) -> Optional[int]:
+        fixed = self.execution_plan.fixed_horizon
+        return fixed.bars if fixed.enabled and fixed.bars else None
 
     def _compute_r_ticks(self, candle: Candle) -> float:
         """Compute stop distance in ticks from initial_stop config.
@@ -1217,28 +1181,29 @@ class LadderRiskEngine:
 
         return float(tick_stop)
 
-    def _build_stop_adjustments(self, legs: Sequence[Leg], r_ticks: Optional[float]) -> List[Dict[str, Any]]:
-        adjustments: List[Dict[str, Any]] = []
-        for entry in self.stop_adjustments_config:
-            if not isinstance(entry, Mapping):
-                continue
-            trigger_type = str(entry.get("trigger_type") or "target_id")
-            trigger_target_id = entry.get("trigger_target_id")
-            trigger_ticks = coerce_float(entry.get("trigger_ticks"))
-            action_type = str(entry.get("action_type") or "move_to_breakeven")
-            action_r = coerce_float(entry.get("action_r"))
-            if trigger_type == "r_multiple" and trigger_ticks in (None, 0):
-                continue
-            if trigger_type != "r_multiple" and not trigger_target_id:
-                continue
+    def _build_stop_adjustments(self, legs: Sequence[Leg], r_ticks: Optional[float]) -> List[RuntimeStopAdjustment]:
+        adjustments: List[RuntimeStopAdjustment] = []
+        leg_ids = {str(leg.leg_id or "") for leg in legs if leg.leg_id}
+        for rule in self.execution_plan.stop_adjustments:
+            trigger_target_id: Optional[str] = None
+            trigger_ticks = rule.trigger_ticks
+            if rule.trigger_type == "r_multiple":
+                if trigger_ticks in (None, 0):
+                    if rule.trigger_value in (None, 0) or r_ticks in (None, 0):
+                        continue
+                    trigger_ticks = float(rule.trigger_value) * float(r_ticks)
+            else:
+                trigger_target_id = str(rule.trigger_value or "").strip() or None
+                if trigger_target_id not in leg_ids:
+                    continue
             adjustments.append(
-                {
-                    "trigger_type": trigger_type,
-                    "trigger_target_id": trigger_target_id,
-                    "trigger_ticks": trigger_ticks,
-                    "action_type": action_type,
-                    "action_r": action_r,
-                }
+                RuntimeStopAdjustment(
+                    trigger_type=rule.trigger_type,
+                    trigger_target_id=trigger_target_id,
+                    trigger_ticks=trigger_ticks,
+                    action_type=rule.action_type,
+                    action_r=rule.action_value,
+                )
             )
         return adjustments
 
@@ -1255,7 +1220,8 @@ class LadderRiskEngine:
         breakeven_ticks: float,
         trailing_activation_ticks: Optional[float],
         trailing_distance_ticks: Optional[float],
-        runtime_stop_adjustments: List[Dict[str, Any]],
+        fixed_horizon_bars: Optional[int],
+        runtime_stop_adjustments: List[RuntimeStopAdjustment],
         base_currency: Optional[str],
         quote_currency: Optional[str],
         atr_at_entry: Optional[float],
@@ -1267,11 +1233,8 @@ class LadderRiskEngine:
         use_wallet_execution: bool,
         execution_profile: Optional[SeriesExecutionProfile],
     ) -> LadderPosition:
-        self.trailing_config = (
-            self.template.get("trailing_stop") if isinstance(self.template.get("trailing_stop"), dict) else {}
-        )
         self._last_tp_allocation = None
-        trailing_atr_multiple = float(self.trailing_config.get("atr_multiplier") or 0.0)
+        trailing_atr_multiple = float(self.execution_plan.trailing.atr_multiplier or 0.0)
 
         return LadderPosition(
             entry_time=candle.time,
@@ -1310,6 +1273,7 @@ class LadderRiskEngine:
             trailing_activation_ticks=trailing_activation_ticks,
             trailing_distance_ticks=trailing_distance_ticks,
             trailing_atr_multiple=trailing_atr_multiple,
+            fixed_horizon_bars=fixed_horizon_bars,
             pre_entry_context=pre_entry_context,
             stop_adjustments=runtime_stop_adjustments,
             trade_id=trade_id,
@@ -1548,11 +1512,10 @@ class LadderRiskEngine:
         }
 
     def _resolve_base_quote(self) -> Tuple[str, str]:
-        base = self.instrument.get("base_currency")
-        quote = self.instrument.get("quote_currency")
-        if self.execution_profile is not None:
-            base = base or self.execution_profile.instrument.base_currency
-            quote = quote or self.execution_profile.instrument.quote_currency
+        base = self.execution_profile.instrument.base_currency if self.execution_profile is not None else None
+        quote = self.execution_profile.instrument.quote_currency if self.execution_profile is not None else None
+        base = base or self.instrument.get("base_currency")
+        quote = quote or self.instrument.get("quote_currency")
         symbol = str(self.instrument.get("symbol") or "")
         if not base or not quote:
             context = self.runtime_log_context(
@@ -1784,7 +1747,7 @@ class LadderRiskEngine:
         self,
         candle: Candle,
         *,
-        same_bar_policy: SameBarResolutionPolicy | str = SameBarResolutionPolicy.TARGET_FIRST,
+        same_bar_policy: SameBarResolutionPolicy | str = SameBarResolutionPolicy.PESSIMISTIC_STOP,
     ) -> List[Dict[str, Any]]:
         previous_signature = dict(self._trade_material_signature_map)
         if self.active_trade is None:
@@ -1923,7 +1886,9 @@ class LadderRiskEngine:
             self._trade_material_value(getattr(trade, "stop_price", None)),
             bool(getattr(trade, "moved_to_breakeven", False)),
             bool(getattr(trade, "trailing_active", False)),
+            self._trade_material_value(getattr(trade, "fixed_horizon_bars", None)),
             isoformat(getattr(trade, "closed_at", None)),
+            str(getattr(trade, "close_reason", "") or ""),
             self._trade_material_value(getattr(trade, "gross_pnl", None)),
             self._trade_material_value(getattr(trade, "fees_paid", None)),
             self._trade_material_value(getattr(trade, "net_pnl", None)),

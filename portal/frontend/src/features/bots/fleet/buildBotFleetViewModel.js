@@ -3,7 +3,7 @@ import {
   formatRelativeTime,
   getBotCardDisplayState,
 } from '../state/botRuntimeStatus.js'
-import { symbolsFromInstrumentSlots } from '../../../utils/instrumentSymbols.js'
+import { symbolsFromStrategy } from '../../../utils/instrumentSymbols.js'
 import { mapRunToViewModel } from '../viewModels/runViewModel.js'
 import { formatExecutionModeLabel, resolveExecutionMode } from '../executionMode.js'
 import { getBotPerformanceTrace } from '../../../components/bots/botPerformanceTrace.js'
@@ -57,7 +57,7 @@ function strategyFor(bot, strategyLookup) {
 
 function symbolsFor(bot, strategyLookup) {
   const strategy = strategyFor(bot, strategyLookup)
-  return strategy ? symbolsFromInstrumentSlots(strategy.instrument_slots) : []
+  return strategy ? symbolsFromStrategy(strategy) : []
 }
 
 function formatTimeframeLabel(value) {
@@ -148,7 +148,7 @@ function buildHeaderMetaText(strategyLabel, variantLabel, runMode, executionLabe
 }
 
 function describeActivity(display, bot, nowEpochMs) {
-  const lastEventAt = display?.lifecycle?.updatedAt || bot?.updated_at || bot?.last_run_at || null
+  const lastEventAt = display?.lifecycle?.updatedAt || bot?.updated_at || null
   const startedAt = display?.startedAt || null
   const endedAt = display?.endedAt || null
   const statusKey = display?.statusKey || 'stopped'
@@ -241,7 +241,7 @@ function formatDuration(startedAt, endedAt = null, nowEpochMs = Date.now()) {
   return `${seconds}s`
 }
 
-function describeHeartbeat(state) {
+function describeLease(state) {
   const normalized = String(state || '').trim().toLowerCase()
   if (!normalized || normalized === 'inactive') return 'Offline'
   if (normalized === 'fresh') return 'Fresh'
@@ -296,8 +296,6 @@ function totalTrades(bot) {
     readNestedNumber(bot, [['runtime', 'total_trades']]),
     readNestedNumber(bot, [['runtime', 'stats', 'total_trades']]),
     readNestedNumber(bot, [['run', 'summary', 'total_trades']]),
-    readNestedNumber(bot, [['last_stats', 'total_trades']]),
-    readNestedNumber(bot, [['last_run_artifact', 'summary', 'total_trades']]),
   ])
 }
 
@@ -305,9 +303,6 @@ function netPnlValue(bot) {
   return firstFiniteNumber([
     readNestedNumber(bot, [['runtime', 'stats', 'net_pnl']]),
     readNestedNumber(bot, [['run', 'summary', 'net_pnl']]),
-    readNestedNumber(bot, [['last_stats', 'net_pnl']]),
-    readNestedNumber(bot, [['last_run_artifact', 'summary', 'net_pnl']]),
-    readNestedNumber(bot, [['last_run_artifact', 'stats', 'net_pnl']]),
   ])
 }
 
@@ -327,10 +322,10 @@ function actionHint(display) {
   return 'Ready to start.'
 }
 
-function durationFor(display, bot, nowEpochMs) {
+function durationFor(display, nowEpochMs) {
   const statusKey = display?.statusKey || 'stopped'
-  const startedAt = bot?.last_run_artifact?.started_at || display?.startedAt || null
-  const endedAt = bot?.last_run_artifact?.ended_at || display?.endedAt || null
+  const startedAt = display?.startedAt || null
+  const endedAt = display?.endedAt || null
 
   if (['starting', 'running', 'degraded', 'paused'].includes(statusKey)) {
     return formatDuration(startedAt, null, nowEpochMs)
@@ -406,7 +401,7 @@ export function buildBotCardViewModel(
   const runMode = buildRunModeBadge(bot?.run_type)
   const executionLabel = describeExecution(bot)
   const headerMetaText = buildHeaderMetaText(strategyLabel, strategyVariantLabel, runMode, executionLabel, timeframe)
-  const durationLabel = durationFor(display, bot, nowEpochMs)
+  const durationLabel = durationFor(display, nowEpochMs)
   const baseMetadataItems = [
     buildMetadataItem({
       key: 'bot-id',
@@ -517,7 +512,7 @@ export function buildBotCardViewModel(
     operationalRows: [
       { key: 'mode', label: 'Mode', value: runMode.label },
       { key: 'phase', label: 'Phase', value: phaseLabel },
-      { key: 'heartbeat', label: 'Heartbeat', value: describeHeartbeat(display?.lifecycle?.heartbeatState) },
+      { key: 'lease', label: 'Lease', value: describeLease(display?.lifecycle?.leaseState) },
       { key: 'container', label: 'Container', value: describeContainer(display?.containerStatus) },
       { key: 'workers', label: 'Workers', value: workerUsage, mono: true },
     ],
@@ -563,7 +558,7 @@ export function buildBotFleetSummary(
     else if (display.statusKey === 'running' || display.statusKey === 'degraded' || display.statusKey === 'paused') summary.live += 1
     else summary.idle += 1
 
-    const candidate = display?.lifecycle?.updatedAt || bot?.updated_at || bot?.last_run_at || null
+    const candidate = display?.lifecycle?.updatedAt || bot?.updated_at || null
     const candidateEpochMs = Date.parse(String(candidate || ''))
     if (Number.isFinite(candidateEpochMs) && candidateEpochMs >= lastUpdatedEpochMs) {
       lastUpdatedEpochMs = candidateEpochMs

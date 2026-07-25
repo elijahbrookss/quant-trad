@@ -184,6 +184,7 @@ def _ci_profile_markers_for_path(path: str) -> set[str]:
 
     if (
         name.startswith("test_strategy_")
+        or name.startswith("test_research_")
         or name.startswith("test_indicator_")
         or name.startswith("test_bot_config_")
         or name.startswith("test_bot_run_context_")
@@ -244,6 +245,7 @@ def _is_pr_profile_test(path: str, name: str) -> bool:
         or name.startswith("test_provider_")
         or name.startswith("test_report_data")
         or name.startswith("test_report_execution_mode_contract")
+        or name.startswith("test_research_")
         or name.startswith("test_run_artifact")
         or name.startswith("test_run_research_dataset")
         or name.startswith("test_run_storage_json_safety")

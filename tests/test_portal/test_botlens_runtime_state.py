@@ -300,6 +300,50 @@ def test_build_run_health_state_coalesces_repeated_warning_conditions() -> None:
     assert second.highest_warning_severity == "warning"
 
 
+def test_run_health_warning_summary_groups_counts_by_symbol_and_condition() -> None:
+    state = _build_run_health_state(
+        empty_run_health_state(),
+        status="running",
+        warning_count=2,
+        warnings=[
+            {
+                "warning_id": "indicator_budget::typed_regime::instrument-btc|1m",
+                "warning_type": "indicator_budget",
+                "indicator_id": "typed_regime",
+                "symbol_key": "instrument-btc|1m",
+                "symbol": "BTC",
+                "timeframe": "1m",
+                "message": "Execution budget exceeded.",
+                "count": 3,
+            },
+            {
+                "warning_id": "indicator_budget::typed_regime::instrument-eth|1m",
+                "warning_type": "indicator_budget",
+                "indicator_id": "typed_regime",
+                "symbol_key": "instrument-eth|1m",
+                "symbol": "ETH",
+                "timeframe": "1m",
+                "message": "Execution budget exceeded.",
+                "count": 2,
+            },
+        ],
+        last_event_at="2026-01-01T00:00:00Z",
+    )
+
+    summary = state.to_dict()["warning_summary"]
+    assert summary["count"] == 2
+    assert summary["event_count"] == 5
+    assert summary["by_symbol"]["instrument-btc|1m"]["count"] == 1
+    assert summary["by_symbol"]["instrument-btc|1m"]["event_count"] == 3
+    assert summary["by_symbol"]["instrument-eth|1m"]["count"] == 1
+    assert summary["groups"][0]["warning_type"] == "indicator_budget"
+    assert summary["groups"][0]["count"] == 2
+    assert [entry["symbol_key"] for entry in summary["groups"][0]["symbols"]] == [
+        "instrument-btc|1m",
+        "instrument-eth|1m",
+    ]
+
+
 def test_read_run_projection_snapshot_preserves_compact_health_warning_summary_fields() -> None:
     snapshot = read_run_projection_snapshot(
         {

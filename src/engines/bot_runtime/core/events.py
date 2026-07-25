@@ -71,7 +71,7 @@ class StopFillEvent(TypedDict, total=False):
 
 
 class TerminalFillEvent(TypedDict, total=False):
-    type: Literal["backtest_end", "terminal_liquidation"]
+    type: Literal["backtest_end", "terminal_liquidation", "fixed_horizon"]
     trade_id: str
     price: float
     time: str

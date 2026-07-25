@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -39,7 +40,10 @@ from portal.backend.service.bots.botlens_domain_events import (
     build_botlens_domain_events_from_lifecycle,
     build_botlens_domain_events_from_fact_batch,
 )
-from portal.backend.service.bots.botlens_projection_batches import projection_batch_from_payload
+from portal.backend.service.bots.botlens_projection_batches import (
+    projection_batch_from_payload,
+    runtime_event_rows_from_batch,
+)
 from portal.backend.service.bots.botlens_mailbox import (
     BootstrapSlot,
     FanoutEnvelope,
@@ -63,7 +67,7 @@ from portal.backend.service.bots.botlens_state import (
 )
 from portal.backend.service.bots.botlens_projector_registry import ProjectorRegistry
 from portal.backend.service.bots.botlens_intake_router import IntakeRouter
-import portal.backend.service.bots.botlens_symbol_projector as sym_mod
+import portal.backend.service.bots.botlens_intake_router as intake_mod
 import portal.backend.service.bots.botlens_run_projector as run_mod
 
 
@@ -101,6 +105,25 @@ def _queue_owner(*, key: str, depth_metric: str, utilization_metric: str, oldest
         oldest_age_metric=oldest_age_metric,
         labels=labels,
     )
+
+
+def _iso_candle_time(candle_time: int) -> str:
+    value = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=int(candle_time))
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _epoch_candle_time(candle_time: int) -> int:
+    value = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=int(candle_time))
+    return int(value.timestamp())
+
+
+def _intake_payload(payload: dict) -> dict:
+    payload = json.loads(json.dumps(payload))
+    for fact in payload.get("facts") or []:
+        candle = fact.get("candle") if isinstance(fact, dict) else None
+        if isinstance(candle, dict) and isinstance(candle.get("time"), int):
+            candle["time"] = _iso_candle_time(int(candle["time"]))
+    return payload
 
 
 def _facts_batch(
@@ -145,7 +168,17 @@ def _facts_batch(
         {
             "fact_type": "trade_opened",
             "series_key": symbol_key,
-            "trade": {"trade_id": "trade-1", "symbol_key": symbol_key, "symbol": symbol},
+            "trade": {
+                "trade_id": "trade-1",
+                "symbol_key": symbol_key,
+                "symbol": symbol,
+                "status": "open",
+                "direction": "long",
+                "opened_at": _iso_candle_time(candle_time),
+                "bar_time": _iso_candle_time(candle_time),
+                "position_commit_seq": 1,
+                "position_commit_seq_status": "position_scoped",
+            },
         },
     ]
     if isinstance(overlay_delta, dict):
@@ -213,7 +246,7 @@ def _projection_batch(payload: dict) -> Any:
     for fact in payload.get("facts") or []:
         candle = fact.get("candle") if isinstance(fact, dict) else None
         if isinstance(candle, dict) and isinstance(candle.get("time"), int):
-            candle["time"] = f"2026-01-01T00:{int(candle['time']):02d}:00Z"
+            candle["time"] = _iso_candle_time(int(candle["time"]))
         trade = fact.get("trade") if isinstance(fact, dict) else None
         if isinstance(trade, dict) and not (trade.get("entry_time") or trade.get("opened_at")):
             trade["entry_time"] = str(payload.get("event_time") or "2026-01-01T00:00:00Z")
@@ -309,15 +342,12 @@ async def test_projectors_use_shared_botlens_domain_event_type_helper(
     symbol_rows: list[dict] = []
     run_rows: list[dict] = []
 
-    monkeypatch.setattr(
-        sym_mod,
-        "record_bot_runtime_events_batch",
-        lambda rows: symbol_rows.extend([dict(row) for row in rows]) or len(rows),
-    )
+    symbol_batch = _projection_batch(_bootstrap_payload())
+    symbol_rows.extend(runtime_event_rows_from_batch(batch=symbol_batch))
 
     symbol_projector, *_ = _make_symbol_projector()
     await symbol_projector._load_initial_state()
-    await symbol_projector._apply_bootstrap(_bootstrap_payload())
+    await symbol_projector._apply_bootstrap(symbol_batch)
 
     assert symbol_rows
     assert all(
@@ -325,40 +355,9 @@ async def test_projectors_use_shared_botlens_domain_event_type_helper(
         for row in symbol_rows
     )
 
-    monkeypatch.setattr(
-        run_mod,
-        "record_bot_runtime_events_batch",
-        lambda rows: run_rows.extend([dict(row) for row in rows]) or len(rows),
-    )
-
-    async def _fake_evict(_run_id: str) -> None:
-        return None
-
-    run_projector = RunProjector(
-        run_id="run-1",
-        bot_id="bot-1",
-        mailbox=RunMailbox(run_id="run-1", bot_id="bot-1"),
-        fanout_channel=asyncio.Queue(),
-        fanout_queue_metrics=_queue_owner(
-            key="fanout_channel:run-1",
-            depth_metric="fanout_queue_depth",
-            utilization_metric="fanout_queue_utilization",
-            oldest_age_metric="fanout_queue_oldest_age_ms",
-            bot_id="bot-1",
-            run_id="run-1",
-            queue_name="fanout_channel",
-        ),
-        on_evict=_fake_evict,
-    )
-    await run_projector._persist_lifecycle_event(
-        lifecycle={
-            "phase": "live",
-            "status": "running",
-            "owner": "runtime",
-            "checkpoint_at": "2026-01-01T00:00:00Z",
-        },
-        lifecycle_seq=1,
-    )
+    run_rows.extend(runtime_event_rows_from_batch(
+        batch=_run_lifecycle_batch(phase="live", status="running", seq=1)
+    ))
 
     assert run_rows
     assert all(
@@ -406,7 +405,7 @@ class TestSymbolMailbox:
     def test_enqueue_facts_queues_payload(self) -> None:
         async def scenario() -> None:
             mailbox = SymbolMailbox(run_id="run-1", bot_id="bot-1", symbol_key="btc|1m")
-            assert mailbox.enqueue_facts({"seq": 1})
+            assert mailbox.enqueue_batch(_projection_batch(_facts_payload(run_seq=1)))
             assert mailbox.fact_queue.qsize() == 1
         asyncio.run(scenario())
 
@@ -429,80 +428,62 @@ class TestSymbolMailbox:
 class TestSymbolProjectorBootstrap:
     def test_bootstrap_resets_state_and_applies_facts(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            events: list = []
-            monkeypatch.setattr(
-                sym_mod,
-                "record_bot_runtime_events_batch",
-                lambda rows: events.extend([dict(row) for row in rows]) or len(rows),
-            )
-
             projector, notifications, fanout = _make_symbol_projector()
             await projector._load_initial_state()
-            await projector._apply_bootstrap(_bootstrap_payload(candle_time=5, run_seq=10))
+            await projector._apply_bootstrap(_projection_batch(_bootstrap_payload(candle_time=5, run_seq=10)))
 
             snapshot = projector.get_snapshot()
-            assert snapshot.candles.candles[-1]["time"] == 5
+            assert snapshot.candles.candles[-1]["time"] == _epoch_candle_time(5)
             assert snapshot.symbol_key == "instrument-btc|1m"
-            assert len(events) >= 2
-            assert {event["event_type"] for event in events} >= {
-                "botlens_domain.health_status_reported",
-                "botlens_domain.candle_observed",
-            }
+            assert not notifications.empty()
+            assert not fanout.empty()
 
         asyncio.run(scenario())
 
     def test_bootstrap_sets_session_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
-
             projector, *_ = _make_symbol_projector()
             await projector._load_initial_state()
-            await projector._apply_bootstrap(_bootstrap_payload(bridge_session_id="sess-A"))
+            await projector._apply_bootstrap(_projection_batch(_bootstrap_payload(bridge_session_id="sess-A")))
             assert projector._current_session_id == "sess-A"
 
         asyncio.run(scenario())
 
     def test_second_bootstrap_replaces_first_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
-
             projector, *_ = _make_symbol_projector()
             await projector._load_initial_state()
-            await projector._apply_bootstrap(_bootstrap_payload(candle_time=1, run_seq=1))
-            await projector._apply_bootstrap(_bootstrap_payload(candle_time=99, run_seq=50, bridge_session_id="sess-B"))
+            await projector._apply_bootstrap(_projection_batch(_bootstrap_payload(candle_time=1, run_seq=1)))
+            await projector._apply_bootstrap(_projection_batch(_bootstrap_payload(candle_time=99, run_seq=50, bridge_session_id="sess-B")))
 
             # State must reflect the second bootstrap, not the first.
             snapshot = projector.get_snapshot()
-            assert snapshot.candles.candles[-1]["time"] == 99
+            assert snapshot.candles.candles[-1]["time"] == _epoch_candle_time(99)
             assert projector._current_session_id == "sess-B"
 
         asyncio.run(scenario())
 
     def test_bootstrap_emits_typed_deltas_to_fanout_channel(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
-
             projector, _, fanout = _make_symbol_projector()
             await projector._load_initial_state()
-            await projector._apply_bootstrap(_bootstrap_payload(candle_time=1))
+            await projector._apply_bootstrap(_projection_batch(_bootstrap_payload(candle_time=1)))
 
             assert not fanout.empty()
             item = fanout.get_nowait()
             assert isinstance(item, FanoutEnvelope)
             assert isinstance(item.item, FanoutSymbolDeltaBatch)
-            delta_types = {d.event.delta_type for d in item.item.deltas}
-            assert "botlens_symbol_candle_delta" in delta_types
-            assert "botlens_symbol_runtime_delta" in delta_types
+            delta_types = {type(delta).__name__ for delta in item.item.deltas}
+            assert "CandleDelta" in delta_types
+            assert "TradeDelta" in delta_types
 
         asyncio.run(scenario())
 
     def test_bootstrap_notifies_run_projector(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
-
             projector, notifications, _ = _make_symbol_projector()
             await projector._load_initial_state()
-            await projector._apply_bootstrap(_bootstrap_payload(candle_time=1))
+            await projector._apply_bootstrap(_projection_batch(_bootstrap_payload(candle_time=1)))
 
             assert not notifications.empty()
             notification = notifications.get_nowait()
@@ -516,96 +497,98 @@ class TestSymbolProjectorBootstrap:
 class TestSymbolProjectorFacts:
     def test_facts_advance_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
-
             projector, *_ = _make_symbol_projector()
             await projector._load_initial_state()
-            await projector._apply_bootstrap(_bootstrap_payload(candle_time=1, run_seq=1))
-            await projector._apply_facts(_facts_payload(candle_time=2, run_seq=2))
+            await projector._apply_bootstrap(_projection_batch(_bootstrap_payload(candle_time=1, run_seq=1)))
+            await projector._apply_facts(_projection_batch(_facts_payload(candle_time=2, run_seq=2)))
 
             snapshot = projector.get_snapshot()
-            assert snapshot.candles.candles[-1]["time"] == 2
+            assert snapshot.candles.candles[-1]["time"] == _epoch_candle_time(2)
 
         asyncio.run(scenario())
 
     def test_stale_session_facts_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            events: list = []
-            monkeypatch.setattr(
-                sym_mod,
-                "record_bot_runtime_events_batch",
-                lambda rows: events.extend([dict(row) for row in rows]) or len(rows),
-            )
-
-            projector, *_ = _make_symbol_projector()
+            projector, _, fanout = _make_symbol_projector()
             await projector._load_initial_state()
             await projector._apply_bootstrap(
-                _bootstrap_payload(candle_time=1, run_seq=1, bridge_session_id="session-A")
+                _projection_batch(_bootstrap_payload(candle_time=1, run_seq=1, bridge_session_id="session-A"))
             )
-            events.clear()
+            while not fanout.empty():
+                fanout.get_nowait()
 
             # Facts from old session must be rejected.
             await projector._apply_facts(
-                _facts_payload(candle_time=99, run_seq=99, bridge_session_id="session-OLD")
+                _projection_batch(_facts_payload(candle_time=99, run_seq=99, bridge_session_id="session-OLD"))
             )
-            assert not events
+            assert fanout.empty()
             snapshot = projector.get_snapshot()
-            assert snapshot.candles.candles[-1]["time"] == 1
+            assert snapshot.candles.candles[-1]["time"] == _epoch_candle_time(1)
 
         asyncio.run(scenario())
 
     def test_same_session_facts_accepted_after_bootstrap(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            events: list = []
-            monkeypatch.setattr(
-                sym_mod,
-                "record_bot_runtime_events_batch",
-                lambda rows: events.extend([dict(row) for row in rows]) or len(rows),
-            )
-
             projector, *_ = _make_symbol_projector()
             await projector._load_initial_state()
             await projector._apply_bootstrap(
-                _bootstrap_payload(candle_time=1, run_seq=1, bridge_session_id="session-B")
+                _projection_batch(_bootstrap_payload(candle_time=1, run_seq=1, bridge_session_id="session-B"))
             )
-            events.clear()
 
             await projector._apply_facts(
-                _facts_payload(candle_time=5, run_seq=2, bridge_session_id="session-B")
+                _projection_batch(_facts_payload(candle_time=5, run_seq=2, bridge_session_id="session-B"))
             )
-            assert events
             snapshot = projector.get_snapshot()
-            assert snapshot.candles.candles[-1]["time"] == 5
+            assert snapshot.candles.candles[-1]["time"] == _epoch_candle_time(5)
 
         asyncio.run(scenario())
 
     def test_new_session_facts_accepted_after_replacement_bootstrap(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def scenario() -> None:
-            events: list = []
-            monkeypatch.setattr(
-                sym_mod,
-                "record_bot_runtime_events_batch",
-                lambda rows: events.extend([dict(row) for row in rows]) or len(rows),
-            )
-
             projector, *_ = _make_symbol_projector()
             await projector._load_initial_state()
             await projector._apply_bootstrap(
-                _bootstrap_payload(candle_time=1, run_seq=1, bridge_session_id="session-A")
+                _projection_batch(_bootstrap_payload(candle_time=1, run_seq=1, bridge_session_id="session-A"))
             )
             await projector._apply_bootstrap(
-                _bootstrap_payload(candle_time=10, run_seq=10, bridge_session_id="session-B")
+                _projection_batch(_bootstrap_payload(candle_time=10, run_seq=10, bridge_session_id="session-B"))
             )
-            events.clear()
 
             await projector._apply_facts(
-                _facts_payload(candle_time=11, run_seq=11, bridge_session_id="session-B")
+                _projection_batch(_facts_payload(candle_time=11, run_seq=11, bridge_session_id="session-B"))
             )
 
-            assert events
             snapshot = projector.get_snapshot()
-            assert snapshot.candles.candles[-1]["time"] == 11
+            assert snapshot.candles.candles[-1]["time"] == _epoch_candle_time(11)
             assert projector._current_session_id == "session-B"
+
+        asyncio.run(scenario())
+
+    def test_fact_drain_applies_multiple_batches_with_one_downstream_emit(self) -> None:
+        async def scenario() -> None:
+            projector, notifications, fanout = _make_symbol_projector()
+            await projector._load_initial_state()
+            await projector._apply_bootstrap(_projection_batch(_bootstrap_payload(candle_time=1, run_seq=1)))
+            while not notifications.empty():
+                notifications.get_nowait()
+            while not fanout.empty():
+                fanout.get_nowait()
+
+            await projector._apply_fact_batches(
+                (
+                    _projection_batch(_facts_payload(candle_time=2, run_seq=2)),
+                    _projection_batch(_facts_payload(candle_time=3, run_seq=3)),
+                )
+            )
+
+            snapshot = projector.get_snapshot()
+            assert snapshot.candles.candles[-1]["time"] == _epoch_candle_time(3)
+            assert notifications.qsize() == 1
+            assert fanout.qsize() == 1
+            fanout_item = fanout.get_nowait()
+            assert isinstance(fanout_item, FanoutEnvelope)
+            assert isinstance(fanout_item.item, FanoutSymbolDeltaBatch)
+            assert sum(1 for delta in fanout_item.item.deltas if type(delta).__name__ == "CandleDelta") == 2
 
         asyncio.run(scenario())
 
@@ -641,9 +624,13 @@ class TestSymbolProjectorDrainStale:
 
             # Put two stale + two fresh facts in the queue.
             for seq in range(1, 3):
-                mailbox.fact_queue.put_nowait(QueueEnvelope(payload={"bridge_session_id": "old-session", "seq": seq}))
+                mailbox.fact_queue.put_nowait(QueueEnvelope(payload=_projection_batch(
+                    _facts_payload(bridge_session_id="old-session", run_seq=seq)
+                )))
             for seq in range(3, 5):
-                mailbox.fact_queue.put_nowait(QueueEnvelope(payload={"bridge_session_id": "new-session", "seq": seq}))
+                mailbox.fact_queue.put_nowait(QueueEnvelope(payload=_projection_batch(
+                    _facts_payload(bridge_session_id="new-session", run_seq=seq)
+                )))
 
             drained = projector._drain_stale_session_batches("new-session")
             assert drained == 2
@@ -651,7 +638,7 @@ class TestSymbolProjectorDrainStale:
             remaining = []
             while not mailbox.fact_queue.empty():
                 remaining.append(mailbox.fact_queue.get_nowait())
-            assert all(r.payload["bridge_session_id"] == "new-session" for r in remaining)
+            assert all(r.payload.bridge_session_id == "new-session" for r in remaining)
 
         asyncio.run(scenario())
 
@@ -1018,7 +1005,7 @@ class TestIntakeRouter:
             registry = ProjectorRegistry(run_stream=run_stream)
             router = IntakeRouter(registry=registry)
 
-            payload = _bootstrap_payload()
+            payload = _intake_payload(_bootstrap_payload())
             await router.route(payload)
 
             mailbox = await registry.ensure_symbol(
@@ -1035,7 +1022,7 @@ class TestIntakeRouter:
             registry = ProjectorRegistry(run_stream=run_stream)
             router = IntakeRouter(registry=registry)
 
-            payload = _facts_payload()
+            payload = _intake_payload(_facts_payload())
             await router.route(payload)
 
             mailbox = await registry.ensure_symbol(
@@ -1058,11 +1045,12 @@ class TestIntakeRouter:
                 "run_id": "run-1",
                 "phase": "live",
                 "status": "running",
+                "checkpoint_at": "2026-01-01T00:01:00Z",
             }
             await router.route(payload)
 
             mailbox = await registry.ensure_run(run_id="run-1", bot_id="bot-1")
-            assert mailbox.lifecycle_channel.qsize() == 1
+            assert mailbox.lifecycle_queue.qsize() == 1
 
         asyncio.run(scenario())
 
@@ -1102,24 +1090,18 @@ class TestBootstrapSupersession:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
-
             projector, _, _ = _make_symbol_projector()
             await projector._load_initial_state()
 
             # Simulate: queue has 3 stale + 2 fresh facts.
             for i in range(3):
-                projector._mailbox.fact_queue.put_nowait(QueueEnvelope(payload={
-                    "bridge_session_id": "old-session",
-                    "facts": [],
-                    "run_seq": i,
-                }))
+                projector._mailbox.fact_queue.put_nowait(QueueEnvelope(payload=_projection_batch(
+                    _facts_payload(bridge_session_id="old-session", run_seq=i)
+                )))
             for i in range(2):
-                projector._mailbox.fact_queue.put_nowait(QueueEnvelope(payload={
-                    "bridge_session_id": "new-session",
-                    "facts": [],
-                    "run_seq": 100 + i,
-                }))
+                projector._mailbox.fact_queue.put_nowait(QueueEnvelope(payload=_projection_batch(
+                    _facts_payload(bridge_session_id="new-session", run_seq=100 + i)
+                )))
 
             drained = projector._drain_stale_session_batches("new-session")
             assert drained == 3
@@ -1138,8 +1120,6 @@ class TestFanoutDecoupling:
     ) -> None:
         """Projection must put_nowait to fanout, never awaiting delivery."""
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
-
             fanout: asyncio.Queue = asyncio.Queue(maxsize=100)
             mailbox = SymbolMailbox(run_id="run-1", bot_id="bot-1", symbol_key="instrument-btc|1m")
             projector = SymbolProjector(
@@ -1167,7 +1147,7 @@ class TestFanoutDecoupling:
                 ),
             )
             await projector._load_initial_state()
-            await projector._apply_bootstrap(_bootstrap_payload(candle_time=1))
+            await projector._apply_bootstrap(_projection_batch(_bootstrap_payload(candle_time=1)))
 
             # Fanout item was produced without blocking on delivery.
             assert not fanout.empty()
@@ -1182,8 +1162,6 @@ class TestFanoutDecoupling:
     ) -> None:
         """When fanout channel is full, projection must continue (delta dropped, not blocked)."""
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
-
             # Fill fanout channel to capacity.
             fanout: asyncio.Queue = asyncio.Queue(maxsize=1)
             fanout.put_nowait({"sentinel": True})  # fills it
@@ -1216,7 +1194,7 @@ class TestFanoutDecoupling:
             await projector._load_initial_state()
 
             # Should not raise, even though fanout is full.
-            await projector._apply_bootstrap(_bootstrap_payload(candle_time=1))
+            await projector._apply_bootstrap(_projection_batch(_bootstrap_payload(candle_time=1)))
             # Projection completed. The full fanout just logged a warning and moved on.
 
         asyncio.run(scenario())
@@ -1233,9 +1211,9 @@ class TestHubIntegration:
         async def scenario() -> None:
             events: list = []
             monkeypatch.setattr(
-                sym_mod,
+                intake_mod,
                 "record_bot_runtime_events_batch",
-                lambda rows: events.extend([dict(row) for row in rows]) or len(rows),
+                lambda rows, **_kwargs: events.extend([dict(row) for row in rows]) or len(rows),
             )
 
             from portal.backend.service.bots.telemetry_stream import BotTelemetryHub
@@ -1245,8 +1223,8 @@ class TestHubIntegration:
 
             await hub.add_run_viewer(run_id="run-1", ws=ws, selected_symbol_key="instrument-btc|1m")
 
-            await hub.ingest(_bootstrap_payload(candle_time=1, run_seq=1))
-            await hub.ingest(_facts_payload(candle_time=2, run_seq=2))
+            await hub.ingest(_intake_payload(_bootstrap_payload(candle_time=1, run_seq=1)))
+            await hub.ingest(_intake_payload(_facts_payload(candle_time=2, run_seq=2)))
 
             # Give background tasks and thread pool operations time to complete.
             # asyncio.sleep(0) yields to other tasks but doesn't wait for threads;
@@ -1256,7 +1234,7 @@ class TestHubIntegration:
             symbol_snapshot = hub.get_symbol_snapshot(run_id="run-1", symbol_key="instrument-btc|1m")
             run_snapshot = hub.get_run_snapshot(run_id="run-1")
             assert symbol_snapshot is not None
-            assert symbol_snapshot.candles.candles[-1]["time"] == 2
+            assert symbol_snapshot.candles.candles[-1]["time"] == _epoch_candle_time(2)
             assert run_snapshot is not None
             assert "instrument-btc|1m" in run_snapshot.symbol_catalog.entries
             assert events
@@ -1271,24 +1249,24 @@ class TestHubIntegration:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
+            monkeypatch.setattr(intake_mod, "record_bot_runtime_events_batch", lambda rows, **_kwargs: len(rows))
 
             from portal.backend.service.bots.telemetry_stream import BotTelemetryHub
             hub = BotTelemetryHub()
             ws = FakeWebSocket()
 
             await hub.add_run_viewer(run_id="run-1", ws=ws, selected_symbol_key="instrument-btc|1m")
-            await hub.ingest(_bootstrap_payload(candle_time=1, run_seq=1))
-            await hub.ingest(_facts_payload(
+            await hub.ingest(_intake_payload(_bootstrap_payload(candle_time=1, run_seq=1)))
+            await hub.ingest(_intake_payload(_facts_payload(
                 candle_time=2, run_seq=2,
                 log_entries=[{"id": "log-1", "message": "test"}],
-            ))
+            )))
 
             await asyncio.sleep(0.15)
 
             message_types = {m["type"] for m in ws.messages}
             assert "botlens_symbol_candle_delta" in message_types
-            assert "botlens_symbol_runtime_delta" in message_types
+            assert "botlens_symbol_diagnostic_delta" in message_types
 
         asyncio.run(scenario())
 
@@ -1296,13 +1274,13 @@ class TestHubIntegration:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
+            monkeypatch.setattr(intake_mod, "record_bot_runtime_events_batch", lambda rows, **_kwargs: len(rows))
 
             from portal.backend.service.bots.telemetry_stream import BotTelemetryHub
             hub = BotTelemetryHub()
 
-            await hub.ingest(_bootstrap_payload(run_id="run-A", candle_time=10, run_seq=100))
-            await hub.ingest(_bootstrap_payload(run_id="run-B", candle_time=20, run_seq=200))
+            await hub.ingest(_intake_payload(_bootstrap_payload(run_id="run-A", candle_time=10, run_seq=100)))
+            await hub.ingest(_intake_payload(_bootstrap_payload(run_id="run-B", candle_time=20, run_seq=200)))
 
             await asyncio.sleep(0.15)
 
@@ -1310,8 +1288,8 @@ class TestHubIntegration:
             run_b_snapshot = hub.get_symbol_snapshot(run_id="run-B", symbol_key="instrument-btc|1m")
             assert run_a_snapshot is not None
             assert run_b_snapshot is not None
-            assert run_a_snapshot.candles.candles[-1]["time"] == 10
-            assert run_b_snapshot.candles.candles[-1]["time"] == 20
+            assert run_a_snapshot.candles.candles[-1]["time"] == _epoch_candle_time(10)
+            assert run_b_snapshot.candles.candles[-1]["time"] == _epoch_candle_time(20)
 
         asyncio.run(scenario())
 
@@ -1320,7 +1298,7 @@ class TestHubIntegration:
     ) -> None:
         """Multiple bootstraps for same symbol: only latest state is canonical."""
         async def scenario() -> None:
-            monkeypatch.setattr(sym_mod, "record_bot_runtime_events_batch", lambda rows: len(rows))
+            monkeypatch.setattr(intake_mod, "record_bot_runtime_events_batch", lambda rows, **_kwargs: len(rows))
 
             from portal.backend.service.bots.telemetry_stream import BotTelemetryHub
             hub = BotTelemetryHub()
@@ -1328,17 +1306,17 @@ class TestHubIntegration:
             # Three bootstraps in quick succession — only latest (candle=99) matters.
             for seq, candle_time in [(1, 10), (2, 20), (3, 99)]:
                 await hub.ingest(
-                    _bootstrap_payload(
+                    _intake_payload(_bootstrap_payload(
                         candle_time=candle_time,
                         run_seq=seq,
                         bridge_session_id=f"session-{seq}",
-                    )
+                    ))
                 )
 
             await asyncio.sleep(0.15)
 
             symbol_snapshot = hub.get_symbol_snapshot(run_id="run-1", symbol_key="instrument-btc|1m")
             assert symbol_snapshot is not None
-            assert symbol_snapshot.candles.candles[-1]["time"] == 99
+            assert symbol_snapshot.candles.candles[-1]["time"] == _epoch_candle_time(99)
 
         asyncio.run(scenario())

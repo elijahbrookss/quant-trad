@@ -3,14 +3,10 @@
 from ._shared import _coerce_float, _coerce_int, _parse_optional_timestamp, _utcnow
 from .atm import get_atm_template, load_atm_templates, upsert_atm_template
 from .bots import (
-    clear_bot_runner,
     delete_bot,
-    find_orphaned_bots,
     get_bot,
     load_bots,
     mark_bot_crashed,
-    update_bot_heartbeat,
-    update_bot_run_artifact,
     upsert_bot,
 )
 from .candles import get_candle_storage_summary, list_candle_closure_evidence, list_candles_for_series
@@ -18,6 +14,7 @@ from .lifecycle import (
     get_bot_run_lifecycle,
     get_latest_bot_run_lifecycle,
     list_bot_run_lifecycle_events,
+    list_latest_bot_run_lifecycles,
     record_bot_run_lifecycle_checkpoint,
 )
 from .indicators import (
@@ -45,19 +42,24 @@ from .observability import (
 from .presets import delete_symbol_preset, list_symbol_presets, upsert_symbol_preset
 from .report_materializations import (
     claim_report_materialization_build,
+    compute_report_input_fingerprint,
     get_materialized_run_report,
     get_report_materialization_status,
+    list_report_materialization_statuses,
     mark_report_materialization_failed,
     reset_report_materialization,
     store_materialized_run_report,
 )
-from .runs import get_bot_run, list_bot_runs, upsert_bot_run
+from .runs import get_bot_run, list_bot_runs, list_bot_runs_by_ids, list_latest_bot_runs_by_bot_ids, upsert_bot_run
 from .run_leases import (
     BotRunLeaseConflict,
     BotRunLeaseLost,
     acquire_bot_run_lease,
     bot_run_lease_token_hash,
+    find_expired_bot_run_leases,
     get_bot_run_lease,
+    list_active_bot_run_leases,
+    list_bot_run_leases_by_run_ids,
     new_bot_run_lease_token,
     release_bot_run_lease,
     renew_bot_run_lease,
@@ -107,7 +109,6 @@ __all__ = [
     "BotRunLeaseLost",
     "acquire_bot_run_lease",
     "bot_run_lease_token_hash",
-    "clear_bot_runner",
     "delete_bot",
     "delete_indicator",
     "delete_instrument",
@@ -120,7 +121,7 @@ __all__ = [
     "delete_symbol_preset",
     "ensure_default_strategy_variant",
     "find_instrument",
-    "find_orphaned_bots",
+    "find_expired_bot_run_leases",
     "get_atm_template",
     "get_bot",
     "get_bot_run_lifecycle",
@@ -137,14 +138,20 @@ __all__ = [
     "get_materialized_run_report",
     "get_report_materialization_status",
     "list_bot_run_lifecycle_events",
+    "list_bot_run_leases_by_run_ids",
     "list_bot_run_steps_for_run",
+    "list_bot_runs_by_ids",
     "list_bot_runs",
     "list_bot_runtime_events",
+    "list_active_bot_run_leases",
     "list_candles_for_series",
     "list_bot_trade_events_for_trades",
     "list_bot_trades_for_run",
     "list_observability_events",
     "list_observability_metric_rollups",
+    "list_latest_bot_run_lifecycles",
+    "list_latest_bot_runs_by_bot_ids",
+    "list_report_materialization_statuses",
     "list_strategy_variants",
     "list_strategy_instrument_links",
     "list_strategy_instrument_symbols",
@@ -162,6 +169,7 @@ __all__ = [
     "record_observability_events_batch",
     "record_observability_metric_rollups_batch",
     "claim_report_materialization_build",
+    "compute_report_input_fingerprint",
     "mark_report_materialization_failed",
     "reset_report_materialization",
     "record_bot_runtime_event",
@@ -172,8 +180,6 @@ __all__ = [
     "record_bot_trade",
     "record_bot_trade_event",
     "strategies_for_indicator",
-    "update_bot_heartbeat",
-    "update_bot_run_artifact",
     "update_bot_runtime_status",
     "upsert_atm_template",
     "upsert_bot",

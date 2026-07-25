@@ -311,6 +311,57 @@ def get_bot_run_lease(run_id: str) -> Optional[Dict[str, Any]]:
         return record.to_dict() if record else None
 
 
+def list_bot_run_leases_by_run_ids(run_ids: list[str]) -> Dict[str, Dict[str, Any]]:
+    normalized = [str(run_id or "").strip() for run_id in run_ids]
+    wanted = [run_id for run_id in dict.fromkeys(normalized) if run_id]
+    if not wanted or not db.available:
+        return {}
+    with db.session() as session:
+        rows = (
+            session.execute(select(BotRunLeaseRecord).where(BotRunLeaseRecord.run_id.in_(wanted)))
+            .scalars()
+            .all()
+        )
+        return {str(row.run_id): row.to_dict() for row in rows}
+
+
+def list_active_bot_run_leases(*, runner_id: Optional[str] = None) -> list[Dict[str, Any]]:
+    if not db.available:
+        return []
+    normalized_runner_id = str(runner_id or "").strip()
+    with db.session() as session:
+        query = select(BotRunLeaseRecord).where(
+            BotRunLeaseRecord.status == _ACTIVE_STATUS,
+            BotRunLeaseRecord.released_at.is_(None),
+        )
+        if normalized_runner_id:
+            query = query.where(BotRunLeaseRecord.runner_id == normalized_runner_id)
+        rows = session.execute(query).scalars().all()
+        return [row.to_dict() for row in rows]
+
+
+def find_expired_bot_run_leases(
+    *,
+    stale_threshold_seconds: float = 0.0,
+    runner_id: Optional[str] = None,
+) -> list[Dict[str, Any]]:
+    if not db.available:
+        return []
+    threshold = max(0.0, float(stale_threshold_seconds or 0.0))
+    cutoff = _utcnow() - timedelta(seconds=threshold)
+    normalized_runner_id = str(runner_id or "").strip()
+    with db.session() as session:
+        query = select(BotRunLeaseRecord).where(
+            BotRunLeaseRecord.status == _ACTIVE_STATUS,
+            BotRunLeaseRecord.released_at.is_(None),
+            BotRunLeaseRecord.expires_at <= cutoff,
+        )
+        if normalized_runner_id:
+            query = query.where(BotRunLeaseRecord.runner_id == normalized_runner_id)
+        rows = session.execute(query).scalars().all()
+        return [row.to_dict() for row in rows]
+
+
 def run_lease_is_active(lease: Mapping[str, Any] | None, *, now: Any = None) -> bool:
     if not lease:
         return False
@@ -328,7 +379,10 @@ __all__ = [
     "BotRunLeaseLost",
     "acquire_bot_run_lease",
     "bot_run_lease_token_hash",
+    "find_expired_bot_run_leases",
     "get_bot_run_lease",
+    "list_active_bot_run_leases",
+    "list_bot_run_leases_by_run_ids",
     "new_bot_run_lease_token",
     "release_bot_run_lease",
     "renew_bot_run_lease",

@@ -7,17 +7,20 @@ from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
 
 from core.settings import env_is_set, env_value, get_settings
-from engines.bot_runtime.core.execution_profile import compile_runtime_profile_or_error
+from engines.bot_runtime.core.execution_profile import compile_series_execution_profile, normalize_execution_semantics
 from engines.bot_runtime.runtime.components.runtime_policy import ExecutionMode
 
 from .strategy_loader import StrategyLoader
 from .startup_validation import validate_wallet_config as normalize_wallet_config
 from .execution_behavior import execution_behavior_from_bot, normalize_execution_behavior
 from .market_data_stream_policy import normalize_market_data_stream_policy
+from .startup_lifecycle import is_active_run_state
 from ..market import instrument_service
 from ..storage.storage import (
     delete_bot,
+    get_bot as get_bot_record,
     get_atm_template,
+    get_latest_bot_run_lifecycle,
     get_strategy_variant,
     list_strategy_variants,
     load_bots,
@@ -27,8 +30,6 @@ from ..storage.storage import (
 from ..strategy_variant_resolution import EffectiveStrategyConfig, resolve_strategy_variant
 from risk import normalise_risk_config
 
-_DERIVATIVE_TYPES = {"perp", "perps", "swap", "future", "futures", "derivative", "derivatives"}
-_RUNTIME_ALLOWED_DERIVATIVE_TYPES = {"future", "futures", "perp", "perps"}
 _SETTINGS = get_settings()
 
 
@@ -82,7 +83,7 @@ class BotConfigService:
     def list_bots(self) -> List[Dict[str, object]]:
         bots = load_bots()
         for bot in bots:
-            bot["instrument_type"] = self.instrument_policy_from_bot(bot)
+            bot["execution_semantics"] = self.execution_semantics_from_bot(bot)
             bot["market_data_stream_policy"] = normalize_market_data_stream_policy(
                 bot.get("market_data_stream_policy")
                 if isinstance(bot.get("market_data_stream_policy"), Mapping)
@@ -91,15 +92,15 @@ class BotConfigService:
         return bots
 
     def get_bot(self, bot_id: str) -> Dict[str, object]:
-        for bot in load_bots():
-            if bot["id"] == bot_id:
-                bot["instrument_type"] = self.instrument_policy_from_bot(bot)
-                bot["market_data_stream_policy"] = normalize_market_data_stream_policy(
-                    bot.get("market_data_stream_policy")
-                    if isinstance(bot.get("market_data_stream_policy"), Mapping)
-                    else None
-                )
-                return bot
+        bot = get_bot_record(bot_id)
+        if bot:
+            bot["execution_semantics"] = self.execution_semantics_from_bot(bot)
+            bot["market_data_stream_policy"] = normalize_market_data_stream_policy(
+                bot.get("market_data_stream_policy")
+                if isinstance(bot.get("market_data_stream_policy"), Mapping)
+                else None
+            )
+            return bot
         raise KeyError(f"Bot {bot_id} was not found")
 
     def create_bot(self, name: str, **payload: object) -> Dict[str, object]:
@@ -171,21 +172,19 @@ class BotConfigService:
             "market_data_stream_policy": market_data_stream_policy,
             "snapshot_interval_ms": int(payload.get("snapshot_interval_ms") or 0),
             "bot_env": self.validate_bot_env(payload.get("bot_env") if isinstance(payload.get("bot_env"), Mapping) else {}),
-            "status": "idle",
-            "last_stats": {},
         }
         if int(record.get("snapshot_interval_ms") or 0) <= 0:
             raise ValueError("snapshot_interval_ms is required and must be > 0")
-        self.apply_instrument_policy(record, payload.get("instrument_type"))
+        self.apply_execution_semantics(record, payload.get("execution_semantics"))
         self.validate_backtest_window(record)
         upsert_bot(record)
         return record
 
     def update_bot(self, bot_id: str, **payload: object) -> Dict[str, object]:
-        bots = {bot["id"]: bot for bot in load_bots()}
-        if bot_id not in bots:
+        existing = get_bot_record(bot_id)
+        if not existing:
             raise KeyError(f"Bot {bot_id} was not found")
-        record = bots[bot_id]
+        record = dict(existing)
 
         if "strategy_id" in payload and payload["strategy_id"] is not None:
             record["strategy_id"] = self.validate_strategy_id(payload.get("strategy_id"))
@@ -204,8 +203,8 @@ class BotConfigService:
             record["risk_config"] = normalise_risk_config(config)
         if "name" in payload and payload["name"] is not None:
             record["name"] = payload["name"]
-        if "instrument_type" in payload:
-            self.apply_instrument_policy(record, payload.get("instrument_type"))
+        if "execution_semantics" in payload:
+            self.apply_execution_semantics(record, payload.get("execution_semantics"))
         if "run_type" in payload and payload["run_type"] is not None:
             record["run_type"] = str(payload["run_type"]).lower()
         if "mode" in payload and payload["mode"] is not None:
@@ -251,7 +250,11 @@ class BotConfigService:
         if "bot_env" in payload:
             next_env = self.validate_bot_env(payload.get("bot_env") if isinstance(payload.get("bot_env"), Mapping) else {})
             current_env = dict(record.get("bot_env") or {})
-            if str(record.get("status") or "").lower() == "running" and next_env != current_env:
+            lifecycle = get_latest_bot_run_lifecycle(bot_id)
+            if is_active_run_state(
+                status=(lifecycle or {}).get("status"),
+                phase=(lifecycle or {}).get("phase"),
+            ) and next_env != current_env:
                 raise ValueError("Bot env settings changed. Stop and restart the bot to apply new env vars.")
             record["bot_env"] = next_env
         strategy_id = self.validate_strategy_id(record.get("strategy_id"))
@@ -321,35 +324,75 @@ class BotConfigService:
             return text
 
     @staticmethod
-    def normalize_instrument_policy(value: Optional[object]) -> Optional[str]:
+    def normalize_execution_semantics_policy(value: Optional[object]) -> Optional[str]:
         if value in (None, ""):
             return None
-        text = str(value).strip().lower()
-        if not text:
-            return None
-        if text == "spot":
-            return "spot"
-        if text in _DERIVATIVE_TYPES:
-            return "derivatives"
-        raise ValueError(f"Unsupported instrument_type '{value}'")
+        resolved = normalize_execution_semantics(value)
+        if resolved not in {"spot", "derivative", "proxy_derivative"}:
+            raise ValueError(f"Unsupported execution_semantics '{value}'")
+        return resolved
 
-    def instrument_policy_from_bot(self, bot: Mapping[str, object]) -> Optional[str]:
-        direct = bot.get("instrument_type")
+    @staticmethod
+    def execution_semantics_from_bot(bot: Mapping[str, object]) -> Optional[str]:
+        direct = bot.get("execution_semantics")
         if direct:
-            return self.normalize_instrument_policy(direct)
+            return normalize_execution_semantics(direct)
         risk = bot.get("risk")
-        if isinstance(risk, Mapping):
-            return self.normalize_instrument_policy(risk.get("instrument_type"))
+        if isinstance(risk, Mapping) and risk.get("execution_semantics"):
+            return normalize_execution_semantics(risk.get("execution_semantics"))
         return None
 
-    def apply_instrument_policy(self, record: Dict[str, object], value: Optional[object]) -> None:
-        policy = self.normalize_instrument_policy(value)
-        if policy is None:
+    def apply_execution_semantics(self, record: Dict[str, object], value: Optional[object]) -> None:
+        execution_semantics = self.normalize_execution_semantics_policy(value)
+        if execution_semantics is None:
             return
-        record["instrument_type"] = policy
+        record["execution_semantics"] = execution_semantics
         risk = dict(record.get("risk") or {})
-        risk["instrument_type"] = policy
+        risk["execution_semantics"] = execution_semantics
         record["risk"] = risk
+
+    @staticmethod
+    def _instrument_fields(instrument: Mapping[str, Any]) -> Dict[str, Any]:
+        metadata = instrument.get("metadata") if isinstance(instrument.get("metadata"), Mapping) else {}
+        fields = metadata.get("instrument_fields") if isinstance(metadata.get("instrument_fields"), Mapping) else {}
+        return dict(fields)
+
+    @classmethod
+    def _has_proxy_derivative_reference(cls, instrument: Mapping[str, Any]) -> bool:
+        fields = cls._instrument_fields(instrument)
+        margin_rates = instrument.get("proxy_derivative_margin_rates") or fields.get("proxy_derivative_margin_rates")
+        execution_fields = instrument.get("proxy_derivative_instrument_fields") or fields.get("proxy_derivative_instrument_fields")
+        return isinstance(margin_rates, Mapping) and bool(margin_rates) and isinstance(execution_fields, Mapping) and bool(execution_fields)
+
+    def _execution_semantics_for_runtime_instrument(
+        self,
+        bot: Mapping[str, object],
+        instrument: Mapping[str, Any],
+        *,
+        run_type: str,
+    ) -> str:
+        instrument_type = self._normalize_runtime_instrument_type(instrument.get("instrument_type"))
+        if not instrument_type:
+            symbol = str(instrument.get("symbol") or instrument.get("id") or "unknown").strip()
+            raise ValueError(
+                f"{symbol}: instrument_type missing. Validate the instrument before running this bot."
+            )
+
+        requested = self.execution_semantics_from_bot(bot)
+        if requested:
+            execution_semantics = normalize_execution_semantics(requested, instrument_type=instrument_type)
+        elif run_type == "backtest" and instrument_type == "spot" and self._has_proxy_derivative_reference(instrument):
+            execution_semantics = "proxy_derivative"
+        else:
+            execution_semantics = normalize_execution_semantics(None, instrument_type=instrument_type)
+
+        if execution_semantics == "proxy_derivative" and run_type != "backtest":
+            symbol = str(instrument.get("symbol") or instrument.get("id") or "unknown").strip()
+            raise ValueError(
+                f"{symbol}: proxy_derivative execution is currently supported for backtest runs only. "
+                "Use spot execution semantics outside historical research until paper/live proxy execution is modeled."
+            )
+        return execution_semantics
 
     @staticmethod
     def validate_backtest_window(record: Mapping[str, object]) -> None:
@@ -563,10 +606,23 @@ class BotConfigService:
     @staticmethod
     def _resolve_runtime_instrument(strategy: Any, link: Any) -> Dict[str, Any]:
         snapshot = dict(getattr(link, "instrument_snapshot", {}) or {})
+        instrument_id = str(
+            getattr(link, "instrument_id", "")
+            or snapshot.get("id")
+            or snapshot.get("instrument_id")
+            or ""
+        ).strip()
+        if instrument_id:
+            try:
+                resolved_by_id = instrument_service.get_instrument_record(instrument_id)
+                if resolved_by_id:
+                    return {**snapshot, **dict(resolved_by_id)}
+            except Exception:
+                pass
         symbol = str(
             snapshot.get("symbol")
             or getattr(link, "symbol", "")
-            or getattr(link, "instrument_id", "")
+            or instrument_id
             or ""
         ).strip()
         resolved = (
@@ -588,7 +644,7 @@ class BotConfigService:
         if not strategy.instrument_links:
             raise ValueError("Strategy has no instruments attached. Add at least one instrument before bot start.")
 
-        policy = self.instrument_policy_from_bot(bot)
+        run_type = str(bot.get("run_type") or "backtest").strip().lower()
         symbols: List[str] = []
         readiness_entries: List[Dict[str, Any]] = []
         errors: List[str] = []
@@ -604,37 +660,33 @@ class BotConfigService:
             if symbol and symbol not in symbols:
                 symbols.append(symbol)
             instrument_type = self._normalize_runtime_instrument_type(instrument.get("instrument_type"))
-            if policy:
-                if not instrument_type:
-                    raise ValueError(
-                        f"Instrument type missing for {symbol or getattr(link, 'instrument_id', None)}. "
-                        "Validate the instrument before running this bot."
-                    )
-                is_spot = instrument_type == "spot"
-                if policy == "derivatives" and is_spot:
-                    raise ValueError(
-                        f"Derivatives-only bot cannot run on spot instrument {symbol or getattr(link, 'instrument_id', None)}."
-                    )
-                if policy == "spot" and not is_spot:
-                    raise ValueError(
-                        f"Spot-only bot cannot run on derivatives instrument {symbol or getattr(link, 'instrument_id', None)}."
-                    )
-
             if not instrument:
                 errors.append(
                     f"{symbol or getattr(link, 'instrument_id', None)}: instrument metadata missing. Refresh instrument metadata in Strategy."
                 )
                 continue
             try:
-                profile = compile_runtime_profile_or_error(
+                execution_semantics = self._execution_semantics_for_runtime_instrument(
+                    bot,
                     instrument,
-                    allowed_derivative_types=_RUNTIME_ALLOWED_DERIVATIVE_TYPES,
+                    run_type=run_type,
+                )
+                profile = compile_series_execution_profile(
+                    instrument,
+                    risk_config=bot.get("risk_config") if isinstance(bot.get("risk_config"), Mapping) else None,
+                    require_margin_accounting=execution_semantics in {"derivative", "proxy_derivative"},
+                    execution_semantics=execution_semantics,
                 )
                 readiness_entries.append(
                     {
                         "symbol": symbol or None,
                         "instrument_id": getattr(link, "instrument_id", None),
                         "instrument_type": instrument_type or None,
+                        "source_instrument_type": profile.instrument.source_instrument_type,
+                        "execution_semantics": profile.instrument.execution_semantics,
+                        "research_market_role": profile.instrument.research_market_role,
+                        "accounting_mode": profile.accounting_mode,
+                        "margin_calc_type": profile.margin_calc_type,
                         "profile": profile.to_dict() if hasattr(profile, "to_dict") else {"instrument_type": instrument_type or None},
                     }
                 )
@@ -665,9 +717,6 @@ class BotConfigService:
             },
         }
 
-    def validate_instrument_policy(self, bot: Mapping[str, object]) -> None:
-        self.prepare_startup_artifacts(bot)
-
     @staticmethod
     def _normalize_runtime_instrument_type(value: Optional[object]) -> str:
         text = str(value or "").strip().lower()
@@ -678,5 +727,5 @@ class BotConfigService:
         return text
 
     def validate_runtime_readiness(self, bot: Mapping[str, object]) -> None:
-        """Validate bot runtime prerequisites for v1 derivatives execution."""
+        """Validate bot runtime prerequisites for configured execution semantics."""
         self.prepare_startup_artifacts(bot)

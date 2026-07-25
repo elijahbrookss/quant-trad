@@ -7,7 +7,6 @@ from typing import Any, Dict, Optional, Sequence
 from indicators.manifest import resolve_manifest_color_palette
 from ..indicator_factory import INDICATOR_MAP as _INDICATOR_MAP
 from ..dependency_bindings import validate_dependency_bindings
-from ..output_prefs import normalize_output_prefs
 from .context import IndicatorServiceContext, _context
 from .utils import (
     build_meta_from_record,
@@ -35,7 +34,30 @@ class IndicatorInstanceCreator:
         dependencies: Optional[Sequence[Dict[str, Any]]] = None,
         color: Optional[str] = None,
         color_palette: Optional[str] = None,
-        output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        payload = self.validate(
+            type_str,
+            name,
+            params,
+            dependencies,
+            color,
+            color_palette,
+            indicator_id=str(uuid.uuid4()),
+        )
+        self._ctx.repository.upsert(payload)
+        refreshed = self._ctx.repository.get(payload["id"])
+        return build_meta_from_record(refreshed, ctx=self._ctx) if refreshed else payload
+
+    def validate(
+        self,
+        type_str: str,
+        name: Optional[str],
+        params: Dict[str, Any],
+        dependencies: Optional[Sequence[Dict[str, Any]]] = None,
+        color: Optional[str] = None,
+        color_palette: Optional[str] = None,
+        *,
+        indicator_id: str = "",
     ) -> Dict[str, Any]:
         definition = self._resolve_type(type_str)
         params_copy = dict(params or {})
@@ -49,21 +71,11 @@ class IndicatorInstanceCreator:
             bindings=dependencies,
             ctx=self._ctx,
         )
-        resolved_output_prefs = normalize_output_prefs(
-            manifest=definition.MANIFEST,
-            output_prefs=output_prefs,
-        )
-        logger.info(
-            "event=indicator_create_output_prefs_resolved indicator_type=%s output_prefs=%s",
-            type_str,
-            resolved_output_prefs,
-        )
         meta = {
-            "id": str(uuid.uuid4()),
+            "id": str(indicator_id or "").strip(),
             "type": type_str,
             "params": resolved_params,
             "dependencies": resolved_dependencies,
-            "output_prefs": resolved_output_prefs,
             "enabled": True,
             "name": name or type_str.replace("_", " ").title(),
             "color": normalize_color(color),
@@ -74,9 +86,7 @@ class IndicatorInstanceCreator:
         if exchange:
             meta["exchange"] = exchange
         payload = ensure_color(meta, ctx=self._ctx)
-        self._ctx.repository.upsert(payload)
-        refreshed = self._ctx.repository.get(payload["id"])
-        return build_meta_from_record(refreshed, ctx=self._ctx) if refreshed else payload
+        return build_meta_from_record(payload, ctx=self._ctx)
 
     @staticmethod
     def _resolve_type(type_str: str):
@@ -99,7 +109,6 @@ class IndicatorInstanceUpdater:
         params: Dict[str, Any],
         name: Optional[str],
         dependencies: Optional[Sequence[Dict[str, Any]]] = None,
-        output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
         *,
         color: Optional[str] = None,
         color_provided: bool = False,
@@ -128,20 +137,9 @@ class IndicatorInstanceUpdater:
             ctx=self._ctx,
             indicator_id=inst_id,
         )
-        resolved_output_prefs = normalize_output_prefs(
-            manifest=definition.MANIFEST,
-            output_prefs=output_prefs,
-        )
-        logger.info(
-            "event=indicator_update_output_prefs_resolved indicator_id=%s indicator_type=%s output_prefs=%s",
-            inst_id,
-            type_str,
-            resolved_output_prefs,
-        )
 
         params_unchanged = dict(meta.get("params") or {}) == resolved_params
         dependencies_unchanged = list(meta.get("dependencies") or []) == resolved_dependencies
-        output_prefs_unchanged = dict(meta.get("output_prefs") or {}) == resolved_output_prefs
         name_unchanged = (name or meta.get("name")) == meta.get("name")
         color_unchanged = (
             not color_provided
@@ -161,7 +159,6 @@ class IndicatorInstanceUpdater:
         if (
             params_unchanged
             and dependencies_unchanged
-            and output_prefs_unchanged
             and name_unchanged
             and color_unchanged
             and color_palette_unchanged
@@ -170,12 +167,16 @@ class IndicatorInstanceUpdater:
         ):
             return meta
 
+        if not params_unchanged or not dependencies_unchanged:
+            strategies = self._ctx.repository.strategies_for_indicator(inst_id)
+            if strategies:
+                raise ValueError("Cannot edit params/dependencies for a strategy-bound indicator; clone instead")
+
         self._ctx.overlay_cache.purge_indicator(inst_id)
 
         meta_payload = dict(meta)
         meta_payload["params"] = resolved_params
         meta_payload["dependencies"] = resolved_dependencies
-        meta_payload["output_prefs"] = resolved_output_prefs
         meta_payload["name"] = name or meta.get("name") or type_str.replace("_", " ").title()
         if color_provided:
             meta_payload["color"] = normalize_color(color)

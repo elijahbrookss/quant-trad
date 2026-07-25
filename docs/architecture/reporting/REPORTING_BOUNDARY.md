@@ -11,6 +11,7 @@ tags:
   - diagnostics
   - export
 code_paths:
+  - portal/backend/service/provenance.py
   - portal/backend/service/reports
   - portal/backend/controller/reports.py
   - portal/backend/service/reports/comparison.py
@@ -32,20 +33,29 @@ Related diagram: [run-research-dataset-flow.mmd](diagrams/run-research-dataset-f
 
 Reports are views. `RunResearchDataset v1` is the canonical run-level data product. Export bundles are generated from the dataset and are not comparison truth.
 
-`RunReportDTO v2` is the typed single-run report contract for frontend and
+`RunReportDTO` with `contract_version=run_report.v2` is the typed single-run report contract for frontend and
 future MCP consumers. It wraps canonical dataset facts into research-trust and
 research-performance sections while keeping raw rows available only as
 referenced/debug data.
 
 Terminal report artifacts are materialized separately from run lifecycle truth.
 When a run reaches a terminal status, the backend may enqueue a
-`RunReportDTO v2` build and persist the artifact/status in
-`portal_report_materializations_v1`. Report states (`not_started`, `building`,
+`RunReportDTO` build and persist the artifact/status in
+`portal_report_materializations`. Report states (`not_started`, `building`,
 `ready`, `failed`, `stale`) do not alter run terminal status; report build
 failure is a reporting condition, not a runtime failure.
 
-Paired run-report comparison reads ready `RunReportDTO v2` artifacts from
-`portal_report_materializations_v1`. It returns structured blockers for
+Materialized report artifacts are valid only for the exact durable input
+fingerprint recorded with the artifact. The fingerprint includes the run row,
+runtime-event high-water mark, and trade count/update boundary. A ready artifact
+with a missing or changed input fingerprint is stale and must be rebuilt before
+serving or comparing. Contract/schema version alone is not a cache validity
+boundary. Report materializations also record the builder source revision; a
+ready artifact built by another source revision is stale for the current backend
+and must be rebuilt before serving or comparing.
+
+Paired run-report comparison reads ready `RunReportDTO` artifacts from
+`portal_report_materializations`. It returns structured blockers for
 non-terminal, missing, building, failed, or stale report artifacts and does not
 enqueue cold report builds by default. Semantic, performance, behavior, wallet,
 symbol, coordinator-wait, and operational drift deltas are derived from the
@@ -70,22 +80,23 @@ Reporting does not mutate strategy, execution, fee, wallet, trade, or BotLens se
 [run-research-dataset-flow.mmd](diagrams/run-research-dataset-flow.mmd) shows:
 
 1. Run, trade, runtime-event, and step rows are read from durable storage.
-2. `RunResearchDataset v1` normalizes metadata, readiness, summary metrics, timeseries, decisions, signals, trades, context/world-state rows, candle catalog, diagnostics, candle gaps, runtime performance, operational health, and insights.
+2. `RunResearchDataset v1` normalizes metadata, readiness, summary metrics, timeseries, decisions, signals, trades, context/world-state rows, candidate lifecycle evidence, candle catalog, diagnostics, candle gaps, runtime performance, operational health, and insights.
 3. Reports, compare views, exports, and external analysis tools read from the dataset.
 
-## Dataset Truth
+## Dataset Rebuilds From Durable Run Facts
 
 The dataset is rebuildable from durable DB/read-model truth:
 
-- `portal_bot_runs` for metadata and config snapshots,
+- `portal_bot_runs` for metadata, lean provenance hashes, and bounded config snapshots,
 - `portal_bot_trades` and trade events for trade lifecycle and financial outcomes,
 - `portal_bot_run_events` for decisions, execution diagnostics, wallet/fallback facts, and BotLens-domain facts,
-- `portal_bot_run_step_rollups_v1` for profiler timings and mergeable p95/p99
-  histogram estimates when present,
+- `portal_bot_run_step_rollups` for phase-duration profiler timings and
+  mergeable p95/p99 histogram estimates when present,
 - observability events for normalized report diagnostics.
 - the reporting candle service for bounded candle windows when requested.
 
-Run configuration metadata preserves strategy variant provenance when available.
+Run configuration metadata preserves strategy variant provenance when available
+without embedding the full raw run snapshot in report artifacts.
 `run_strategy_snapshot` records the exact effective strategy configuration at run
 start, including `effective_params`, `output_filters`, `base_params`, and
 `param_source_map`. Reports expose this as provenance only. Reporting must not
@@ -122,6 +133,14 @@ metadata, such as breakout timing, confirmation counters, value-area references,
 and distance-from-reference values, remains part of indicator output context;
 reporting must not add strategy-specific signal fields that reinterpret an
 indicator's private state.
+
+Candidate lifecycle evidence comes from finalized report artifact indicator
+output rows whose output type is `lifecycle`. Reporting flattens stage-change
+events into a `candidate_lifecycle` dataset section and summarizes candidate
+funnels, terminal outcomes, reasons, and family/side buckets. This is report and
+research evidence only. It must not make lifecycle outputs strategy-visible,
+rerun indicator logic, inspect indicator internals, or reinterpret candidate
+meaning outside the generic lifecycle event contract.
 
 Display-facing metrics must use `MetricValueDTO` validity metadata. Consumers
 must render `invalid`, `not_available`, or `not_computed` states instead of
@@ -195,16 +214,14 @@ continuity evidence is absent, reporting blocks certification with
 `missing_canonical_continuity_evidence` instead of silently certifying from
 observer facts.
 
-## Outputs
+## What Reporting Publishes
 
-- report API payloads,
-- compare payloads,
-- compact research summary and comparison-summary payloads for CLI/agent
-  workflows,
-- downloadable/export bundles,
-- normalized diagnostics,
-- readiness and caveat explanations.
-- optional research exports with candle files.
+Reporting publishes report API payloads, compare payloads, compact research and
+comparison summaries for CLI/agent workflows, downloadable export bundles,
+normalized diagnostics, paged signal/decision/trade/context/candidate-lifecycle
+datasets, readiness/caveat explanations, and optional research exports with
+candle files. These are downstream products of the dataset, not new execution
+semantics.
 
 ## Failure And Recovery
 
@@ -212,7 +229,7 @@ observer facts.
 - Terminal open trades block safe comparison unless explicitly modeled.
 - Reports should explain which section is missing instead of returning optimistic partial truth.
 - A completed run with unclassified `RUN_FAILED` or `FAULT_RECORDED` facts blocks
-  golden-run certification. Recoverable watchdog stale-heartbeat facts are
+  golden-run certification. Recoverable watchdog expired-lease facts are
   reported as degraded lifecycle health instead of lifecycle contradiction.
   Recoverable startup container-ownership ambiguity is treated the same way
   when it is explicitly classified and later runtime truth proves the run
@@ -226,7 +243,7 @@ observer facts.
 - Reporting is downstream of runtime truth.
 - Legacy dataset compare uses canonical dataset readiness, not ad hoc
   report-file existence. Materialized run-report compare additionally requires
-  both `RunReportDTO v2` artifacts to be `ready` so the comparison UI can use
+  both RunReportDTO contract (`run_report.v2`) artifacts to be `ready` so the comparison UI can use
   the same artifact truth source as single-run reports.
 - Standard computed metrics are exposed by the dataset; consumers should not need
   private formula implementations for normal report views.

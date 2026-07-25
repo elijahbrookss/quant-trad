@@ -6,6 +6,7 @@ import urllib.parse
 import urllib.request
 
 from cli.experiments.pass_gates import evaluate_pass_gates
+from cli.experiments.state_store import ExperimentStateStore
 from cli.main import main
 
 
@@ -244,6 +245,174 @@ def test_experiments_run_plan_requires_explicit_proceed_for_data_warnings(tmp_pa
 
     assert exit_code == 2
     assert not list((tmp_path / "experiments").glob("**/state.json"))
+
+
+def test_experiments_summarize_compacts_local_artifacts(tmp_path, capsys):
+    plan = {
+        "schema_version": "experiment_plan.v1",
+        "name": "summary-smoke",
+        "hypothesis": "Candidate should improve risk.",
+        "windows": [{"id": "w1", "start": "2026-01-01T00:00:00Z", "end": "2026-01-31T23:59:59Z"}],
+        "variants": [
+            {
+                "id": "baseline",
+                "bot_id": "bot-base",
+                "label": "Baseline",
+                "role": "derivative",
+                "comparison_group": "btc",
+                "execution_semantics": "derivative",
+            },
+            {
+                "id": "candidate",
+                "bot_id": "bot-candidate",
+                "label": "Candidate",
+                "role": "spot_proxy",
+                "comparison_group": "btc",
+                "execution_semantics": "proxy_derivative",
+            },
+        ],
+        "comparisons": [{"id": "candidate_vs_baseline", "baseline_variant_id": "baseline", "candidate_variant_id": "candidate"}],
+    }
+    store = ExperimentStateStore(tmp_path, experiment_id="exp-summary")
+    state = store.create_state(plan)
+    run_record = {
+        "schema_version": "experiment_window_variant_run.v1",
+        "experiment_id": "exp-summary",
+        "window_id": "w1",
+        "variant_id": "candidate",
+        "bot_id": "bot-candidate",
+        "run_id": "run-candidate",
+        "status": "completed",
+        "window": plan["windows"][0],
+        "variant": plan["variants"][1],
+        "start": {
+            "context": {
+                "execution": {
+                    "datasource": "CCXT",
+                    "exchange": "COINBASE",
+                    "execution_semantics": "proxy_derivative",
+                    "run_type": "backtest",
+                    "symbols": ["BTC/USD"],
+                    "timeframe": "1h",
+                }
+            }
+        },
+        "terminal_status": {"summary": {"total_trades": 4, "net_pnl": 12.5}},
+    }
+    run_path = store.write_run_record("w1", "candidate", run_record)
+    summary_path = store.artifacts_dir / "summaries" / "w1__candidate__research-summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "run_research_summary.v1",
+                "run_id": "run-candidate",
+                "symbols": ["BTC/USD"],
+                "timeframe": "1h",
+                "run_type": "backtest",
+                "metrics": {"trades": 4, "net_pnl": 12.5, "profit_factor": 1.4, "max_drawdown_pct": 0.04},
+                "readiness": {
+                    "comparison_status": "ready_with_caveats",
+                    "safe_to_compare": True,
+                    "dataset_status": "ready",
+                    "results_status": "ready",
+                    "caveats": ["candle_continuity_degraded"],
+                    "degraded_sections": ["data_quality"],
+                },
+                "sections": [{"name": "trades", "status": "available", "available": True, "row_count": 4}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_record["research_summary"] = {"path": str(summary_path), "run_id": "run-candidate"}
+    store.write_run_record("w1", "candidate", run_record)
+    comparison_path = store.artifacts_dir / "comparisons" / "w1__candidate_vs_baseline.json"
+    comparison_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "run_report_comparison_summary.v1",
+                "comparison_status": "ready",
+                "comparison_verdict": "same_semantics",
+                "can_compare": True,
+                "performance_delta": {
+                    "net_pnl": {"left": 5.0, "right": 12.5, "delta": 7.5, "valid": True, "unit": "currency"}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    preflight_path = store.artifacts_dir / "summaries" / "data_preflight.json"
+    preflight_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "experiment_data_preflight.v1",
+                "status": "warning",
+                "summary": {"checks": 1, "warnings": 1, "errors": 0},
+                "checks": [
+                    {
+                        "window_id": "w1",
+                        "variant_id": "candidate",
+                        "bot_id": "bot-candidate",
+                        "instrument_id": "inst-spot",
+                        "provider": "CCXT",
+                        "exchange": "COINBASE",
+                        "symbol": "BTC/USD",
+                        "timeframe": "1h",
+                        "status": "warning",
+                        "severity": "warning",
+                        "row_count": 100,
+                        "missing_ranges": [],
+                        "continuity": {
+                            "final_status": "defect",
+                            "continuity_ratio": 0.99,
+                            "candle_count": 100,
+                            "detected_gap_count": 1,
+                            "missing_candle_estimate": 1,
+                            "max_gap_seconds": 7200,
+                            "gap_count_by_type": {"provider_missing_data": 1},
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    pass_gate_path = store.artifacts_dir / "summaries" / "pass_gate_result.json"
+    pass_gate_path.write_text(json.dumps({"schema_version": "pass_gate_result.v1", "status": "PASSED", "gates": []}), encoding="utf-8")
+    state.update(
+        {
+            "status": "COMPLETED",
+            "run_refs": [{"window_id": "w1", "variant_id": "candidate", "bot_id": "bot-candidate", "run_id": "run-candidate", "path": str(run_path)}],
+            "comparison_refs": [
+                {
+                    "window_id": "w1",
+                    "baseline_variant_id": "baseline",
+                    "candidate_variant_id": "candidate",
+                    "baseline_run_id": "run-base",
+                    "candidate_run_id": "run-candidate",
+                    "summary_path": str(comparison_path),
+                    "status": "COMPLETED",
+                }
+            ],
+            "data_preflight_ref": str(preflight_path),
+            "pass_gate_result_ref": str(pass_gate_path),
+        }
+    )
+    store.write_state(state)
+    out_path = tmp_path / "summary.json"
+
+    exit_code = main(["--log-root", str(tmp_path), "experiments", "summarize", "exp-summary", "--out", str(out_path)])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["schema_version"] == "experiment_summary.v1"
+    assert payload["counts"]["completed_runs"] == 1
+    assert payload["instrument_semantics"]["contains_proxy_derivative"] is True
+    assert payload["runs"][0]["metrics"]["net_pnl"] == 12.5
+    assert payload["runs"][0]["sections"]["trades"]["row_count"] == 4
+    assert payload["comparisons"][0]["performance_delta"]["net_pnl"]["delta"] == 7.5
+    assert payload["data_preflight"]["checks"][0]["continuity"]["gap_count_by_type"] == {"provider_missing_data": 1}
+    assert payload["pass_gates"]["status"] == "PASSED"
+    assert out_path.exists()
 
 
 def test_pass_gates_resolve_trade_count_aliases():

@@ -24,6 +24,30 @@ from .execution import (
 from .execution_adapter import ExecutionAdapter, SpotExecutionAdapter, DerivativesExecutionAdapter
 from .execution_intent import ExecutionIntent, ExecutionOutcome, LimitParams
 from .execution_model import ExecutionModel
+from .execution_order import (
+    FillOrder,
+    OrderType,
+    build_fill_order,
+    execute_fill_order,
+)
+from .execution_plan import (
+    BreakevenPlan,
+    EntryExecutionPlan,
+    FixedHorizonExitPlan,
+    LimitMakerPlan,
+    RuntimeExecutionPlan,
+    RuntimeStopAdjustment,
+    StopAdjustmentPlanRule,
+    TrailingStopPlan,
+    compile_runtime_execution_plan,
+)
+from .execution_policy import (
+    ExitExecutionPolicy,
+    LiquidityRole,
+    exit_policy_for,
+    fee_rate_for_role,
+    normalize_liquidity_role,
+)
 from .execution_runtime import DeterministicExecutionModel
 from .entry_execution import EntryExecutionCoordinator, PendingEntry
 from .entry_settlement import EntrySettlement, EntrySettlementContext, EntrySettlementService
@@ -46,13 +70,14 @@ from .execution_profile import (
     InstrumentContract,
     ExecutionConstraintsContract,
     ExecutionCapabilities,
+    ExecutionFeeContract,
     RiskConfigContract,
     CollateralModel,
     SimpleCollateralModel,
     SeriesExecutionProfile,
+    normalize_execution_semantics,
     normalize_runtime_instrument_type,
     compile_series_execution_profile,
-    compile_runtime_profile_or_error,
 )
 from .runtime_events import (
     DecisionAcceptedContext,
@@ -106,6 +131,24 @@ __all__ = [
     "ExecutionOutcome",
     "LimitParams",
     "ExecutionModel",
+    "FillOrder",
+    "OrderType",
+    "build_fill_order",
+    "execute_fill_order",
+    "BreakevenPlan",
+    "EntryExecutionPlan",
+    "FixedHorizonExitPlan",
+    "LimitMakerPlan",
+    "RuntimeExecutionPlan",
+    "RuntimeStopAdjustment",
+    "StopAdjustmentPlanRule",
+    "TrailingStopPlan",
+    "compile_runtime_execution_plan",
+    "ExitExecutionPolicy",
+    "LiquidityRole",
+    "exit_policy_for",
+    "fee_rate_for_role",
+    "normalize_liquidity_role",
     "DeterministicExecutionModel",
     "EntryExecutionCoordinator",
     "PendingEntry",
@@ -136,13 +179,14 @@ __all__ = [
     "InstrumentContract",
     "ExecutionConstraintsContract",
     "ExecutionCapabilities",
+    "ExecutionFeeContract",
     "RiskConfigContract",
     "CollateralModel",
     "SimpleCollateralModel",
     "SeriesExecutionProfile",
+    "normalize_execution_semantics",
     "normalize_runtime_instrument_type",
     "compile_series_execution_profile",
-    "compile_runtime_profile_or_error",
     "DecisionAcceptedContext",
     "DecisionRejectedContext",
     "SCHEMA_VERSION",

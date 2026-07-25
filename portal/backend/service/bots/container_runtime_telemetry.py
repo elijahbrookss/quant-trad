@@ -36,6 +36,16 @@ _CONTROL_MESSAGE_KINDS = frozenset(
         "botlens_lifecycle_event",
     }
 )
+_COALESCABLE_MESSAGE_KINDS = frozenset({"botlens_runtime_facts"})
+_MATERIAL_FACT_TYPES = frozenset(
+    {
+        "trade_opened",
+        "trade_updated",
+        "trade_closed",
+        "wallet_ledger_event",
+        "decision_emitted",
+    }
+)
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -218,6 +228,8 @@ class TelemetryEmitter:
         self._fact_dedupe: Dict[tuple[str, str, str, str], Dict[str, Any]] = {}
         self._suppressed_bootstrap_duplicates = 0
         self._suppressed_large_fact_duplicates = 0
+        self._coalesced_runtime_messages = 0
+        self._dropped_stale_runtime_messages = 0
         self._last_payload_bytes = 0
         self._last_send_ms = 0.0
         if not self.url:
@@ -297,6 +309,69 @@ class TelemetryEmitter:
         queue = self._pending_messages[queue_name]
         while queue:
             self._mark_delivery(queue.popleft(), False)
+
+    @staticmethod
+    def _coalesce_key_for_payload(payload: Mapping[str, Any]) -> tuple[str, str, str, str, str] | None:
+        kind = str(payload.get("kind") or "").strip()
+        if kind not in _COALESCABLE_MESSAGE_KINDS:
+            return None
+        facts = payload.get("facts") if isinstance(payload.get("facts"), list) else []
+        for fact in facts:
+            if not isinstance(fact, Mapping):
+                continue
+            fact_type = str(fact.get("fact_type") or "").strip().lower()
+            if fact_type in _MATERIAL_FACT_TYPES:
+                return None
+        bot_id = str(payload.get("bot_id") or "").strip()
+        run_id = str(payload.get("run_id") or "").strip()
+        series_key = str(payload.get("series_key") or "").strip()
+        bridge_session_id = str(payload.get("bridge_session_id") or "").strip()
+        if not bot_id or not run_id or not series_key:
+            return None
+        return (kind, bot_id, run_id, series_key, bridge_session_id)
+
+    def _drop_older_coalesced_locked(
+        self,
+        queue_name: str,
+        coalesce_key: tuple[str, str, str, str, str] | None,
+    ) -> int:
+        if coalesce_key is None or queue_name != _GENERAL_QUEUE_NAME:
+            return 0
+        queue = self._pending_messages[queue_name]
+        if not queue:
+            return 0
+        kept: deque[Dict[str, Any]] = deque([queue.popleft()])
+        dropped = 0
+        while queue:
+            entry = queue.popleft()
+            if entry.get("coalesce_key") == coalesce_key:
+                self._mark_delivery(entry, False)
+                dropped += 1
+                continue
+            kept.append(entry)
+        queue.extend(kept)
+        if dropped:
+            self._coalesced_runtime_messages += dropped
+        return dropped
+
+    def _drop_failed_if_superseded_locked(
+        self,
+        queue_name: str,
+        coalesce_key: tuple[str, str, str, str, str] | None,
+    ) -> bool:
+        if coalesce_key is None or queue_name != _GENERAL_QUEUE_NAME:
+            return False
+        queue = self._pending_messages[queue_name]
+        if not queue or queue[0].get("coalesce_key") != coalesce_key:
+            return False
+        if not any(entry.get("coalesce_key") == coalesce_key for entry in list(queue)[1:]):
+            return False
+        dropped_entry = queue.popleft()
+        self._mark_delivery(dropped_entry, False)
+        self._dropped_stale_runtime_messages += 1
+        self._emit_queue_gauges_locked()
+        self._state_lock.notify_all()
+        return True
 
     async def _close_async_connection(self) -> None:
         ws = self._async_ws
@@ -413,6 +488,7 @@ class TelemetryEmitter:
                     continue
                 message = str(entry.get("message") or "")
                 context = entry.get("context") if isinstance(entry.get("context"), Mapping) else {}
+                coalesce_key = entry.get("coalesce_key")
                 delivery_context = {
                     **context,
                     "queue_name": queue_name,
@@ -432,6 +508,15 @@ class TelemetryEmitter:
                     continue
 
                 with self._state_lock:
+                    if self._drop_failed_if_superseded_locked(
+                        queue_name,
+                        coalesce_key if isinstance(coalesce_key, tuple) else None,
+                    ):
+                        _OBSERVER.increment(
+                            "telemetry_stale_message_dropped_total",
+                            **self._base_labels(delivery_context, queue_name=queue_name),
+                        )
+                        continue
                     queue_depth = self._queue_depth_locked(queue_name)
                     self._emit_queue_gauges_locked(context=context)
                 labels = self._base_labels(delivery_context, queue_name=queue_name)
@@ -462,6 +547,7 @@ class TelemetryEmitter:
         context: Mapping[str, Any] | None = None,
         delivery_event: Any | None = None,
         delivery_state: Dict[str, Any] | None = None,
+        coalesce_key: tuple[str, str, str, str, str] | None = None,
     ) -> bool:
         delivery_entry = {
             "delivery_event": delivery_event,
@@ -481,6 +567,16 @@ class TelemetryEmitter:
                 return False
             queue = self._pending_messages[resolved_queue_name]
             queue_capacity = self._queue_capacities[resolved_queue_name]
+            coalesced = self._drop_older_coalesced_locked(resolved_queue_name, coalesce_key)
+            if coalesced:
+                _OBSERVER.increment("telemetry_messages_coalesced_total", value=coalesced, **labels)
+                _OBSERVER.event(
+                    "telemetry_runtime_message_coalesced",
+                    coalesced_count=coalesced,
+                    queue_depth=len(queue),
+                    queue_capacity=queue_capacity,
+                    **labels,
+                )
             while len(queue) >= queue_capacity and not self._closing and not self._stop:
                 if not self._backpressure_active[resolved_queue_name]:
                     _OBSERVER.event(
@@ -519,6 +615,7 @@ class TelemetryEmitter:
                 {
                     "message": str(message),
                     "context": resolved_context,
+                    "coalesce_key": coalesce_key,
                     "enqueued_monotonic": time.monotonic(),
                     "delivery_event": delivery_event,
                     "delivery_state": delivery_state,
@@ -625,6 +722,7 @@ class TelemetryEmitter:
                 return True, False
         message = json.dumps(payload, separators=(",", ":"), default=str)
         context = telemetry_payload_context(payload)
+        coalesce_key = self._coalesce_key_for_payload(payload)
         labels = self._base_labels(context, queue_name=queue_name)
         _OBSERVER.increment("telemetry_emitted_total", **labels)
         _OBSERVER.observe(
@@ -638,6 +736,7 @@ class TelemetryEmitter:
             context=context,
             delivery_event=delivery_event,
             delivery_state=delivery_state,
+            coalesce_key=coalesce_key,
         )
         if accepted and dedupe_key is not None and dedupe_signature is not None:
             with self._state_lock:
@@ -729,6 +828,8 @@ class TelemetryEmitter:
                 "emit_backpressure_active": bool(self._backpressure_active[_GENERAL_QUEUE_NAME]),
                 "suppressed_bootstrap_duplicates": int(self._suppressed_bootstrap_duplicates),
                 "suppressed_large_fact_duplicates": int(self._suppressed_large_fact_duplicates),
+                "coalesced_runtime_messages": int(self._coalesced_runtime_messages),
+                "dropped_stale_runtime_messages": int(self._dropped_stale_runtime_messages),
                 "last_payload_bytes": int(self._last_payload_bytes),
                 "last_send_ms": round(float(self._last_send_ms), 3),
             }

@@ -40,5 +40,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_portal_bot_run_lifecycle_events_run_seq
 CREATE INDEX IF NOT EXISTS ix_portal_bot_run_lifecycle_bot_checkpoint
     ON portal_bot_run_lifecycle (bot_id, checkpoint_at DESC);
 
+CREATE INDEX IF NOT EXISTS ix_portal_bot_run_lifecycle_bot_checkpoint_updated
+    ON portal_bot_run_lifecycle (bot_id, checkpoint_at DESC, updated_at DESC);
+
 CREATE INDEX IF NOT EXISTS ix_portal_bot_run_lifecycle_events_run_seq
     ON portal_bot_run_lifecycle_events (run_id, seq ASC);

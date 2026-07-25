@@ -42,11 +42,11 @@ services:
     environment:
       PYTHONPATH: /app/src:/app
       QT_CONFIG_PROFILE: ${QT_CONFIG_PROFILE:-dev}
-      QT_LOGGING_LOKI_URL: ${QT_LOGGING_LOKI_URL:-http://loki:3100}
       QT_LOGGING_DEBUG: ${QT_LOGGING_DEBUG:-true}
       QT_WORKERS_INDICATORS_PROCESSES: ${QT_WORKERS_INDICATORS_PROCESSES:-5}
       QT_BOT_RUNTIME_IMAGE: ${QT_BOT_RUNTIME_IMAGE:-quanttrad-backend:dev}
       QT_BOT_RUNTIME_NETWORK: ${QT_BOT_RUNTIME_NETWORK:-quant-trad_quanttrad}
+      SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required for run provenance}
     ports:
       - "8000:8000"
     command:
@@ -145,6 +145,7 @@ services:
       - "3100:3100"
     volumes:
       - ./loki/config.yml:/etc/loki/config.yml:ro
+      - loki-data:/loki
     networks:
       - quanttrad
 
@@ -248,6 +249,7 @@ volumes:
   pg-logs:
   pgadmin-data:
   grafana-data:
+  loki-data:
   ibkr-gateway-config:
   ibkr-gateway-logs:
 

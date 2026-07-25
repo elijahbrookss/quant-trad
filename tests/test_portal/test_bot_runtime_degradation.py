@@ -42,7 +42,6 @@ def _runtime_deps() -> BotRuntimeDeps:
         record_bot_trade=lambda _payload: None,
         record_bot_trade_event=lambda _payload: None,
         record_bot_run_steps_batch=lambda _payloads: 0,
-        update_bot_run_artifact=lambda _run_id, _payload: None,
         build_run_artifact_bundle=lambda _bot_id, _run_id, _config, _series: None,
     )
 
@@ -78,8 +77,6 @@ def test_execute_loop_preserves_degraded_status_instead_of_completed(monkeypatch
     runtime._live_mode = False
     monkeypatch.setattr(runtime, "_set_phase", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runtime, "_log_event", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(runtime, "_start_overlay_aggregator", lambda: None)
-    monkeypatch.setattr(runtime, "_stop_overlay_aggregator", lambda: None)
     monkeypatch.setattr(runtime, "_record_step_trace", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runtime, "_flush_persistence_buffer", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runtime, "_flush_step_trace_buffer", lambda *_args, **_kwargs: None)
@@ -205,7 +202,6 @@ def test_next_signal_for_records_guard_warning_without_bar_time_name_error(monke
     runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=_runtime_deps())
     warnings_recorded: list[dict] = []
     monkeypatch.setattr(runtime, "_record_runtime_warning", lambda payload: warnings_recorded.append(dict(payload)))
-    monkeypatch.setattr(runtime, "_series_overlay_entries", lambda _state: [])
     monkeypatch.setattr(
         "engines.bot_runtime.runtime.mixins.execution_loop.evaluate_strategy_bar",
         lambda **_kwargs: SimpleNamespace(artifacts=[], selected_artifact=None),
@@ -326,7 +322,6 @@ def test_next_signal_for_skips_trading_overlay_and_detail_step(monkeypatch):
         instrument={"id": "instrument-btc"},
         timeframe="1m",
         symbol="BTCUSD",
-        overlays=[{"overlay_id": "existing"}],
         meta={"compiled_strategy": object()},
     )
     state = SeriesExecutionState(series=series, bar_index=0, total_bars=1)
@@ -345,11 +340,10 @@ def test_next_signal_for_skips_trading_overlay_and_detail_step(monkeypatch):
     ]
     assert state.indicator_overlays == {}
     assert state.last_overlay_refresh_epoch is None
-    assert series.overlays == [{"overlay_id": "existing"}]
     assert evaluate_calls[0]["minimal_decision_details"] is True
 
 
-def test_explicit_overlay_refresh_uses_current_indicator_state() -> None:
+def test_overlay_projection_uses_current_indicator_state_without_mutating_runtime_series() -> None:
     runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=_runtime_deps())
     candle = Candle(
         time=datetime(2026, 4, 10, 0, 50, tzinfo=timezone.utc),
@@ -383,50 +377,59 @@ def test_explicit_overlay_refresh_uses_current_indicator_state() -> None:
         instrument={"id": "instrument-btc"},
         timeframe="1m",
         symbol="BTCUSD",
-        overlays=[],
         candles=[candle],
     )
     state = SeriesExecutionState(series=series, bar_index=1, total_bars=1, active_candle=candle)
     state.indicator_engine = _SpyIndicatorEngine()
 
-    overlays = runtime._refresh_indicator_overlays_for_state(
+    overlays = runtime._build_indicator_overlay_projection_for_state(
         state,
         candle=candle,
-        reason="test_debug_refresh",
+        reason="test_projection",
     )
 
     assert snapshot_calls == [candle.time]
-    assert overlays == series.overlays
     assert overlays[0]["overlay_id"] == "spy.markers"
     assert overlays[0]["payload"]["markers"] == [{"time": 1}]
 
 
-def test_visible_overlays_request_refreshes_indicator_overlays(monkeypatch) -> None:
+def test_visible_overlays_reads_projected_overlay_cache(monkeypatch) -> None:
     runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=_runtime_deps())
     overlay_payload = {"overlay_id": "spy.markers", "type": "test_indicator_overlay", "payload": {}}
     series = SimpleNamespace(
+        strategy_id="strategy-1",
         instrument={"id": "instrument-btc"},
         timeframe="1h",
         symbol="BTCUSD",
-        overlays=[],
-        trade_overlay=None,
     )
-    state = SimpleNamespace(series=series)
-    calls: list[dict[str, object]] = []
-
-    def refresh(candidate_state, **kwargs):
-        calls.append({"state": candidate_state, **kwargs})
-        series.overlays = [overlay_payload]
-        return [overlay_payload]
-
-    monkeypatch.setattr(runtime, "_series_state_for", lambda candidate: state if candidate is series else None)
-    monkeypatch.setattr(runtime, "_refresh_indicator_overlays_for_state", refresh)
+    runtime._overlay_projection_cache = {
+        "instrument-btc|1h": {"visible_overlays": [overlay_payload]}
+    }
     monkeypatch.setattr(runtime, "_current_epoch_for", lambda _series: None)
 
     visible = runtime._series_visible_overlays(series, status="running")
 
-    assert calls == [{"state": state, "reason": "visible_overlays"}]
     assert visible == [overlay_payload]
+
+
+def test_visible_overlays_does_not_build_indicator_projection(monkeypatch) -> None:
+    runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=_runtime_deps())
+    series = SimpleNamespace(
+        strategy_id="strategy-1",
+        instrument={"id": "instrument-btc"},
+        timeframe="1h",
+        symbol="BTCUSD",
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_build_indicator_overlay_projection_for_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("projection build must be explicit")),
+    )
+    monkeypatch.setattr(runtime, "_current_epoch_for", lambda _series: None)
+
+    visible = runtime._series_visible_overlays(series, status="running")
+
+    assert visible == []
 
 
 def test_indicator_runtime_initialization_configures_overlay_replay_window():
@@ -477,7 +480,7 @@ def test_indicator_runtime_initialization_configures_overlay_replay_window():
 
     runtime._initialize_indicator_runtime_state(state)
 
-    assert indicator.calls == [4]
+    assert indicator.calls == [640]
 
 
 def test_aggregate_stats_reuses_cached_trade_summary_until_trade_revision_changes():

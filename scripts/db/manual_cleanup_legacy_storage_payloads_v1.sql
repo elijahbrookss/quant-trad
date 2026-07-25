@@ -28,7 +28,7 @@ ORDER BY COALESCE(sum(payload_bytes), 0) DESC;
 
 \echo 'Deleting legacy raw observability event chatter now represented by rollups/live state...'
 WITH deleted AS (
-    DELETE FROM observability_events.botlens_backend_events_v1
+    DELETE FROM observability_events.botlens_backend_events
     WHERE event_name IN (
         'db_write_observed',
         'db_write_slow',
@@ -86,5 +86,5 @@ ORDER BY count(*) DESC;
 
 \echo 'Reclaiming storage with VACUUM FULL. This locks rewritten tables.'
 VACUUM (FULL, ANALYZE) public.portal_bot_run_events;
-VACUUM (FULL, ANALYZE) observability_events.botlens_backend_events_v1;
+VACUUM (FULL, ANALYZE) observability_events.botlens_backend_events;
 VACUUM (FULL, ANALYZE) public.portal_async_jobs;

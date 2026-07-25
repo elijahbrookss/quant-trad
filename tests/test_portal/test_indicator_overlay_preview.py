@@ -10,6 +10,7 @@ import pandas as pd
 
 from engines.bot_runtime.core.domain import Candle
 from indicators.market_profile.compute.engine import MarketProfileIndicator
+from indicators.market_profile.overlays import market_profile_overlay_transformer  # noqa: F401
 from portal.backend.service.indicators.indicator_service import api as indicator_api
 from portal.backend.service.indicators.indicator_service.api import _collect_runtime_overlays
 from indicators.market_profile.runtime.typed_indicator import TypedMarketProfileIndicator
@@ -56,8 +57,9 @@ def test_collect_runtime_overlays_transforms_market_profile_payload_at_current_e
     )
 
     assert len(overlays) == 1
-    payload = overlays[0]["payload"]
-    assert payload["overlay_id"] == "ind.value_area"
+    overlay = overlays[0]
+    assert overlay["overlay_id"] == "ind.value_area"
+    payload = overlay["payload"]
     assert len(payload["boxes"]) == 1
     assert payload["boxes"][0]["x1"] == 100
     assert payload["boxes"][0]["x2"] == 200
@@ -103,36 +105,111 @@ def test_market_profile_runtime_indicator_emits_signal_output_without_overlay_ma
     overlays = indicator.overlay_snapshot()
 
     assert outputs["balance_breakout"].ready is True
-    assert outputs["balance_breakout"].value["events"] == [
-        {
-            "key": "balance_breakout_long",
-            "direction": "long",
-            "metadata": {
-                "trigger_price": 104.0,
-                "reference": {
-                    "kind": "price_level",
-                    "family": "value_area",
-                    "name": "VAH",
-                    "label": "VAH",
-                    "price": 101.0,
-                    "precision": 2,
-                    "source": "market_profile",
-                    "key": "2025-01-01T00:00:00+00:00:2025-01-01T02:00:00+00:00:1",
-                    "context": {
-                        "profile_key": "2025-01-01T00:00:00+00:00:2025-01-01T02:00:00+00:00:1",
-                        "active_value_area": {
-                            "vah": 101.0,
-                            "val": 99.0,
-                            "poc": 100.0,
-                        },
-                    },
-                },
-            },
-        }
-    ]
+    events = outputs["balance_breakout"].value["events"]
+    assert len(events) == 1
+    event = events[0]
+    assert event["key"] == "balance_breakout_long"
+    assert event["direction"] == "long"
+    assert event["known_at"] == int(candles[-1].time.timestamp())
+    assert event["metadata"]["trigger_price"] == 104.0
+    assert event["metadata"]["distance_from_reference"] == 3.0
+    assert outputs["confirmed_breakout_metrics"].ready is False
+    reference = event["metadata"]["reference"]
+    assert reference["kind"] == "price_level"
+    assert reference["family"] == "value_area"
+    assert reference["name"] == "VAH"
+    assert reference["price"] == 101.0
+    assert reference["context"]["active_value_area"] == {
+        "vah": 101.0,
+        "val": 99.0,
+        "poc": 100.0,
+    }
     assert "value_area" in overlays
     assert set(overlays.keys()) == {"value_area"}
     assert overlays["value_area"].value["payload"]["markers"] == []
+
+
+def test_market_profile_runtime_indicator_exposes_confirmed_breakout_metrics():
+    indicator = TypedMarketProfileIndicator(
+        indicator_id="mp-1",
+        version="v1",
+        params={"bin_size": 1.0, "price_precision": 2},
+        source_facts={
+            "symbol": "ES",
+            "profiles": [
+                {
+                    "start": 1735689600,
+                    "end": 1735696800,
+                    "VAH": 101.0,
+                    "VAL": 99.0,
+                    "POC": 100.0,
+                    "session_count": 1,
+                    "precision": 2,
+                    "formed_at": 1735696800,
+                    "known_at": 1735696800,
+                }
+            ],
+            "profile_params": {
+                "use_merged_value_areas": False,
+                "extend_value_area_to_chart_end": True,
+            },
+        },
+    )
+
+    candles = [
+        Candle(
+            time=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=1.0,
+        ),
+        Candle(
+            time=datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=1.0,
+        ),
+        Candle(
+            time=datetime(2026, 1, 1, 2, 0, tzinfo=timezone.utc),
+            open=103.0,
+            high=104.0,
+            low=103.0,
+            close=104.0,
+            volume=1.0,
+        ),
+        Candle(
+            time=datetime(2026, 1, 1, 3, 0, tzinfo=timezone.utc),
+            open=104.0,
+            high=104.2,
+            low=103.0,
+            close=103.5,
+            volume=1.0,
+        ),
+    ]
+
+    for candle in candles:
+        indicator.apply_bar(candle, {})
+
+    outputs = indicator.snapshot()
+    confirmed = outputs["confirmed_balance_breakout"].value["events"][0]
+    metrics = outputs["confirmed_breakout_metrics"]
+
+    assert confirmed["key"] == "confirmed_balance_breakout_long"
+    assert metrics.ready is True
+    assert metrics.bar_time == candles[-1].time
+    assert metrics.value == {
+        "distance_from_reference": 2.5,
+        "distance_from_reference_abs": 2.5,
+        "distance_from_reference_pct": 2.5 / 101.0,
+        "trigger_price": 103.5,
+        "reference_price": 101.0,
+        "outside_bars_observed": 2.0,
+        "confirmation_bars_required": 2.0,
+    }
 
 
 def test_market_profile_runtime_indicator_waits_until_projected_strategy_bar_close() -> None:
@@ -144,17 +221,17 @@ def test_market_profile_runtime_indicator_waits_until_projected_strategy_bar_clo
             "symbol": "ES",
             "profiles": [
                 {
-                    "start": 1735725600,  # 2026-01-01 10:00 UTC
-                    "end": 1735729200,    # 2026-01-01 11:00 UTC projected strategy boundary
-                    "source_start": 1735725600,
-                    "source_end": 1735727400,  # 2026-01-01 10:30 UTC source-session end
+                    "start": 1767261600,  # 2026-01-01 10:00 UTC
+                    "end": 1767265200,    # 2026-01-01 11:00 UTC projected strategy boundary
+                    "source_start": 1767261600,
+                    "source_end": 1767263400,  # 2026-01-01 10:30 UTC source-session end
                     "VAH": 101.0,
                     "VAL": 99.0,
                     "POC": 100.0,
                     "session_count": 1,
                     "precision": 2,
-                    "formed_at": 1735727400,
-                    "known_at": 1735729200,
+                    "formed_at": 1767263400,
+                    "known_at": 1767265200,
                 }
             ],
             "profile_params": {
@@ -187,6 +264,79 @@ def test_market_profile_runtime_indicator_waits_until_projected_strategy_bar_clo
 
     indicator.apply_bar(second_candle, {})
     assert indicator.snapshot()["value_area_metrics"].ready is True
+
+
+def test_market_profile_runtime_indicator_exposes_source_continuity_diagnostics() -> None:
+    indicator = TypedMarketProfileIndicator(
+        indicator_id="mp-1",
+        version="v1",
+        params={"bin_size": 1.0, "price_precision": 2},
+        source_facts={
+            "symbol": "ES",
+            "profiles": [
+                {
+                    "start": 1735689600,
+                    "end": 1735696800,
+                    "VAH": 101.0,
+                    "VAL": 99.0,
+                    "POC": 100.0,
+                    "session_count": 1,
+                    "precision": 2,
+                    "formed_at": 1735696800,
+                    "known_at": 1735696800,
+                }
+            ],
+            "profile_params": {
+                "use_merged_value_areas": False,
+                "extend_value_area_to_chart_end": True,
+            },
+            "source_candle_continuity": {
+                "schema_version": "indicator_source_candle_continuity.v1",
+                "timeframe": "30m",
+                "status": "warning",
+                "severity": "warning",
+                "acceptability": "acceptable_with_caveat",
+                "continuity": {
+                    "final_status": "defect",
+                    "detected_gap_count": 1,
+                    "defect_gap_count": 1,
+                    "missing_candle_estimate": 2,
+                    "gaps": [
+                        {
+                            "previous_ts": "2025-11-28T21:30:00Z",
+                            "current_ts": "2025-11-28T23:00:00Z",
+                            "classification": "provider_missing_data",
+                        }
+                    ],
+                },
+            },
+        },
+    )
+
+    indicator.apply_bar(
+        Candle(
+            time=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=1.0,
+        ),
+        {},
+    )
+
+    diagnostics = indicator.runtime_diagnostics()
+    overlays = indicator.overlay_snapshot()
+
+    assert diagnostics["source_candle_continuity"]["acceptability"] == "acceptable_with_caveat"
+    transform_summary = overlays["value_area"].value["payload"]["summary"]["transform_summary"]
+    assert transform_summary["source_candle_continuity"]["continuity"]["gaps"] == [
+        {
+            "previous_ts": "2025-11-28T21:30:00Z",
+            "current_ts": "2025-11-28T23:00:00Z",
+            "classification": "provider_missing_data",
+        }
+    ]
 
 
 def test_market_profile_to_lightweight_profiles_include_known_at_for_preview_transform():

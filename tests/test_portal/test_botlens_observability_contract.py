@@ -34,6 +34,10 @@ import portal.backend.service.bots.botlens_run_projector as run_mod
 import portal.backend.service.bots.botlens_symbol_projector as sym_mod
 
 
+def _stub_symbol_ledger_rebuild(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sym_mod, "load_domain_projection_batches", lambda **_kwargs: ())
+
+
 class _FakeWebSocket:
     async def accept(self) -> None:  # pragma: no cover - not used here
         return None
@@ -495,6 +499,7 @@ def test_bootstrap_supersede_emits_metric_and_event() -> None:
 
 @pytest.mark.asyncio
 async def test_fanout_drop_emits_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_symbol_ledger_rebuild(monkeypatch)
     fanout = __import__("asyncio").Queue(maxsize=1)
     fanout.put_nowait({"sentinel": True})
     projector = SymbolProjector(
@@ -561,7 +566,10 @@ async def test_fanout_drop_emits_metrics(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_run_notification_overflow_keeps_latest_notification_and_requires_replay() -> None:
+async def test_run_notification_overflow_keeps_latest_notification_and_requires_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_symbol_ledger_rebuild(monkeypatch)
     run_notifications = __import__("asyncio").Queue(maxsize=1)
     run_notifications.put_nowait(QueueEnvelope(payload={"stale": True}))
     projector = SymbolProjector(
@@ -778,6 +786,7 @@ def test_record_bot_runtime_event_seq_collision_emits_event(monkeypatch: pytest.
 async def test_symbol_projector_emits_apply_metrics_without_persistence_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_symbol_ledger_rebuild(monkeypatch)
     run_id = "run-symbol-apply-metrics"
     bot_id = "bot-symbol-apply-metrics"
     symbol_key = "instrument-btc|1m"
@@ -840,7 +849,10 @@ async def test_symbol_projector_emits_apply_metrics_without_persistence_wait(
 
 
 @pytest.mark.asyncio
-async def test_symbol_projector_emits_projection_cursor_and_delta_metrics() -> None:
+async def test_symbol_projector_emits_projection_cursor_and_delta_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_symbol_ledger_rebuild(monkeypatch)
     run_id = "run-projection-metrics"
     bot_id = "bot-projection-metrics"
     symbol_key = "instrument-projection|1m"
@@ -924,6 +936,7 @@ async def test_symbol_projector_emits_projection_cursor_and_delta_metrics() -> N
 async def test_symbol_projector_runtime_event_no_longer_persists_typed_delta_metrics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_symbol_ledger_rebuild(monkeypatch)
     fanout = __import__("asyncio").Queue()
 
     projector = SymbolProjector(

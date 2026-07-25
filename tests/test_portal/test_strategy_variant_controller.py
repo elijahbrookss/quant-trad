@@ -77,7 +77,8 @@ def test_strategy_variant_crud_routes_are_thin_service_wrappers(monkeypatch) -> 
 
     response = client.get("/api/strategies/strategy-1/variants")
     assert response.status_code == 200
-    assert response.json()[0]["name"] == "expanding-only"
+    assert response.json()["schema_version"] == "strategy_variants.v1"
+    assert response.json()["variants"][0]["name"] == "expanding-only"
     filter_payload = {
         "scope": {"intent": ["enter_long"]},
         "indicator_id": "regime-1",
@@ -150,12 +151,24 @@ def test_strategy_preview_and_compile_routes_forward_variant_id(monkeypatch) -> 
         captured["preview"] = {"strategy_id": strategy_id, **payload}
         return {"preview_id": "preview-1"}
 
+    def _summary(strategy_id: str, **payload: Any) -> dict[str, Any]:
+        captured["summary"] = {"strategy_id": strategy_id, **payload}
+        return {"schema_version": "strategy_preview_summary.v1", "preview_id": "preview-1"}
+
+    def _compare(**payload: Any) -> dict[str, Any]:
+        captured["compare"] = payload
+        return {"schema_version": "strategy_preview_compare.v1", "case_count": len(payload["cases"])}
+
     def _compile(strategy_id: str, **payload: Any) -> dict[str, Any]:
         captured["compile"] = {"strategy_id": strategy_id, **payload}
         return {"strategy_id": strategy_id, "variant": {"id": payload.get("variant_id")}}
 
     monkeypatch.setattr(controller.strategy_service, "run_strategy_preview", _preview)
+    monkeypatch.setattr(controller.strategy_service, "run_strategy_preview_summary", _summary)
+    monkeypatch.setattr(controller.strategy_service, "compare_strategy_previews", _compare)
     monkeypatch.setattr(controller.strategy_service, "compile_strategy_contract", _compile)
+    monkeypatch.setattr(controller.strategy_service, "get_effective_strategy_contract", _compile)
+    monkeypatch.setattr(controller.strategy_service, "get_strategy_decision_inputs", _compile)
 
     response = client.post(
         "/api/strategies/strategy-1/preview",
@@ -179,6 +192,67 @@ def test_strategy_preview_and_compile_routes_forward_variant_id(monkeypatch) -> 
     }
 
     response = client.post(
+        "/api/strategies/strategy-1/preview/summary",
+        json={
+            "start": "2026-02-01T00:00:00Z",
+            "end": "2026-02-01T01:00:00Z",
+            "interval": "1h",
+            "instrument_ids": ["instrument-1"],
+            "variant_id": "variant-1",
+            "max_examples": 2,
+            "include_signals": True,
+        },
+    )
+    assert response.status_code == 200
+    assert captured["summary"] == {
+        "strategy_id": "strategy-1",
+        "start": "2026-02-01T00:00:00Z",
+        "end": "2026-02-01T01:00:00Z",
+        "interval": "1h",
+        "instrument_ids": ["instrument-1"],
+        "variant_id": "variant-1",
+        "variant_name": None,
+        "max_examples": 2,
+        "include_signals": True,
+    }
+
+    response = client.post(
+        "/api/strategies/preview/compare",
+        json={
+            "start": "2026-02-01T00:00:00Z",
+            "end": "2026-02-01T01:00:00Z",
+            "interval": "1h",
+            "cases": [
+                {
+                    "label": "base",
+                    "strategy_id": "strategy-1",
+                    "instrument_ids": ["instrument-1"],
+                    "variant_name": "default",
+                }
+            ],
+            "max_examples": 3,
+            "include_signals": False,
+        },
+    )
+    assert response.status_code == 200
+    assert captured["compare"] == {
+        "start": "2026-02-01T00:00:00Z",
+        "end": "2026-02-01T01:00:00Z",
+        "interval": "1h",
+        "cases": [
+            {
+                "label": "base",
+                "strategy_id": "strategy-1",
+                "instrument_ids": ["instrument-1"],
+                "variant_id": None,
+                "variant_name": "default",
+            }
+        ],
+        "max_examples": 3,
+        "include_signals": False,
+    }
+
+    response = client.post(
         "/api/strategies/strategy-1/compile",
         json={"variant_id": "variant-1", "variant_name": "expanding-only"},
     )
@@ -187,4 +261,20 @@ def test_strategy_preview_and_compile_routes_forward_variant_id(monkeypatch) -> 
         "strategy_id": "strategy-1",
         "variant_id": "variant-1",
         "variant_name": "expanding-only",
+    }
+
+    response = client.get("/api/strategies/strategy-1/effective?variant_name=expanding-only")
+    assert response.status_code == 200
+    assert captured["compile"] == {
+        "strategy_id": "strategy-1",
+        "variant_id": None,
+        "variant_name": "expanding-only",
+    }
+
+    response = client.get("/api/strategies/strategy-1/decision-inputs?variant_id=variant-1")
+    assert response.status_code == 200
+    assert captured["compile"] == {
+        "strategy_id": "strategy-1",
+        "variant_id": "variant-1",
+        "variant_name": None,
     }

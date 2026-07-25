@@ -17,6 +17,7 @@ code_paths:
   - src/core/settings.py
   - portal/backend/controller/providers.py
   - portal/backend/service/providers
+  - cli/setup.py
   - cli/main.py
   - cli/audit.py
   - config/defaults.yaml
@@ -60,7 +61,7 @@ on the backend/provider boundary to resolve capabilities and credentials.
 ## Consequences
 
 - Provider API keys no longer live in centralized settings or bot run config.
-- CLI, UI, and IDE/agent workflows use the same backend credential API.
+- CLI setup, UI, and IDE/agent workflows use the same backend credential API.
 - Agents can add credentials safely with stdin/env workflows while CLI audit
   logs redact secret-bearing arguments.
 - Credential metadata can be listed, validated, and revoked without exposing

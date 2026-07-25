@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Dict, List, Optional
 
 from ._shared import BotRunRecord, SQLAlchemyError, _json_safe, _parse_optional_timestamp, _utcnow, db, logger, select
+
+_NON_MATERIAL_CONFIG_KEYS = {
+    "generated_at",
+    "report_generated_at",
+    "report_warnings",
+    "request_id",
+    "runtime_warnings",
+    "updated_at",
+    "warnings",
+}
 
 
 def _merge_symbols(existing: Any, incoming: Any) -> list[str]:
@@ -17,6 +29,26 @@ def _merge_symbols(existing: Any, incoming: Any) -> list[str]:
         seen.add(symbol)
         merged.append(symbol)
     return merged
+
+
+def _hash_payload(payload: Any) -> Optional[str]:
+    safe_payload = _json_safe(payload)
+    if safe_payload in (None, "", [], {}):
+        return None
+    encoded = json.dumps(safe_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _material_config_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _material_config_payload(item)
+            for key, item in sorted(value.items(), key=lambda entry: str(entry[0]))
+            if str(key) not in _NON_MATERIAL_CONFIG_KEYS
+        }
+    if isinstance(value, list):
+        return [_material_config_payload(item) for item in value]
+    return _json_safe(value)
 
 
 def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -54,8 +86,26 @@ def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
             record.summary = dict(_json_safe(payload.get("summary") or {}))
         if payload.get("config_snapshot") is not None:
             record.config_snapshot = dict(_json_safe(payload.get("config_snapshot") or {}))
-        if payload.get("decision_ledger") is not None:
-            record.decision_ledger = list(_json_safe(payload.get("decision_ledger") or []))
+            record.config_hash = (
+                str(payload.get("config_hash") or "").strip()
+                or _hash_payload(record.config_snapshot)
+            )
+            record.material_config_hash = (
+                str(payload.get("material_config_hash") or payload.get("strategy_material_config_hash") or "").strip()
+                or _hash_payload(_material_config_payload(record.config_snapshot))
+            )
+        for field in (
+            "config_hash",
+            "material_config_hash",
+            "strategy_hash",
+            "data_snapshot_hash",
+            "runtime_contract_version",
+            "runtime_source_revision",
+            "runtime_image",
+            "storage_schema_version",
+        ):
+            if payload.get(field) not in (None, ""):
+                setattr(record, field, str(payload.get(field)).strip())
         record.updated_at = now
         if record.created_at is None:
             record.created_at = now
@@ -72,6 +122,52 @@ def get_bot_run(run_id: str) -> Optional[Dict[str, Any]]:
     with db.session() as session:
         record = session.get(BotRunRecord, run_id)
         return record.to_dict() if record else None
+
+
+def list_bot_runs_by_ids(run_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Return run snapshots keyed by run id."""
+
+    normalized = [str(run_id or "").strip() for run_id in run_ids]
+    wanted = [run_id for run_id in dict.fromkeys(normalized) if run_id]
+    if not wanted or not db.available:
+        return {}
+    with db.session() as session:
+        rows = (
+            session.execute(select(BotRunRecord).where(BotRunRecord.run_id.in_(wanted)))
+            .scalars()
+            .all()
+        )
+        return {str(row.run_id): row.to_dict() for row in rows}
+
+
+def list_latest_bot_runs_by_bot_ids(bot_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Return the latest BotRunRecord for each bot id."""
+
+    normalized = [str(bot_id or "").strip() for bot_id in bot_ids]
+    wanted = [bot_id for bot_id in dict.fromkeys(normalized) if bot_id]
+    if not wanted or not db.available:
+        return {}
+    with db.session() as session:
+        rows = (
+            session.execute(
+                select(BotRunRecord)
+                .where(BotRunRecord.bot_id.in_(wanted))
+                .order_by(
+                    BotRunRecord.bot_id.asc(),
+                    BotRunRecord.started_at.desc().nullslast(),
+                    BotRunRecord.updated_at.desc().nullslast(),
+                    BotRunRecord.created_at.desc().nullslast(),
+                )
+            )
+            .scalars()
+            .all()
+        )
+    latest: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        bot_id = str(row.bot_id or "")
+        if bot_id and bot_id not in latest:
+            latest[bot_id] = row.to_dict()
+    return latest
 
 
 
@@ -118,4 +214,3 @@ def list_bot_runs(
             exc,
         )
         raise
-

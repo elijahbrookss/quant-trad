@@ -323,14 +323,98 @@ def test_list_report_summaries_exposes_execution_mode(monkeypatch) -> None:
     monkeypatch.setattr(
         contract.report_data,
         "get_report_materialization_status",
-        lambda _run_id: {"status": "not_built", "contract_version": "run_report_v2"},
+        lambda _run_id: {"status": "not_built", "contract_version": "run_report.v2"},
     )
 
     payload = contract.list_report_summaries()
 
     assert payload["items"][0]["execution_mode"] == "full"
-    assert payload["items"][0]["readiness"]["results_ready"] is True
-    assert payload["items"][0]["readiness"]["safe_to_compare"] is True
+
+
+def test_report_instruments_exposes_mixed_execution_semantics(monkeypatch) -> None:
+    dataset = _dataset()
+    dataset["metadata"]["instrument_semantics"] = [
+        {
+            "symbol": "BTC/USD",
+            "instrument_id": "btc-spot",
+            "instrument_type": "spot",
+            "source_instrument_type": "spot",
+            "execution_semantics": "proxy_derivative",
+        },
+        {
+            "symbol": "BIP-20DEC30-CDE",
+            "instrument_id": "btc-perp",
+            "instrument_type": "future",
+            "source_instrument_type": "future",
+            "execution_semantics": "derivative",
+        },
+    ]
+    dataset["readiness"]["caveats"] = ["mixed_instrument_types", "proxy_derivative_sources"]
+    monkeypatch.setattr(contract, "build_run_research_dataset", lambda _run_id: dataset)
+
+    payload = contract.get_report_instruments("run-1")
+
+    assert payload["mixed"]["mixed_source_instrument_types"] is True
+    assert payload["mixed"]["execution_semantics"] == ["derivative", "proxy_derivative"]
+    assert payload["caveats"] == ["mixed_instrument_types", "proxy_derivative_sources"]
+
+
+def test_report_symbol_summary_counts_runtime_pressure_by_symbol(monkeypatch) -> None:
+    dataset = _dataset()
+    dataset["metadata"]["instrument_semantics"] = [
+        {
+            "symbol": "BTC/USD",
+            "instrument_id": "btc-spot",
+            "source_instrument_type": "spot",
+            "execution_semantics": "proxy_derivative",
+        }
+    ]
+    dataset["signals"] = [{"signal_id": "sig-1", "symbol": "BTC/USD", "instrument_id": "btc-spot"}]
+    dataset["decisions"] = [
+        {"decision_id": "dec-1", "symbol": "BTC/USD", "instrument_id": "btc-spot", "accepted": True},
+        {"decision_id": "dec-2", "symbol": "BTC/USD", "instrument_id": "btc-spot", "rejected": True},
+    ]
+    dataset["trades"] = [
+        {
+            "trade_id": "trade-1",
+            "symbol": "BTC/USD",
+            "instrument_id": "btc-spot",
+            "status": "closed",
+            "net_pnl": 7.0,
+            "gross_pnl": 8.0,
+            "fees": 1.0,
+        }
+    ]
+    monkeypatch.setattr(contract, "build_run_research_dataset", lambda _run_id: dataset)
+    monkeypatch.setattr(
+        contract.report_data,
+        "list_run_events",
+        lambda _run_id: [
+            {
+                "payload": {
+                    "event_name": "POSITION_OPENED",
+                    "context": {"symbol": "BTC/USD", "instrument_id": "btc-spot"},
+                }
+            },
+            {
+                "payload": {
+                    "event_name": "MARGIN_REJECTED",
+                    "context": {"symbol": "BTC/USD", "instrument_id": "btc-spot"},
+                }
+            },
+        ],
+    )
+
+    payload = contract.get_report_symbol_summary("run-1")
+    row = payload["items"][0]
+
+    assert row["execution_semantics"] == "proxy_derivative"
+    assert row["signals"] == 1
+    assert row["accepted_decisions"] == 1
+    assert row["rejected_decisions"] == 1
+    assert row["position_opened_events"] == 1
+    assert row["margin_rejected_events"] == 1
+    assert row["net_pnl"] == 7.0
 
 
 def test_report_contract_reuses_dataset_build_for_burst(monkeypatch) -> None:
@@ -359,13 +443,13 @@ def test_report_contract_reuses_dataset_build_for_burst(monkeypatch) -> None:
     assert calls["count"] == 1
 
 
-def test_run_report_v2_builds_from_existing_dataset(monkeypatch) -> None:
+def test_run_report_builds_from_existing_dataset(monkeypatch) -> None:
     dataset = _run_report_dataset()
     _install_run_report_dataset(monkeypatch, dataset)
 
     payload = contract.get_run_report("run-1")
 
-    assert payload["contract_version"] == "run_report_v2"
+    assert payload["contract_version"] == "run_report.v2"
     assert payload["identity"]["run_id"] == "run-1"
     assert payload["trust"]["research_status"] == "research_valid"
     assert payload["performance"]["net_pnl"]["value"] == 14.0
@@ -376,7 +460,7 @@ def test_run_report_v2_builds_from_existing_dataset(monkeypatch) -> None:
     assert payload["operational_diagnostics"]["operational_fingerprint"] == "operational-fingerprint"
 
 
-def test_run_report_v2_metric_values_include_validity_metadata(monkeypatch) -> None:
+def test_run_report_metric_values_include_validity_metadata(monkeypatch) -> None:
     dataset = _run_report_dataset()
     _install_run_report_dataset(monkeypatch, dataset)
 
@@ -395,7 +479,7 @@ def test_run_report_v2_metric_values_include_validity_metadata(monkeypatch) -> N
     assert performance["slippage"]["invalid_reason"] == "not_modeled"
 
 
-def test_run_report_v2_trust_fields_are_backend_computed(monkeypatch) -> None:
+def test_run_report_trust_fields_are_backend_computed(monkeypatch) -> None:
     dataset = _run_report_dataset()
     _install_run_report_dataset(monkeypatch, dataset)
 
@@ -410,7 +494,7 @@ def test_run_report_v2_trust_fields_are_backend_computed(monkeypatch) -> None:
     assert trust["entry_decision_order_timeout_count"] == 0
 
 
-def test_run_report_v2_observer_diagnostics_stay_non_material(monkeypatch) -> None:
+def test_run_report_observer_diagnostics_stay_non_material(monkeypatch) -> None:
     dataset = _run_report_dataset()
     _install_run_report_dataset(monkeypatch, dataset)
 

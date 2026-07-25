@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 from queue import Empty
 from types import SimpleNamespace
@@ -21,7 +22,11 @@ from engines.bot_runtime.core.runtime_events import (
 )
 from engines.bot_runtime.runtime.mixins.runtime_events import RuntimeEventsMixin
 from engines.bot_runtime.runtime.mixins.runtime_push_stream import RuntimePushStreamMixin
-from engines.bot_runtime.runtime.components.canonical_facts import CanonicalFactAppender, LiveFactsBroadcastConsumer
+from engines.bot_runtime.runtime.components.canonical_facts import (
+    CanonicalFactAppender,
+    CanonicalFactProjectionDispatcher,
+    LiveFactsBroadcastConsumer,
+)
 from portal.backend.service.bots.botlens_domain_events import (
     build_botlens_domain_events_from_fact_batch,
     serialize_botlens_domain_event,
@@ -88,10 +93,13 @@ class _PushRuntime(_FakeRuntime):
         self._lock = _SimpleLock()
         self._subscribers = {"sub-1": {"queue": object(), "overflow_policy": "fail", "overflowed": False}}
         self._push_series_cache = {}
+        self._overlay_projection_cache = {}
         self._push_log_marker = None
         self._push_decision_marker = None
         self._push_payload_bytes_sample_every = 10
         self._botlens_fact_stream_overlay_point_limit = 160
+        self._botlens_overlay_window_bars = 640
+        self._botlens_overlay_emit_every_bars = 25
         self._obs_enabled = False
         self._warning_revision = 0
         self._push_runtime_health_fingerprint = None
@@ -111,6 +119,9 @@ class _PushRuntime(_FakeRuntime):
         self._run_context = SimpleNamespace(run_id="run-1")
         self.bot_id = "bot-1"
         self.config = {}
+        self._chart_state_builder = SimpleNamespace(
+            visible_overlays=lambda overlays, _status, _epoch: list(overlays or []),
+        )
 
     def _allocate_test_canonical_seq(self) -> int:
         self._canonical_seq += 1
@@ -136,22 +147,16 @@ class _PushRuntime(_FakeRuntime):
     def _series_state_for(self, series):
         return SimpleNamespace(bar_index=1)
 
-    def _series_visible_overlays(self, series, *, status, refresh=True):
-        _ = status, refresh
-        return list(series.overlays or [])
+    def _current_epoch_for(self, series):
+        _ = series
+        return None
 
-    def _series_overlay_revision(self, series, *, status):
-        _ = status
-        return (
-            "running",
-            tuple(
-                (
-                    str(entry.get("overlay_id") or entry.get("type") or ""),
-                    str(entry.get("type") or ""),
-                )
-                for entry in (series.overlays or [])
-            ),
-        )
+    def _refresh_chart_overlay_cache_from_projection(self):
+        return None
+
+    def _projected_overlays_for_series(self, series):
+        cache = self._overlay_projection_cache.get(self._series_identity(series)["series_key"], {})
+        return list(cache.get("visible_overlays") or [])
 
     def _overlay_summary(self, overlays):
         return {
@@ -394,7 +399,6 @@ def test_botlens_bootstrap_payload_emits_fact_batch_for_selected_series() -> Non
     runtime._push_wallet_marker = None
     runtime._run_context = SimpleNamespace(runtime_event_stream=[])
     runtime._series_state_for = lambda _series: SimpleNamespace(bar_index=1)
-    runtime._series_visible_overlays = lambda selected, *, status: list(selected.overlays or [])
 
     def _visible_candles(selected, status, bar_index, intrabar_manager):
         _ = status, intrabar_manager
@@ -420,7 +424,10 @@ def test_botlens_bootstrap_payload_emits_fact_batch_for_selected_series() -> Non
             },
         ]
 
-    runtime._chart_state_builder = SimpleNamespace(visible_candles=_visible_candles)
+    runtime._chart_state_builder = SimpleNamespace(
+        visible_candles=_visible_candles,
+        visible_overlays=lambda overlays, _status, _epoch: list(overlays or []),
+    )
     series = SimpleNamespace(
         instrument={"id": "instrument-bip"},
         timeframe="1h",
@@ -455,6 +462,13 @@ def test_botlens_bootstrap_payload_emits_fact_batch_for_selected_series() -> Non
         ),
     )
     runtime._series = [series, other_series]
+    runtime._overlay_projection_cache = {
+        "instrument-bip|1h": {"visible_overlays": [{"overlay_id": "overlay-1", "type": "line", "value": 1.5}]}
+    }
+    runtime._projected_overlays_for_series = lambda selected: list(
+        runtime._overlay_projection_cache.get(runtime._series_identity(selected)["series_key"], {}).get("visible_overlays") or []
+    )
+    runtime._current_epoch_for = lambda _series: None
     runtime.snapshot = lambda: {
         "status": "running",
         "known_at": "2026-04-09T14:00:00Z",
@@ -549,27 +563,59 @@ def test_wallet_facts_emit_full_entry_ledger_trace_in_logical_order() -> None:
         "POSITION_OPENED",
         "EQUITY_UPDATED",
     ]
-    assert [event["event_id"] for event in wallet_events] == sorted(event["event_id"] for event in wallet_events)
-    assert all(event["run_seq"] == 12 for event in wallet_events)
-    assert all(event["run_seq_status"] == "runtime_assigned" for event in wallet_events)
-    assert all(event["source_run_seq"] == 12 for event in wallet_events)
-    assert all(event["wallet_commit_seq"] == 7 for event in wallet_events)
-    assert all(event["wallet_eval_seq"] == 6 for event in wallet_events)
-    assert all(event["position_commit_seq"] == 1 for event in wallet_events)
-    assert [event["wallet_event_order"] for event in wallet_events] == [10, 20, 40, 50]
-    assert all(event["decision_id"] == "decision-1" for event in wallet_events)
-    assert wallet_events[0]["margin_required"] == 100.0
-    assert wallet_events[0]["margin_available"] == 1000.0
-    assert wallet_events[0]["balance_after"] == 1000.0
-    assert wallet_events[0]["locked_margin_after"] == 100.0
-    assert wallet_events[0]["free_collateral_after"] == 900.0
-    assert wallet_events[0]["wallet_after"]["locked_margin"]["USD"] == 100.0
-    assert wallet_events[1]["balance_before"] == 1000.0
-    assert wallet_events[1]["balance_after"] == 999.6
-    assert wallet_events[1]["fee"] == 0.4
-    assert wallet_events[1]["free_collateral_before"] == 900.0
-    assert wallet_events[1]["free_collateral_after"] == 899.6
-    assert wallet_events[-1]["equity_after"] == 999.6
+
+
+def test_live_transport_payload_slims_wallet_snapshots_and_log_context() -> None:
+    runtime = _runtime()
+    payload = {
+        "facts": [
+            {
+                "fact_type": "wallet_ledger_event",
+                "wallet_event": {
+                    "event_name": "MARGIN_RESERVED",
+                    "wallet_commit_seq": 1,
+                    "balance_before": 1000.0,
+                    "balance_after": 1000.0,
+                    "wallet_before": {
+                        "balances": {"USD": 1000.0},
+                        "margin_positions": {"trade-1": {"locked_margin": 10.0}},
+                    },
+                    "wallet_after": {
+                        "balances": {"USD": 1000.0},
+                        "margin_positions": {"trade-1": {"locked_margin": 20.0}},
+                    },
+                    "wallet_delta": {"collateral_reserved": 10.0},
+                    "margin_requirement": {"total_required_collateral": 10.0},
+                },
+            },
+            {
+                "fact_type": "log_emitted",
+                "log": {
+                    "id": "diag-1",
+                    "event": "overlay_debug",
+                    "message": "large debug",
+                    "context": {
+                        "component": "indicator_guard",
+                        "operation": "overlay_snapshot",
+                        "raw": {"payload": "x" * 1024},
+                        "traceback": "nope",
+                    },
+                },
+            },
+        ]
+    }
+
+    live_payload = runtime._botlens_live_transport_payload(payload)
+    wallet_event = live_payload["facts"][0]["wallet_event"]
+    log = live_payload["facts"][1]["log"]
+
+    assert "wallet_before" not in wallet_event
+    assert "wallet_after" not in wallet_event
+    assert "wallet_delta" not in wallet_event
+    assert "margin_requirement" not in wallet_event
+    assert wallet_event["wallet_snapshot_summary"]["before_positions"] == 1
+    assert "raw" not in log["context"]
+    assert "traceback" not in log["context"]
 
 
 def test_wallet_initialized_round_trip_preserves_wallet_commit_clock() -> None:
@@ -1492,7 +1538,7 @@ def test_trade_facts_use_engine_cursor_changes_without_full_trade_serialization(
     assert cache["trade_cursor_revision"] == 2
 
 
-def test_push_update_keeps_overlay_facts_off_the_first_live_bar_and_emits_after_visual_refresh_interval() -> None:
+def test_push_update_never_builds_or_emits_overlay_projection_facts() -> None:
     runtime = _PushRuntime()
     series = SimpleNamespace(
         instrument={"id": "instrument-bip"},
@@ -1501,8 +1547,6 @@ def test_push_update_keeps_overlay_facts_off_the_first_live_bar_and_emits_after_
         symbol="BIP-20DEC30-CDE",
         datasource="COINBASE",
         exchange="coinbase_direct",
-        overlays=[{"overlay_id": "overlay-1", "type": "regime_overlay", "payload": {"blocks": []}}],
-        trade_overlay=None,
         candles=[{"time": 1}, {"time": 2}],
         risk_engine=SimpleNamespace(trade_revision=0, serialise_trades=lambda: [], stats=lambda: {}),
     )
@@ -1512,28 +1556,40 @@ def test_push_update_keeps_overlay_facts_off_the_first_live_bar_and_emits_after_
         to_dict=lambda: {"time": 2, "open": 1.5, "high": 2.5, "low": 1.0, "close": 2.0},
     )
 
-    with patch("engines.bot_runtime.runtime.mixins.runtime_push_stream.time.monotonic", return_value=10.0):
-        runtime._push_update("bar", series=series, candle=candle)
+    runtime._build_indicator_overlay_projection_for_state = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("push_update must not build overlay projections")
+    )
 
-    first_fact_types = [fact["fact_type"] for fact in runtime.broadcast_payloads[0]["facts"]]
-    assert "overlay_ops_emitted" not in first_fact_types
+    runtime._push_update("bar", series=series, candle=candle)
+    runtime._push_update("bar", series=series, candle=candle)
 
-    with patch("engines.bot_runtime.runtime.mixins.runtime_push_stream.time.monotonic", return_value=15.0):
-        runtime._push_update("bar", series=series, candle=candle)
-
-    second_fact_types = [fact["fact_type"] for fact in runtime.broadcast_payloads[1]["facts"]]
-    assert "overlay_ops_emitted" in second_fact_types
+    for payload in runtime.broadcast_payloads:
+        fact_types = [fact["fact_type"] for fact in payload["facts"]]
+        assert "overlay_ops_emitted" not in fact_types
 
 
-def test_push_update_defers_visual_overlay_refresh_until_refresh_interval() -> None:
+def test_push_update_queues_botlens_projection_dispatch_off_bar_path() -> None:
     runtime = _PushRuntime()
-    refresh_calls = 0
+    broadcast_started = threading.Event()
+    broadcast_release = threading.Event()
 
-    def _refresh_indicator_overlays_for_state(_state, **_kwargs):
-        nonlocal refresh_calls
-        refresh_calls += 1
+    def _blocking_broadcast(event, payload=None):
+        broadcast_started.set()
+        if not broadcast_release.wait(timeout=2.0):
+            raise RuntimeError("test broadcast was not released")
+        runtime.broadcast_payloads.append({"transport_event": event, **dict(payload or {})})
+        return (1, 0)
 
-    runtime._refresh_indicator_overlays_for_state = _refresh_indicator_overlays_for_state
+    runtime._canonical_fact_appender = CanonicalFactAppender(
+        allocate_seq=runtime._allocate_test_canonical_seq,
+        append_batch=lambda **_kwargs: {"inserted_rows": 1},
+        projection_dispatcher=CanonicalFactProjectionDispatcher(
+            consumers=(LiveFactsBroadcastConsumer(_blocking_broadcast),),
+            queue_max=4,
+            flush_interval_s=0.001,
+            drain_timeout_s=2.0,
+        ),
+    )
     series = SimpleNamespace(
         instrument={"id": "instrument-bip"},
         timeframe="1h",
@@ -1541,9 +1597,7 @@ def test_push_update_defers_visual_overlay_refresh_until_refresh_interval() -> N
         symbol="BIP-20DEC30-CDE",
         datasource="COINBASE",
         exchange="coinbase_direct",
-        overlays=[{"overlay_id": "overlay-1", "type": "regime_overlay", "payload": {"blocks": []}}],
-        trade_overlay=None,
-        candles=[{"time": 1}, {"time": 2}, {"time": 3}],
+        candles=[{"time": 1}, {"time": 2}],
         risk_engine=SimpleNamespace(trade_revision=0, serialise_trades=lambda: [], stats=lambda: {}),
     )
     runtime._series = [series]
@@ -1551,17 +1605,142 @@ def test_push_update_defers_visual_overlay_refresh_until_refresh_interval() -> N
         to_dict=lambda: {"time": 2, "open": 1.5, "high": 2.5, "low": 1.0, "close": 2.0},
     )
 
-    with patch("engines.bot_runtime.runtime.mixins.runtime_push_stream.time.monotonic", return_value=10.0):
-        runtime._push_update("bar", series=series, candle=candle)
-    with patch("engines.bot_runtime.runtime.mixins.runtime_push_stream.time.monotonic", return_value=12.0):
-        runtime._push_update("bar", series=series, candle=candle)
+    result = runtime._push_update("bar", series=series, candle=candle)
 
-    assert refresh_calls == 0
+    assert result["subscriber_count"] == 1.0
+    assert result["dropped_messages"] == 0.0
+    assert broadcast_started.wait(timeout=1.0)
+    assert runtime.broadcast_payloads == []
 
-    with patch("engines.bot_runtime.runtime.mixins.runtime_push_stream.time.monotonic", return_value=15.0):
-        runtime._push_update("bar", series=series, candle=candle)
+    broadcast_release.set()
+    runtime._canonical_fact_appender.flush(reason="test", shutdown=True, timeout_s=2.0)
 
-    assert refresh_calls == 1
+    assert runtime.broadcast_payloads[0]["transport_event"] == "facts"
+
+
+def test_overlay_projection_uses_bar_cadence_and_emits_bounded_delta() -> None:
+    runtime = _PushRuntime()
+    projection_calls = 0
+
+    def _build_indicator_overlay_projection_for_state(_state, **_kwargs):
+        nonlocal projection_calls
+        projection_calls += 1
+        return [{"overlay_id": f"overlay-{projection_calls}", "type": "regime_overlay", "payload": {"blocks": []}}]
+
+    runtime._build_indicator_overlay_projection_for_state = _build_indicator_overlay_projection_for_state
+    runtime._botlens_overlay_emit_every_bars = 3
+    series = SimpleNamespace(
+        instrument={"id": "instrument-bip"},
+        timeframe="1h",
+        strategy_id="strategy-1",
+        symbol="BIP-20DEC30-CDE",
+        datasource="COINBASE",
+        exchange="coinbase_direct",
+        candles=[{"time": 1}, {"time": 2}, {"time": 3}],
+        risk_engine=SimpleNamespace(trade_revision=0, serialise_trades=lambda: [], stats=lambda: {}),
+    )
+    runtime._series = [series]
+    candle = SimpleNamespace(
+        time=datetime(2026, 4, 9, 14, tzinfo=timezone.utc),
+        to_dict=lambda: {"time": 2, "open": 1.5, "high": 2.5, "low": 1.0, "close": 2.0},
+    )
+    state = SimpleNamespace(series=series, bar_index=1)
+
+    first = runtime._emit_overlay_projection_for_state(state, candle, reason="test")
+    state.bar_index = 2
+    second = runtime._emit_overlay_projection_for_state(state, candle, reason="test")
+    state.bar_index = 4
+    third = runtime._emit_overlay_projection_for_state(state, candle, reason="test")
+
+    assert projection_calls == 2
+    assert first["overlay_projection_projected_count"] == 1.0
+    assert second["overlay_projection_skipped_count"] == 1.0
+    assert third["overlay_projection_projected_count"] == 1.0
+    overlay_payloads = [
+        payload
+        for payload in runtime.broadcast_payloads
+        if any(fact["fact_type"] == "overlay_ops_emitted" for fact in payload.get("facts", []))
+    ]
+    assert len(overlay_payloads) == 2
+    first_delta = overlay_payloads[0]["facts"][0]["overlay_delta"]
+    assert first_delta["projection"] == {
+        "mode": "bounded",
+        "window_bars": 640,
+        "emit_every_bars": 3,
+        "bar_index": 1,
+    }
+    assert first_delta["ops"][0]["overlay"]["detail_level"] == "bounded_render"
+
+
+def _runtime_with_existing_overlay_projection_cache() -> tuple[_PushRuntime, SimpleNamespace, SimpleNamespace, dict]:
+    runtime = _PushRuntime()
+    runtime._build_indicator_overlay_projection_for_state = lambda *_args, **_kwargs: [
+        {"overlay_id": "next-overlay", "type": "regime_overlay", "payload": {"blocks": []}}
+    ]
+    runtime._botlens_overlay_emit_every_bars = 1
+    series = SimpleNamespace(
+        instrument={"id": "instrument-bip"},
+        timeframe="1h",
+        strategy_id="strategy-1",
+        symbol="BIP-20DEC30-CDE",
+        datasource="COINBASE",
+        exchange="coinbase_direct",
+        candles=[{"time": 1}],
+        risk_engine=SimpleNamespace(trade_revision=0, serialise_trades=lambda: [], stats=lambda: {}),
+    )
+    runtime._series = [series]
+    existing_cache = {
+        "overlay_entries": {
+            "old-overlay": {
+                "overlay_id": "old-overlay",
+                "type": "regime_overlay",
+                "detail_level": "bounded_render",
+                "payload": {"blocks": []},
+            }
+        },
+        "overlay_fingerprints": {"old-overlay": "old-fingerprint"},
+        "overlay_order": ["old-overlay"],
+        "overlay_commit_seq": 7,
+        "raw_overlays": [{"overlay_id": "old-overlay", "type": "regime_overlay", "payload": {"blocks": []}}],
+        "visible_overlays": [{"overlay_id": "old-overlay", "type": "regime_overlay", "payload": {"blocks": []}}],
+        "last_projected_bar_index": 4,
+        "last_projected_epoch": 1_765_000_000,
+        "projection_mode": "bounded",
+    }
+    runtime._overlay_projection_cache["instrument-bip|1h"] = dict(existing_cache)
+    candle = SimpleNamespace(
+        time=datetime(2026, 4, 9, 14, tzinfo=timezone.utc),
+        to_dict=lambda: {"time": 2, "open": 1.5, "high": 2.5, "low": 1.0, "close": 2.0},
+    )
+    state = SimpleNamespace(series=series, bar_index=10)
+    return runtime, candle, state, existing_cache
+
+
+def test_overlay_projection_reraises_canonical_append_failure_without_advancing_cache() -> None:
+    runtime, candle, state, existing_cache = _runtime_with_existing_overlay_projection_cache()
+    runtime.commit_botlens_fact_payload = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        RuntimeError("projection append failed")
+    )
+
+    with pytest.raises(RuntimeError, match="projection append failed"):
+        runtime._emit_overlay_projection_for_state(state, candle, reason="test")
+
+    assert runtime._overlay_projection_cache["instrument-bip|1h"] == existing_cache
+    assert runtime.broadcast_payloads == []
+
+
+def test_overlay_projection_reraises_canonical_dispatch_failure_without_advancing_cache() -> None:
+    runtime, candle, state, existing_cache = _runtime_with_existing_overlay_projection_cache()
+    runtime._canonical_fact_appender = SimpleNamespace(
+        append_fact_batch=lambda **_kwargs: SimpleNamespace(batch=SimpleNamespace()),
+        dispatch=lambda _batch: (_ for _ in ()).throw(RuntimeError("projection dispatch failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="projection dispatch failed"):
+        runtime._emit_overlay_projection_for_state(state, candle, reason="test")
+
+    assert runtime._overlay_projection_cache["instrument-bip|1h"] == existing_cache
+    assert runtime.broadcast_payloads == []
 
 
 def test_push_update_coalesces_unchanged_series_stats() -> None:
@@ -1573,8 +1752,6 @@ def test_push_update_coalesces_unchanged_series_stats() -> None:
         symbol="BIP-20DEC30-CDE",
         datasource="COINBASE",
         exchange="coinbase_direct",
-        overlays=[],
-        trade_overlay=None,
         candles=[{"time": 1}, {"time": 2}],
         risk_engine=SimpleNamespace(
             trade_revision=0,
@@ -1612,8 +1789,6 @@ def test_push_update_bounds_live_log_and_decision_fact_batches() -> None:
         symbol="BIP-20DEC30-CDE",
         datasource="COINBASE",
         exchange="coinbase_direct",
-        overlays=[],
-        trade_overlay=None,
         candles=[{"time": 1}, {"time": 2}],
         risk_engine=SimpleNamespace(trade_revision=0, serialise_trades=lambda: [], stats=lambda: {}),
     )
@@ -1632,26 +1807,15 @@ def test_push_update_bounds_live_log_and_decision_fact_batches() -> None:
     assert [entry["event_id"] for entry in decisions] == ["decision-3", "decision-4", "decision-5"]
 
 
-def test_visual_overlay_refresh_trigger_allows_immediate_emit_on_trade_entry() -> None:
+def test_overlay_projection_due_uses_bar_distance_not_wall_clock() -> None:
     runtime = _runtime()
-    cache = {}
-    overlay_revision = ("running", ("overlay-1",))
+    runtime._botlens_overlay_emit_every_bars = 5
+    state = SimpleNamespace(bar_index=10)
+    cache = {"last_projected_bar_index": 6}
 
-    with patch("engines.bot_runtime.runtime.mixins.runtime_push_stream.time.monotonic", return_value=10.0):
-        assert runtime._should_emit_visual_overlay_facts(
-            cache,
-            event="bar",
-            overlay_revision=overlay_revision,
-            trade_entry_refresh_required=False,
-        ) is False
-
-    with patch("engines.bot_runtime.runtime.mixins.runtime_push_stream.time.monotonic", return_value=10.1):
-        assert runtime._should_emit_visual_overlay_facts(
-            cache,
-            event="bar",
-            overlay_revision=("running", ("overlay-2",)),
-            trade_entry_refresh_required=True,
-        ) is True
+    assert runtime._overlay_projection_due_for_state(state, cache) is False
+    state.bar_index = 11
+    assert runtime._overlay_projection_due_for_state(state, cache) is True
 
 
 def test_push_update_coalesces_repeated_runtime_warning_counts_until_health_heartbeat() -> None:
@@ -1696,8 +1860,6 @@ def test_push_update_coalesces_repeated_runtime_warning_counts_until_health_hear
         symbol="BIP-20DEC30-CDE",
         datasource="COINBASE",
         exchange="coinbase_direct",
-        overlays=[],
-        trade_overlay=None,
         candles=[{"time": 1}, {"time": 2}],
         risk_engine=SimpleNamespace(trade_revision=0, serialise_trades=lambda: [], stats=lambda: {}),
     )

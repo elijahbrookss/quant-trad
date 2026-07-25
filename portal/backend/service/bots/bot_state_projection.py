@@ -63,27 +63,40 @@ def _parse_timestamp(value: Any) -> Optional[datetime]:
     return parsed.astimezone(timezone.utc)
 
 
-def _heartbeat_projection(
-    bot: Mapping[str, Any],
+def _lease_projection(
+    lease: Mapping[str, Any],
     *,
     claimed_active: bool,
-    heartbeat_stale_ms: int,
 ) -> Dict[str, Any]:
-    heartbeat_at = _parse_timestamp(bot.get("heartbeat_at"))
-    runner_id = str(bot.get("runner_id") or "").strip() or None
+    runner_id = str(lease.get("runner_id") or "").strip() or None
+    lease_status = str(lease.get("status") or "").strip().lower()
+    renewed_at = _parse_timestamp(lease.get("renewed_at"))
+    expires_at = _parse_timestamp(lease.get("expires_at"))
+    now = datetime.now(timezone.utc)
     age_ms: Optional[int] = None
-    if heartbeat_at is not None:
-        age_ms = max(0, int((datetime.now(timezone.utc) - heartbeat_at).total_seconds() * 1000.0))
-    if heartbeat_at is None:
-        state = "missing" if claimed_active or runner_id else "inactive"
-    elif age_ms is not None and age_ms > heartbeat_stale_ms:
-        state = "stale"
-    else:
+    expires_in_ms: Optional[int] = None
+    if renewed_at is not None:
+        age_ms = max(0, int((now - renewed_at).total_seconds() * 1000.0))
+    if expires_at is not None:
+        expires_in_ms = int((expires_at - now).total_seconds() * 1000.0)
+    if not lease:
+        state = "missing" if claimed_active else "inactive"
+    elif lease_status == "active" and not lease.get("released_at") and expires_at is not None and expires_at > now:
         state = "fresh"
+    elif lease_status == "active":
+        state = "stale"
+    elif lease_status:
+        state = lease_status
+    else:
+        state = "inactive"
     return {
         "runner_id": runner_id,
-        "at": bot.get("heartbeat_at"),
+        "status": lease_status or None,
+        "renewed_at": lease.get("renewed_at"),
+        "expires_at": lease.get("expires_at"),
+        "released_at": lease.get("released_at"),
         "age_ms": age_ms,
+        "expires_in_ms": expires_in_ms,
         "state": state,
         "fresh": state == "fresh",
         "stale": state == "stale",
@@ -105,31 +118,26 @@ def _default_container_state(bot_id: str) -> Dict[str, Any]:
 
 def _resolve_status(
     *,
-    persisted_status: str,
     lifecycle_status: str,
+    run_status: str,
     engine_status: str,
     container_status: str,
     container_running: bool,
-    heartbeat_state: str,
 ) -> str:
     if lifecycle_status in _TERMINAL_STATUSES and container_running:
         if engine_status in _ACTIVE_STATUSES:
             return engine_status
-        if persisted_status in _ACTIVE_STATUSES:
-            return persisted_status
         return "degraded"
     if lifecycle_status in _ACTIVE_STATUSES | _TERMINAL_STATUSES:
         if lifecycle_status in _ACTIVE_STATUSES and container_status in {"exited", "dead"}:
             return "crashed"
         return lifecycle_status
+    if run_status in _ACTIVE_STATUSES | _TERMINAL_STATUSES:
+        return run_status
     if container_running and engine_status:
         return engine_status
     if container_status in {"exited", "dead"}:
         return "crashed"
-    if heartbeat_state == "stale" and persisted_status in _ACTIVE_STATUSES:
-        return "crashed"
-    if persisted_status in _ACTIVE_STATUSES | _TERMINAL_STATUSES:
-        return persisted_status
     return "idle"
 
 
@@ -150,7 +158,7 @@ def _resolve_reason(
     status: str,
     phase: str,
     container_status: str,
-    heartbeat_state: str,
+    lease_state: str,
     selected_run_id: Optional[str],
 ) -> str:
     if phase == "launching_container":
@@ -178,7 +186,7 @@ def _resolve_reason(
             return "container_exited"
         if container_status == "missing" and selected_run_id:
             return "container_missing"
-        if heartbeat_state == "stale":
+        if lease_state == "stale":
             return "runner_stale"
         return "runtime_crashed"
     return status or "idle"
@@ -348,7 +356,6 @@ def _attach_lightweight_equity_trace(
         bot_payload.get("backtest_start")
         or selected_run_bot.get("backtest_start")
         or selected_run.get("started_at")
-        or bot_payload.get("last_run_at")
     )
     latest_at = _latest_symbol_activity_at(summary_state) or selected_run.get("ended_at") or selected_run.get("updated_at")
     if not started_at or not latest_at:
@@ -372,10 +379,9 @@ def project_bot_state(
     *,
     run: Mapping[str, Any] | None = None,
     lifecycle: Mapping[str, Any] | None = None,
+    lease: Mapping[str, Any] | None = None,
     run_snapshot: RunProjectionSnapshot | None = None,
-    view_row: Mapping[str, Any] | None = None,
     container_state: Mapping[str, Any] | None = None,
-    heartbeat_stale_ms: int = 30000,
 ) -> Dict[str, Any]:
     payload = dict(bot or {})
     bot_id = str(payload.get("id") or "").strip()
@@ -389,7 +395,6 @@ def project_bot_state(
         or str(selected_run.get("run_id") or "").strip()
         or None
     )
-    del view_row
     summary_state = run_snapshot
     has_run_snapshot = summary_state is not None
     health_payload = summary_state.health.to_dict() if has_run_snapshot else {}
@@ -404,22 +409,20 @@ def project_bot_state(
         else None
     )
     engine_status = _normalize_status(snapshot_runtime.get("status"), default="") if has_run_snapshot else ""
-    persisted_status = _normalize_status(payload.get("status"))
     lifecycle_status = _normalize_status(lifecycle_row.get("status"), default="")
+    run_status = _normalize_status(selected_run.get("status"), default="")
     claimed_active = bool(selected_run_id) and (
-        persisted_status in _ACTIVE_STATUSES
-        or lifecycle_status in _ACTIVE_STATUSES
-        or bool(payload.get("runner_id"))
+        lifecycle_status in _ACTIVE_STATUSES
+        or run_status in _ACTIVE_STATUSES
     )
-    heartbeat = _heartbeat_projection(payload, claimed_active=claimed_active, heartbeat_stale_ms=heartbeat_stale_ms)
+    lease_payload = _lease_projection(_mapping(lease), claimed_active=claimed_active)
     container = dict(container_state or _default_container_state(bot_id))
     status = _resolve_status(
-        persisted_status=persisted_status,
         lifecycle_status=lifecycle_status,
+        run_status=run_status,
         engine_status=engine_status,
         container_status=str(container.get("status") or ""),
         container_running=bool(container.get("running")),
-        heartbeat_state=str(heartbeat.get("state") or ""),
     )
     lifecycle_phase = str(lifecycle_row.get("phase") or "").strip()
     default_phase = _default_phase_for_status(
@@ -432,7 +435,7 @@ def project_bot_state(
         status=status,
         phase=phase,
         container_status=str(container.get("status") or ""),
-        heartbeat_state=str(heartbeat.get("state") or ""),
+        lease_state=str(lease_payload.get("state") or ""),
         selected_run_id=selected_run_id,
     )
 
@@ -444,7 +447,7 @@ def project_bot_state(
     if not runtime_stats:
         runtime_stats = _aggregate_symbol_catalog_stats(summary_state)
     if not runtime_stats:
-        runtime_stats = _mapping(selected_run.get("summary")) or _mapping(payload.get("last_stats"))
+        runtime_stats = _mapping(selected_run.get("summary"))
     runtime_stats = _attach_lightweight_equity_trace(
         runtime_stats,
         bot_payload=payload,
@@ -491,7 +494,7 @@ def project_bot_state(
         "warnings": warnings,
         "stats": runtime_stats,
         "equity_curve": runtime_stats.get("equity_curve") if isinstance(runtime_stats.get("equity_curve"), list) else None,
-        "started_at": snapshot_runtime.get("started_at") or selected_run.get("started_at") or payload.get("last_run_at"),
+        "started_at": snapshot_runtime.get("started_at") or selected_run.get("started_at"),
         "ended_at": snapshot_runtime.get("ended_at") or selected_run.get("ended_at"),
     }
     lifecycle_payload = {
@@ -513,7 +516,7 @@ def project_bot_state(
         "backend_owned": phase in BACKEND_OWNED_PHASES,
         "terminal": phase in TERMINAL_PHASES,
         "container": container,
-        "heartbeat": heartbeat,
+        "lease": lease_payload,
         "telemetry": telemetry,
         "live": bool(container.get("running")) and status in {"running", "degraded", "telemetry_degraded"},
     }
@@ -545,14 +548,13 @@ def project_bot_states(
     *,
     runs_by_bot_id: Mapping[str, Mapping[str, Any]] | None = None,
     lifecycle_by_bot_id: Mapping[str, Mapping[str, Any]] | None = None,
-    view_rows_by_bot_id: Mapping[str, Mapping[str, Any]] | None = None,
+    leases_by_bot_id: Mapping[str, Mapping[str, Any]] | None = None,
     container_states_by_bot_id: Mapping[str, Mapping[str, Any]] | None = None,
-    heartbeat_stale_ms: int = 30000,
 ) -> list[Dict[str, Any]]:
     projected: list[Dict[str, Any]] = []
     run_lookup = {str(key): value for key, value in dict(runs_by_bot_id or {}).items()}
     lifecycle_lookup = {str(key): value for key, value in dict(lifecycle_by_bot_id or {}).items()}
-    view_lookup = {str(key): value for key, value in dict(view_rows_by_bot_id or {}).items()}
+    lease_lookup = {str(key): value for key, value in dict(leases_by_bot_id or {}).items()}
     container_lookup = {str(key): value for key, value in dict(container_states_by_bot_id or {}).items()}
     for bot in bots or []:
         if not isinstance(bot, Mapping):
@@ -563,9 +565,8 @@ def project_bot_states(
                 bot,
                 run=run_lookup.get(bot_id),
                 lifecycle=lifecycle_lookup.get(bot_id),
-                view_row=view_lookup.get(bot_id),
+                lease=lease_lookup.get(bot_id),
                 container_state=container_lookup.get(bot_id),
-                heartbeat_stale_ms=heartbeat_stale_ms,
             )
         )
     return projected

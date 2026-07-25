@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import statistics
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 from data_providers.utils.ohlcv import interval_to_timedelta
@@ -18,6 +18,7 @@ from utils.log_context import build_log_context, with_log_context
 import logging
 
 from ..market.candle_service import fetch_ohlcv_by_instrument
+from ..provenance import REPORT_CONTRACT_VERSION, REPORT_SCHEMA_VERSION
 from . import report_data
 from .run_research_dataset import DATASET_SCHEMA_VERSION, build_run_research_dataset
 
@@ -39,8 +40,10 @@ _COMPARABLE_SUMMARY_METRICS = (
 )
 _DATASET_CACHE_TTL_SECONDS = 15.0
 _DATASET_CACHE_MAX_ENTRIES = 32
-_DATASET_CACHE: "OrderedDict[Tuple[str, int], Tuple[float, Dict[str, Any]]]" = OrderedDict()
-_DATASET_INFLIGHT: Dict[Tuple[str, int], Future] = {}
+_DatasetBuilder = Callable[[str], Dict[str, Any]]
+_DatasetCacheKey = Tuple[str, _DatasetBuilder]
+_DATASET_CACHE: "OrderedDict[_DatasetCacheKey, Tuple[float, Dict[str, Any]]]" = OrderedDict()
+_DATASET_INFLIGHT: Dict[_DatasetCacheKey, Future] = {}
 _DATASET_CACHE_LOCK = threading.RLock()
 
 
@@ -84,11 +87,11 @@ def _execution_mode_from_run(run: Mapping[str, Any]) -> str:
     return normalized if normalized in {"fast", "full"} else "fast"
 
 
-def _dataset_cache_key(run_id: str) -> Tuple[str, int]:
-    return (str(run_id), id(build_run_research_dataset))
+def _dataset_cache_key(run_id: str) -> _DatasetCacheKey:
+    return (str(run_id), build_run_research_dataset)
 
 
-def _cached_dataset_unlocked(key: Tuple[str, int]) -> Optional[Dict[str, Any]]:
+def _cached_dataset_unlocked(key: _DatasetCacheKey) -> Optional[Dict[str, Any]]:
     entry = _DATASET_CACHE.get(key)
     if not entry:
         return None
@@ -114,7 +117,7 @@ def clear_report_dataset_cache(run_id: Optional[str] = None) -> None:
                 _DATASET_CACHE.pop(key, None)
 
 
-def _store_dataset_unlocked(key: Tuple[str, int], dataset: Dict[str, Any]) -> None:
+def _store_dataset_unlocked(key: _DatasetCacheKey, dataset: Dict[str, Any]) -> None:
     _DATASET_CACHE[key] = (time.monotonic(), dataset)
     _DATASET_CACHE.move_to_end(key)
     while len(_DATASET_CACHE) > _DATASET_CACHE_MAX_ENTRIES:
@@ -294,6 +297,186 @@ def get_run_report_summary(run_id: str) -> Dict[str, Any]:
         "summary": dataset.get("summary") or {},
         "portfolio_metrics": dataset.get("portfolio_metrics") or {},
         "sections": dataset.get("sections") or {},
+    }
+
+
+def get_report_instruments(run_id: str) -> Dict[str, Any]:
+    """Return run-scoped instrument semantics without loading full report rows."""
+
+    dataset = _dataset(run_id)
+    metadata = _mapping(dataset.get("metadata"))
+    readiness = _mapping(dataset.get("readiness"))
+    rows = [dict(row) for row in metadata.get("instrument_semantics") or [] if isinstance(row, Mapping)]
+    source_types = sorted(
+        {
+            str(row.get("source_instrument_type") or row.get("instrument_type") or "").strip()
+            for row in rows
+            if str(row.get("source_instrument_type") or row.get("instrument_type") or "").strip()
+        }
+    )
+    execution_semantics = sorted(
+        {
+            str(row.get("execution_semantics") or "").strip()
+            for row in rows
+            if str(row.get("execution_semantics") or "").strip()
+        }
+    )
+    return {
+        "schema_version": "report_instruments.v1",
+        "run_id": run_id,
+        "items": rows,
+        "mixed": {
+            "source_instrument_types": source_types,
+            "execution_semantics": execution_semantics,
+            "mixed_source_instrument_types": len(source_types) > 1,
+            "mixed_execution_semantics": len(execution_semantics) > 1,
+        },
+        "caveats": list(readiness.get("caveats") or []),
+    }
+
+
+def _row_payload(row: Mapping[str, Any]) -> Dict[str, Any]:
+    payload = row.get("payload")
+    return dict(payload) if isinstance(payload, Mapping) else {}
+
+
+def _event_context(row: Mapping[str, Any]) -> Dict[str, Any]:
+    payload = _row_payload(row)
+    context = payload.get("context")
+    return dict(context) if isinstance(context, Mapping) else {}
+
+
+def _event_name_key(row: Mapping[str, Any]) -> str:
+    payload = _row_payload(row)
+    return str(payload.get("event_name") or row.get("event_name") or "").strip().lower()
+
+
+def _identity_from_row(row: Mapping[str, Any]) -> Tuple[str, str]:
+    context = _mapping(row.get("context")) or _event_context(row) or _mapping(row.get("decision_context"))
+    symbol = str(row.get("symbol") or context.get("symbol") or "").strip()
+    instrument_id = str(row.get("instrument_id") or context.get("instrument_id") or "").strip()
+    if not symbol and not instrument_id:
+        symbol = "UNKNOWN"
+    return symbol, instrument_id
+
+
+def _summary_bucket(
+    buckets: Dict[Tuple[str, str], Dict[str, Any]],
+    *,
+    symbol: str,
+    instrument_id: str,
+    semantics_by_identity: Mapping[Tuple[str, str], Dict[str, Any]],
+) -> Dict[str, Any]:
+    key = (symbol, instrument_id)
+    if key not in buckets:
+        semantics = semantics_by_identity.get(key) or semantics_by_identity.get((symbol, "")) or semantics_by_identity.get(("", instrument_id)) or {}
+        buckets[key] = {
+            "symbol": symbol or None,
+            "instrument_id": instrument_id or None,
+            "source_instrument_type": semantics.get("source_instrument_type") or semantics.get("instrument_type"),
+            "execution_semantics": semantics.get("execution_semantics"),
+            "signals": 0,
+            "decisions": 0,
+            "accepted_decisions": 0,
+            "rejected_decisions": 0,
+            "trades": 0,
+            "closed_trades": 0,
+            "position_opened_events": 0,
+            "margin_rejected_events": 0,
+            "net_pnl": 0.0,
+            "gross_pnl": 0.0,
+            "fees": 0.0,
+        }
+    return buckets[key]
+
+
+def get_report_symbol_summary(run_id: str) -> Dict[str, Any]:
+    """Return compact per-symbol execution trace and performance counts."""
+
+    dataset = _dataset(run_id)
+    metadata = _mapping(dataset.get("metadata"))
+    instrument_rows = [
+        dict(row)
+        for row in metadata.get("instrument_semantics") or []
+        if isinstance(row, Mapping)
+    ]
+    semantics_by_identity: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for row in instrument_rows:
+        symbol = str(row.get("symbol") or "").strip()
+        instrument_id = str(row.get("instrument_id") or "").strip()
+        if symbol or instrument_id:
+            semantics_by_identity[(symbol, instrument_id)] = row
+            if symbol:
+                semantics_by_identity[(symbol, "")] = row
+            if instrument_id:
+                semantics_by_identity[("", instrument_id)] = row
+
+    buckets: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for row in dataset.get("signals") or []:
+        if not isinstance(row, Mapping):
+            continue
+        symbol, instrument_id = _identity_from_row(row)
+        _summary_bucket(buckets, symbol=symbol, instrument_id=instrument_id, semantics_by_identity=semantics_by_identity)["signals"] += 1
+
+    for row in dataset.get("decisions") or []:
+        if not isinstance(row, Mapping):
+            continue
+        symbol, instrument_id = _identity_from_row(row)
+        bucket = _summary_bucket(buckets, symbol=symbol, instrument_id=instrument_id, semantics_by_identity=semantics_by_identity)
+        bucket["decisions"] += 1
+        if bool(row.get("accepted")):
+            bucket["accepted_decisions"] += 1
+        if bool(row.get("rejected")):
+            bucket["rejected_decisions"] += 1
+
+    for row in dataset.get("trades") or []:
+        if not isinstance(row, Mapping):
+            continue
+        symbol, instrument_id = _identity_from_row(row)
+        bucket = _summary_bucket(buckets, symbol=symbol, instrument_id=instrument_id, semantics_by_identity=semantics_by_identity)
+        bucket["trades"] += 1
+        if row.get("exit_time") or str(row.get("status") or "").strip().lower() in {"closed", "completed", "complete"}:
+            bucket["closed_trades"] += 1
+        bucket["net_pnl"] += float(_safe_float(row.get("net_pnl")) or 0.0)
+        bucket["gross_pnl"] += float(_safe_float(row.get("gross_pnl")) or _safe_float(row.get("pnl")) or 0.0)
+        bucket["fees"] += float(_safe_float(row.get("fees")) or _safe_float(row.get("fee")) or 0.0)
+
+    for row in report_data.list_run_events(run_id):
+        if not isinstance(row, Mapping):
+            continue
+        name = _event_name_key(row)
+        if name not in {"position_opened", "margin_rejected"}:
+            continue
+        symbol, instrument_id = _identity_from_row(row)
+        bucket = _summary_bucket(buckets, symbol=symbol, instrument_id=instrument_id, semantics_by_identity=semantics_by_identity)
+        if name == "position_opened":
+            bucket["position_opened_events"] += 1
+        elif name == "margin_rejected":
+            bucket["margin_rejected_events"] += 1
+
+    items = sorted(
+        buckets.values(),
+        key=lambda row: (str(row.get("symbol") or ""), str(row.get("instrument_id") or "")),
+    )
+    totals = {
+        "signals": sum(int(row.get("signals") or 0) for row in items),
+        "decisions": sum(int(row.get("decisions") or 0) for row in items),
+        "accepted_decisions": sum(int(row.get("accepted_decisions") or 0) for row in items),
+        "rejected_decisions": sum(int(row.get("rejected_decisions") or 0) for row in items),
+        "trades": sum(int(row.get("trades") or 0) for row in items),
+        "closed_trades": sum(int(row.get("closed_trades") or 0) for row in items),
+        "position_opened_events": sum(int(row.get("position_opened_events") or 0) for row in items),
+        "margin_rejected_events": sum(int(row.get("margin_rejected_events") or 0) for row in items),
+        "net_pnl": sum(float(row.get("net_pnl") or 0.0) for row in items),
+        "gross_pnl": sum(float(row.get("gross_pnl") or 0.0) for row in items),
+        "fees": sum(float(row.get("fees") or 0.0) for row in items),
+    }
+    return {
+        "schema_version": "report_symbol_summary.v1",
+        "run_id": run_id,
+        "items": items,
+        "totals": totals,
+        "instrument_semantics": instrument_rows,
     }
 
 
@@ -1027,7 +1210,7 @@ def _coordinator_waits(run_id: str) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - coordinator waits are diagnostic, not material truth.
         logger.warning(
             with_log_context(
-                "run_report_v2_coordinator_waits_unavailable",
+                "run_report_coordinator_waits_unavailable",
                 build_log_context(run_id=run_id, error=str(exc)),
             )
         )
@@ -1138,7 +1321,7 @@ def _run_report_identity(dataset: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def build_run_report(run_id: str) -> Dict[str, Any]:
-    """Build the RunReportDTO v2 payload from canonical report inputs."""
+    """Build the RunReportDTO payload from canonical report inputs."""
 
     dataset = _dataset(run_id)
     try:
@@ -1146,14 +1329,14 @@ def build_run_report(run_id: str) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - report v2 should degrade optional runtime ordering context.
         logger.warning(
             with_log_context(
-                "run_report_v2_runtime_ordering_context_unavailable",
+                "run_report_runtime_ordering_context_unavailable",
                 build_log_context(run_id=run_id, error=str(exc)),
             )
         )
         events = []
     return {
-        "contract_version": "run_report_v2",
-        "schema_version": "run_report.v2",
+        "contract_version": REPORT_CONTRACT_VERSION,
+        "schema_version": REPORT_SCHEMA_VERSION,
         "run_id": run_id,
         "identity": _run_report_identity(dataset),
         "trust": _research_trust(dataset, events),
@@ -1171,6 +1354,7 @@ def build_run_report(run_id: str) -> Dict[str, Any]:
             "readiness_route": f"/api/reports/{run_id}/readiness",
             "diagnostics_route": f"/api/reports/{run_id}/diagnostics",
             "metrics_route": f"/api/reports/{run_id}/metrics",
+            "candidate_lifecycle_route": f"/api/reports/{run_id}/candidate-lifecycle",
         },
     }
 
@@ -1286,6 +1470,51 @@ def get_signal_dataset(
         rows = [row for row in rows if str(row.get("instrument_id") or "") == instrument_id]
     rows.sort(key=lambda row: (str(row.get("bar_time") or row.get("known_at") or ""), str(row.get("signal_id") or "")))
     return _page(run_id=run_id, section="signals", rows=rows, limit=limit, offset=offset)
+
+
+def get_candidate_lifecycle_dataset(
+    run_id: str,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    symbol: Optional[str] = None,
+    instrument_id: Optional[str] = None,
+    family: Optional[str] = None,
+    side: Optional[str] = None,
+    stage: Optional[str] = None,
+    status: Optional[str] = None,
+) -> Dict[str, Any]:
+    dataset = _dataset(run_id)
+    payload = _mapping(dataset.get("candidate_lifecycle"))
+    rows = [dict(row) for row in payload.get("items") or [] if isinstance(row, Mapping)]
+    if symbol:
+        rows = [row for row in rows if str(row.get("symbol") or "") == symbol]
+    if instrument_id:
+        rows = [row for row in rows if str(row.get("instrument_id") or "") == instrument_id]
+    if family:
+        rows = [row for row in rows if str(row.get("family") or "") == family]
+    if side:
+        rows = [row for row in rows if str(row.get("side") or "") == side]
+    if stage:
+        rows = [row for row in rows if str(row.get("stage") or "") == stage]
+    if status:
+        rows = [row for row in rows if str(row.get("status") or "") == status]
+    rows.sort(
+        key=lambda row: (
+            str(row.get("bar_time") or row.get("known_at") or ""),
+            int(row.get("indicator_commit_seq") or 0),
+            int(row.get("event_index") or 0),
+            str(row.get("candidate_id") or ""),
+        )
+    )
+    return _page(run_id=run_id, section="candidate_lifecycle", rows=rows, limit=limit, offset=offset) | {
+        "availability": {
+            "available": bool(payload.get("available")),
+            "reason": payload.get("reason"),
+            "schema_version": payload.get("schema_version"),
+        },
+        "summary": _mapping(payload.get("summary")),
+    }
 
 
 def get_timeseries_dataset(

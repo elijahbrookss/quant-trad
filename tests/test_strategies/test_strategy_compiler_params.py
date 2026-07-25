@@ -4,6 +4,8 @@ from typing import Any
 
 import pytest
 
+from indicators.manifest import manifest_output_catalog
+from indicators.registry import get_indicator_manifest
 from strategies.compiler import IndicatorMetaGetter, compile_strategy
 from strategies.contracts import ContextMatchSpec, HoldsForBarsSpec, MetricMatchSpec
 
@@ -90,6 +92,74 @@ def test_existing_literal_strategy_still_compiles() -> None:
     guard = spec.rules[0].guards[0]
     assert isinstance(guard, MetricMatchSpec)
     assert guard.value == 1.5
+
+
+def test_market_profile_confirmed_breakout_metrics_can_gate_confirmed_breakout_signal() -> None:
+    outputs = manifest_output_catalog(get_indicator_manifest("market_profile"))
+
+    spec = compile_strategy(
+        strategy_id="s1",
+        timeframe="1h",
+        rules={
+            "r1": {
+                "id": "r1",
+                "name": "structure entry quality",
+                "intent": "enter_long",
+                "trigger": {
+                    "type": "signal_match",
+                    "indicator_id": "mp-1",
+                    "output_name": "confirmed_balance_breakout",
+                    "event_key": "confirmed_balance_breakout_long",
+                },
+                "guards": [
+                    {
+                        "type": "metric_match",
+                        "indicator_id": "mp-1",
+                        "output_name": "confirmed_breakout_metrics",
+                        "field": "distance_from_reference_pct",
+                        "operator": ">=",
+                        "value": 0.005,
+                    }
+                ],
+            }
+        },
+        attached_indicator_ids=["mp-1"],
+        indicator_meta_getter=_make_meta_getter(outputs),
+    )
+
+    guard = spec.rules[0].guards[0]
+    assert isinstance(guard, MetricMatchSpec)
+    assert guard.output_name == "confirmed_breakout_metrics"
+    assert guard.field == "distance_from_reference_pct"
+
+
+def test_candle_stats_atr_expansion_can_be_standalone_strategy_trigger() -> None:
+    outputs = manifest_output_catalog(get_indicator_manifest("candle_stats"))
+
+    spec = compile_strategy(
+        strategy_id="s1",
+        timeframe="1h",
+        rules={
+            "r1": {
+                "id": "r1",
+                "name": "ATR expansion long",
+                "intent": "enter_long",
+                "trigger": {
+                    "type": "signal_match",
+                    "indicator_id": "candle-stats-1",
+                    "output_name": "atr_expansion",
+                    "event_key": "atr_expansion_long",
+                },
+                "guards": [],
+            }
+        },
+        attached_indicator_ids=["candle-stats-1"],
+        indicator_meta_getter=_make_meta_getter(outputs),
+    )
+
+    assert spec.rules[0].trigger.output_name == "atr_expansion"
+    assert spec.rules[0].trigger.event_key == "atr_expansion_long"
+    assert spec.rules[0].guards == ()
 
 
 def test_parameterized_metric_match_resolves_correctly() -> None:

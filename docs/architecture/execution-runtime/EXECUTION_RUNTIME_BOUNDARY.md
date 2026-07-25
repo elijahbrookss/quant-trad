@@ -13,6 +13,7 @@ tags:
   - deterministic
 code_paths:
   - src/engines/bot_runtime
+  - src/engines/bot_runtime/runtime/components/canonical_facts.py
   - portal/backend/service/bots/bot_watchdog.py
   - portal/backend/service/bots/runner_observability.py
   - portal/backend/service/bots/run_lease.py
@@ -51,7 +52,101 @@ Runtime emits:
 - trade lifecycle rows/events,
 - fee, margin, wallet, and settlement effects,
 - lifecycle checkpoints,
-- runtime diagnostics and fallback events.
+- runtime diagnostics and fallback events,
+- bounded BotLens projection/debug facts that never become execution authority.
+
+Runtime separates source identity from execution modeling:
+
+- `instrument_type` comes from the canonical instrument record and describes the
+  market-data source.
+- `execution_semantics` describes how the bot runtime models orders, shorts,
+  wallet effects, and margin for that run.
+- `SeriesExecutionProfile` is the single runtime authority for tick size,
+  contract size, tick value, fees, amount constraints, quote currency,
+  collateral model, and margin calculator.
+- `LadderRiskEngine` consumes those values from the compiled profile, not from
+  bot config, ATM templates, or ad hoc instrument dictionary lookups.
+- `proxy_derivative` is a backtest research binding where a spot source remains
+  labeled as spot while runtime applies derivative-style execution semantics.
+- Startup readiness and reports must carry both source instrument type and
+  execution semantics so mixed spot/perp research windows are explicit.
+- Proxy-derivative execution must compile from explicit derivative evidence
+  such as `proxy_derivative_margin_rates`,
+  `proxy_derivative_instrument_fields`, or a validated derivative reference.
+  Missing evidence is an admission failure; runtime must not silently fall back
+  to spot full-notional accounting or spot quantity constraints.
+- ATM templates are strategy/risk templates. They must not be used to patch
+  missing instrument execution fields for runtime admission.
+- Series construction routes candles through the linked instrument identity.
+  Strategy-level provider fields are fallback defaults, not a reason to fetch a
+  spot proxy from the derivative venue.
+- Series construction must fail on provider `ingestion_failure` candle evidence.
+  It may carry sparse-source classifications into diagnostics, but it must not
+  accept a truncated replay as a completed backtest window.
+
+## Position Lifecycle And Order Semantics
+
+ATM templates declare position lifecycle intent; runtime executes that intent.
+Template compatibility is handled at the ATM boundary. Runtime compiles the
+normalized template into a `RuntimeExecutionPlan` before opening trades.
+Position state consumes resolved runtime policy objects rather than raw
+template dictionaries.
+
+The canonical policy fields are:
+
+- `exit_plan.fixed_horizon`: close remaining open legs after `bars` completed
+  position bars at the strategy bar close. This is a market/taker close and
+  emits a `fixed_horizon` exit fill plus a close reason of `FIXED_HORIZON`.
+- `stop_adjustments`: one-time stop movement rules such as move-to-breakeven
+  at a configured R multiple, an absolute trigger tick value, or after a target
+  hit. Runtime accepts normalized nested template rules and flattened
+  compatibility rules at the template edge, then converts them into canonical
+  runtime stop-adjustment objects.
+- `breakeven`: direct breakeven activation for simple strategies when explicit
+  stop adjustments are not configured.
+- `trailing`: trailing-stop activation and distance config. A trailing stop may
+  only tighten in the favorable direction; it must never loosen an existing
+  stop.
+
+Runtime maps exit event types to liquidity roles:
+
+- target fills represent resting take-profit limits and use maker fees,
+- stop fills represent stop-market exits and use taker fees,
+- fixed-horizon and terminal closes are market closes and use taker fees.
+
+Limit-maker entries are post-only. If a submitted maker entry would cross the
+current reference price immediately, runtime rejects it with
+`POST_ONLY_WOULD_CROSS`. Limit-maker entries are submitted from the signal
+close and cannot fill from the already-known signal bar range. Once a maker
+order is accepted as resting, later bars may fill it as maker liquidity when
+price trades through the limit for the configured validity window.
+
+Execution profiles remain the fee and instrument authority. Templates may
+request order style and exit behavior, but they must not patch missing
+instrument fee, tick, quantity, or margin fields.
+
+Runtime supports only `signal_price` as the immediate entry anchor. Entry timing
+beyond current signal-close submission is not hidden behind a price anchor. A
+true next-bar entry model requires its own pending signal-entry lifecycle so
+reports can distinguish when the signal was known from when the order became
+executable.
+
+Executable fills use `FillOrder` semantics: side, quantity, price, order type,
+liquidity role, price source, and fee rate are known before the adapter applies
+the fill. The older `fill_market` adapter method remains only as a compatibility
+facade for adapters that have not yet implemented direct order execution.
+
+## Slippage Modeling Gap
+
+Slippage is not yet empirically calibrated. Runtime has deterministic execution
+hooks, but Quant-Trad does not yet have enough paper/live fill evidence to
+model symbol-, venue-, regime-, order-type-, and size-sensitive slippage with
+confidence.
+
+Until that evidence exists, slippage assumptions must be explicit and bounded.
+They must not be buried inside maker/taker fee logic, stop logic, or report
+summaries. Future slippage models should attach to the execution-policy
+boundary after order type, liquidity role, and fallback behavior are known.
 
 ## Diagram Walkthrough: Runtime Hot Path
 
@@ -62,9 +157,14 @@ Runtime emits:
 3. The per-bar loop advances indicator snapshots and decision evaluation.
 4. Execution core resolves FAST/FULL behavior, intrabar fallback, fills, fees, margin, and settlement.
 5. Runtime emits events and persists trade/run facts.
-6. Projections and reports consume those facts downstream.
+6. Runtime emits compact BotLens push facts without building visual overlay
+   geometry.
+7. Visual overlay projection runs as a separate bounded projection step when
+   its bar cadence is due.
+8. Projections and reports consume those facts downstream.
 
-Hot-path payloads should stay compact. Detailed debug and history belong on cold paths.
+Hot-path payloads should stay compact. Detailed debug and history belong on
+cold paths or bounded projection steps.
 
 ## Diagram Walkthrough: Lifecycle State
 
@@ -83,7 +183,7 @@ silently overwritten by a later completion. If durable facts contain both
 completion and an unclassified terminal failure/fault, reporting must expose a
 lifecycle contradiction and block golden-run certification.
 
-Watchdog stale-heartbeat detection is recoverable lifecycle degradation unless
+Watchdog expired-lease detection is recoverable lifecycle degradation unless
 there is independent evidence that the runtime process actually reached a
 terminal failure. Container-not-running and startup/process failures remain
 terminal only when the watchdog can verify the container belongs to the run it
@@ -91,16 +191,17 @@ is evaluating and startup launch grace has expired. A fixed-name container from
 an older run is startup ambiguity, not proof that the new run crashed.
 Recoverable watchdog conditions should produce degraded operational health with
 context, not `RUN_FAILED` or an unclassified terminal fault. Watchdog lifecycle
-rows should include bounded diagnostics such as stale age, previous runner,
-detecting runner, runner clock gap evidence, and nearby container lifecycle
-evidence when those facts are available.
+rows should include bounded diagnostics such as lease expiry age, previous
+runner, detecting runner, runner clock gap evidence, and nearby container
+lifecycle evidence when those facts are available.
 
 Run ownership is leased per `run_id`. The backend acquires a run lease before
 launching the runner, the runtime renews that lease while it is alive, and clean
-terminal exit releases it. A fresh run lease is stronger liveness evidence than
-the legacy bot-row heartbeat; stale bot heartbeats with a fresh run lease are
-not terminal proof. Runtime processes must fail loud if they lose the lease or
-cannot renew it before continuing to emit run facts.
+terminal exit releases it. `portal_bot_run_leases` is the liveness and ownership
+source; `portal_bots` remains a bot definition row and must not carry
+`runner_id`, heartbeat, status, summary, or artifact state. Runtime processes
+must fail loud if they lose the lease or cannot renew it before continuing to
+emit run facts.
 
 ## Execution Semantics
 
@@ -111,23 +212,41 @@ FAST and FULL are execution semantics, not playback modes.
 - Missing/incomplete/ambiguous intrabar data falls back to pessimistic behavior with diagnostics.
 - UI animation can replay events, but it must not change execution truth.
 
-## State And Truth
+## Evidence Runtime Must Leave Behind
 
-Runtime truth includes decisions, rejected decisions, fills, fees, trade state, wallet reservations, margin effects, terminal closes, lifecycle transitions, and domain events.
+Runtime truth includes decisions, rejected decisions, fills, fees, trade state,
+wallet reservations, margin effects, terminal closes, lifecycle transitions,
+and domain events. BotLens snapshots, fleet cards, API transport shapes, and
+report views are projections over that truth. Projection state may be rebuilt or
+unavailable; runtime truth should remain durable and inspectable.
 
-Runtime projections include BotLens snapshots, fleet cards, API transport shapes, and report views. Projection state may be rebuilt or unavailable; runtime truth should remain durable and inspectable.
+Performance diagnostics are supporting evidence, not execution truth. Step
+traces may be batched and lag the hot path, but they must flush before a run is
+considered fully finalized or surface a diagnostic if they cannot be drained.
 
-Runtime performance diagnostics are supporting evidence, not execution truth.
-Step traces may be batched and lag the hot path, but they must flush before a
-run is considered fully finalized or surface a diagnostic if they cannot be
-drained.
-
-Canonical BotLens facts are required runtime truth, so they use a stricter
-buffer than step traces. The runtime may enqueue sequenced canonical fact
-batches off the bar hot path and write them in bounded DB batches, but the queue
-must not drop rows. Terminal completion requires draining that buffer after the
-final status push. Queue overflow, write failure, or drain timeout fails the run
+Canonical BotLens facts are required runtime evidence, so they use a stricter
+buffer than step traces. Runtime may enqueue sequenced canonical fact batches
+off the bar hot path and write them in bounded DB batches, but the queue must
+not drop rows. Terminal completion requires draining that buffer after the final
+status push. Queue overflow, write failure, or drain timeout fails the run
 instead of silently producing a report from partial canonical facts.
+
+Live BotLens projection dispatch happens after the sequenced fact append. The
+bar step may build the compact fact batch from the current runtime timeline,
+assign its producer sequence, and enqueue the committed batch to a bounded
+projection dispatcher. It must not wait for websocket subscriber fanout or
+projector transport work before continuing execution. The dispatcher consumes
+the already stamped batch from that bar's known-at snapshot; it does not rebuild
+state from mutable runtime internals.
+
+Visual overlay projection is separate from ordinary runtime push dispatch.
+`_push_update` does not materialize indicator overlay geometry and does not
+read or write a `StrategySeries.overlays` cache. After bar finalization,
+runtime may run an `overlay_projection` step that snapshots indicator visual
+state, diffs the bounded overlay cache, and emits overlay deltas only when the
+projected viewport changed. Overlay projection pressure degrades BotLens
+overlay freshness; it must not change decisions, fills, wallet effects,
+reports, or execution completion.
 
 ## Failure And Recovery
 
@@ -142,6 +261,8 @@ instead of silently producing a report from partial canonical facts.
 - All bot runs are walk-forward.
 - Known-at timing governs indicators, decisions, and execution.
 - Runtime truth does not come from frontend playback.
+- Visual overlays are bounded BotLens projection state, not runtime series
+  truth.
 - Shared-wallet and symbol-sharded paths must preserve deterministic ordering.
 - Heavy debug/history reads are cold-path behavior.
 

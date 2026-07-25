@@ -83,13 +83,13 @@ export async function fetchIndicator(id) {
   return normalizeIndicatorRead(await handleResponse(res))
 }
 
-export async function createIndicator({ type, name, params, dependencies = [], output_prefs = {}, color, color_palette }) {
+export async function createIndicator({ type, name, params, dependencies = [], color, color_palette }) {
   adapterLogger.debug('create_indicator_request', {
     type,
     hasName: Boolean(name),
     paramKeys: Object.keys(params || {}),
   })
-  const body = { type, name, params, dependencies, output_prefs }
+  const body = { type, name, params, dependencies }
   if (color !== undefined) {
     body.color = color
   }
@@ -105,13 +105,12 @@ export async function createIndicator({ type, name, params, dependencies = [], o
   return normalizeIndicatorRead(await handleResponse(res))
 }
 
-export async function updateIndicator(id, { type, name, params, dependencies = [], output_prefs = {}, color, color_palette }) {
-  const body = { type, name, params, dependencies, output_prefs }
+export async function updateIndicator(id, { type, name, params, dependencies = [], color, color_palette }) {
+  const body = { type, name, params, dependencies }
   adapterLogger.debug('update_indicator_request', {
     id,
     type,
     dependencyCount: dependencies.length,
-    outputPrefs: output_prefs,
   })
   if (color !== undefined) {
     body.color = color
@@ -128,11 +127,10 @@ export async function updateIndicator(id, { type, name, params, dependencies = [
   const payload = normalizeIndicatorRead(await handleResponse(res))
   adapterLogger.debug('update_indicator_response', {
     id,
-    outputPrefs: payload?.output_prefs || null,
     typedOutputs: Array.isArray(payload?.typed_outputs)
       ? payload.typed_outputs
           .filter((entry) => entry?.type === 'signal')
-          .map((entry) => ({ name: entry?.name, enabled: entry?.enabled !== false }))
+          .map((entry) => ({ name: entry?.name }))
       : null,
   })
   return payload

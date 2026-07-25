@@ -104,6 +104,30 @@ class DeterministicExecutionModel(ExecutionModel):
 
         limit_price = float(intent.limit_params.limit_price or intent.requested_price)
         side = str(intent.side).lower()
+        pending_evaluation = bool(intent.metadata.get("pending_evaluation"))
+        if not pending_evaluation and _post_only_would_cross(
+            side=side,
+            limit_price=limit_price,
+            reference_price=float(intent.requested_price or candle_open or candle_close),
+        ):
+            rejection = FillRejection(
+                reason="POST_ONLY_WOULD_CROSS",
+                metadata={
+                    "order_type": order_type,
+                    "side": side,
+                    "limit_price": limit_price,
+                    "requested_price": float(intent.requested_price or candle_close),
+                },
+            )
+            outcome = self.submit(intent)
+            return replace(
+                outcome,
+                status="rejected",
+                updated_at=_utc_now(),
+                limit_price=limit_price,
+                validity_window=intent.limit_params.validity_window,
+            ), rejection
+
         if side in {"buy", "long"}:
             filled = candle_low <= limit_price
         else:
@@ -154,6 +178,14 @@ class DeterministicExecutionModel(ExecutionModel):
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _post_only_would_cross(*, side: str, limit_price: float, reference_price: float) -> bool:
+    if limit_price <= 0 or reference_price <= 0:
+        return False
+    if side in {"buy", "long"}:
+        return limit_price >= reference_price
+    return limit_price <= reference_price
 
 
 __all__ = ["DeterministicExecutionModel"]

@@ -340,9 +340,50 @@ def _durable_overlay_entry(key: Any, overlay: Any) -> Dict[str, Any]:
     }
 
 
+def _durable_overlay_payload_patch(value: Any) -> Dict[str, Any]:
+    mapping = _mapping(value)
+    replace = mapping.get("replace") if isinstance(mapping.get("replace"), Mapping) else {}
+    durable_replace = _durable_overlay_payload(replace)
+    remove_values = mapping.get("remove") if isinstance(mapping.get("remove"), list) else []
+    remove = [
+        str(entry).strip()
+        for entry in remove_values
+        if str(entry).strip()
+    ]
+    summary = _mapping(mapping.get("payload_summary"))
+    durable = {
+        "replace": durable_replace or None,
+        "remove": remove or None,
+        "payload_summary": summary or None,
+    }
+    return {
+        entry_key: entry_value
+        for entry_key, entry_value in durable.items()
+        if entry_value not in (None, "", {}, [])
+    }
+
+
 def _durable_overlay_delta(value: Any) -> Dict[str, Any]:
     payload = _mapping(value)
     overlay_commit_seq, base_overlay_commit_seq, overlay_commit_seq_status = _overlay_delta_clock(payload)
+    projection = _mapping(payload.get("projection"))
+    projection_bar_index = (
+        _coerce_int(projection.get("bar_index"), -1)
+        if projection.get("bar_index") is not None
+        else -1
+    )
+    durable_projection = {
+        "mode": _optional_text(projection.get("mode")),
+        "window_bars": _coerce_int(projection.get("window_bars"), 0) or None,
+        "emit_every_bars": _coerce_int(projection.get("emit_every_bars"), 0) or None,
+        "bar_index": projection_bar_index if projection_bar_index >= 0 else None,
+        "source": _optional_text(projection.get("source")),
+    }
+    durable_projection = {
+        key: item
+        for key, item in durable_projection.items()
+        if item not in (None, "", [], {}, ())
+    }
     durable_ops: List[Dict[str, Any]] = []
     op_counts: Dict[str, int] = {}
     point_count = 0
@@ -359,12 +400,18 @@ def _durable_overlay_delta(value: Any) -> Dict[str, Any]:
             if overlay_summary:
                 durable_op["overlay"] = overlay_summary
                 point_count += int(_mapping(overlay_summary.get("payload_summary")).get("point_count") or 0)
+        elif op_name == "patch":
+            patch_summary = _durable_overlay_payload_patch(op.get("payload_patch"))
+            if patch_summary:
+                durable_op["payload_patch"] = patch_summary
+                point_count += int(_mapping(patch_summary.get("payload_summary")).get("point_count") or 0)
         durable_ops.append(durable_op)
         op_counts[op_name] = op_counts.get(op_name, 0) + 1
     durable = {
         "overlay_commit_seq": overlay_commit_seq,
         "base_overlay_commit_seq": base_overlay_commit_seq,
         "overlay_commit_seq_status": overlay_commit_seq_status,
+        "projection": durable_projection or None,
         "ops": durable_ops,
         "op_counts": op_counts or None,
         "point_count": point_count or None,
@@ -1476,7 +1523,7 @@ def _durable_context_payload(
         warning_types = sorted(
             {
                 str(entry).strip().lower()
-                for entry in context.get("warning_types", [])
+                for entry in (context.get("warning_types") or [])
                 if str(entry).strip()
             }
         ) or sorted(

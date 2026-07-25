@@ -1,4 +1,5 @@
 import { BotCreateModal } from '../create/BotCreateModal.jsx'
+import { BotConfigModal } from '../config/BotConfigModal.jsx'
 import { BotDiagnosticsModal } from '../diagnostics/BotDiagnosticsModal.jsx'
 import { BotLensRuntimeContainer } from '../botlens/BotLensRuntimeContainer.jsx'
 import { buildBotsPageViewModel } from './buildBotsPageViewModel.js'
@@ -9,6 +10,9 @@ export function BotsPageView({
   closeCreateModal,
   createError,
   createOpen,
+  configBot,
+  configBotActive,
+  configSaving,
   diagnosticsBot,
   error,
   filteredBots,
@@ -18,6 +22,8 @@ export function BotsPageView({
   handleChange,
   handleCreate,
   handleDelete,
+  handleOpenConfig,
+  handleSaveConfig,
   handleOpenCreate,
   handleStart,
   handleStop,
@@ -72,6 +78,7 @@ export function BotsPageView({
         fleetSummary={fleetSummary}
         handleDelete={handleDelete}
         handleOpenCreate={handleOpenCreate}
+        handleOpenConfig={handleOpenConfig}
         handleStart={handleStart}
         handleStop={handleStop}
         handleViewReport={handleViewReport}
@@ -90,6 +97,16 @@ export function BotsPageView({
         strategyLookup={strategyLookup}
       />
 
+      <BotConfigModal
+        active={configBotActive}
+        bot={configBot}
+        canUpdate={Boolean(handleSaveConfig)}
+        onClose={() => handleOpenConfig(null)}
+        onSave={handleSaveConfig}
+        open={Boolean(configBot)}
+        saving={configSaving}
+        strategy={configBot?.strategy_id ? strategyLookup.get(configBot.strategy_id) : null}
+      />
       <BotDiagnosticsModal bot={diagnosticsBot} open={Boolean(diagnosticsBot)} onClose={() => setDiagnosticsBotId(null)} />
       {lensBot ? <BotLensRuntimeContainer bot={lensBot} open={Boolean(lensBot)} onClose={() => setLensBotId(null)} /> : null}
       <BotCreateModal

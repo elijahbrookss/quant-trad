@@ -6,10 +6,10 @@ from engines.bot_runtime.runtime.components.step_trace_buffer import StepTracePe
 
 
 def test_step_trace_buffer_batches_and_flushes():
-    batches: list[int] = []
+    batches: list[list[dict]] = []
 
     def _batch_handler(payloads):
-        batches.append(len(payloads))
+        batches.append([dict(payload) for payload in payloads])
         return len(payloads)
 
     buffer = StepTracePersistenceBuffer(
@@ -36,12 +36,14 @@ def test_step_trace_buffer_batches_and_flushes():
 
     buffer.flush(reason="test", shutdown=True, timeout_s=2.0)
 
-    assert sum(batches) == 7
-    assert max(batches) <= 3
-    assert max(batches) == 3
+    flattened = [row for batch in batches for row in batch]
+    assert len(flattened) == 1
+    assert flattened[0]["_step_trace_rollup"] is True
+    assert flattened[0]["sample_count"] == 7
+    assert flattened[0]["raw_sample_count"] == 7
 
 
-def test_step_trace_buffer_drop_oldest_when_queue_full():
+def test_step_trace_buffer_drop_oldest_when_aggregate_keys_exceed_queue():
     persisted = 0
 
     def _batch_handler(payloads):
@@ -63,7 +65,7 @@ def test_step_trace_buffer_drop_oldest_when_queue_full():
             {
                 "run_id": "run-1",
                 "bot_id": "bot-1",
-                "step_name": "step_series_state",
+                "step_name": f"step_series_state_{index}",
                 "started_at": "2026-03-01T00:00:00Z",
                 "ended_at": "2026-03-01T00:00:00.100000Z",
                 "duration_ms": 100.0 + index,

@@ -7,7 +7,7 @@ CREATE SCHEMA IF NOT EXISTS runtime_state;
 CREATE SCHEMA IF NOT EXISTS observability_events;
 CREATE SCHEMA IF NOT EXISTS observability_metrics;
 
-CREATE TABLE IF NOT EXISTS observability_events.botlens_backend_events_v1 (
+CREATE TABLE IF NOT EXISTS observability_events.botlens_backend_events (
     id SERIAL PRIMARY KEY,
     observed_at TIMESTAMP NOT NULL DEFAULT NOW(),
     component VARCHAR(128) NOT NULL,
@@ -34,15 +34,15 @@ CREATE TABLE IF NOT EXISTS observability_events.botlens_backend_events_v1 (
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS ix_botlens_backend_events_v1_observed_at
-    ON observability_events.botlens_backend_events_v1 (observed_at);
-CREATE INDEX IF NOT EXISTS ix_botlens_backend_events_v1_event_name_observed_at
-    ON observability_events.botlens_backend_events_v1 (event_name, observed_at);
-CREATE INDEX IF NOT EXISTS ix_botlens_backend_events_v1_run_id_observed_at
-    ON observability_events.botlens_backend_events_v1 (run_id, observed_at);
+CREATE INDEX IF NOT EXISTS ix_botlens_backend_events_observed_at
+    ON observability_events.botlens_backend_events (observed_at);
+CREATE INDEX IF NOT EXISTS ix_botlens_backend_events_event_name_observed_at
+    ON observability_events.botlens_backend_events (event_name, observed_at);
+CREATE INDEX IF NOT EXISTS ix_botlens_backend_events_run_id_observed_at
+    ON observability_events.botlens_backend_events (run_id, observed_at);
 
 -- Raw metric samples were removed from the durable schema. Use
--- observability_metrics.botlens_backend_metric_rollups_v1 for retained metrics.
+-- observability_metrics.botlens_backend_metric_rollups for retained metrics.
 
 CREATE INDEX IF NOT EXISTS ix_portal_bot_run_events_bot_run_seq_id
     ON public.portal_bot_run_events (bot_id, run_id, seq, id);
@@ -60,7 +60,7 @@ ALTER TABLE public.portal_bot_run_events
     ADD COLUMN IF NOT EXISTS run_seq INTEGER,
     ADD COLUMN IF NOT EXISTS run_seq_status TEXT;
 
-CREATE OR REPLACE VIEW runtime_state.bot_runtime_events_v1 AS
+CREATE OR REPLACE VIEW runtime_state.bot_runtime_events AS
 SELECT
     e.id,
     e.event_id,
@@ -96,11 +96,11 @@ SELECT
     e.reason_code
 FROM public.portal_bot_run_events e;
 
-CREATE OR REPLACE VIEW runtime_state.bot_run_lifecycle_v1 AS
+CREATE OR REPLACE VIEW runtime_state.bot_run_lifecycle AS
 SELECT *
 FROM public.portal_bot_run_lifecycle;
 
-CREATE OR REPLACE VIEW runtime_state.bot_run_lifecycle_events_v1 AS
+CREATE OR REPLACE VIEW runtime_state.bot_run_lifecycle_events AS
 SELECT *
 FROM public.portal_bot_run_lifecycle_events;
 

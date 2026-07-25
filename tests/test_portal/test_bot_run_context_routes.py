@@ -37,7 +37,7 @@ def test_bot_run_context_routes_are_compact_contracts(monkeypatch: pytest.Monkey
     monkeypatch.setattr(
         bots_controller.bot_service,
         "start_bot_run_context",
-        lambda bot_id, request_id=None: {
+        lambda bot_id, request_id=None, start_overrides=None: {
             "schema_version": "bot_run_start.v1",
             "bot_id": bot_id,
             "run_id": "run-2",
@@ -96,7 +96,7 @@ def test_bot_update_route_exposes_backtest_window_for_experiment_plans(monkeypat
             "wallet_config": {},
             "snapshot_interval_ms": 1000,
             "bot_env": {},
-            "instrument_type": None,
+            "execution_semantics": None,
             "status": "idle",
         }
 

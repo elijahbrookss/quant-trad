@@ -19,9 +19,6 @@ class _FakeConfigService:
                 "wallet_config": {"balances": {"USDC": 100.0}},
                 "snapshot_interval_ms": 1000,
                 "run_type": "backtest",
-                "status": "running",
-                "runner_id": "runner-1",
-                "heartbeat_at": "2026-04-09T04:21:43Z",
             }
         ]
 
@@ -56,6 +53,14 @@ class _FakeStorage:
             "checkpoint_at": "2026-04-09T04:21:43Z",
             "updated_at": "2026-04-09T04:21:43Z",
         }
+        self.lease = {
+            "run_id": "run-1",
+            "bot_id": "bot-1",
+            "runner_id": "runner-1",
+            "status": "active",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "released_at": None,
+        }
 
     def get_latest_bot_run_lifecycle(self, bot_id: str):
         return dict(self.lifecycle) if str(bot_id) == "bot-1" else None
@@ -68,6 +73,9 @@ class _FakeStorage:
 
     def get_bot_run(self, run_id: str):
         return dict(self.run) if str(run_id) == "run-1" else None
+
+    def get_bot_run_lease(self, run_id: str):
+        return dict(self.lease) if str(run_id) == "run-1" else None
 
     def get_report_materialization_status(self, run_id: str):
         return {"run_id": run_id, "status": "not_started", "can_view": False}
@@ -144,3 +152,127 @@ def test_runtime_capacity_marks_estimate_incomplete_when_snapshot_missing(monkey
     assert result["workers_requested"] == 0
     assert result["telemetry_unavailable_bots"] == 1
     assert result["estimate_incomplete"] is True
+
+
+def test_publish_projected_bot_skips_projection_without_stream_subscribers(monkeypatch):
+    class _ConfigThatShouldNotLoad(_FakeConfigService):
+        def get_bot(self, bot_id: str):
+            raise AssertionError("projection should not load bot when nobody is subscribed")
+
+    composition = _FakeComposition(config_service=_ConfigThatShouldNotLoad(), storage=_FakeStorage())
+    composition.stream_manager = SimpleNamespace(
+        has_subscribers=lambda: False,
+        broadcast=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not broadcast")),
+    )
+    monkeypatch.setattr(bot_service, "_composition", lambda: composition)
+
+    bot_service.publish_projected_bot("bot-1")
+
+
+def test_list_bots_uses_batched_projection_reads(monkeypatch):
+    class _BatchConfig(_FakeConfigService):
+        def __init__(self) -> None:
+            self._bots = [
+                {
+                    "id": "bot-1",
+                    "name": "Bot 1",
+                    "strategy_id": "strategy-1",
+                },
+                {
+                    "id": "bot-2",
+                    "name": "Bot 2",
+                    "strategy_id": "strategy-1",
+                },
+            ]
+
+    class _BatchStorage(_FakeStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.single_latest_runtime_calls = 0
+            self.batch_latest_run_calls = 0
+            self.batch_lifecycle_calls = 0
+            self.batch_status_calls = 0
+
+        def get_latest_bot_runtime_run_id(self, bot_id: str):
+            self.single_latest_runtime_calls += 1
+            return super().get_latest_bot_runtime_run_id(bot_id)
+
+        def list_latest_bot_runs_by_bot_ids(self, bot_ids):
+            self.batch_latest_run_calls += 1
+            return {
+                bot_id: {
+                    "run_id": f"run-{bot_id[-1]}",
+                    "bot_id": bot_id,
+                    "status": "completed",
+                    "summary": {},
+                }
+                for bot_id in bot_ids
+            }
+
+        def list_latest_bot_run_lifecycles(self, bot_ids, *, run_ids_by_bot=None):
+            self.batch_lifecycle_calls += 1
+            return {
+                bot_id: {
+                    "bot_id": bot_id,
+                    "run_id": (run_ids_by_bot or {}).get(bot_id),
+                    "phase": "completed",
+                    "status": "completed",
+                    "metadata": {},
+                    "failure": {},
+                }
+                for bot_id in bot_ids
+            }
+
+        def list_bot_runs_by_ids(self, run_ids):
+            return {
+                run_id: {
+                    "run_id": run_id,
+                    "bot_id": f"bot-{run_id[-1]}",
+                    "status": "completed",
+                    "summary": {},
+                }
+                for run_id in run_ids
+            }
+
+        def list_bot_run_leases_by_run_ids(self, run_ids):
+            return {
+                run_id: {
+                    "run_id": run_id,
+                    "bot_id": f"bot-{run_id[-1]}",
+                    "runner_id": "runner-1",
+                    "status": "released",
+                    "expires_at": "2026-04-09T04:22:43Z",
+                    "released_at": "2026-04-09T04:22:44Z",
+                }
+                for run_id in run_ids
+            }
+
+        def list_report_materialization_statuses(self, run_ids):
+            self.batch_status_calls += 1
+            return {
+                run_id: {
+                    "run_id": run_id,
+                    "status": "not_started",
+                    "can_view": False,
+                    "can_build": True,
+                    "can_retry": False,
+                }
+                for run_id in run_ids
+            }
+
+    storage = _BatchStorage()
+    composition = _FakeComposition(config_service=_BatchConfig(), storage=storage)
+    monkeypatch.setattr(bot_service, "_composition", lambda: composition)
+    monkeypatch.setattr(bot_service, "_telemetry_hub", lambda: _FakeTelemetryHub())
+    monkeypatch.setattr(
+        "portal.backend.service.bots.bot_service.DockerBotRunner.inspect_bot_container",
+        lambda _bot_id: {"status": "missing", "running": False},
+    )
+
+    result = bot_service.list_bots()
+
+    assert [row["id"] for row in result] == ["bot-1", "bot-2"]
+    assert storage.batch_latest_run_calls == 1
+    assert storage.batch_lifecycle_calls == 1
+    assert storage.batch_status_calls == 1
+    assert storage.single_latest_runtime_calls == 0

@@ -30,8 +30,8 @@ const outputOptionsForType = (indicator, outputType, options = {}) => (
   getAuthorableOutputsByType(indicator, outputType, options).map((entry) => ({
     value: entry.name,
     label: entry.label || entry.name,
-    description: entry?.enabled === false ? 'Disabled in indicator settings; kept for existing rules.' : '',
-    badge: entry?.enabled === false ? 'Disabled' : undefined,
+    description: '',
+    badge: undefined,
     meta: entry,
   }))
 )

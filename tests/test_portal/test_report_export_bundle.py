@@ -25,6 +25,13 @@ def _dataset() -> dict:
         "trades": [{"trade_id": "trade-1", "net_pnl": 1.0}],
         "decisions": [{"decision_id": "decision-1"}],
         "signals": [{"signal_id": "signal-1"}],
+        "candidate_lifecycle": {
+            "schema_version": "candidate_lifecycle_dataset.v1",
+            "available": True,
+            "row_count": 1,
+            "items": [{"candidate_id": "candidate-1", "stage": "formed"}],
+            "summary": {"candidate_count": 1},
+        },
         "context": {
             "decision_context": {"items": [{"decision_id": "decision-1"}]},
             "indicator_snapshots": {"items": []},
@@ -66,6 +73,8 @@ def test_export_manifest_includes_file_metadata_without_full_dataset(monkeypatch
     assert files["trades.json"]["row_count"] == 1
     assert files["timeseries/equity_curve.json"]["row_count"] == 1
     assert files["candle_catalog.json"]["row_count"] == 1
+    assert files["candidate_lifecycle.json"]["row_count"] == 1
+    assert files["candidate_lifecycle.csv"]["row_count"] == 1
     assert files["trades.json"]["size_bytes"] > 0
     assert len(files["trades.json"]["sha256"]) == 64
     assert files["trades.csv"]["row_count"] == 1
@@ -89,10 +98,12 @@ def test_export_archive_manifest_matches_section_files(monkeypatch) -> None:
         names = set(archive.namelist())
         manifest = json.loads(archive.read("manifest.json"))
         metrics = json.loads(archive.read("metrics.json"))
+        candidate_lifecycle = json.loads(archive.read("candidate_lifecycle.json"))
     manifest_paths = {entry["path"] for entry in manifest["files"]}
     assert "run_research_dataset.json" not in names
     assert manifest_paths == names
     assert metrics["portfolio_metrics"]["sharpe"] == 1.25
+    assert candidate_lifecycle["summary"]["candidate_count"] == 1
 
 
 def test_research_export_can_include_optional_candle_files(monkeypatch) -> None:

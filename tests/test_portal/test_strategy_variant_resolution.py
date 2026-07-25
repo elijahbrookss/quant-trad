@@ -111,6 +111,43 @@ def test_materialize_output_filters_appends_context_guard_by_intent_scope() -> N
     assert materialized[2]["guards"] == []
 
 
+def test_materialize_output_filters_appends_market_profile_metric_guard() -> None:
+    rules = [
+        {
+            "id": "rule-long",
+            "name": "Long",
+            "intent": "enter_long",
+            "trigger": {"type": "signal_match"},
+            "guards": [],
+        },
+    ]
+
+    materialized = materialize_output_filters(
+        rules,
+        [
+            {
+                "scope": {"intent": ["enter_long"]},
+                "indicator_id": "market-profile-1",
+                "output_name": "confirmed_breakout_metrics",
+                "field": "distance_from_reference_pct",
+                "operator": ">=",
+                "value": 0.005,
+            }
+        ],
+    )
+
+    assert materialized[0]["guards"][0] | {"source": {}} == {
+        "type": "metric_match",
+        "indicator_id": "market-profile-1",
+        "output_name": "confirmed_breakout_metrics",
+        "field": "distance_from_reference_pct",
+        "operator": ">=",
+        "value": 0.005,
+        "source": {},
+    }
+    assert materialized[0]["guards"][0]["source"]["type"] == "variant_output_filter"
+
+
 def test_materialize_output_filters_dedupes_by_guard_semantics_not_trace_source() -> None:
     rules = [
         {

@@ -252,6 +252,37 @@ export function applyOverlayDelta(overlays = [], overlayDelta = {}) {
       overlayMap.delete(key)
       return
     }
+    if (opName === 'patch') {
+      const existing = overlayMap.get(key)
+      const patch = op.payload_patch && typeof op.payload_patch === 'object' ? op.payload_patch : null
+      if (!existing || !patch) return
+      const payload = existing.payload && typeof existing.payload === 'object'
+        ? { ...existing.payload }
+        : {}
+      if (Array.isArray(patch.remove)) {
+        patch.remove.forEach((removeKey) => {
+          delete payload[String(removeKey || '')]
+        })
+      }
+      if (patch.replace && typeof patch.replace === 'object') {
+        Object.entries(patch.replace).forEach(([replaceKey, replaceValue]) => {
+          payload[String(replaceKey)] = replaceValue
+        })
+      }
+      const nextOverlay = {
+        ...existing,
+        payload,
+        ...(patch.payload_summary && typeof patch.payload_summary === 'object'
+          ? { payload_summary: { ...patch.payload_summary } }
+          : {}),
+        overlay_id: key,
+      }
+      overlayMap.set(key, {
+        ...nextOverlay,
+        overlay_revision: stableOverlayRevision({ ...nextOverlay, overlay_id: key }),
+      })
+      return
+    }
     if (opName !== 'upsert' || !op.overlay || typeof op.overlay !== 'object') return
     overlayMap.set(key, {
       ...op.overlay,
@@ -350,6 +381,7 @@ function normalizeLiveSymbolSummary(summary) {
     instrument_id: String(summary.instrument_id || '').trim() || null,
     symbol: String(summary.symbol || '').trim().toUpperCase() || null,
     timeframe: String(summary.timeframe || '').trim().toLowerCase() || null,
+    warning_summary: normalizeSymbolWarningSummary(summary.warning_summary, symbolKey),
     readiness: normalizeSymbolReadiness(summary.readiness, {
       catalog_discovered: true,
     }),
@@ -381,6 +413,7 @@ function normalizeRunBootstrapSymbol(entry) {
     last_trade_at: activity.last_trade_at || null,
     last_activity_at: activity.last_activity_at || null,
     stats: entry.stats && typeof entry.stats === 'object' ? { ...entry.stats } : {},
+    warning_summary: normalizeSymbolWarningSummary(entry.warning_summary, symbolKey),
     readiness: normalizeSymbolReadiness(entry.readiness, {
       catalog_discovered: true,
     }),
@@ -452,10 +485,109 @@ function normalizeHealth(health) {
       if (leftSeen !== rightSeen) return rightSeen - leftSeen
       return Number(right.count || 0) - Number(left.count || 0)
     })
+  const warningSummary = normalizeWarningSummary(health.warning_summary, warnings)
   return {
     ...health,
     warning_count: Math.max(Number(health.warning_count || 0) || 0, warnings.length),
+    warning_summary: warningSummary,
     warnings,
+  }
+}
+
+function warningSummarySeverity(left, right) {
+  const leftValue = String(left || '').trim().toLowerCase()
+  const rightValue = String(right || 'warning').trim().toLowerCase() || 'warning'
+  if (!leftValue) return rightValue
+  return warningSeverityRank(leftValue) <= warningSeverityRank(rightValue) ? leftValue : rightValue
+}
+
+function normalizeSymbolWarningSummary(summary, symbolKey = '') {
+  const source = summary && typeof summary === 'object' ? summary : {}
+  const normalizedSymbolKey = normalizeSeriesKey(source.symbol_key || symbolKey || '')
+  const count = Math.max(0, Number(source.count || 0) || 0)
+  const eventCount = Math.max(count, Number(source.event_count || 0) || 0)
+  const warningTypes = Array.isArray(source.warning_types)
+    ? source.warning_types.map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean)
+    : []
+  return {
+    ...source,
+    symbol_key: normalizedSymbolKey || null,
+    symbol: String(source.symbol || '').trim().toUpperCase() || null,
+    timeframe: String(source.timeframe || '').trim().toLowerCase() || null,
+    count,
+    event_count: eventCount,
+    warning_types: Array.from(new Set(warningTypes)).sort(),
+    highest_severity: String(source.highest_severity || '').trim().toLowerCase() || null,
+  }
+}
+
+function normalizeWarningSummary(summary, warnings = []) {
+  const source = summary && typeof summary === 'object' ? summary : {}
+  const bySymbol = {}
+  const sourceBySymbol = source.by_symbol && typeof source.by_symbol === 'object' ? source.by_symbol : {}
+  Object.entries(sourceBySymbol).forEach(([key, value]) => {
+    const bucketKey = key === '__run__' ? '__run__' : normalizeSeriesKey(key)
+    if (!bucketKey || !value || typeof value !== 'object') return
+    bySymbol[bucketKey] = normalizeSymbolWarningSummary(value, bucketKey)
+  })
+  if (!Object.keys(bySymbol).length) {
+    warnings.forEach((warning) => {
+      const bucketKey = normalizeSeriesKey(warning.symbol_key || '') || '__run__'
+      const existing = bySymbol[bucketKey] || normalizeSymbolWarningSummary({}, bucketKey)
+      const warningType = String(warning.warning_type || '').trim().toLowerCase()
+      bySymbol[bucketKey] = {
+        ...existing,
+        symbol: existing.symbol || String(warning.symbol || '').trim().toUpperCase() || null,
+        timeframe: existing.timeframe || String(warning.timeframe || '').trim().toLowerCase() || null,
+        count: Number(existing.count || 0) + 1,
+        event_count: Number(existing.event_count || 0) + Math.max(1, Number(warning.count || 1) || 1),
+        warning_types: Array.from(new Set([...(existing.warning_types || []), warningType].filter(Boolean))).sort(),
+        highest_severity: warningSummarySeverity(existing.highest_severity, warning.severity),
+      }
+    })
+  }
+  const groups = Array.isArray(source.groups)
+    ? source.groups.filter((entry) => entry && typeof entry === 'object').map((entry) => ({ ...entry }))
+    : []
+  return {
+    ...source,
+    count: Math.max(Number(source.count || 0) || 0, warnings.length),
+    event_count: Math.max(Number(source.event_count || 0) || 0, warnings.reduce((total, warning) => total + Math.max(1, Number(warning.count || 1) || 1), 0)),
+    warning_types: Array.isArray(source.warning_types)
+      ? source.warning_types.map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean)
+      : Array.from(new Set(warnings.map((warning) => String(warning.warning_type || '').trim().toLowerCase()).filter(Boolean))).sort(),
+    highest_severity: String(source.highest_severity || '').trim().toLowerCase()
+      || warnings.reduce((highest, warning) => warningSummarySeverity(highest, warning.severity), null),
+    by_symbol: bySymbol,
+    groups,
+  }
+}
+
+function runtimeHealthForSymbol(health, symbolKey, previousRuntime = {}) {
+  if (!health || typeof health !== 'object') return previousRuntime
+  const normalizedSymbolKey = normalizeSeriesKey(symbolKey || '')
+  const bySymbol = health.warning_summary?.by_symbol && typeof health.warning_summary.by_symbol === 'object'
+    ? health.warning_summary.by_symbol
+    : {}
+  const symbolSummary = normalizedSymbolKey ? bySymbol[normalizedSymbolKey] || null : null
+  const runSummary = bySymbol.__run__ || null
+  const symbolWarnings = (Array.isArray(health.warnings) ? health.warnings : [])
+    .filter((warning) => normalizeSeriesKey(warning.symbol_key || '') === normalizedSymbolKey)
+  return {
+    ...previousRuntime,
+    status: health.status || previousRuntime.status || 'waiting',
+    phase: health.phase ?? previousRuntime.phase ?? null,
+    last_event_at: health.last_event_at || previousRuntime.last_event_at || null,
+    worker_count: health.worker_count ?? previousRuntime.worker_count ?? 0,
+    active_workers: health.active_workers ?? previousRuntime.active_workers ?? 0,
+    warning_count: Math.max(Number(symbolSummary?.count || 0) || 0, symbolWarnings.length),
+    warning_summary: symbolSummary || normalizeSymbolWarningSummary({}, normalizedSymbolKey),
+    warnings: symbolWarnings,
+    run_warning_count: Number(runSummary?.count || 0) || 0,
+    run_warning_summary: runSummary || null,
+    degraded: health.degraded && typeof health.degraded === 'object' ? { ...health.degraded } : {},
+    pressure: health.pressure && typeof health.pressure === 'object' ? { ...health.pressure } : {},
+    churn: health.churn && typeof health.churn === 'object' ? { ...health.churn } : {},
   }
 }
 
@@ -517,8 +649,27 @@ function normalizeScopedCursors(source, { seq = 0, trades = [] } = {}) {
         ?? 0,
       ) || 0,
     ),
+    overlay_projection: normalizeOverlayProjection(source?.overlay_projection ?? cursors.overlay_projection),
     position_commit_seq_by_trade: normalizePositionCommitSeqByTrade(source, trades),
   }
+}
+
+function normalizeOverlayProjection(value) {
+  const source = value && typeof value === 'object' ? value : {}
+  const mode = String(source.mode || '').trim().toLowerCase()
+  const windowBars = toPositiveInt(source.window_bars)
+  const emitEveryBars = toPositiveInt(source.emit_every_bars)
+  const barIndex = toNonNegativeInt(source.bar_index)
+  const normalized = {
+    ...(mode ? { mode } : {}),
+    ...(windowBars ? { window_bars: windowBars } : {}),
+    ...(emitEveryBars ? { emit_every_bars: emitEveryBars } : {}),
+    ...(barIndex !== null ? { bar_index: barIndex } : {}),
+    source: String(source.source || '').trim() || null,
+  }
+  return Object.values(normalized).some((entry) => entry !== null && entry !== undefined && entry !== '')
+    ? normalized
+    : null
 }
 
 function mergeScopedCursors(base, patch) {
@@ -533,6 +684,8 @@ function mergeScopedCursors(base, patch) {
       Number(baseCursors.overlay_commit_seq || 0) || 0,
       Number(patchCursors.overlay_commit_seq || 0) || 0,
     ),
+    overlay_projection: normalizeOverlayProjection(patchCursors.overlay_projection)
+      || normalizeOverlayProjection(baseCursors.overlay_projection),
     position_commit_seq_by_trade: {
       ...(baseCursors.position_commit_seq_by_trade || {}),
       ...(patchCursors.position_commit_seq_by_trade || {}),
@@ -573,6 +726,7 @@ export function normalizeSelectedSymbolState(selectedSymbol, { symbolKey = null,
     stats: source.stats && typeof source.stats === 'object' ? { ...source.stats } : {},
     runtime: source.runtime && typeof source.runtime === 'object' ? { ...source.runtime } : {},
     continuity: normalizeContinuity(source.continuity),
+    overlay_projection: normalizeOverlayProjection(source.overlay_projection),
     live_cursors: normalizeScopedCursors(source, { seq: normalizedSeq, trades: recentTrades }),
   }
 }
@@ -848,7 +1002,7 @@ export function applyRunHealthDelta(store, message) {
       ...nextSymbolStates[symbolKey],
       status: String(health?.status || nextSymbolStates[symbolKey]?.status || 'waiting').trim(),
       runtime: health && typeof health === 'object'
-        ? { ...(nextSymbolStates[symbolKey]?.runtime || {}), ...health }
+        ? runtimeHealthForSymbol(health, symbolKey, nextSymbolStates[symbolKey]?.runtime || {})
         : nextSymbolStates[symbolKey]?.runtime,
     }
   })
@@ -1109,9 +1263,11 @@ export function applyOverlayDeltaMessage(store, message) {
       next.live_cursors = {
         ...next.live_cursors,
         overlay_commit_seq: clock.overlayCommitSeq,
+        overlay_projection: normalizeOverlayProjection(payload.projection),
       }
       next.overlay_commit_seq = clock.overlayCommitSeq
       next.overlay_commit_seq_status = clock.status
+      next.overlay_projection = normalizeOverlayProjection(payload.projection)
     }
     return next
   })

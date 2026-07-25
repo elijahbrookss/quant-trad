@@ -90,12 +90,18 @@ def _canonical_lifecycle_row_from_runtime_row(row: BotRunEventRecord | Mapping[s
     context = dict(payload.get("context") or {}) if isinstance(payload.get("context"), Mapping) else {}
     created_at = row.created_at if isinstance(row, BotRunEventRecord) else row.get("created_at")
     checkpoint_at = row.event_time if isinstance(row, BotRunEventRecord) else row.get("event_time")
+    row_run_id = row.run_id if isinstance(row, BotRunEventRecord) else row.get("run_id")
+    row_bot_id = row.bot_id if isinstance(row, BotRunEventRecord) else row.get("bot_id")
+    source_seq = int((row.seq if isinstance(row, BotRunEventRecord) else row.get("seq")) or 0)
+    run_seq = int((row.run_seq if isinstance(row, BotRunEventRecord) else row.get("run_seq")) or source_seq or 0)
     return {
         "id": int((row.id if isinstance(row, BotRunEventRecord) else row.get("id")) or 0),
         "event_id": str((row.event_id if isinstance(row, BotRunEventRecord) else row.get("event_id")) or ""),
-        "run_id": str(context.get("run_id") or (row.run_id if isinstance(row, BotRunEventRecord) else row.get("run_id")) or ""),
-        "bot_id": str(context.get("bot_id") or (row.bot_id if isinstance(row, BotRunEventRecord) else row.get("bot_id")) or ""),
-        "seq": int((row.seq if isinstance(row, BotRunEventRecord) else row.get("seq")) or 0),
+        "run_id": str(context.get("run_id") or row_run_id or ""),
+        "bot_id": str(context.get("bot_id") or row_bot_id or ""),
+        "seq": run_seq,
+        "run_seq": run_seq,
+        "source_seq": source_seq,
         "phase": str(context.get("phase") or "").strip() or None,
         "status": str(context.get("status") or "").strip() or None,
         "owner": str(context.get("component") or "").strip() or None,
@@ -118,7 +124,10 @@ def _latest_canonical_lifecycle_row(run_id: str) -> Optional[Dict[str, Any]]:
                 select(BotRunEventRecord)
                 .where(BotRunEventRecord.run_id == normalized_run_id)
                 .where(BotRunEventRecord.event_name.in_(_CANONICAL_LIFECYCLE_EVENT_NAMES))
-                .order_by(BotRunEventRecord.seq.desc(), BotRunEventRecord.id.desc())
+                .order_by(
+                    func.coalesce(BotRunEventRecord.run_seq, BotRunEventRecord.seq).desc(),
+                    BotRunEventRecord.id.desc(),
+                )
                 .limit(1)
             )
             .scalars()
@@ -137,7 +146,10 @@ def _list_canonical_lifecycle_rows(run_id: str) -> List[Dict[str, Any]]:
                 select(BotRunEventRecord)
                 .where(BotRunEventRecord.run_id == normalized_run_id)
                 .where(BotRunEventRecord.event_name.in_(_CANONICAL_LIFECYCLE_EVENT_NAMES))
-                .order_by(BotRunEventRecord.seq.asc(), BotRunEventRecord.id.asc())
+                .order_by(
+                    func.coalesce(BotRunEventRecord.run_seq, BotRunEventRecord.seq).asc(),
+                    BotRunEventRecord.id.asc(),
+                )
             )
             .scalars()
             .all()
@@ -171,16 +183,34 @@ def _list_legacy_lifecycle_rows(run_id: str) -> List[Dict[str, Any]]:
         return [row.to_dict() for row in rows]
 
 
-def _allocate_next_canonical_seq(run_id: str) -> int:
+def _canonical_lifecycle_seq_for_event_id(event_id: str) -> Optional[int]:
+    normalized_event_id = str(event_id or "").strip()
+    if not normalized_event_id or not db.available:
+        return None
     with db.session() as session:
-        _acquire_lifecycle_seq_lock(session, run_id=run_id)
-        return int(
+        row = (
             session.execute(
-                select(func.coalesce(func.max(BotRunEventRecord.seq), 0))
-                .where(BotRunEventRecord.run_id == run_id)
-            ).scalar_one()
-            or 0
-        ) + 1
+                select(BotRunEventRecord.run_seq, BotRunEventRecord.seq)
+                .where(BotRunEventRecord.event_id == normalized_event_id)
+                .limit(1)
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            return None
+        seq = int(row.get("run_seq") or row.get("seq") or 0)
+        return seq if seq > 0 else None
+
+
+def _allocate_next_legacy_lifecycle_seq(session: Any, *, run_id: str) -> int:
+    return int(
+        session.execute(
+            select(func.coalesce(func.max(BotRunLifecycleEventRecord.seq), 0))
+            .where(BotRunLifecycleEventRecord.run_id == run_id)
+        ).scalar_one()
+        or 0
+    ) + 1
 
 
 def _run_ready_requires_prior_lifecycle(*, run_id: str, phase: str, status: str) -> None:
@@ -216,6 +246,7 @@ def _sync_legacy_lifecycle_tables(
 
     def _write() -> StorageWriteOutcome:
         with db.session() as session:
+            _acquire_lifecycle_seq_lock(session, run_id=run_id)
             existing = (
                 session.execute(
                     select(BotRunLifecycleEventRecord)
@@ -231,11 +262,16 @@ def _sync_legacy_lifecycle_tables(
                 result["seq"] = int(getattr(existing, "seq", seq) or seq)
                 return StorageWriteOutcome(result=result, noop_reason="duplicate_skip", noop_count=1)
 
+            effective_seq = int(seq)
+            if effective_seq <= 0:
+                effective_seq = _allocate_next_legacy_lifecycle_seq(session, run_id=run_id)
+            write_context["seq"] = effective_seq
+
             event_row = BotRunLifecycleEventRecord(
                 event_id=event_id,
                 run_id=run_id,
                 bot_id=bot_id,
-                seq=int(seq),
+                seq=effective_seq,
                 phase=phase,
                 status=status,
                 owner=owner,
@@ -284,10 +320,6 @@ def _sync_legacy_lifecycle_tables(
                 current.updated_at = now
 
             bot_row = session.get(BotRecord, bot_id)
-            if bot_row is not None:
-                bot_row.status = status
-                bot_row.updated_at = now
-                rows_written += 1
 
             run_row = session.get(BotRunRecord, run_id)
             if run_row is None:
@@ -327,7 +359,7 @@ def _sync_legacy_lifecycle_tables(
             return StorageWriteOutcome(
                 result={
                     **current.to_dict(),
-                    "seq": int(seq),
+                    "seq": effective_seq,
                 },
                 rows_written=rows_written,
                 payload_bytes=payload_bytes,
@@ -371,9 +403,10 @@ def record_bot_run_lifecycle_checkpoint(
     failure = dict(payload.get("failure") or {}) if isinstance(payload.get("failure"), Mapping) else {}
     checkpoint_at = _parse_optional_timestamp(payload.get("checkpoint_at")) or _utcnow()
     event_id = str(payload.get("event_id") or "").strip() or str(uuid.uuid4())
-    seq = int(payload.get("seq") or payload.get("run_seq") or 0)
-    if seq <= 0:
-        seq = _allocate_next_canonical_seq(run_id)
+    source_seq = int(payload.get("seq") or payload.get("run_seq") or 0)
+    if source_seq < 0:
+        source_seq = 0
+    projection_seq = source_seq if source_seq > 0 else 1
 
     _run_ready_requires_prior_lifecycle(run_id=run_id, phase=phase, status=status)
 
@@ -399,6 +432,7 @@ def record_bot_run_lifecycle_checkpoint(
         run_id=run_id,
         lifecycle=canonical_payload,
     )
+    canonical_lifecycle_event_id = events[0].event_id if events else event_id
     batch = projection_batch_from_payload(
         batch_kind=LIFECYCLE_KIND,
         run_id=run_id,
@@ -406,7 +440,7 @@ def record_bot_run_lifecycle_checkpoint(
         symbol_key=None,
         payload=canonical_payload,
         events=tuple(events),
-        seq=int(seq),
+        seq=int(projection_seq),
     )
     rows = runtime_event_rows_from_batch(batch=batch)
     if rows:
@@ -423,15 +457,16 @@ def record_bot_run_lifecycle_checkpoint(
             },
         )
 
+    seq = _canonical_lifecycle_seq_for_event_id(canonical_lifecycle_event_id) or source_seq
     lifecycle_state = _sync_legacy_lifecycle_tables(
         payload={
             **canonical_payload,
-            "event_id": event_id,
+            "event_id": canonical_lifecycle_event_id,
         },
         seq=int(seq),
         replace_metadata=replace_metadata,
     )
-    lifecycle_state["seq"] = int(seq)
+    lifecycle_state["seq"] = int(lifecycle_state.get("seq") or seq)
     lifecycle_state["live"] = bool(canonical_payload["live"])
     return lifecycle_state
 
@@ -466,6 +501,65 @@ def get_latest_bot_run_lifecycle(bot_id: str) -> Optional[Dict[str, Any]]:
         return row.to_dict() if row else None
 
 
+def list_latest_bot_run_lifecycles(
+    bot_ids: List[str],
+    *,
+    run_ids_by_bot: Mapping[str, str] | None = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Return latest lifecycle rows keyed by bot id for fleet projection reads."""
+
+    normalized = [str(bot_id or "").strip() for bot_id in bot_ids]
+    wanted = [bot_id for bot_id in dict.fromkeys(normalized) if bot_id]
+    if not wanted or not db.available:
+        return {}
+
+    result: Dict[str, Dict[str, Any]] = {}
+    run_ids = [
+        str(run_id or "").strip()
+        for run_id in dict.fromkeys((run_ids_by_bot or {}).values())
+        if str(run_id or "").strip()
+    ]
+    with db.session() as session:
+        if run_ids:
+            rows = (
+                session.execute(
+                    select(BotRunLifecycleRecord)
+                    .where(BotRunLifecycleRecord.run_id.in_(run_ids))
+                    .order_by(
+                        BotRunLifecycleRecord.checkpoint_at.desc(),
+                        BotRunLifecycleRecord.updated_at.desc(),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for row in rows:
+                bot_id = str(row.bot_id or "").strip()
+                if bot_id and bot_id not in result:
+                    result[bot_id] = row.to_dict()
+
+        missing = [bot_id for bot_id in wanted if bot_id not in result]
+        if missing:
+            rows = (
+                session.execute(
+                    select(BotRunLifecycleRecord)
+                    .where(BotRunLifecycleRecord.bot_id.in_(missing))
+                    .order_by(
+                        BotRunLifecycleRecord.bot_id.asc(),
+                        BotRunLifecycleRecord.checkpoint_at.desc(),
+                        BotRunLifecycleRecord.updated_at.desc(),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for row in rows:
+                bot_id = str(row.bot_id or "").strip()
+                if bot_id and bot_id not in result:
+                    result[bot_id] = row.to_dict()
+    return result
+
+
 def list_bot_run_lifecycle_events(run_id: str) -> List[Dict[str, Any]]:
     canonical = _list_canonical_lifecycle_rows(run_id)
     if canonical:
@@ -477,5 +571,6 @@ __all__ = [
     "get_bot_run_lifecycle",
     "get_latest_bot_run_lifecycle",
     "list_bot_run_lifecycle_events",
+    "list_latest_bot_run_lifecycles",
     "record_bot_run_lifecycle_checkpoint",
 ]

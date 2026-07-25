@@ -15,16 +15,39 @@ from indicators.config import DataContext
 class _FakePersistence:
     engine_available = True
 
-    def __init__(self, frame, *, closure_evidence=None):
+    def __init__(self, frame, *, closure_evidence=None, fetch_frames=None):
         self.frame = frame
+        self.fetch_frames = list(fetch_frames or [])
+        self.fetch_calls = 0
         self.closure_evidence = list(closure_evidence or [])
         self.recorded_closures = []
+        self.lock_requests = []
+        self.released_locks = []
 
     def ensure_schema(self) -> None:
         return None
 
     def fetch_ohlcv(self, ctx, datasource):
+        self.fetch_calls += 1
+        if self.fetch_frames:
+            index = min(self.fetch_calls - 1, len(self.fetch_frames) - 1)
+            return self.fetch_frames[index].copy()
         return self.frame.copy()
+
+    def acquire_ingest_lock(self, ctx, datasource, start, end):
+        handle = object()
+        self.lock_requests.append(
+            {
+                "datasource": datasource,
+                "start": start,
+                "end": end,
+                "handle": handle,
+            }
+        )
+        return handle
+
+    def release_ingest_lock(self, handle):
+        self.released_locks.append(handle)
 
     def load_closure_ranges(self, ctx, datasource, requested_start, requested_end):
         return [
@@ -54,11 +77,20 @@ class _FakeProvider(BaseDataProvider):
         super().__init__(persistence=persistence)
         self.response = response
         self.error = error
+        self.api_calls = []
 
     def get_datasource(self) -> str:
         return "FAKE_PROVIDER"
 
     def fetch_from_api(self, symbol, start, end, interval):
+        self.api_calls.append(
+            {
+                "symbol": symbol,
+                "start": start,
+                "end": end,
+                "interval": interval,
+            }
+        )
         if self.error is not None:
             raise self.error
         return self.response.copy() if self.response is not None else pd.DataFrame()
@@ -234,3 +266,23 @@ def test_loaded_closure_evidence_is_carried_into_gap_classification():
     assert classification["classification"] == "provider_missing_data"
     assert classification["reason_code"] == "provider_response_empty"
     assert classification["provider_evidence"]["provider_response"]["provider_message"] == "known closure"
+
+
+def test_get_ohlcv_rechecks_cache_under_ingest_lock_before_provider_fetch():
+    partial = _cached_frame(["2024-01-01T00:00:00Z", "2024-01-01T02:00:00Z"])
+    filled = _cached_frame(
+        [
+            "2024-01-01T00:00:00Z",
+            "2024-01-01T01:00:00Z",
+            "2024-01-01T02:00:00Z",
+        ]
+    )
+    persistence = _FakePersistence(partial, fetch_frames=[partial, filled])
+    provider = _FakeProvider(persistence=persistence)
+
+    result = provider.get_ohlcv(_ctx())
+
+    assert provider.api_calls == []
+    assert len(persistence.lock_requests) == 1
+    assert persistence.released_locks == [persistence.lock_requests[0]["handle"]]
+    assert list(result["timestamp"]) == list(pd.to_datetime(filled["timestamp"], utc=True))

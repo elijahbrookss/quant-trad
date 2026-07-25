@@ -3,6 +3,21 @@ import { createLogger } from '../utils/logger.js'
 import { API_ORIGIN as BASE } from '../config/appConfig.js'
 const adapterLogger = createLogger('StrategyAdapter')
 
+export const STRATEGY_AUTHORING_DISABLED_MESSAGE =
+  'Strategy authoring is CLI-owned while the frontend strategy workspace is dormant.'
+
+export class StrategyAuthoringDisabledError extends Error {
+  constructor() {
+    super(STRATEGY_AUTHORING_DISABLED_MESSAGE)
+    this.name = 'StrategyAuthoringDisabledError'
+    this.code = 'strategy_authoring_disabled'
+  }
+}
+
+const authoringDisabled = () => {
+  throw new StrategyAuthoringDisabledError()
+}
+
 const normalizeStrategyCore = (strategy = {}) => ({
   id: strategy?.id ?? null,
   name: strategy?.name ?? '',
@@ -25,8 +40,23 @@ const normalizeStrategyCore = (strategy = {}) => ({
   updated_at: strategy?.updated_at ?? null,
 })
 
+const uniqueStrings = (values = []) => {
+  if (!Array.isArray(values)) return []
+  const seen = new Set()
+  const result = []
+  for (const value of values) {
+    const text = String(value || '').trim()
+    if (!text) continue
+    const key = text.toUpperCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(text)
+  }
+  return result
+}
+
 const normalizeStrategyBindings = (bindings = {}) => ({
-  symbols: Array.isArray(bindings?.symbols) ? bindings.symbols : [],
+  symbols: uniqueStrings(bindings?.symbols),
   instrument_slots: Array.isArray(bindings?.instrument_slots) ? bindings.instrument_slots : [],
   instruments: Array.isArray(bindings?.instruments) ? bindings.instruments : [],
   indicator_ids: Array.isArray(bindings?.indicator_ids) ? bindings.indicator_ids : [],
@@ -38,42 +68,75 @@ export function normalizeStrategySummary(payload) {
     return null
   }
 
-  const strategy = normalizeStrategyCore(payload.strategy)
-  const bindings = normalizeStrategyBindings(payload.bindings)
+  if (payload.schema_version && payload.schema_version !== 'strategy_inventory_item.v1') {
+    return null
+  }
+
+  const strategy = normalizeStrategyCore(payload)
+  const symbols = uniqueStrings(payload.symbols)
+  const counts = {
+    instrument_count: Number(payload?.instrument_count || 0),
+    indicator_count: Number(payload?.indicator_count || 0),
+    rule_count: Number(payload?.rule_count || 0),
+    variant_count: Number(payload?.variant_count || 0),
+  }
+
+  return {
+    ...strategy,
+    ...counts,
+    symbols,
+    readiness:
+      payload?.readiness && typeof payload.readiness === 'object'
+        ? { ...payload.readiness }
+        : {},
+    strategy,
+    counts,
+  }
+}
+
+export function normalizeStrategyDetail(definition, sections = {}) {
+  if (
+    !definition
+    || typeof definition !== 'object'
+    || definition.schema_version !== 'strategy_definition.v1'
+  ) {
+    return null
+  }
+
+  const strategy = normalizeStrategyCore(definition.strategy)
+  const read_context = {
+    missing_indicators: Array.isArray(definition?.read_context?.missing_indicators)
+      ? definition.read_context.missing_indicators
+      : [],
+    instrument_messages: Array.isArray(definition?.read_context?.instrument_messages)
+      ? definition.read_context.instrument_messages
+      : [],
+  }
+  const bindingsDoc = sections?.bindings
+  const rulesDoc = sections?.rules
+  const variantsDoc = sections?.variants
+  const bindings = normalizeStrategyBindings(bindingsDoc?.bindings)
+  const rules = Array.isArray(rulesDoc?.rules) ? rulesDoc.rules : []
+  const variants = Array.isArray(variantsDoc?.variants) ? variantsDoc.variants : []
+  const counts = {
+    ...(definition?.counts && typeof definition.counts === 'object' ? definition.counts : {}),
+    instrument_count: bindings.instruments.length,
+    indicator_count: bindings.indicators.length,
+    rule_count: rules.length,
+    variant_count: variants.length,
+  }
+  const decision = { rules }
 
   return {
     ...strategy,
     ...bindings,
-    strategy,
-    bindings,
-  }
-}
-
-export function normalizeStrategyDetail(payload) {
-  const summary = normalizeStrategySummary(payload)
-  if (!summary) {
-    return null
-  }
-
-  const decision = {
-    rules: Array.isArray(payload?.decision?.rules) ? payload.decision.rules : [],
-  }
-  const read_context = {
-    missing_indicators: Array.isArray(payload?.read_context?.missing_indicators)
-      ? payload.read_context.missing_indicators
-      : [],
-    instrument_messages: Array.isArray(payload?.read_context?.instrument_messages)
-      ? payload.read_context.instrument_messages
-      : [],
-  }
-  const variants = Array.isArray(payload?.variants) ? payload.variants : []
-
-  return {
-    ...summary,
-    rules: decision.rules,
+    counts,
+    rules,
     missing_indicators: read_context.missing_indicators,
     instrument_messages: read_context.instrument_messages,
     variants,
+    strategy,
+    bindings,
     decision,
     read_context,
   }
@@ -120,129 +183,101 @@ async function handleResponse(res) {
   throw error
 }
 
+function ensureContract(payload, schemaVersion, label) {
+  if (!payload || typeof payload !== 'object' || payload.schema_version !== schemaVersion) {
+    throw new Error(`${label} returned an unexpected contract`)
+  }
+  return payload
+}
+
 /** Fetch all strategy records. */
 export async function fetchStrategies() {
   const res = await fetch(`${BASE}/api/strategies/`, { mode: 'cors' })
-  const payload = await handleResponse(res)
-  const list = Array.isArray(payload) ? payload : []
+  const payload = ensureContract(await handleResponse(res), 'strategy_inventory.v1', 'Strategy inventory')
+  const list = Array.isArray(payload.items) ? payload.items : []
   return list.map(normalizeStrategySummary).filter(Boolean)
 }
 
 /** Fetch a single strategy detail record. */
 export async function fetchStrategy(strategyId) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}`, { mode: 'cors' })
-  return normalizeStrategyDetail(await handleResponse(res))
+  const [definitionRes, bindingsRes, rulesRes, variantsRes] = await Promise.all([
+    fetch(`${BASE}/api/strategies/${strategyId}`, { mode: 'cors' }),
+    fetch(`${BASE}/api/strategies/${strategyId}/bindings`, { mode: 'cors' }),
+    fetch(`${BASE}/api/strategies/${strategyId}/rules`, { mode: 'cors' }),
+    fetch(`${BASE}/api/strategies/${strategyId}/variants`, { mode: 'cors' }),
+  ])
+  const definition = ensureContract(
+    await handleResponse(definitionRes),
+    'strategy_definition.v1',
+    'Strategy definition',
+  )
+  const bindings = ensureContract(
+    await handleResponse(bindingsRes),
+    'strategy_bindings.v1',
+    'Strategy bindings',
+  )
+  const rules = ensureContract(await handleResponse(rulesRes), 'strategy_rules.v1', 'Strategy rules')
+  const variants = ensureContract(
+    await handleResponse(variantsRes),
+    'strategy_variants.v1',
+    'Strategy variants',
+  )
+  return normalizeStrategyDetail(definition, { bindings, rules, variants })
 }
 
 /** Create a new strategy. */
-export async function createStrategy(payload) {
-  const res = await fetch(`${BASE}/api/strategies/`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    mode: 'cors',
-  })
-  return normalizeStrategyDetail(await handleResponse(res))
+export async function createStrategy() {
+  return authoringDisabled()
 }
 
 /** Create a saved strategy variant. */
-export async function createStrategyVariant(strategyId, payload) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/variants`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    mode: 'cors',
-  })
-  return handleResponse(res)
+export async function createStrategyVariant() {
+  return authoringDisabled()
 }
 
 /** Update a saved strategy variant. */
-export async function updateStrategyVariant(strategyId, variantId, payload) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/variants/${variantId}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    mode: 'cors',
-  })
-  return handleResponse(res)
+export async function updateStrategyVariant() {
+  return authoringDisabled()
 }
 
 /** Delete a saved non-default strategy variant. */
-export async function deleteStrategyVariant(strategyId, variantId) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/variants/${variantId}`, {
-    method: 'DELETE',
-    mode: 'cors',
-  })
-  return handleResponse(res)
+export async function deleteStrategyVariant() {
+  return authoringDisabled()
 }
 
 /** Update strategy metadata. */
-export async function updateStrategy(strategyId, payload) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    mode: 'cors',
-  })
-  return normalizeStrategyDetail(await handleResponse(res))
+export async function updateStrategy() {
+  return authoringDisabled()
 }
 
 /** Delete a strategy. */
-export async function deleteStrategy(strategyId) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}`, {
-    method: 'DELETE',
-    mode: 'cors',
-  })
-  return handleResponse(res)
+export async function deleteStrategy() {
+  return authoringDisabled()
 }
 
 /** Attach an indicator instance to a strategy. */
-export async function attachStrategyIndicator(strategyId, indicatorId) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/indicators/${indicatorId}`, {
-    method: 'POST',
-    mode: 'cors',
-  })
-  return normalizeStrategyDetail(await handleResponse(res))
+export async function attachStrategyIndicator() {
+  return authoringDisabled()
 }
 
 /** Detach an indicator instance from a strategy. */
-export async function detachStrategyIndicator(strategyId, indicatorId) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/indicators/${indicatorId}`, {
-    method: 'DELETE',
-    mode: 'cors',
-  })
-  return normalizeStrategyDetail(await handleResponse(res))
+export async function detachStrategyIndicator() {
+  return authoringDisabled()
 }
 
 /** Create a rule for a strategy. */
-export async function createStrategyRule(strategyId, payload) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/rules`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    mode: 'cors',
-  })
-  return normalizeStrategyDetail(await handleResponse(res))
+export async function createStrategyRule() {
+  return authoringDisabled()
 }
 
 /** Update an existing strategy rule. */
-export async function updateStrategyRule(strategyId, ruleId, payload) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/rules/${ruleId}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    mode: 'cors',
-  })
-  return normalizeStrategyDetail(await handleResponse(res))
+export async function updateStrategyRule() {
+  return authoringDisabled()
 }
 
 /** Delete a strategy rule. */
-export async function deleteStrategyRule(strategyId, ruleId) {
-  const res = await fetch(`${BASE}/api/strategies/${strategyId}/rules/${ruleId}`, {
-    method: 'DELETE',
-    mode: 'cors',
-  })
-  return normalizeStrategyDetail(await handleResponse(res))
+export async function deleteStrategyRule() {
+  return authoringDisabled()
 }
 
 /** Run a rule-logic preview for a strategy over the requested window. */

@@ -1935,6 +1935,50 @@ def test_serialize_botlens_domain_event_persists_bounded_overlay_render_payload(
     }
 
 
+def test_serialize_botlens_domain_event_allows_patch_without_remove_list() -> None:
+    events = build_botlens_domain_events_from_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        payload={
+            "known_at": "2026-02-01T00:00:00Z",
+            "facts": [
+                {
+                    "fact_type": "series_state_observed",
+                    "series_key": "instr-1|1m",
+                    "instrument_id": "instr-1",
+                    "symbol": "BTCUSD",
+                    "timeframe": "1m",
+                },
+                {
+                    "fact_type": "overlay_ops_emitted",
+                    "overlay_delta": {
+                        "overlay_commit_seq": 4,
+                        "base_overlay_commit_seq": 3,
+                        "overlay_commit_seq_status": "overlay_scoped",
+                        "ops": [
+                            {
+                                "op": "patch",
+                                "key": "atr-short",
+                                "payload_patch": {
+                                    "replace": {
+                                        "markers": [{"time": 4, "price": 103.0}],
+                                    },
+                                },
+                            }
+                        ],
+                    },
+                },
+            ],
+        },
+    )
+
+    overlay_event = next(event for event in events if event.event_name.value == "OVERLAY_STATE_CHANGED")
+    patch = serialize_botlens_domain_event(overlay_event)["context"]["overlay_delta"]["ops"][0]["payload_patch"]
+
+    assert patch["replace"]["markers"] == [{"time": 4, "price": 103.0}]
+    assert "remove" not in patch
+
+
 def test_serialize_botlens_domain_event_preserves_polyline_history_when_payload_is_bounded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

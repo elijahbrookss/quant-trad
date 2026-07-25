@@ -20,11 +20,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from collections.abc import Mapping
 from typing import Any, Dict
+
+from core.settings import get_settings
 
 from ..observability import BackendObserver
 from ..storage.storage import record_bot_runtime_events_batch
@@ -64,6 +67,54 @@ _PERSIST_BATCH_MAX_ROWS = 512
 _PERSIST_BATCH_MAX_DELAY_MS = 25
 _PERSIST_IDEMPOTENCE_MAX_EVENT_IDS = 50_000
 _TERMINAL_LIFECYCLE_STATES = frozenset({"completed", "stopped", "cancelled", "canceled", "error", "failed", "crashed", "startup_failed"})
+
+
+def _enqueue_terminal_report_materialization(
+    *,
+    run_id: str,
+    bot_id: str,
+    terminal_status: str,
+) -> None:
+    settings = get_settings().reports.materialization
+    if not settings.terminal_auto_enqueue_enabled:
+        logger.info(
+            "report_materialization_terminal_auto_enqueue_skipped | run_id=%s | bot_id=%s | reason=disabled",
+            run_id,
+            bot_id,
+        )
+        return
+
+    def _enqueue() -> None:
+        try:
+            from ..reports.materialization import enqueue_report_materialization_for_terminal_run
+
+            enqueue_report_materialization_for_terminal_run(
+                run_id,
+                terminal_status=terminal_status,
+                source_reason="botlens_terminal_lifecycle",
+            )
+        except Exception as exc:  # noqa: BLE001 - report materialization must not alter lifecycle truth.
+            logger.warning(
+                "report_materialization_terminal_enqueue_failed | run_id=%s | bot_id=%s | error=%s",
+                run_id,
+                bot_id,
+                exc,
+            )
+
+    delay_seconds = max(float(settings.terminal_auto_enqueue_delay_seconds or 0.0), 0.0)
+    if delay_seconds <= 0:
+        _enqueue()
+        return
+
+    timer = threading.Timer(delay_seconds, _enqueue)
+    timer.daemon = True
+    timer.start()
+    logger.info(
+        "report_materialization_terminal_auto_enqueue_scheduled | run_id=%s | bot_id=%s | delay_seconds=%s",
+        run_id,
+        bot_id,
+        delay_seconds,
+    )
 
 
 def _ingest_source_reason(*, kind: str, payload: Mapping[str, Any]) -> str:
@@ -114,7 +165,9 @@ class IntakeRouter:
         self._persist_idempotence_max_event_ids = max(int(persist_idempotence_max_event_ids), 0)
         self._persist_lock = asyncio.Lock()
         self._pending_persist_batches: dict[tuple[Any, ...], _PendingPersistBatch] = {}
+        self._persist_tasks: set[asyncio.Task[None]] = set()
         self._persisted_event_ids: dict[tuple[str, str, str, str, str], OrderedDict[str, None]] = {}
+        self._scheduled_event_ids: dict[tuple[str, str, str, str, str], OrderedDict[str, None]] = {}
         self._continuity_accumulators: dict[tuple[str, str], CandleContinuityAccumulator] = {}
         self._continuity_identities: dict[tuple[str, str], dict[str, Any]] = {}
 
@@ -150,6 +203,7 @@ class IntakeRouter:
             return rows
         key = self._persist_idempotence_key(context)
         seen = self._persisted_event_ids.get(key)
+        scheduled = self._scheduled_event_ids.get(key)
         batch_seen: set[str] = set()
         filtered: list[Dict[str, Any]] = []
         for row in rows:
@@ -161,9 +215,51 @@ class IntakeRouter:
                 continue
             if seen is not None and event_id in seen:
                 continue
+            if scheduled is not None and event_id in scheduled:
+                continue
             batch_seen.add(event_id)
             filtered.append(row)
         return filtered
+
+    def _reserve_persist_rows(
+        self,
+        *,
+        rows: list[Dict[str, Any]],
+        context: Mapping[str, Any],
+    ) -> None:
+        if not rows or self._persist_idempotence_max_event_ids <= 0:
+            return
+        key = self._persist_idempotence_key(context)
+        scheduled = self._scheduled_event_ids.setdefault(key, OrderedDict())
+        for row in rows:
+            event_id = str(row.get("event_id") or "").strip()
+            if not event_id:
+                continue
+            if event_id in scheduled:
+                scheduled.move_to_end(event_id)
+            else:
+                scheduled[event_id] = None
+            while len(scheduled) > self._persist_idempotence_max_event_ids:
+                scheduled.popitem(last=False)
+
+    def _forget_scheduled_persist_rows(
+        self,
+        *,
+        rows: list[Dict[str, Any]],
+        context: Mapping[str, Any],
+    ) -> None:
+        if not rows or self._persist_idempotence_max_event_ids <= 0:
+            return
+        key = self._persist_idempotence_key(context)
+        scheduled = self._scheduled_event_ids.get(key)
+        if scheduled is None:
+            return
+        for row in rows:
+            event_id = str(row.get("event_id") or "").strip()
+            if event_id:
+                scheduled.pop(event_id, None)
+        if not scheduled:
+            self._scheduled_event_ids.pop(key, None)
 
     def _remember_persist_rows(
         self,
@@ -256,6 +352,45 @@ class IntakeRouter:
         for waiter in pending.waiters:
             if not waiter.done():
                 waiter.set_result(inserted)
+
+    def _schedule_persist_rows(
+        self,
+        *,
+        rows: list[Dict[str, Any]],
+        context: Mapping[str, Any],
+    ) -> None:
+        rows = self._filter_new_persist_rows(rows=rows, context=context)
+        if not rows:
+            return
+        self._reserve_persist_rows(rows=rows, context=context)
+
+        async def _run() -> None:
+            try:
+                await self._persist_rows(rows=rows, context=context)
+                self._forget_scheduled_persist_rows(rows=rows, context=context)
+                self._remember_persist_rows(rows=rows, context=context)
+            except Exception as exc:  # noqa: BLE001
+                self._forget_scheduled_persist_rows(rows=rows, context=context)
+                logger.exception(
+                    "botlens_ingest_persist_failed | bot_id=%s | run_id=%s | series_key=%s | rows=%s | error=%s",
+                    context.get("bot_id"),
+                    context.get("run_id"),
+                    context.get("series_key"),
+                    len(rows),
+                    exc,
+                )
+                _OBSERVER.event(
+                    "botlens_ingest_persist_failed",
+                    level=logging.ERROR,
+                    failure_mode=type(exc).__name__,
+                    row_count=len(rows),
+                    error=str(exc),
+                    **dict(context),
+                )
+
+        task = asyncio.create_task(_run())
+        self._persist_tasks.add(task)
+        task.add_done_callback(self._persist_tasks.discard)
 
     def _accumulate_continuity(
         self,
@@ -604,11 +739,10 @@ class IntakeRouter:
             }
             rows = self._filter_new_persist_rows(rows=rows, context=persist_context)
         if rows:
-            await self._persist_rows(
+            self._schedule_persist_rows(
                 rows=rows,
                 context=persist_context,
             )
-            self._remember_persist_rows(rows=rows, context=persist_context)
         symbol_mailbox = await self._registry.ensure_symbol(
             run_id=run_id, bot_id=bot_id, symbol_key=symbol_key
         )
@@ -715,7 +849,7 @@ class IntakeRouter:
             )
         rows = runtime_event_rows_from_batch(batch=batch, events=durable_events)
         if rows:
-            await self._persist_rows(
+            self._schedule_persist_rows(
                 rows=rows,
                 context={
                     "bot_id": bot_id,
@@ -761,21 +895,11 @@ class IntakeRouter:
                 bot_id=bot_id,
                 reason=str(payload.get("status") or payload.get("phase") or "terminal").strip().lower(),
             )
-            try:
-                from ..reports.materialization import enqueue_report_materialization_for_terminal_run
-
-                enqueue_report_materialization_for_terminal_run(
-                    run_id,
-                    terminal_status=str(payload.get("status") or payload.get("phase") or "terminal").strip().lower(),
-                    source_reason="botlens_terminal_lifecycle",
-                )
-            except Exception as exc:  # noqa: BLE001 - report materialization must not alter lifecycle truth.
-                logger.warning(
-                    "report_materialization_terminal_enqueue_failed | run_id=%s | bot_id=%s | error=%s",
-                    run_id,
-                    bot_id,
-                    exc,
-                )
+            _enqueue_terminal_report_materialization(
+                run_id=run_id,
+                bot_id=bot_id,
+                terminal_status=str(payload.get("status") or payload.get("phase") or "terminal").strip().lower(),
+            )
 
 
 __all__ = ["IntakeRouter"]

@@ -94,11 +94,11 @@ test('readiness helpers do not infer comparison from result readiness alone', ()
   assert.equal(comparisonStatus({ results_ready: true, safe_to_compare: false }), 'blocked')
 })
 
-test('run report v2 view preserves backend trust and sectioned DTO data', () => {
+test('run report view preserves backend trust and sectioned DTO data', () => {
   const view = runReportView({
-    contract_version: 'run_report_v2',
+    contract_version: 'run_report.v2',
     schema_version: 'run_report.v2',
-    run_id: 'run-v2',
+    run_id: 'run-report',
     identity: {
       bot_id: 'bot-1',
       bot_name: 'Research Bot',
@@ -128,7 +128,7 @@ test('run report v2 view preserves backend trust and sectioned DTO data', () => 
   })
 
   assert.equal(view.supported, true)
-  assert.equal(view.runId, 'run-v2')
+  assert.equal(view.runId, 'run-report')
   assert.equal(view.trust.research_status, 'research_ready')
   assert.equal(view.trust.semantic_fingerprint, 'semantic-abc')
   assert.equal(view.performance.net_pnl.value, 125)
@@ -139,7 +139,7 @@ test('run report v2 view preserves backend trust and sectioned DTO data', () => 
 
 test('run report v2 list item adapter uses DTO facts without inventing trust', () => {
   const fallback = reportListItemView({
-    run_id: 'run-v2',
+    run_id: 'run-report',
     bot_name: 'Fallback Bot',
     strategy_name: 'Fallback Strategy',
     summary: { net_pnl: -1, total_trades: 1 },
@@ -147,8 +147,8 @@ test('run report v2 list item adapter uses DTO facts without inventing trust', (
   })
 
   const view = runReportListItemView({
-    contract_version: 'run_report_v2',
-    run_id: 'run-v2',
+    contract_version: 'run_report.v2',
+    run_id: 'run-report',
     identity: {
       bot_name: 'DTO Bot',
       strategy_name: 'DTO Strategy',

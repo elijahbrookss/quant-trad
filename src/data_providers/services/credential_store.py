@@ -8,7 +8,7 @@ import re
 from typing import Any, Dict, Iterable, Optional
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -21,6 +21,26 @@ _ENGINE: Optional[Engine] = None
 _FERNET: Optional[Fernet] = None
 _SCHEMA_READY = False
 _CREDENTIAL_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_REQUIRED_COLUMNS = frozenset(
+    {
+        "credential_ref",
+        "provider_id",
+        "venue_id",
+        "environment",
+        "display_name",
+        "status",
+        "secrets_encrypted",
+        "secret_version",
+        "required_secret_keys",
+        "validation",
+        "created_at",
+        "updated_at",
+        "last_validated_at",
+        "last_used_at",
+        "revoked_at",
+    }
+)
+_REQUIRED_INDEXES = frozenset({"ix_provider_credential_refs_provider_venue"})
 
 
 @dataclass(frozen=True)
@@ -187,30 +207,26 @@ def ensure_schema() -> None:
     global _SCHEMA_READY
     if _SCHEMA_READY:
         return
-    ddl = f"""
-    CREATE TABLE IF NOT EXISTS {_TABLE_NAME} (
-        credential_ref TEXT PRIMARY KEY,
-        provider_id TEXT NOT NULL,
-        venue_id TEXT NOT NULL DEFAULT '',
-        environment TEXT NOT NULL DEFAULT 'paper',
-        display_name TEXT NULL,
-        status TEXT NOT NULL DEFAULT 'active',
-        secrets_encrypted TEXT NOT NULL,
-        secret_version INTEGER NOT NULL DEFAULT 1,
-        required_secret_keys JSONB NOT NULL DEFAULT '[]'::jsonb,
-        validation JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        last_validated_at TIMESTAMPTZ NULL,
-        last_used_at TIMESTAMPTZ NULL,
-        revoked_at TIMESTAMPTZ NULL
-    );
-    """
-    with _engine().begin() as conn:
-        exists = conn.execute(text("SELECT to_regclass(:table_name)"), {"table_name": _TABLE_NAME}).scalar()
-        if not exists:
-            logger.warning("provider_credential_refs_table_missing_provisioning | table=%s", _TABLE_NAME)
-        conn.execute(text(ddl))
+    inspector = inspect(_engine())
+    if _TABLE_NAME not in set(inspector.get_table_names()):
+        raise RuntimeError(
+            f"Provider credential table '{_TABLE_NAME}' is missing. "
+            "Start the portal schema bootstrap before using provider credentials."
+        )
+    existing_columns = {column["name"] for column in inspector.get_columns(_TABLE_NAME)}
+    missing_columns = sorted(_REQUIRED_COLUMNS - existing_columns)
+    if missing_columns:
+        raise RuntimeError(
+            f"Provider credential table '{_TABLE_NAME}' is missing columns: {', '.join(missing_columns)}. "
+            "Rebuild the database or run an explicit out-of-band migration."
+        )
+    existing_indexes = {str(index.get("name") or "") for index in inspector.get_indexes(_TABLE_NAME)}
+    missing_indexes = sorted(_REQUIRED_INDEXES - existing_indexes)
+    if missing_indexes:
+        raise RuntimeError(
+            f"Provider credential table '{_TABLE_NAME}' is missing required indexes: {', '.join(missing_indexes)}. "
+            "Run the portal schema bootstrap so credential lookups use the model-declared indexes."
+        )
     _SCHEMA_READY = True
 
 

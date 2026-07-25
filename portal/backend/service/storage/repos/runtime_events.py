@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import math
-import json
 import time
 from collections import defaultdict
 from collections.abc import Mapping
@@ -12,8 +11,13 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
 from engines.bot_runtime.core.series_identity import normalize_series_key as normalize_public_series_key
+from engines.bot_runtime.runtime.components.step_trace_rollup import (
+    coerce_step_trace_rollup_payloads,
+    is_step_trace_rollup_payload,
+    merge_step_rollup_rows,
+)
 from engines.bot_runtime.runtime.event_types import RUNTIME_PREFIX
-from sqlalchemy import and_, or_, text
+from sqlalchemy import and_, or_, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from ...observability import payload_size_bytes
@@ -52,124 +56,7 @@ from ._shared import (
 _OBSERVER = _STORAGE_OBSERVER
 _RUNTIME_EVENT_ID_CONFLICT_CONSTRAINT = "uq_portal_bot_run_events_event_id"
 _RUN_SEQ_STATUS_RUNTIME_ASSIGNED = "runtime_assigned"
-_STEP_ROLLUP_BUCKET_SECONDS = 10
-_STEP_CONTEXT_METRIC_EXACT = frozenset(
-    {
-        "active_workers",
-        "botlens_fact_stream_candles_fact_count",
-        "botlens_fact_stream_candles_payload_bytes",
-        "botlens_fact_stream_coalesced_count",
-        "botlens_fact_stream_decisions_fact_count",
-        "botlens_fact_stream_decisions_payload_bytes",
-        "botlens_fact_stream_diagnostics_fact_count",
-        "botlens_fact_stream_diagnostics_payload_bytes",
-        "botlens_fact_stream_dropped_stale_count",
-        "botlens_fact_stream_fact_count",
-        "botlens_fact_stream_health_runtime_state_fact_count",
-        "botlens_fact_stream_health_runtime_state_payload_bytes",
-        "botlens_fact_stream_overlays_fact_count",
-        "botlens_fact_stream_overlays_payload_bytes",
-        "botlens_fact_stream_run_summary_fact_count",
-        "botlens_fact_stream_run_summary_payload_bytes",
-        "botlens_fact_stream_surface_count",
-        "botlens_fact_stream_symbol_summary_fact_count",
-        "botlens_fact_stream_symbol_summary_payload_bytes",
-        "botlens_fact_stream_trades_fact_count",
-        "botlens_fact_stream_trades_payload_bytes",
-        "botlens_fact_stream_wallet_fact_count",
-        "botlens_fact_stream_wallet_payload_bytes",
-        "build_state_ms",
-        "canonical_append_ms",
-        "canonical_event_count",
-        "canonical_fact_count",
-        "canonical_fact_overflow_count",
-        "canonical_fact_persist_batch_ms",
-        "canonical_fact_persist_error_count",
-        "canonical_fact_persist_lag_ms",
-        "canonical_fact_persisted_batch_count",
-        "canonical_fact_persisted_row_count",
-        "canonical_fact_queue_depth",
-        "canonical_fact_queued_count",
-        "candle_update_ms",
-        "coalesced_count",
-        "db_commit_ms",
-        "degraded_symbols_count",
-        "decision_order_blocking_participant_count",
-        "decision_order_fail_count",
-        "decision_order_max_blocking_participant_count",
-        "decision_order_release_count",
-        "decision_order_wait_count",
-        "decision_order_wait_ms",
-        "decision_order_wait_poll_count",
-        "delta_build_ms",
-        "delta_serialize_ms",
-        "dispatch_ms",
-        "dropped_stale_count",
-        "enqueue_ms",
-        "execution_decision_flow_ms",
-        "execution_ms",
-        "execution_prime_ms",
-        "execution_settlement_ms",
-        "execution_trade_event_processing_ms",
-        "finalize_residual_ms",
-        "indicator_eval_ms",
-        "indicator_state_update_ms",
-        "live_fact_count",
-        "max_overlay_payload_bytes",
-        "overlay_payload_bytes",
-        "overlay_projection_delta_ms",
-        "overlay_projection_entries_total",
-        "overlay_projection_fingerprint_ms",
-        "overlay_projection_ms",
-        "overlay_projection_normalize_ms",
-        "overlay_projection_ops_count",
-        "overlay_projection_projector_ms",
-        "overlay_projection_skipped_count",
-        "overlays_update_ms",
-        "payload_bytes",
-        "pending_signals_append_ms",
-        "pending_signals_consume_ms",
-        "pending_signals_ops_ms",
-        "persist_ms",
-        "persistence_ms",
-        "queue_wait_ms",
-        "rule_eval_ms",
-        "serialize_ms",
-        "series_overlay_entries_ms",
-        "series_overlay_indicator_entries_count",
-        "series_overlay_indicator_entries_ms",
-        "series_overlay_regime_build_ms",
-        "series_overlay_regime_entries_count",
-        "series_overlay_total_entries_count",
-        "signal_eval_ms",
-        "snapshot_events_in_cycle",
-        "stats_update_ms",
-        "step_trace_dropped_count",
-        "step_trace_enqueue_ms",
-        "step_trace_persist_batch_ms",
-        "step_trace_persist_error_count",
-        "step_trace_persist_lag_ms",
-        "step_trace_queue_depth",
-        "strategy_eval_ms",
-        "stream_emit_ms",
-        "trace_persist_ms",
-        "trade_lock_hold_ms",
-        "trade_lock_wait_ms",
-        "worker_count",
-    }
-)
-_STEP_CONTEXT_METRIC_SUFFIXES: tuple[str, ...] = ()
-_STEP_CONTEXT_METRIC_SKIP = frozenset(
-    {
-        "bar_epoch",
-        "bar_index",
-        "bar_time",
-        "event",
-        "run_id",
-        "symbol",
-        "timeframe",
-    }
-)
+_STEP_ROLLUP_BUCKET_SECONDS = 60
 _STEP_HISTOGRAM_BOUNDS = (
     0.0,
     1.0,
@@ -809,13 +696,6 @@ def _finite_step_float(value: Any) -> Optional[float]:
     return parsed
 
 
-def _should_rollup_step_context_metric(key: str) -> bool:
-    metric_name = _clean_step_metric_name(key)
-    if not metric_name or metric_name in _STEP_CONTEXT_METRIC_SKIP:
-        return False
-    return metric_name in _STEP_CONTEXT_METRIC_EXACT or metric_name.endswith(_STEP_CONTEXT_METRIC_SUFFIXES)
-
-
 def _step_histogram_counts(values: Sequence[float]) -> List[int]:
     counts = [0 for _ in _STEP_HISTOGRAM_BOUNDS]
     for raw_value in values:
@@ -872,17 +752,7 @@ def _step_metric_samples(payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
         "status": "ok" if bool(payload.get("ok", True)) else "failed",
         "error_count": 1 if payload.get("error") else 0,
     }
-    samples = [{**base, "metric_name": "duration_ms", "value": float(duration_ms)}]
-    context = payload.get("context") if isinstance(payload.get("context"), Mapping) else {}
-    for key, raw_value in context.items():
-        metric_name = _clean_step_metric_name(key)
-        if not _should_rollup_step_context_metric(metric_name):
-            continue
-        value = _finite_step_float(raw_value)
-        if value is None:
-            continue
-        samples.append({**base, "metric_name": metric_name, "value": value})
-    return samples
+    return [{**base, "metric_name": "duration_ms", "value": float(duration_ms)}]
 
 
 def _rollup_step_metric_samples(payloads: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
@@ -944,114 +814,143 @@ def _rollup_step_metric_samples(payloads: Sequence[Mapping[str, Any]]) -> List[D
     return rollups
 
 
+def _step_rollup_identity_for_row(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    return (
+        _parse_optional_timestamp(row.get("bucket_start")) or row.get("bucket_start"),
+        int(row.get("bucket_seconds") or _STEP_ROLLUP_BUCKET_SECONDS),
+        str(row.get("run_id") or ""),
+        str(row.get("bot_id") or ""),
+        str(row.get("step_name") or ""),
+        str(row.get("metric_name") or ""),
+        str(row.get("strategy_id") or ""),
+        str(row.get("symbol") or ""),
+        str(row.get("timeframe") or ""),
+        str(row.get("status") or "ok"),
+    )
+
+
+def _step_rollup_record_payload(record: BotRunStepRollupRecord) -> Dict[str, Any]:
+    return {
+        "bucket_start": record.bucket_start,
+        "bucket_seconds": int(record.bucket_seconds or _STEP_ROLLUP_BUCKET_SECONDS),
+        "first_seen": record.first_seen,
+        "last_seen": record.last_seen,
+        "run_id": str(record.run_id or ""),
+        "bot_id": str(record.bot_id or ""),
+        "step_name": str(record.step_name or ""),
+        "metric_name": str(record.metric_name or ""),
+        "strategy_id": str(record.strategy_id or ""),
+        "symbol": str(record.symbol or ""),
+        "timeframe": str(record.timeframe or ""),
+        "status": str(record.status or "ok"),
+        "sample_count": int(record.sample_count or 0),
+        "value_sum": float(record.value_sum or 0.0),
+        "value_min": float(record.value_min or 0.0),
+        "value_max": float(record.value_max or 0.0),
+        "latest_value": float(record.latest_value or 0.0),
+        "p95_value": float(record.p95_value or 0.0),
+        "p99_value": float(record.p99_value or 0.0),
+        "histogram_bounds": list(record.histogram_bounds or []),
+        "histogram_counts": list(record.histogram_counts or []),
+        "raw_sample_count": int(record.raw_sample_count or 0),
+        "error_count": int(record.error_count or 0),
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+    }
+
+
+def _merge_existing_step_rollups(session: Any, rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    items = [dict(row) for row in rows]
+    if not items or not _session_has_real_bind(session):
+        return items
+
+    identities = [_step_rollup_identity_for_row(row) for row in items]
+    existing_rows = (
+        session.execute(
+            select(BotRunStepRollupRecord)
+            .where(
+                tuple_(
+                    BotRunStepRollupRecord.bucket_start,
+                    BotRunStepRollupRecord.bucket_seconds,
+                    BotRunStepRollupRecord.run_id,
+                    BotRunStepRollupRecord.bot_id,
+                    BotRunStepRollupRecord.step_name,
+                    BotRunStepRollupRecord.metric_name,
+                    BotRunStepRollupRecord.strategy_id,
+                    BotRunStepRollupRecord.symbol,
+                    BotRunStepRollupRecord.timeframe,
+                    BotRunStepRollupRecord.status,
+                ).in_(identities)
+            )
+            .with_for_update()
+        )
+        .scalars()
+        .all()
+    )
+    existing_by_identity = {
+        _step_rollup_identity_for_row(_step_rollup_record_payload(record)): _step_rollup_record_payload(record)
+        for record in existing_rows
+    }
+    merged: List[Dict[str, Any]] = []
+    for row in items:
+        existing = existing_by_identity.get(_step_rollup_identity_for_row(row))
+        merged.append(merge_step_rollup_rows(existing, row) if existing else row)
+    return merged
+
+
 def _upsert_step_rollups(session: Any, rollups: Sequence[Mapping[str, Any]]) -> int:
     if not rollups:
         return 0
-    statement = text(
-        """
-        INSERT INTO public.portal_bot_run_step_rollups_v1 AS rollup (
-            bucket_start,
-            bucket_seconds,
-            first_seen,
-            last_seen,
-            run_id,
-            bot_id,
-            step_name,
-            metric_name,
-            strategy_id,
-            symbol,
-            timeframe,
-            status,
-            sample_count,
-            value_sum,
-            value_min,
-            value_max,
-            latest_value,
-            p95_value,
-            p99_value,
-            histogram_bounds,
-            histogram_counts,
-            raw_sample_count,
-            error_count,
-            created_at,
-            updated_at
-        )
-        VALUES (
-            :bucket_start,
-            :bucket_seconds,
-            :first_seen,
-            :last_seen,
-            :run_id,
-            :bot_id,
-            :step_name,
-            :metric_name,
-            :strategy_id,
-            :symbol,
-            :timeframe,
-            :status,
-            :sample_count,
-            :value_sum,
-            :value_min,
-            :value_max,
-            :latest_value,
-            :p95_value,
-            :p99_value,
-            CAST(:histogram_bounds AS jsonb),
-            CAST(:histogram_counts AS jsonb),
-            :raw_sample_count,
-            :error_count,
-            :created_at,
-            :updated_at
-        )
-        ON CONFLICT ON CONSTRAINT uq_portal_bot_run_step_rollups_v1_bucket_identity
-        DO UPDATE SET
-            first_seen = LEAST(rollup.first_seen, EXCLUDED.first_seen),
-            last_seen = GREATEST(rollup.last_seen, EXCLUDED.last_seen),
-            sample_count = rollup.sample_count + EXCLUDED.sample_count,
-            value_sum = rollup.value_sum + EXCLUDED.value_sum,
-            value_min = LEAST(rollup.value_min, EXCLUDED.value_min),
-            value_max = GREATEST(rollup.value_max, EXCLUDED.value_max),
-            latest_value = EXCLUDED.latest_value,
-            histogram_bounds = EXCLUDED.histogram_bounds,
-            histogram_counts = public.quanttrad_jsonb_histogram_counts_add(
-                rollup.histogram_counts,
-                EXCLUDED.histogram_counts
-            ),
-            p95_value = public.quanttrad_jsonb_histogram_quantile(
-                EXCLUDED.histogram_bounds,
-                public.quanttrad_jsonb_histogram_counts_add(rollup.histogram_counts, EXCLUDED.histogram_counts),
-                0.95,
-                GREATEST(rollup.value_max, EXCLUDED.value_max)
-            ),
-            p99_value = public.quanttrad_jsonb_histogram_quantile(
-                EXCLUDED.histogram_bounds,
-                public.quanttrad_jsonb_histogram_counts_add(rollup.histogram_counts, EXCLUDED.histogram_counts),
-                0.99,
-                GREATEST(rollup.value_max, EXCLUDED.value_max)
-            ),
-            raw_sample_count = rollup.raw_sample_count + EXCLUDED.raw_sample_count,
-            error_count = rollup.error_count + EXCLUDED.error_count,
-            updated_at = EXCLUDED.updated_at
-        """
-    )
-    rows = []
+    table = BotRunStepRollupRecord.__table__
+    writable_columns = {column.name for column in table.columns if column.name != "id"}
+    rows_by_identity: Dict[tuple[Any, ...], Dict[str, Any]] = {}
     for row in rollups:
-        item = dict(row)
-        item["histogram_bounds"] = json.dumps(item.get("histogram_bounds") or [])
-        item["histogram_counts"] = json.dumps(item.get("histogram_counts") or [])
-        rows.append(item)
-    session.execute(statement, rows)
+        item = {key: value for key, value in dict(row).items() if key in writable_columns}
+        item["histogram_bounds"] = list(item.get("histogram_bounds") or [])
+        item["histogram_counts"] = list(item.get("histogram_counts") or [])
+        identity = _step_rollup_identity_for_row(item)
+        existing = rows_by_identity.get(identity)
+        rows_by_identity[identity] = merge_step_rollup_rows(existing or {}, item) if existing else item
+    rows = [
+        {key: value for key, value in dict(row).items() if key in writable_columns}
+        for row in _merge_existing_step_rollups(session, list(rows_by_identity.values()))
+    ]
+    if not rows:
+        return 0
+
+    statement = pg_insert(table).values(rows)
+    excluded = statement.excluded
+    statement = statement.on_conflict_do_update(
+        constraint="uq_portal_bot_run_step_rollups_bucket_identity",
+        set_={
+            "first_seen": excluded.first_seen,
+            "last_seen": excluded.last_seen,
+            "sample_count": excluded.sample_count,
+            "value_sum": excluded.value_sum,
+            "value_min": excluded.value_min,
+            "value_max": excluded.value_max,
+            "latest_value": excluded.latest_value,
+            "histogram_bounds": excluded.histogram_bounds,
+            "histogram_counts": excluded.histogram_counts,
+            "p95_value": excluded.p95_value,
+            "p99_value": excluded.p99_value,
+            "raw_sample_count": excluded.raw_sample_count,
+            "error_count": excluded.error_count,
+            "updated_at": excluded.updated_at,
+        },
+    )
+    session.execute(statement)
     return len(rollups)
 
 
 def record_bot_run_step(payload: Dict[str, Any]) -> None:
-    """Persist a timed bot runtime step as typed profiler rollups."""
+    """Persist one precomputed runtime step rollup."""
 
     record_bot_run_steps_batch([payload])
 
 
 def record_bot_run_steps_batch(payloads: Sequence[Dict[str, Any]]) -> int:
-    """Persist runtime step trace batches as typed metric rollups."""
+    """Persist precomputed runtime step rollups."""
 
     if not db.available:
         return 0
@@ -1059,7 +958,14 @@ def record_bot_run_steps_batch(payloads: Sequence[Dict[str, Any]]) -> int:
     if not items:
         return 0
 
-    rollups = _rollup_step_metric_samples(items)
+    invalid_items = [
+        item
+        for item in items
+        if not (isinstance(item, Mapping) and is_step_trace_rollup_payload(item))
+    ]
+    if invalid_items:
+        raise ValueError("record_bot_run_steps_batch accepts precomputed step rollups only")
+    rollups = coerce_step_trace_rollup_payloads(items)
     if not rollups:
         return 0
 
@@ -1664,10 +1570,12 @@ def list_bot_runtime_events(
 
 
 def get_latest_bot_runtime_run_id(bot_id: str) -> Optional[str]:
+    """Return the latest run id from the run metadata read model."""
+
     if not db.available:
         return None
     with db.session() as session:
-        row = (
+        latest_run_id = (
             session.execute(
                 select(BotRunRecord.run_id)
                 .where(BotRunRecord.bot_id == str(bot_id))
@@ -1681,31 +1589,7 @@ def get_latest_bot_runtime_run_id(bot_id: str) -> Optional[str]:
             .scalars()
             .first()
         )
-        if row:
-            return str(row)
-        fallback = (
-            session.execute(
-                select(BotRunEventRecord.run_id)
-                .where(BotRunEventRecord.bot_id == str(bot_id))
-                .order_by(BotRunEventRecord.id.desc())
-                .limit(1)
-            )
-            .scalars()
-            .first()
-        )
-        if fallback:
-            return str(fallback)
-        lifecycle_row = (
-            session.execute(
-                select(BotRunLifecycleRecord.run_id)
-                .where(BotRunLifecycleRecord.bot_id == str(bot_id))
-                .order_by(BotRunLifecycleRecord.checkpoint_at.desc(), BotRunLifecycleRecord.updated_at.desc())
-                .limit(1)
-            )
-            .scalars()
-            .first()
-        )
-        return str(lifecycle_row) if lifecycle_row else None
+        return str(latest_run_id) if latest_run_id else None
 
 
 def get_latest_bot_runtime_event(
@@ -1744,7 +1628,6 @@ def update_bot_runtime_status(*, bot_id: str, run_id: str, status: str, telemetr
     started = time.perf_counter()
     payloads = {
         "portal_bot_runs": payload_size_bytes({"status": status, "telemetry_degraded": telemetry_degraded}),
-        "portal_bots": payload_size_bytes({"status": status}),
     }
 
     def _write() -> StorageWriteOutcome:
@@ -1752,8 +1635,6 @@ def update_bot_runtime_status(*, bot_id: str, run_id: str, status: str, telemetr
             bot = session.get(BotRecord, bot_id)
             if bot is None:
                 raise KeyError(f"Bot {bot_id} was not found")
-            bot.status = status
-            bot.updated_at = _utcnow()
             run = session.get(BotRunRecord, run_id)
             if run is None:
                 run = BotRunRecord(
@@ -1784,7 +1665,7 @@ def update_bot_runtime_status(*, bot_id: str, run_id: str, status: str, telemetr
                 run.ended_at = _utcnow()
         return StorageWriteOutcome(
             result=None,
-            rows_written=2,
+            rows_written=1,
             payload_bytes=sum(payloads.values()),
         )
 
@@ -1802,15 +1683,5 @@ def update_bot_runtime_status(*, bot_id: str, run_id: str, status: str, telemetr
             result=None,
             rows_written=1,
             payload_bytes=payloads["portal_bot_runs"],
-        ),
-    )
-    _observe_db_write_outcome(
-        storage_target="portal_bots",
-        context={"run_id": run_id, "bot_id": bot_id, "status": status},
-        started=started,
-        outcome=StorageWriteOutcome(
-            result=None,
-            rows_written=1,
-            payload_bytes=payloads["portal_bots"],
         ),
     )

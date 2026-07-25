@@ -90,7 +90,7 @@ def test_report_contract_routes_expose_canonical_shapes(monkeypatch: pytest.Monk
         reports_controller,
         "_materialized_run_report",
         lambda run_id: {
-            "contract_version": "run_report_v2",
+            "contract_version": "run_report.v2",
             "schema_version": "run_report.v2",
             "run_id": run_id,
             "identity": {"run_id": run_id},
@@ -113,10 +113,10 @@ def test_report_contract_routes_expose_canonical_shapes(monkeypatch: pytest.Monk
         reports_controller,
         "_report_materialization_status",
         lambda run_id, **_kwargs: {
-            "contract_version": "run_report_v2",
+            "contract_version": "run_report.v2",
             "schema_version": "run_report_materialization_status.v1",
             "run_id": run_id,
-            "report_status": {"status": "ready", "contract_version": "run_report_v2", "can_view": True, "can_build": False, "can_retry": False},
+            "report_status": {"status": "ready", "contract_version": "run_report.v2", "can_view": True, "can_build": False, "can_retry": False},
         },
     )
     monkeypatch.setattr(reports_controller, "_get_report_sections", lambda _run_id: _dataset()["sections"])
@@ -147,6 +147,19 @@ def test_report_contract_routes_expose_canonical_shapes(monkeypatch: pytest.Monk
             "offset": 0,
             "total": 1,
             "items": [{"decision_id": "decision-1"}],
+        },
+    )
+    monkeypatch.setattr(
+        reports_controller,
+        "_get_candidate_lifecycle_dataset",
+        lambda run_id, **_kwargs: {
+            "schema_version": "dataset_page.v1",
+            "run_id": run_id,
+            "section": "candidate_lifecycle",
+            "limit": 100,
+            "offset": 0,
+            "total": 1,
+            "items": [{"candidate_id": "candidate-1", "stage": "formed"}],
         },
     )
     monkeypatch.setattr(reports_controller, "_get_candle_catalog", lambda run_id: {"schema_version": "candle_catalog.v1", "run_id": run_id, "items": [], "caveats": []})
@@ -194,9 +207,9 @@ def test_report_contract_routes_expose_canonical_shapes(monkeypatch: pytest.Monk
     assert client.get("/api/reports/run-1/summary").json()["portfolio_metrics"]["sharpe"] == 1.25
     assert client.get("/api/reports/run-1/research-summary").json()["schema_version"] == "run_research_summary.v1"
     assert client.get("/api/reports/run-1/research-summary").json()["metrics"]["net_pnl"] == 10.0
-    report_v2 = client.get("/api/reports/run-1/run-report").json()
-    assert report_v2["contract_version"] == "run_report_v2"
-    assert report_v2["performance"]["sharpe"]["valid"] is True
+    report_payload = client.get("/api/reports/run-1/run-report").json()
+    assert report_payload["contract_version"] == "run_report.v2"
+    assert report_payload["performance"]["sharpe"]["valid"] is True
     assert client.get("/api/reports/run-1/sections").json()["schema_version"] == "report_sections.v1"
     assert client.get("/api/reports/run-1/diagnostics").json()["schema_version"] == "report_diagnostics.v1"
     assert client.get("/api/reports/run-1/metrics").json()["schema_version"] == "report_metrics.v1"
@@ -204,6 +217,7 @@ def test_report_contract_routes_expose_canonical_shapes(monkeypatch: pytest.Monk
     assert client.get("/api/reports/run-1/trades").json()["schema_version"] == "trades_dataset.v1"
     assert client.get("/api/reports/run-1/timeseries/equity_curve").json()["section"] == "timeseries.equity_curve"
     assert client.get("/api/reports/run-1/context").json()["section"] == "context.decision_context"
+    assert client.get("/api/reports/run-1/candidate-lifecycle").json()["section"] == "candidate_lifecycle"
     assert client.get("/api/reports/run-1/candles/catalog").json()["schema_version"] == "candle_catalog.v1"
     assert client.get("/api/reports/run-1/metrics/sharpe/explanation").json()["value"] == 1.25
 
@@ -241,7 +255,7 @@ def test_materialized_report_compare_route_exposes_run_comparison_dto(monkeypatc
         reports_controller,
         "_compare_materialized_run_reports",
         lambda left_run_id, right_run_id, **_kwargs: RunComparisonDTO.model_validate({
-            "contract_version": "run_report_comparison_v1",
+            "contract_version": "run_report_comparison.v1",
             "left_run_id": left_run_id,
             "right_run_id": right_run_id,
             "comparison_status": "ready",
@@ -265,7 +279,7 @@ def test_materialized_report_compare_route_exposes_run_comparison_dto(monkeypatc
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["contract_version"] == "run_report_comparison_v1"
+    assert payload["contract_version"] == "run_report_comparison.v1"
     assert payload["comparison_verdict"] == "semantic_match"
     assert payload["trust_comparison"]["semantic_fingerprint_match"] is True
 
@@ -292,34 +306,39 @@ def test_run_report_route_blocks_active_runs(monkeypatch: pytest.MonkeyPatch) ->
     assert response.json()["detail"]["code"] == "run_not_terminal"
 
 
-def test_run_report_route_returns_building_status(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_report_route_returns_status_without_building(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(reports_controller, "_materialized_run_report", lambda _run_id: None)
     monkeypatch.setattr(
         reports_controller,
         "_report_materialization_status",
         lambda run_id, **_kwargs: {
-            "contract_version": "run_report_v2",
+            "contract_version": "run_report.v2",
             "schema_version": "run_report_materialization_status.v1",
             "run_id": run_id,
-            "report_status": {"status": "not_started", "contract_version": "run_report_v2", "can_view": False, "can_build": True, "can_retry": False},
+            "report_status": {"status": "not_started", "contract_version": "run_report.v2", "can_view": False, "can_build": True, "can_retry": False},
         },
     )
-    monkeypatch.setattr(
-        reports_controller,
-        "_ensure_report_materialization",
-        lambda run_id, **_kwargs: {
-            "contract_version": "run_report_v2",
-            "schema_version": "run_report_materialization_status.v1",
-            "run_id": run_id,
-            "report_status": {"status": "building", "contract_version": "run_report_v2", "can_view": False, "can_build": False, "can_retry": False},
-        },
-    )
+
+    def _unexpected_build(*_args: object, **_kwargs: object) -> dict:
+        raise AssertionError("GET /run-report must not enqueue materialization")
+
+    monkeypatch.setattr(reports_controller, "_ensure_report_materialization", _unexpected_build)
 
     client = TestClient(app)
     response = client.get("/api/reports/run-queued/run-report")
 
     assert response.status_code == 202
-    assert response.json()["report_status"]["status"] == "building"
+    assert response.json()["report_status"]["status"] == "not_started"
+
+
+def test_run_report_get_rejects_build_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(reports_controller, "_materialized_run_report", lambda _run_id: None)
+
+    client = TestClient(app)
+    response = client.get("/api/reports/run-queued/run-report?build=true")
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "report_build_requires_post"
 
 
 def test_report_export_contract_uses_manifest_and_zip(monkeypatch: pytest.MonkeyPatch) -> None:

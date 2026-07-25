@@ -51,6 +51,7 @@ async_jobs:
   quantlab_job_wait_timeout_seconds: 180
   quantlab_job_poll_interval_seconds: 0.2
   quantlab_result_cache_ttl_seconds: 300
+  reclaim_interval_seconds: 30
 
 workers:
   indicators:
@@ -58,6 +59,14 @@ workers:
     index: 0
     total: 1
     idle_sleep_seconds: 0.2
+    idle_sleep_max_seconds: 1.5
+    db_wait_timeout_seconds: 120
+  research:
+    processes: 2
+    index: 0
+    total: 1
+    idle_sleep_seconds: 0.2
+    idle_sleep_max_seconds: 2.0
     db_wait_timeout_seconds: 120
 
 bot_runtime:
@@ -105,6 +114,8 @@ bot_runtime:
     max_candles: 320
     max_overlays: 400
     max_overlay_points: 160
+    overlay_window_bars: 640
+    overlay_emit_every_bars: 25
     max_closed_trades: 240
     max_logs: 300
     max_decisions: 600
@@ -174,6 +185,9 @@ frontend:
     live_resubscribe_window_ms: 30000
 
 reports:
+  materialization:
+    terminal_auto_enqueue_enabled: false
+    terminal_auto_enqueue_delay_seconds: 0
   artifacts:
     enabled: true
     root_dir: reports

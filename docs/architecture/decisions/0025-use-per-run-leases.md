@@ -31,7 +31,7 @@ Accepted on 2026-05-19.
 
 Bot runtime ownership was tracked mainly through `portal_bots.runner_id` and a
 bot-level heartbeat. That was useful for local Docker supervision, but it was
-too coarse for future runner agents:
+too coarse for future runner agents and overloaded the bot definition row:
 
 - a bot can have historical and active runs with different ownership evidence,
 - fixed Docker container names can make old-run evidence look like current-run
@@ -50,13 +50,14 @@ the token hash, and acquires the lease before launching the runtime. The token
 is passed to the runner process. The runtime renews the lease until terminal
 exit and releases it on clean shutdown.
 
-The watchdog treats a fresh run lease as stronger evidence than a stale bot-row
-heartbeat. A stale heartbeat with a fresh lease is logged and skipped instead
-of being marked degraded.
+The watchdog reads run leases directly. Expired leases become bounded
+watchdog diagnostics and recoverable lifecycle degradation unless container/run
+evidence proves a terminal runtime failure.
 
 ## Consequences
 
 - Run ownership is scoped to `run_id`, not only `bot_id`.
+- `portal_bots` no longer carries ownership or liveness fields.
 - Runner agents can be dumb: claim/renew/release a lease and emit lifecycle
   checkpoints, without declaring symbol/provider capability.
 - Docker remains an implementation detail; lease semantics work for any future

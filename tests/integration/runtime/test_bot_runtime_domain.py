@@ -6,6 +6,7 @@ from engines.bot_runtime.core.domain import (
     LadderRiskEngine,
     LadderPosition,
     Leg,
+    SameBarResolutionPolicy,
     normalize_epoch,
     timeframe_to_seconds,
 )
@@ -145,7 +146,7 @@ def test_ladder_position_targets_and_stops():
     position.register_entry_fee()
 
     first_candle = Candle(time=start, open=100, high=112, low=99, close=110)
-    events = position.apply_bar(first_candle)
+    events = position.apply_bar(first_candle, same_bar_policy=SameBarResolutionPolicy.TARGET_FIRST)
     target_events = [event for event in events if event["type"] == "target"]
     assert target_events, "Target leg should fill when price trades through target"
     assert position.moved_to_breakeven, "Stop should move to breakeven after target fill"
@@ -170,7 +171,7 @@ def test_ladder_position_emits_settlement_events():
         exit_settlement=exit_settlement,
     )
     first_candle = Candle(time=start, open=100, high=112, low=99, close=110)
-    events = position.apply_bar(first_candle)
+    events = position.apply_bar(first_candle, same_bar_policy=SameBarResolutionPolicy.TARGET_FIRST)
     target_events = [event for event in events if event["type"] == "target"]
     assert target_events
     assert "settlement" in target_events[0]

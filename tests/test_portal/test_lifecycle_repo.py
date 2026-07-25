@@ -49,8 +49,8 @@ def test_record_bot_run_lifecycle_checkpoint_persists_canonical_rows_and_returns
         }
 
     monkeypatch.setattr(lifecycle, "db", _db_available())
-    monkeypatch.setattr(lifecycle, "_allocate_next_canonical_seq", lambda _run_id: 5)
     monkeypatch.setattr(lifecycle, "record_bot_runtime_events_batch", _record)
+    monkeypatch.setattr(lifecycle, "_canonical_lifecycle_seq_for_event_id", lambda _event_id: 5)
     monkeypatch.setattr(lifecycle, "_sync_legacy_lifecycle_tables", _sync)
 
     result = lifecycle.record_bot_run_lifecycle_checkpoint(
@@ -66,9 +66,11 @@ def test_record_bot_run_lifecycle_checkpoint_persists_canonical_rows_and_returns
     assert result["seq"] == 5
     assert result["live"] is False
     assert captured["synced_seq"] == 5
+    assert captured["synced_payload"]["event_id"] == captured["rows"][0]["event_id"]
     assert captured["context"]["pipeline_stage"] == "botlens_canonical_lifecycle_append"
     assert captured["context"]["message_kind"] == "botlens_lifecycle_event"
     assert captured["context"]["source_reason"] == "producer"
+    assert captured["rows"][0]["seq"] == 1
     assert [row["payload"]["event_name"] for row in captured["rows"]] == ["RUN_PHASE_REPORTED"]
 
 
@@ -76,7 +78,6 @@ def test_record_bot_run_lifecycle_checkpoint_rejects_run_ready_without_prior_can
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(lifecycle, "db", _db_available())
-    monkeypatch.setattr(lifecycle, "_allocate_next_canonical_seq", lambda _run_id: 7)
     monkeypatch.setattr(lifecycle, "_latest_canonical_lifecycle_row", lambda _run_id: None)
     monkeypatch.setattr(
         lifecycle,
@@ -94,6 +95,31 @@ def test_record_bot_run_lifecycle_checkpoint_rejects_run_ready_without_prior_can
                 message="All planned series emitted first runtime snapshot; bot is live.",
             )
         )
+
+
+def test_canonical_lifecycle_row_uses_runtime_run_seq_as_visible_seq() -> None:
+    row = {
+        "id": 11,
+        "event_id": "event-1",
+        "bot_id": "bot-1",
+        "run_id": "run-1",
+        "seq": 2,
+        "run_seq": 9,
+        "payload": {
+            "context": {
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "phase": "live",
+                "status": "running",
+            }
+        },
+    }
+
+    result = lifecycle._canonical_lifecycle_row_from_runtime_row(row)
+
+    assert result["seq"] == 9
+    assert result["run_seq"] == 9
+    assert result["source_seq"] == 2
 
 
 def test_get_bot_run_lifecycle_prefers_canonical_rows_over_legacy_fallback(

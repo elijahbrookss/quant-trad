@@ -12,6 +12,7 @@ from starlette.concurrency import run_in_threadpool
 
 from ..service.reports.contract import (
     compare_run_datasets as _compare_run_datasets,
+    get_candidate_lifecycle_dataset as _get_candidate_lifecycle_dataset,
     get_candle_catalog as _get_candle_catalog,
     get_candle_dataset as _get_candle_dataset,
     get_context_dataset as _get_context_dataset,
@@ -19,12 +20,14 @@ from ..service.reports.contract import (
     get_decision_candle_window as _get_decision_candle_window,
     get_metric_explanation as _get_metric_explanation,
     get_operational_health as _get_operational_health,
+    get_report_instruments as _get_report_instruments,
     get_report_diagnostics as _get_report_diagnostics,
     get_report_metrics as _get_report_metrics,
     get_report_readiness as _get_report_readiness,
     get_report_sections as _get_report_sections,
     get_run_report_summary as _get_run_report_summary,
     get_run_research_summary as _get_run_research_summary,
+    get_report_symbol_summary as _get_report_symbol_summary,
     get_run_research_dataset as _get_run_research_dataset,
     get_signal_dataset as _get_signal_dataset,
     get_signal_candle_window as _get_signal_candle_window,
@@ -154,7 +157,7 @@ async def compare_materialized_reports(
     include_golden: bool = Query(True, description="Read existing golden comparison evidence when available."),
     require_golden: bool = Query(False, description="Block comparison when existing golden evidence is unavailable."),
 ) -> RunComparisonDTO:
-    """Compare two ready materialized RunReportDTO v2 artifacts without building reports."""
+    """Compare two ready materialized RunReportDTO contract (`run_report.v2`) artifacts without building reports."""
 
     context = build_log_context(left_run_id=left_run_id, right_run_id=right_run_id, include_golden=include_golden, require_golden=require_golden)
     logger.info(with_log_context("run_report_compare_request", context))
@@ -303,7 +306,7 @@ async def build_run_report_materialization(
     async_build: bool = Query(False, description="Build in the background instead of returning the final status."),
     force_rebuild: bool = Query(False, description="Force a new materialized report build."),
 ) -> RunReportMaterializationResponse:
-    """Build or enqueue a materialized RunReportDTO v2 artifact without returning the artifact."""
+    """Build or enqueue a materialized RunReportDTO contract (`run_report.v2`) artifact without returning the artifact."""
 
     context = build_log_context(run_id=run_id, async_build=async_build, force_rebuild=force_rebuild)
     logger.info(with_log_context("run_report_materialization_build_request", context))
@@ -341,18 +344,27 @@ async def build_run_report_materialization(
 )
 async def get_run_report(
     run_id: str,
-    build: bool = Query(True, description="Enqueue materialization for terminal runs when no ready artifact exists."),
-    force_rebuild: bool = Query(False, description="Force a new materialized report build."),
+    build: bool = Query(False, description="Deprecated. Report reads are side-effect free; use POST /run-report/build."),
+    force_rebuild: bool = Query(False, description="Deprecated on GET. Use POST /run-report/build?force_rebuild=true."),
 ) -> Any:
-    """Return a materialized Run Report DTO v2 contract for a terminal run."""
+    """Return a materialized Run Report DTO contract for a terminal run."""
 
     context = build_log_context(run_id=run_id, build=build, force_rebuild=force_rebuild)
-    logger.info(with_log_context("run_report_v2_request", context))
+    logger.info(with_log_context("run_report_request", context))
     try:
+        if build or force_rebuild:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "report_build_requires_post",
+                    "message": "GET /run-report is read-only. Use POST /run-report/build to build or force rebuild.",
+                    "run_id": run_id,
+                },
+            )
         if not force_rebuild:
             materialized = await _run_report_task(_materialized_run_report, run_id)
             if materialized is not None:
-                logger.info(with_log_context("run_report_v2_materialized_success", context))
+                logger.info(with_log_context("run_report_materialized_success", context))
                 return RunReportDTO.model_validate(materialized)
 
         status_payload = await _run_report_task(
@@ -360,21 +372,7 @@ async def get_run_report(
             run_id,
             require_terminal=True,
         )
-        if not build and not force_rebuild:
-            return JSONResponse(status_code=202, content=status_payload)
-
-        status_payload = await _run_report_task(
-            _ensure_report_materialization,
-            run_id,
-            force=force_rebuild,
-            async_build=True,
-        )
         status = dict(status_payload.get("report_status") or {})
-        if status.get("can_view") and not force_rebuild:
-            materialized = await _run_report_task(_materialized_run_report, run_id)
-            if materialized is not None:
-                logger.info(with_log_context("run_report_v2_materialized_success", context))
-                return RunReportDTO.model_validate(materialized)
         if status.get("status") == "failed":
             raise HTTPException(
                 status_code=409,
@@ -386,10 +384,10 @@ async def get_run_report(
             )
         return JSONResponse(status_code=202, content=status_payload)
     except KeyError as exc:
-        logger.warning(with_log_context("run_report_v2_missing", context))
+        logger.warning(with_log_context("run_report_missing", context))
         raise HTTPException(404, str(exc)) from exc
     except RunReportMaterializationNotTerminal as exc:
-        logger.info(with_log_context("run_report_v2_not_terminal", context | {"run_status": exc.status}))
+        logger.info(with_log_context("run_report_not_terminal", context | {"run_status": exc.status}))
         raise HTTPException(
             status_code=409,
             detail={
@@ -402,7 +400,7 @@ async def get_run_report(
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - convert to API error
-        logger.error(with_log_context("run_report_v2_failed", context), exc_info=exc)
+        logger.error(with_log_context("run_report_failed", context), exc_info=exc)
         raise HTTPException(500, "Run report materialization failed") from exc
 
 
@@ -422,6 +420,42 @@ async def get_report_sections(run_id: str) -> ReportSectionsResponse:
     except Exception as exc:  # noqa: BLE001 - convert to API error
         logger.error(with_log_context("report_sections_failed", context), exc_info=exc)
         raise HTTPException(500, "Report sections build failed") from exc
+
+
+@router.get("/{run_id}/instruments")
+async def get_report_instruments(run_id: str) -> Dict[str, Any]:
+    """Return run-scoped instrument source and execution semantics."""
+
+    context = build_log_context(run_id=run_id)
+    logger.info(with_log_context("report_instruments_request", context))
+    try:
+        payload = await _run_report_task(_get_report_instruments, run_id)
+        logger.info(with_log_context("report_instruments_success", context | {"rows": len(payload.get("items") or [])}))
+        return payload
+    except KeyError as exc:
+        logger.warning(with_log_context("report_instruments_missing", context))
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - convert to API error
+        logger.error(with_log_context("report_instruments_failed", context), exc_info=exc)
+        raise HTTPException(500, "Report instruments build failed") from exc
+
+
+@router.get("/{run_id}/symbol-summary")
+async def get_report_symbol_summary(run_id: str) -> Dict[str, Any]:
+    """Return per-symbol signal/decision/trade/rejection counts for CLI research."""
+
+    context = build_log_context(run_id=run_id)
+    logger.info(with_log_context("report_symbol_summary_request", context))
+    try:
+        payload = await _run_report_task(_get_report_symbol_summary, run_id)
+        logger.info(with_log_context("report_symbol_summary_success", context | {"rows": len(payload.get("items") or [])}))
+        return payload
+    except KeyError as exc:
+        logger.warning(with_log_context("report_symbol_summary_missing", context))
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - convert to API error
+        logger.error(with_log_context("report_symbol_summary_failed", context), exc_info=exc)
+        raise HTTPException(500, "Report symbol summary build failed") from exc
 
 
 @router.get("/{run_id}/trades", response_model=DatasetPageResponse)
@@ -524,6 +558,55 @@ async def get_signal_dataset(
     except Exception as exc:  # noqa: BLE001 - convert to API error
         logger.error(with_log_context("report_signals_failed", context), exc_info=exc)
         raise HTTPException(500, "Signal dataset build failed") from exc
+
+
+@router.get("/{run_id}/candidate-lifecycle", response_model=DatasetPageResponse)
+async def get_candidate_lifecycle_dataset(
+    run_id: str,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    symbol: Optional[str] = Query(None),
+    instrument_id: Optional[str] = Query(None, alias="instrumentId"),
+    family: Optional[str] = Query(None),
+    side: Optional[str] = Query(None),
+    stage: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+) -> DatasetPageResponse:
+    """Return paged candidate lifecycle evidence for a run."""
+
+    context = build_log_context(
+        run_id=run_id,
+        limit=limit,
+        offset=offset,
+        symbol=symbol,
+        instrument_id=instrument_id,
+        family=family,
+        side=side,
+        stage=stage,
+        status=status,
+    )
+    logger.info(with_log_context("report_candidate_lifecycle_request", context))
+    try:
+        payload = await _run_report_task(
+            _get_candidate_lifecycle_dataset,
+            run_id,
+            limit=limit,
+            offset=offset,
+            symbol=symbol,
+            instrument_id=instrument_id,
+            family=family,
+            side=side,
+            stage=stage,
+            status=status,
+        )
+        logger.info(with_log_context("report_candidate_lifecycle_success", context | {"total": payload.get("total")}))
+        return DatasetPageResponse.model_validate(payload)
+    except KeyError as exc:
+        logger.warning(with_log_context("report_candidate_lifecycle_missing", context))
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - convert to API error
+        logger.error(with_log_context("report_candidate_lifecycle_failed", context), exc_info=exc)
+        raise HTTPException(500, "Candidate lifecycle dataset build failed") from exc
 
 
 @router.get("/{run_id}/timeseries/{section}", response_model=DatasetPageResponse)

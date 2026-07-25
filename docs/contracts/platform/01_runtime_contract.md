@@ -14,17 +14,61 @@ All derived outputs should follow one timeline:
 8. publish canonical decision artifacts from the same bar result
 9. build downstream read models and downstream rejection artifacts from the same bar result
 
+## Instrument Source vs Execution Semantics
+
+`instrument_type` is canonical source metadata from the instrument record.
+Runtime must not rewrite a spot source into a derivative instrument to make a
+backtest convenient.
+
+Bot runtime may bind a source instrument to an explicit execution semantic:
+
+- `spot`: source data and execution/accounting are spot-like.
+- `derivative`: source data and execution/accounting are derivative-like.
+- `proxy_derivative`: source data is spot, while the backtest runtime applies
+  derivative-style execution semantics for research.
+
+Proxy-derivative runs must preserve source metadata in startup readiness,
+runtime/report metadata, and comparison inputs so mixed source types remain
+visible. A spot source used as `proxy_derivative` may take derivative-style long
+and short decisions, but reports must still identify the source instrument as
+spot market data.
+
+Proxy-derivative admission requires explicit derivative execution evidence:
+`proxy_derivative_margin_rates` and `proxy_derivative_instrument_fields` on the
+source instrument, usually attached from a validated derivative reference by the
+instrument service. Runtime must fail loud when those fields are missing. It
+must not silently treat a spot source as full-notional cash spot, invent default
+margin rates, or apply spot quantity constraints to a derivative proxy run.
+
+The compiled `SeriesExecutionProfile` is the runtime authority for execution
+fields. `LadderRiskEngine`, wallet reservation diagnostics, execution adapters,
+and series metadata must consume tick size, contract size, tick value, fees,
+amount constraints, quote currency, collateral mode, and margin calculator from
+that profile. ATM templates are strategy/risk templates only and must not patch
+or override missing execution metadata.
+
+When a strategy contains instruments from more than one provider or venue,
+runtime data routing must follow each strategy-instrument link's canonical
+instrument record. Strategy-level datasource/exchange fields are defaults, not
+authority over linked instruments.
+
+Backtest replay admission must reject candle frames carrying
+`ingestion_failure` gap evidence. Provider sparse-data evidence may flow into
+continuity diagnostics and reports, but a failed provider call is not a valid
+shortened market window.
+
 ## Artifact Contract
 
 Indicators are computation units with internal state.
 
 Public runtime surfaces are:
-- typed outputs for strategy/runtime truth,
+- typed outputs for strategy/runtime/research truth,
 - optional canonical overlays for chart rendering,
 - optional runtime details for operator/debug inspection.
 
 Rules:
-- outputs are the only strategy-visible indicator interface,
+- signal, context, and metric outputs are the only strategy-visible indicator interface,
+- lifecycle outputs are public research evidence for candidate/setup funnels and are not strategy inputs,
 - overlays are not strategy inputs,
 - runtime details are not strategy inputs,
 - normal trading evaluation advances indicators with output-only frames; overlays and runtime details are opt-in projection/debug reads,
@@ -37,9 +81,12 @@ Rules:
 - `overlay_snapshot()` is a read of current indicator state and may be requested selectively by consumers,
 - `detail_snapshot()` is a read of current indicator state and may be transported independently from overlays,
 - chart readouts that depend on the same live timeline should prefer canonical overlay payloads over a parallel detail refetch path,
-- runtime transport may diff those full overlay snapshots and stream only deltas downstream,
+- runtime transport may request those full overlay snapshots on a bounded
+  projection cadence, diff them, and stream only changed overlay deltas
+  downstream,
 - every declared output must be returned every bar,
-- every declared overlay must be returned every bar,
+- every declared overlay must be returned for every requested overlay snapshot
+  bar,
 - every declared detail must be returned every bar,
 - `ready=False` means unusable now, not pending,
 - runtime never waits, retries, or substitutes missing values,
@@ -124,11 +171,19 @@ Rules:
 
 Projector rebuild failure is not an empty valid projection.
 
+Projection pressure is not execution truth. BotLens projection queues and
+transport handoffs may degrade, drop stale visual/debug work, and require a
+projection resync. They must not fail an otherwise valid run. Canonical runtime
+persistence remains strict: durable fact persistence overflow, writer failure,
+or terminal persistence drain timeout is a runtime failure.
+
 Rules:
 
 - run projector rebuild failures must surface `health.status=projection_error`, readiness false, and a bounded fault explaining the failed rebuild,
 - symbol projector rebuild failures must surface a `projection_error` diagnostic and `snapshot_ready=false`,
 - selected-symbol reads over a failed symbol projection must return an explicit unavailable/projection-error state,
+- producer-side BotLens projection overflow/drain timeout must be reported as projection degradation, not execution failure,
+- symbol fact projectors should drain ready messages in bounded batches before declaring projection pressure,
 - error details must be bounded and operationally useful, not raw unbounded persisted payloads,
 - downstream UI/service paths must distinguish "empty but valid" from "projection unavailable".
 

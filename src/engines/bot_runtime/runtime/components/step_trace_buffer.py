@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import logging
-import queue
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 from utils.log_context import with_log_context
+
+from .step_trace_rollup import (
+    merge_step_rollup_rows,
+    rollup_step_metric_samples,
+    step_rollup_identity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +26,12 @@ def _missing_batch_writer(name: str):
 
 
 class StepTracePersistenceBuffer:
-    """Persist step traces asynchronously so bar execution is not DB-bound."""
+    """Aggregate and persist step traces asynchronously.
+
+    Runtime records many small timing samples in the hot path. The durable table
+    stores bucketed rollups, so this buffer merges samples in memory and ships
+    compact rollup rows instead of pushing one raw payload per bar to the writer.
+    """
 
     def __init__(
         self,
@@ -38,11 +48,14 @@ class StepTracePersistenceBuffer:
         self._record_batch = record_batch or _missing_batch_writer("record_bot_run_steps_batch")
         policy = str(overflow_policy or "drop_oldest").strip().lower()
         self._overflow_policy = policy if policy in {"drop_oldest", "drop_newest"} else "drop_oldest"
-        self._queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=self._queue_max)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._start_lock = threading.Lock()
+        self._condition = threading.Condition()
         self._metrics_lock = threading.Lock()
+        self._pending_rollups: Dict[tuple[Any, ...], Dict[str, Any]] = {}
+        self._oldest_pending_monotonic: Optional[float] = None
+        self._write_inflight = 0
         self._dropped_count = 0
         self._persisted_count = 0
         self._persist_lag_ms = 0.0
@@ -78,7 +91,7 @@ class StepTracePersistenceBuffer:
         )
         flush_interval_ms = _float(
             config.get("step_trace_flush_interval_ms") or config.get("BOT_RUNTIME_STEP_TRACE_FLUSH_INTERVAL_MS"),
-            500.0,
+            5000.0,
         )
         overflow_policy = str(
             config.get("step_trace_overflow_policy")
@@ -111,61 +124,78 @@ class StepTracePersistenceBuffer:
     def record(self, payload: Dict[str, Any]) -> float:
         self._ensure_started()
         enqueue_started = time.perf_counter()
-        item = {
-            "payload": dict(payload),
-            "enqueued_monotonic": time.monotonic(),
-        }
-        try:
-            self._queue.put_nowait(item)
-        except queue.Full:
-            if self._overflow_policy == "drop_oldest":
-                dropped_oldest = False
-                try:
-                    self._queue.get_nowait()
-                    self._queue.task_done()
-                    dropped_oldest = True
-                except queue.Empty:
-                    dropped_oldest = False
-                if dropped_oldest:
-                    try:
-                        self._queue.put_nowait(item)
-                    except queue.Full:
-                        self._mark_dropped()
-                        return max((time.perf_counter() - enqueue_started) * 1000.0, 0.0)
-                    self._mark_dropped()
-                else:
-                    self._mark_dropped()
-            else:
-                self._mark_dropped()
+        rollups = rollup_step_metric_samples([dict(payload)])
+        if not rollups:
+            return max((time.perf_counter() - enqueue_started) * 1000.0, 0.0)
+        dropped = 0
+        now = time.monotonic()
+        with self._condition:
+            if self._oldest_pending_monotonic is None:
+                self._oldest_pending_monotonic = now
+            for rollup in rollups:
+                key = step_rollup_identity(rollup)
+                if key not in self._pending_rollups and len(self._pending_rollups) >= self._queue_max:
+                    if self._overflow_policy == "drop_oldest":
+                        oldest_key = next(iter(self._pending_rollups), None)
+                        if oldest_key is not None:
+                            removed = self._pending_rollups.pop(oldest_key, {})
+                            dropped += int(removed.get("raw_sample_count") or removed.get("sample_count") or 1)
+                    else:
+                        dropped += int(rollup.get("raw_sample_count") or rollup.get("sample_count") or 1)
+                        continue
+                current = self._pending_rollups.get(key)
+                self._pending_rollups[key] = merge_step_rollup_rows(current or {}, rollup)
+        if dropped:
+            self._mark_dropped(dropped)
         return max((time.perf_counter() - enqueue_started) * 1000.0, 0.0)
 
     def flush(self, *, reason: str, shutdown: bool = False, timeout_s: float = 5.0) -> None:
         thread = self._thread
-        if not thread and self._queue.empty():
+        with self._condition:
+            is_empty = not self._pending_rollups and self._write_inflight <= 0
+        if not thread and is_empty:
             return
         self._ensure_started()
         deadline = time.monotonic() + max(float(timeout_s), 0.1)
-        while time.monotonic() < deadline:
-            if self._queue.unfinished_tasks <= 0 and self._queue.empty():
-                break
-            time.sleep(0.01)
+        with self._condition:
+            self._condition.notify_all()
+            while time.monotonic() < deadline:
+                if not self._pending_rollups and self._write_inflight <= 0:
+                    break
+                self._condition.wait(timeout=0.01)
         if shutdown:
             self._stop.set()
+            with self._condition:
+                self._condition.notify_all()
             thread = self._thread
             if thread and thread.is_alive():
                 thread.join(timeout=max(float(timeout_s), 0.1))
+            with self._condition:
+                if self._pending_rollups and not (thread and thread.is_alive()):
+                    # Last-chance synchronous drain preserves shutdown summaries.
+                    pending = self._drain_pending_locked()
+                else:
+                    pending = []
+            if pending:
+                self._persist_rollups(pending)
+
+        with self._condition:
+            queue_depth = len(self._pending_rollups) + self._write_inflight
+            unfinished = self._write_inflight
 
         logger.debug(
             "bot_step_trace_flush | reason=%s | queue_depth=%s | unfinished=%s",
             reason,
-            self._queue.qsize(),
-            self._queue.unfinished_tasks,
+            queue_depth,
+            unfinished,
         )
 
     def metrics_snapshot(self) -> Dict[str, float]:
+        with self._condition:
+            queue_depth = len(self._pending_rollups) + self._write_inflight
         with self._metrics_lock:
             return {
-                "queue_depth": float(self._queue.qsize()),
+                "queue_depth": float(queue_depth),
                 "dropped_count": float(self._dropped_count),
                 "persisted_count": float(self._persisted_count),
                 "persist_lag_ms": float(self._persist_lag_ms),
@@ -173,67 +203,67 @@ class StepTracePersistenceBuffer:
                 "persist_error_count": float(self._persist_error_count),
             }
 
-    def _mark_dropped(self) -> None:
+    def _mark_dropped(self, count: int = 1) -> None:
         with self._metrics_lock:
-            self._dropped_count += 1
+            self._dropped_count += max(int(count or 0), 1)
+
+    def _drain_pending_locked(self) -> list[Dict[str, Any]]:
+        pending = list(self._pending_rollups.values())
+        self._pending_rollups.clear()
+        self._oldest_pending_monotonic = None
+        self._write_inflight += len(pending)
+        return pending
+
+    def _persist_rollups(self, rollups: list[Dict[str, Any]], *, oldest_enqueued: Optional[float] = None) -> None:
+        persist_started = time.perf_counter()
+        persisted = 0
+        raw_sample_count = sum(int(row.get("raw_sample_count") or row.get("sample_count") or 0) for row in rollups)
+        if rollups:
+            try:
+                persisted = int(self._record_batch(rollups))
+            except Exception as exc:  # noqa: BLE001
+                with self._metrics_lock:
+                    self._persist_error_count += 1
+                logger.warning("bot_step_trace_rollup_persist_failed | error=%s", exc)
+        persist_batch_ms = max((time.perf_counter() - persist_started) * 1000.0, 0.0)
+        persist_lag_ms = max((time.monotonic() - float(oldest_enqueued or time.monotonic())) * 1000.0, 0.0)
+        with self._metrics_lock:
+            self._persisted_count += max(raw_sample_count or persisted, 0)
+            self._persist_batch_ms = persist_batch_ms
+            self._persist_lag_ms = persist_lag_ms
+        with self._condition:
+            self._write_inflight = max(self._write_inflight - len(rollups), 0)
+            self._condition.notify_all()
+
+        logger.debug(
+            with_log_context(
+                "bot_step_trace_rollups_persisted",
+                {
+                    "rollup_count": len(rollups),
+                    "raw_sample_count": raw_sample_count,
+                    "persisted": persisted,
+                    "persist_batch_ms": round(persist_batch_ms, 3),
+                    "persist_lag_ms": round(persist_lag_ms, 3),
+                    "queue_depth": self.metrics_snapshot().get("queue_depth"),
+                },
+            )
+        )
 
     def _worker_loop(self) -> None:
-        while not self._stop.is_set() or not self._queue.empty():
-            batch: List[Dict[str, Any]] = []
-            oldest_enqueued: Optional[float] = None
-            try:
-                first = self._queue.get(timeout=self._flush_interval_s)
-            except queue.Empty:
-                continue
-            batch.append(first)
-            oldest_enqueued = float(first.get("enqueued_monotonic") or time.monotonic())
-            batch_deadline = time.monotonic() + self._flush_interval_s
-            for _ in range(max(0, self._batch_size - 1)):
-                try:
-                    remaining = max(batch_deadline - time.monotonic(), 0.0)
-                    if remaining <= 0.0:
-                        break
-                    nxt = self._queue.get(timeout=remaining)
-                except queue.Empty:
-                    break
-                batch.append(nxt)
-                candidate = float(nxt.get("enqueued_monotonic") or oldest_enqueued)
-                oldest_enqueued = min(oldest_enqueued, candidate)
-
-            payloads = []
-            for item in batch:
-                payload = item.get("payload")
-                if isinstance(payload, dict):
-                    payloads.append(payload)
-
-            persist_started = time.perf_counter()
-            persisted = 0
-            if payloads:
-                try:
-                    persisted = int(self._record_batch(payloads))
-                except Exception as exc:  # noqa: BLE001
-                    with self._metrics_lock:
-                        self._persist_error_count += 1
-                    logger.warning("bot_step_trace_batch_persist_failed | error=%s", exc)
-            persist_batch_ms = max((time.perf_counter() - persist_started) * 1000.0, 0.0)
-            persist_lag_ms = max((time.monotonic() - float(oldest_enqueued or time.monotonic())) * 1000.0, 0.0)
-            with self._metrics_lock:
-                self._persisted_count += max(persisted, 0)
-                self._persist_batch_ms = persist_batch_ms
-                self._persist_lag_ms = persist_lag_ms
-
-            for _ in batch:
-                self._queue.task_done()
-
-            logger.debug(
-                with_log_context(
-                    "bot_step_trace_batch_persisted",
-                    {
-                        "batch_size": len(payloads),
-                        "persisted": persisted,
-                        "persist_batch_ms": round(persist_batch_ms, 3),
-                        "persist_lag_ms": round(persist_lag_ms, 3),
-                        "queue_depth": self._queue.qsize(),
-                    },
-                )
-            )
+        while not self._stop.is_set():
+            with self._condition:
+                if not self._pending_rollups:
+                    self._condition.wait(timeout=self._flush_interval_s)
+                if not self._pending_rollups:
+                    continue
+                oldest_enqueued = self._oldest_pending_monotonic
+                rollups = self._drain_pending_locked()
+            self._persist_rollups(rollups, oldest_enqueued=oldest_enqueued)
+        while True:
+            with self._condition:
+                if not self._pending_rollups:
+                    self._condition.notify_all()
+                    return
+                oldest_enqueued = self._oldest_pending_monotonic
+                rollups = self._drain_pending_locked()
+            self._persist_rollups(rollups, oldest_enqueued=oldest_enqueued)

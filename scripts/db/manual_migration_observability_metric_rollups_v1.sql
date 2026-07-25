@@ -5,7 +5,7 @@ BEGIN;
 
 CREATE SCHEMA IF NOT EXISTS observability_metrics;
 
-CREATE TABLE IF NOT EXISTS observability_metrics.botlens_backend_metric_rollups_v1 (
+CREATE TABLE IF NOT EXISTS observability_metrics.botlens_backend_metric_rollups (
     id SERIAL PRIMARY KEY,
     bucket_start TIMESTAMP NOT NULL,
     bucket_seconds INTEGER NOT NULL DEFAULT 10,
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS observability_metrics.botlens_backend_metric_rollups_
     source_metric_record_count INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_botlens_backend_metric_rollups_v1_bucket_identity UNIQUE (
+    CONSTRAINT uq_botlens_backend_metric_rollups_bucket_identity UNIQUE (
         bucket_start,
         bucket_seconds,
         component,
@@ -59,14 +59,14 @@ CREATE TABLE IF NOT EXISTS observability_metrics.botlens_backend_metric_rollups_
     )
 );
 
-ALTER TABLE observability_metrics.botlens_backend_metric_rollups_v1
+ALTER TABLE observability_metrics.botlens_backend_metric_rollups
     ADD COLUMN IF NOT EXISTS source_metric_record_count INTEGER NOT NULL DEFAULT 0;
 
-CREATE INDEX IF NOT EXISTS ix_botlens_backend_metric_rollups_v1_bucket_start
-    ON observability_metrics.botlens_backend_metric_rollups_v1 (bucket_start);
-CREATE INDEX IF NOT EXISTS ix_botlens_backend_metric_rollups_v1_metric_bucket
-    ON observability_metrics.botlens_backend_metric_rollups_v1 (metric_name, bucket_start);
-CREATE INDEX IF NOT EXISTS ix_botlens_backend_metric_rollups_v1_run_bucket
-    ON observability_metrics.botlens_backend_metric_rollups_v1 (run_id, bucket_start);
+CREATE INDEX IF NOT EXISTS ix_botlens_backend_metric_rollups_bucket_start
+    ON observability_metrics.botlens_backend_metric_rollups (bucket_start);
+CREATE INDEX IF NOT EXISTS ix_botlens_backend_metric_rollups_metric_bucket
+    ON observability_metrics.botlens_backend_metric_rollups (metric_name, bucket_start);
+CREATE INDEX IF NOT EXISTS ix_botlens_backend_metric_rollups_run_bucket
+    ON observability_metrics.botlens_backend_metric_rollups (run_id, bucket_start);
 
 COMMIT;

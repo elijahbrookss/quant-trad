@@ -6,11 +6,34 @@ build-backend = "setuptools.build_meta"
 name = "quant-trad"
 version = "0.1.0"
 description = "Quant-Trad research and runtime tooling."
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 
 [project.scripts]
 qt = "cli.main:main"
 qt-mcp = "cli.mcp_server:main"
 
-[tool.setuptools]
-packages = ["cli", "cli.experiments"]
+[tool.setuptools.package-dir]
+"" = "src"
+cli = "cli"
+portal = "portal"
+
+[tool.setuptools.packages.find]
+where = [".", "src"]
+include = [
+    "atm*",
+    "cli*",
+    "core*",
+    "data_providers*",
+    "engines*",
+    "indicators*",
+    "overlays*",
+    "portal*",
+    "risk*",
+    "signals*",
+    "strategies*",
+    "utils*",
+]
+exclude = [
+    "portal.frontend*",
+    "tests*",
+]

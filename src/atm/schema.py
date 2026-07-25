@@ -25,6 +25,31 @@ DEFAULT_ATM_TEMPLATE: Dict[str, Any] = {
         {"id": "tp-2", "r_multiple": 2.0, "size_fraction": 0.33},
         {"id": "tp-3", "r_multiple": 3.0, "size_fraction": 0.33},
     ],
+    "exit_plan": {
+        "fixed_horizon": {
+            "enabled": False,
+            "bars": None,
+            "price": "close",
+            "order_type": "market",
+        },
+    },
+    "breakeven": {
+        "enabled": False,
+        "activation_type": "r_multiple",
+        "ticks": 0,
+        "r_multiple": 1.0,
+        "target_index": None,
+        "target_id": None,
+    },
+    "trailing": {
+        "enabled": False,
+        "activation_type": "r_multiple",
+        "ticks": 0,
+        "atr_multiplier": None,
+        "r_multiple": 1.0,
+        "target_index": None,
+        "target_id": None,
+    },
     "stop_adjustments": [
         {
             "id": "sa-1",

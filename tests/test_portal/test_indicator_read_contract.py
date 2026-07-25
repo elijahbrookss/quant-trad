@@ -33,13 +33,12 @@ def test_get_indicator_returns_nested_whole_indicator_contract(monkeypatch) -> N
             "color_palette": "warm",
             "datasource": "ALPACA",
             "exchange": "cme",
-            "output_prefs": {"balance_breakout": {"enabled": True}},
             "manifest": {
                 "type": "market_profile",
                 "label": "Market Profile",
                 "outputs": [{"name": "balance_breakout", "type": "signal"}],
             },
-            "typed_outputs": [{"name": "balance_breakout", "type": "signal", "enabled": True}],
+            "typed_outputs": [{"name": "balance_breakout", "type": "signal"}],
             "overlay_outputs": [{"name": "value_area", "kind": "band"}],
             "runtime_supported": True,
             "compute_supported": True,
@@ -61,7 +60,6 @@ def test_get_indicator_returns_nested_whole_indicator_contract(monkeypatch) -> N
             "color_palette": "warm",
             "datasource": "ALPACA",
             "exchange": "cme",
-            "output_prefs": {"balance_breakout": {"enabled": True}},
         },
         "manifest": {
             "type": "market_profile",
@@ -69,11 +67,102 @@ def test_get_indicator_returns_nested_whole_indicator_contract(monkeypatch) -> N
             "outputs": [{"name": "balance_breakout", "type": "signal"}],
         },
         "outputs": {
-            "typed": [{"name": "balance_breakout", "type": "signal", "enabled": True}],
+            "typed": [{"name": "balance_breakout", "type": "signal"}],
             "overlays": [{"name": "value_area", "kind": "band"}],
         },
         "capabilities": {
             "runtime_supported": True,
             "compute_supported": True,
+        },
+    }
+
+
+def test_validate_config_returns_nested_whole_indicator_contract(monkeypatch) -> None:
+    client = _client()
+    calls = []
+
+    def _validate_instance_config(
+        type_str,
+        name,
+        params,
+        *,
+        dependencies=None,
+        color=None,
+        color_palette=None,
+    ):
+        calls.append(
+            {
+                "type": type_str,
+                "name": name,
+                "params": params,
+                "dependencies": dependencies,
+                "color": color,
+                "color_palette": color_palette,
+            }
+        )
+        return {
+            "id": "",
+            "type": type_str,
+            "name": name or "Candle Stats",
+            "params": {"warmup_bars": 5},
+            "dependencies": dependencies or [],
+            "enabled": True,
+            "color": color,
+            "color_palette": color_palette,
+            "datasource": "ALPACA",
+            "exchange": None,
+            "manifest": {"type": type_str, "label": "Candle Stats"},
+            "typed_outputs": [{"name": "candle_stats", "type": "metric"}],
+            "overlay_outputs": [],
+            "runtime_supported": True,
+            "compute_supported": False,
+        }
+
+    monkeypatch.setattr(controller, "validate_instance_config", _validate_instance_config)
+
+    response = client.post(
+        "/api/indicators/validate-config",
+        json={
+            "type": "candle_stats",
+            "name": "ATR Check",
+            "params": {"warmup_bars": 5},
+            "dependencies": [],
+            "color": "#00ffaa",
+            "color_palette": "cool",
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == [
+        {
+            "type": "candle_stats",
+            "name": "ATR Check",
+            "params": {"warmup_bars": 5},
+            "dependencies": [],
+            "color": "#00ffaa",
+            "color_palette": "cool",
+        }
+    ]
+    assert response.json() == {
+        "instance": {
+            "id": "",
+            "type": "candle_stats",
+            "name": "ATR Check",
+            "params": {"warmup_bars": 5},
+            "dependencies": [],
+            "enabled": True,
+            "color": "#00ffaa",
+            "color_palette": "cool",
+            "datasource": "ALPACA",
+            "exchange": None,
+        },
+        "manifest": {"type": "candle_stats", "label": "Candle Stats"},
+        "outputs": {
+            "typed": [{"name": "candle_stats", "type": "metric"}],
+            "overlays": [],
+        },
+        "capabilities": {
+            "runtime_supported": True,
+            "compute_supported": False,
         },
     }

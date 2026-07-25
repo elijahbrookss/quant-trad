@@ -130,14 +130,12 @@ def test_update_bot_uses_explicit_bot_atm_not_variant(monkeypatch) -> None:
         "risk": {},
         "snapshot_interval_ms": 1000,
         "bot_env": {},
-        "status": "idle",
-        "last_stats": {},
     }
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
-        "portal.backend.service.bots.config_service.load_bots",
-        lambda: [dict(persisted)],
+        "portal.backend.service.bots.config_service.get_bot_record",
+        lambda bot_id: dict(persisted) if bot_id == "bot-1" else None,
     )
     monkeypatch.setattr(
         "portal.backend.service.bots.config_service.load_strategies",
@@ -206,14 +204,12 @@ def test_update_bot_persists_execution_mode_in_runtime_config(monkeypatch) -> No
         "risk": {},
         "snapshot_interval_ms": 1000,
         "bot_env": {},
-        "status": "idle",
-        "last_stats": {},
     }
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
-        "portal.backend.service.bots.config_service.load_bots",
-        lambda: [dict(persisted)],
+        "portal.backend.service.bots.config_service.get_bot_record",
+        lambda bot_id: dict(persisted) if bot_id == "bot-1" else None,
     )
     monkeypatch.setattr(
         "portal.backend.service.bots.config_service.load_strategies",

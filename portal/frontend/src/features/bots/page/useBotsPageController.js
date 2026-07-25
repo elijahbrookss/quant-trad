@@ -7,6 +7,7 @@ import {
   listBots,
   startBot as startBotApi,
   stopBot as stopBotApi,
+  updateBot as updateBotApi,
 } from '../../../adapters/bot.adapter.js'
 import { fetchStrategies, fetchStrategy } from '../../../adapters/strategy.adapter.js'
 import { buildBotFleetSummary, sortBots } from '../fleet/buildBotFleetViewModel.js'
@@ -14,6 +15,7 @@ import {
   getBotCardDisplayState,
   getBotStatus,
 } from '../state/botRuntimeStatus.js'
+import { isBotConfigActive } from '../config/botConfigModel.js'
 import { mapRunToViewModel } from '../viewModels/runViewModel.js'
 import { useBotCreateController } from '../create/useBotCreateController.js'
 import { useBotStream } from '../../../components/bots/useBotStream.js'
@@ -145,6 +147,8 @@ export function useBotsPageController() {
   const [createError, setCreateError] = useState(null)
   const [lensBotId, setLensBotId] = useState(null)
   const [diagnosticsBotId, setDiagnosticsBotId] = useState(null)
+  const [configBotId, setConfigBotId] = useState(null)
+  const [configSaving, setConfigSaving] = useState(false)
   const [error, setError] = useState(null)
   const [strategies, setStrategies] = useState([])
   const [strategiesLoading, setStrategiesLoading] = useState(false)
@@ -336,13 +340,38 @@ export function useBotsPageController() {
       await deleteBotApi(botId)
       if (lensBotId === botId) setLensBotId(null)
       if (diagnosticsBotId === botId) setDiagnosticsBotId(null)
+      if (configBotId === botId) setConfigBotId(null)
     } catch (err) {
       logger.error('bot_delete_failed', { bot_id: botId, message: err?.message }, err)
       setError(err?.message || 'Unable to delete bot')
     } finally {
       setPendingDelete(null)
     }
-  }, [diagnosticsBotId, lensBotId, logger])
+  }, [configBotId, diagnosticsBotId, lensBotId, logger])
+
+  const handleOpenConfig = useCallback((bot) => {
+    setError(null)
+    setConfigBotId(bot?.id || null)
+  }, [])
+
+  const handleSaveConfig = useCallback(async (botId, payload) => {
+    if (!botId || !payload) return null
+    setError(null)
+    setConfigSaving(true)
+    try {
+      logger.info('bot_config_update_requested', { bot_id: botId })
+      const updated = await updateBotApi(botId, payload)
+      if (updated?.id) {
+        upsertBot(updated)
+      }
+      return updated
+    } catch (err) {
+      logger.error('bot_config_update_failed', { bot_id: botId, message: err?.message }, err)
+      throw err
+    } finally {
+      setConfigSaving(false)
+    }
+  }, [logger, upsertBot])
 
   const handleViewReport = useCallback((bot) => {
     const display = getBotCardDisplayState(bot, {
@@ -425,6 +454,20 @@ export function useBotsPageController() {
     [bots, diagnosticsBotId],
   )
 
+  const configBot = useMemo(
+    () => bots.find((bot) => bot.id === configBotId) || null,
+    [bots, configBotId],
+  )
+
+  const configBotActive = useMemo(() => {
+    if (!configBot) return false
+    const display = getBotCardDisplayState(configBot, {
+      nowEpochMs,
+      pendingStart: pendingStart === configBot.id,
+    })
+    return isBotConfigActive(display)
+  }, [configBot, nowEpochMs, pendingStart])
+
   useEffect(() => {
     if (lensBotId && !lensBot) {
       setLensBotId(null)
@@ -436,6 +479,12 @@ export function useBotsPageController() {
       setDiagnosticsBotId(null)
     }
   }, [diagnosticsBot, diagnosticsBotId])
+
+  useEffect(() => {
+    if (configBotId && !configBot) {
+      setConfigBotId(null)
+    }
+  }, [configBot, configBotId])
 
   const manualRefreshFleet = useCallback(async () => {
     await runManualFleetRefresh({
@@ -457,6 +506,9 @@ export function useBotsPageController() {
     },
     createError,
     createOpen,
+    configBot,
+    configBotActive,
+    configSaving,
     diagnosticsBot,
     error,
     filteredBots,
@@ -466,6 +518,8 @@ export function useBotsPageController() {
     handleChange,
     handleCreate,
     handleDelete,
+    handleOpenConfig,
+    handleSaveConfig,
     handleOpenCreate: async () => {
       logger.info('bot_create_modal_open')
       setCreateError(null)

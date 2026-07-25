@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from engines.bot_runtime.runtime.components.canonical_facts import (
     CanonicalFactAppender,
     CanonicalFactPersistenceBuffer,
+    CanonicalFactProjectionDispatcher,
     canonical_fact_payload,
 )
 
@@ -23,6 +26,20 @@ class _RecordingConsumer:
         self.seqs: list[int] = []
 
     def consume(self, batch):  # noqa: ANN001
+        self.seqs.append(int(batch.seq))
+        return (1, 0)
+
+
+class _BlockingConsumer:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.seqs: list[int] = []
+
+    def consume(self, batch):  # noqa: ANN001
+        self.started.set()
+        if not self.release.wait(timeout=2.0):
+            raise RuntimeError("test projection consumer was not released")
         self.seqs.append(int(batch.seq))
         return (1, 0)
 
@@ -169,6 +186,94 @@ def test_canonical_fact_appender_batches_async_persistence_and_dispatches_seq() 
     assert [item["seq"] for item in persisted_batches[0]] == [1, 2]
     assert persisted_batches[0][0]["payload"]["run_seq"] == 1
     assert persisted_batches[0][1]["payload"]["run_seq"] == 2
+
+
+def test_canonical_fact_appender_queues_projection_dispatch_off_append_path() -> None:
+    consumer = _BlockingConsumer()
+    dispatcher = CanonicalFactProjectionDispatcher(
+        consumers=(consumer,),
+        queue_max=4,
+        flush_interval_s=0.001,
+        drain_timeout_s=2.0,
+    )
+    appender = CanonicalFactAppender(
+        allocate_seq=lambda: 1,
+        append_batch=lambda **_kwargs: {"inserted_rows": 1},
+        projection_dispatcher=dispatcher,
+    )
+
+    outcome = appender.append_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        batch_kind="botlens_runtime_facts",
+        payload=_canonical_payload(known_at="2026-04-19T12:00:00Z"),
+    )
+
+    assert outcome is not None
+    assert outcome.consumer_results[0].consumer_name == "CanonicalFactProjectionDispatcher"
+    assert outcome.consumer_results[0].result["queued"] is True
+    assert consumer.started.wait(timeout=1.0)
+    assert consumer.seqs == []
+
+    consumer.release.set()
+    appender.flush(reason="test", shutdown=True, timeout_s=2.0)
+
+    assert consumer.seqs == [1]
+
+
+def test_canonical_fact_projection_dispatcher_overflow_degrades_without_failing_run() -> None:
+    seq = 0
+    consumer = _BlockingConsumer()
+    dispatcher = CanonicalFactProjectionDispatcher(
+        consumers=(consumer,),
+        queue_max=1,
+        flush_interval_s=0.001,
+        drain_timeout_s=2.0,
+    )
+
+    def _allocate() -> int:
+        nonlocal seq
+        seq += 1
+        return seq
+
+    appender = CanonicalFactAppender(
+        allocate_seq=_allocate,
+        append_batch=lambda **_kwargs: {"inserted_rows": 1},
+        projection_dispatcher=dispatcher,
+    )
+
+    appender.append_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        batch_kind="botlens_runtime_facts",
+        payload=_canonical_payload(known_at="2026-04-19T12:00:00Z"),
+    )
+    assert consumer.started.wait(timeout=1.0)
+    appender.append_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        batch_kind="botlens_runtime_facts",
+        payload=_canonical_payload(known_at="2026-04-19T12:01:00Z"),
+    )
+
+    degraded_outcome = appender.append_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        batch_kind="botlens_runtime_facts",
+        payload=_canonical_payload(known_at="2026-04-19T12:02:00Z"),
+    )
+    assert degraded_outcome is not None
+    assert degraded_outcome.consumer_results[0].error is None
+    assert degraded_outcome.consumer_results[0].result["degraded"] is True
+    assert degraded_outcome.consumer_results[0].result["overflow_policy"] == "drop_oldest"
+
+    consumer.release.set()
+    appender.flush(reason="test", shutdown=True, timeout_s=2.0)
+
+    metrics = appender.metrics_snapshot()
+    assert metrics["projection_overflow_count"] == 1.0
+    assert metrics["projection_dropped_count"] == 1.0
+    assert metrics["projection_degraded"] == 1.0
 
 
 def test_canonical_fact_buffer_surfaces_writer_failure_on_drain() -> None:

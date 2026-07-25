@@ -379,13 +379,22 @@ def test_supervise_startup_and_runtime_shuts_down_manager_after_final_lifecycle_
 
 
 class _FakeAsyncWebSocket:
-    def __init__(self, *, fail_first_send: bool = False, send_gate: threading.Event | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_first_send: bool = False,
+        send_gate: threading.Event | None = None,
+        send_started: threading.Event | None = None,
+    ) -> None:
         self.sent: list[str] = []
         self.close_calls = 0
         self._fail_first_send = fail_first_send
         self._send_gate = send_gate
+        self._send_started = send_started
 
     async def send(self, message: str) -> None:
+        if self._send_started is not None:
+            self._send_started.set()
         if self._send_gate is not None:
             while not self._send_gate.is_set():
                 await asyncio.sleep(0.01)
@@ -522,6 +531,79 @@ def _large_runtime_facts_payload(
             },
         ],
     }
+
+
+def test_telemetry_runtime_fact_coalesce_key_excludes_material_facts() -> None:
+    visual_payload = {
+        "kind": "botlens_runtime_facts",
+        "bot_id": "bot-1",
+        "run_id": "run-1",
+        "series_key": "instrument-btc|1m",
+        "bridge_session_id": "session-1",
+        "facts": [{"fact_type": "runtime_state_observed", "runtime": {"status": "running"}}],
+    }
+    material_payload = {
+        **visual_payload,
+        "facts": [{"fact_type": "trade_opened", "trade": {"trade_id": "trade-1"}}],
+    }
+
+    assert telemetry_mod.TelemetryEmitter._coalesce_key_for_payload(visual_payload) == (
+        "botlens_runtime_facts",
+        "bot-1",
+        "run-1",
+        "instrument-btc|1m",
+        "session-1",
+    )
+    assert telemetry_mod.TelemetryEmitter._coalesce_key_for_payload(material_payload) is None
+
+
+def test_telemetry_emitter_coalescing_preserves_inflight_head(monkeypatch: pytest.MonkeyPatch) -> None:
+    send_gate = threading.Event()
+    send_started = threading.Event()
+    connections: list[_FakeAsyncWebSocket] = []
+
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
+        assert open_timeout == 2
+        assert close_timeout == 1
+        ws = _FakeAsyncWebSocket(send_gate=send_gate, send_started=send_started)
+        connections.append(ws)
+        return ws
+
+    monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
+
+    emitter = telemetry_mod.TelemetryEmitter(
+        "ws://example.test/telemetry",
+        queue_max=8,
+        queue_timeout_ms=50,
+        retry_ms=10,
+    )
+    try:
+        first_payload = {
+            "kind": "botlens_runtime_facts",
+            "bot_id": "bot-1",
+            "run_id": "run-1",
+            "series_key": "instrument-btc|1m",
+            "bridge_session_id": "session-1",
+            "run_seq": 1,
+            "facts": [{"fact_type": "runtime_state_observed", "runtime": {"status": "running"}}],
+        }
+        second_payload = {
+            **first_payload,
+            "run_seq": 2,
+            "facts": [{"fact_type": "runtime_state_observed", "runtime": {"status": "running", "progress_state": "progressing"}}],
+        }
+
+        assert emitter.send(first_payload)
+        _wait_until(lambda: send_started.is_set() and len(connections) == 1)
+        assert emitter.send(second_payload)
+
+        send_gate.set()
+        _wait_until(lambda: len(connections[0].sent) == 2)
+
+        assert [json.loads(message)["run_seq"] for message in connections[0].sent] == [1, 2]
+    finally:
+        send_gate.set()
+        emitter.close()
 
 
 def test_telemetry_emitter_reuses_single_websocket_for_multiple_messages(monkeypatch: pytest.MonkeyPatch) -> None:

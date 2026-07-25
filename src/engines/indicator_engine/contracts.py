@@ -10,7 +10,7 @@ from typing import Any, Literal, Mapping, Sequence, Tuple
 
 from .signal_output import assert_signal_output_event
 
-OutputType = Literal["signal", "context", "metric"]
+OutputType = Literal["signal", "context", "metric", "lifecycle"]
 
 
 @dataclass(frozen=True)
@@ -211,7 +211,7 @@ def validate_output_definitions(definitions: Sequence[OutputDefinition]) -> None
         if name in seen:
             raise RuntimeError(f"indicator_manifest_invalid: duplicate output name={name}")
         seen.add(name)
-        if str(definition.type or "").strip().lower() not in {"signal", "context", "metric"}:
+        if str(definition.type or "").strip().lower() not in {"signal", "context", "metric", "lifecycle"}:
             raise RuntimeError(
                 f"indicator_manifest_invalid: invalid output type name={name} type={definition.type}"
             )
@@ -282,6 +282,9 @@ def validate_runtime_output(
         return
     if definition.type == "metric":
         _validate_metric_output(definition.name, output.value)
+        return
+    if definition.type == "lifecycle":
+        _validate_lifecycle_output(definition.name, output.value)
         return
     raise RuntimeError(
             f"indicator_output_invalid: unsupported output type={definition.type} output={definition.name}"
@@ -372,6 +375,81 @@ def _validate_signal_output(output_name: str, value: Mapping[str, Any]) -> None:
             raise RuntimeError(
                 f"indicator_output_invalid: signal event shape output={output_name} index={index} detail={exc}"
             ) from exc
+
+
+def _validate_lifecycle_output(output_name: str, value: Mapping[str, Any]) -> None:
+    if set(value.keys()) != {"events"}:
+        raise RuntimeError(
+            f"indicator_output_invalid: lifecycle shape output={output_name} keys={sorted(value.keys())}"
+        )
+    events = value.get("events")
+    if not isinstance(events, list):
+        raise RuntimeError(
+            f"indicator_output_invalid: lifecycle events must be list output={output_name}"
+        )
+    allowed_keys = {
+        "candidate_id",
+        "family",
+        "side",
+        "stage",
+        "status",
+        "group_key",
+        "source_event_id",
+        "source_output",
+        "source_event_key",
+        "signal_output",
+        "signal_event_key",
+        "known_at",
+        "reason",
+        "reference",
+        "metrics",
+        "thresholds",
+    }
+    required_text = ("candidate_id", "family", "side", "stage", "status", "reason")
+    optional_text = (
+        "group_key",
+        "source_event_id",
+        "source_output",
+        "source_event_key",
+        "signal_output",
+        "signal_event_key",
+    )
+    for index, event in enumerate(events):
+        if not isinstance(event, Mapping):
+            raise RuntimeError(
+                f"indicator_output_invalid: lifecycle event must be mapping output={output_name} index={index}"
+            )
+        unexpected = sorted(str(key) for key in event.keys() if str(key) not in allowed_keys)
+        if unexpected:
+            raise RuntimeError(
+                "indicator_output_invalid: lifecycle event keys invalid "
+                f"output={output_name} index={index} keys={unexpected}"
+            )
+        for field in required_text:
+            _require_lifecycle_text(event.get(field), output_name=output_name, index=index, field=field)
+        for field in optional_text:
+            value_for_field = event.get(field)
+            if value_for_field is not None:
+                _require_lifecycle_text(value_for_field, output_name=output_name, index=index, field=field)
+        if event.get("known_at") is None or str(event.get("known_at")).strip() == "":
+            raise RuntimeError(
+                f"indicator_output_invalid: lifecycle known_at required output={output_name} index={index}"
+            )
+        for field in ("reference", "metrics", "thresholds"):
+            value_for_field = event.get(field)
+            if value_for_field is not None and not isinstance(value_for_field, Mapping):
+                raise RuntimeError(
+                    "indicator_output_invalid: lifecycle field must be mapping "
+                    f"output={output_name} index={index} field={field}"
+                )
+
+
+def _require_lifecycle_text(value: Any, *, output_name: str, index: int, field: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError(
+            "indicator_output_invalid: lifecycle field must be non-empty string "
+            f"output={output_name} index={index} field={field}"
+        )
 
 
 def _validate_context_output(output_name: str, value: Mapping[str, Any]) -> None:

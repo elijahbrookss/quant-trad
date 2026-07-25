@@ -262,6 +262,54 @@ test('run deltas and selected-symbol bootstrap stay on separate client boundarie
   assert.equal(getSelectedSymbolState(store).symbol_key, 'instrument-btc|1m')
 })
 
+test('run health warning summary stays run-scoped and only maps matching symbol warnings to selected runtime', () => {
+  let store = createRunStore(runBootstrapPayload())
+  store = applySelectedSymbolBootstrap(store, selectedSymbolBootstrapPayload())
+
+  store = applyRunHealthDelta(store, {
+    stream_session_id: 'stream-1',
+    stream_seq: 30,
+    scope_seq: 30,
+    payload: {
+      health: {
+        status: 'running',
+        warning_count: 1,
+        warnings: [
+          {
+            warning_id: 'indicator_budget::typed_regime::instrument-eth|5m',
+            warning_type: 'indicator_budget',
+            symbol_key: 'instrument-eth|5m',
+            symbol: 'ETH',
+            timeframe: '5m',
+            count: 2,
+          },
+        ],
+        warning_summary: {
+          count: 1,
+          event_count: 2,
+          by_symbol: {
+            'instrument-eth|5m': {
+              symbol_key: 'instrument-eth|5m',
+              symbol: 'ETH',
+              timeframe: '5m',
+              count: 1,
+              event_count: 2,
+              warning_types: ['indicator_budget'],
+            },
+          },
+          groups: [],
+        },
+      },
+    },
+  })
+
+  const selected = getSelectedSymbolState(store)
+  assert.equal(store.health.warning_count, 1)
+  assert.equal(store.health.warning_summary.by_symbol['instrument-eth|5m'].event_count, 2)
+  assert.equal(selected.runtime.warning_count, 0)
+  assert.deepEqual(selected.runtime.warnings, [])
+})
+
 test('typed symbol delta without a bootstrap base state is logged and ignored', () => {
   const events = []
   setLogSink((event) => events.push(event))

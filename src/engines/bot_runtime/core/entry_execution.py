@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Optional, TYPE_CHECKING
 
 from utils.log_context import build_log_context, with_log_context
@@ -71,13 +71,22 @@ class EntryExecutionCoordinator:
             return None
 
         execution_model = engine._resolve_execution_model()
-        outcome, rejection = execution_model.evaluate(
-            intent,
-            candle_high=candle.high,
-            candle_low=candle.low,
-            candle_close=candle.close,
-            candle_open=candle.open,
-        )
+        if intent.order_type == "limit_maker":
+            outcome, rejection = execution_model.evaluate(
+                intent,
+                candle_high=candle.close,
+                candle_low=candle.close,
+                candle_close=candle.close,
+                candle_open=candle.close,
+            )
+        else:
+            outcome, rejection = execution_model.evaluate(
+                intent,
+                candle_high=candle.high,
+                candle_low=candle.low,
+                candle_close=candle.close,
+                candle_open=candle.open,
+            )
         if rejection:
             engine.last_rejection_reason = rejection.reason
             engine.last_rejection_detail = self._finalize_rejection_detail(
@@ -115,7 +124,7 @@ class EntryExecutionCoordinator:
 
         if outcome.status == "open":
             validity_remaining = request.limit_params.validity_window if request.limit_params else 1
-            pending = build_pending(max(int(validity_remaining) - 1, 0))
+            pending = build_pending(max(int(validity_remaining), 1))
             if pending.validity_remaining <= 0:
                 return self._apply_entry_fallback(candle, pending, outcome)
             self.pending_entry = pending
@@ -157,8 +166,12 @@ class EntryExecutionCoordinator:
         request = pending.request
         engine = self._engine
         execution_model = engine._resolve_execution_model()
-        outcome, rejection = execution_model.evaluate(
+        pending_intent = replace(
             pending.intent,
+            metadata={**dict(pending.intent.metadata), "pending_evaluation": True},
+        )
+        outcome, rejection = execution_model.evaluate(
+            pending_intent,
             candle_high=candle.high,
             candle_low=candle.low,
             candle_close=candle.close,

@@ -20,6 +20,18 @@ class DataPersistence(Protocol):
     def fetch_ohlcv(self, ctx: DataContext, datasource: str) -> pd.DataFrame:
         ...
 
+    def acquire_ingest_lock(
+        self,
+        ctx: DataContext,
+        datasource: str,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ) -> Any | None:
+        ...
+
+    def release_ingest_lock(self, handle: Any | None) -> None:
+        ...
+
     def load_closure_ranges(
         self,
         ctx: DataContext,
@@ -62,6 +74,18 @@ class NullPersistence:
 
     def fetch_ohlcv(self, ctx: DataContext, datasource: str) -> pd.DataFrame:
         return pd.DataFrame()
+
+    def acquire_ingest_lock(
+        self,
+        ctx: DataContext,
+        datasource: str,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ) -> Any | None:
+        return None
+
+    def release_ingest_lock(self, handle: Any | None) -> None:
+        return None
 
     def load_closure_ranges(
         self,

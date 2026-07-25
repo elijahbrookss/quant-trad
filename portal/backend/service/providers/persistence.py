@@ -1,20 +1,128 @@
+import hashlib
 import json
+import re
 from typing import Any, List, Mapping, Tuple
 
 import pandas as pd
-from sqlalchemy import create_engine, text
-from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    Column,
+    Float,
+    Index,
+    Integer,
+    MetaData,
+    PrimaryKeyConstraint,
+    Table,
+    Text,
+    create_engine,
+    inspect,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.schema import CreateIndex, CreateTable
 
 from core.logger import logger
 from indicators.config import DataContext
 from data_providers.config.runtime import PersistenceConfig
 from data_providers.utils.ohlcv import interval_to_timedelta
 
+
+_SCHEMA_LOCK_KEY = 9021002
+_TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_table_name(value: str, *, setting: str) -> str:
+    name = str(value or "").strip()
+    if not _TABLE_NAME_RE.match(name):
+        raise ValueError(f"{setting} must be a simple PostgreSQL table identifier.")
+    return name
+
+
+def _market_data_tables(config: PersistenceConfig) -> tuple[Table, Table, Table]:
+    metadata = MetaData()
+    candles_raw = Table(
+        _validate_table_name(config.candles_raw_table, setting="candles_raw_table"),
+        metadata,
+        Column("instrument_id", Text, nullable=False),
+        Column("timeframe_seconds", Integer, nullable=False),
+        Column("candle_time", TIMESTAMP(timezone=True), nullable=False),
+        Column("close_time", TIMESTAMP(timezone=True), nullable=False),
+        Column("open", Float, nullable=False),
+        Column("high", Float, nullable=False),
+        Column("low", Float, nullable=False),
+        Column("close", Float, nullable=False),
+        Column("volume", Float, nullable=True),
+        Column("trade_count", BigInteger, nullable=True),
+        Column("is_closed", Boolean, nullable=False, server_default=text("TRUE")),
+        Column("source_time", TIMESTAMP(timezone=True), nullable=True),
+        Column("inserted_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+        PrimaryKeyConstraint("instrument_id", "timeframe_seconds", "candle_time"),
+        CheckConstraint("timeframe_seconds > 0"),
+        CheckConstraint("close_time > candle_time"),
+        CheckConstraint("high >= low"),
+        CheckConstraint("low <= open AND open <= high"),
+        CheckConstraint("low <= close AND close <= high"),
+        CheckConstraint("volume IS NULL OR volume >= 0"),
+        CheckConstraint("trade_count IS NULL OR trade_count >= 0"),
+    )
+    derivatives_state = Table(
+        _validate_table_name(config.derivatives_state_table, setting="derivatives_state_table"),
+        metadata,
+        Column("instrument_id", Text, nullable=False),
+        Column("observed_at", TIMESTAMP(timezone=True), nullable=False),
+        Column("source_time", TIMESTAMP(timezone=True), nullable=True),
+        Column("open_interest", Float, nullable=True),
+        Column("open_interest_value", Float, nullable=True),
+        Column("funding_rate", Float, nullable=True),
+        Column("funding_time", TIMESTAMP(timezone=True), nullable=True),
+        Column("mark_price", Float, nullable=True),
+        Column("index_price", Float, nullable=True),
+        Column("premium_rate", Float, nullable=True),
+        Column("premium_index", Float, nullable=True),
+        Column("next_funding_time", TIMESTAMP(timezone=True), nullable=True),
+        Column("inserted_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+        PrimaryKeyConstraint("instrument_id", "observed_at"),
+        CheckConstraint("open_interest IS NULL OR open_interest >= 0"),
+        CheckConstraint("open_interest_value IS NULL OR open_interest_value >= 0"),
+    )
+    closures = Table(
+        _validate_table_name(config.closures_table, setting="closures_table"),
+        metadata,
+        Column("instrument_id", Text, nullable=False),
+        Column("timeframe_seconds", Integer, nullable=False),
+        Column("start_ts", TIMESTAMP(timezone=True), nullable=False),
+        Column("end_ts", TIMESTAMP(timezone=True), nullable=False),
+        Column("metadata", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+        Column("created_at", TIMESTAMP(timezone=True), server_default=text("now()")),
+        PrimaryKeyConstraint("instrument_id", "timeframe_seconds", "start_ts", "end_ts"),
+        CheckConstraint("timeframe_seconds > 0"),
+        CheckConstraint("end_ts > start_ts"),
+    )
+    Index(
+        "idx_candles_raw_instrument_tf_time",
+        candles_raw.c.instrument_id,
+        candles_raw.c.timeframe_seconds,
+        candles_raw.c.candle_time.desc(),
+    )
+    Index(
+        "idx_derivatives_state_instrument_time",
+        derivatives_state.c.instrument_id,
+        derivatives_state.c.observed_at.desc(),
+    )
+    Index("idx_derivatives_state_time", derivatives_state.c.observed_at.desc())
+    Index("idx_candle_closures_lookup", closures.c.instrument_id, closures.c.timeframe_seconds, closures.c.start_ts)
+    return candles_raw, derivatives_state, closures
+
+
 class DataPersistenceService:
     """Handle storage, schema management, and closure bookkeeping for OHLCV data."""
 
     def __init__(self, config: PersistenceConfig, *, engine=None):
         self._config = config
+        self._tables = _market_data_tables(config)
         self._engine = engine or (create_engine(config.dsn) if config.dsn else None)
         self._schema_logged = False
 
@@ -29,8 +137,86 @@ class DataPersistenceService:
     def engine_available(self) -> bool:
         return self._engine is not None
 
+    @staticmethod
+    def _advisory_lock_key(
+        *,
+        datasource: str,
+        instrument_id: str,
+        timeframe_seconds: int,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ) -> int:
+        payload = "|".join(
+            [
+                str(datasource or "").upper(),
+                str(instrument_id or ""),
+                str(int(timeframe_seconds)),
+                pd.to_datetime(start, utc=True).isoformat(),
+                pd.to_datetime(end, utc=True).isoformat(),
+            ]
+        )
+        digest = hashlib.blake2b(payload.encode("utf-8"), digest_size=8).digest()
+        value = int.from_bytes(digest, byteorder="big", signed=False)
+        if value >= 2**63:
+            value -= 2**64
+        return value
+
+    def acquire_ingest_lock(
+        self,
+        ctx: DataContext,
+        datasource: str,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ) -> Any | None:
+        """Acquire a series/window advisory lock before provider ingestion."""
+
+        if not self._engine or pd.to_datetime(end, utc=True) <= pd.to_datetime(start, utc=True):
+            return None
+
+        self.ensure_schema()
+
+        conn = None
+        try:
+            instrument_id, timeframe_seconds = self._resolve_context(ctx)
+            lock_key = self._advisory_lock_key(
+                datasource=datasource,
+                instrument_id=instrument_id,
+                timeframe_seconds=timeframe_seconds,
+                start=pd.to_datetime(start, utc=True),
+                end=pd.to_datetime(end, utc=True),
+            )
+            conn = self._engine.connect()
+            conn.execute(text("SELECT pg_advisory_lock(:lock_key)"), {"lock_key": lock_key})
+            logger.debug(
+                "candle_ingest_lock_acquired | datasource=%s instrument_id=%s timeframe_seconds=%s start=%s end=%s",
+                datasource,
+                instrument_id,
+                timeframe_seconds,
+                pd.to_datetime(start, utc=True).isoformat(),
+                pd.to_datetime(end, utc=True).isoformat(),
+            )
+            return conn, lock_key
+        except SQLAlchemyError as exc:
+            logger.warning("candle_ingest_lock_acquire_failed | error=%s", exc)
+            if conn is not None:
+                conn.close()
+            return None
+
+    def release_ingest_lock(self, handle: Any | None) -> None:
+        """Release a lock returned by acquire_ingest_lock."""
+
+        if not handle:
+            return
+        conn, lock_key = handle
+        try:
+            conn.execute(text("SELECT pg_advisory_unlock(:lock_key)"), {"lock_key": lock_key})
+        except SQLAlchemyError as exc:
+            logger.warning("candle_ingest_lock_release_failed | error=%s", exc)
+        finally:
+            conn.close()
+
     def ensure_schema(self):
-        """Create candle, derivatives, and closure tables if they are missing."""
+        """Create or validate candle, derivatives, and closure storage schema."""
 
         if not self._engine:
             logger.warning(
@@ -39,93 +225,16 @@ class DataPersistenceService:
             )
             return
 
-        ddl_create = f"""
-        CREATE TABLE IF NOT EXISTS {self._config.candles_raw_table} (
-            instrument_id TEXT NOT NULL,
-            timeframe_seconds INTEGER NOT NULL,
-            candle_time TIMESTAMPTZ NOT NULL,
-            close_time TIMESTAMPTZ NOT NULL,
-            open DOUBLE PRECISION NOT NULL,
-            high DOUBLE PRECISION NOT NULL,
-            low DOUBLE PRECISION NOT NULL,
-            close DOUBLE PRECISION NOT NULL,
-            volume DOUBLE PRECISION,
-            trade_count BIGINT,
-            is_closed BOOLEAN NOT NULL DEFAULT TRUE,
-            source_time TIMESTAMPTZ,
-            inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            PRIMARY KEY (instrument_id, timeframe_seconds, candle_time),
-            CHECK (timeframe_seconds > 0),
-            CHECK (close_time > candle_time),
-            CHECK (high >= low),
-            CHECK (low <= open AND open <= high),
-            CHECK (low <= close AND close <= high),
-            CHECK (volume IS NULL OR volume >= 0),
-            CHECK (trade_count IS NULL OR trade_count >= 0)
-        );
-        """
-        ddl_derivatives = f"""
-        CREATE TABLE IF NOT EXISTS {self._config.derivatives_state_table} (
-            instrument_id TEXT NOT NULL,
-            observed_at TIMESTAMPTZ NOT NULL,
-            source_time TIMESTAMPTZ,
-            open_interest DOUBLE PRECISION,
-            open_interest_value DOUBLE PRECISION,
-            funding_rate DOUBLE PRECISION,
-            funding_time TIMESTAMPTZ,
-            mark_price DOUBLE PRECISION,
-            index_price DOUBLE PRECISION,
-            premium_rate DOUBLE PRECISION,
-            premium_index DOUBLE PRECISION,
-            next_funding_time TIMESTAMPTZ,
-            inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            PRIMARY KEY (instrument_id, observed_at),
-            CHECK (open_interest IS NULL OR open_interest >= 0),
-            CHECK (open_interest_value IS NULL OR open_interest_value >= 0)
-        );
-        """
-        ddl_closures = f"""
-        CREATE TABLE IF NOT EXISTS {self._config.closures_table} (
-            instrument_id TEXT NOT NULL,
-            timeframe_seconds INTEGER NOT NULL,
-            start_ts TIMESTAMPTZ NOT NULL,
-            end_ts TIMESTAMPTZ NOT NULL,
-            metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-            created_at TIMESTAMPTZ DEFAULT now(),
-            PRIMARY KEY (instrument_id, timeframe_seconds, start_ts, end_ts),
-            CHECK (timeframe_seconds > 0),
-            CHECK (end_ts > start_ts)
-        );
-        """
-        ddl_indexes = [
-            f"""
-            CREATE INDEX IF NOT EXISTS idx_candles_raw_instrument_tf_time
-            ON {self._config.candles_raw_table} (instrument_id, timeframe_seconds, candle_time DESC);
-            """,
-            f"""
-            CREATE INDEX IF NOT EXISTS idx_derivatives_state_instrument_time
-            ON {self._config.derivatives_state_table} (instrument_id, observed_at DESC);
-            """,
-            f"""
-            CREATE INDEX IF NOT EXISTS idx_derivatives_state_time
-            ON {self._config.derivatives_state_table} (observed_at DESC);
-            """,
-            f"""
-            CREATE INDEX IF NOT EXISTS idx_candle_closures_lookup
-            ON {self._config.closures_table} (instrument_id, timeframe_seconds, start_ts);
-            """,
-        ]
-
         try:
             with self._engine.begin() as conn:
-                conn.execute(text(ddl_create))
-                conn.execute(text(ddl_derivatives))
-                conn.execute(text(ddl_closures))
-                for ddl in ddl_indexes:
-                    conn.execute(text(ddl))
+                conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _SCHEMA_LOCK_KEY})
+                try:
+                    self._bootstrap_schema_contract(conn)
+                finally:
+                    conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _SCHEMA_LOCK_KEY})
             if not self._schema_logged:
                 logger.info(
-                    "schema_ensured | raw=%s derivatives=%s closures=%s",
+                    "market_data_schema_contract_ready | raw=%s derivatives=%s closures=%s",
                     self._config.candles_raw_table,
                     self._config.derivatives_state_table,
                     self._config.closures_table,
@@ -140,6 +249,53 @@ class DataPersistenceService:
                 e,
             )
             raise
+
+    def _bootstrap_schema_contract(self, conn) -> None:
+        inspector = inspect(conn)
+        existing_tables = set(inspector.get_table_names())
+        for table in self._tables:
+            if table.name in existing_tables:
+                continue
+            conn.execute(CreateTable(table))
+            logger.warning("market_data_table_created | table=%s", table.name)
+            existing_tables.add(table.name)
+
+        inspector = inspect(conn)
+        for table in self._tables:
+            self._assert_table_columns(inspector, table)
+
+        inspector = inspect(conn)
+        for table in self._tables:
+            existing_indexes = {str(index.get("name") or "") for index in inspector.get_indexes(table.name)}
+            for index in sorted(table.indexes, key=lambda item: str(item.name or "")):
+                index_name = str(index.name or "")
+                if index_name in existing_indexes:
+                    continue
+                conn.execute(CreateIndex(index))
+                logger.info("market_data_index_created | table=%s index=%s", table.name, index_name)
+                existing_indexes.add(index_name)
+
+        inspector = inspect(conn)
+        for table in self._tables:
+            existing_indexes = {str(index.get("name") or "") for index in inspector.get_indexes(table.name)}
+            required_indexes = {str(index.name or "") for index in table.indexes}
+            missing = sorted(required_indexes - existing_indexes)
+            if missing:
+                raise RuntimeError(
+                    f"Market data table '{table.name}' is missing required indexes: {', '.join(missing)}."
+                )
+
+    @staticmethod
+    def _assert_table_columns(inspector, table: Table) -> None:
+        expected = {column.name for column in table.columns}
+        existing = {column["name"] for column in inspector.get_columns(table.name)}
+        missing = sorted(expected - existing)
+        if not missing:
+            return
+        raise RuntimeError(
+            f"Market data table '{table.name}' is missing columns: {', '.join(missing)}. "
+            "Rebuild the database or run an explicit out-of-band migration."
+        )
 
     def fetch_ohlcv(self, ctx: DataContext, datasource: str) -> pd.DataFrame:
         """Load OHLCV rows for the requested context."""
@@ -171,37 +327,6 @@ class DataPersistenceService:
                     "end": ctx.end,
                 },
             )
-        except ProgrammingError as exc:
-            if "does not exist" in str(exc).lower():
-                logger.warning("Table '%s' missing. Ensuring schema and retrying fetch.", self._config.candles_raw_table)
-                self.ensure_schema()
-                try:
-                    instrument_id, timeframe_seconds = self._resolve_context(ctx)
-                    query = text(
-                        f"""
-                        SELECT candle_time AS timestamp, open, high, low, close, volume, trade_count
-                        FROM {self._config.candles_raw_table}
-                        WHERE instrument_id = :instrument_id
-                          AND timeframe_seconds = :timeframe_seconds
-                          AND candle_time BETWEEN :start AND :end
-                        ORDER BY candle_time
-                        """
-                    )
-                    return pd.read_sql(
-                        query,
-                        self._engine,
-                        params={
-                            "instrument_id": instrument_id,
-                            "timeframe_seconds": timeframe_seconds,
-                            "start": ctx.start,
-                            "end": ctx.end,
-                        },
-                    )
-                except Exception as retry_exc:  # noqa: BLE001
-                    logger.exception("Retry failed for table '%s': %s", self._config.candles_raw_table, retry_exc)
-                    return pd.DataFrame()
-            logger.exception("Query failed for table '%s': %s", self._config.candles_raw_table, exc)
-            return pd.DataFrame()
         except SQLAlchemyError as exc:
             logger.exception("Database error during OHLCV query: %s", exc)
             raise
@@ -243,34 +368,6 @@ class DataPersistenceService:
                         "request_end": requested_end,
                     },
                 ).fetchall()
-        except ProgrammingError as exc:
-            message = str(exc).lower()
-            if "does not exist" in message:
-                logger.warning(
-                    "Closure table '%s' missing. Ensuring schema before retry.",
-                    self._config.closures_table,
-                )
-                self.ensure_schema()
-                try:
-                    with self._engine.begin() as conn:
-                        rows = conn.execute(
-                            query,
-                            {
-                                "instrument_id": instrument_id,
-                                "timeframe_seconds": timeframe_seconds,
-                                "request_start": requested_start,
-                                "request_end": requested_end,
-                            },
-                        ).fetchall()
-                except Exception:  # noqa: BLE001
-                    return []
-            logger.exception(
-                "Failed to load closure ranges for %s [%s]: %s",
-                ctx.symbol,
-                ctx.interval,
-                exc,
-            )
-            return []
         except SQLAlchemyError as exc:
             logger.exception(
                 "Failed to load closure ranges for %s [%s]: %s",
@@ -278,7 +375,7 @@ class DataPersistenceService:
                 ctx.interval,
                 exc,
             )
-            return []
+            raise
 
         closures: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
         for row in rows:
@@ -323,24 +420,6 @@ class DataPersistenceService:
                         "request_end": requested_end,
                     },
                 ).fetchall()
-        except ProgrammingError as exc:
-            message = str(exc).lower()
-            if "does not exist" in message or "metadata" in message:
-                logger.warning(
-                    "Closure evidence unavailable for table '%s'. Apply the candle closure evidence migration.",
-                    self._config.closures_table,
-                )
-            else:
-                logger.exception(
-                    "Failed to load closure evidence ranges for %s [%s]: %s",
-                    ctx.symbol,
-                    ctx.interval,
-                    exc,
-                )
-            return [
-                {"start": start, "end": end, "metadata": {}}
-                for start, end in self.load_closure_ranges(ctx, datasource, requested_start, requested_end)
-            ]
         except SQLAlchemyError as exc:
             logger.exception(
                 "Failed to load closure evidence ranges for %s [%s]: %s",
@@ -348,7 +427,7 @@ class DataPersistenceService:
                 ctx.interval,
                 exc,
             )
-            return []
+            raise
 
         evidence: List[Mapping[str, Any]] = []
         for row in rows:
@@ -459,36 +538,6 @@ class DataPersistenceService:
                     start_ts.isoformat(),
                     end_ts.isoformat(),
                 )
-        except ProgrammingError as exc:
-            message = str(exc).lower()
-            if "metadata" in message:
-                logger.warning(
-                    "Closure table '%s' is missing metadata column. Apply candle closure evidence migration.",
-                    self._config.closures_table,
-                )
-                return
-            if "does not exist" in message:
-                logger.warning(
-                    "Closure table '%s' missing during record; ensuring schema and retrying once.",
-                    self._config.closures_table,
-                )
-                self.ensure_schema()
-                try:
-                    self.record_closure_range(ctx, datasource, start, end, metadata=metadata)
-                except Exception:
-                    logger.exception(
-                        "Retry failed while recording closure for %s [%s].",
-                        instrument_id,
-                        timeframe_seconds,
-                    )
-                return
-            logger.exception(
-                "Failed to record closure for %s [%s]: %s",
-                instrument_id,
-                timeframe_seconds,
-                exc,
-            )
-            return
         except SQLAlchemyError as exc:
             logger.exception(
                 "Failed to record closure for %s [%s]: %s",
@@ -496,7 +545,7 @@ class DataPersistenceService:
                 timeframe_seconds,
                 exc,
             )
-            return
+            raise
 
     def write_dataframe(self, df: pd.DataFrame, ctx: DataContext) -> int:
         """Write a prepared OHLCV dataframe into the persistence layer."""
@@ -572,19 +621,6 @@ class DataPersistenceService:
             return len(prepared)
 
         except SQLAlchemyError as exc:
-            message = str(exc).lower()
-            if "does not exist" in message:
-                logger.warning(
-                    "Candle table missing during ingest; ensuring schema and retrying once for %s [%s].",
-                    ctx.symbol,
-                    ctx.interval,
-                )
-                self.ensure_schema()
-                try:
-                    return self.write_dataframe(df, ctx)
-                except Exception:
-                    logger.exception("Retry failed after ensuring schema for %s [%s].", ctx.symbol, ctx.interval)
-                    return 0
             logger.exception("DB error during ingest for %s: %s", ctx.symbol, exc)
             raise
 

@@ -95,7 +95,7 @@ class MarginRequirement:
     estimated_entry_fee: float = 0.0
     estimated_exit_fee: float = 0.0
     fee_model_version: Optional[str] = None
-    margin_model_version: str = "margin_requirement_v1"
+    margin_model_version: str = "margin_requirement.v1"
 
     @property
     def total_required(self) -> float:

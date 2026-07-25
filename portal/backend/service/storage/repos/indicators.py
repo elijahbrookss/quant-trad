@@ -19,7 +19,7 @@ from ._shared import (
 
 
 def _record_to_indicator_payload(record: IndicatorRecord) -> Dict[str, Any]:
-    params, dependencies, output_prefs = split_indicator_payload(record.params)
+    params, dependencies = split_indicator_payload(record.params)
     payload = {
         "id": record.id,
         "name": record.name,
@@ -31,8 +31,6 @@ def _record_to_indicator_payload(record: IndicatorRecord) -> Dict[str, Any]:
         "created_at": (record.created_at or _utcnow()).isoformat() + "Z",
         "updated_at": (record.updated_at or _utcnow()).isoformat() + "Z",
     }
-    if output_prefs is not None:
-        payload["output_prefs"] = output_prefs
     return payload
 
 def load_indicators() -> List[Dict[str, Any]]:
@@ -84,7 +82,6 @@ def upsert_indicator(meta: Dict[str, Any]) -> None:
             params_to_store = merge_indicator_payload(
                 meta.get("params"),
                 meta.get("dependencies"),
-                output_prefs=meta.get("output_prefs"),
             )
             logger.info(
                 "event=upsert_indicator_params_assignment indicator_id=%s params_keys=%s params=%s",

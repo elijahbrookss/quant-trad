@@ -20,10 +20,8 @@ from ..core import _isoformat
 from ..components.overlay_delta import (
     build_overlay_delta,
     compact_overlay_for_transport,
-    entry_fingerprint,
     overlay_cache_key,
     overlay_delta_op_counts,
-    overlay_payload_fingerprint,
     overlay_payload_metrics,
 )
 
@@ -66,7 +64,6 @@ BOTLENS_FACT_STREAM_SURFACE_BY_FACT_TYPE = {
     BOTLENS_FACT_SERIES_STATE: "symbol_summary",
     BOTLENS_FACT_SERIES_STATS: "symbol_summary",
 }
-BOTLENS_SELECTED_SYMBOL_VISUAL_REFRESH_INTERVAL_MS = 4_000
 BOTLENS_RUNTIME_HEALTH_EMIT_INTERVAL_MS = 15_000
 BOTLENS_FACT_STREAM_LOG_FACT_LIMIT = 32
 BOTLENS_FACT_STREAM_DECISION_FACT_LIMIT = 64
@@ -192,24 +189,39 @@ class RuntimePushStreamMixin:
                 return int(value[0]), int(value[1])
         return None, None
 
+    @staticmethod
+    def _projection_enqueue_metrics_from_consumer_results(consumer_results: Sequence[Any]) -> Dict[str, Any]:
+        for result in consumer_results:
+            consumer_name = str(getattr(result, "consumer_name", "") or "")
+            if consumer_name != "CanonicalFactProjectionDispatcher" or getattr(result, "error", None):
+                continue
+            value = getattr(result, "result", None)
+            if isinstance(value, AbcMapping):
+                return {
+                    "projection_dispatch_queued": bool(value.get("queued")),
+                    "projection_dispatch_queue_depth": value.get("queue_depth"),
+                }
+        return {}
+
     def commit_botlens_fact_payload(
         self,
         payload: Mapping[str, Any],
         *,
         batch_kind: str,
         dispatch: bool = True,
+        live_payload: Optional[Mapping[str, Any]] = None,
     ) -> Any:
         run_id = self._canonical_run_id()
         start_context = self._canonical_start_context()
         appender = getattr(self, "_canonical_fact_appender", None)
         if appender is None:
             raise RuntimeError("bot runtime canonical fact appender is not configured")
-        return appender.append_fact_batch(
-            bot_id=self.bot_id,
-            run_id=run_id,
-            batch_kind=batch_kind,
-            payload=payload,
-            context={
+        append_kwargs = {
+            "bot_id": self.bot_id,
+            "run_id": run_id,
+            "batch_kind": batch_kind,
+            "payload": payload,
+            "context": {
                 "worker_id": (
                     getattr(start_context, "worker_id", None)
                     if start_context is not None
@@ -218,8 +230,99 @@ class RuntimePushStreamMixin:
                 "source_emitter": "bot_runtime",
                 "source_reason": "producer",
             },
-            dispatch=dispatch,
-        )
+            "dispatch": dispatch,
+        }
+        if live_payload is not None:
+            append_kwargs["live_payload"] = live_payload
+        return appender.append_fact_batch(**append_kwargs)
+
+    @staticmethod
+    def _compact_log_for_live_transport(entry: Mapping[str, Any]) -> Dict[str, Any]:
+        log = dict(entry or {})
+        compacted: Dict[str, Any] = {}
+        for key in (
+            "id",
+            "event_id",
+            "event",
+            "level",
+            "message",
+            "timestamp",
+            "created_at",
+            "strategy_id",
+            "symbol",
+            "timeframe",
+            "bar_time",
+            "chart_time",
+            "component",
+            "owner",
+            "diagnostic_code",
+        ):
+            value = log.get(key)
+            if value not in (None, "", [], {}, ()):
+                compacted[key] = value
+        context = log.get("context") if isinstance(log.get("context"), AbcMapping) else {}
+        compact_context = {
+            key: context.get(key)
+            for key in (
+                "component",
+                "operation",
+                "status",
+                "failure_mode",
+                "reason_code",
+                "diagnostic_code",
+                "request_id",
+                "trace_id",
+            )
+            if context.get(key) not in (None, "", [], {}, ())
+        }
+        if compact_context:
+            compacted["context"] = compact_context
+        return compacted
+
+    @staticmethod
+    def _compact_wallet_event_for_live_transport(entry: Mapping[str, Any]) -> Dict[str, Any]:
+        wallet_event = dict(entry or {})
+        compacted: Dict[str, Any] = {}
+        for key, value in wallet_event.items():
+            if key in {"wallet_before", "wallet_after", "wallet_delta", "margin_requirement"}:
+                continue
+            if value not in (None, "", [], {}, ()):
+                compacted[key] = value
+        before = wallet_event.get("wallet_before") if isinstance(wallet_event.get("wallet_before"), AbcMapping) else {}
+        after = wallet_event.get("wallet_after") if isinstance(wallet_event.get("wallet_after"), AbcMapping) else {}
+        if before or after:
+            compacted["wallet_snapshot_summary"] = {
+                "before_positions": len(before.get("margin_positions") or {}) if isinstance(before.get("margin_positions"), AbcMapping) else 0,
+                "after_positions": len(after.get("margin_positions") or {}) if isinstance(after.get("margin_positions"), AbcMapping) else 0,
+                "before_balance_currencies": sorted(str(key) for key in (before.get("balances") or {}).keys())
+                if isinstance(before.get("balances"), AbcMapping)
+                else [],
+                "after_balance_currencies": sorted(str(key) for key in (after.get("balances") or {}).keys())
+                if isinstance(after.get("balances"), AbcMapping)
+                else [],
+            }
+        return compacted
+
+    @classmethod
+    def _compact_fact_for_live_transport(cls, fact: Mapping[str, Any]) -> Dict[str, Any]:
+        compacted = dict(fact or {})
+        fact_type = str(compacted.get("fact_type") or "").strip().lower()
+        if fact_type == BOTLENS_FACT_LOG_EMITTED and isinstance(compacted.get("log"), AbcMapping):
+            compacted["log"] = cls._compact_log_for_live_transport(compacted["log"])
+        elif fact_type == BOTLENS_FACT_WALLET_EVENT and isinstance(compacted.get("wallet_event"), AbcMapping):
+            compacted["wallet_event"] = cls._compact_wallet_event_for_live_transport(compacted["wallet_event"])
+        return compacted
+
+    @classmethod
+    def _botlens_live_transport_payload(cls, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        root = dict(payload or {})
+        facts = root.get("facts") if isinstance(root.get("facts"), list) else []
+        root["facts"] = [
+            cls._compact_fact_for_live_transport(fact)
+            for fact in facts
+            if isinstance(fact, AbcMapping)
+        ]
+        return root
 
     def subscribe(self, *, overflow_policy: str = "fail") -> Tuple[str, Queue]:
         channel: Queue = Queue(maxsize=256)
@@ -645,57 +748,13 @@ class RuntimePushStreamMixin:
         status: str,
         refresh: bool = True,
     ) -> List[Dict[str, Any]]:
-        series_state = self._series_state_for(series)
-        refresh_overlays = getattr(self, "_refresh_indicator_overlays_for_state", None)
-        if refresh and series_state is not None and callable(refresh_overlays):
-            refresh_overlays(
-                series_state,
-                reason="visible_overlays",
-            )
-        overlays = list(series.overlays or [])
-        if series.trade_overlay:
-            overlays.append(series.trade_overlay)
+        _ = refresh
+        projected = getattr(self, "_projected_overlays_for_series", None)
+        overlays = projected(series) if callable(projected) else []
         return self._chart_state_builder.visible_overlays(
             overlays,
             status,
             self._current_epoch_for(series),
-        )
-
-    def _series_overlay_revision(
-        self,
-        series: StrategySeries,
-        *,
-        status: str,
-    ) -> Tuple[Any, ...]:
-        overlays = list(series.overlays or [])
-        if series.trade_overlay:
-            overlays.append(series.trade_overlay)
-        members = [
-            (
-                overlay_cache_key(overlay, index),
-                overlay_payload_fingerprint(
-                    compact_overlay_for_transport(
-                        overlay,
-                        key=overlay_cache_key(overlay, index),
-                        max_payload_items=int(
-                            getattr(
-                                self,
-                                "_botlens_fact_stream_overlay_point_limit",
-                                BOTLENS_FACT_STREAM_OVERLAY_POINT_LIMIT,
-                            )
-                            or BOTLENS_FACT_STREAM_OVERLAY_POINT_LIMIT
-                        ),
-                    )
-                ),
-            )
-            for index, overlay in enumerate(overlays)
-            if isinstance(overlay, Mapping)
-        ]
-        members.sort(key=lambda entry: entry[0])
-        return (
-            str(status or ""),
-            self._current_epoch_for(series),
-            tuple(members),
         )
 
     def _overlay_delta_op_counts(self, delta: Mapping[str, Any]) -> Dict[str, int]:
@@ -721,9 +780,6 @@ class RuntimePushStreamMixin:
 
     def _overlay_payload_metrics(self, payload: Mapping[str, Any]) -> Tuple[int, int]:
         return overlay_payload_metrics(payload)
-
-    def _entry_fingerprint(self, entries: Sequence[Mapping[str, Any]]) -> Tuple[int, Optional[str], Optional[str]]:
-        return entry_fingerprint(entries)
 
     @staticmethod
     def _entries_after_marker(
@@ -2139,50 +2195,271 @@ class RuntimePushStreamMixin:
         cache["series_stats_changed"] = True
         return trade_facts, series_stats, trades_count, trade_entry_refresh_required
 
-    def _should_emit_visual_overlay_facts(
+    def _overlay_projection_due_for_state(
         self,
-        cache: Dict[str, Any],
+        state: Any,
+        cache: Mapping[str, Any],
         *,
-        event: str,
-        overlay_revision: Tuple[Any, ...] | None,
-        trade_entry_refresh_required: bool,
+        force: bool = False,
     ) -> bool:
-        if str(event or "").strip().lower() == "intrabar":
-            return False
-        if overlay_revision is None:
-            return False
-        if cache.get("visual_overlay_revision") == overlay_revision:
-            return False
-        if trade_entry_refresh_required:
+        if force:
             return True
-        last_emit_monotonic = float(cache.get("visual_overlay_emit_monotonic") or 0.0)
-        if last_emit_monotonic <= 0.0:
-            cache["visual_overlay_emit_monotonic"] = time.monotonic()
-            return False
-        elapsed_ms = max((time.monotonic() - last_emit_monotonic) * 1000.0, 0.0)
-        return elapsed_ms >= float(BOTLENS_SELECTED_SYMBOL_VISUAL_REFRESH_INTERVAL_MS)
+        current_bar_index = max(int(getattr(state, "bar_index", 0) or 0), 0)
+        last_projected = cache.get("last_projected_bar_index")
+        if last_projected is None:
+            return True
+        return current_bar_index - int(last_projected or 0) >= int(
+            getattr(self, "_botlens_overlay_emit_every_bars", 25) or 25
+        )
 
-    def _should_refresh_visual_overlays(
+    def _empty_overlay_projection_metrics(self, *, skipped: bool = False) -> Dict[str, float]:
+        return {
+            "overlay_projection_ms": 0.0,
+            "overlay_projection_projected_count": 0.0 if skipped else 1.0,
+            "overlay_projection_skipped_count": 1.0 if skipped else 0.0,
+            "overlay_projection_entries_total": 0.0,
+            "overlay_projection_ops_count": 0.0,
+            "overlay_projection_dispatch_ms": 0.0,
+            "overlay_projection_error_count": 0.0,
+        }
+
+    def _emit_overlay_projection_for_state(
         self,
-        cache: Dict[str, Any],
+        state: Any,
+        candle: Optional[Candle],
         *,
-        event: str,
-        trade_entry_refresh_required: bool,
-    ) -> bool:
-        normalized_event = str(event or "").strip().lower()
-        if normalized_event == "intrabar":
-            return False
-        if trade_entry_refresh_required:
-            return True
-        if normalized_event != "bar":
-            return True
+        reason: str,
+        force: bool = False,
+    ) -> Dict[str, Optional[float]]:
+        projection_started = datetime.now(timezone.utc)
+        projection_started_perf = time.perf_counter()
+        series = getattr(state, "series", None)
+        context: Dict[str, Any] = {
+            "reason": reason,
+            "force": bool(force),
+            "overlay_window_bars": int(getattr(self, "_botlens_overlay_window_bars", 0) or 0),
+            "overlay_emit_every_bars": int(getattr(self, "_botlens_overlay_emit_every_bars", 0) or 0),
+            "bar_index": int(getattr(state, "bar_index", 0) or 0),
+            "bar_time": _isoformat(getattr(candle, "time", None) if candle is not None else None),
+        }
+        if series is None or candle is None:
+            metrics = self._empty_overlay_projection_metrics(skipped=True)
+            context.update(metrics)
+            context["skip_reason"] = "missing_series_or_candle"
+            self._record_step_trace(
+                "overlay_projection",
+                started_at=projection_started,
+                ended_at=datetime.now(timezone.utc),
+                ok=True,
+                context=context,
+            )
+            return metrics
+        try:
+            identity = self._series_identity(series)
+            public_series_key = identity["series_key"]
+            cache = self._overlay_projection_cache.setdefault(public_series_key, {})
+            if not self._overlay_projection_due_for_state(state, cache, force=force):
+                metrics = self._empty_overlay_projection_metrics(skipped=True)
+                context.update(metrics)
+                context.update(identity)
+                context["skip_reason"] = "projection_cadence"
+                self._record_step_trace(
+                    "overlay_projection",
+                    started_at=projection_started,
+                    ended_at=datetime.now(timezone.utc),
+                    ok=True,
+                    strategy_id=getattr(series, "strategy_id", None),
+                    symbol=getattr(series, "symbol", None),
+                    timeframe=getattr(series, "timeframe", None),
+                    context=context,
+                )
+                return metrics
 
-        last_emit_monotonic = float(cache.get("visual_overlay_emit_monotonic") or 0.0)
-        if last_emit_monotonic <= 0.0:
-            cache["visual_overlay_emit_monotonic"] = time.monotonic()
-            return False
-        elapsed_ms = max((time.monotonic() - last_emit_monotonic) * 1000.0, 0.0)
-        return elapsed_ms >= float(BOTLENS_SELECTED_SYMBOL_VISUAL_REFRESH_INTERVAL_MS)
+            build_started = time.perf_counter()
+            raw_overlays = self._build_indicator_overlay_projection_for_state(
+                state,
+                candle=candle,
+                reason=reason,
+                force=force,
+            )
+            status = str(self.state.get("status") or "").lower()
+            current_epoch = int(candle.time.timestamp())
+            visible_overlays = self._chart_state_builder.visible_overlays(
+                raw_overlays,
+                status,
+                current_epoch,
+            )
+            projection_build_ms = max((time.perf_counter() - build_started) * 1000.0, 0.0)
+            delta_started = time.perf_counter()
+            working_cache = dict(cache)
+            overlay_delta = self._build_overlay_delta(working_cache, visible_overlays)
+            delta_ms = max((time.perf_counter() - delta_started) * 1000.0, 0.0)
+        except Exception as exc:
+            duration_ms = max((time.perf_counter() - projection_started_perf) * 1000.0, 0.0)
+            context.update(
+                {
+                    "overlay_projection_ms": duration_ms,
+                    "overlay_projection_error_count": 1.0,
+                    "error": str(exc),
+                }
+            )
+            logger.warning(
+                with_log_context(
+                    "bot_overlay_projection_failed",
+                    self._series_log_context(series, **context) if series is not None else self._runtime_log_context(**context),
+                )
+            )
+            self._record_step_trace(
+                "overlay_projection",
+                started_at=projection_started,
+                ended_at=datetime.now(timezone.utc),
+                ok=False,
+                strategy_id=getattr(series, "strategy_id", None),
+                symbol=getattr(series, "symbol", None),
+                timeframe=getattr(series, "timeframe", None),
+                error=str(exc),
+                context=context,
+            )
+            return {
+                "overlay_projection_ms": duration_ms,
+                "overlay_projection_projected_count": 0.0,
+                "overlay_projection_skipped_count": 0.0,
+                "overlay_projection_entries_total": 0.0,
+                "overlay_projection_ops_count": 0.0,
+                "overlay_projection_dispatch_ms": 0.0,
+                "overlay_projection_error_count": 1.0,
+            }
+
+        working_cache["raw_overlays"] = [dict(entry) for entry in raw_overlays if isinstance(entry, Mapping)]
+        working_cache["visible_overlays"] = [dict(entry) for entry in visible_overlays if isinstance(entry, Mapping)]
+        working_cache["last_projected_bar_index"] = int(getattr(state, "bar_index", 0) or 0)
+        working_cache["last_projected_epoch"] = current_epoch
+        working_cache["projection_mode"] = "bounded"
+
+        overlay_ops_count = float(len(overlay_delta.get("ops") or [])) if isinstance(overlay_delta, Mapping) else 0.0
+        dispatch_ms = 0.0
+        if isinstance(overlay_delta, Mapping):
+            overlay_delta = {
+                **dict(overlay_delta),
+                "projection": {
+                    "mode": "bounded",
+                    "window_bars": int(getattr(self, "_botlens_overlay_window_bars", 0) or 0),
+                    "emit_every_bars": int(getattr(self, "_botlens_overlay_emit_every_bars", 0) or 0),
+                    "bar_index": int(getattr(state, "bar_index", 0) or 0),
+                },
+            }
+            payload = {
+                "type": "facts",
+                "event": "overlay_projection",
+                "known_at": _isoformat(candle.time),
+                "observed_at": _isoformat(datetime.now(timezone.utc)),
+                "series_key": public_series_key,
+                "facts": [
+                    {
+                        "fact_type": BOTLENS_FACT_OVERLAY_OPS,
+                        "series_key": public_series_key,
+                        "overlay_delta": overlay_delta,
+                    }
+                ],
+            }
+            dispatch_started = time.perf_counter()
+            try:
+                append_outcome = self.commit_botlens_fact_payload(
+                    payload,
+                    batch_kind=BOTLENS_RUNTIME_FACTS_KIND,
+                    dispatch=False,
+                    live_payload=self._botlens_live_transport_payload(payload),
+                )
+                if append_outcome is None:
+                    raise RuntimeError("overlay_projection_canonical_append_missing_outcome")
+                self._canonical_fact_appender.dispatch(append_outcome.batch)
+            except Exception as exc:
+                dispatch_ms = max((time.perf_counter() - dispatch_started) * 1000.0, 0.0)
+                duration_ms = max((time.perf_counter() - projection_started_perf) * 1000.0, 0.0)
+                failure_context = {
+                    **context,
+                    **identity,
+                    "overlay_projection_ms": duration_ms,
+                    "overlay_projection_error_count": 1.0,
+                    "overlay_projection_dispatch_ms": dispatch_ms,
+                    "overlay_projection_entries_total": float(len(visible_overlays)),
+                    "overlay_projection_ops_count": overlay_ops_count,
+                    "projection_build_ms": projection_build_ms,
+                    "projection_delta_ms": delta_ms,
+                    "failure_stage": "canonical_overlay_dispatch",
+                    "error": str(exc),
+                }
+                logger.error(
+                    with_log_context(
+                        "bot_overlay_projection_canonical_dispatch_failed",
+                        self._series_log_context(series, **failure_context),
+                    )
+                )
+                self._record_step_trace(
+                    "overlay_projection",
+                    started_at=projection_started,
+                    ended_at=datetime.now(timezone.utc),
+                    ok=False,
+                    strategy_id=getattr(series, "strategy_id", None),
+                    symbol=getattr(series, "symbol", None),
+                    timeframe=getattr(series, "timeframe", None),
+                    error=str(exc),
+                    context=failure_context,
+                )
+                raise
+            dispatch_ms = max((time.perf_counter() - dispatch_started) * 1000.0, 0.0)
+
+        cache.clear()
+        cache.update(working_cache)
+        self._refresh_chart_overlay_cache_from_projection()
+
+        if isinstance(overlay_delta, Mapping):
+            logger.debug(
+                with_log_context(
+                    "bot_overlay_projection_delta_sent",
+                    self._series_log_context(
+                        series,
+                        bar_index=int(getattr(state, "bar_index", 0) or 0),
+                        overlay_commit_seq=overlay_delta.get("overlay_commit_seq"),
+                        base_overlay_commit_seq=overlay_delta.get("base_overlay_commit_seq"),
+                        overlay_ops=int(overlay_ops_count),
+                        overlay_op_counts=self._overlay_delta_op_counts(overlay_delta),
+                        projection_mode="bounded",
+                        overlay_window_bars=int(getattr(self, "_botlens_overlay_window_bars", 0) or 0),
+                        overlay_emit_every_bars=int(getattr(self, "_botlens_overlay_emit_every_bars", 0) or 0),
+                    ),
+                )
+            )
+
+        metrics = {
+            "overlay_projection_ms": max((time.perf_counter() - projection_started_perf) * 1000.0, 0.0),
+            "overlay_projection_projected_count": 1.0,
+            "overlay_projection_skipped_count": 0.0,
+            "overlay_projection_entries_total": float(len(visible_overlays)),
+            "overlay_projection_ops_count": overlay_ops_count,
+            "overlay_projection_dispatch_ms": dispatch_ms,
+            "overlay_projection_error_count": 0.0,
+        }
+        context.update(identity)
+        context.update(metrics)
+        context.update(
+            {
+                "projection_build_ms": projection_build_ms,
+                "projection_delta_ms": delta_ms,
+                "overlay_delta_emitted": isinstance(overlay_delta, Mapping),
+            }
+        )
+        self._record_step_trace(
+            "overlay_projection",
+            started_at=projection_started,
+            ended_at=datetime.now(timezone.utc),
+            ok=True,
+            strategy_id=getattr(series, "strategy_id", None),
+            symbol=getattr(series, "symbol", None),
+            timeframe=getattr(series, "timeframe", None),
+            context=context,
+        )
+        return metrics
 
     def _botlens_bootstrap_closed_trade_limit_value(self) -> int:
         configured = getattr(self, "_botlens_bootstrap_closed_trade_limit", None)
@@ -2354,6 +2631,12 @@ class RuntimePushStreamMixin:
                         "base_overlay_commit_seq": 0,
                         "overlay_commit_seq": 1,
                         "overlay_commit_seq_status": "overlay_scoped",
+                        "projection": {
+                            "mode": "bounded",
+                            "window_bars": int(getattr(self, "_botlens_overlay_window_bars", 0) or 0),
+                            "emit_every_bars": int(getattr(self, "_botlens_overlay_emit_every_bars", 0) or 0),
+                            "source": "runtime_overlay_projection",
+                        },
                         "ops": overlay_ops,
                     },
                 }
@@ -2399,7 +2682,12 @@ class RuntimePushStreamMixin:
             limit=int(getattr(self, "_botlens_fact_stream_log_fact_limit", BOTLENS_FACT_STREAM_LOG_FACT_LIMIT))
         ):
             if isinstance(entry, AbcMapping):
-                facts.append({"fact_type": BOTLENS_FACT_LOG_EMITTED, "log": dict(entry)})
+                facts.append(
+                    {
+                        "fact_type": BOTLENS_FACT_LOG_EMITTED,
+                        "log": self._compact_log_for_live_transport(entry),
+                    }
+                )
         for entry in self.decision_events(
             limit=int(
                 getattr(
@@ -2411,7 +2699,11 @@ class RuntimePushStreamMixin:
         ):
             if isinstance(entry, AbcMapping):
                 facts.append({"fact_type": BOTLENS_FACT_DECISION_EMITTED, "decision": dict(entry)})
-        facts.extend(self._wallet_facts())
+        facts.extend(
+            self._compact_fact_for_live_transport(fact)
+            for fact in self._wallet_facts()
+            if isinstance(fact, AbcMapping)
+        )
         observed_at = _isoformat(datetime.now(timezone.utc))
         last_candle_time = None
         candles = selected_series.get("candles") if isinstance(selected_series.get("candles"), list) else []
@@ -2458,6 +2750,8 @@ class RuntimePushStreamMixin:
             "stream_emit_ms": None,
             "dispatch_ms": None,
             "queue_wait_ms": None,
+            "projection_dispatch_queued": None,
+            "projection_dispatch_queue_depth": None,
             "subscriber_count": None,
             "subscribers_count": None,
             "dropped_messages": None,
@@ -2583,7 +2877,6 @@ class RuntimePushStreamMixin:
                 identity = self._series_identity(series)
                 public_series_key = identity["series_key"]
                 cache = self._push_series_cache.setdefault(public_series_key, {})
-                status = str(self.state.get("status") or "").lower()
                 series_state = self._series_state_for(series)
                 bar_index = series_state.bar_index if series_state else 0
                 candles_count = min(bar_index + 1, len(series.candles))
@@ -2604,84 +2897,7 @@ class RuntimePushStreamMixin:
                     cache=cache,
                     bar_time=candle_time,
                 )
-                visible_overlays = None
-                overlay_revision = None
-                if self._should_refresh_visual_overlays(
-                    cache,
-                    event=event,
-                    trade_entry_refresh_required=trade_entry_refresh_required,
-                ):
-                    refresh_overlays = getattr(self, "_refresh_indicator_overlays_for_state", None)
-                    if series_state is not None and callable(refresh_overlays):
-                        refresh_overlays(
-                            series_state,
-                            candle=candle,
-                            reason="push_update_visual_due",
-                        )
-                    overlay_revision = self._series_overlay_revision(series, status=status)
-                    if cache.get("overlay_revision") != overlay_revision or "visible_overlays" not in cache:
-                        cache["visible_overlays"] = self._series_visible_overlays(
-                            series,
-                            status=status,
-                            refresh=False,
-                        )
-                        cache["overlay_revision"] = overlay_revision
-                    visible_overlays = cache.get("visible_overlays")
-                if isinstance(visible_overlays, list):
-                    overlay_summary = self._overlay_summary(visible_overlays)
-                    emit_visual_overlay_facts = self._should_emit_visual_overlay_facts(
-                        cache,
-                        event=event,
-                        overlay_revision=overlay_revision,
-                        trade_entry_refresh_required=trade_entry_refresh_required,
-                    )
-                    if emit_visual_overlay_facts:
-                        logger.debug(
-                            with_log_context(
-                                "bot_overlay_emit_attempt",
-                                self._series_log_context(
-                                    series,
-                                    bar_index=bar_index,
-                                    status=status,
-                                    event=event,
-                                    overlays=overlay_summary.get("total_overlays"),
-                                    overlay_types=overlay_summary.get("type_counts"),
-                                    overlay_payloads=overlay_summary.get("payload_counts"),
-                                    overlay_profile_params=overlay_summary.get("profile_params_samples"),
-                                    emitted_delta=True,
-                                    trade_entry_refresh_required=trade_entry_refresh_required,
-                                ),
-                            )
-                        )
-                        overlay_delta = self._build_overlay_delta(cache, visible_overlays)
-                        if isinstance(overlay_delta, Mapping):
-                            payload["facts"].append(
-                                {
-                                    "fact_type": BOTLENS_FACT_OVERLAY_OPS,
-                                    "series_key": public_series_key,
-                                    "overlay_delta": dict(overlay_delta),
-                                }
-                            )
-                            cache["visual_overlay_revision"] = overlay_revision
-                            cache["visual_overlay_emit_monotonic"] = time.monotonic()
-                            logger.debug(
-                                with_log_context(
-                                    "bot_overlay_delta_sent",
-                                    self._series_log_context(
-                                        series,
-                                        bar_index=bar_index,
-                                        overlay_commit_seq=overlay_delta.get("overlay_commit_seq"),
-                                        base_overlay_commit_seq=overlay_delta.get("base_overlay_commit_seq"),
-                                        overlay_ops=len(overlay_delta.get("ops") or []),
-                                        overlay_op_counts=self._overlay_delta_op_counts(overlay_delta),
-                                        overlays=overlay_summary.get("total_overlays"),
-                                        overlay_types=overlay_summary.get("type_counts"),
-                                        overlay_payloads=overlay_summary.get("payload_counts"),
-                                        overlay_profile_params=overlay_summary.get("profile_params_samples"),
-                                        trade_entry_refresh_required=trade_entry_refresh_required,
-                                    ),
-                                )
-                            )
+                payload_context["trade_entry_refresh_required"] = bool(trade_entry_refresh_required)
                 payload["facts"].extend(trade_facts)
                 series_stats_changed = bool(cache.get("series_stats_changed"))
                 if isinstance(series_stats, AbcMapping) and (
@@ -2704,11 +2920,12 @@ class RuntimePushStreamMixin:
                         }
             )
             build_state_ms = max((time.perf_counter() - build_started) * 1000.0, 0.0)
-            overlay_count, overlay_points = self._overlay_payload_metrics(payload)
+            live_transport_payload = self._botlens_live_transport_payload(payload)
+            overlay_count, overlay_points = self._overlay_payload_metrics(live_transport_payload)
             should_probe_payload_bytes = bool(self._obs_enabled and self._should_probe_payload_size())
             payload_context.update(
                 self._botlens_fact_stream_surface_metrics(
-                    payload,
+                    live_transport_payload,
                     include_bytes=should_probe_payload_bytes,
                 )
             )
@@ -2736,7 +2953,7 @@ class RuntimePushStreamMixin:
                 if should_probe_payload_bytes:
                     serialize_started = time.perf_counter()
                     try:
-                        payload_context["payload_bytes"] = self._payload_size_bytes(payload)
+                        payload_context["payload_bytes"] = self._payload_size_bytes(live_transport_payload)
                     except Exception:
                         payload_context["payload_bytes"] = None
                     finally:
@@ -2744,7 +2961,7 @@ class RuntimePushStreamMixin:
                         payload_context["serialize_ms"] = serialize_ms
                         payload_context["delta_serialize_ms"] = serialize_ms
             append_outcome = None
-            live_fact_count = len(payload.get("facts") or [])
+            live_fact_count = len(live_transport_payload.get("facts") or [])
             canonical_facts = canonical_fact_payload(payload).get("facts")
             payload_context["live_fact_count"] = live_fact_count
             payload_context["canonical_fact_count"] = (
@@ -2756,6 +2973,7 @@ class RuntimePushStreamMixin:
                     payload,
                     batch_kind=BOTLENS_RUNTIME_FACTS_KIND,
                     dispatch=False,
+                    live_payload=live_transport_payload,
                 )
                 canonical_append_ms = max((time.perf_counter() - append_started) * 1000.0, 0.0)
                 payload_context["canonical_append_ms"] = canonical_append_ms
@@ -2767,7 +2985,13 @@ class RuntimePushStreamMixin:
                 dispatch_ms = max((time.perf_counter() - dispatch_started) * 1000.0, 0.0)
                 enqueue_ms = dispatch_ms
                 payload = append_outcome.batch.live_payload
-                subscriber_count, dropped_messages = self._broadcast_metrics_from_consumer_results(consumer_results)
+                payload_context.update(self._projection_enqueue_metrics_from_consumer_results(consumer_results))
+                dispatched_subscribers, dispatched_drops = self._broadcast_metrics_from_consumer_results(
+                    consumer_results
+                )
+                if dispatched_subscribers is not None:
+                    subscriber_count = dispatched_subscribers
+                dropped_messages = dispatched_drops if dispatched_drops is not None else 0
             else:
                 payload_context["noncanonical_facts_skipped"] = len(payload.get("facts") or [])
                 subscriber_count, dropped_messages = 0, 0

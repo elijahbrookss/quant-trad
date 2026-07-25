@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { Popover, PopoverButton, PopoverPanel, Transition } from '@headlessui/react'
 import { MoreVertical, Pencil, Trash2 } from 'lucide-react'
 
-import { symbolsFromInstrumentSlots } from '../../utils/instrumentSymbols.js'
+import { symbolsFromStrategy } from '../../utils/instrumentSymbols.js'
 import { DateRangePickerComponent } from '../ChartComponent/DateTimePickerComponent.jsx'
 import DropdownSelect from '../ChartComponent/DropdownSelect.jsx'
 import { InstrumentsTab, ATMTab, RiskTab, RulesTab, OrderTriggersTab, VariantsTab } from './index.js'
@@ -68,7 +68,7 @@ const StrategyDetails = ({
     : EMPTY_LIST
   const strategyDatasource = strategy?.datasource || ''
   const strategyExchange = strategy?.exchange || ''
-  const strategySymbols = symbolsFromInstrumentSlots(strategy?.instrument_slots)
+  const strategySymbols = symbolsFromStrategy(strategy)
 
   const handleDateRangeChange = (range) => {
     setPreviewWindow((prev) => ({ ...prev, dateRange: range }))
