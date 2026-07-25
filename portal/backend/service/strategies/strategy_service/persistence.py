@@ -4,34 +4,37 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Mapping, Optional
 
-from ...storage import storage
+from ...storage.repos import atm as atm_repo
+from ...storage.repos import instruments as instrument_repo
+from ...storage.repos import presets as preset_repo
+from ...storage.repos import strategies as strategy_repo
 
 
 def load_strategies() -> Iterable[Dict[str, Any]]:
-    return storage.load_strategies()
+    return strategy_repo.load_strategies()
 
 
 def upsert_strategy(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    return storage.upsert_strategy(payload)
+    return strategy_repo.upsert_strategy(payload)
 
 
 def delete_strategy(strategy_id: str) -> None:
-    storage.delete_strategy(strategy_id)
+    strategy_repo.delete_strategy(strategy_id)
 
 
 def upsert_strategy_indicator(strategy_id: str, indicator_id: str) -> None:
-    storage.upsert_strategy_indicator(
+    strategy_repo.upsert_strategy_indicator(
         strategy_id=strategy_id,
         indicator_id=indicator_id,
     )
 
 
 def delete_strategy_indicator(strategy_id: str, indicator_id: str) -> None:
-    storage.delete_strategy_indicator(strategy_id, indicator_id)
+    strategy_repo.delete_strategy_indicator(strategy_id, indicator_id)
 
 
 def upsert_strategy_instrument(strategy_id: str, instrument_id: str, snapshot: Mapping[str, Any]) -> None:
-    storage.upsert_strategy_instrument(
+    strategy_repo.upsert_strategy_instrument(
         strategy_id=strategy_id,
         instrument_id=instrument_id,
         snapshot=snapshot,
@@ -39,71 +42,71 @@ def upsert_strategy_instrument(strategy_id: str, instrument_id: str, snapshot: M
 
 
 def delete_strategy_instrument(strategy_id: str, instrument_id: str) -> None:
-    storage.delete_strategy_instrument(strategy_id, instrument_id)
+    strategy_repo.delete_strategy_instrument(strategy_id, instrument_id)
 
 
 def list_strategy_instrument_symbols(strategy_id: str) -> list[str]:
-    return storage.list_strategy_instrument_symbols(strategy_id)
+    return instrument_repo.list_strategy_instrument_symbols(strategy_id)
 
 
 def list_strategy_instrument_links(strategy_id: str) -> list[Dict[str, Any]]:
-    return storage.list_strategy_instrument_links(strategy_id)
+    return instrument_repo.list_strategy_instrument_links(strategy_id)
 
 
 def delete_orphan_strategy_instrument_links(strategy_id: str) -> int:
-    return storage.delete_orphan_strategy_instrument_links(strategy_id)
+    return strategy_repo.delete_orphan_strategy_instrument_links(strategy_id)
 
 
 def upsert_strategy_rule(payload: Mapping[str, Any]) -> None:
-    storage.upsert_strategy_rule(payload)
+    strategy_repo.upsert_strategy_rule(payload)
 
 
 def delete_strategy_rule(rule_id: str) -> None:
-    storage.delete_strategy_rule(rule_id)
+    strategy_repo.delete_strategy_rule(rule_id)
 
 
 def list_strategy_variants(strategy_id: str) -> list[Dict[str, Any]]:
-    return storage.list_strategy_variants(strategy_id)
+    return strategy_repo.list_strategy_variants(strategy_id)
 
 
 def get_strategy_variant(variant_id: str) -> Optional[Dict[str, Any]]:
-    return storage.get_strategy_variant(variant_id)
+    return strategy_repo.get_strategy_variant(variant_id)
 
 
 def ensure_default_strategy_variant(strategy_id: str) -> Dict[str, Any]:
-    return storage.ensure_default_strategy_variant(strategy_id)
+    return strategy_repo.ensure_default_strategy_variant(strategy_id)
 
 
 def upsert_strategy_variant(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    return storage.upsert_strategy_variant(dict(payload))
+    return strategy_repo.upsert_strategy_variant(dict(payload))
 
 
 def delete_strategy_variant(variant_id: str) -> None:
-    storage.delete_strategy_variant(variant_id)
+    strategy_repo.delete_strategy_variant(variant_id)
 
 
 def get_atm_template(template_id: str) -> Optional[Dict[str, Any]]:
-    return storage.get_atm_template(template_id)
+    return atm_repo.get_atm_template(template_id)
 
 
 def list_atm_templates() -> list[Dict[str, Any]]:
-    return storage.load_atm_templates()
+    return atm_repo.load_atm_templates()
 
 
 def upsert_atm_template(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    return storage.upsert_atm_template(payload)
+    return atm_repo.upsert_atm_template(payload)
 
 
 def list_symbol_presets() -> list[Dict[str, Any]]:
-    return storage.list_symbol_presets()
+    return preset_repo.list_symbol_presets()
 
 
 def upsert_symbol_preset(payload: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
-    return storage.upsert_symbol_preset(payload)
+    return preset_repo.upsert_symbol_preset(payload)
 
 
 def delete_symbol_preset(preset_id: str) -> None:
-    storage.delete_symbol_preset(preset_id)
+    preset_repo.delete_symbol_preset(preset_id)
 
 
 __all__ = [

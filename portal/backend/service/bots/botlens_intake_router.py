@@ -30,7 +30,7 @@ from typing import Any, Dict
 from core.settings import get_settings
 
 from ..observability import BackendObserver
-from ..storage.storage import record_bot_runtime_events_batch
+from ..storage.repos.runtime_events import record_bot_runtime_events_batch
 from .botlens_contract import (
     BRIDGE_BOOTSTRAP_KIND,
     BRIDGE_FACTS_KIND,

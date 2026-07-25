@@ -17,7 +17,7 @@ from engines.bot_runtime.core.execution_profile import (
 
 from ..providers import persistence_bootstrap  # noqa: F401
 
-from ..storage.storage import (
+from ..storage.repos.instruments import (
     delete_instrument,
     find_instrument,
     get_instrument,

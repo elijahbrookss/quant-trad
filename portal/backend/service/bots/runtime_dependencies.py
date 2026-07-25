@@ -17,10 +17,12 @@ from ..indicators.indicator_service import (
 from ..market.candle_service import fetch_ohlcv, fetch_ohlcv_by_instrument
 from ..market.instrument_service import get_instrument_record, resolve_instrument
 from ..reports.artifacts import build_run_artifact_bundle
-from ..storage.storage import (
+from ..storage.repos.runtime_events import (
     record_bot_run_steps_batch,
     record_bot_runtime_event,
     record_bot_runtime_events_batch,
+)
+from ..storage.repos.trades import (
     record_bot_trade,
     record_bot_trade_event,
 )

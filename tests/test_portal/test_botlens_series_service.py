@@ -487,7 +487,7 @@ def test_get_symbol_chart_history_forwards_typed_bar_time_window(
         return iter([])
 
     monkeypatch.setattr(chart_svc, "iter_all_run_domain_truth", _iter)
-    monkeypatch.setattr(chart_svc.storage, "list_candles_for_series", lambda **kwargs: [])
+    monkeypatch.setattr(chart_svc, "list_candles_for_series", lambda **kwargs: [])
 
     result = chart_svc.get_symbol_chart_history(
         run_id="run-1",
@@ -516,7 +516,7 @@ def test_get_symbol_chart_history_falls_back_to_source_candle_storage(
             {"time": 2, "open": 2.0, "high": 2.5, "low": 1.5, "close": 2.25},
         ]
 
-    monkeypatch.setattr(chart_svc.storage, "list_candles_for_series", _source_candles)
+    monkeypatch.setattr(chart_svc, "list_candles_for_series", _source_candles)
 
     result = chart_svc.get_symbol_chart_history(
         run_id="run-1",

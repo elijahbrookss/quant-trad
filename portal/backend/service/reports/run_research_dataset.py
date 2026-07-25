@@ -21,7 +21,16 @@ from typing import Any, Dict, List, Optional
 from utils.log_context import build_log_context, with_log_context
 
 from ..provenance import REPORT_DATASET_SCHEMA_VERSION
-from ..storage import storage
+from ..storage.repos.candles import (
+    get_candle_storage_summary,
+    list_candle_closure_evidence,
+    list_candles_for_series,
+)
+from ..storage.repos.lifecycle import list_bot_run_lifecycle_events
+from ..storage.repos.observability import list_observability_events
+from ..storage.repos.runs import get_bot_run
+from ..storage.repos.runtime_events import list_bot_run_steps_for_run
+from ..storage.repos.trades import list_bot_trades_for_run
 from . import artifacts as report_artifacts
 from . import report_data
 from .candle_continuity import classify_unknown_gaps_from_closures
@@ -1024,9 +1033,6 @@ def _candle_dt(row: Mapping[str, Any]) -> Optional[datetime]:
 
 
 def _fetch_excursion_candles(trade: Mapping[str, Any]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    list_candles = getattr(storage, "list_candles_for_series", None)
-    if not callable(list_candles):
-        return [], {"status": "unavailable", "caveats": ["candle_window_storage_unavailable"]}
     instrument_id = str(trade.get("instrument_id") or "").strip()
     entry_dt = _parse_iso(trade.get("entry_time"))
     exit_dt = _parse_iso(trade.get("exit_time"))
@@ -1041,7 +1047,7 @@ def _fetch_excursion_candles(trade: Mapping[str, Any]) -> tuple[List[Dict[str, A
         limit = max(1, min(expected_limit, 2000))
         end = exit_dt + timedelta(seconds=seconds)
         try:
-            rows = list_candles(
+            rows = list_candles_for_series(
                 instrument_id=instrument_id,
                 timeframe=timeframe,
                 start=_iso(entry_dt),
@@ -2061,12 +2067,8 @@ def _load_candle_closure_evidence(
     key = (instrument, interval)
     if key in closure_cache:
         return closure_cache[key]
-    loader = getattr(storage, "list_candle_closure_evidence", None)
-    if not callable(loader):
-        closure_cache[key] = []
-        return []
     try:
-        rows = loader(
+        rows = list_candle_closure_evidence(
             instrument_id=instrument,
             timeframe=interval,
             start=metadata.simulated_window.get("start"),
@@ -2230,14 +2232,11 @@ def _diagnostic_summary(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
 
 
 def _observability_events_for_run(run_id: str) -> List[Dict[str, Any]]:
-    list_events = getattr(storage, "list_observability_events", None)
-    if not callable(list_events):
-        return []
     try:
-        return [dict(row) for row in list_events(run_id=run_id, limit=2000)]
-    except TypeError:
-        rows = list_events(limit=5000)
-        return [dict(row) for row in rows if str(row.get("run_id") or "") == run_id]
+        return [
+            dict(row)
+            for row in list_observability_events(run_id=run_id, limit=2000)
+        ]
     except Exception as exc:  # noqa: BLE001 - diagnostics should report source gaps, not fail report builds.
         logger.warning(
             with_log_context(
@@ -2554,11 +2553,8 @@ def _position_ordering_health(events: Sequence[Mapping[str, Any]]) -> Dict[str, 
 
 
 def _lifecycle_events_for_run(run_id: str) -> List[Dict[str, Any]]:
-    list_events = getattr(storage, "list_bot_run_lifecycle_events", None)
-    if not callable(list_events):
-        return []
     try:
-        return [dict(row) for row in list_events(run_id)]
+        return [dict(row) for row in list_bot_run_lifecycle_events(run_id)]
     except Exception as exc:  # noqa: BLE001 - diagnostics should report source gaps, not fail report builds.
         logger.warning(
             with_log_context(
@@ -3579,8 +3575,7 @@ def _timeseries(
 
 
 def _performance(run: Mapping[str, Any], events: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
-    steps_func = getattr(storage, "list_bot_run_steps_for_run", None)
-    steps = steps_func(str(run.get("run_id") or "")) if callable(steps_func) else []
+    steps = list_bot_run_steps_for_run(str(run.get("run_id") or ""))
     durations = [_safe_float(step.get("p95_value", step.get("duration_ms"))) for step in steps]
     clean_durations = [float(value) for value in durations if value is not None]
     by_step: Dict[str, Dict[str, Any]] = {}
@@ -4211,14 +4206,13 @@ def _candle_catalog(
                         },
                     )
     items: List[Dict[str, Any]] = []
-    storage_summary = getattr(storage, "get_candle_storage_summary", None)
     for entry in combos.values():
         series_key = f"{entry.get('instrument_id')}|{entry.get('timeframe')}" if entry.get("instrument_id") and entry.get("timeframe") else None
         fact = gap_by_series.get(str(series_key or "")) or {}
         stored: Dict[str, Any] = {}
-        if callable(storage_summary) and entry.get("instrument_id") and entry.get("timeframe"):
+        if entry.get("instrument_id") and entry.get("timeframe"):
             stored = _mapping(
-                storage_summary(
+                get_candle_storage_summary(
                     instrument_id=str(entry.get("instrument_id")),
                     timeframe=str(entry.get("timeframe")),
                     start=metadata.simulated_window.get("start"),
@@ -5255,7 +5249,7 @@ def _finalize_readiness(
 def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     """Build the canonical research dataset for a bot run from durable DB truth."""
 
-    run = storage.get_bot_run(run_id)
+    run = get_bot_run(run_id)
     if not run:
         raise KeyError(f"Run {run_id} was not found")
     run = dict(run)
@@ -5265,7 +5259,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     decisions = [_decision_row(entry) for entry in report_data.list_decision_ledger(run_id)]
     signals = _signal_rows(events)
     trade_closed_by_id = _trade_closed_context_by_id(events)
-    raw_trades = [dict(row) for row in storage.list_bot_trades_for_run(run_id)]
+    raw_trades = [dict(row) for row in list_bot_trades_for_run(run_id)]
     trades = _normalize_trades(raw_trades, trade_closed_context_by_id=trade_closed_by_id)
     decisions, signals, trades = _link_trace_rows(decisions=decisions, signals=signals, trades=trades)
     metadata = _metadata(run)
