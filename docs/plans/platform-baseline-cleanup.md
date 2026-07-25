@@ -19,7 +19,7 @@ engineering guidance; this file records only cleanup-specific state.
 | --- | --- | --- | --- |
 | Candle-continuity extraction | integration baseline | Complete | — |
 | Canonical lifecycle ledger | `feats/lifecycle-canonical-ledger` | Complete | baseline |
-| Strict execution contracts | `feats/execution-contract-strictness` | Validated; pending merge | lifecycle integration |
+| Strict execution contracts | `feats/execution-contract-strictness` | Complete | lifecycle integration |
 | Compatibility/dead-path removal | `feats/compatibility-dead-path-removal` | Pending | strict execution contract ownership |
 | Temporal/config ownership | `feats/config-temporal-ownership` | Pending | compatibility caller migration |
 | Baseline hygiene | `feats/baseline-hygiene` | Pending | structural ownership settled |
@@ -55,7 +55,7 @@ retired tables until that explicit hard cutover is complete.
 | 2026-07-24 | `1724240` candle-continuity extraction | focused continuity/reporting: 54 passed; reporting: 37 passed; PR profile: 851 passed, 286 deselected; docs: 2 passed |
 | 2026-07-24 | integration branch publication | pushed without history rewrite; upstream configured |
 | 2026-07-24 | `94a84a9..617f3ea` canonical lifecycle ledger | focused lifecycle/runtime/bootstrap: 59 passed; PR profile: 856 passed, 287 deselected; docs: 2 passed; isolated TimescaleDB 15 clean/repeated bootstrap, field-equivalent hard cutover, and event/summary rollback all passed |
-| 2026-07-25 | `feats/execution-contract-strictness` | focused execution/ATM/persistence: 57 passed; runtime profile: 371 passed, 798 deselected; PR profile: 882 passed, 287 deselected; docs: 2 passed; normalized-template idempotence, pre-persistence compilation, dormant-rule validation, and deterministic target allocation covered |
+| 2026-07-25 | `4ec2e45` strict contracts / merge `9ad7c5c` | focused execution/ATM/persistence: 57 passed; runtime profile: 371 passed, 798 deselected; PR profile: 882 passed, 287 deselected; docs: 2 passed; normalized-template idempotence, pre-persistence compilation, dormant-rule validation, and deterministic target allocation covered |
 
 Each child branch must record its focused tests, broader regression profile,
 documentation validation, diff review, and remaining-reference search before
