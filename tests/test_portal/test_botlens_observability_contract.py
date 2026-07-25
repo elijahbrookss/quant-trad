@@ -463,7 +463,6 @@ async def test_intake_router_bounds_message_kind_metric_labels() -> None:
     router = IntakeRouter(registry=registry)
 
     await router.route({"kind": "future-kind-v99", "bot_id": "bot-1", "run_id": "run-1"})
-    await router.route({"kind": "bot_projection_refresh", "bot_id": "bot-1", "run_id": "run-1"})
 
     ingest_metrics = [
         metric
@@ -472,7 +471,6 @@ async def test_intake_router_bounds_message_kind_metric_labels() -> None:
     ]
 
     assert any(metric["tags"].get("message_kind") == "unknown" for metric in ingest_metrics)
-    assert any(metric["tags"].get("message_kind") == "deprecated" for metric in ingest_metrics)
 
 
 def test_symbol_mailbox_overflow_emits_drop_metrics() -> None:

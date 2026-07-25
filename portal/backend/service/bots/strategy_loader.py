@@ -20,7 +20,7 @@ from ...db.models import (
     StrategyRuleRecord,
     StrategyVariantRecord,
 )
-from ..risk.atm import normalise_template
+from atm import normalise_template
 from ..strategy_variant_resolution import materialize_output_filters, resolve_strategy_variant
 from engines.bot_runtime.strategy.models import Strategy, StrategyIndicatorLink, StrategyInstrumentLink
 from risk import normalise_risk_config

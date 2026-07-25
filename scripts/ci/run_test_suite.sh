@@ -96,7 +96,7 @@ case "$SUITE" in
     run_profiles docs
     ;;
   integration)
-    run_suite "pytest -m 'not db' --ignore=tests/test_reports/test_report_exports.py --ignore=tests/test_reports/test_reports_endpoints.py --cov=src --cov-report=term --cov-report=xml"
+    run_suite "pytest -m 'not db' --ignore=tests/test_reports/test_reports_endpoints.py --cov=src --cov-report=term --cov-report=xml"
     ;;
   *)
     echo "unknown suite: $SUITE" >&2

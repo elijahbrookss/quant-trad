@@ -240,8 +240,6 @@ class RunMailbox:
         self.lifecycle_queue: asyncio.Queue[QueueEnvelope] = asyncio.Queue(
             maxsize=_LIFECYCLE_CHANNEL_MAX
         )
-        # Backward-compatible alias used by older callers/tests.
-        self.event_channel = self.lifecycle_queue
         self.notification_queue: asyncio.Queue[QueueEnvelope] = asyncio.Queue(
             maxsize=_RUN_NOTIFICATION_QUEUE_MAX
         )
@@ -334,10 +332,6 @@ class RunMailbox:
                     **labels,
                 )
             self._emit_notification_gauges()
-
-    # Backward-compatible alias while callers are migrated.
-    def enqueue_batch(self, payload: ProjectionBatch) -> None:
-        self.enqueue_lifecycle(payload)
 
     def enqueue_facts(self, symbol_key: str, payload: ProjectionBatch) -> bool:
         mailbox = self.get_or_create_symbol_mailbox(symbol_key)

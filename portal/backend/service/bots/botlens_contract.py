@@ -55,9 +55,6 @@ RUN_SCOPE_KEY = "__run__"
 BRIDGE_BOOTSTRAP_KIND = "botlens_runtime_bootstrap_facts"
 BRIDGE_FACTS_KIND = "botlens_runtime_facts"
 LIFECYCLE_KIND = "botlens_lifecycle_event"
-# Legacy compatibility kind. Intake treats this as deprecated and does not
-# project it into the BotLens runtime state model.
-PROJECTION_REFRESH_KIND = "bot_projection_refresh"
 
 EVENT_TYPE_RUNTIME_BOOTSTRAP = "botlens.runtime_bootstrap_facts"
 EVENT_TYPE_RUNTIME_FACTS = "botlens.runtime_facts"
@@ -207,7 +204,6 @@ __all__ = [
     "FACT_TYPE_TRADE_OPENED",
     "FACT_TYPE_TRADE_UPDATED",
     "LIFECYCLE_KIND",
-    "PROJECTION_REFRESH_KIND",
     "RUN_SCOPE_KEY",
     "SCHEMA_VERSION",
     "STREAM_CONNECTED_TYPE",
