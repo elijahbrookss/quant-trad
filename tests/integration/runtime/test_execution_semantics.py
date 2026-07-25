@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pandas as pd
+import pytest
 
 from engines.bot_runtime.core.domain import Candle, LadderPosition, Leg, SameBarResolutionPolicy
 from engines.bot_runtime.core.runtime_events import RuntimeEventName
@@ -235,10 +236,16 @@ def test_full_complete_intrabar_sequence_does_not_emit_fallback_warning() -> Non
 
 def test_execution_mode_is_separate_from_playback_mode() -> None:
     runtime = _runtime_for_intrabar(lambda *args, **kwargs: None, execution_mode="fast")
-    runtime.apply_config({"mode": "walk-forward"})
+    runtime.apply_config({"playback_mode": "walk-forward"})
 
     assert runtime.playback_mode == "walk-forward"
     assert runtime.execution_mode == ExecutionMode.FAST
+
+
+@pytest.mark.parametrize("value", ["instant", "walk-forward", "walkforward"])
+def test_execution_mode_rejects_playback_values(value: str) -> None:
+    with pytest.raises(ValueError, match="execution_mode"):
+        ExecutionMode.from_config(value)
 
 
 def test_full_intrabar_resolution_is_repeatable_for_same_inputs() -> None:

@@ -432,8 +432,8 @@ def test_visible_overlays_does_not_build_indicator_projection(monkeypatch) -> No
     assert visible == []
 
 
-def test_indicator_runtime_initialization_configures_overlay_replay_window():
-    class _ReplayWindowIndicator:
+def test_indicator_runtime_initialization_configures_overlay_history():
+    class _OverlayHistoryIndicator:
         def __init__(self):
             self.calls = []
             self.runtime_spec = IndicatorRuntimeSpec(
@@ -445,10 +445,10 @@ def test_indicator_runtime_initialization_configures_overlay_replay_window():
                 overlays=(),
             )
 
-        def configure_replay_window(self, *, history_bars=None):
+        def configure_overlay_history(self, *, history_bars):
             self.calls.append(history_bars)
 
-    indicator = _ReplayWindowIndicator()
+    indicator = _OverlayHistoryIndicator()
     deps = replace(
         _runtime_deps(),
         indicator_get_instance_meta=lambda *args, **kwargs: {"id": "stats-1", "type": "candle_stats"},

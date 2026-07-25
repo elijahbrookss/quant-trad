@@ -27,6 +27,7 @@ from engines.bot_runtime.core.runtime_events import (
     build_correlation_id,
 )
 from engines.bot_runtime.strategy.series_builder import SeriesBuilder, StrategySeries
+from engines.indicator_engine.contracts import configure_indicator_overlay_history
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine, IndicatorGuardConfig
 from indicators.runtime.indicator_overlay_cache import default_overlay_cache
 from overlays.builtins import ensure_builtin_overlays_registered
@@ -87,8 +88,7 @@ class RuntimeSetupPrepareMixin:
         self.playback_mode = (self.config.get("playback_mode") or self.config.get("mode") or "instant").lower()
         self.mode = self.playback_mode
         self.execution_mode = ExecutionMode.from_config(
-            self.config.get("execution_mode"),
-            legacy_mode=self.config.get("mode"),
+            self.config.get("execution_mode")
         )
         self.run_type = (self.config.get("run_type") or "backtest").lower()
         self.playback_speed = 0.0
@@ -594,7 +594,9 @@ class RuntimeSetupPrepareMixin:
                 self.state["mode"] = self.mode
                 self.state["playback_mode"] = self.playback_mode
         if "execution_mode" in payload:
-            self.execution_mode = ExecutionMode.from_config(payload.get("execution_mode"), legacy_mode=self.mode)
+            self.execution_mode = ExecutionMode.from_config(
+                payload.get("execution_mode")
+            )
             with self._lock:
                 self.state["execution_mode"] = self.execution_mode.value
         if "focus_symbol" in payload:
@@ -870,7 +872,7 @@ class RuntimeSetupPrepareMixin:
             execution_context=execution_context,
             ctx=self._indicator_ctx,
         )
-        self._configure_indicator_overlay_window(
+        configure_indicator_overlay_history(
             indicators,
             history_bars=self._botlens_overlay_window_bars,
         )
@@ -908,13 +910,6 @@ class RuntimeSetupPrepareMixin:
                 ),
             )
         )
-
-    @staticmethod
-    def _configure_indicator_overlay_window(indicators: List[Any], *, history_bars: int) -> None:
-        for indicator in indicators:
-            configure = getattr(indicator, "configure_replay_window", None)
-            if callable(configure):
-                configure(history_bars=history_bars)
 
     def _build_indicator_guard_config(self) -> IndicatorGuardConfig:
         defaults = _SETTINGS.bot_runtime.indicator_guard

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from engines.bot_runtime.core.domain import Candle, StrategySignal
+from engines.indicator_engine.contracts import configure_indicator_overlay_history
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
 from indicators.config import IndicatorExecutionContext
 from overlays.schema import build_overlay
@@ -317,13 +318,6 @@ def _collect_ready_overlays(
         payload.setdefault("overlay_name", overlay_name)
         collected.append(payload)
     return collected
-
-
-def _configure_replay_window(indicators: Sequence[Any], *, history_bars: int) -> None:
-    for indicator in indicators:
-        configure = getattr(indicator, "configure_replay_window", None)
-        if callable(configure):
-            configure(history_bars=history_bars)
 
 
 def _require_mapping(payload: Mapping[str, Any], key: str) -> Mapping[str, Any]:
@@ -755,7 +749,7 @@ def evaluate_strategy_preview(
         candle_fetch_ms = max((time.perf_counter() - fetch_started) * 1000.0, 0.0)
         if not candles:
             raise ValueError(f"No candles returned for {instrument_id}")
-        _configure_replay_window(indicators, history_bars=len(candles))
+        configure_indicator_overlay_history(indicators, history_bars=len(candles))
 
         strategy_markers: List[Dict[str, Any]] = []
         strategy_signals: List[Dict[str, Any]] = []

@@ -224,6 +224,8 @@ FAST and FULL are execution semantics, not playback modes.
 
 - FAST uses strategy timeframe OHLC and pessimistic same-bar handling.
 - FULL uses lower-timeframe intrabar data when available.
+- Missing execution mode defaults to FAST; all non-`fast`/`full` values fail.
+- Playback values are never interpreted as execution values.
 - Missing/incomplete/ambiguous intrabar data falls back to pessimistic behavior with diagnostics.
 - UI animation can replay events, but it must not change execution truth.
 

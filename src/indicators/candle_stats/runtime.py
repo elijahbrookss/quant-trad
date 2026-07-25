@@ -12,6 +12,7 @@ from engines.indicator_engine.contracts import (
     Indicator,
     RuntimeOverlay,
     RuntimeOutput,
+    require_overlay_history_bars,
 )
 from indicators.manifest import build_runtime_spec
 from overlays.builders import build_line_overlay
@@ -144,16 +145,8 @@ class TypedCandleStatsIndicator(Indicator):
         self._output = RuntimeOutput(bar_time=datetime.min, ready=False, value={})
         self._atr_expansion_signal = RuntimeOutput(bar_time=datetime.min, ready=False, value={})
 
-    def configure_replay_window(self, *, history_bars: int | None = None) -> None:
-        if history_bars is None:
-            return
-        try:
-            parsed = int(history_bars)
-        except (TypeError, ValueError):
-            return
-        if parsed <= 0:
-            return
-        self._overlay_history_limit_bars = max(parsed, 1)
+    def configure_overlay_history(self, *, history_bars: int) -> None:
+        self._overlay_history_limit_bars = require_overlay_history_bars(history_bars)
 
     def apply_bar(self, bar: Any, inputs: Mapping[Any, RuntimeOutput]) -> None:
         if not isinstance(bar, Candle):
