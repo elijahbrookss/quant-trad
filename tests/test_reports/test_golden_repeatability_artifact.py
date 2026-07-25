@@ -91,8 +91,6 @@ def test_golden_artifact_persists_full_decision_differences(monkeypatch, tmp_pat
 
     assert result["verdict"] == "FAIL"
     assert "decision_verdict_or_id_mismatch" in result["fail_reasons"]
-    assert decision_compare["missing_ids_count"] == 2
-    assert decision_compare["extra_ids_count"] == 2
     assert decision_compare["missing_decision_count"] == 2
     assert decision_compare["extra_decision_count"] == 2
     assert decision_compare["missing_decision_ids"] == ["missing-1", "missing-2"]
@@ -101,11 +99,34 @@ def test_golden_artifact_persists_full_decision_differences(monkeypatch, tmp_pat
     assert [row["decision_id"] for row in decision_compare["verdict_changes"]] == ["changed-1", "changed-2"]
     assert decision_compare["verdict_changes"][0]["left_verdict"] == "accepted"
     assert decision_compare["verdict_changes"][0]["right_verdict"] == "rejected"
-    assert decision_compare["first_missing_id"] == "missing-1"
-    assert decision_compare["first_extra_id"] == "extra-1"
-    assert decision_compare["first_verdict_change"]["decision_id"] == "changed-1"
-    assert "left" in decision_compare["first_verdict_change"]
-    assert "right" in decision_compare["first_verdict_change"]
+    assert "missing_ids_count" not in decision_compare
+    assert "extra_ids_count" not in decision_compare
+    assert "first_missing_id" not in decision_compare
+    assert "first_extra_id" not in decision_compare
+    assert "first_verdict_change" not in decision_compare
+    trace = artifact["disagreement_trace"]
+    assert trace["status"] == "available"
+    assert trace["first_divergence"]["section"] == "decisions"
+    assert set(trace["runs"]) == {"left", "right"}
+    assert (
+        trace["runs"]["left"]["strategy_decision"]["value"]["decision_id"]
+        == "changed-1"
+    )
+    assert trace["runs"]["left"]["input_dataset"]["fingerprints"] == {
+        "data_snapshot_hash": "data-a",
+        "material_config_hash": "config-a",
+        "strategy_hash": "strategy-a",
+        "semantic_fingerprint": "semantic-a",
+        "operational_fingerprint": "operational-a",
+    }
+    assert (
+        trace["runs"]["left"]["generated_order"]["availability"]
+        == "unavailable"
+    )
+    assert (
+        trace["runs"]["left"]["available_candles"]["availability"]
+        == "catalog_only"
+    )
 
 
 def test_golden_verdict_logic_unchanged_for_matching_pair(monkeypatch, tmp_path) -> None:
@@ -122,3 +143,253 @@ def test_golden_verdict_logic_unchanged_for_matching_pair(monkeypatch, tmp_path)
     assert result["decision_compare"]["missing_decision_ids"] == []
     assert result["decision_compare"]["extra_decision_ids"] == []
     assert result["decision_compare"]["verdict_changes"] == []
+    assert result["disagreement_trace"]["status"] == "not_required"
+
+
+def test_golden_disagreement_trace_links_persisted_execution_evidence(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    left_decision = _decision("decision-1")
+    left_decision["trade_id"] = "trade-1"
+    left_decision["known_at"] = "2026-01-01T00:00:00Z"
+    left_decision["decision_context"].update(
+        {
+            "normalized_execution_plan": {
+                "entry_order_type": "market",
+                "stop_price": 96.0,
+                "target_prices": [110.0],
+            },
+            "generated_order": {
+                "side": "buy",
+                "qty": 1.0,
+                "order_type": "market",
+            },
+            "fill_decision": {
+                "status": "filled",
+                "price": 100.0,
+                "fee": 0.2,
+            },
+        }
+    )
+    right_decision = _decision(
+        "decision-1",
+        status="rejected",
+        accepted=False,
+        reason_code="RULE_BLOCKED",
+    )
+    left = _dataset("left", [left_decision])
+    right = _dataset("right", [right_decision])
+
+    left["metadata"].update(
+        {
+            "simulated_window": {
+                "start": "2026-01-01T00:00:00Z",
+                "end": "2026-01-01T01:00:00Z",
+            },
+            "configuration": {
+                "source": "portal_bot_runs.provenance_columns",
+                "data": {
+                    "date_range": {
+                        "start": "2026-01-01T00:00:00Z",
+                        "end": "2026-01-01T01:00:00Z",
+                    }
+                },
+                "execution": {"execution_mode": "fast"},
+                "atm": {"template_id": "atm-1"},
+                "risk": {"base_risk_per_trade": 4.0},
+                "indicators": [{"id": "profile-1", "type": "market_profile"}],
+            },
+        }
+    )
+    left["trades"] = [
+        {
+            "id": "trade-1",
+            "decision_id": "decision-1",
+            "symbol": "BTC",
+            "direction": "long",
+            "status": "closed",
+            "entry_time": "2026-01-01T00:00:00Z",
+            "entry_price": 100.0,
+            "exit_time": "2026-01-01T01:00:00Z",
+            "exit_price": 110.0,
+            "gross_pnl": 10.0,
+            "fees": 0.31,
+            "net_pnl": 9.69,
+            "close_reason": "EXEC_EXIT_TARGET",
+        }
+    ]
+    left["candidate_lifecycle"] = {
+        "items": [
+            {
+                "decision_id": "decision-1",
+                "trade_id": "trade-1",
+                "symbol": "BTC",
+                "stage": "confirmed",
+                "known_at": "2026-01-01T00:00:00Z",
+            }
+        ]
+    }
+    left["candle_catalog"] = {
+        "items": [
+            {
+                "symbol": "BTC",
+                "timeframe": "1h",
+                "first_candle_at": "2026-01-01T00:00:00Z",
+                "last_candle_at": "2026-01-01T01:00:00Z",
+                "candle_count": 2,
+                "fingerprint": "candles-a",
+                "continuity_status": "source_sparse",
+            }
+        ]
+    }
+    left["candle_gaps"] = {
+        "canonical_evidence_status": "available",
+        "provider_gap_count": 1,
+        "blocking_gap_count": 0,
+        "caveats": ["candle_continuity_provider_sparse"],
+        "facts": [
+            {
+                "symbol": "BTC",
+                "timeframe": "1h",
+                "classification": "provider_missing_data",
+                "reason_code": "provider_response_empty",
+            }
+        ],
+    }
+    left["fee_accounting"] = {
+        "total_fees": 0.31,
+        "fee_sanity_checks": {"trade_fees_match_summary": True},
+    }
+    left["wallet_accounting"] = {
+        "wallet_replay_status": "ready",
+        "ending_equity": 1009.69,
+        "caveats": [],
+    }
+    left["summary"].update(
+        {
+            "gross_pnl": 10.0,
+            "fees": 0.31,
+            "net_pnl": 9.69,
+            "equity_end": 1009.69,
+        }
+    )
+    left["readiness"].update(
+        {
+            "data_quality_status": "degraded",
+            "execution_quality_status": "ready",
+            "caveats": ["candle_continuity_provider_sparse"],
+        }
+    )
+
+    monkeypatch.setattr(
+        golden,
+        "get_run_research_dataset",
+        lambda run_id: {"left": left, "right": right}[run_id],
+    )
+    monkeypatch.setattr(
+        golden,
+        "_runtime_ordering_summary",
+        lambda run_id: {
+            "status": "ready",
+            "gap_count": 0,
+            "duplicate_values": [],
+        },
+    )
+
+    result = golden.compare_runs(
+        "left",
+        "right",
+        out_dir=tmp_path,
+        check_prior=False,
+    )
+    trace = result["disagreement_trace"]["runs"]["left"]
+
+    assert trace["known_at_state"]["value"]["boundary"] == "2026-01-01T00:00:00Z"
+    assert trace["input_dataset"]["requested_range"]["end"] == "2026-01-01T01:00:00Z"
+    assert trace["input_dataset"]["loaded_ranges"] == [
+        {
+            "symbol": "BTC",
+            "instrument_id": None,
+            "timeframe": "1h",
+            "first_candle_at": "2026-01-01T00:00:00Z",
+            "last_candle_at": "2026-01-01T01:00:00Z",
+            "candle_count": 2,
+            "fingerprint": "candles-a",
+        }
+    ]
+    assert trace["normalized_execution_plan"]["value"]["stop_price"] == 96.0
+    assert trace["generated_order"]["value"]["qty"] == 1.0
+    assert trace["fill_or_rejection_decision"]["value"]["status"] == "filled"
+    assert trace["lifecycle_transitions"]["candidate_events"][0]["stage"] == "confirmed"
+    assert trace["position_changes"]["value"]["close_reason"] == "EXEC_EXIT_TARGET"
+    assert trace["accounting_effects"]["wallet"]["ending_equity"] == 1009.69
+    assert trace["accounting_effects"]["fees"]["total_fees"] == 0.31
+    assert trace["report_output"]["summary"]["net_pnl"] == 9.69
+    assert trace["gap_and_continuity"]["facts"][0]["reason_code"] == "provider_response_empty"
+    assert trace["provenance_caveats_and_quality"]["quality_status"] == {
+        "data": "degraded",
+        "execution": "ready",
+    }
+
+
+def test_golden_disagreement_trace_does_not_attach_unrelated_rows(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    left = _dataset("left", [_decision("decision-1")])
+    right = _dataset(
+        "right",
+        [
+            _decision(
+                "decision-1",
+                status="rejected",
+                accepted=False,
+                reason_code="RULE_BLOCKED",
+            )
+        ],
+    )
+    left["candidate_lifecycle"] = {
+        "items": [
+            {
+                "decision_id": "different-decision",
+                "symbol": "ETH",
+                "stage": "confirmed",
+            }
+        ]
+    }
+    left["candle_catalog"] = {
+        "items": [
+            {
+                "symbol": "ETH",
+                "timeframe": "1h",
+                "fingerprint": "unrelated-candles",
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        golden,
+        "get_run_research_dataset",
+        lambda run_id: {"left": left, "right": right}[run_id],
+    )
+    monkeypatch.setattr(
+        golden,
+        "_runtime_ordering_summary",
+        lambda run_id: {
+            "status": "ready",
+            "gap_count": 0,
+            "duplicate_values": [],
+        },
+    )
+
+    result = golden.compare_runs(
+        "left",
+        "right",
+        out_dir=tmp_path,
+        check_prior=False,
+    )
+    trace = result["disagreement_trace"]["runs"]["left"]
+
+    assert trace["lifecycle_transitions"]["candidate_events"] == []
+    assert trace["input_dataset"]["loaded_ranges"] == []
+    assert trace["available_candles"]["catalog"] == []

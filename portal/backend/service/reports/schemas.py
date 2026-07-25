@@ -447,6 +447,7 @@ class GoldenEvidenceDTO(BaseModel):
     entry_decision_order_timeout_right: Optional[int] = None
     runtime_ordering_left: Dict[str, Any] = Field(default_factory=dict)
     runtime_ordering_right: Dict[str, Any] = Field(default_factory=dict)
+    disagreement_trace: Dict[str, Any] = Field(default_factory=dict)
     first_divergence: FirstDivergenceDTO = Field(
         default_factory=lambda: FirstDivergenceDTO(
             present=False,

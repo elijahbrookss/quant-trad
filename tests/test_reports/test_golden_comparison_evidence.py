@@ -39,12 +39,16 @@ def test_existing_golden_artifact_is_located_and_normalized(tmp_path) -> None:
                     "right_count": 103,
                     "missing_decision_count": 0,
                     "extra_decision_count": 0,
-                    "missing_ids_count": 0,
-                    "extra_ids_count": 0,
                     "verdict_change_count": 0,
                     "missing_decision_ids": [],
                     "extra_decision_ids": [],
                     "verdict_changes": [],
+                },
+                "disagreement_trace": {
+                    "schema_version": "golden_disagreement_trace.v1",
+                    "status": "not_required",
+                    "first_divergence": None,
+                    "runs": {},
                 },
                 "trade_lifecycle_compare": {"left_count": 91, "right_count": 91, "equal": True, "first_diff": None},
                 "wallet_trace": {
@@ -78,6 +82,7 @@ def test_existing_golden_artifact_is_located_and_normalized(tmp_path) -> None:
     assert evidence.decision_count_left == 103
     assert evidence.decision_diff_full_lists_available is True
     assert evidence.verdict_changes_full_available is True
+    assert evidence.disagreement_trace["status"] == "not_required"
     assert evidence.trade_lifecycle_equal is True
     assert evidence.wallet_market_time_overtake_left == 0
     assert evidence.first_divergence.present is False
@@ -102,8 +107,6 @@ def test_golden_artifact_first_divergence_is_normalized(tmp_path) -> None:
                     "right_count": 1,
                     "missing_decision_count": 0,
                     "extra_decision_count": 0,
-                    "missing_ids_count": 0,
-                    "extra_ids_count": 0,
                     "verdict_change_count": 1,
                     "missing_decision_ids": [],
                     "extra_decision_ids": [],
@@ -120,13 +123,21 @@ def test_golden_artifact_first_divergence_is_normalized(tmp_path) -> None:
                             "right_action": "enter_long",
                         }
                     ],
-                    "first_verdict_change": {
-                        "decision_id": "decision-1",
-                        "left": {"decision_id": "decision-1", "symbol": "BTC", "bar_time": "2026-01-01T00:00:00Z", "status": "accepted"},
-                        "right": {"decision_id": "decision-1", "symbol": "BTC", "bar_time": "2026-01-01T00:00:00Z", "status": "rejected"},
-                    },
                 },
                 "trade_lifecycle_compare": {"equal": True},
+                "disagreement_trace": {
+                    "schema_version": "golden_disagreement_trace.v1",
+                    "status": "available",
+                    "first_divergence": {
+                        "section": "decisions",
+                        "left": {"status": "accepted"},
+                        "right": {"status": "rejected"},
+                    },
+                    "runs": {
+                        "left": {"run_id": "left"},
+                        "right": {"run_id": "right"},
+                    },
+                },
                 "first_divergence": {
                     "section": "decisions",
                     "index": 0,
@@ -149,6 +160,16 @@ def test_golden_artifact_first_divergence_is_normalized(tmp_path) -> None:
     assert evidence.verdict_changes[0]["left_verdict"] == "accepted"
     assert evidence.verdict_changes_full_available is True
 
+    reversed_evidence = read_golden_comparison_evidence(
+        "right",
+        "left",
+        search_roots=[tmp_path],
+    )
+    trace = reversed_evidence.disagreement_trace
+    assert trace["first_divergence"]["left"]["status"] == "rejected"
+    assert trace["first_divergence"]["right"]["status"] == "accepted"
+    assert set(trace["runs"]) == {"left", "right"}
+
 
 def test_golden_evidence_reader_uses_full_decision_arrays(tmp_path) -> None:
     artifact = tmp_path / "comparison_summary.json"
@@ -165,8 +186,6 @@ def test_golden_evidence_reader_uses_full_decision_arrays(tmp_path) -> None:
                     "right_count": 5,
                     "missing_decision_count": 2,
                     "extra_decision_count": 2,
-                    "missing_ids_count": 2,
-                    "extra_ids_count": 2,
                     "verdict_change_count": 2,
                     "missing_decision_ids": ["missing-1", "missing-2"],
                     "extra_decision_ids": ["extra-1", "extra-2"],
@@ -174,8 +193,6 @@ def test_golden_evidence_reader_uses_full_decision_arrays(tmp_path) -> None:
                         {"decision_id": "changed-1", "left_verdict": "accepted", "right_verdict": "rejected"},
                         {"decision_id": "changed-2", "left_verdict": "rejected", "right_verdict": "accepted"},
                     ],
-                    "first_missing_id": "missing-1",
-                    "first_extra_id": "extra-1",
                 },
                 "trade_lifecycle_compare": {"equal": True},
             }
@@ -193,48 +210,6 @@ def test_golden_evidence_reader_uses_full_decision_arrays(tmp_path) -> None:
     assert evidence.verdict_change_count == 2
     assert [row["decision_id"] for row in evidence.verdict_changes] == ["changed-1", "changed-2"]
     assert evidence.verdict_changes_full_available is True
-
-
-def test_legacy_golden_artifact_partial_decision_fields_remain_supported(tmp_path) -> None:
-    artifact = tmp_path / "comparison_summary.json"
-    artifact.write_text(
-        json.dumps(
-            {
-                "run_ids": ["left", "right"],
-                "verdict": "FAIL",
-                "fail_reasons": ["decision_verdict_or_id_mismatch"],
-                "material": {"left": {}, "right": {}},
-                "material_diff": {},
-                "decision_compare": {
-                    "left_count": 3,
-                    "right_count": 3,
-                    "missing_ids_count": 2,
-                    "extra_ids_count": 1,
-                    "verdict_change_count": 1,
-                    "first_missing_id": "missing-1",
-                    "first_extra_id": "extra-1",
-                    "first_verdict_change": {
-                        "decision_id": "decision-1",
-                        "left": {"decision_id": "decision-1", "status": "accepted"},
-                        "right": {"decision_id": "decision-1", "status": "rejected"},
-                    },
-                },
-                "trade_lifecycle_compare": {"equal": True},
-            }
-        )
-    )
-
-    evidence = read_golden_comparison_evidence("left", "right", search_roots=[tmp_path])
-
-    assert evidence.available is True
-    assert evidence.missing_decision_count == 2
-    assert evidence.extra_decision_count == 1
-    assert evidence.missing_decision_ids == ["missing-1"]
-    assert evidence.extra_decision_ids == ["extra-1"]
-    assert evidence.decision_diff_full_lists_available is False
-    assert evidence.verdict_change_count == 1
-    assert evidence.verdict_changes[0]["decision_id"] == "decision-1"
-    assert evidence.verdict_changes_full_available is False
 
 
 def test_missing_golden_artifact_returns_not_available(tmp_path) -> None:
