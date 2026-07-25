@@ -2760,6 +2760,12 @@ class RuntimePushStreamMixin:
                         **identity,
                         "summary": {
                             **dict(summary),
+                            **(
+                                {"candle_snapshot": dict(meta["candle_snapshot"])}
+                                if isinstance(meta.get("candle_snapshot"), AbcMapping)
+                                and meta.get("candle_snapshot")
+                                else {}
+                            ),
                             "boundary_name": "run_final",
                             "evidence_scope": "canonical_terminal",
                             "materiality": "canonical",

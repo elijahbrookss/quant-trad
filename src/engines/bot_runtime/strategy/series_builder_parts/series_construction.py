@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from core.candle_continuity import expected_interval_seconds, summarize_candle_continuity
+from core.candle_snapshot import build_candle_series_snapshot
 from engines.bot_runtime.core.domain import (
     Candle,
     LadderRiskEngine,
@@ -437,6 +438,17 @@ class SeriesBuilderConstructionMixin:
             gap_classification=candle_gap_classification,
         )
         series_meta["candle_continuity"] = continuity_summary.to_dict()
+        series_meta["candle_snapshot"] = build_candle_series_snapshot(
+            candles,
+            instrument_id=(instrument.get("id") if isinstance(instrument, dict) else None)
+            or instrument_id,
+            symbol=symbol,
+            timeframe=timeframe,
+            datasource=datasource,
+            exchange=exchange,
+            strategy_id=strategy.id,
+            replay_start_index=replay_start_index,
+        )
         if continuity_summary.detected_gap_count:
             logger.warning(
                 with_log_context(

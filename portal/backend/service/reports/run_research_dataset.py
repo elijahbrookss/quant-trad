@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from utils.log_context import build_log_context, with_log_context
 
+from core.candle_snapshot import aggregate_candle_series_snapshots
 from ..provenance import REPORT_DATASET_SCHEMA_VERSION
 from ..storage.repos.candles import (
     get_candle_storage_summary,
@@ -2043,6 +2044,7 @@ def _candle_gaps(
             "gap_count_by_type": gap_counts,
             "detected_gap_count": detected,
             "candle_count": summary_context.get("candle_count"),
+            "candle_snapshot": _mapping(summary_context.get("candle_snapshot")),
             "missing_candle_estimate": summary_context.get("missing_candle_estimate"),
             "gaps": gaps,
             "observed_at": row.get("observed_at"),
@@ -4375,6 +4377,7 @@ def _candle_catalog(
                     else None
                 ),
                 "continuity_status": continuity_status,
+                "candle_snapshot": _mapping(fact.get("candle_snapshot")),
                 "available_resolutions": available_resolutions,
                 "storage_source": "market_candles_raw" if stored else "candle_continuity_summary" if fact else "unresolved_instrument",
                 "series_key": series_key,
@@ -4404,16 +4407,59 @@ def _stable_hash(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _data_snapshot_hash(candle_catalog: Mapping[str, Any]) -> Optional[str]:
-    rows = []
-    for item in candle_catalog.get("items") or []:
-        if not isinstance(item, Mapping):
-            continue
-        rows.append(_candle_catalog_material_row(item))
-    if not rows:
+def _data_snapshot_hash(
+    candle_catalog: Mapping[str, Any],
+    *,
+    candle_gaps: Optional[Mapping[str, Any]] = None,
+) -> Optional[str]:
+    items = [
+        item
+        for item in candle_catalog.get("items") or []
+        if isinstance(item, Mapping)
+    ]
+    if not items:
         return None
-    rows.sort(key=lambda row: (str(row.get("instrument_id") or ""), str(row.get("timeframe") or "")))
-    return _stable_hash({"candle_catalog": rows})
+    if any(
+        not str(item.get("instrument_id") or "").strip()
+        or not str(item.get("timeframe") or "").strip()
+        for item in items
+    ):
+        return None
+    if candle_gaps is not None:
+        snapshots = [
+            _mapping(fact.get("candle_snapshot"))
+            for fact in candle_gaps.get("facts") or []
+            if isinstance(fact, Mapping)
+            and _mapping(fact.get("candle_snapshot"))
+        ]
+    else:
+        snapshots = [
+            _mapping(item.get("candle_snapshot"))
+            for item in items
+            if _mapping(item.get("candle_snapshot"))
+        ]
+    expected_series = {
+        (
+            str(item.get("instrument_id") or "").strip(),
+            str(item.get("timeframe") or "").strip().lower(),
+        )
+        for item in items
+        if str(item.get("instrument_id") or "").strip()
+        and str(item.get("timeframe") or "").strip()
+    }
+    covered_series = {
+        (
+            str(snapshot.get("instrument_id") or "").strip(),
+            str(snapshot.get("timeframe") or "").strip().lower(),
+        )
+        for snapshot in snapshots
+    }
+    if not snapshots or not expected_series or expected_series != covered_series:
+        return None
+    return str(
+        aggregate_candle_series_snapshots(snapshots).get("data_snapshot_hash")
+        or ""
+    ).strip() or None
 
 
 def _candle_catalog_material_row(item: Mapping[str, Any]) -> Dict[str, Any]:
@@ -5583,7 +5629,10 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         wallet_diagnostics=wallet_diagnostics,
         operational_health=operational_health,
     )
-    data_snapshot_hash = _data_snapshot_hash(candle_catalog)
+    data_snapshot_hash = _data_snapshot_hash(
+        candle_catalog,
+        candle_gaps=candle_gaps,
+    )
     metadata = replace(metadata, data_snapshot_hash=data_snapshot_hash)
     semantic_fingerprint = _report_semantic_fingerprint(
         metadata=metadata,

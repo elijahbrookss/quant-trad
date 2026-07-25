@@ -1655,19 +1655,74 @@ def test_semantic_fingerprint_ignores_run_instance_identifiers(monkeypatch: pyte
     assert changed["metadata"]["report_operational_fingerprint"] != baseline["metadata"]["report_operational_fingerprint"]
 
 
-def test_data_snapshot_hash_changes_when_candle_gap_window_changes(monkeypatch: pytest.MonkeyPatch) -> None:
-    baseline_events = [row for row in _events() if _event_name(row) != "candle_continuity_summary"]
-    changed_events = [row for row in _events() if _event_name(row) != "candle_continuity_summary"]
-    baseline_events.append(_provider_gap(20))
-    changed_gap = _provider_gap(20)
-    changed_gap["payload"]["context"]["gaps"][0]["previous_ts"] = "2026-03-07T00:00:00Z"
-    changed_gap["payload"]["context"]["gaps"][0]["current_ts"] = "2026-03-07T02:00:00Z"
-    changed_events.append(changed_gap)
+def test_data_snapshot_hash_uses_runtime_candle_values_not_gap_metadata() -> None:
+    snapshot = {
+        "schema_version": "candle_series_snapshot.v1",
+        "strategy_id": "strategy-1",
+        "instrument_id": "instrument-btc",
+        "symbol": "BTC",
+        "timeframe": "1h",
+        "datasource": "coinbase",
+        "exchange": "cbi",
+        "candle_value_hash": "a" * 64,
+        "candle_count": 10,
+        "warmup_candle_count": 2,
+        "replay_candle_count": 8,
+        "first_ts": "2026-03-01T00:00:00Z",
+        "last_ts": "2026-03-01T09:00:00Z",
+        "fields": ["time", "open", "high", "low", "close", "atr", "volume"],
+    }
+    baseline = {
+        "items": [
+            {
+                "instrument_id": "instrument-btc",
+                "timeframe": "1h",
+                "gap_count": 0,
+                "candle_snapshot": snapshot,
+            }
+        ]
+    }
+    changed_gap = copy.deepcopy(baseline)
+    changed_gap["items"][0]["gap_count"] = 3
 
-    baseline = _build(monkeypatch, events=baseline_events)
-    changed = _build(monkeypatch, events=changed_events)
+    assert run_research_dataset._data_snapshot_hash(
+        changed_gap
+    ) == run_research_dataset._data_snapshot_hash(baseline)
 
-    assert changed["metadata"]["data_snapshot_hash"] != baseline["metadata"]["data_snapshot_hash"]
+    changed_values = copy.deepcopy(baseline)
+    changed_values["items"][0]["candle_snapshot"]["candle_value_hash"] = "b" * 64
+    assert run_research_dataset._data_snapshot_hash(
+        changed_values
+    ) != run_research_dataset._data_snapshot_hash(baseline)
+
+
+def test_data_snapshot_hash_is_unavailable_when_any_series_lacks_runtime_evidence() -> None:
+    catalog = {
+        "items": [
+            {
+                "instrument_id": "instrument-btc",
+                "timeframe": "1h",
+                "candle_snapshot": {
+                    "schema_version": "candle_series_snapshot.v1",
+                    "strategy_id": "strategy-1",
+                    "instrument_id": "instrument-btc",
+                    "symbol": "BTC",
+                    "timeframe": "1h",
+                    "candle_value_hash": "a" * 64,
+                    "candle_count": 10,
+                    "warmup_candle_count": 2,
+                    "replay_candle_count": 8,
+                },
+            },
+            {
+                "instrument_id": "instrument-eth",
+                "timeframe": "1h",
+                "candle_snapshot": {},
+            },
+        ]
+    }
+
+    assert run_research_dataset._data_snapshot_hash(catalog) is None
 
 
 def test_observer_continuity_facts_do_not_change_material_identity(monkeypatch: pytest.MonkeyPatch) -> None:

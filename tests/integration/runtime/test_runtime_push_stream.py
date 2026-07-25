@@ -1744,6 +1744,17 @@ def test_terminal_continuity_fact_uses_complete_producer_summary() -> None:
         "gap_count_by_type": {"unknown_gap": 0},
         "final_status": "healthy",
     }
+    candle_snapshot = {
+        "schema_version": "candle_series_snapshot.v1",
+        "strategy_id": "strategy-1",
+        "instrument_id": "instrument-btc",
+        "symbol": "BTC/USD",
+        "timeframe": "1h",
+        "candle_value_hash": "a" * 64,
+        "candle_count": 169,
+        "warmup_candle_count": 100,
+        "replay_candle_count": 69,
+    }
     runtime._series = [
         SimpleNamespace(
             instrument={"id": "instrument-btc"},
@@ -1753,7 +1764,10 @@ def test_terminal_continuity_fact_uses_complete_producer_summary() -> None:
             datasource="CCXT",
             exchange="coinbase",
             candles=[SimpleNamespace(time=datetime(2024, 1, 8, tzinfo=timezone.utc))],
-            meta={"candle_continuity": summary},
+            meta={
+                "candle_continuity": summary,
+                "candle_snapshot": candle_snapshot,
+            },
         )
     ]
 
@@ -1764,6 +1778,7 @@ def test_terminal_continuity_fact_uses_complete_producer_summary() -> None:
     assert fact["fact_type"] == "candle_continuity_summary"
     assert fact["summary"] == {
         **summary,
+        "candle_snapshot": candle_snapshot,
         "boundary_name": "run_final",
         "evidence_scope": "canonical_terminal",
         "materiality": "canonical",

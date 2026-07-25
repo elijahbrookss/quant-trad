@@ -99,6 +99,17 @@ def test_terminal_candle_continuity_summary_round_trips_as_material_diagnostic()
                         "boundary_name": "run_final",
                         "evidence_scope": "canonical_terminal",
                         "materiality": "canonical",
+                        "candle_snapshot": {
+                            "schema_version": "candle_series_snapshot.v1",
+                            "strategy_id": "strategy-1",
+                            "instrument_id": "instrument-btc",
+                            "symbol": "BTC/USD",
+                            "timeframe": "1h",
+                            "candle_value_hash": "a" * 64,
+                            "candle_count": 169,
+                            "warmup_candle_count": 100,
+                            "replay_candle_count": 69,
+                        },
                     },
                 }
             ],
@@ -115,6 +126,10 @@ def test_terminal_candle_continuity_summary_round_trips_as_material_diagnostic()
     assert payload["context"]["details"]["boundary_name"] == "run_final"
     assert payload["context"]["details"]["candle_count"] == 169
     assert payload["context"]["details"]["materiality"] == "canonical"
+    assert (
+        payload["context"]["details"]["candle_snapshot"]["candle_value_hash"]
+        == "a" * 64
+    )
 
 
 def test_spot_entry_fill_round_trips_with_wallet_and_execution_evidence() -> None:
