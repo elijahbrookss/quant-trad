@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from engines.bot_runtime.core.domain import Candle, LadderPosition, Leg, SameBarResolutionPolicy
+from engines.bot_runtime.core.execution_policy import exit_policy_for, normalize_liquidity_role
 from engines.bot_runtime.core.runtime_events import RuntimeEventName
 from engines.bot_runtime.deps import BotRuntimeDeps
 from engines.bot_runtime.runtime.components.run_context import RunContext
@@ -70,6 +71,30 @@ def test_ladder_position_default_does_not_enable_breakeven() -> None:
     position = _position("long")
 
     assert position.breakeven_trigger_ticks == 0.0
+
+
+@pytest.mark.parametrize("value", [None, "", "stop", "optimistic", "unknown"])
+def test_same_bar_policy_rejects_noncanonical_values(value: object) -> None:
+    with pytest.raises(ValueError, match="same_bar_policy=.* is unsupported"):
+        SameBarResolutionPolicy.normalize(value)
+
+
+@pytest.mark.parametrize("value", [None, "", "passive", "market"])
+def test_liquidity_role_rejects_unknown_values(value: object) -> None:
+    with pytest.raises(ValueError, match="liquidity_role=.* is unsupported"):
+        normalize_liquidity_role(value)
+
+
+def test_exit_policy_rejects_unknown_event_type() -> None:
+    with pytest.raises(ValueError, match="exit event_type='partial_close' is unsupported"):
+        exit_policy_for("partial_close")
+
+
+def test_terminal_close_rejects_unknown_reason_code() -> None:
+    position = _position("long")
+
+    with pytest.raises(ValueError, match="terminal reason_code='EXPIRED' is unsupported"):
+        position.force_close_at_backtest_end(_candle(1), reason_code="expired")
 
 
 def _runtime_deps(fetch_ohlcv) -> BotRuntimeDeps:

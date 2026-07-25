@@ -115,8 +115,12 @@ class StrategyLoader:
             atm_template = None
             if selected_atm_template_id:
                 template_rec = session.get(ATMTemplateRecord, selected_atm_template_id)
-                if template_rec:
-                    atm_template = normalise_template(template_rec.template)
+                if not template_rec:
+                    raise ValueError(
+                        "ATM template not found: "
+                        f"{selected_atm_template_id} for strategy {strategy_id}"
+                    )
+                atm_template = normalise_template(template_rec.template)
 
             # Fetch indicator links
             indicator_links_db = session.execute(

@@ -43,10 +43,14 @@ class SameBarResolutionPolicy(str, Enum):
     def normalize(cls, value: Optional[object]) -> "SameBarResolutionPolicy":
         if isinstance(value, SameBarResolutionPolicy):
             return value
-        normalized = str(value or cls.PESSIMISTIC_STOP.value).strip().lower()
-        if normalized in {"pessimistic", "pessimistic_stop", "stop_first", "stop"}:
-            return cls.PESSIMISTIC_STOP
-        return cls.TARGET_FIRST
+        normalized = str(value or "").strip().lower()
+        try:
+            return cls(normalized)
+        except ValueError:
+            raise ValueError(
+                f"same_bar_policy={normalized!r} is unsupported; "
+                "supported=['pessimistic_stop', 'target_first']"
+            ) from None
 
 
 @dataclass
@@ -644,12 +648,15 @@ class LadderPosition:
         if not self.is_active():
             return []
 
-        normalized_reason = str(reason_code or "BACKTEST_END").strip().upper() or "BACKTEST_END"
+        normalized_reason = str(reason_code or "").strip().upper()
+        if normalized_reason not in {"BACKTEST_END", "TERMINAL_LIQUIDATION"}:
+            raise ValueError(
+                f"terminal reason_code={normalized_reason!r} is unsupported; "
+                "supported=['BACKTEST_END', 'TERMINAL_LIQUIDATION']"
+            )
         policy = exit_policy_for(
             "terminal_liquidation" if normalized_reason == "TERMINAL_LIQUIDATION" else "backtest_end"
         )
-        if normalized_reason != policy.reason_code:
-            policy = replace(policy, reason_code=normalized_reason)
         return self._close_open_legs_at_price(
             candle,
             exit_price_source=float(candle.close),

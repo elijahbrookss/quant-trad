@@ -152,6 +152,11 @@ side, quantity, price, order type, liquidity role, price source, and fee rate
 are known before the adapter applies the fill. Adapters that do not implement
 the typed order surface fail before a fill can be produced.
 
+The runtime reads entry order semantics only from the immutable compiled plan.
+Unknown liquidity roles, exit-event types, and same-bar conflict policies are
+invariant violations; they raise contextual errors instead of selecting a
+market, taker, backtest-end, or optimistic fallback.
+
 ## Slippage Modeling Gap
 
 Slippage is not yet empirically calibrated. Runtime has deterministic execution

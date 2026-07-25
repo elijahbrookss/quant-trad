@@ -22,9 +22,15 @@ class ExitExecutionPolicy:
 
 
 def normalize_liquidity_role(value: object) -> LiquidityRole:
-    """Normalize unknown or empty liquidity roles to taker."""
+    """Return a canonical liquidity role or reject malformed execution state."""
 
-    return "maker" if str(value or "").strip().lower() == "maker" else "taker"
+    normalized = str(value or "").strip().lower()
+    if normalized not in {"maker", "taker"}:
+        raise ValueError(
+            f"liquidity_role={normalized!r} is unsupported; "
+            "supported=['maker', 'taker']"
+        )
+    return "maker" if normalized == "maker" else "taker"
 
 
 def fee_rate_for_role(*, role: object, maker_fee_rate: float, taker_fee_rate: float) -> float:
@@ -76,13 +82,19 @@ def exit_policy_for(event_type: str) -> ExitExecutionPolicy:
             price_source="liquidation_price",
             reason_code="TERMINAL_LIQUIDATION",
         )
-    return ExitExecutionPolicy(
-        event_type="backtest_end",
-        exit_kind="CLOSE",
-        order_type="market",
-        liquidity_role="taker",
-        price_source="bar_close",
-        reason_code="BACKTEST_END",
+    if normalized == "backtest_end":
+        return ExitExecutionPolicy(
+            event_type="backtest_end",
+            exit_kind="CLOSE",
+            order_type="market",
+            liquidity_role="taker",
+            price_source="bar_close",
+            reason_code="BACKTEST_END",
+        )
+    raise ValueError(
+        f"exit event_type={normalized!r} is unsupported; "
+        "supported=['backtest_end', 'fixed_horizon', 'stop', 'target', "
+        "'terminal_liquidation']"
     )
 
 

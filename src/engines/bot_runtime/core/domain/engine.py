@@ -101,8 +101,6 @@ class LadderRiskEngine:
 
         self.base_risk_per_trade = coerce_float(self.execution_profile.risk.base_risk_per_trade)
 
-        self.execution_mode = self.execution_plan.entry.order_type
-
         self.contract_size = float(self.execution_profile.constraints.contract_size)
         if self.contract_size in (None, 0):
             raise ValueError("contract_size required from compiled execution profile")
@@ -164,7 +162,7 @@ class LadderRiskEngine:
         configured_context = self.runtime_log_context(
             targets=",".join(str(order.get("ticks") or order.get("r_multiple") or "?") for order in self.orders),
             tick_size=self.tick_size,
-            execution_mode=self.execution_mode,
+            execution_mode=self.execution_plan.entry.order_type,
             fixed_horizon_bars=self._fixed_horizon_bars(),
             instrument_type=self.execution_profile.instrument.instrument_type if self.execution_profile is not None else None,
             accounting_mode=self.execution_profile.accounting_mode if self.execution_profile is not None else None,
@@ -528,6 +526,7 @@ class LadderRiskEngine:
 
     def build_entry_request(self, candle: Candle, direction: str) -> EntryRequest:
         entry_request_id = self._entry_request_id(candle, direction)
+        order_type = self.execution_plan.entry.order_type
         atr_at_entry = candle.atr if self._has_valid_atr(candle.atr) else None
         r_ticks = self._compute_r_ticks(candle)
 
@@ -557,7 +556,7 @@ class LadderRiskEngine:
                 r_value=r_value,
                 atr_at_entry=atr_at_entry,
                 r_multiple_at_entry=self.r_multiple,
-                order_type="market" if self.execution_mode != "limit_maker" else "limit_maker",
+                order_type=order_type,
                 limit_params=None,
                 side="buy" if direction == "long" else "sell",
                 requested_price=float(candle.close),
@@ -619,7 +618,7 @@ class LadderRiskEngine:
                 r_value=r_value,
                 atr_at_entry=atr_at_entry,
                 r_multiple_at_entry=self.r_multiple,
-                order_type="market" if self.execution_mode != "limit_maker" else "limit_maker",
+                order_type=order_type,
                 limit_params=None,
                 side="buy" if direction == "long" else "sell",
                 requested_price=float(candle.close),
@@ -655,7 +654,7 @@ class LadderRiskEngine:
                 r_value=r_value,
                 atr_at_entry=atr_at_entry,
                 r_multiple_at_entry=self.r_multiple,
-                order_type="market" if self.execution_mode != "limit_maker" else "limit_maker",
+                order_type=order_type,
                 limit_params=None,
                 side="buy" if direction == "long" else "sell",
                 requested_price=float(candle.close),
@@ -674,7 +673,6 @@ class LadderRiskEngine:
 
         requested_qty = float(normalization.qty_final)
 
-        order_type = "market" if self.execution_mode != "limit_maker" else "limit_maker"
         limit_params: Optional[LimitParams] = None
         if order_type == "limit_maker":
             limit_params = self._build_limit_params(candle, direction=direction, r_value=r_value)
