@@ -20,17 +20,19 @@ engineering guidance; this file records only cleanup-specific state.
 | Candle-continuity extraction | integration baseline | Complete | — |
 | Canonical lifecycle ledger | `feats/lifecycle-canonical-ledger` | Complete | baseline |
 | Strict execution contracts | `feats/execution-contract-strictness` | Complete | lifecycle integration |
-| Compatibility/dead-path removal | `feats/compatibility-dead-path-removal` | Complete | strict execution contract ownership |
+| Compatibility/dead-path removal | `feats/compatibility-dead-path-removal` | In progress | strict execution contract ownership |
 | Canonical ATM input schema | `feats/atm-canonical-contract` | Complete | compatibility inventory |
 | Storage repository ownership | `feats/storage-repository-ownership` | Complete | compatibility caller migration |
 | Temporal/config ownership | `feats/config-temporal-ownership` | Complete | storage ownership |
-| Baseline hygiene | `feats/baseline-hygiene` | Complete | structural ownership settled |
-| Correctness evidence campaign | `feats/correctness-evidence-campaign` | Complete | all structural cleanup |
+| Baseline hygiene | `feats/baseline-hygiene` | In progress | structural ownership settled |
+| Correctness evidence campaign | `feats/correctness-evidence-campaign` | In progress | all structural cleanup |
 
 ## Canonical Decisions
 
 - `portal_bot_run_events` / `BotRunEventRecord` is the lifecycle event ledger.
-- `portal_bot_runs` is a rebuildable current-run summary, not lifecycle history.
+- `portal_bot_runs` is the current-run summary, not lifecycle history. Its
+  lifecycle status/timestamps must be ledger-projected; configuration and
+  provenance fields remain independently persisted run identity.
 - Raw execution configuration must compile once into a strict execution plan;
   runtime code must not reinterpret or silently repair it.
 - Backtest evaluation, indicator warmup, runtime recovery, overlay retention,
@@ -68,13 +70,16 @@ retired tables until that explicit hard cutover is complete.
 
 | Finding | Classification | Evidence / action |
 | --- | --- | --- |
-| Lifecycle models, schema, readers, writers, and tests | KEEP | `portal_bot_run_events` is the sole event ledger; `portal_bot_runs` is only the rebuildable summary. Legacy tables, fallback reads, mirrors, and synchronization code are absent after the validated hard cutover. |
+| Lifecycle models, schema, readers, writers, and tests | KEEP | Completed in `00440b2`: `portal_bot_run_events` is the sole lifecycle owner; direct run status/timestamp writers and fallback reads are gone; non-lifecycle run upserts reject lifecycle fields; phase/status/owner, chronology, terminality, and event-ID equivalence fail loudly; and lifecycle status/timestamps have an explicit ledger rebuild operation. |
 | Risk service re-exports, `template_metrics`, strategy `evaluate`, provider cache alias | DELETE | Internal callers either use the canonical package already or can import it directly; wrapper-specific tests are not behavioral coverage. |
 | Runtime streaming aggregate, one-thread-per-series runner, Python-version fallback, local `dotenv` shadow | DELETE | No production owners or callers; Python 3.12 and the declared `python-dotenv` dependency are canonical. |
 | BotLens mailbox aliases and `bot_projection_refresh` | DELETE | No producer or useful caller remains; unknown messages already fail into bounded observability. |
 | Broad `storage.storage` wildcard facade | CONSOLIDATE | Completed in `383d75b`: callers import named repository owners, bot orchestration uses one explicit gateway, package aggregates are empty, and the wildcard facade is deleted. Required gateway operations fail loudly rather than falling back through capability probes. |
 | ATM aliases and nested/flattened stop-adjustment shapes | CONSOLIDATE | Completed in `7bb68f4`: schema v2 snake-case policy is the sole input contract; explicit target IDs/fractions and flattened stable-ID stop rules are required, while wrappers, aliases, implicit allocation, and instrument economics are rejected. |
 | Implicit 20-tick breakeven movement | DELETE | Completed in `66aac0b` and `c5d3c76`: omitted breakeven and stop-adjustment policy compiles to disabled behavior, and the domain position default is zero. Breakeven movement now requires explicit configuration. |
+| Fill-adapter fallback, fabricated bridge sessions/raw fanout, duplicate material fingerprint | DELETE | Completed in `6ed8366`: typed `execute_order(FillOrder)`, explicit bridge identity, typed fanout envelopes, and `semantic_fingerprint` are the sole contracts. |
+| Silent internal execution coercions and missing ATM references | DELETE | Completed in `484ad56`: unknown same-bar, exit-event, terminal-reason, and liquidity values fail loudly; referenced ATM records must exist; entry order semantics come only from the compiled plan. |
+| Same-batch runtime-event ID ordering | DELETE | Completed in `58ea831`: event IDs are idempotency keys only; stable producer order determines dense canonical `run_seq`, and non-monotonic position clocks block golden certification. |
 | Playback `mode` fallback into `execution_mode` | CONSOLIDATE | Completed in `a5ef7de`: execution mode defaults at its own owner, accepts only `fast`/`full`, and rejects playback values. |
 | Indicator overlay-history interface and Candle Stats/Regime implementations | KEEP | Renamed in `a5ef7de` to the explicit `configure_overlay_history` contract. All three definitions mean render-only retention, not research range, evaluation, recovery, or warmup. |
 | Four replay-window dispatch helpers | CONSOLIDATE | Completed in `a5ef7de`: indicator preview, runtime validation, strategy preview, and bot setup use one fail-loud `configure_indicator_overlay_history` owner. |
@@ -88,8 +93,8 @@ retired tables until that explicit hard cutover is complete.
 | Filename-routed PR profile and stale controller test seam | DELETE | Completed in `35949fe`: the full non-database backend suite replaces the 70-line filename allowlist, and the overlay logging test now fails through the current metadata-service boundary. |
 | Commented changelog workflow experiment | DELETE | Completed in `7338f56`: the workflow had no executable path. The remote `test` branch still exists, so its active CI trigger remains. |
 | CLI operations | KEEP | `qt` is the canonical operator contract. Every invocation writes a redacted structured audit by default and API calls record method, URL, status, duration, and byte counts. Direct mutation commands do not consistently require plan/apply/confirm, and `--no-audit-log` can disable the record, so unrestricted CLI access is not yet an agent-safe boundary. |
-| MCP operations | VERIFY USAGE | All 42 registrations have handlers and no orphan definitions were found. Mutating tools require confirmation and usually plan by default; paper/live starts require an additional opt-in. External invocation is not visible in the internal call graph, so retain the thin optional adapter until usage evidence supports tool-level deletion. |
-| Missing bridge-session fallback to `"legacy"` | VERIFY USAGE | Verify every producer supplies a session identity before changing ingestion behavior. |
+| MCP operations | VERIFY USAGE | All 44 registrations have handlers and no orphan definitions were found. Mutating tools require confirmation and usually plan by default; paper/live starts require an additional opt-in. External invocation is not visible in the internal call graph, so retain the thin optional adapter until usage evidence supports tool-level deletion. |
+| Missing bridge-session fallback to `"legacy"` | DELETE | Completed in `6ed8366` after all production producers were verified to supply an explicit bridge session. |
 
 ## Scale and Agent-Safety Audit
 
@@ -148,8 +153,12 @@ retired tables until that explicit hard cutover is complete.
 | 2026-07-25 | `6fb995a` database ownership fixture | opt-in PostgreSQL profile: 3 passed; full suite against TimescaleDB: 1,260 passed, 47 pre-existing dependency/deprecation warnings, 22.55s |
 | 2026-07-25 | clean/repeated TimescaleDB bootstrap | isolated canonical startup and restart both produced 24 tables, 64 indexes, required extensions, and schema fingerprint `3ca3bf80c5b92e7883ecc066c5327495f234ff9eb047fb562a3d95d859544482`; normal empty legacy lifecycle tables were removed through the guarded migration |
 | 2026-07-25 | `c5d3c76` domain breakeven default | affected execution profile: 47 passed; direct `LadderPosition` construction now defaults to disabled breakeven; final full suite with PostgreSQL enabled: 1,261 passed, 47 pre-existing dependency/deprecation warnings, 25.67s |
-| 2026-07-25 | merge `074bc8d` correctness evidence campaign | child branch integrated into `feat/platform-baseline-cleanup` without history rewrite; all structural and correctness workstreams are complete |
+| 2026-07-25 | merge `074bc8d` correctness evidence campaign | child branch integrated into `feat/platform-baseline-cleanup` without history rewrite; later independent audit reopened the incomplete structural and correctness acceptance items recorded below |
 | 2026-07-25 | `a0e196e` canonical persisted runtime evidence | affected runtime/BotLens/reporting/wallet: 209 passed; PR profile: 1,268 passed; full local PostgreSQL profile: 1,268 passed, 3 gated tests skipped; gated DB profile: 3 passed. Repeated persisted runs `31a41c9a-d60c-4e0b-9ae9-9d8b367a4aaa` and `f0703de6-721b-47b2-a11f-f094f21745cc` each produced 12 decisions, 11 closed trades, 22 fills, 92 gap-free runtime-sequenced events, and ending equity 100,432.6918. Strategy, material config, data snapshot, material, and semantic fingerprints matched; wallet replay was consistent with zero drift or missing trace. Canonical continuity covered 269 candles with zero gaps. Golden policy remained blocked only by deferred `market_state_unavailable`; operational fingerprints differed as expected. |
+| 2026-07-25 | `6ed8366` compatibility hard cutover | affected runtime/BotLens/reporting: 275 passed; complete non-database backend gate after two fixture-only bridge-session corrections: 1,269 passed; docs: 2 passed; removed 219 lines of adapter, fanout, bridge, fingerprint, and dead-helper fallback behavior |
+| 2026-07-25 | `484ad56` execution invariant hardening | affected execution/strategy loader: 137 passed; complete non-database backend gate: 1,281 passed; docs: 2 passed; unknown policies/roles/events/reasons and orphan ATM references now fail before fills |
+| 2026-07-25 | `58ea831` canonical fact ordering | persistence/report/runtime-fact profile: 148 passed; complete non-database backend gate: 1,283 passed; docs: 2 passed; same-batch producer order is durable and non-monotonic trade clocks block golden certification |
+| 2026-07-25 | `00440b2` canonical lifecycle ownership | lifecycle/event/docs profile: 64 passed; complete non-database backend gate: 1,291 passed; clean isolated PostgreSQL profile: 3 passed; repeated Timescale startup and repeated PostgreSQL profile: 3 passed. Direct summary writers, status fallback reads, divergent event-ID retries, backdated/post-terminal checkpoints, and ignored decision-ledger run payloads were removed or rejected. |
 
 Each child branch must record its focused tests, broader regression profile,
 documentation validation, diff review, and remaining-reference search before
@@ -168,14 +177,22 @@ integration.
   by a run remain unsupported and must stay explicit in reports.
 - Margin accounting still has two persisted representations: raw fills for
   execution evidence and derived ledger events for wallet truth.
+- Existing persisted repeatability evidence proves matching semantic results,
+  not byte-identical operational artifacts; full prefix-truncation no-lookahead
+  and credential-free persisted paper replay remain unproven.
+- Runtime provenance is persisted but not exposed consistently in reports, and
+  `data_snapshot_hash` does not yet fingerprint candle values.
+- Long async research jobs have no owner heartbeat/fencing, and abandoned
+  report materializations have no stale-build recovery lease.
 - Sampled transport continuity can report apparent gaps even when producer-owned
   complete-series continuity is clean; the material/diagnostic distinction must
   remain visible to operators.
 
 ## Blockers and Deviations
 
-- Blockers: no merge blocker. Golden-candidate promotion remains policy-blocked
-  by deferred market-state capture.
+- Blockers: final merge readiness remains open on full no-lookahead/paper
+  replay evidence and demonstrated quality propagation gaps. Golden-candidate
+  promotion also remains policy-blocked by deferred market-state capture.
 - Deviations from the initial inventory: none yet.
 - The local TimescaleDB service on port 15432 passed full and gated database
   validation when the DSN was constructed from `POSTGRES_*`. The Make forensic
@@ -200,14 +217,14 @@ integration.
 - [x] One canonical lifecycle ledger; no mirrors or fallback reads
 - [x] Explicit, reconstructable, transactionally updated run summary projection
 - [x] Malformed canonical execution configuration fails before runtime
-- [x] Proven dead and compatibility-only production paths removed
-- [x] Explicit storage ownership and nonduplicated temporal dispatch
+- [ ] Proven dead and compatibility-only production paths removed
+- [ ] Explicit storage ownership and nonduplicated temporal dispatch
 - [x] Accurate backend CI with optional frontend checks
-- [x] Deterministic reference and repeated backtests
-- [x] No-lookahead checks
-- [x] Backtest and paper/runtime replay agreement under equal assumptions
+- [ ] Deterministic reference and repeated backtests
+- [ ] No-lookahead checks
+- [ ] Backtest and paper/runtime replay agreement under equal assumptions
 - [x] Order, fill, position, lifecycle, wallet, fee, P&L, and equity reconciliation
-- [x] Quality/provenance/readiness/trust evidence preserved end to end
+- [ ] Quality/provenance/readiness/trust evidence preserved end to end
 - [x] Clean and repeated database bootstrap validation
-- [x] Architecture and operator documentation aligned
-- [x] Integration branch clean, pushed, and ready for review
+- [ ] Architecture and operator documentation aligned
+- [ ] Integration branch clean, pushed, and ready for review
