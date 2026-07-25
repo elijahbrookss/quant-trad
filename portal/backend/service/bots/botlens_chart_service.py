@@ -8,13 +8,13 @@ from .botlens_chart_contracts import chart_history_response_contract
 from .botlens_contract import normalize_series_key
 from .botlens_domain_events import canonicalize_botlens_candle
 from .botlens_retrieval_queries import iter_all_run_domain_truth
-from ..storage import storage
+from ..storage.repos.candles import list_candles_for_series
 
 _CANDLE_EVENT_NAMES = ("CANDLE_OBSERVED",)
 
 
 def get_bot_run(run_id: str):
-    from ..storage.storage import get_bot_run as _get_bot_run
+    from ..storage.repos.runs import get_bot_run as _get_bot_run
 
     return _get_bot_run(run_id)
 
@@ -143,7 +143,7 @@ def get_symbol_chart_history(
 
     if not candles_by_time:
         instrument_id, timeframe = _series_identity(normalized_symbol_key)
-        source_candles = storage.list_candles_for_series(
+        source_candles = list_candles_for_series(
             instrument_id=instrument_id or "",
             timeframe=timeframe or "",
             start=start_dt,

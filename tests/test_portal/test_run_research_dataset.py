@@ -47,6 +47,10 @@ class _ResearchDatasetStorage:
         _ = run_id
         return [dict(row) for row in self._steps]
 
+    def list_bot_run_lifecycle_events(self, run_id: str):
+        _ = run_id
+        return []
+
     def list_observability_events(self, run_id: str, limit: int = 2000):
         _ = run_id
         return [dict(row) for row in self._observability_events[:limit]]
@@ -463,8 +467,33 @@ def _steps() -> list[dict[str, Any]]:
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, storage: _ResearchDatasetStorage) -> None:
-    monkeypatch.setattr(run_research_dataset, "storage", storage)
-    monkeypatch.setattr(report_data, "storage", storage)
+    for name in (
+        "get_bot_run",
+        "list_bot_trades_for_run",
+        "list_bot_run_steps_for_run",
+        "list_bot_run_lifecycle_events",
+        "list_observability_events",
+        "get_candle_storage_summary",
+        "list_candle_closure_evidence",
+        "list_candles_for_series",
+    ):
+        monkeypatch.setattr(run_research_dataset, name, getattr(storage, name))
+    monkeypatch.setattr(report_data, "get_bot_run", storage.get_bot_run)
+    monkeypatch.setattr(
+        report_data,
+        "list_bot_runtime_events",
+        storage.list_bot_runtime_events,
+    )
+    monkeypatch.setattr(
+        report_data,
+        "list_bot_trades_for_run",
+        storage.list_bot_trades_for_run,
+    )
+    monkeypatch.setattr(
+        report_data,
+        "list_observability_event_rows",
+        storage.list_observability_events,
+    )
 
 
 def _build(

@@ -29,7 +29,9 @@ def _to_int(value: Any, default: int = 0) -> int:
 
 
 def list_bot_runtime_events(**kwargs):
-    from ..storage.storage import list_bot_runtime_events as _list_bot_runtime_events
+    from ..storage.repos.runtime_events import (
+        list_bot_runtime_events as _list_bot_runtime_events,
+    )
 
     return _list_bot_runtime_events(**kwargs)
 

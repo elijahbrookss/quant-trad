@@ -85,36 +85,32 @@ def _load_projection_inputs_batch(
     if not bot_ids:
         return {}
 
-    latest_runs_loader = getattr(storage, "list_latest_bot_runs_by_bot_ids", None)
-    lifecycle_loader = getattr(storage, "list_latest_bot_run_lifecycles", None)
-    runs_by_id_loader = getattr(storage, "list_bot_runs_by_ids", None)
-    leases_by_id_loader = getattr(storage, "list_bot_run_leases_by_run_ids", None)
-    report_status_loader = getattr(storage, "list_report_materialization_statuses", None)
-    if not (
-        callable(latest_runs_loader)
-        and callable(lifecycle_loader)
-        and callable(runs_by_id_loader)
-        and callable(leases_by_id_loader)
-        and callable(report_status_loader)
-    ):
-        return {str(bot.get("id") or ""): _load_projection_inputs(bot) for bot in bots}
-
-    latest_runs_by_bot = dict(latest_runs_loader(bot_ids) or {})
+    latest_runs_by_bot = dict(storage.list_latest_bot_runs_by_bot_ids(bot_ids) or {})
     run_ids_by_bot = {
         bot_id: str((run or {}).get("run_id") or "").strip()
         for bot_id, run in dict(latest_runs_by_bot or {}).items()
         if str((run or {}).get("run_id") or "").strip()
     }
-    lifecycles_by_bot = dict(lifecycle_loader(bot_ids, run_ids_by_bot=run_ids_by_bot) or {})
+    lifecycles_by_bot = dict(
+        storage.list_latest_bot_run_lifecycles(
+            bot_ids,
+            run_ids_by_bot=run_ids_by_bot,
+        )
+        or {}
+    )
     selected_run_ids = set(run_ids_by_bot.values())
     for lifecycle in dict(lifecycles_by_bot or {}).values():
         run_id = str((lifecycle or {}).get("run_id") or "").strip()
         if run_id:
             selected_run_ids.add(run_id)
 
-    runs_by_id = dict(runs_by_id_loader(sorted(selected_run_ids)) or {})
-    leases_by_id = dict(leases_by_id_loader(sorted(selected_run_ids)) or {})
-    report_statuses = dict(report_status_loader(sorted(selected_run_ids)) or {})
+    runs_by_id = dict(storage.list_bot_runs_by_ids(sorted(selected_run_ids)) or {})
+    leases_by_id = dict(
+        storage.list_bot_run_leases_by_run_ids(sorted(selected_run_ids)) or {}
+    )
+    report_statuses = dict(
+        storage.list_report_materialization_statuses(sorted(selected_run_ids)) or {}
+    )
     telemetry_hub = _telemetry_hub()
 
     result: Dict[

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from portal.backend.service.storage import storage
+from portal.backend.service.storage.repos.bots import get_bot, upsert_bot
+from portal.backend.service.storage.repos.instruments import upsert_instrument
 
 
 def ensure_report_bot(
@@ -19,8 +20,8 @@ def ensure_report_bot(
         "run_type": "backtest",
         "status": status,
     }
-    storage.upsert_bot(payload)
-    bot = storage.get_bot(bot_id)
+    upsert_bot(payload)
+    bot = get_bot(bot_id)
     if not bot or bot.get("id") != bot_id:
         raise RuntimeError(f"report_test_builder_failed: bot_id={bot_id}")
     return bot
@@ -32,7 +33,7 @@ def ensure_report_instrument(
     datasource: str = "local",
     exchange: str = "test",
 ) -> Dict[str, Any]:
-    instrument = storage.upsert_instrument(
+    instrument = upsert_instrument(
         {
             "symbol": symbol,
             "datasource": datasource,

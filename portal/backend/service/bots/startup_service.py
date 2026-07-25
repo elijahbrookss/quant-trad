@@ -290,7 +290,10 @@ class BotStartupOrchestrator:
         )
 
     def _acquire_run_lease(self, ctx: BotStartupContext) -> None:
-        from ..storage.storage import bot_run_lease_token_hash, new_bot_run_lease_token
+        from ..storage.repos.run_leases import (
+            bot_run_lease_token_hash,
+            new_bot_run_lease_token,
+        )
 
         ctx.run_lease_token = new_bot_run_lease_token()
         lease = self.storage.acquire_bot_run_lease(

@@ -72,11 +72,12 @@ from portal.backend.service.observability_exporter import (
 from portal.backend.service.observability import BackendObserver
 from portal.backend.service.bots.startup_validation import validate_wallet_config
 from portal.backend.service.bots.strategy_loader import StrategyLoader
-from portal.backend.service.storage.storage import (
-    get_bot_run,
-    load_bots,
+from portal.backend.service.storage.repos.bots import load_bots
+from portal.backend.service.storage.repos.lifecycle import (
     record_bot_run_lifecycle_checkpoint,
-    upsert_bot_run,
+)
+from portal.backend.service.storage.repos.runs import get_bot_run, upsert_bot_run
+from portal.backend.service.storage.repos.runtime_events import (
     update_bot_runtime_status,
 )
 

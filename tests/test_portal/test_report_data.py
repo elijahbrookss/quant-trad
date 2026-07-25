@@ -62,6 +62,20 @@ class _FakeReportStorage:
         return [dict(row) for row in self._trades]
 
 
+def _install_storage(monkeypatch, storage: _FakeReportStorage) -> None:
+    monkeypatch.setattr(report_data, "get_bot_run", storage.get_bot_run)
+    monkeypatch.setattr(
+        report_data,
+        "list_bot_runtime_events",
+        storage.list_bot_runtime_events,
+    )
+    monkeypatch.setattr(
+        report_data,
+        "list_bot_trades_for_run",
+        storage.list_bot_trades_for_run,
+    )
+
+
 def _run(**overrides):
     data = {
         "run_id": "run-1",
@@ -160,7 +174,7 @@ def test_report_decision_ledger_reads_botlens_domain_decision_rows(monkeypatch) 
             ),
         ],
     )
-    monkeypatch.setattr(report_data, "storage", storage)
+    _install_storage(monkeypatch, storage)
 
     ledger = report_data.list_decision_ledger("run-1")
 
@@ -188,7 +202,7 @@ def test_report_decision_ledger_preserves_deterministic_known_at(monkeypatch) ->
             )
         ],
     )
-    monkeypatch.setattr(report_data, "storage", storage)
+    _install_storage(monkeypatch, storage)
 
     ledger = report_data.list_decision_ledger("run-1")
 
@@ -205,7 +219,7 @@ def test_report_rejection_count_matches_rejected_domain_decision_rows(monkeypatc
             _decision_row(3, decision_state="rejected", decision_id="decision-3", reason_code="MARGIN"),
         ],
     )
-    monkeypatch.setattr(report_data, "storage", storage)
+    _install_storage(monkeypatch, storage)
 
     summary = report_data.summarize_decision_ledger(report_data.list_decision_ledger("run-1"))
 
@@ -222,7 +236,7 @@ def test_report_accepted_count_matches_accepted_domain_decision_rows(monkeypatch
             _decision_row(3, decision_state="rejected", decision_id="decision-3", reason_code="MARGIN"),
         ],
     )
-    monkeypatch.setattr(report_data, "storage", storage)
+    _install_storage(monkeypatch, storage)
 
     summary = report_data.summarize_decision_ledger(report_data.list_decision_ledger("run-1"))
 
@@ -238,7 +252,7 @@ def test_result_readiness_is_false_when_accepted_trade_lifecycle_is_incomplete(m
             _trade_row(2, "TRADE_CLOSED", "trade-1"),
         ],
     )
-    monkeypatch.setattr(report_data, "storage", storage)
+    _install_storage(monkeypatch, storage)
 
     readiness = report_data.get_result_readiness("run-1")
 
@@ -264,7 +278,7 @@ def test_result_readiness_is_true_for_completed_clean_run(monkeypatch) -> None:
             }
         ],
     )
-    monkeypatch.setattr(report_data, "storage", storage)
+    _install_storage(monkeypatch, storage)
 
     readiness = report_data.get_result_readiness("run-1")
 
@@ -299,7 +313,7 @@ def test_result_readiness_is_false_when_completed_run_has_terminal_open_trade(mo
             }
         ],
     )
-    monkeypatch.setattr(report_data, "storage", storage)
+    _install_storage(monkeypatch, storage)
 
     readiness = report_data.get_result_readiness("run-1")
 
@@ -325,7 +339,7 @@ def test_result_readiness_is_false_when_financial_summary_missing(monkeypatch) -
             }
         ],
     )
-    monkeypatch.setattr(report_data, "storage", storage)
+    _install_storage(monkeypatch, storage)
 
     readiness = report_data.get_result_readiness("run-1")
 
@@ -340,7 +354,7 @@ def test_result_readiness_is_false_when_decision_summary_missing(monkeypatch) ->
         events=[],
         trades=[],
     )
-    monkeypatch.setattr(report_data, "storage", storage)
+    _install_storage(monkeypatch, storage)
 
     readiness = report_data.get_result_readiness("run-1", decision_summary={})
 

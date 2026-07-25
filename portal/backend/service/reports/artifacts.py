@@ -9,11 +9,17 @@ import json
 import logging
 from pathlib import Path
 import shutil
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from core.settings import get_settings
 from utils.log_context import build_log_context, with_log_context
+from ..storage.repos.indicators import get_indicator
+from ..storage.repos.runs import upsert_bot_run
+from ..storage.repos.trades import (
+    list_bot_trade_events_for_trades,
+    list_bot_trades_for_run,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -24,10 +30,47 @@ _SUPPORTED_OUTPUT_FORMATS = {"csv", "parquet"}
 _MANIFEST_VERSION = 1
 
 
-def _storage():
-    from portal.backend.service.storage import storage
+class ArtifactStorage(Protocol):
+    """Persistence operations required to materialize report artifacts."""
 
-    return storage
+    def get_indicator(self, indicator_id: str) -> Optional[Dict[str, Any]]: ...
+
+    def list_bot_trades_for_run(self, run_id: str) -> List[Dict[str, Any]]: ...
+
+    def list_bot_trade_events_for_trades(
+        self,
+        trade_ids: Iterable[str],
+    ) -> List[Dict[str, Any]]: ...
+
+    def upsert_bot_run(self, payload: Dict[str, Any]) -> Dict[str, Any]: ...
+
+
+class RepositoryArtifactStorage:
+    """Report artifact gateway over explicitly owned repositories."""
+
+    def get_indicator(self, indicator_id: str) -> Optional[Dict[str, Any]]:
+        return get_indicator(indicator_id)
+
+    def list_bot_trades_for_run(self, run_id: str) -> List[Dict[str, Any]]:
+        return list_bot_trades_for_run(run_id)
+
+    def list_bot_trade_events_for_trades(
+        self,
+        trade_ids: Iterable[str],
+    ) -> List[Dict[str, Any]]:
+        return list_bot_trade_events_for_trades(trade_ids)
+
+    def upsert_bot_run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return upsert_bot_run(payload)
+
+
+_ARTIFACT_STORAGE: ArtifactStorage = RepositoryArtifactStorage()
+
+
+def _storage() -> ArtifactStorage:
+    """Return the report-artifact-specific persistence gateway."""
+
+    return _ARTIFACT_STORAGE
 
 
 def _report_helpers():

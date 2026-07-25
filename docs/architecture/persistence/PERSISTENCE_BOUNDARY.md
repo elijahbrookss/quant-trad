@@ -16,6 +16,7 @@ code_paths:
   - portal/backend/db/session.py
   - portal/backend/service/provenance.py
   - portal/backend/service/storage
+  - portal/backend/service/bots/storage_gateway.py
   - portal/backend/service/storage/repos/lifecycle.py
   - portal/backend/service/storage/repos/run_leases.py
   - portal/backend/service/storage/repos/runtime_events.py
@@ -41,7 +42,13 @@ Related diagram: [runtime-event-ledger-flow.mmd](diagrams/runtime-event-ledger-f
 
 ## Boundary Contract
 
-`PG_DSN` is the only runtime persistence DSN. Runtime services should write through explicit repository or gateway boundaries, not hidden globals or alternate data stores.
+`PG_DSN` is the only runtime persistence DSN. Each persistence responsibility
+is owned by one named module under `portal/backend/service/storage/repos`.
+Services import those owners directly unless orchestration needs an injectable
+protocol, in which case the protocol and its repository-backed implementation
+live at the consuming service boundary. The bot runtime uses
+`bots/storage_gateway.py` for that purpose. The storage packages do not
+re-export repository functions, and there is no aggregate storage facade.
 
 Persistence owns durable storage. It does not own execution decisions or projection interpretation.
 

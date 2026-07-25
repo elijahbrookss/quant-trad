@@ -9,7 +9,10 @@ from typing import Any, Dict, Mapping
 
 from core.settings import get_settings
 
-from ..storage.storage import release_bot_run_lease, renew_bot_run_lease
+from ..storage.repos.run_leases import (
+    release_bot_run_lease,
+    renew_bot_run_lease,
+)
 
 logger = logging.getLogger(__name__)
 _BOT_RUNTIME_SETTINGS = get_settings().bot_runtime
