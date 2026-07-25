@@ -128,6 +128,7 @@ retired tables until that explicit hard cutover is complete.
 | 2026-07-25 | `6fb995a` database ownership fixture | opt-in PostgreSQL profile: 3 passed; full suite against TimescaleDB: 1,260 passed, 47 pre-existing dependency/deprecation warnings, 22.55s |
 | 2026-07-25 | clean/repeated TimescaleDB bootstrap | isolated canonical startup and restart both produced 24 tables, 64 indexes, required extensions, and schema fingerprint `3ca3bf80c5b92e7883ecc066c5327495f234ff9eb047fb562a3d95d859544482`; normal empty legacy lifecycle tables were removed through the guarded migration |
 | 2026-07-25 | `c5d3c76` domain breakeven default | affected execution profile: 47 passed; direct `LadderPosition` construction now defaults to disabled breakeven; final full suite with PostgreSQL enabled: 1,261 passed, 47 pre-existing dependency/deprecation warnings, 25.67s |
+| 2026-07-25 | merge `074bc8d` correctness evidence campaign | child branch integrated into `feat/platform-baseline-cleanup` without history rewrite; all structural and correctness workstreams are complete |
 
 Each child branch must record its focused tests, broader regression profile,
 documentation validation, diff review, and remaining-reference search before
@@ -178,4 +179,4 @@ integration.
 - [x] Quality/provenance/readiness/trust evidence preserved end to end
 - [x] Clean and repeated database bootstrap validation
 - [x] Architecture and operator documentation aligned
-- [ ] Integration branch clean, pushed, and ready for review
+- [x] Integration branch clean, pushed, and ready for review
