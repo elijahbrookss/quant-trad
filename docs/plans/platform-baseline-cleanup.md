@@ -40,6 +40,13 @@ engineering guidance; this file records only cleanup-specific state.
   `fast`, and is never inferred from playback.
 - Existing continuity, provenance, readiness, diagnostics, caveat, and trust
   contracts remain canonical until tests prove a structural gap.
+- Complete-series candle continuity is producer-owned and persisted at the
+  terminal run boundary independently of UI subscribers. Transport-observer
+  continuity remains diagnostic and cannot certify or block material data
+  quality.
+- Canonical fill events are execution and accounting evidence. Spot wallet
+  replay consumes those fills directly; margin wallet replay continues to use
+  the existing derived margin ledger until that path is consolidated.
 - Persistence responsibilities are owned by named repository modules. The bot
   orchestration boundary uses one explicit injectable gateway; storage packages
   do not aggregate or re-export repository functions.
@@ -74,6 +81,9 @@ retired tables until that explicit hard cutover is complete.
 | Research range, backtest evaluation, indicator warmup, runtime recovery, transport replay | KEEP | These are distinct windows with different clocks, failure policy, and consumers. Similar names are not evidence of duplication. |
 | Continuity, candle catalog, readiness, provenance, diagnostics, confidence, and caveats | KEEP | Created in dataset/report builders, finalized in readiness, persisted with report fingerprints/materializations, exported in report bundles, and displayed through CLI/MCP report resources and research-check results. |
 | Warmup/provider/truncation quality omissions | CONSOLIDATE | Completed in `38cf782`, `84dbf93`, and `0d8118f`: backtest warmup evidence is explicit, malformed candle frames fail before evaluation, and bounded observability reads expose coverage/truncation caveats. The existing envelope remains canonical. |
+| Viewer-dependent runtime facts and transport-derived continuity | CONSOLIDATE | Completed in `a0e196e`: canonical decision/fill facts are produced without subscribers, complete-series continuity is persisted by the runtime at `run_final`, and sampled transport continuity is explicitly diagnostic-only. |
+| Spot fill/accounting truth | CONSOLIDATE | Completed in `a0e196e`: entry/exit fills persist strict causal, fee, currency, accounting-mode, wallet-before/delta, and commit-clock evidence. Spot replay consumes 22 canonical fills without derived margin events and fails loudly on malformed or inconsistent state. |
+| Margin fill plus derived-ledger dual representation | CONSOLIDATE | Raw margin fills are retained for execution evidence while the existing derived margin ledger remains wallet truth. Report replay excludes raw margin fills to prevent double application; one canonical margin accounting representation remains deferred. |
 | Tracked `portal/frontend/.vite/deps` | DELETE | Completed in `7338f56`: the generated cache was removed, ignored, and a repository-wide tracked-artifact audit is clean. |
 | Filename-routed PR profile and stale controller test seam | DELETE | Completed in `35949fe`: the full non-database backend suite replaces the 70-line filename allowlist, and the overlay logging test now fails through the current metadata-service boundary. |
 | Commented changelog workflow experiment | DELETE | Completed in `7338f56`: the workflow had no executable path. The remote `test` branch still exists, so its active CI trigger remains. |
@@ -105,6 +115,16 @@ retired tables until that explicit hard cutover is complete.
   session-aware execution is not implemented.
 - Golden disagreement traces expose absent order/fill/accounting evidence as
   unavailable; they cannot reconstruct facts that a run did not persist.
+- Golden candidacy remains blocked when market-state capture is unavailable,
+  even when deterministic semantic comparison succeeds. Market-state expansion
+  remains intentionally out of scope.
+- The report instrument-semantics row can still show null `accounting_mode` and
+  `execution_semantics` for a spot instrument even though canonical fills carry
+  explicit `spot` accounting. This is a metadata-propagation gap, not a fill
+  replay ambiguity.
+- The local `LOCAL_PG_ENV` loader prefers a quoted/stale `PG_DSN` from
+  `secrets.env`; repository forensic targets fail in this environment unless
+  the DSN is constructed from the working PostgreSQL fields.
 - MCP host registration is optional and was not configured in the validated
   local Codex environment.
 - Frontend modernization, L2/order flow, market-state expansion, options, and
@@ -129,6 +149,7 @@ retired tables until that explicit hard cutover is complete.
 | 2026-07-25 | clean/repeated TimescaleDB bootstrap | isolated canonical startup and restart both produced 24 tables, 64 indexes, required extensions, and schema fingerprint `3ca3bf80c5b92e7883ecc066c5327495f234ff9eb047fb562a3d95d859544482`; normal empty legacy lifecycle tables were removed through the guarded migration |
 | 2026-07-25 | `c5d3c76` domain breakeven default | affected execution profile: 47 passed; direct `LadderPosition` construction now defaults to disabled breakeven; final full suite with PostgreSQL enabled: 1,261 passed, 47 pre-existing dependency/deprecation warnings, 25.67s |
 | 2026-07-25 | merge `074bc8d` correctness evidence campaign | child branch integrated into `feat/platform-baseline-cleanup` without history rewrite; all structural and correctness workstreams are complete |
+| 2026-07-25 | `a0e196e` canonical persisted runtime evidence | affected runtime/BotLens/reporting/wallet: 209 passed; PR profile: 1,268 passed; full local PostgreSQL profile: 1,268 passed, 3 gated tests skipped; gated DB profile: 3 passed. Repeated persisted runs `31a41c9a-d60c-4e0b-9ae9-9d8b367a4aaa` and `f0703de6-721b-47b2-a11f-f094f21745cc` each produced 12 decisions, 11 closed trades, 22 fills, 92 gap-free runtime-sequenced events, and ending equity 100,432.6918. Strategy, material config, data snapshot, material, and semantic fingerprints matched; wallet replay was consistent with zero drift or missing trace. Canonical continuity covered 269 candles with zero gaps. Golden policy remained blocked only by deferred `market_state_unavailable`; operational fingerprints differed as expected. |
 
 Each child branch must record its focused tests, broader regression profile,
 documentation validation, diff review, and remaining-reference search before
@@ -145,13 +166,21 @@ integration.
   extraction should continue only behind the established regression evidence.
 - Session-aware margin behavior and reconstruction of evidence never persisted
   by a run remain unsupported and must stay explicit in reports.
+- Margin accounting still has two persisted representations: raw fills for
+  execution evidence and derived ledger events for wallet truth.
+- Sampled transport continuity can report apparent gaps even when producer-owned
+  complete-series continuity is clean; the material/diagnostic distinction must
+  remain visible to operators.
 
 ## Blockers and Deviations
 
-- Blockers: none.
+- Blockers: no merge blocker. Golden-candidate promotion remains policy-blocked
+  by deferred market-state capture.
 - Deviations from the initial inventory: none yet.
-- The configured developer database on port 15432 rejected local credentials;
-  database validation used an isolated repository-defined TimescaleDB project.
+- The local TimescaleDB service on port 15432 passed full and gated database
+  validation when the DSN was constructed from `POSTGRES_*`. The Make forensic
+  environment preferred a quoted/stale `PG_DSN` and required an explicit local
+  environment workaround.
 - Strict execution scope expanded to compile ATM templates at strategy and
   standalone-template persistence boundaries and to include execution-contract
   tests in the PR profile; this closes an admission-timing gap found in review.
@@ -161,8 +190,10 @@ integration.
   quantity-step allocation.
 - Frontend checks remain intentionally skipped because frontend is outside the
   cleanup critical path.
-- A representative persisted real-strategy run was not fabricated: canonical
-  stores are empty and no approved credential-free seed/ingest command exists.
+- Two representative persisted real-strategy runs completed from the existing
+  local BTC/USD fixture without live orders or credentialed/paid market-data
+  calls. Failed strict-contract discovery runs remain in the developer database
+  as auditable degraded-terminal evidence.
 
 ## Final Acceptance
 
