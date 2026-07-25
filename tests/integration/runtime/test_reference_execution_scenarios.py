@@ -65,13 +65,17 @@ def _adapter(adapter_type: type[BacktestAdapter] | type[PaperAdapter]):
     )
 
 
-def _engine(adapter_type: type[BacktestAdapter] | type[PaperAdapter]) -> tuple[LadderRiskEngine, SharedWalletGateway]:
+def _engine(
+    adapter_type: type[BacktestAdapter] | type[PaperAdapter],
+    *,
+    base_risk_per_trade: float = 4.0,
+    take_profit_orders: list[dict[str, Any]] | None = None,
+) -> tuple[LadderRiskEngine, SharedWalletGateway]:
     engine = LadderRiskEngine(
         config={
             "initial_stop": {"atr_multiplier": 2.0},
-            "take_profit_orders": [
-                {"id": "tp-1", "ticks": 10, "size_fraction": 1.0}
-            ],
+            "take_profit_orders": take_profit_orders
+            or [{"id": "tp-1", "ticks": 10, "size_fraction": 1.0}],
             "execution_mode": "market",
         },
         instrument={
@@ -101,7 +105,7 @@ def _engine(adapter_type: type[BacktestAdapter] | type[PaperAdapter]) -> tuple[L
             },
             "metadata": {"info": {"base_increment": "1"}},
         },
-        risk_config={"base_risk_per_trade": 4.0},
+        risk_config={"base_risk_per_trade": base_risk_per_trade},
     )
     gateway = SharedWalletGateway(_wallet_proxy())
     engine.attach_wallet_gateway(gateway)
@@ -566,3 +570,420 @@ def test_reference_trace_is_repeatable_for_identical_inputs() -> None:
     )
 
     assert second == first
+
+
+def _run_multiple_target_reference(
+    *,
+    adapter_type: type[BacktestAdapter] | type[PaperAdapter],
+    direction: str,
+) -> dict[str, Any]:
+    engine, gateway = _engine(
+        adapter_type,
+        base_risk_per_trade=8.0,
+        take_profit_orders=[
+            {"id": "tp-1", "ticks": 5, "size_fraction": 0.5},
+            {"id": "tp-2", "ticks": 10, "size_fraction": 0.5},
+        ],
+    )
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    candles = [
+        Candle(
+            time=start,
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            atr=ATR,
+            volume=10.0,
+        ),
+        Candle(
+            time=start + timedelta(minutes=1),
+            open=100.0,
+            high=105.0 if direction == "long" else 100.0,
+            low=100.0 if direction == "long" else 95.0,
+            close=105.0 if direction == "long" else 95.0,
+            atr=ATR,
+            volume=10.0,
+        ),
+        Candle(
+            time=start + timedelta(minutes=2),
+            open=105.0 if direction == "long" else 95.0,
+            high=110.0 if direction == "long" else 95.0,
+            low=105.0 if direction == "long" else 90.0,
+            close=110.0 if direction == "long" else 90.0,
+            atr=ATR,
+            volume=10.0,
+        ),
+    ]
+    position = engine.maybe_enter(candles[0], direction)
+    assert position is not None
+    event_batches = []
+    for candle in candles[1:]:
+        events = engine.step(candle)
+        SettlementApplier(obs_enabled=False).apply(
+            events,
+            engine.exit_settlement,
+            execution_profile=engine.execution_profile,
+        )
+        event_batches.append(events)
+
+    target_events = [
+        event
+        for events in event_batches
+        for event in events
+        if event["type"] == "target"
+    ]
+    close_events = [
+        event
+        for events in event_batches
+        for event in events
+        if event["type"] == "close"
+    ]
+    trade = position.serialize()
+    wallet = gateway.project()
+    ending_equity = float(wallet.balances["USD"])
+    return {
+        "input_dataset": {
+            "identity": f"hand-verifiable-multiple-targets-{direction}-v1",
+            "fingerprint": _dataset_fingerprint(candles),
+            "requested_range": [
+                candles[0].time.isoformat(),
+                candles[-1].time.isoformat(),
+            ],
+            "loaded_range": [
+                candles[0].time.isoformat(),
+                candles[-1].time.isoformat(),
+            ],
+            "candles": [candle.serialize() for candle in candles],
+        },
+        "known_at": {
+            "boundary": candles[0].time.isoformat(),
+            "available_candle_count": 1,
+        },
+        "strategy_decision": {
+            "decision_id": "reference-decision",
+            "signal_id": "reference-signal",
+            "intent": f"enter_{direction}",
+            "known_at": candles[0].time.isoformat(),
+        },
+        "generated_order": {
+            "side": position.entry_order["side"],
+            "qty": position.entry_order["qty"],
+            "order_type": position.entry_order["order_type"],
+        },
+        "fills": [
+            {
+                "type": event["type"],
+                "leg_id": event["leg_id"],
+                "price": event["price"],
+                "contracts": event["contracts"],
+                "pnl": event["pnl"],
+                "fee_paid": event["fee_paid"],
+                "fee_type": event["fee_type"],
+                "order_type": event["order_type"],
+                "price_source": event["price_source"],
+            }
+            for event in target_events
+        ],
+        "lifecycle": {
+            "transitions": [
+                "ENTRY_OPENED",
+                *[event["type"].upper() for event in target_events],
+                *[event["type"].upper() for event in close_events],
+            ],
+            "leg_states": [
+                {
+                    "leg_id": leg["id"],
+                    "status": leg["status"],
+                    "contracts": leg["contracts"],
+                    "pnl": leg["pnl"],
+                }
+                for leg in trade["legs"]
+            ],
+        },
+        "accounting": {
+            "starting_cash": STARTING_CASH,
+            "realized_pnl": float(trade["gross_pnl"]),
+            "fees": float(trade["fees_paid"]),
+            "unrealized_pnl": 0.0,
+            "ending_equity": ending_equity,
+            "locked_margin": float(wallet.locked_margin.get("USD", 0.0)),
+            "free_collateral": float(wallet.free_collateral["USD"]),
+        },
+        "report": {
+            "gross_pnl": float(trade["gross_pnl"]),
+            "fees": float(trade["fees_paid"]),
+            "net_pnl": float(trade["net_pnl"]),
+            "equity_end": ending_equity,
+        },
+        "quality": {
+            "status": "ok",
+            "gaps": [],
+            "provenance": "hand_verified_fixture",
+            "caveats": [],
+        },
+    }
+
+
+@pytest.mark.parametrize("adapter_type", [BacktestAdapter, PaperAdapter])
+@pytest.mark.parametrize(
+    ("direction", "expected_fills", "expected_fees", "expected_equity"),
+    [
+        (
+            "long",
+            [
+                ("tp-1", 105.0, 1.0, 5.0, 0.105),
+                ("tp-2", 110.0, 1.0, 10.0, 0.11),
+            ],
+            0.615,
+            1014.385,
+        ),
+        (
+            "short",
+            [
+                ("tp-1", 95.0, 1.0, 5.0, 0.095),
+                ("tp-2", 90.0, 1.0, 10.0, 0.09),
+            ],
+            0.585,
+            1014.415,
+        ),
+    ],
+)
+def test_multiple_target_reference_reconciles(
+    adapter_type: type[BacktestAdapter] | type[PaperAdapter],
+    direction: str,
+    expected_fills: list[tuple[str, float, float, float, float]],
+    expected_fees: float,
+    expected_equity: float,
+) -> None:
+    trace = _run_multiple_target_reference(
+        adapter_type=adapter_type,
+        direction=direction,
+    )
+
+    assert trace["generated_order"]["qty"] == 2.0
+    assert [
+        (
+            fill["leg_id"],
+            fill["price"],
+            fill["contracts"],
+            fill["pnl"],
+            fill["fee_paid"],
+        )
+        for fill in trace["fills"]
+    ] == expected_fills
+    assert trace["lifecycle"]["transitions"] == [
+        "ENTRY_OPENED",
+        "TARGET",
+        "TARGET",
+        "CLOSE",
+    ]
+    assert sum(fill["contracts"] for fill in trace["fills"]) == 2.0
+    assert trace["accounting"]["realized_pnl"] == 15.0
+    assert trace["accounting"]["fees"] == pytest.approx(expected_fees)
+    assert trace["report"]["net_pnl"] == pytest.approx(15.0 - expected_fees)
+    assert trace["accounting"]["ending_equity"] == pytest.approx(expected_equity)
+    assert trace["accounting"]["locked_margin"] == 0.0
+    assert (
+        trace["accounting"]["starting_cash"]
+        + trace["accounting"]["realized_pnl"]
+        - trace["accounting"]["fees"]
+        + trace["accounting"]["unrealized_pnl"]
+        == pytest.approx(trace["accounting"]["ending_equity"])
+    )
+
+
+@pytest.mark.parametrize("direction", ["long", "short"])
+def test_multiple_target_reference_has_backtest_paper_parity_and_repeatability(
+    direction: str,
+) -> None:
+    first = _run_multiple_target_reference(
+        adapter_type=BacktestAdapter,
+        direction=direction,
+    )
+    second = _run_multiple_target_reference(
+        adapter_type=BacktestAdapter,
+        direction=direction,
+    )
+    paper = _run_multiple_target_reference(
+        adapter_type=PaperAdapter,
+        direction=direction,
+    )
+
+    assert second == first
+    assert paper == first
+
+
+def _run_terminal_reference(
+    *,
+    adapter_type: type[BacktestAdapter] | type[PaperAdapter],
+    direction: str,
+) -> dict[str, Any]:
+    engine, gateway = _engine(adapter_type)
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    entry = Candle(
+        time=start,
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        atr=ATR,
+        volume=10.0,
+    )
+    terminal = Candle(
+        time=start + timedelta(minutes=1),
+        open=100.0,
+        high=104.0 if direction == "long" else 101.0,
+        low=99.0 if direction == "long" else 96.0,
+        close=103.0 if direction == "long" else 97.0,
+        atr=ATR,
+        volume=10.0,
+    )
+    position = engine.maybe_enter(entry, direction)
+    assert position is not None
+    events = engine.force_close_active_trade_at_backtest_end(terminal)
+    SettlementApplier(obs_enabled=False).apply(
+        events,
+        engine.exit_settlement,
+        execution_profile=engine.execution_profile,
+    )
+    terminal_fill = next(event for event in events if event["type"] == "backtest_end")
+    close_event = next(event for event in events if event["type"] == "close")
+    trade = position.serialize()
+    wallet = gateway.project()
+    ending_equity = float(wallet.balances["USD"])
+    candles = [entry, terminal]
+    return {
+        "input_dataset": {
+            "identity": f"hand-verifiable-backtest-end-{direction}-v1",
+            "fingerprint": _dataset_fingerprint(candles),
+            "requested_range": [entry.time.isoformat(), terminal.time.isoformat()],
+            "loaded_range": [entry.time.isoformat(), terminal.time.isoformat()],
+            "candles": [candle.serialize() for candle in candles],
+        },
+        "known_at": {
+            "boundary": entry.time.isoformat(),
+            "available_candle_count": 1,
+        },
+        "strategy_decision": {
+            "decision_id": "reference-decision",
+            "signal_id": "reference-signal",
+            "intent": f"enter_{direction}",
+            "known_at": entry.time.isoformat(),
+        },
+        "generated_order": {
+            "side": position.entry_order["side"],
+            "qty": position.entry_order["qty"],
+            "order_type": position.entry_order["order_type"],
+        },
+        "fill": {
+            "type": terminal_fill["type"],
+            "price": terminal_fill["price"],
+            "contracts": terminal_fill["contracts"],
+            "pnl": terminal_fill["pnl"],
+            "fee_paid": terminal_fill["fee_paid"],
+            "fee_type": terminal_fill["fee_type"],
+            "order_type": terminal_fill["order_type"],
+            "price_source": terminal_fill["price_source"],
+            "reason_code": terminal_fill["reason_code"],
+        },
+        "lifecycle": {
+            "transitions": ["ENTRY_OPENED", "BACKTEST_END", "CLOSE"],
+            "close_reason": close_event["close_reason"],
+            "closed_at": trade["closed_at"],
+        },
+        "accounting": {
+            "starting_cash": STARTING_CASH,
+            "realized_pnl": float(trade["gross_pnl"]),
+            "fees": float(trade["fees_paid"]),
+            "unrealized_pnl": 0.0,
+            "ending_equity": ending_equity,
+            "locked_margin": float(wallet.locked_margin.get("USD", 0.0)),
+            "free_collateral": float(wallet.free_collateral["USD"]),
+        },
+        "report": {
+            "gross_pnl": float(trade["gross_pnl"]),
+            "fees": float(trade["fees_paid"]),
+            "net_pnl": float(trade["net_pnl"]),
+            "equity_end": ending_equity,
+        },
+        "quality": {
+            "status": "ok",
+            "gaps": [],
+            "provenance": "hand_verified_fixture",
+            "caveats": [],
+        },
+    }
+
+
+@pytest.mark.parametrize("adapter_type", [BacktestAdapter, PaperAdapter])
+@pytest.mark.parametrize(
+    ("direction", "exit_price", "expected_fees", "expected_equity"),
+    [
+        ("long", 103.0, 0.406, 1002.594),
+        ("short", 97.0, 0.394, 1002.606),
+    ],
+)
+def test_terminal_reference_reconciles(
+    adapter_type: type[BacktestAdapter] | type[PaperAdapter],
+    direction: str,
+    exit_price: float,
+    expected_fees: float,
+    expected_equity: float,
+) -> None:
+    trace = _run_terminal_reference(
+        adapter_type=adapter_type,
+        direction=direction,
+    )
+
+    assert trace["generated_order"]["qty"] == 1.0
+    assert trace["fill"] == {
+        "type": "backtest_end",
+        "price": exit_price,
+        "contracts": 1.0,
+        "pnl": 3.0,
+        "fee_paid": pytest.approx(exit_price * 0.002),
+        "fee_type": "taker",
+        "order_type": "market",
+        "price_source": "bar_close",
+        "reason_code": "BACKTEST_END",
+    }
+    assert trace["lifecycle"]["transitions"] == [
+        "ENTRY_OPENED",
+        "BACKTEST_END",
+        "CLOSE",
+    ]
+    assert trace["lifecycle"]["close_reason"] == "BACKTEST_END"
+    assert trace["accounting"]["realized_pnl"] == 3.0
+    assert trace["accounting"]["fees"] == pytest.approx(expected_fees)
+    assert trace["report"]["net_pnl"] == pytest.approx(3.0 - expected_fees)
+    assert trace["accounting"]["ending_equity"] == pytest.approx(expected_equity)
+    assert trace["accounting"]["locked_margin"] == 0.0
+    assert (
+        trace["accounting"]["starting_cash"]
+        + trace["accounting"]["realized_pnl"]
+        - trace["accounting"]["fees"]
+        + trace["accounting"]["unrealized_pnl"]
+        == pytest.approx(trace["accounting"]["ending_equity"])
+    )
+
+
+@pytest.mark.parametrize("direction", ["long", "short"])
+def test_terminal_reference_has_backtest_paper_parity_and_repeatability(
+    direction: str,
+) -> None:
+    first = _run_terminal_reference(
+        adapter_type=BacktestAdapter,
+        direction=direction,
+    )
+    second = _run_terminal_reference(
+        adapter_type=BacktestAdapter,
+        direction=direction,
+    )
+    paper = _run_terminal_reference(
+        adapter_type=PaperAdapter,
+        direction=direction,
+    )
+
+    assert second == first
+    assert paper == first
