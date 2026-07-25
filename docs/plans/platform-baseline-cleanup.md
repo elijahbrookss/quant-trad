@@ -23,7 +23,7 @@ engineering guidance; this file records only cleanup-specific state.
 | Compatibility/dead-path removal | `feats/compatibility-dead-path-removal` | Complete | strict execution contract ownership |
 | Canonical ATM input schema | `feats/atm-canonical-contract` | Complete | compatibility inventory |
 | Storage repository ownership | `feats/storage-repository-ownership` | Complete | compatibility caller migration |
-| Temporal/config ownership | `feats/config-temporal-ownership` | Pending | storage ownership |
+| Temporal/config ownership | `feats/config-temporal-ownership` | Complete | storage ownership |
 | Baseline hygiene | `feats/baseline-hygiene` | Pending | structural ownership settled |
 | Correctness evidence campaign | `feats/correctness-evidence-campaign` | Pending | all structural cleanup |
 
@@ -35,6 +35,9 @@ engineering guidance; this file records only cleanup-specific state.
   runtime code must not reinterpret or silently repair it.
 - Backtest evaluation, indicator warmup, runtime recovery, overlay retention,
   strategy lookback, research range, and transport replay remain distinct.
+- Indicator overlay history is render-only and configured through one
+  fail-loud dispatcher. Execution mode accepts only `fast`/`full`, defaults to
+  `fast`, and is never inferred from playback.
 - Existing continuity, provenance, readiness, diagnostics, caveat, and trust
   contracts remain canonical until tests prove a structural gap.
 - Persistence responsibilities are owned by named repository modules. The bot
@@ -64,9 +67,9 @@ retired tables until that explicit hard cutover is complete.
 | BotLens mailbox aliases and `bot_projection_refresh` | DELETE | No producer or useful caller remains; unknown messages already fail into bounded observability. |
 | Broad `storage.storage` wildcard facade | CONSOLIDATE | Completed in `383d75b`: callers import named repository owners, bot orchestration uses one explicit gateway, package aggregates are empty, and the wildcard facade is deleted. Required gateway operations fail loudly rather than falling back through capability probes. |
 | ATM aliases and nested/flattened stop-adjustment shapes | CONSOLIDATE | Completed in `7bb68f4`: schema v2 snake-case policy is the sole input contract; explicit target IDs/fractions and flattened stable-ID stop rules are required, while wrappers, aliases, implicit allocation, and instrument economics are rejected. |
-| Playback `mode` fallback into `execution_mode` | CONSOLIDATE | Playback and execution semantics are independent; remove the cross-domain default and require the execution default at its owner. |
-| Indicator `configure_replay_window` interface and Candle Stats/Regime implementations | KEEP | All three definitions mean visual overlay-history retention, not research range, evaluation, recovery, or warmup. |
-| Four replay-window dispatch helpers | CONSOLIDATE | Indicator preview, runtime validation, strategy preview, and bot setup duplicate dispatch ownership for the same overlay-retention hint. |
+| Playback `mode` fallback into `execution_mode` | CONSOLIDATE | Completed in `a5ef7de`: execution mode defaults at its own owner, accepts only `fast`/`full`, and rejects playback values. |
+| Indicator overlay-history interface and Candle Stats/Regime implementations | KEEP | Renamed in `a5ef7de` to the explicit `configure_overlay_history` contract. All three definitions mean render-only retention, not research range, evaluation, recovery, or warmup. |
+| Four replay-window dispatch helpers | CONSOLIDATE | Completed in `a5ef7de`: indicator preview, runtime validation, strategy preview, and bot setup use one fail-loud `configure_indicator_overlay_history` owner. |
 | Research range, backtest evaluation, indicator warmup, runtime recovery, transport replay | KEEP | These are distinct windows with different clocks, failure policy, and consumers. Similar names are not evidence of duplication. |
 | Continuity, candle catalog, readiness, provenance, diagnostics, confidence, and caveats | KEEP | Created in dataset/report builders, finalized in readiness, persisted with report fingerprints/materializations, exported in report bundles, and displayed through CLI/MCP report resources and research-check results. |
 | Warmup/provider/truncation quality omissions | CONSOLIDATE | Surface warmup shortfall and malformed/empty provider evidence; add an explicit caveat when the 2,000-event observability read truncates. Do not replace the envelope. |
@@ -86,6 +89,7 @@ retired tables until that explicit hard cutover is complete.
 | 2026-07-25 | `7338f56` compatibility/dead-path removal / merge `ea4b63d` | focused canonical-import/runtime/BotLens/provider checks: 65 passed; child and integration PR profiles: 880 passed, 284 deselected; docs: 2 passed; backend compileall passed; deleted 75,184 lines including tracked Vite cache, unused wrappers/shims, deprecated routing, and stale CI references |
 | 2026-07-25 | `7bb68f4` canonical ATM execution policy | focused ATM/runtime/strategy/reporting: 139 passed; runtime profile: 371 passed, 806 deselected; PR profile: 893 passed, 284 deselected; docs: 2 passed; backend compileall and remaining-reference audit passed; removed multi-template composition, alternative field shapes, implicit target allocation, and ATM-owned instrument economics |
 | 2026-07-25 | `383d75b` storage repository ownership | focused bot/storage/reporting: 139 passed; required-gateway follow-up: 25 passed; PR profile: 893 passed, 284 deselected; docs: 2 passed; backend compileall and remaining-reference audit passed; deleted the wildcard storage facade, emptied aggregate package exports, centralized the bot gateway, and removed optional storage capability fallbacks |
+| 2026-07-25 | `a5ef7de` temporal/config ownership | focused indicator/runtime/config: 105 passed; PR profile: 902 passed, 284 deselected; docs: 2 passed; affected compileall and remaining-reference audit passed; renamed visual replay hints to render-only overlay history, centralized four dispatchers, made malformed bounds fail loudly, and removed playback-to-execution inference |
 
 Each child branch must record its focused tests, broader regression profile,
 documentation validation, diff review, and remaining-reference search before
@@ -97,8 +101,6 @@ integration.
   always surfaced in quality evidence.
 - Report observability reads can truncate at 2,000 events without a truncation
   caveat.
-- Similar temporal names currently hide distinct semantics and duplicated
-  dispatch ownership.
 
 ## Blockers and Deviations
 
@@ -122,7 +124,7 @@ integration.
 - [x] Explicit, reconstructable, transactionally updated run summary projection
 - [x] Malformed canonical execution configuration fails before runtime
 - [x] Proven dead and compatibility-only production paths removed
-- [ ] Explicit storage ownership and nonduplicated temporal dispatch
+- [x] Explicit storage ownership and nonduplicated temporal dispatch
 - [ ] Accurate backend CI with optional frontend checks
 - [ ] Deterministic reference and repeated backtests
 - [ ] No-lookahead checks
