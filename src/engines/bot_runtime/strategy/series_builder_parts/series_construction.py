@@ -20,6 +20,7 @@ from engines.bot_runtime.core.domain import (
     normalize_epoch,
     timeframe_duration,
 )
+from engines.bot_runtime.core.domain.candle_factory import build_candles_from_dataframe
 from engines.bot_runtime.adapters import BacktestAdapter, LiveAdapter, PaperAdapter
 from engines.bot_runtime.core.execution_profile import (
     SeriesExecutionProfile,
@@ -89,73 +90,7 @@ class SeriesBuilderConstructionMixin:
 
     @staticmethod
     def _build_candles(df: Any, timeframe: Optional[str] = None) -> List[Candle]:
-        import pandas as pd
-
-        frame = df.copy()
-        frame.index = pd.to_datetime(frame.index, utc=True)
-        if not frame.index.is_monotonic_increasing:
-            frame = frame.sort_index()
-        range_series = frame.get("high", frame.get("High")) - frame.get("low", frame.get("Low"))
-        frame["__range__"] = range_series
-        atr_col = None
-        for candidate in ("ATR_Wilder", "atr", "atr_wilder"):
-            if candidate in frame.columns:
-                atr_col = candidate
-                break
-        volume_col = None
-        for candidate in ("volume", "Volume"):
-            if candidate in frame.columns:
-                volume_col = candidate
-                break
-        if atr_col:
-            frame["__avg_atr_15"] = frame[atr_col].rolling(window=15).mean().shift(1)
-        frame["__avg_range_15"] = range_series.rolling(window=15).mean().shift(1)
-        if volume_col:
-            frame["__avg_volume_15"] = frame[volume_col].rolling(window=15).mean().shift(1)
-        candles: List[Candle] = []
-        duration = timeframe_duration(timeframe)
-        for ts, row in frame.iterrows():
-            try:
-                open_price = float(row.get("open", row.get("Open")))
-                high_price = float(row.get("high", row.get("High")))
-                low_price = float(row.get("low", row.get("Low")))
-                close_price = float(row.get("close", row.get("Close")))
-            except (TypeError, ValueError):
-                continue
-            start_dt = ts.to_pydatetime()
-            end_dt = start_dt + duration if duration else None
-            atr_value = None
-            if atr_col and row.get(atr_col) is not None:
-                try:
-                    atr_value = float(row.get(atr_col))
-                except (TypeError, ValueError):
-                    atr_value = None
-            volume_value = None
-            if volume_col and row.get(volume_col) is not None:
-                try:
-                    volume_value = float(row.get(volume_col))
-                except (TypeError, ValueError):
-                    volume_value = None
-            lookback = {
-                "avg_range_15": row.get("__avg_range_15"),
-                "avg_atr_15": row.get("__avg_atr_15"),
-                "avg_volume_15": row.get("__avg_volume_15"),
-            }
-            candles.append(
-                Candle(
-                    time=start_dt,
-                    open=open_price,
-                    high=high_price,
-                    low=low_price,
-                    close=close_price,
-                    end=end_dt,
-                    atr=atr_value,
-                    volume=volume_value,
-                    range=float(high_price - low_price),
-                    lookback_15={k: float(v) if v is not None and not pd.isna(v) else None for k, v in lookback.items()},
-                )
-            )
-        return candles
+        return build_candles_from_dataframe(df, timeframe=timeframe)
 
     def _build_atm_template(self, strategy: Strategy) -> Dict[str, Any]:
         """Return the canonical strategy-owned execution-policy template."""
