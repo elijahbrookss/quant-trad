@@ -912,6 +912,48 @@ def test_dataset_includes_timeseries_context_and_candle_catalog(monkeypatch: pyt
     assert dataset["operational_health"]["event_volume_summary"]["total"] >= 1
 
 
+def test_dataset_reports_observability_event_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observability_events = [
+        {
+            "event_name": "diagnostic_event",
+            "level": "INFO",
+            "observed_at": "2026-04-01T00:00:00Z",
+            "details": {"index": index},
+        }
+        for index in range(2001)
+    ]
+
+    dataset = _build(
+        monkeypatch,
+        observability_events=observability_events,
+    )
+
+    coverage = dataset["operational_health"]["observability_event_coverage"]
+    assert coverage == {
+        "schema_version": "observability_event_coverage.v1",
+        "status": "truncated",
+        "retained_count": 2000,
+        "probe_count": 2001,
+        "limit": 2000,
+        "has_more": True,
+        "ordering": "observed_at_desc",
+    }
+    assert "observability_events_truncated" in dataset["readiness"]["caveats"]
+    assert (
+        "observability_events_truncated"
+        in dataset["readiness"]["golden_blocking_reasons"]
+    )
+    diagnostics = {
+        row["code"]: row for row in dataset["diagnostics"]["items"]
+    }
+    assert (
+        diagnostics["observability_events_truncated"]["readiness_impact"]
+        == "blocks_golden"
+    )
+
+
 def test_dataset_extracts_runtime_indicator_and_market_context_from_signal_artifact(monkeypatch: pytest.MonkeyPatch) -> None:
     events = [
         _event(
