@@ -139,14 +139,17 @@ Use focused checks first, then broaden only when the change warrants it:
 - `make test-reporting-api`
 - `make test-botlens`
 - `make validate-docs`
-- `make frontend-test`
-- `make frontend-build`
 - `make git-check`
 - `make check`
+- `make frontend-check` only when intentionally validating the legacy frontend
 
 `make test-reporting-api` is intentionally separate from `make test-reporting`
 because it starts FastAPI route tests and may expose backend lifespan, DB, or
 watchdog readiness issues. It is bounded by `REPORT_API_TEST_TIMEOUT`.
+
+`make check` is the backend baseline: repository hygiene, architecture-doc
+contracts, and every non-database backend test. `make check-all` adds the
+optional legacy frontend tests and build.
 
 For architecture-affecting changes, follow `AGENTS.md`: inspect
 `docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md`, update targeted component
