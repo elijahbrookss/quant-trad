@@ -61,13 +61,8 @@ def _spot_instrument() -> dict:
 def _engine(instrument: dict, *, base_risk_per_trade: float = 10.0) -> LadderRiskEngine:
     return LadderRiskEngine(
         config={
-            "tick_size": instrument["tick_size"],
-            "contract_size": instrument["contract_size"],
-            "tick_value": instrument["tick_value"],
-            "taker_fee_rate": 0.001,
-            "maker_fee_rate": 0.0005,
             "initial_stop": {"atr_multiplier": 1.0},
-            "take_profit_orders": [{"id": "tp-1", "ticks": 10, "contracts": 1}],
+            "take_profit_orders": [{"id": "tp-1", "ticks": 10, "size_fraction": 1.0}],
             "execution_mode": "market",
         },
         instrument=instrument,

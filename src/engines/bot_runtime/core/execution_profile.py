@@ -231,7 +231,6 @@ def _instrument_fields(instrument: Mapping[str, Any]) -> Mapping[str, Any]:
 
 def _proxy_margin_rates(
     instrument: Mapping[str, Any],
-    template: Optional[Mapping[str, Any]],
 ) -> Mapping[str, Any]:
     instrument_fields = _instrument_fields(instrument)
     configured = _extract_mapping(
@@ -239,7 +238,6 @@ def _proxy_margin_rates(
         instrument.get("margin_rates"),
         instrument_fields.get("proxy_derivative_margin_rates"),
         instrument_fields.get("margin_rates"),
-        template.get("proxy_derivative_margin_rates") if isinstance(template, Mapping) else None,
     )
     if configured:
         return configured
@@ -252,13 +250,11 @@ def _proxy_margin_rates(
 
 def _proxy_instrument_fields(
     instrument: Mapping[str, Any],
-    template: Optional[Mapping[str, Any]],
 ) -> Mapping[str, Any]:
     instrument_fields = _instrument_fields(instrument)
     configured = _extract_mapping(
         instrument.get("proxy_derivative_instrument_fields"),
         instrument_fields.get("proxy_derivative_instrument_fields"),
-        template.get("proxy_derivative_instrument_fields") if isinstance(template, Mapping) else None,
     )
     if configured:
         return configured
@@ -273,7 +269,6 @@ def _execution_margin_instrument(
     instrument: Mapping[str, Any],
     *,
     execution_semantics: str,
-    template: Optional[Mapping[str, Any]],
 ) -> Mapping[str, Any]:
     if execution_semantics != "proxy_derivative":
         return instrument
@@ -281,7 +276,7 @@ def _execution_margin_instrument(
     proxy["instrument_type"] = "future"
     proxy["can_short"] = True
     proxy["short_requires_borrow"] = False
-    proxy["margin_rates"] = dict(_proxy_margin_rates(instrument, template))
+    proxy["margin_rates"] = dict(_proxy_margin_rates(instrument))
     return proxy
 
 
@@ -289,7 +284,6 @@ def _execution_instrument(
     instrument: Mapping[str, Any],
     *,
     execution_semantics: str,
-    template: Optional[Mapping[str, Any]],
 ) -> Mapping[str, Any]:
     if execution_semantics != "proxy_derivative":
         return instrument
@@ -298,14 +292,14 @@ def _execution_instrument(
     metadata = dict(proxy.get("metadata") or {})
     instrument_fields = dict(metadata.get("instrument_fields") or {})
 
-    for key, value in _proxy_instrument_fields(instrument, template).items():
+    for key, value in _proxy_instrument_fields(instrument).items():
         proxy[key] = deepcopy(value)
         instrument_fields[key] = deepcopy(value)
 
     proxy["instrument_type"] = "future"
     proxy["can_short"] = True
     proxy["short_requires_borrow"] = False
-    proxy["margin_rates"] = dict(_proxy_margin_rates(instrument, template))
+    proxy["margin_rates"] = dict(_proxy_margin_rates(instrument))
     for fee_key in ("maker_fee_rate", "taker_fee_rate"):
         proxy_fee_key = f"proxy_derivative_{fee_key}"
         if fee_key in proxy:
@@ -387,14 +381,13 @@ def _allowed_types(
 def compile_series_execution_profile(
     instrument: Mapping[str, Any],
     *,
-    template: Optional[Mapping[str, Any]] = None,
     risk_config: Optional[Mapping[str, Any]] = None,
     require_margin_accounting: bool = False,
     allowed_source_instrument_types: Optional[Iterable[str]] = None,
     execution_semantics: Optional[object] = None,
     research_market_role: Optional[object] = None,
 ) -> SeriesExecutionProfile:
-    """Compile a canonical runtime profile from instrument/template payloads."""
+    """Compile a canonical runtime profile from instrument and risk contracts."""
 
     if not isinstance(instrument, Mapping) or not instrument:
         raise ValueError("instrument metadata missing. Validate instrument before runtime.")
@@ -430,7 +423,6 @@ def compile_series_execution_profile(
     execution_instrument = _execution_instrument(
         instrument,
         execution_semantics=resolved_execution_semantics,
-        template=template,
     )
 
     amount_constraints = resolve_amount_constraints(execution_instrument)
@@ -450,7 +442,6 @@ def compile_series_execution_profile(
     margin_instrument = _execution_margin_instrument(
         execution_instrument,
         execution_semantics=resolved_execution_semantics,
-        template=template,
     )
     margin_rates = extract_margin_rates(margin_instrument)
     try:

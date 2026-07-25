@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import risk as risk_math
-from atm import merge_templates
+from atm import normalise_template
 from risk import normalise_risk_config
 
 from utils.log_context import build_log_context, merge_log_context, with_log_context
@@ -65,19 +65,15 @@ class LadderRiskEngine:
         risk_config: Optional[Mapping[str, Any]] = None,
     ):
         provided_template = config or {}
-        self.template = merge_templates(provided_template)
+        self.template = normalise_template(provided_template)
         self.execution_plan = compile_runtime_execution_plan(self.template)
         self.instrument = instrument or {}
         self.risk_config = normalise_risk_config(risk_config)
         self.execution_profile = execution_profile or compile_series_execution_profile(
             self.instrument,
-            template=self.template,
             risk_config=self.risk_config,
         )
         self._runtime_log_context = build_log_context(
-            strategy_id=self.template.get("strategy_id"),
-            strategy_name=self.template.get("strategy_name"),
-            timeframe=self.template.get("timeframe"),
             symbol=self.instrument.get("symbol"),
             datasource=self.instrument.get("datasource"),
             exchange=self.instrument.get("exchange"),
@@ -290,9 +286,9 @@ class LadderRiskEngine:
 
     def _entry_request_id(self, candle: Candle, direction: str) -> str:
         bar_time = candle.time.isoformat() if getattr(candle, "time", None) is not None else ""
-        run_id = getattr(self, "run_id", None) or self.template.get("run_id") or ""
-        strategy_id = getattr(self, "strategy_id", None) or self.template.get("strategy_id") or ""
-        timeframe = self.template.get("timeframe") or self.instrument.get("timeframe") or ""
+        run_id = getattr(self, "run_id", None) or ""
+        strategy_id = getattr(self, "strategy_id", None) or ""
+        timeframe = self.instrument.get("timeframe") or ""
         instrument_id = self.instrument.get("id") or ""
         symbol = self.instrument.get("symbol") or ""
         decision_id = getattr(self, "last_decision_id", None) or ""

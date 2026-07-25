@@ -60,10 +60,11 @@ policy fields:
 - `exit_plan.fixed_horizon` declares a deterministic hold duration in completed
   bars and closes remaining open legs at bar close with a market/taker exit.
 - `breakeven` and `stop_adjustments` declare one-time stop movement. ATM
-  normalization accepts nested and flattened compatibility forms, then runtime
-  consumes canonical execution-plan objects.
+  templates use mapping-valued breakeven policy and flattened stop-adjustment
+  rules with stable IDs; other shapes are rejected.
 - `trailing` declares activation and distance inputs. The active stop only
   tightens in the favorable direction.
+- Take-profit orders declare stable IDs and explicit fractions totaling one.
 
 Bot runtime maps exit events to explicit order and liquidity-role semantics:
 

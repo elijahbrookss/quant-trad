@@ -30,19 +30,34 @@ from engines.bot_runtime.core.execution_plan import compile_runtime_execution_pl
                     {"id": "tp-2", "ticks": 20},
                 ]
             },
-            "size_fraction for every target or for none",
+            "take_profit_orders[1].size_fraction is required",
         ),
-        ({"stop_ticks": "not-a-number"}, "unsupported ATM stop fields"),
-        ({"targets": [2.5]}, "targets[0] must be an integer"),
+        ({"stop_ticks": "not-a-number"}, "ATM template contains unsupported fields"),
+        ({"targets": [2.5]}, "ATM template contains unsupported fields"),
         (
-            {"take_profit_orders": [{"id": "tp-1", "ticks": 10, "target_ticks": 20}]},
-            "conflicting tick fields",
+            {
+                "take_profit_orders": [
+                    {
+                        "id": "tp-1",
+                        "ticks": 10,
+                        "target_ticks": 20,
+                        "size_fraction": 1.0,
+                    }
+                ]
+            },
+            "take_profit_orders[0] contains unsupported fields",
         ),
+        ({"executionMode": "market"}, "ATM template contains unsupported fields"),
+        ({"limit_maker": {"offset": {"type": "ticks"}}}, "limit_maker contains unsupported fields"),
+        ({"exit_plan": {"fixedHorizon": {}}}, "exit_plan contains unsupported fields"),
+        ({"breakeven": 8}, "breakeven must be a mapping"),
+        ({"trailing": True}, "trailing must be a mapping"),
         ({"stop_adjustments": ["not-a-rule"]}, "stop_adjustments[0] must be a mapping"),
         (
             {
                 "stop_adjustments": [
                     {
+                        "id": "sa-ignore",
                         "trigger_type": "r_multiple",
                         "trigger_value": 1.0,
                         "action_type": "ignore",
@@ -50,6 +65,37 @@ from engines.bot_runtime.core.execution_plan import compile_runtime_execution_pl
                 ]
             },
             "action_type='ignore' is unsupported",
+        ),
+        (
+            {
+                "stop_adjustments": [
+                    {
+                        "id": "sa-nested",
+                        "trigger": {"type": "r_multiple_reached", "value": 1.0},
+                        "action": {"type": "move_to_breakeven"},
+                    }
+                ]
+            },
+            "stop_adjustments[0] contains unsupported fields",
+        ),
+        (
+            {
+                "stop_adjustments": [
+                    {
+                        "id": "duplicate",
+                        "trigger_type": "r_multiple",
+                        "trigger_value": 1.0,
+                        "action_type": "move_to_breakeven",
+                    },
+                    {
+                        "id": "duplicate",
+                        "trigger_type": "r_multiple",
+                        "trigger_value": 2.0,
+                        "action_type": "move_to_breakeven",
+                    },
+                ]
+            },
+            "duplicates stop-adjustment id",
         ),
         (
             {"exit_plan": {"fixed_horizon": {"enabled": True, "bars": "many"}}},
@@ -97,7 +143,7 @@ def test_compiler_rejects_ambiguous_trailing_distance() -> None:
 def test_compiler_rejects_invalid_disabled_trailing_target_reference() -> None:
     config = normalise_template(
         {
-            "take_profit_orders": [{"id": "tp-1", "ticks": 10}],
+            "take_profit_orders": [{"id": "tp-1", "ticks": 10, "size_fraction": 1.0}],
             "trailing": {
                 "enabled": False,
                 "activation_type": "target_hit",
@@ -116,7 +162,7 @@ def test_compiler_rejects_invalid_disabled_trailing_target_reference() -> None:
 def test_compiler_rejects_unknown_stop_adjustment_target() -> None:
     config = normalise_template(
         {
-            "take_profit_orders": [{"id": "tp-1", "ticks": 10}],
+            "take_profit_orders": [{"id": "tp-1", "ticks": 10, "size_fraction": 1.0}],
             "stop_adjustments": [],
         }
     )
@@ -141,6 +187,18 @@ def test_compiler_rejects_malformed_config_even_if_normalizer_is_bypassed() -> N
     malformed["execution_mode"] = "iceberg"
 
     with pytest.raises(ValueError, match="execution_mode"):
+        compile_runtime_execution_plan(malformed)
+
+
+def test_compiler_rejects_unknown_fields_when_normalizer_is_bypassed() -> None:
+    config = normalise_template({"stop_adjustments": []})
+    malformed = deepcopy(config)
+    malformed["take_profit_orders"][0]["target_ticks"] = 10
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape("take_profit_orders[0] contains unsupported fields"),
+    ):
         compile_runtime_execution_plan(malformed)
 
 

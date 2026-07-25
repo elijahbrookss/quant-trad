@@ -417,11 +417,12 @@ def _strategy_config_sections(config: Mapping[str, Any]) -> Dict[str, Any]:
         or _first_config_section(strategy_map, "indicators", "indicator_config", "indicator_bindings")
         or _first_config_section(bot, "indicators", "indicator_config")
     )
+    atm_template = _mapping(strategy_map.get("atm_template"))
+    atm_template_id = str(strategy_map.get("atm_template_id") or "").strip() or None
     atm_config = (
-        _first_config_section(config, "atm", "atm_template", "atm_config", "bracket_template")
-        or _first_config_section(strategy_map, "atm", "atm_template", "atm_config", "bracket_template")
-        or _first_config_section(risk, "atm", "atm_template", "bracket_template")
-        or _first_config_section(bot, "atm", "atm_template", "atm_config")
+        {"template_id": atm_template_id, "template": atm_template}
+        if atm_template_id or atm_template
+        else {}
     )
     execution_config = {
         "execution_mode": config.get("execution_mode") or bot.get("execution_mode") or risk.get("execution_mode"),
