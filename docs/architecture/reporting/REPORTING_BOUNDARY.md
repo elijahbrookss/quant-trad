@@ -13,6 +13,7 @@ tags:
 code_paths:
   - portal/backend/service/provenance.py
   - portal/backend/service/reports
+  - portal/backend/service/reports/candle_continuity.py
   - portal/backend/controller/reports.py
   - portal/backend/service/reports/comparison.py
   - portal/backend/service/reports/golden_evidence.py
@@ -259,6 +260,10 @@ semantics.
   reclassify unknown gaps from `portal_candle_closures` evidence for the same
   instrument/timeframe/window. Unknown continuity is a data quality caveat, and
   unclassified/runtime/projection/ingestion gaps block golden readiness.
+- `reports/candle_continuity.py` owns the pure reporting-time transformation of
+  unknown gap rows against already-loaded closure evidence. The dataset builder
+  owns evidence loading, caching, and diagnostics and delegates classification
+  without reordering gaps or reconstructing candle history.
 - Headless research runs must emit canonical `run_final` continuity evidence
   without requiring BotLens to be opened.
 - Strategy rows in report config snapshots must preserve the run-start

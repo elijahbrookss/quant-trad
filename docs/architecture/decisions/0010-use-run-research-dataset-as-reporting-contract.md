@@ -12,6 +12,7 @@ tags:
   - export
 code_paths:
   - portal/backend/service/reports/run_research_dataset.py
+  - portal/backend/service/reports/candle_continuity.py
   - portal/backend/service/reports/contract.py
   - portal/backend/service/reports/export_bundle.py
   - portal/backend/service/reports/schemas.py
@@ -60,4 +61,3 @@ reasons, and material fingerprint.
 - [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)
 - [Reporting contract redesign](../reporting/REPORTING_CONTRACT_REDESIGN.md)
 - [Reporting datasets concept](../../concepts/reporting-datasets.md)
-
