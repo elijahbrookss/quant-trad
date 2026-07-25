@@ -54,7 +54,7 @@ run_profiles() {
 
 case "$SUITE" in
   pr)
-    run_suite "QT_OMIT_DB_TESTS=1 QT_CI_PROFILE=pr pytest -q"
+    run_suite "QT_OMIT_DB_TESTS=1 pytest -q"
     ;;
   contracts)
     run_profiles core provider cli docs

@@ -36,7 +36,6 @@ _install_session_event_loop()
 
 
 _CI_PROFILES = {
-    "pr",
     "core",
     "provider",
     "runtime",
@@ -203,78 +202,9 @@ def _ci_profile_markers_for_path(path: str) -> set[str]:
     return profiles
 
 
-def _is_pr_profile_test(path: str, name: str) -> bool:
-    if path.startswith("tests/smoke/") or path.startswith("tests/contract/"):
-        return True
-    if path.startswith("tests/test_cli/"):
-        return True
-    if path.startswith("tests/test_data_providers/"):
-        return True
-    if path.startswith("tests/integration/runtime/"):
-        return True
-    if path.startswith("tests/test_indicators/") or path.startswith("tests/test_strategies/"):
-        return True
-    if path in {
-        "tests/test_atm_template.py",
-        "tests/test_execution_plan_contract.py",
-        "tests/test_indicator_engine_overlays.py",
-        "tests/test_perf_log.py",
-    }:
-        return True
-    if path.startswith("tests/test_reports/"):
-        return name != "test_reports_endpoints.py"
-    if not path.startswith("tests/test_portal/"):
-        return False
-
-    return (
-        name.startswith("test_bot_runtime_")
-        or name.startswith("test_botlens_bootstrap_contracts")
-        or name.startswith("test_botlens_canonical_facts")
-        or name.startswith("test_botlens_domain_events")
-        or name.startswith("test_botlens_event_replay_ordering")
-        or name.startswith("test_botlens_execution_mode_contract")
-        or name.startswith("test_botlens_runtime_state")
-        or name.startswith("test_botlens_typed_deltas")
-        or name.startswith("test_bots_repo_status_contract")
-        or name.startswith("test_fee_")
-        or name.startswith("test_indicator_runtime_contract")
-        or name.startswith("test_indicator_signal_endpoint_filtering")
-        or name.startswith("test_indicator_type_details")
-        or name.startswith("test_lifecycle_")
-        or name.startswith("test_margin_")
-        or name.startswith("test_observe_only_runtime")
-        or name.startswith("test_paper_market_stream")
-        or name.startswith("test_provider_")
-        or name.startswith("test_report_data")
-        or name.startswith("test_report_execution_mode_contract")
-        or name.startswith("test_research_")
-        or name.startswith("test_run_artifact")
-        or name.startswith("test_run_research_dataset")
-        or name.startswith("test_run_storage_json_safety")
-        or name.startswith("test_runner_observability")
-        or name.startswith("test_runtime_events_repo")
-        or name.startswith("test_spot_execution")
-        or name.startswith("test_strategy_compile_contract")
-        or name.startswith("test_strategy_preview_signal_contract")
-        or name.startswith("test_strategy_read_contract")
-        or name.startswith("test_strategy_rule_creation_contract")
-        or name.startswith("test_strategy_service_public_api")
-        or name.startswith("test_strategy_variant_resolution")
-        or name.startswith("test_wallet_")
-        or name in {
-            "test_bot_projection_and_runner_contract.py",
-            "test_bot_startup_orchestrator.py",
-            "test_bot_watchdog.py",
-        }
-    )
-
-
 def pytest_collection_modifyitems(config, items):
     for item in items:
-        path, name = _normalise_test_path(str(item.path))
         profiles = _ci_profile_markers_for_path(str(item.path))
-        if _is_pr_profile_test(path, name):
-            profiles.add("pr")
         for profile in profiles:
             item.add_marker(getattr(pytest.mark, profile))
 
