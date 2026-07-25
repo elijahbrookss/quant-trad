@@ -210,6 +210,40 @@ def test_report_decision_ledger_preserves_deterministic_known_at(monkeypatch) ->
     assert ledger[0]["known_at"] != ledger[0]["created_at"]
 
 
+def test_report_decision_projection_is_invariant_to_later_event_suffix(monkeypatch) -> None:
+    first = _event_row(
+        1,
+        "DECISION_EMITTED",
+        {
+            "decision_state": "accepted",
+            "decision_id": "decision-1",
+            "signal_id": "signal-1",
+            "trade_id": "trade-1",
+            "bar_time": "2026-02-01T00:00:00Z",
+            "known_at": "2026-02-01T00:00:00Z",
+        },
+    )
+    later = _event_row(
+        2,
+        "DECISION_EMITTED",
+        {
+            "decision_state": "rejected",
+            "decision_id": "decision-2",
+            "signal_id": "signal-2",
+            "reason_code": "RISK",
+            "bar_time": "2026-02-01T00:01:00Z",
+            "known_at": "2026-02-01T00:01:00Z",
+        },
+    )
+    _install_storage(monkeypatch, _FakeReportStorage(run=_run(), events=[first]))
+    prefix_entry = report_data.list_decision_ledger("run-1")[0]
+
+    _install_storage(monkeypatch, _FakeReportStorage(run=_run(), events=[first, later]))
+    extended_entry = report_data.list_decision_ledger("run-1")[0]
+
+    assert extended_entry == prefix_entry
+
+
 def test_report_rejection_count_matches_rejected_domain_decision_rows(monkeypatch) -> None:
     storage = _FakeReportStorage(
         run=_run(),

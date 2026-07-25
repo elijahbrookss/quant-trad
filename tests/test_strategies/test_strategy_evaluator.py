@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -189,6 +189,50 @@ def test_evaluator_does_not_select_disabled_rule_even_when_it_matches() -> None:
     disabled = next(artifact for artifact in result.artifacts if artifact["rule_id"] == "rule-a")
     assert disabled["enabled"] is False
     assert disabled["evaluation_result"] == "not_matched"
+
+
+@pytest.mark.parametrize("offset_minutes", [-1, 1])
+def test_evaluator_rejects_outputs_outside_the_evaluation_bar(
+    offset_minutes: int,
+) -> None:
+    compiled = compile_strategy(
+        strategy_id="strategy-1",
+        timeframe="1m",
+        rules=[
+            {
+                "id": "rule-a",
+                "name": "Breakout",
+                "intent": "enter_long",
+                "trigger": _trigger(),
+                "guards": [],
+            }
+        ],
+        attached_indicator_ids=["ind-1"],
+        indicator_meta_getter=_make_meta_getter([_SIGNAL_OUTPUT]),
+    )
+    bar_time = datetime(2026, 4, 4, 12, 0, tzinfo=timezone.utc)
+    output_time = bar_time + timedelta(minutes=offset_minutes)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"strategy_output_time_invalid: bar_time mismatch output=ind-1\.sig",
+    ):
+        evaluate_strategy_bar(
+            compiled_strategy=compiled,
+            state=DecisionEvaluationState(),
+            outputs={
+                "ind-1.sig": RuntimeOutput(
+                    bar_time=output_time,
+                    ready=True,
+                    value={"events": [{"key": "breakout_long"}]},
+                )
+            },
+            output_types={"ind-1.sig": "signal"},
+            instrument_id="instrument-1",
+            symbol="BTCUSD",
+            timeframe="1m",
+            bar_time=bar_time,
+        )
 
 
 def test_decision_detail_field_classification_separates_runtime_contract_from_debug_details() -> None:

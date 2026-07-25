@@ -171,6 +171,7 @@ def evaluate_strategy_bar(
     bar_time: datetime,
     minimal_decision_details: bool = False,
 ) -> DecisionFrameResult:
+    _validate_current_outputs(outputs=outputs, bar_time=bar_time)
     epoch = int(bar_time.timestamp())
     artifacts: list[dict[str, Any]] = []
     matched_indexes: list[int] = []
@@ -239,6 +240,23 @@ def evaluate_strategy_bar(
         max_history_bars=compiled_strategy.max_history_bars,
     )
     return DecisionFrameResult(artifacts=artifacts, selected_artifact=selected_artifact)
+
+
+def _validate_current_outputs(
+    *,
+    outputs: Mapping[str, RuntimeOutput],
+    bar_time: datetime,
+) -> None:
+    for output_key, runtime_output in sorted(outputs.items(), key=lambda item: str(item[0])):
+        if not isinstance(runtime_output, RuntimeOutput):
+            raise RuntimeError(
+                f"strategy_output_invalid: RuntimeOutput required output={output_key}"
+            )
+        if runtime_output.bar_time != bar_time:
+            raise RuntimeError(
+                "strategy_output_time_invalid: bar_time mismatch "
+                f"output={output_key} expected={bar_time} actual={runtime_output.bar_time}"
+            )
 
 
 def advance_decision_state(

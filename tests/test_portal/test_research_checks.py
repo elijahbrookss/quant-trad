@@ -89,6 +89,42 @@ def test_raw_event_check_honors_entry_lag_bars() -> None:
     assert first["outcomes"]["1"]["forward_return_pct"] == pytest.approx((102.8 - 102.6) / 102.6)
 
 
+def test_raw_event_detection_is_invariant_to_future_candle_suffix() -> None:
+    detector = {
+        "type": "raw_condition",
+        "field": "close",
+        "operator": "gt",
+        "value_field": "previous_close",
+    }
+    prefix = _candles().iloc[:4]
+    prefix_result = checks.evaluate_raw_event_check(
+        prefix,
+        detector=detector,
+        outcomes={"forward_bars": [1], "min_sample_count": 1},
+        data_quality={"status": "clean"},
+    )
+    extended_result = checks.evaluate_raw_event_check(
+        _candles(),
+        detector=detector,
+        outcomes={"forward_bars": [1], "min_sample_count": 1},
+        data_quality={"status": "clean"},
+    )
+    prefix_end = prefix.index[-1].isoformat().replace("+00:00", "Z")
+    extended_prefix_events = [
+        event
+        for event in extended_result["events"]
+        if event["event_time"] <= prefix_end
+    ]
+
+    assert [
+        (event["event_time"], event["event_close"])
+        for event in extended_prefix_events
+    ] == [
+        (event["event_time"], event["event_close"])
+        for event in prefix_result["events"]
+    ]
+
+
 def test_research_check_service_creates_observation_check_and_link(monkeypatch: pytest.MonkeyPatch) -> None:
     created: list[dict[str, Any]] = []
     links: list[dict[str, Any]] = []
