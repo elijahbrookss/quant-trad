@@ -21,7 +21,7 @@ engineering guidance; this file records only cleanup-specific state.
 | Canonical lifecycle ledger | `feats/lifecycle-canonical-ledger` | Complete | baseline |
 | Strict execution contracts | `feats/execution-contract-strictness` | Complete | lifecycle integration |
 | Compatibility/dead-path removal | `feats/compatibility-dead-path-removal` | Complete | strict execution contract ownership |
-| Canonical ATM input schema | `feats/atm-canonical-contract` | Pending | compatibility inventory |
+| Canonical ATM input schema | `feats/atm-canonical-contract` | Complete | compatibility inventory |
 | Storage repository ownership | `feats/storage-repository-ownership` | Pending | compatibility caller migration |
 | Temporal/config ownership | `feats/config-temporal-ownership` | Pending | storage ownership |
 | Baseline hygiene | `feats/baseline-hygiene` | Pending | structural ownership settled |
@@ -60,7 +60,7 @@ retired tables until that explicit hard cutover is complete.
 | Runtime streaming aggregate, one-thread-per-series runner, Python-version fallback, local `dotenv` shadow | DELETE | No production owners or callers; Python 3.12 and the declared `python-dotenv` dependency are canonical. |
 | BotLens mailbox aliases and `bot_projection_refresh` | DELETE | No producer or useful caller remains; unknown messages already fail into bounded observability. |
 | Broad `storage.storage` wildcard facade | CONSOLIDATE | Migrate each caller to the owning repository module, then delete the facade and narrow package exports. |
-| ATM aliases and nested/flattened stop-adjustment shapes | CONSOLIDATE | Defaults/persisted examples and the strict compiler currently disagree on representation; select one schema and reject all alternative spellings. |
+| ATM aliases and nested/flattened stop-adjustment shapes | CONSOLIDATE | Completed in `7bb68f4`: schema v2 snake-case policy is the sole input contract; explicit target IDs/fractions and flattened stable-ID stop rules are required, while wrappers, aliases, implicit allocation, and instrument economics are rejected. |
 | Playback `mode` fallback into `execution_mode` | CONSOLIDATE | Playback and execution semantics are independent; remove the cross-domain default and require the execution default at its owner. |
 | Indicator `configure_replay_window` interface and Candle Stats/Regime implementations | KEEP | All three definitions mean visual overlay-history retention, not research range, evaluation, recovery, or warmup. |
 | Four replay-window dispatch helpers | CONSOLIDATE | Indicator preview, runtime validation, strategy preview, and bot setup duplicate dispatch ownership for the same overlay-retention hint. |
@@ -81,6 +81,7 @@ retired tables until that explicit hard cutover is complete.
 | 2026-07-24 | `94a84a9..617f3ea` canonical lifecycle ledger | focused lifecycle/runtime/bootstrap: 59 passed; PR profile: 856 passed, 287 deselected; docs: 2 passed; isolated TimescaleDB 15 clean/repeated bootstrap, field-equivalent hard cutover, and event/summary rollback all passed |
 | 2026-07-25 | `4ec2e45` strict contracts / merge `9ad7c5c` | focused execution/ATM/persistence: 57 passed; runtime profile: 371 passed, 798 deselected; PR profile: 882 passed, 287 deselected; docs: 2 passed; normalized-template idempotence, pre-persistence compilation, dormant-rule validation, and deterministic target allocation covered |
 | 2026-07-25 | `7338f56` compatibility/dead-path removal / merge `ea4b63d` | focused canonical-import/runtime/BotLens/provider checks: 65 passed; child and integration PR profiles: 880 passed, 284 deselected; docs: 2 passed; backend compileall passed; deleted 75,184 lines including tracked Vite cache, unused wrappers/shims, deprecated routing, and stale CI references |
+| 2026-07-25 | `7bb68f4` canonical ATM execution policy | focused ATM/runtime/strategy/reporting: 139 passed; runtime profile: 371 passed, 806 deselected; PR profile: 893 passed, 284 deselected; docs: 2 passed; backend compileall and remaining-reference audit passed; removed multi-template composition, alternative field shapes, implicit target allocation, and ATM-owned instrument economics |
 
 Each child branch must record its focused tests, broader regression profile,
 documentation validation, diff review, and remaining-reference search before
@@ -88,8 +89,6 @@ integration.
 
 ## Discovered Risks
 
-- ATM defaults and accepted input aliases still permit more than one shape for
-  the same execution responsibility.
 - Backtest warmup shortfalls and some malformed/empty provider data are not
   always surfaced in quality evidence.
 - Report observability reads can truncate at 2,000 events without a truncation
@@ -119,7 +118,7 @@ integration.
 - [x] One canonical lifecycle ledger; no mirrors or fallback reads
 - [x] Explicit, reconstructable, transactionally updated run summary projection
 - [x] Malformed canonical execution configuration fails before runtime
-- [ ] Proven dead and compatibility-only production paths removed
+- [x] Proven dead and compatibility-only production paths removed
 - [ ] Explicit storage ownership and nonduplicated temporal dispatch
 - [ ] Accurate backend CI with optional frontend checks
 - [ ] Deterministic reference and repeated backtests
