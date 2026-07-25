@@ -207,6 +207,9 @@ Lifecycle checkpoint reads filter canonical lifecycle event names from
 `seq`. `portal_bot_runs.status` and its start/end timestamps are a rebuildable
 current-run summary projection. No lifecycle-specific history or current-state
 mirror is part of the schema contract.
+The canonical lifecycle append and run-summary projection commit in one
+database transaction; a projection failure rolls back both so terminal state
+cannot leave a permanently stale summary.
 
 Runtime fact transport and durable persistence must not compete to write the
 same event id. Source-owned canonical facts, including wallet ledger facts, are

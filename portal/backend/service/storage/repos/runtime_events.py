@@ -6,7 +6,7 @@ import logging
 import math
 import time
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -1172,7 +1172,13 @@ def record_bot_runtime_events_batch(
     payloads: Sequence[Dict[str, Any]],
     *,
     context: Mapping[str, Any] | None = None,
+    transactional_projection: Callable[[Any], None] | None = None,
 ) -> int:
+    """Persist canonical events and an optional projection in one transaction.
+
+    A projection failure rolls back both the event append and the projection.
+    """
+
     if not db.available:
         raise RuntimeError("database is required for bot runtime event persistence")
     items = [dict(payload) for payload in (payloads or []) if isinstance(payload, dict)]
@@ -1388,6 +1394,8 @@ def record_bot_runtime_events_batch(
                     .all()
                     if str(value or "").strip()
                 }
+            if transactional_projection is not None:
+                transactional_projection(session)
         inserted = len(inserted_event_ids)
         conflict_duplicates = max(len(pending_rows) - inserted, 0)
         if conflict_duplicates > 0:

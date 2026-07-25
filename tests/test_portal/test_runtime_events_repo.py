@@ -279,6 +279,96 @@ class _FakeDb:
         yield self.session_handle
 
 
+def _runtime_event_payload() -> dict:
+    return {
+        "event_id": "evt-transaction",
+        "bot_id": "bot-1",
+        "run_id": "run-1",
+        "seq": 1,
+        "event_type": "botlens_domain.run_phase_reported",
+        "payload": {
+            "schema_version": 1,
+            "event_id": "evt-transaction",
+            "event_ts": "2026-07-24T12:00:00Z",
+            "event_name": "RUN_PHASE_REPORTED",
+            "root_id": "evt-transaction",
+            "parent_id": None,
+            "correlation_id": "corr-transaction",
+            "context": {
+                "run_id": "run-1",
+                "bot_id": "bot-1",
+                "phase": "container_booting",
+                "status": "starting",
+            },
+        },
+    }
+
+
+def test_runtime_event_transactional_projection_runs_before_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _TransactionDb(_FakeDb):
+        committed = False
+        rolled_back = False
+
+        @contextmanager
+        def session(self):
+            try:
+                yield self.session_handle
+            except Exception:
+                self.rolled_back = True
+                raise
+            else:
+                self.committed = True
+
+    fake_db = _TransactionDb([[], ["evt-transaction"]])
+    projected: list[object] = []
+    monkeypatch.setattr(runtime_events, "db", fake_db)
+
+    result = runtime_events.record_bot_runtime_events_batch(
+        [_runtime_event_payload()],
+        transactional_projection=lambda session: projected.append(session),
+    )
+
+    assert result == 1
+    assert projected == [fake_db.session_handle]
+    assert fake_db.committed is True
+    assert fake_db.rolled_back is False
+
+
+def test_runtime_event_transactional_projection_failure_rolls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _TransactionDb(_FakeDb):
+        committed = False
+        rolled_back = False
+
+        @contextmanager
+        def session(self):
+            try:
+                yield self.session_handle
+            except Exception:
+                self.rolled_back = True
+                raise
+            else:
+                self.committed = True
+
+    fake_db = _TransactionDb([[], ["evt-transaction"]])
+    monkeypatch.setattr(runtime_events, "db", fake_db)
+
+    def _fail_projection(_session) -> None:
+        raise RuntimeError("projection failed")
+
+    with pytest.raises(RuntimeError, match="projection failed"):
+        runtime_events.record_bot_runtime_events_batch(
+            [_runtime_event_payload()],
+            transactional_projection=_fail_projection,
+        )
+
+    assert fake_db.committed is False
+    assert fake_db.rolled_back is True
+
+
 def _statement_sql(statement) -> str:
     return str(statement.compile(dialect=postgresql.dialect()))
 

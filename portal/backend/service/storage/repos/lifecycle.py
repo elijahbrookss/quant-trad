@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Mapping
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
 from ...bots.botlens_contract import LIFECYCLE_KIND
@@ -13,15 +13,10 @@ from ...bots.botlens_domain_events import (
     build_botlens_domain_events_from_lifecycle,
 )
 from ...bots.botlens_projection_batches import projection_batch_from_payload, runtime_event_rows_from_batch
-from ...observability import payload_size_bytes
 from ._shared import (
     BotRecord,
     BotRunEventRecord,
     BotRunRecord,
-    StorageWriteOutcome,
-    _STORAGE_OBSERVER,
-    _execute_write_with_retry,
-    _observe_db_write_outcome,
     _parse_optional_timestamp,
     _utcnow,
     db,
@@ -31,7 +26,6 @@ from ._shared import (
 from .runtime_events import get_latest_bot_runtime_run_id, record_bot_runtime_events_batch
 from .runs import list_latest_bot_runs_by_bot_ids
 
-_OBSERVER = _STORAGE_OBSERVER
 _TERMINAL_LIFECYCLE_STATUSES = frozenset(
     {"stopped", "failed", "startup_failed", "crashed", "completed", "canceled", "cancelled", "degraded_terminal"}
 )
@@ -90,13 +84,13 @@ def _canonical_lifecycle_row_from_runtime_row(row: BotRunEventRecord | Mapping[s
     }
 
 
-def _latest_canonical_lifecycle_row(run_id: str) -> Optional[Dict[str, Any]]:
+def _latest_canonical_lifecycle_row(run_id: str, *, session: Any | None = None) -> Optional[Dict[str, Any]]:
     normalized_run_id = str(run_id or "").strip()
-    if not normalized_run_id or not db.available:
+    if not normalized_run_id or (session is None and not db.available):
         return None
-    with db.session() as session:
+    with (nullcontext(session) if session is not None else db.session()) as active_session:
         row = (
-            session.execute(
+            active_session.execute(
                 select(BotRunEventRecord)
                 .where(BotRunEventRecord.run_id == normalized_run_id)
                 .where(BotRunEventRecord.event_name.in_(_CANONICAL_LIFECYCLE_EVENT_NAMES))
@@ -185,8 +179,11 @@ def _run_ready_requires_prior_lifecycle(*, run_id: str, phase: str, status: str)
         )
 
 
-def _update_bot_run_summary_from_lifecycle(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    """Project the latest canonical lifecycle status onto ``portal_bot_runs``."""
+def _project_bot_run_summary_in_session(
+    session: Any,
+    payload: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Project canonical lifecycle status in the event append transaction."""
 
     bot_id = str(payload.get("bot_id") or "").strip()
     run_id = str(payload.get("run_id") or "").strip()
@@ -195,73 +192,44 @@ def _update_bot_run_summary_from_lifecycle(payload: Mapping[str, Any]) -> Dict[s
     if not bot_id or not run_id or not status:
         raise ValueError("bot_id, run_id, and status are required for bot run summary projection")
 
-    started = time.perf_counter()
-    write_context = {"bot_id": bot_id, "run_id": run_id, "status": status}
-    payload_bytes = payload_size_bytes(
-        {
-            "status": status,
-            "checkpoint_at": checkpoint_at.isoformat() + "Z",
-        }
-    )
+    now = _utcnow()
+    bot_row = session.get(BotRecord, bot_id)
+    run_row = session.get(BotRunRecord, run_id)
+    if run_row is None:
+        run_row = BotRunRecord(
+            run_id=run_id,
+            bot_id=bot_id,
+            bot_name=bot_row.name if bot_row is not None else None,
+            strategy_id=bot_row.strategy_id if bot_row is not None else None,
+            run_type=(bot_row.run_type if bot_row is not None and bot_row.run_type else "backtest"),
+            status=status,
+            started_at=checkpoint_at,
+            backtest_start=bot_row.backtest_start if bot_row is not None else None,
+            backtest_end=bot_row.backtest_end if bot_row is not None else None,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(run_row)
+    else:
+        run_row.bot_id = bot_id
+        if not run_row.bot_name and bot_row is not None:
+            run_row.bot_name = bot_row.name
+        if not run_row.strategy_id and bot_row is not None:
+            run_row.strategy_id = bot_row.strategy_id
+        if not run_row.run_type:
+            run_row.run_type = bot_row.run_type if bot_row is not None and bot_row.run_type else "backtest"
+        if run_row.backtest_start is None and bot_row is not None:
+            run_row.backtest_start = bot_row.backtest_start
+        if run_row.backtest_end is None and bot_row is not None:
+            run_row.backtest_end = bot_row.backtest_end
+        if run_row.started_at is None:
+            run_row.started_at = checkpoint_at
+        run_row.status = status
+        run_row.updated_at = now
+    if status in _TERMINAL_LIFECYCLE_STATUSES:
+        run_row.ended_at = checkpoint_at
 
-    def _write() -> StorageWriteOutcome:
-        with db.session() as session:
-            now = _utcnow()
-            bot_row = session.get(BotRecord, bot_id)
-            run_row = session.get(BotRunRecord, run_id)
-            if run_row is None:
-                run_row = BotRunRecord(
-                    run_id=run_id,
-                    bot_id=bot_id,
-                    bot_name=bot_row.name if bot_row is not None else None,
-                    strategy_id=bot_row.strategy_id if bot_row is not None else None,
-                    run_type=(bot_row.run_type if bot_row is not None and bot_row.run_type else "backtest"),
-                    status=status,
-                    started_at=checkpoint_at,
-                    backtest_start=bot_row.backtest_start if bot_row is not None else None,
-                    backtest_end=bot_row.backtest_end if bot_row is not None else None,
-                    created_at=now,
-                    updated_at=now,
-                )
-                session.add(run_row)
-            else:
-                run_row.bot_id = bot_id
-                if not run_row.bot_name and bot_row is not None:
-                    run_row.bot_name = bot_row.name
-                if not run_row.strategy_id and bot_row is not None:
-                    run_row.strategy_id = bot_row.strategy_id
-                if not run_row.run_type:
-                    run_row.run_type = bot_row.run_type if bot_row is not None and bot_row.run_type else "backtest"
-                if run_row.backtest_start is None and bot_row is not None:
-                    run_row.backtest_start = bot_row.backtest_start
-                if run_row.backtest_end is None and bot_row is not None:
-                    run_row.backtest_end = bot_row.backtest_end
-                if run_row.started_at is None:
-                    run_row.started_at = checkpoint_at
-                run_row.status = status
-                run_row.updated_at = now
-            if status in _TERMINAL_LIFECYCLE_STATUSES:
-                run_row.ended_at = checkpoint_at
-
-            return StorageWriteOutcome(
-                result=run_row.to_dict(),
-                rows_written=1,
-                payload_bytes=payload_bytes,
-            )
-
-    outcome = _execute_write_with_retry(
-        operation="update_bot_run_summary_from_lifecycle",
-        storage_target="portal_bot_runs",
-        context=write_context,
-        action=_write,
-    )
-    _observe_db_write_outcome(
-        storage_target="portal_bot_runs",
-        context=write_context,
-        started=started,
-        outcome=outcome,
-    )
-    return dict(outcome.result)
+    return run_row.to_dict()
 
 
 def record_bot_run_lifecycle_checkpoint(payload: Mapping[str, Any]) -> Dict[str, Any]:
@@ -330,6 +298,18 @@ def record_bot_run_lifecycle_checkpoint(payload: Mapping[str, Any]) -> Dict[str,
             f"canonical lifecycle event serialization produced no rows run_id={run_id} "
             f"event_id={canonical_lifecycle_event_id}"
         )
+    lifecycle_state: Optional[Dict[str, Any]] = None
+
+    def _project_lifecycle_summary(session: Any) -> None:
+        nonlocal lifecycle_state
+        lifecycle_state = _latest_canonical_lifecycle_row(run_id, session=session)
+        if lifecycle_state is None:
+            raise RuntimeError(
+                "canonical lifecycle append did not produce readable lifecycle truth "
+                f"run_id={run_id} event_id={canonical_lifecycle_event_id}"
+            )
+        _project_bot_run_summary_in_session(session, lifecycle_state)
+
     record_bot_runtime_events_batch(
         rows,
         context={
@@ -341,15 +321,11 @@ def record_bot_run_lifecycle_checkpoint(payload: Mapping[str, Any]) -> Dict[str,
             "source_reason": "producer",
             "event_name": batch.events[0].event_name.value,
         },
+        transactional_projection=_project_lifecycle_summary,
     )
 
-    lifecycle_state = _latest_canonical_lifecycle_row(run_id)
     if lifecycle_state is None:
-        raise RuntimeError(
-            "canonical lifecycle append did not produce readable lifecycle truth "
-            f"run_id={run_id} event_id={canonical_lifecycle_event_id}"
-        )
-    _update_bot_run_summary_from_lifecycle(lifecycle_state)
+        raise RuntimeError("canonical lifecycle transactional projection did not run")
     return lifecycle_state
 
 
