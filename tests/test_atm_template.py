@@ -5,6 +5,12 @@ import pytest
 from atm.template import normalise_template
 
 
+def test_omitted_stop_adjustments_normalize_to_empty() -> None:
+    config = normalise_template({})
+
+    assert config["stop_adjustments"] == []
+
+
 def test_normalise_template_accepts_canonical_runtime_exit_policy() -> None:
     config = normalise_template(
         {

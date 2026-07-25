@@ -103,16 +103,7 @@ DEFAULT_ATM_TEMPLATE: Dict[str, Any] = {
         "target_index": None,
         "target_id": None,
     },
-    "stop_adjustments": [
-        {
-            "id": "sa-1",
-            "trigger_type": "r_multiple",
-            "trigger_value": 1.0,
-            "trigger_ticks": None,
-            "action_type": "move_to_breakeven",
-            "action_value": None,
-        }
-    ],
+    "stop_adjustments": [],
 }
 
 

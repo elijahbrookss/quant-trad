@@ -612,11 +612,10 @@ def test_flattened_stop_adjustment_rule_executes_after_normalization():
     assert position.stop_price == 102.0
 
 
-def test_empty_stop_adjustments_do_not_enable_implicit_breakeven():
+def test_omitted_stop_adjustments_do_not_enable_implicit_breakeven():
     engine = _build_spot_engine(
         base_risk_per_trade=8,
         take_profit_orders=[{"id": "tp-1", "ticks": 10, "size_fraction": 1.0}],
-        extra_config={"stop_adjustments": []},
     )
     _enable_runtime_execution(engine)
     entry = _build_candle(close=100.0, atr=2.0)

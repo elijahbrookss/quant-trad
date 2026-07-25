@@ -60,7 +60,9 @@ ATM schema version 2 has one accepted authoring shape: snake-case field names,
 `exit_plan.fixed_horizon`, mapping-valued `breakeven` and `trailing`, and
 flattened `stop_adjustments`. Alternative spellings, wrapper objects, nested
 trigger/action objects, implicit target allocation, and instrument economics
-are rejected as unsupported fields. Target fractions must sum to one.
+are rejected as unsupported fields. Target fractions must sum to one. Omitted
+`stop_adjustments` normalize to an empty list; stop movement occurs only when
+the template explicitly declares it.
 
 The normalizer and compiler both enforce the schema so direct compiler callers
 cannot bypass the admission contract. Position state receives resolved runtime
