@@ -80,7 +80,7 @@ retired tables until that explicit hard cutover is complete.
 | 2026-07-24 | integration branch publication | pushed without history rewrite; upstream configured |
 | 2026-07-24 | `94a84a9..617f3ea` canonical lifecycle ledger | focused lifecycle/runtime/bootstrap: 59 passed; PR profile: 856 passed, 287 deselected; docs: 2 passed; isolated TimescaleDB 15 clean/repeated bootstrap, field-equivalent hard cutover, and event/summary rollback all passed |
 | 2026-07-25 | `4ec2e45` strict contracts / merge `9ad7c5c` | focused execution/ATM/persistence: 57 passed; runtime profile: 371 passed, 798 deselected; PR profile: 882 passed, 287 deselected; docs: 2 passed; normalized-template idempotence, pre-persistence compilation, dormant-rule validation, and deterministic target allocation covered |
-| 2026-07-25 | `7338f56` compatibility/dead-path removal | focused canonical-import/runtime/BotLens/provider checks: 65 passed; PR profile: 880 passed, 284 deselected; docs: 2 passed; backend compileall passed; deleted 75,184 lines including tracked Vite cache, unused wrappers/shims, deprecated routing, and stale CI references |
+| 2026-07-25 | `7338f56` compatibility/dead-path removal / merge `ea4b63d` | focused canonical-import/runtime/BotLens/provider checks: 65 passed; child and integration PR profiles: 880 passed, 284 deselected; docs: 2 passed; backend compileall passed; deleted 75,184 lines including tracked Vite cache, unused wrappers/shims, deprecated routing, and stale CI references |
 
 Each child branch must record its focused tests, broader regression profile,
 documentation validation, diff review, and remaining-reference search before
