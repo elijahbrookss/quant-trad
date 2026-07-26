@@ -69,7 +69,7 @@ respect.
 | [0041](0041-use-canonical-execution-plan-and-order-fill-semantics.md) | Use canonical execution plans and order fill semantics | Accepted |
 | [0042](0042-use-runtime-event-ledger-as-lifecycle-truth.md) | Use the runtime event ledger as lifecycle truth | Accepted, retroactive cleanup |
 | [0043](0043-reconcile-accounting-from-canonical-fills-and-wallet-ledger.md) | Reconcile accounting from canonical fills and wallet ledger | Accepted, retroactive cleanup |
-| [0044](0044-enforce-known-at-prefix-invariance.md) | Enforce known-at prefix invariance | Accepted, retroactive cleanup; proof incomplete |
+| [0044](0044-enforce-known-at-prefix-invariance.md) | Enforce known-at prefix invariance | Accepted, retroactive cleanup |
 | [0045](0045-require-explicit-execution-and-exit-policy.md) | Require explicit execution and exit policy | Accepted, retroactive cleanup |
 | [0046](0046-fingerprint-exact-candle-inputs-and-keep-quality-separate.md) | Fingerprint exact candle inputs and keep quality separate | Accepted, retroactive cleanup |
 | [0047](0047-fence-async-job-ownership.md) | Fence async job ownership | Accepted |
