@@ -505,7 +505,6 @@ def test_backtest_warmup_is_strictly_pre_window_and_auditable() -> None:
         start - timedelta(hours=1),
         start,
         start + timedelta(hours=1),
-        end,
     ]
     assert replay_index == 2
     assert evidence == {

@@ -1217,6 +1217,11 @@ def test_experiments_start_bot_writes_resumable_record(tmp_path, monkeypatch):
         _ = timeout
         assert request.get_method() == "POST"
         assert urllib.parse.urlparse(request.full_url).path == "/api/bots/bot-1/runs/start"
+        assert json.loads(request.data.decode("utf-8")) == {
+            "run_type": "backtest",
+            "dataset_id": "mds-1",
+            "request_id": "req-1",
+        }
         return _Response(
             json.dumps(
                 {
@@ -1239,6 +1244,8 @@ def test_experiments_start_bot_writes_resumable_record(tmp_path, monkeypatch):
             "experiments",
             "start-bot",
             "bot-1",
+            "--dataset-id",
+            "mds-1",
             "--request-id",
             "req-1",
             "--baseline-run-id",

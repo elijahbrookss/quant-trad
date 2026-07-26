@@ -1,13 +1,19 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, Mapping, Optional
 
 import pandas as pd
 
 from core.candle_continuity import expected_interval_seconds, summarize_candle_continuity
 from data_providers.utils.ohlcv import compute_tr_atr, interval_to_timedelta
 from indicators.config import DataContext
+from market_data.backtest import (
+    bound_instrument_for_id,
+    bound_instrument_for_symbol,
+    bound_series_for_request,
+    normalize_backtest_dataset_binding,
+)
 
 from . import instrument_service
 from .feed_service import canonical_candle_feed
@@ -18,12 +24,22 @@ _DERIVED_CANDLE_FEATURE_VERSION = "runtime_candle_features.wilder_atr_14.v1"
 
 @dataclass(frozen=True)
 class MarketDataReadScope:
-    as_of_commit_seq: int
+    dataset_binding: Mapping[str, Any]
 
     def __post_init__(self) -> None:
-        if int(self.as_of_commit_seq) < 0:
-            raise ValueError("market_data_read_scope_invalid: commit sequence must be nonnegative")
-        object.__setattr__(self, "as_of_commit_seq", int(self.as_of_commit_seq))
+        object.__setattr__(
+            self,
+            "dataset_binding",
+            normalize_backtest_dataset_binding(self.dataset_binding),
+        )
+
+    @property
+    def dataset_id(self) -> str:
+        return str(self.dataset_binding["dataset_id"])
+
+    @property
+    def as_of_commit_seq(self) -> int:
+        return int(self.dataset_binding["max_commit_seq"])
 
 
 _MARKET_DATA_READ_SCOPE: ContextVar[Optional[MarketDataReadScope]] = ContextVar(
@@ -32,10 +48,10 @@ _MARKET_DATA_READ_SCOPE: ContextVar[Optional[MarketDataReadScope]] = ContextVar(
 
 
 @contextmanager
-def market_data_read_scope(*, as_of_commit_seq: int) -> Iterator[MarketDataReadScope]:
-    """Bind nested candle/indicator reads to one immutable commit watermark."""
+def market_data_read_scope(*, dataset_binding: Mapping[str, Any]) -> Iterator[MarketDataReadScope]:
+    """Bind nested candle/indicator reads to one admitted immutable dataset."""
 
-    scope = MarketDataReadScope(as_of_commit_seq=as_of_commit_seq)
+    scope = MarketDataReadScope(dataset_binding=dataset_binding)
     token = _MARKET_DATA_READ_SCOPE.set(scope)
     try:
         yield scope
@@ -76,9 +92,19 @@ def fetch_ohlcv(
 ) -> pd.DataFrame:
     """Read canonical stored candles; missing data requires explicit ingestion."""
 
-    instrument_id = instrument_service.require_instrument_id(
-        datasource, exchange, symbol
-    )
+    scope = current_market_data_read_scope()
+    if scope is None:
+        instrument_id = instrument_service.require_instrument_id(
+            datasource, exchange, symbol
+        )
+    else:
+        instrument = bound_instrument_for_symbol(
+            scope.dataset_binding,
+            datasource=datasource,
+            exchange=exchange,
+            symbol=symbol,
+        )
+        instrument_id = str(instrument["id"])
     return fetch_ohlcv_by_instrument(instrument_id, start, end, interval)
 
 
@@ -90,22 +116,45 @@ def fetch_ohlcv_by_instrument(
 ) -> pd.DataFrame:
     """Read one canonical instrument series without provider/API fallback."""
 
-    try:
-        instrument = instrument_service.get_instrument_record(instrument_id)
-    except KeyError as exc:
-        raise ValueError(str(exc)) from exc
     scope = current_market_data_read_scope()
-    frame = canonical_candle_feed.read_by_instrument(
-        instrument,
-        start=start,
-        end=end,
-        interval=interval,
-        as_of_commit_seq=(scope.as_of_commit_seq if scope is not None else None),
-    )
+    if scope is None:
+        try:
+            instrument = instrument_service.get_instrument_record(instrument_id)
+        except KeyError as exc:
+            raise ValueError(str(exc)) from exc
+        frame = canonical_candle_feed.read_by_instrument(
+            instrument,
+            start=start,
+            end=end,
+            interval=interval,
+        )
+    else:
+        instrument = bound_instrument_for_id(
+            scope.dataset_binding, instrument_id
+        )
+        timeframe_seconds = int(interval_to_timedelta(interval).total_seconds())
+        entry = bound_series_for_request(
+            scope.dataset_binding,
+            instrument_id=instrument_id,
+            timeframe_seconds=timeframe_seconds,
+            start=start,
+            end=end,
+        )
+        frame = canonical_candle_feed.read_dataset_series(
+            dataset_id=scope.dataset_id,
+            series_id=int(entry["series_id"]),
+            instrument=instrument,
+            interval=interval,
+            start=start,
+            end=end,
+            quality=list(entry.get("quality_evidence") or []),
+        )
     enriched = _with_runtime_candle_features(frame)
     if scope is not None:
         enriched.attrs["market_data_read_scope"] = {
-            "schema_version": "market_data_read_scope.v1",
+            "schema_version": "market_data_read_scope.v2",
+            "dataset_id": scope.dataset_id,
+            "dataset_hash": scope.dataset_binding["dataset_hash"],
             "as_of_commit_seq": scope.as_of_commit_seq,
         }
     return enriched

@@ -261,15 +261,29 @@ def test_mcp_start_bot_run_is_guarded_and_defaults_to_backtest(tmp_path):
         server.call_tool("start_bot_run", {"bot_id": "bot-1"})
     with pytest.raises(McpError, match="allow_non_backtest"):
         server.call_tool("start_bot_run", {"bot_id": "bot-1", "run_type": "paper", "confirm": True})
+    with pytest.raises(McpError, match="dataset_id is required"):
+        server.call_tool("start_bot_run", {"bot_id": "bot-1", "confirm": True})
 
-    payload = server.call_tool("start_bot_run", {"bot_id": "bot-1", "request_id": "req-1", "confirm": True})
+    payload = server.call_tool(
+        "start_bot_run",
+        {
+            "bot_id": "bot-1",
+            "dataset_id": "mds-1",
+            "request_id": "req-1",
+            "confirm": True,
+        },
+    )
 
     assert payload["run_id"] == "run-1"
     assert client.calls[-1] == (
         "POST",
         "/api/bots/bot-1/runs/start",
         None,
-        {"run_type": "backtest", "request_id": "req-1"},
+        {
+            "run_type": "backtest",
+            "dataset_id": "mds-1",
+            "request_id": "req-1",
+        },
     )
 
 

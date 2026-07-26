@@ -157,3 +157,43 @@ def test_bot_data_preflight_route_returns_compact_candle_coverage(monkeypatch: p
         "start": "2026-01-01T00:00:00Z",
         "end": "2026-01-31T23:59:59Z",
     }
+
+
+def test_backtest_dataset_preparation_route_does_not_start_a_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = {}
+
+    def fake_prepare(bot_id: str, **kwargs):
+        observed.update(bot_id=bot_id, **kwargs)
+        return {
+            "schema_version": "backtest_dataset_preparation.v1",
+            "status": "ready",
+            "dataset": {"dataset_id": "mds_123"},
+        }
+
+    monkeypatch.setattr(
+        bots_controller.bot_service,
+        "prepare_backtest_dataset",
+        fake_prepare,
+    )
+    client = TestClient(app)
+    response = client.post(
+        "/api/bots/bot-1/backtest-dataset/prepare",
+        json={
+            "evaluation_start": "2024-01-01T00:00:00Z",
+            "evaluation_end": "2025-01-01T00:00:00Z",
+            "acquire_missing": True,
+            "created_by": "operator",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["dataset"]["dataset_id"] == "mds_123"
+    assert observed == {
+        "bot_id": "bot-1",
+        "evaluation_start": "2024-01-01T00:00:00Z",
+        "evaluation_end": "2025-01-01T00:00:00Z",
+        "acquire_missing": True,
+        "created_by": "operator",
+    }

@@ -11,6 +11,11 @@ import pytest
 
 pytest.importorskip("sqlalchemy")
 
+from market_data.backtest import (
+    build_backtest_execution_config_hash,
+    build_backtest_execution_instrument,
+    normalize_backtest_execution_instruments,
+)
 import portal.backend.service.bots.botlens_canonical_facts as canonical_facts_mod
 import portal.backend.service.bots.container_runtime as runtime_mod
 import portal.backend.service.bots.container_runtime_telemetry as telemetry_mod
@@ -1548,43 +1553,132 @@ def test_handle_worker_phase_event_ignores_stale_runtime_subscribing_after_await
     assert ctx.series_states["BTC"]["status"] == "awaiting_first_snapshot"
 
 
-def test_backtest_market_data_scope_captures_and_persists_one_watermark(
+def _runtime_dataset_binding() -> dict:
+    dataset_hash = "a" * 64
+    instrument = {
+        "id": "instrument-1",
+        "symbol": "BTC/USD",
+        "datasource": "CCXT",
+        "exchange": "coinbase",
+        "instrument_type": "spot",
+        "maker_fee_rate": 0.004,
+        "taker_fee_rate": 0.006,
+    }
+    instruments, instrument_config_hash = normalize_backtest_execution_instruments(
+        [build_backtest_execution_instrument("instrument-1", instrument)]
+    )
+    strategy_identity = {
+        "strategy_id": "strategy-1",
+        "strategy_hash": "strategy-hash-1",
+        "effective_strategy_config_hash": "strategy-config-hash-1",
+        "indicator_config_hash": "indicator-config-hash-1",
+        "execution_policy_hash": "execution-policy-hash-1",
+    }
+    binding = {
+        "schema_version": "backtest_dataset_binding.v1",
+        "dataset_contract_version": "market_dataset.v1",
+        "dataset_id": f"mds_{dataset_hash[:32]}",
+        "dataset_hash": dataset_hash,
+        "max_commit_seq": 73,
+        **strategy_identity,
+        "instrument_config_hash": instrument_config_hash,
+        "instruments": instruments,
+        "validation_status": "ready",
+        "provider_call_performed": False,
+        "evaluation_range": {"start": "2026-01-01T00:00:00Z", "end_exclusive": "2026-01-02T00:00:00Z"},
+        "warmup_range": {"start": "2025-12-31T10:00:00Z", "end_exclusive": "2026-01-01T00:00:00Z"},
+        "materialization_range": {"start": "2025-12-31T10:00:00Z", "end_exclusive": "2026-01-02T00:00:00Z"},
+        "decision_range": {"start": "2026-01-01T00:00:00Z", "end_exclusive": "2026-01-02T00:00:00Z"},
+        "series": [
+            {
+                "series_id": 7,
+                "instrument_id": "instrument-1",
+                "fact_type": "candle.ohlcv",
+                "contract_version": "candle.ohlcv.v1",
+                "timeframe_seconds": 3600,
+                "range_start": "2025-12-31T10:00:00Z",
+                "range_end": "2026-01-02T00:00:00Z",
+                "row_count": 38,
+                "max_commit_seq": 73,
+                "material_hash": "material-hash",
+                "provenance_hash": "provenance-hash",
+                "quality_hash": "quality-hash",
+            }
+        ],
+        "quality": {"status": "ready", "evidence_count": 0},
+    }
+    binding["execution_config_hash"] = build_backtest_execution_config_hash(
+        bot={"run_type": "backtest"},
+        strategy_identity=strategy_identity,
+        instrument_config_hash=instrument_config_hash,
+    )
+    return binding
+
+
+def test_backtest_market_data_scope_persists_the_admitted_dataset_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     persisted: list[dict] = []
     monkeypatch.setattr(
-        runtime_mod.market_data_repo, "current_commit_seq", lambda: 73
-    )
-    monkeypatch.setattr(
         runtime_mod,
         "get_bot_run",
-        lambda run_id: {
-            "run_id": run_id,
-            "config_snapshot": {"existing": "value"},
-        },
+        lambda run_id: {"run_id": run_id, "config_snapshot": {"existing": "value"}},
     )
     monkeypatch.setattr(
         runtime_mod, "upsert_bot_run", lambda payload: persisted.append(payload) or payload
     )
-    config = {"run_type": "backtest"}
+    binding = _runtime_dataset_binding()
+    config = {
+        "run_type": "backtest",
+        "dataset_id": binding["dataset_id"],
+        "dataset_binding": binding,
+    }
 
     scope = runtime_mod._bind_backtest_market_data_scope(config, run_id="run-1")
 
     assert scope == {
-        "schema_version": "market_data_read_scope.v1",
+        "schema_version": "market_data_read_scope.v2",
+        "dataset_id": binding["dataset_id"],
+        "dataset_hash": binding["dataset_hash"],
         "as_of_commit_seq": 73,
-        "contract_version": "candle.ohlcv.v1",
+        "contract_version": "market_dataset.v1",
     }
-    assert config["market_data_as_of_commit_seq"] == 73
-    assert persisted == [
-        {
-            "run_id": "run-1",
-            "config_snapshot": {
-                "existing": "value",
-                "market_data_read_scope": scope,
+    assert "market_data_as_of_commit_seq" not in config
+    assert config["dataset_binding"]["dataset_id"] == binding["dataset_id"]
+    assert persisted[0]["config_snapshot"]["market_data_read_scope"] == scope
+
+
+def test_backtest_market_data_scope_rejects_missing_or_substituted_binding() -> None:
+    with pytest.raises(ValueError, match="binding must be an object"):
+        runtime_mod._bind_backtest_market_data_scope(
+            {"run_type": "backtest", "dataset_id": "mds_missing"},
+            run_id="run-1",
+        )
+    binding = _runtime_dataset_binding()
+    with pytest.raises(RuntimeError, match="substitution_forbidden"):
+        runtime_mod._bind_backtest_market_data_scope(
+            {
+                "run_type": "backtest",
+                "dataset_id": "mds_different",
+                "dataset_binding": binding,
             },
-        }
-    ]
+            run_id="run-1",
+        )
+
+def test_backtest_market_data_scope_rejects_execution_config_substitution() -> None:
+    binding = _runtime_dataset_binding()
+    with pytest.raises(RuntimeError, match="execution_config_substitution_forbidden"):
+        runtime_mod._bind_backtest_market_data_scope(
+            {
+                "run_type": "backtest",
+                "dataset_id": binding["dataset_id"],
+                "dataset_binding": binding,
+                "wallet_config": {"balances": {"USD": 1.0}},
+            },
+            run_id="run-1",
+        )
+
+
 
 
 def test_paper_market_data_scope_does_not_pin_live_reads() -> None:

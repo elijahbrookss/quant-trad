@@ -53,7 +53,10 @@ from portal.backend.service.bots.execution_behavior import OBSERVE_ONLY_BEHAVIOR
 from portal.backend.service.bots.observe_only_runtime import run_observe_only_market_intake
 from portal.backend.service.bots.paper_market_stream import PaperMarketStreamRunner
 from portal.backend.service.market.feed_service import paper_candle_persistence_sink
-from portal.backend.service.storage.repos.market_data import market_data_repo
+from market_data.backtest import (
+    build_backtest_execution_config_hash,
+    normalize_backtest_dataset_binding,
+)
 from portal.backend.service.bots.run_lease import RunLeaseRenewer, default_run_lease_runner_id
 from engines.bot_runtime.live_market import LiveCandleStore
 from portal.backend.service.reports.artifacts import finalize_run_artifact_bundle_from_workers
@@ -147,24 +150,38 @@ def _bind_backtest_market_data_scope(
     *,
     run_id: str,
 ) -> Dict[str, Any] | None:
-    """Pin every backtest worker and nested strategy read to one market commit."""
+    """Defensively bind every backtest worker to the admitted frozen dataset."""
 
     run_type = str(runtime_bot_config.get("run_type") or "backtest").strip().lower()
     if run_type != "backtest":
         return None
-    configured = runtime_bot_config.get("market_data_as_of_commit_seq")
-    watermark = int(configured) if configured is not None else market_data_repo.current_commit_seq()
-    if watermark <= 0:
+    raw_binding = runtime_bot_config.get("dataset_binding")
+    binding = normalize_backtest_dataset_binding(raw_binding)
+    configured_id = str(runtime_bot_config.get("dataset_id") or "").strip()
+    if configured_id != binding["dataset_id"]:
         raise RuntimeError(
-            "backtest_market_data_unavailable: no accepted canonical candle facts exist"
+            "backtest_dataset_substitution_forbidden: configured dataset_id differs from admitted binding"
+        )
+    actual_execution_config_hash = build_backtest_execution_config_hash(
+        bot=runtime_bot_config,
+        strategy_identity=binding,
+        instrument_config_hash=str(binding["instrument_config_hash"]),
+    )
+    if actual_execution_config_hash != str(binding["execution_config_hash"]):
+        raise RuntimeError(
+            "backtest_execution_config_substitution_forbidden: runtime bot "
+            "configuration differs from the admitted dataset binding"
         )
     scope = {
-        "schema_version": "market_data_read_scope.v1",
-        "as_of_commit_seq": watermark,
-        "contract_version": "candle.ohlcv.v1",
+        "schema_version": "market_data_read_scope.v2",
+        "dataset_id": binding["dataset_id"],
+        "dataset_hash": binding["dataset_hash"],
+        "as_of_commit_seq": binding["max_commit_seq"],
+        "contract_version": binding["dataset_contract_version"],
     }
-    runtime_bot_config["market_data_as_of_commit_seq"] = watermark
+    runtime_bot_config["dataset_binding"] = binding
     runtime_bot_config["market_data_read_scope"] = dict(scope)
+    runtime_bot_config.pop("market_data_as_of_commit_seq", None)
 
     run = get_bot_run(run_id) or {}
     config_snapshot = (
@@ -441,8 +458,16 @@ def _next_run_event_seq(shared_wallet_proxy: Mapping[str, Any]) -> int:
             proxy_lock.release()
 
 
-def _load_strategy_symbols(strategy_id: str) -> List[str]:
-    strategy = StrategyLoader.fetch_strategy(strategy_id)
+def _load_strategy_symbols(
+    strategy_id: str,
+    *,
+    runtime_config: Mapping[str, Any],
+) -> List[str]:
+    raw_binding = runtime_config.get("dataset_binding")
+    deps = build_bot_runtime_deps(
+        dataset_binding=raw_binding if isinstance(raw_binding, Mapping) else None
+    )
+    strategy = deps.fetch_strategy(strategy_id, dict(runtime_config))
     symbols: List[str] = []
     seen: set[str] = set()
     for link in strategy.instrument_links:
@@ -1604,7 +1629,9 @@ def load_container_startup_context(
         metadata={"strategy_id": strategy_id},
         telemetry_sender=telemetry_sender,
     )
-    all_symbols = _load_strategy_symbols(strategy_id)
+    all_symbols = _load_strategy_symbols(
+        strategy_id, runtime_config=runtime_bot_config
+    )
     max_symbols = _MAX_SYMBOLS_PER_STRATEGY
     if len(all_symbols) > max_symbols:
         raise RuntimeError(
@@ -1791,11 +1818,7 @@ def _series_worker(
     runtime = BotRuntime(
         bot_id=bot_id,
         config=child_config,
-        deps=build_bot_runtime_deps(
-            market_data_as_of_commit_seq=child_config.get(
-                "market_data_as_of_commit_seq"
-            )
-        ),
+        deps=build_bot_runtime_deps(dataset_binding=child_config.get("dataset_binding")),
     )
 
     def _queue_worker_event(payload: Mapping[str, Any], *, timeout_s: float = 0.25) -> bool:

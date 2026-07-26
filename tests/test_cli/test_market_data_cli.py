@@ -114,3 +114,78 @@ def test_data_freeze_dataset_builds_exact_single_series_request(monkeypatch) -> 
         "created_by": "operator",
         "metadata": {},
     }
+
+
+def test_prepare_backtest_dataset_is_separate_from_execution(monkeypatch) -> None:
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        observed.update(
+            method=request.get_method(),
+            path=urllib.parse.urlparse(request.full_url).path,
+            body=json.loads(request.data.decode("utf-8")),
+        )
+        return _Response({"status": "ready", "dataset": {"dataset_id": "mds_123"}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "data",
+            "prepare-backtest-dataset",
+            "--bot-id",
+            "bot-1",
+            "--start",
+            "2024-01-01T00:00:00Z",
+            "--end",
+            "2025-01-01T00:00:00Z",
+            "--acquire-missing",
+            "--created-by",
+            "operator",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed == {
+        "method": "POST",
+        "path": "/api/bots/bot-1/backtest-dataset/prepare",
+        "body": {
+            "evaluation_start": "2024-01-01T00:00:00Z",
+            "evaluation_end": "2025-01-01T00:00:00Z",
+            "acquire_missing": True,
+            "created_by": "operator",
+        },
+    }
+
+
+def test_backtest_start_sends_the_existing_dataset_identity(monkeypatch) -> None:
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        observed.update(
+            method=request.get_method(),
+            path=urllib.parse.urlparse(request.full_url).path,
+            body=json.loads(request.data.decode("utf-8")),
+        )
+        return _Response({"status": "started", "run_id": "run-1"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "bots",
+            "start",
+            "bot-1",
+            "--run-type",
+            "backtest",
+            "--dataset-id",
+            "mds_123",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed == {
+        "method": "POST",
+        "path": "/api/bots/bot-1/runs/start",
+        "body": {"run_type": "backtest", "dataset_id": "mds_123"},
+    }

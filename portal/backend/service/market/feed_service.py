@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 import pandas as pd
 
@@ -425,10 +425,19 @@ class CanonicalCandleFeed:
         instrument: Mapping[str, Any],
         interval: str,
         known_at_lte: Optional[Any] = None,
+        start: Optional[Any] = None,
+        end: Optional[Any] = None,
+        quality: Sequence[Mapping[str, Any]] = (),
     ) -> pd.DataFrame:
         records = self.store.read_dataset_series(
             dataset_id=dataset_id,
             series_id=series_id,
+            start=(
+                _as_utc(start, field="start") if start is not None else None
+            ),
+            end=(
+                _as_utc(end, field="end") if end is not None else None
+            ),
             known_at_lte=(
                 _as_utc(known_at_lte, field="known_at_lte")
                 if known_at_lte is not None
@@ -440,7 +449,7 @@ class CanonicalCandleFeed:
             instrument=instrument,
             interval=interval,
             series_id=series_id,
-            quality=[],
+            quality=[dict(row) for row in quality],
             dataset_id=dataset_id,
         )
 

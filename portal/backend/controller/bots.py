@@ -130,6 +130,7 @@ class BotUpdateRequest(BaseModel):
 class BotStartRequest(BaseModel):
     request_id: Optional[str] = None
     run_type: Optional[str] = Field(default=None, pattern="^(backtest|sim_trade|paper|live)$")
+    dataset_id: Optional[str] = None
     execution_behavior: Optional[str] = Field(default=None, pattern="^(simulated|observe-only)$")
     duration_seconds: Optional[float] = Field(default=None, gt=0)
     market_data_stream_policy: Optional[Dict[str, Any]] = None
@@ -144,6 +145,13 @@ class BotStopRequest(BaseModel):
 class BotDataPreflightRequest(BaseModel):
     start: str
     end: str
+
+
+class BotBacktestDatasetPrepareRequest(BaseModel):
+    evaluation_start: str
+    evaluation_end: str
+    acquire_missing: bool = False
+    created_by: Optional[str] = None
 
 
 class BotResponse(BotBase):
@@ -322,6 +330,28 @@ async def preflight_bot_data(bot_id: str, body: BotDataPreflightRequest) -> Dict
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
+
+@router.post("/{bot_id}/backtest-dataset/prepare")
+async def prepare_bot_backtest_dataset(
+    bot_id: str,
+    body: BotBacktestDatasetPrepareRequest,
+) -> Dict[str, Any]:
+    """Prepare and freeze historical material without starting execution."""
+
+    try:
+        return bot_service.prepare_backtest_dataset(
+            bot_id,
+            evaluation_start=body.evaluation_start,
+            evaluation_end=body.evaluation_end,
+            acquire_missing=body.acquire_missing,
+            created_by=body.created_by,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 @router.post("/{bot_id}/stop")
 async def stop_bot(

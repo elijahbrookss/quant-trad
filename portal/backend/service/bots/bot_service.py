@@ -8,6 +8,9 @@ from datetime import UTC, datetime
 from typing import Any, Dict, List, Mapping
 
 from ..market import candle_service
+from ..market.backtest_dataset_service import (
+    prepare_backtest_dataset as prepare_backtest_dataset_material,
+)
 from .bot_state_projection import project_bot_state
 from .runner import DockerBotRunner
 from .runtime_composition import get_runtime_composition
@@ -528,6 +531,34 @@ def preflight_bot_data(bot_id: str, *, start: str, end: str) -> Dict[str, Any]:
         "status": "error" if has_error else "warning" if has_warning else "ok",
         "checks": checks,
     }
+
+def prepare_backtest_dataset(
+    bot_id: str,
+    *,
+    evaluation_start: str,
+    evaluation_end: str,
+    acquire_missing: bool,
+    created_by: str | None = None,
+) -> Dict[str, Any]:
+    """Resolve strategy requirements and freeze data without starting a run."""
+
+    bot = dict(_composition().config_service.get_bot(bot_id))
+    windowed_bot = {
+        **bot,
+        "run_type": "backtest",
+        "backtest_start": evaluation_start,
+        "backtest_end": evaluation_end,
+    }
+    artifacts = _composition().config_service.prepare_startup_artifacts(windowed_bot)
+    return prepare_backtest_dataset_material(
+        bot=windowed_bot,
+        strategy=artifacts["strategy"],
+        evaluation_start=evaluation_start,
+        evaluation_end=evaluation_end,
+        acquire_missing=bool(acquire_missing),
+        created_by=created_by,
+    )
+
 
 
 def delete_bot_record(bot_id: str) -> None:

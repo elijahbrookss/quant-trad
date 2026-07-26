@@ -214,6 +214,10 @@ def test_dataset_freeze_route_resolves_canonical_series_and_returns_hashes(
         observed["freeze"] = kwargs
         return SimpleNamespace(
             dataset_id="mds_abc",
+            contract_version="market_dataset.v1",
+            name="reference",
+            purpose="research",
+            metadata={"schema_version": "market_dataset_request.v1"},
             dataset_hash="abc",
             max_commit_seq=42,
             series=({"series_id": 7, "material_hash": "material"},),

@@ -7,6 +7,7 @@ import json
 import uuid
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -148,7 +149,7 @@ class PostgresMarketDataRepository:
             dataset = session.execute(
                 text(
                     """
-                    SELECT id, dataset_hash, max_commit_seq
+                    SELECT id, dataset_hash, max_commit_seq, name, purpose, metadata
                     FROM market.datasets
                     WHERE id = :dataset_id
                     """
@@ -160,10 +161,15 @@ class PostgresMarketDataRepository:
             rows = session.execute(
                 text(
                     """
-                    SELECT series_id, range_start, range_end, max_commit_seq,
-                           row_count, material_hash, provenance_hash, source_summary,
-                           quality_hash, quality_summary
-                    FROM market.dataset_series
+                    SELECT dataset_series.series_id, dataset_series.range_start,
+                           dataset_series.range_end, dataset_series.max_commit_seq,
+                           dataset_series.row_count, dataset_series.material_hash,
+                           dataset_series.provenance_hash, dataset_series.source_summary,
+                           dataset_series.quality_hash, dataset_series.quality_summary,
+                           series.identity_key, series.instrument_id, series.fact_type,
+                           series.timeframe_seconds, series.contract_version
+                    FROM market.dataset_series AS dataset_series
+                    JOIN market.series AS series ON series.id = dataset_series.series_id
                     WHERE dataset_id = :dataset_id
                     ORDER BY series_id, range_start, range_end
                     """
@@ -175,6 +181,10 @@ class PostgresMarketDataRepository:
             dataset_hash=str(dataset["dataset_hash"]),
             max_commit_seq=int(dataset["max_commit_seq"]),
             series=tuple(dict(row) for row in rows),
+            contract_version="market_dataset.v1",
+            name=str(dataset["name"]) if dataset.get("name") else None,
+            purpose=str(dataset["purpose"]),
+            metadata=dict(dataset.get("metadata") or {}),
         )
 
     def register_source(
@@ -970,7 +980,7 @@ class PostgresMarketDataRepository:
                 )
             dataset_hash = build_dataset_identity_hash(manifest_series)
             dataset_id = f"mds_{dataset_hash[:32]}"
-            session.execute(
+            inserted_dataset_id = session.execute(
                 text(
                     """
                     INSERT INTO market.datasets (
@@ -981,6 +991,7 @@ class PostgresMarketDataRepository:
                         :created_by, CAST(:metadata AS jsonb)
                     )
                     ON CONFLICT (dataset_hash) DO NOTHING
+                    RETURNING id
                     """
                 ),
                 {
@@ -992,7 +1003,8 @@ class PostgresMarketDataRepository:
                     "created_by": str(created_by).strip() if created_by else None,
                     "metadata": _json_text(metadata),
                 },
-            )
+            ).scalar_one_or_none()
+            reused_existing = inserted_dataset_id is None
             for entry in manifest_series:
                 session.execute(
                     text(
@@ -1017,11 +1029,13 @@ class PostgresMarketDataRepository:
                         "quality_summary": _json_text(entry["quality_summary"]),
                     },
                 )
-        return FrozenDataset(
-            dataset_id=dataset_id,
-            dataset_hash=dataset_hash,
-            max_commit_seq=watermark,
-            series=tuple(manifest_series),
+        # Content-identical material may resolve to an already persisted dataset
+        # whose immutable read watermark predates unrelated later commits. Always
+        # return that canonical stored manifest instead of a transient manifest
+        # carrying the current database-global watermark.
+        return replace(
+            self.get_dataset(dataset_id),
+            reused_existing=reused_existing,
         )
 
     def read_dataset_series(
@@ -1030,6 +1044,8 @@ class PostgresMarketDataRepository:
         dataset_id: str,
         series_id: int,
         known_at_lte: Optional[datetime] = None,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
     ) -> list[CandleRecord]:
         with db.session() as session:
             entry = session.execute(
@@ -1047,11 +1063,21 @@ class PostgresMarketDataRepository:
                     "market_dataset_series_unknown: "
                     f"dataset_id={dataset_id} series_id={series_id}"
                 )
+            requested = DatasetSeriesRequest(
+                series_id=int(series_id),
+                start=start or entry["range_start"],
+                end=end or entry["range_end"],
+            )
+            if requested.start < entry["range_start"] or requested.end > entry["range_end"]:
+                raise ValueError(
+                    "market_dataset_range_expansion_forbidden: requested range is outside "
+                    f"dataset_id={dataset_id} series_id={series_id} frozen bounds"
+                )
             return self._read_candles_with_session(
                 session,
                 series_id=int(series_id),
-                start=entry["range_start"],
-                end=entry["range_end"],
+                start=requested.start,
+                end=requested.end,
                 as_of_commit_seq=int(entry["max_commit_seq"]),
                 known_at_lte=known_at_lte,
             )

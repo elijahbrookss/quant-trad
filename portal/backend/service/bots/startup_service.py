@@ -12,6 +12,7 @@ from core.settings import get_settings
 from engines.bot_runtime.strategy.models import Strategy
 
 from ..provenance import RUNTIME_CONTRACT_VERSION, RUNTIME_STORAGE_SCHEMA_VERSION, source_revision
+from ..market.backtest_dataset_service import validate_backtest_dataset
 from .botlens_lifecycle_bridge import emit_lifecycle_event
 from .execution_behavior import execution_behavior_from_bot
 from .startup_lifecycle import (
@@ -72,10 +73,13 @@ def _bot_run_config_snapshot(bot: Mapping[str, Any]) -> Dict[str, Any]:
         "playback_speed",
         "backtest_start",
         "backtest_end",
+        "backtest_warmup_bars",
         "snapshot_interval_ms",
         "bot_env",
         "execution_semantics",
         "duration_seconds",
+        "dataset_id",
+        "dataset_binding",
     )
     snapshot: Dict[str, Any] = {}
     for field in fields:
@@ -190,6 +194,22 @@ class BotStartupOrchestrator:
                 strategy.variant_name
                 or ctx.bot_record.get("strategy_variant_name")
             )
+            if str(ctx.bot_record.get("run_type") or "backtest").strip().lower() == "backtest":
+                dataset_id = str(ctx.bot_record.get("dataset_id") or "").strip()
+                binding = validate_backtest_dataset(
+                    dataset_id=dataset_id,
+                    bot=ctx.bot_record,
+                    strategy=strategy,
+                )
+                ctx.dataset_binding = dict(binding)
+                ctx.bot_record["dataset_binding"] = dict(binding)
+                ctx.runtime_dependency_metadata["dataset"] = {
+                    "dataset_id": binding["dataset_id"],
+                    "dataset_hash": binding["dataset_hash"],
+                    "contract_version": binding["dataset_contract_version"],
+                    "quality": dict(binding["quality"]),
+                }
+                ctx.lifecycle_metadata["dataset"] = dict(ctx.runtime_dependency_metadata["dataset"])
             self._record_phase(
                 ctx,
                 BotLifecyclePhase.RESOLVING_STRATEGY.value,
@@ -348,6 +368,8 @@ class BotStartupOrchestrator:
         start_request_overrides: Dict[str, Any] = {}
         if ctx.bot_record.get("run_type") is not None:
             start_request_overrides["run_type"] = ctx.bot_record.get("run_type")
+        if ctx.bot_record.get("dataset_id") is not None:
+            start_request_overrides["dataset_id"] = ctx.bot_record.get("dataset_id")
         if execution_behavior:
             start_request_overrides["execution_behavior"] = execution_behavior
         if duration_seconds is not None:
@@ -355,9 +377,12 @@ class BotStartupOrchestrator:
         if isinstance(ctx.bot_record.get("market_data_stream_policy"), Mapping):
             start_request_overrides["market_data_stream_policy"] = dict(ctx.bot_record["market_data_stream_policy"])
         strategy_hash = (
-            _clean_hash(run_strategy_snapshot.get("strategy_hash"))
+            _clean_hash(ctx.dataset_binding.get("strategy_hash"))
+            or _clean_hash(run_strategy_snapshot.get("strategy_hash"))
             or _clean_hash(effective_strategy_config.get("strategy_hash"))
         )
+        if strategy_hash:
+            run_strategy_snapshot["strategy_hash"] = strategy_hash
         self.storage.upsert_bot_run(
             {
                 "run_id": ctx.run_id,
@@ -375,6 +400,7 @@ class BotStartupOrchestrator:
                 "config_snapshot": {
                     "execution_mode": execution_mode,
                     "execution_behavior": execution_behavior,
+                    "dataset_binding": dict(ctx.dataset_binding),
                     "request_id": ctx.request_id or None,
                     "start_request": {
                         "request_id": ctx.request_id or None,
