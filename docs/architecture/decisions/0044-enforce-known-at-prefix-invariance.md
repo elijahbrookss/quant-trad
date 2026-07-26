@@ -25,8 +25,7 @@ code_paths:
 Accepted on 2026-07-25.
 
 **Retroactive cleanup ADR:** this records the causal semantics already required
-by the runtime and strengthened during baseline cleanup. Full persisted
-prefix-truncation proof remains an open cleanup acceptance item.
+by the runtime and strengthened during baseline cleanup.
 
 ## Context
 
@@ -48,6 +47,14 @@ suffix must not alter semantic outputs inside the original prefix. Reporting
 projects persisted decisions and outputs; it does not rerun hidden indicator or
 strategy state.
 
+A decision produced from a completed candle is known only at that candle's
+close. An immediate market entry may fill at the signal close, but the new
+position cannot consume that candle's earlier high/low as stop or target
+evidence. Its first ordinary exit-eligible price path begins with the next
+candle. An explicit terminal close may still close a newly opened position at
+the final bar close because it consumes the known close, not an earlier
+intrabar range.
+
 ## Invariants
 
 - Future source rows cannot change an earlier indicator snapshot or decision.
@@ -55,6 +62,8 @@ strategy state.
 - Signal time, order eligibility time, fill time, event time, and persistence
   time remain distinct where their semantics differ.
 - A signal-close maker order cannot fill from the already-known signal bar.
+- No newly opened signal-close position can consume the signal bar's earlier
+  range as executable exit evidence.
 - Warmup and insufficient-history limitations are explicit evidence, not
   silently valid decisions.
 - Missing causal timestamps fail or block certification; they do not fall back
@@ -91,9 +100,12 @@ promoted as trustworthy research inputs.
   consumed candle fingerprints, indicator outputs and overlays, decisions,
   generated orders, fills, position lifecycle, and wallet accounting through
   the original cutoff for both backtest and paper adapters.
-- The cleanup acceptance plan still requires persisted end-to-end
-  CLI/job/report prefix-truncation coverage before this invariant is considered
-  fully proved.
+- `tests/integration/runtime/test_persisted_runtime_correctness.py` runs the
+  production runtime, persistence, artifact, report-summary, backtest adapter,
+  and paper adapter paths over a credential-free reference dataset. It proves
+  exact semantic repeatability, prefix truncation through the known-at
+  boundary, signal-close entry followed by next-bar target exit, lifecycle and
+  wallet reconciliation, and persisted candle identity/continuity evidence.
 
 ## References
 

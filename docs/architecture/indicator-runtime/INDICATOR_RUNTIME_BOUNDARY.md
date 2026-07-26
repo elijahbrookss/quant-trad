@@ -108,6 +108,13 @@ Visual and debug surfaces leave through separate projection payloads:
 payload warnings, and source-fact diagnostics can explain expensive or invalid
 projection/output behavior, but they do not become strategy inputs.
 
+Indicators that load independent source candles publish the existing
+`indicator_source_candle_continuity.v1` diagnostic. Bot runtime composition
+collects it immediately after graph construction, adds canonical
+strategy/instrument/series identity, and stores it in series metadata before
+artifact creation. The runtime dependency is required: missing, malformed, or
+unattributed source diagnostics fail loudly rather than disappearing.
+
 ## Runtime Validation Surface
 
 The backend indicator runtime validation endpoint and output evidence collector

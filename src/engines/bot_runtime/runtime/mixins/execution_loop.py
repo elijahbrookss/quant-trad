@@ -1103,7 +1103,14 @@ class RuntimeExecutionLoopMixin:
             prime_started_perf = time.perf_counter()
             prime_started = datetime.now(timezone.utc)
             try:
-                trade_events = self._prime_intrabar_or_step_bar(state, candle)
+                # A strategy decision is known only after this candle closes.
+                # A position opened from that decision must not consume the
+                # same candle's earlier high/low as executable exit evidence.
+                trade_events = (
+                    []
+                    if entry_created
+                    else self._prime_intrabar_or_step_bar(state, candle)
+                )
                 execution_prime_ms = max((time.perf_counter() - prime_started_perf) * 1000.0, 0.0)
                 self._record_step_trace(
                     "step_execution_prime",
@@ -1117,6 +1124,7 @@ class RuntimeExecutionLoopMixin:
                         "bar_index": state.bar_index,
                         "bar_time": bar_time,
                         "trade_events_count": len(trade_events),
+                        "entry_opened_at_close": entry_created,
                         "intrabar_active_after_prime": bool(state.intrabar_active()),
                     },
                 )

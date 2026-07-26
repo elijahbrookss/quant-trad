@@ -157,6 +157,41 @@ def _run() -> dict[str, Any]:
                 }
             ],
             "indicators": [{"id": "ind-1", "type": "market_profile"}],
+            "indicator_source_diagnostics": [],
+        },
+    }
+
+
+def _source_diagnostic(acceptability: str) -> dict[str, Any]:
+    source_status = "ok" if acceptability == "accepted" else "warning"
+    final_status = (
+        "healthy"
+        if acceptability == "accepted"
+        else "source_sparse"
+        if acceptability == "acceptable_with_caveat"
+        else "degraded"
+    )
+    return {
+        "strategy_id": "strategy-1",
+        "instrument_id": "instrument-btc",
+        "symbol": "BTC",
+        "timeframe": "1h",
+        "datasource": "coinbase",
+        "exchange": "CBI",
+        "indicator_id": "ind-1",
+        "indicator_type": "market_profile",
+        "source_candle_continuity": {
+            "schema_version": "indicator_source_candle_continuity.v1",
+            "timeframe": "5m",
+            "row_count": 10,
+            "status": source_status,
+            "severity": source_status,
+            "acceptability": acceptability,
+            "message": f"source continuity is {acceptability}",
+            "continuity": {
+                "candle_count": 10,
+                "final_status": final_status,
+            },
         },
     }
 
@@ -552,6 +587,117 @@ def test_dataset_builds_from_db_truth_without_artifact_directory(monkeypatch: py
     assert dataset["context"]["schema_version"] == "report_context.v1"
     assert dataset["candle_catalog"]["schema_version"] == "candle_catalog.v1"
     assert dataset["operational_health"]["schema_version"] == "operational_health.v1"
+
+
+@pytest.mark.parametrize(
+    (
+        "acceptability",
+        "expected_status",
+        "expected_caveat",
+        "expected_code",
+        "expected_impact",
+    ),
+    [
+        (
+            "acceptable_with_caveat",
+            "acceptable_with_caveat",
+            "indicator_source_continuity_caveat",
+            "indicator_source_continuity_caveat",
+            "degrades_metrics",
+        ),
+        (
+            "investigate",
+            "investigate",
+            "indicator_source_continuity_investigate",
+            "indicator_source_continuity_investigate",
+            "blocks_golden",
+        ),
+    ],
+)
+def test_dataset_propagates_indicator_source_diagnostics_into_trust_sections(
+    monkeypatch: pytest.MonkeyPatch,
+    acceptability: str,
+    expected_status: str,
+    expected_caveat: str,
+    expected_code: str,
+    expected_impact: str,
+) -> None:
+    run = _run()
+    diagnostic = _source_diagnostic(acceptability)
+    run["config_snapshot"]["indicator_source_diagnostics"] = [diagnostic]
+
+    dataset = _build(monkeypatch, run=run)
+
+    source = dataset["context"]["indicator_source_diagnostics"]
+    assert source["schema_version"] == "indicator_source_diagnostics.v1"
+    assert source["available"] is True
+    assert source["status"] == expected_status
+    assert source["items"] == [diagnostic]
+    assert expected_caveat in source["caveats"]
+    assert dataset["readiness"]["data_quality_status"] == "degraded"
+    assert expected_caveat in dataset["readiness"]["caveats"]
+    report_diagnostic = next(
+        item
+        for item in dataset["diagnostics"]["items"]
+        if item["code"] == expected_code
+    )
+    assert report_diagnostic["readiness_impact"] == expected_impact
+    assert (
+        report_diagnostic["affected_identity"]["source_candle_continuity"]
+        == diagnostic["source_candle_continuity"]
+    )
+    if expected_impact == "blocks_golden":
+        assert expected_code in dataset["readiness"]["golden_blocking_reasons"]
+
+
+def test_dataset_marks_missing_indicator_source_diagnostics_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _run()
+    del run["config_snapshot"]["indicator_source_diagnostics"]
+
+    dataset = _build(monkeypatch, run=run)
+
+    source = dataset["context"]["indicator_source_diagnostics"]
+    assert source["available"] is False
+    assert source["status"] == "unavailable"
+    assert (
+        "indicator_source_diagnostics_unavailable"
+        in dataset["readiness"]["caveats"]
+    )
+    assert (
+        "indicator_source_diagnostics_unavailable"
+        in dataset["readiness"]["golden_blocking_reasons"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda diagnostic: diagnostic.pop("source_candle_continuity"),
+            "source_candle_continuity is required",
+        ),
+        (
+            lambda diagnostic: diagnostic["source_candle_continuity"].update(
+                {"continuity": "not-a-mapping"}
+            ),
+            "source_candle_continuity continuity must be a mapping",
+        ),
+    ],
+)
+def test_dataset_rejects_malformed_indicator_source_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    mutate,
+    message: str,
+) -> None:
+    run = _run()
+    diagnostic = _source_diagnostic("accepted")
+    mutate(diagnostic)
+    run["config_snapshot"]["indicator_source_diagnostics"] = [diagnostic]
+
+    with pytest.raises(ValueError, match=message):
+        _build(monkeypatch, run=run)
 
 
 def test_dataset_surfaces_insufficient_backtest_warmup(

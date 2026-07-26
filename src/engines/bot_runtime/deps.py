@@ -18,6 +18,7 @@ class BotRuntimeDeps:
     indicator_get_instance_meta: Callable[..., Dict[str, Any]]
     indicator_build_runtime_graph: Callable[..., tuple[dict[str, dict[str, Any]], list[Any]]]
     indicator_build_runtime_instance: Callable[..., Any]
+    indicator_collect_runtime_diagnostics: Callable[[Sequence[Any]], list[Dict[str, Any]]]
     indicator_runtime_input_plan_for_instance: Callable[..., Dict[str, Any]]
     build_indicator_context: Callable[[str, Any], Any]
     record_bot_runtime_event: Callable[[Mapping[str, Any]], None]

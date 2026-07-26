@@ -119,6 +119,25 @@ def _series(symbol: str, strategy_id: str, indicator_id: str):
                 "request_satisfies_requirements": True,
                 "indicator_requirements": [],
             },
+            "indicator_source_diagnostics": [
+                {
+                    "indicator_id": indicator_id,
+                    "indicator_type": "test_indicator",
+                    "source_candle_continuity": {
+                        "schema_version": "indicator_source_candle_continuity.v1",
+                        "timeframe": "5m",
+                        "row_count": 2,
+                        "status": "ok",
+                        "severity": "ok",
+                        "acceptability": "accepted",
+                        "message": "Indicator source candle continuity is healthy.",
+                        "continuity": {
+                            "candle_count": 2,
+                            "final_status": "healthy",
+                        },
+                    },
+                }
+            ],
         },
     )
 
@@ -262,6 +281,12 @@ def test_finalize_run_artifact_bundle_from_workers_aggregates_worker_outputs(mon
     assert len(artifacts._read_jsonl(run_dir / "execution" / "runtime_events.jsonl")) == 2
     series_snapshot = artifacts._read_json(run_dir / "run" / "series.json")
     assert len(series_snapshot["series"]) == 2
+    assert (
+        series_snapshot["series"][0]["indicator_source_diagnostics"][0][
+            "source_candle_continuity"
+        ]["schema_version"]
+        == "indicator_source_candle_continuity.v1"
+    )
     assert len(storage.upserts) == 1
     config_snapshot = storage.upserts[0]["config_snapshot"]
     strategy_snapshot = config_snapshot["strategies"][0]
@@ -273,6 +298,13 @@ def test_finalize_run_artifact_bundle_from_workers_aggregates_worker_outputs(mon
     assert strategy_snapshot["atm_template"] == {"name": "ATM 1"}
     assert config_snapshot["backtest_warmup_bars"] == 100
     assert len(config_snapshot["backtest_warmup_evidence"]) == 2
+    assert len(config_snapshot["indicator_source_diagnostics"]) == 2
+    assert config_snapshot["indicator_source_diagnostics"][0]["instrument_id"] == (
+        "BTC-instrument"
+    )
+    assert config_snapshot["indicator_source_diagnostics"][1]["instrument_id"] == (
+        "ETH-instrument"
+    )
     assert config_snapshot["backtest_warmup_evidence"][0]["status"] == "ready"
     assert config_snapshot["expected_candle_series"] == [
         {

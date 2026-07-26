@@ -14,6 +14,9 @@ from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence
 
 from core.settings import get_settings
 from indicators.config import IndicatorExecutionContext
+from indicators.runtime.source_diagnostics import (
+    normalize_indicator_source_diagnostics,
+)
 from engines.bot_runtime.deps import BotRuntimeDeps
 from engines.bot_runtime.core.domain import Candle, normalize_epoch
 from engines.bot_runtime.core import SameBarResolutionPolicy
@@ -871,6 +874,22 @@ class RuntimeSetupPrepareMixin:
             strategy_indicator_metas=indicator_metas,
             execution_context=execution_context,
             ctx=self._indicator_ctx,
+        )
+        series.meta["indicator_source_diagnostics"] = (
+            normalize_indicator_source_diagnostics(
+                self._deps.indicator_collect_runtime_diagnostics(indicators),
+                allow_unrelated_records=True,
+                series_identity={
+                    "strategy_id": series.strategy_id,
+                    "instrument_id": (
+                        str(instrument_id) if instrument_id is not None else None
+                    ),
+                    "symbol": series.symbol,
+                    "timeframe": series.timeframe,
+                    "datasource": series.datasource,
+                    "exchange": series.exchange,
+                },
+            )
         )
         configure_indicator_overlay_history(
             indicators,

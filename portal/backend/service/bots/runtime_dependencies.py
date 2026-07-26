@@ -11,6 +11,7 @@ from ..indicators.indicator_service import (
     IndicatorServiceContext,
     build_runtime_indicator_graph,
     build_runtime_indicator_instance,
+    collect_runtime_indicator_diagnostics,
     get_instance_meta,
     runtime_input_plan_for_instance,
 )
@@ -120,6 +121,7 @@ def build_bot_runtime_deps() -> BotRuntimeDeps:
         indicator_get_instance_meta=_get_indicator_instance_meta,
         indicator_build_runtime_graph=_build_runtime_indicator_graph,
         indicator_build_runtime_instance=_build_runtime_indicator_instance,
+        indicator_collect_runtime_diagnostics=collect_runtime_indicator_diagnostics,
         indicator_runtime_input_plan_for_instance=_runtime_input_plan_for_indicator,
         build_indicator_context=_build_indicator_context,
         record_bot_runtime_event=record_bot_runtime_event,

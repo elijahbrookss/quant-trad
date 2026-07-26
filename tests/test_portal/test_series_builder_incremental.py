@@ -52,6 +52,7 @@ def _builder_deps(
         ),
         indicator_build_runtime_graph=lambda *args, **kwargs: ({}, []),
         indicator_build_runtime_instance=lambda *args, **kwargs: None,
+        indicator_collect_runtime_diagnostics=lambda _indicators: [],
         indicator_runtime_input_plan_for_instance=(
             indicator_runtime_input_plan_for_instance
             or (lambda *args, **kwargs: {})

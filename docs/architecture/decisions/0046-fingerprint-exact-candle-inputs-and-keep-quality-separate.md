@@ -14,8 +14,11 @@ tags:
   - cleanup
 code_paths:
   - src/core/candle_snapshot.py
+  - src/indicators/runtime/source_diagnostics.py
   - src/engines/bot_runtime/strategy/series_builder_parts/series_construction.py
+  - src/engines/bot_runtime/runtime/mixins/setup_prepare.py
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
+  - portal/backend/service/reports/artifacts.py
   - portal/backend/service/reports/run_research_dataset.py
   - docs/architecture/data/DATA_BOUNDARY.md
   - docs/architecture/reporting/REPORTING_BOUNDARY.md
@@ -60,6 +63,22 @@ Continuity gaps, provider provenance, confidence, caveats, warmup, and
 truncation remain separate quality evidence. They may block or degrade a run,
 but do not substitute for or mutate the exact value fingerprint.
 
+Indicators that load independent source candles already produce
+`indicator_source_candle_continuity.v1`. Runtime composition collects that
+existing payload once, attaches canonical strategy/series identity, and
+persists it in both standalone and worker-aggregated run artifacts. Reporting
+publishes the unchanged payload through
+`context.indicator_source_diagnostics`, readiness, diagnostics, report
+sections, and the operational fingerprint. It remains excluded from the
+semantic fingerprint because source quality is evidence about trust, not a
+strategy decision value.
+
+An explicitly captured empty list means no configured indicator required
+independent source candles. A missing list is unavailable evidence and blocks
+golden certification. Provider-sparse or expected-sparse source data degrades
+data quality with a caveat; source defects marked `investigate` block golden
+certification. Malformed records fail report construction.
+
 ## Invariants
 
 - Changing one consumed candle value changes dataset identity.
@@ -71,6 +90,12 @@ but do not substitute for or mutate the exact value fingerprint.
 - Multiple strategies consuming the same market series remain distinct inputs
   and are not collapsed accidentally.
 - Diagnostic or observer-only gap metadata cannot change material data identity.
+- Indicator source-candle diagnostics survive runtime, artifact, report,
+  readiness, diagnostic, and operational-fingerprint boundaries unchanged.
+- Missing source-diagnostic evidence is unavailable, not an optimistic empty
+  collection.
+- Malformed source-diagnostic schema, acceptability, continuity, or identity
+  fails loudly.
 - Missing snapshot evidence is omitted or unavailable, never represented by an
   empty object that looks like proof.
 
@@ -105,8 +130,14 @@ contract. Older runs without value snapshots cannot claim a complete data hash.
 - `tests/test_portal/test_series_builder_incremental.py` verifies one failed
   eligible configured series aborts the whole multi-instrument build.
 - `tests/test_portal/test_report_artifact_bundle_workers.py` verifies
-  multi-worker run metadata retains the complete planned inventory even when
-  the available worker series are partial.
+  multi-worker run metadata retains the complete planned inventory and
+  source-candle diagnostics even when the available worker series are partial.
+- `tests/test_portal/test_bot_runtime_degradation.py` verifies runtime graph
+  diagnostics receive canonical series identity before artifact creation.
+- `tests/test_portal/test_run_research_dataset.py` verifies source diagnostics
+  survive unchanged into report trust sections, missing evidence blocks golden
+  certification, provider caveats degrade quality, and malformed evidence fails
+  loudly.
 - `tests/test_portal/test_container_runtime_transport.py` verifies container
   worker planning consumes the backend preflight instrument inventory.
 - `tests/test_portal/test_report_execution_mode_contract.py`,

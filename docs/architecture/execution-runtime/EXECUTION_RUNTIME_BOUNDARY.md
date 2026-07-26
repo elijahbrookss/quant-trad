@@ -143,6 +143,13 @@ close and cannot fill from the already-known signal bar range. Once a maker
 order is accepted as resting, later bars may fill it as maker liquidity when
 price trades through the limit for the configured validity window.
 
+The same causal boundary applies to immediate market entries. A close-known
+decision may open at the signal close, but the new position cannot evaluate a
+stop or target against that candle's earlier high/low. Ordinary exit
+eligibility starts with the next candle. A terminal end-of-window liquidation
+may close the position at the same final close because it uses the known close
+rather than replaying an earlier intrabar path.
+
 Execution profiles remain the fee and instrument authority. Templates may
 request order style and exit behavior, but they must not patch missing
 instrument fee, tick, quantity, or margin fields.
@@ -322,6 +329,8 @@ controls.
 
 - All bot runs are walk-forward.
 - Known-at timing governs indicators, decisions, and execution.
+- A position opened from a close-known decision cannot consume the signal
+  candle's earlier range as exit evidence.
 - Runtime truth does not come from frontend playback.
 - Visual overlays are bounded BotLens projection state, not runtime series
   truth.

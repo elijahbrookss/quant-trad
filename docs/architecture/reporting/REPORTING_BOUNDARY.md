@@ -242,6 +242,17 @@ unavailable and readiness exposes `missing_data_snapshot_hash`. Continuity,
 provenance, warmup, confidence, and caveats continue through the existing
 quality/readiness contract independently of the value hash.
 
+Independent indicator-source continuity uses the existing
+`indicator_source_candle_continuity.v1` payload. Runtime series snapshots and
+both standalone and worker-aggregated config snapshots persist the payload with
+canonical strategy, instrument, symbol, timeframe, datasource, exchange, and
+indicator identity. `RunResearchDataset v1` exposes it as
+`context.indicator_source_diagnostics`, includes it in operational identity,
+and projects its status into data-quality readiness, caveats, diagnostics, and
+golden blocking. It does not enter the semantic fingerprint. An explicitly
+captured empty list means not applicable; a missing list is unavailable
+evidence. Malformed payloads fail report construction.
+
 ## What Reporting Publishes
 
 Reporting publishes report API payloads, compare payloads, compact research and
@@ -301,6 +312,12 @@ semantics.
   candle snapshots cover every expected series.
 - Observer continuity and diagnostic gap metadata cannot change exact material
   candle identity.
+- Indicator source-candle diagnostics preserve their existing payload through
+  runtime series metadata, run artifacts, report context, readiness,
+  diagnostics, and operational fingerprinting.
+- Provider-source caveats degrade quality; source defects marked for
+  investigation and missing source-diagnostic evidence block golden
+  certification.
 - Strategy rows in report config snapshots must preserve the run-start
   `run_strategy_snapshot`/`effective_strategy_config` when provided by runtime
   series metadata. Worker aggregation must not replace known rules, params, ATM,

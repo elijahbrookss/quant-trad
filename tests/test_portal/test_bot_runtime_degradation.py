@@ -32,6 +32,7 @@ def _runtime_deps() -> BotRuntimeDeps:
         indicator_get_instance_meta=lambda *args, **kwargs: {},
         indicator_build_runtime_graph=lambda *args, **kwargs: ({}, []),
         indicator_build_runtime_instance=lambda *args, **kwargs: None,
+        indicator_collect_runtime_diagnostics=lambda _indicators: [],
         indicator_runtime_input_plan_for_instance=lambda *args, **kwargs: {},
         build_indicator_context=lambda bot_id, _overlay_cache: SimpleNamespace(
             cache_owner="test",
@@ -433,6 +434,24 @@ def test_visible_overlays_does_not_build_indicator_projection(monkeypatch) -> No
 
 
 def test_indicator_runtime_initialization_configures_overlay_history():
+    source_diagnostic = {
+        "indicator_id": "stats-1",
+        "indicator_type": "candle_stats",
+        "source_candle_continuity": {
+            "schema_version": "indicator_source_candle_continuity.v1",
+            "timeframe": "5m",
+            "row_count": 2,
+            "status": "ok",
+            "severity": "ok",
+            "acceptability": "accepted",
+            "message": "Indicator source candle continuity is healthy.",
+            "continuity": {
+                "candle_count": 2,
+                "final_status": "healthy",
+            },
+        },
+    }
+
     class _OverlayHistoryIndicator:
         def __init__(self):
             self.calls = []
@@ -453,6 +472,9 @@ def test_indicator_runtime_initialization_configures_overlay_history():
         _runtime_deps(),
         indicator_get_instance_meta=lambda *args, **kwargs: {"id": "stats-1", "type": "candle_stats"},
         indicator_build_runtime_graph=lambda *args, **kwargs: ({"stats-1": {"id": "stats-1"}}, [indicator]),
+        indicator_collect_runtime_diagnostics=lambda _indicators: [
+            source_diagnostic
+        ],
     )
     runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=deps)
     candle = Candle(
@@ -481,6 +503,17 @@ def test_indicator_runtime_initialization_configures_overlay_history():
     runtime._initialize_indicator_runtime_state(state)
 
     assert indicator.calls == [640]
+    assert series.meta["indicator_source_diagnostics"] == [
+        {
+            **source_diagnostic,
+            "strategy_id": "strategy-1",
+            "instrument_id": "instrument-btc",
+            "symbol": "BTCUSD",
+            "timeframe": "1m",
+            "datasource": "local",
+            "exchange": "test",
+        }
+    ]
 
 
 def test_aggregate_stats_reuses_cached_trade_summary_until_trade_revision_changes():

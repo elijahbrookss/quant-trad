@@ -107,6 +107,7 @@ def _runtime_deps(fetch_ohlcv) -> BotRuntimeDeps:
         indicator_get_instance_meta=lambda *args, **kwargs: {},
         indicator_build_runtime_graph=lambda *args, **kwargs: ({}, []),
         indicator_build_runtime_instance=lambda *args, **kwargs: None,
+        indicator_collect_runtime_diagnostics=lambda _indicators: [],
         indicator_runtime_input_plan_for_instance=lambda *args, **kwargs: {},
         build_indicator_context=lambda bot_id, _overlay_cache: SimpleNamespace(
             cache_owner="test",

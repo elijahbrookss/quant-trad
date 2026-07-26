@@ -20,12 +20,12 @@ engineering guidance; this file records only cleanup-specific state.
 | Candle-continuity extraction | integration baseline | Complete | — |
 | Canonical lifecycle ledger | `feats/lifecycle-canonical-ledger` | Complete | baseline |
 | Strict execution contracts | `feats/execution-contract-strictness` | Complete | lifecycle integration |
-| Compatibility/dead-path removal | `feats/compatibility-dead-path-removal` | In progress | strict execution contract ownership |
+| Compatibility/dead-path removal | `feats/compatibility-dead-path-removal` | Complete | strict execution contract ownership |
 | Canonical ATM input schema | `feats/atm-canonical-contract` | Complete | compatibility inventory |
 | Storage repository ownership | `feats/storage-repository-ownership` | Complete | compatibility caller migration |
 | Temporal/config ownership | `feats/config-temporal-ownership` | Complete | storage ownership |
-| Baseline hygiene | `feats/baseline-hygiene` | In progress | structural ownership settled |
-| Correctness evidence campaign | `feats/correctness-evidence-campaign` | In progress | all structural cleanup |
+| Baseline hygiene | `feats/baseline-hygiene` | Complete | structural ownership settled |
+| Correctness evidence campaign | `feats/correctness-evidence-campaign` | Complete | all structural cleanup |
 | Architecture decision records | integration baseline | Complete | durable cleanup decisions and evidence |
 | Async job ownership fencing | integration baseline | Complete | shared queue and research persistence ownership |
 
@@ -44,6 +44,10 @@ engineering guidance; this file records only cleanup-specific state.
   `fast`, and is never inferred from playback.
 - Existing continuity, provenance, readiness, diagnostics, caveat, and trust
   contracts remain canonical until tests prove a structural gap.
+- Existing `indicator_source_candle_continuity.v1` evidence is collected by
+  runtime composition, persisted with canonical series identity, and displayed
+  through report context/readiness/diagnostics. It remains operational quality
+  evidence, not semantic strategy identity.
 - Complete-series candle continuity is producer-owned and persisted at the
   terminal run boundary independently of UI subscribers. Transport-observer
   continuity remains diagnostic and cannot certify or block material data
@@ -90,7 +94,7 @@ retired tables until that explicit hard cutover is complete.
 | Indicator overlay-history interface and Candle Stats/Regime implementations | KEEP | Renamed in `a5ef7de` to the explicit `configure_overlay_history` contract. All three definitions mean render-only retention, not research range, evaluation, recovery, or warmup. |
 | Four replay-window dispatch helpers | CONSOLIDATE | Completed in `a5ef7de`: indicator preview, runtime validation, strategy preview, and bot setup use one fail-loud `configure_indicator_overlay_history` owner. |
 | Research range, backtest evaluation, indicator warmup, runtime recovery, transport replay | KEEP | These are distinct windows with different clocks, failure policy, and consumers. Similar names are not evidence of duplication. |
-| Continuity, candle catalog, readiness, provenance, diagnostics, confidence, and caveats | KEEP | Created in dataset/report builders, finalized in readiness, persisted with report fingerprints/materializations, exported in report bundles, and displayed through CLI/MCP report resources and research-check results. |
+| Continuity, candle catalog, readiness, provenance, diagnostics, confidence, and caveats | KEEP | Created by existing candle/indicator/runtime/report owners, finalized in readiness, persisted with report fingerprints/materializations, exported in report bundles, and displayed through CLI/MCP report resources and research-check results. Indicator source continuity now survives runtime metadata and both standalone/worker artifacts without introducing another quality envelope. |
 | Compact report and experiment evidence projection | CONSOLIDATE | The canonical dataset already owned identity, repeatability, quality, blockers, fingerprints, and caveats, but `run_research_summary.v1` and persisted experiment summaries dropped part of that evidence. They now project those existing fields unchanged without creating another quality model or expanding the command/MCP surface. |
 | Warmup/provider/truncation quality omissions | CONSOLIDATE | Completed in `38cf782`, `84dbf93`, and `0d8118f`: backtest warmup evidence is explicit, malformed candle frames fail before evaluation, and bounded observability reads expose coverage/truncation caveats. The existing envelope remains canonical. |
 | Viewer-dependent runtime facts and transport-derived continuity | CONSOLIDATE | Completed in `a0e196e`: canonical decision/fill facts are produced without subscribers, complete-series continuity is persisted by the runtime at `run_final`, and sampled transport continuity is explicitly diagnostic-only. |
@@ -100,7 +104,7 @@ retired tables until that explicit hard cutover is complete.
 | Filename-routed PR profile and stale controller test seam | DELETE | Completed in `35949fe`: the full non-database backend suite replaces the 70-line filename allowlist, and the overlay logging test now fails through the current metadata-service boundary. |
 | Deprecated GET report-build flags | DELETE | Removed from the read-only `GET /run-report` contract; report materialization is owned only by `POST /run-report/build`, and the stale architecture route description was corrected. |
 | Duplicate indicator-type routes and removed ATM owner-field shim | DELETE | `/api/indicators/types` and `/api/indicators/types/{type_id}` are the only routes used by the CLI, MCP adapter, tests, and architecture docs. The uncalled `/api/indicators-types` pair and the unreachable `owner_id` payload deletion were removed. |
-| Commented changelog workflow experiment | DELETE | Completed in `7338f56`: the workflow had no executable path. The remote `test` branch still exists, so its active CI trigger remains. |
+| Commented changelog workflow experiment and stale `test` CI targeting | DELETE | The workflow experiment was deleted in `7338f56`. `origin/test` has no commit absent from `origin/develop` (`origin/develop...origin/test = 1178/0`), so the active backend workflow now targets only `develop` and `main`. |
 | CLI operations | KEEP | `qt` is the canonical operator contract. Every invocation writes a redacted structured audit by default and API calls record method, URL, status, duration, and byte counts. Direct mutation commands do not consistently require plan/apply/confirm, and `--no-audit-log` can disable the record, so unrestricted CLI access is not yet an agent-safe boundary. |
 | MCP operations | VERIFY USAGE | All 44 registrations have handlers and no orphan definitions were found. Mutating tools require confirmation and usually plan by default; paper/live starts require an additional opt-in. External invocation is not visible in the internal call graph, so retain the thin optional adapter until usage evidence supports tool-level deletion. |
 | Async queue ownership and research side effects | CONSOLIDATE | Opaque per-claim tokens, monotonic generations, PostgreSQL-clock bounded heartbeats, heartbeat-based reclaim, and conditional terminal writes are canonical. Queued research-check artifacts and success commit atomically; stale, failed, and duplicate owned effects cannot persist. Atomic request-fingerprint uniqueness suppresses concurrent duplicate dispatch, retry budgets bound timeout reclaim, and the exclusive-access migration requeues pre-fencing running rows only on first installation. |
@@ -113,10 +117,10 @@ retired tables until that explicit hard cutover is complete.
 
 | Area | Current protection | Remaining gap |
 | --- | --- | --- |
-| Report materialization | Input fingerprints, cached materializations, and a single-worker executor prevent duplicate concurrent builds. | `run_research_dataset.py` remains a 5,638-line concentration point mixing projection, quality, readiness, metrics, and presentation assembly. |
-| Runtime projection | Bounded transport queues, revision cursors, batched persistence, and explicit overflow/degradation signals protect runtime truth. | `runtime_push_stream.py` is 3,037 lines and mixes event translation, persistence, diagnostics, transport, and lifecycle projection. |
-| Runtime domain | Deterministic policies and reference scenario tests protect entry, exit, fill, lifecycle, and accounting behavior. | `core/domain/engine.py` is 2,028 lines and still combines sizing, admission, order/fill orchestration, position creation, and summary projection. |
-| Setup and research | Async jobs are fingerprinted, partitioned, retryable, fenced by heartbeat/token/generation, and workers use bounded configured pools. Research-check effects commit atomically with terminal success. | Sweeps restart from immutable input after retry and expose neither partial-progress checkpoints nor mid-job cancellation. `setup_prepare.py` is 1,913 lines, `research/checks.py` is 2,023 lines, and series-link loading sizes a thread pool directly from eligible-link count. |
+| Report materialization | Input fingerprints, cached materializations, and a single-worker executor prevent duplicate concurrent builds. | `run_research_dataset.py` remains a 6,041-line concentration point mixing projection, quality, readiness, metrics, and presentation assembly. |
+| Runtime projection | Bounded transport queues, revision cursors, batched persistence, and explicit overflow/degradation signals protect runtime truth. | `runtime_push_stream.py` is 3,015 lines and mixes event translation, persistence, diagnostics, transport, and lifecycle projection. |
+| Runtime domain | Deterministic policies and reference scenario tests protect entry, exit, fill, lifecycle, and accounting behavior. | `core/domain/engine.py` is 2,027 lines and still combines sizing, admission, order/fill orchestration, position creation, and summary projection. |
+| Setup and research | Async jobs are fingerprinted, partitioned, retryable, fenced by heartbeat/token/generation, and workers use bounded configured pools. Research-check effects commit atomically with terminal success. | Sweeps restart from immutable input after retry and expose neither partial-progress checkpoints nor mid-job cancellation. `setup_prepare.py` is 1,931 lines, `research/checks.py` is 2,023 lines, and series-link loading sizes a thread pool directly from eligible-link count. |
 | CLI and MCP | CLI audits by default; MCP delegates to shared CLI/API contracts and guards mutation. | `cli/main.py` is 3,351 lines; CLI audits do not persist response payloads or a uniform validation/caveat envelope, and direct CLI mutations lack uniform confirmation gates. |
 
 ## Unsupported or Deferred Workflows
@@ -181,6 +185,7 @@ retired tables until that explicit hard cutover is complete.
 | 2026-07-25 | canonical strategy market identity | affected strategy API, compile, variant, persistence, and ATM profile: 40 passed; complete non-database backend gate: 1,340 passed with 49 pre-existing dependency/deprecation warnings in 29.05s; docs: 2 passed; affected compileall, whitespace, and retired-helper reference audits passed. Strategy persistence and APIs now expose only `datasource`/`exchange` defaults, strict writes reject strategy-level provider/venue aliases, and provider/venue ownership remains with provider selection, credentials, and instrument admission. |
 | 2026-07-25 | backend-owned container run identity | affected container identity, runner, startup, transport, observe-only, and runtime-composition profile: 52 passed; complete non-database backend gate: 1,342 passed with 49 pre-existing dependency/deprecation warnings in 28.80s; docs: 2 passed; affected compileall, whitespace, and generated-fallback reference audits passed. Missing `QT_BOT_RUNTIME_RUN_ID` now fails before container startup instead of creating a disconnected lifecycle, lease, wallet, and reporting identity; ADR 0042 records the invariant and enforcing test. |
 | 2026-07-25 | compact dataset-quality evidence propagation | focused report/experiment profile: 17 passed; MCP passthrough profile: 16 passed; reporting profile: 136 passed; CLI profile: 64 passed; complete non-database backend gate: 1,343 passed with 49 pre-existing dependency/deprecation warnings in 30.42s; docs: 2 passed; affected compileall and whitespace checks passed. `run_research_summary.v1` and persisted experiment summaries now retain canonical dataset/config/strategy hashes, semantic and operational fingerprints, repeatability, data/execution quality, blockers, degraded/unavailable sections, and caveats. The existing CLI commands and thin MCP adapter remain unchanged, and no agent-policy documentation or second quality envelope was added. |
+| 2026-07-25 | persisted causal harness and source-diagnostics closure | focused runtime/artifact/report/persisted harness: 87 passed; runtime profile: 462 passed, 887 deselected; reporting profile: 141 passed, 1,208 deselected; complete non-database backend gate: 1,349 passed with 49 dependency/deprecation warnings in 44.66s; clean/repeated isolated Timescale bootstrap and complete PostgreSQL-enabled gate: 1,359 passed with 49 warnings in 45.21s; docs: 2 passed. Repeated backtests, prefix truncation, and bounded paper replay use the production Strategy/SeriesBuilder/BotRuntime/compiler/risk/adapters/artifact/persistence path and prove exact semantic repeatability, signal-close causality, adapter agreement, lifecycle/accounting reconciliation, and explicit no-breakeven behavior. Existing indicator source continuity now persists and reaches readiness, caveats, diagnostics, golden gating, and operational identity; malformed evidence fails loudly. |
 
 Each child branch must record its focused tests, broader regression profile,
 documentation validation, diff review, and remaining-reference search before
@@ -188,8 +193,10 @@ integration.
 
 ## Discovered Risks
 
-- There is no repository-defined, credential-free, persisted end-to-end
-  backtest/paper fixture for exercising the complete CLI/API/job path.
+- A repository-defined credential-free persisted runtime harness now exercises
+  the production strategy, series-builder, runtime, adapter, artifact, and
+  persistence boundaries. It is test infrastructure, not a standalone
+  operator-facing `qt backtest` command.
 - Direct CLI mutation is audited but is not uniformly plan/apply/confirm gated;
   agents should use approved wrappers until that boundary is tightened.
 - API uptime health can succeed while database readiness is unavailable.
@@ -199,13 +206,13 @@ integration.
   by a run remain unsupported and must stay explicit in reports.
 - Margin accounting still has two persisted representations: raw fills for
   execution evidence and derived ledger events for wallet truth.
-- Existing persisted repeatability evidence proves matching semantic results,
-  not byte-identical operational artifacts. Runtime-domain prefix invariance is
-  now protected through accounting, but persisted CLI/job/report truncation and
-  credential-free persisted paper replay remain unproven.
+- Persisted semantic repeatability, prefix invariance, paper replay, and
+  accounting are proven by the credential-free harness. Operational artifacts
+  intentionally retain run-instance IDs and wall-clock timing, so byte identity
+  is not claimed.
 - Exact runtime candle values now feed `data_snapshot_hash`; older runs without
-  terminal snapshot evidence remain explicitly unavailable, and runtime
-  provenance is still not exposed consistently in reports.
+  terminal snapshot or indicator-source diagnostic evidence remain explicitly
+  unavailable rather than being upgraded by reconstruction.
 - Canonical spot fill accounting now completes missing report instrument
   accounting/execution semantics. Conflicting configured and fill evidence
   blocks report construction rather than silently selecting one source.
@@ -218,9 +225,10 @@ integration.
 
 ## Blockers and Deviations
 
-- Blockers: final merge readiness remains open on full no-lookahead/paper
-  replay evidence and demonstrated quality propagation gaps. Golden-candidate
-  promotion also remains policy-blocked by deferred market-state capture.
+- Cleanup merge blockers: none after the final regression and database gates.
+  Golden-candidate promotion remains policy-blocked by deferred market-state
+  capture, which is explicit and outside this campaign rather than represented
+  as completed.
 - Deviations from the initial inventory: none yet.
 - The local TimescaleDB service on port 15432 passed full and gated database
   validation when the DSN was constructed from `POSTGRES_*`. The Make forensic
@@ -250,16 +258,16 @@ integration.
 - [x] One canonical lifecycle ledger; no mirrors or fallback reads
 - [x] Explicit, reconstructable, transactionally updated run summary projection
 - [x] Malformed canonical execution configuration fails before runtime
-- [ ] Proven dead and compatibility-only production paths removed
+- [x] Proven dead and compatibility-only production paths removed
 - [x] Explicit storage ownership and nonduplicated temporal dispatch
 - [x] Accurate backend CI with optional frontend checks
-- [ ] Deterministic reference and repeated backtests
-- [ ] No-lookahead checks
-- [ ] Backtest and paper/runtime replay agreement under equal assumptions
+- [x] Deterministic reference and repeated backtests
+- [x] No-lookahead checks
+- [x] Backtest and paper/runtime replay agreement under equal assumptions
 - [x] Order, fill, position, lifecycle, wallet, fee, P&L, and equity reconciliation
-- [ ] Quality/provenance/readiness/trust evidence preserved end to end
+- [x] Quality/provenance/readiness/trust evidence preserved end to end
 - [x] Clean and repeated database bootstrap validation
 - [x] Durable cleanup decisions captured in an ADR index with invariants,
   rejected alternatives, and enforcing evidence
-- [ ] Architecture and operator documentation aligned
+- [x] Architecture and operator documentation aligned
 - [ ] Integration branch clean, pushed, and ready for review

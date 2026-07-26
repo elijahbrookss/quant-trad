@@ -24,6 +24,9 @@ from core.candle_snapshot import (
     aggregate_candle_series_snapshots,
     build_expected_candle_series_inventory,
 )
+from indicators.runtime.source_diagnostics import (
+    normalize_indicator_source_diagnostics,
+)
 from ..provenance import REPORT_DATASET_SCHEMA_VERSION
 from ..storage.repos.candles import (
     get_candle_storage_summary,
@@ -2714,12 +2717,77 @@ def _report_diagnostics(
     performance: Mapping[str, Any],
     summary: RunResearchSummary,
     position_ordering: Mapping[str, Any],
+    context: Mapping[str, Any],
     observability_events: Sequence[Mapping[str, Any]] = (),
     observability_coverage: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     run_id = str(run.get("run_id") or "")
     bot_id = str(run.get("bot_id") or "").strip() or None
     items: List[Dict[str, Any]] = []
+
+    source_diagnostics = _mapping(context.get("indicator_source_diagnostics"))
+    if not source_diagnostics.get("available"):
+        items.append(
+            _diagnostic(
+                severity="warning",
+                source="indicator_source_data",
+                code="indicator_source_diagnostics_unavailable",
+                message=(
+                    "Indicator source-candle diagnostics were not captured for "
+                    "this run."
+                ),
+                affected_identity={"run_id": run_id, "bot_id": bot_id},
+                readiness_impact="blocks_golden",
+                suggested_next_step=(
+                    "Repeat the run with canonical runtime artifact capture "
+                    "before certifying its indicator-derived outputs."
+                ),
+            )
+        )
+    else:
+        for record in source_diagnostics.get("items") or []:
+            if not isinstance(record, Mapping):
+                continue
+            source = _mapping(record.get("source_candle_continuity"))
+            acceptability = str(source.get("acceptability") or "")
+            if acceptability == "accepted":
+                continue
+            investigate = acceptability == "investigate"
+            items.append(
+                _diagnostic(
+                    severity="warning",
+                    source="indicator_source_data",
+                    code=(
+                        "indicator_source_continuity_investigate"
+                        if investigate
+                        else "indicator_source_continuity_caveat"
+                    ),
+                    message=str(
+                        source.get("message")
+                        or "Indicator source-candle continuity requires review."
+                    ),
+                    affected_identity={
+                        "run_id": run_id,
+                        "bot_id": bot_id,
+                        "strategy_id": record.get("strategy_id"),
+                        "instrument_id": record.get("instrument_id"),
+                        "symbol": record.get("symbol"),
+                        "timeframe": record.get("timeframe"),
+                        "indicator_id": record.get("indicator_id"),
+                        "indicator_type": record.get("indicator_type"),
+                        "source_candle_continuity": _json_safe(source),
+                    },
+                    readiness_impact=(
+                        "blocks_golden" if investigate else "degrades_metrics"
+                    ),
+                    suggested_next_step=(
+                        "Repair or classify the indicator source-candle defects "
+                        "before certifying this run."
+                        if investigate
+                        else "Retain this provider-source caveat when comparing results."
+                    ),
+                )
+            )
 
     coverage = _mapping(observability_coverage)
     coverage_status = str(coverage.get("status") or "")
@@ -3215,6 +3283,7 @@ def _sections(
         _mapping(context.get("decision_context")),
         _mapping(context.get("trade_context")),
         _mapping(context.get("market_state")),
+        _mapping(context.get("indicator_source_diagnostics")),
     ]
     context_rows = sum(int(section_payload.get("row_count") or 0) for section_payload in context_sections)
     wallet = _mapping(wallet_diagnostics)
@@ -3234,6 +3303,7 @@ def _sections(
             section("decision_context", available=bool(context.get("decision_context", {}).get("available")), row_count=int(context.get("decision_context", {}).get("row_count") or 0), reason=context.get("decision_context", {}).get("reason")),
             section("trade_context", available=bool(context.get("trade_context", {}).get("available")), row_count=int(context.get("trade_context", {}).get("row_count") or 0), reason=context.get("trade_context", {}).get("reason")),
             section("market_state", available=bool(context.get("market_state", {}).get("available")), row_count=int(context.get("market_state", {}).get("row_count") or 0), reason=context.get("market_state", {}).get("reason")),
+            section("indicator_source_diagnostics", available=bool(context.get("indicator_source_diagnostics", {}).get("available")), row_count=int(context.get("indicator_source_diagnostics", {}).get("row_count") or 0), reason=context.get("indicator_source_diagnostics", {}).get("reason"), status=context.get("indicator_source_diagnostics", {}).get("status")),
             section("candidate_lifecycle", available=bool(candidate_lifecycle.get("available")), row_count=int(candidate_lifecycle.get("row_count") or 0), reason=candidate_lifecycle.get("reason")),
             section("candle_catalog", available=bool(candle_catalog.get("items")), row_count=len(candle_catalog.get("items") or []), reason=None if candle_catalog.get("items") else "candle_catalog_unavailable"),
             section("diagnostics", available=True, row_count=int(_mapping(diagnostics.get("summary")).get("total") or 0)),
@@ -4190,6 +4260,7 @@ def _context_dataset(
     decisions: Sequence[Mapping[str, Any]],
     signals: Sequence[Mapping[str, Any]],
     trades: Sequence[Mapping[str, Any]],
+    indicator_source_diagnostics: Mapping[str, Any],
 ) -> Dict[str, Any]:
     indicator_rows: List[Dict[str, Any]] = []
     decision_context_rows: List[Dict[str, Any]] = []
@@ -4306,6 +4377,11 @@ def _context_dataset(
         for row in trade_context_rows
     ):
         caveats.append("exit_market_state_runtime_capture_incomplete")
+    caveats.extend(
+        str(caveat)
+        for caveat in indicator_source_diagnostics.get("caveats") or []
+        if str(caveat).strip()
+    )
     return {
         "schema_version": "report_context.v1",
         "indicator_snapshots": _series_payload(
@@ -4327,6 +4403,60 @@ def _context_dataset(
             schema_version="market_state_dataset.v1",
             rows=market_state_rows,
             reason="requires captured market-state context values",
+        ),
+        "indicator_source_diagnostics": dict(indicator_source_diagnostics),
+        "caveats": sorted(dict.fromkeys(caveats)),
+    }
+
+
+def _indicator_source_diagnostics_dataset(
+    run: Mapping[str, Any],
+) -> Dict[str, Any]:
+    config = _mapping(run.get("config_snapshot"))
+    if "indicator_source_diagnostics" not in config:
+        return {
+            "schema_version": "indicator_source_diagnostics.v1",
+            "available": False,
+            "status": "unavailable",
+            "row_count": 0,
+            "items": [],
+            "reason": "canonical runtime source diagnostics were not captured",
+            "caveats": ["indicator_source_diagnostics_unavailable"],
+        }
+
+    items = normalize_indicator_source_diagnostics(
+        config.get("indicator_source_diagnostics")
+    )
+    acceptability = {
+        str(
+            _mapping(record.get("source_candle_continuity")).get(
+                "acceptability"
+            )
+            or ""
+        )
+        for record in items
+    }
+    caveats: list[str] = []
+    if "investigate" in acceptability:
+        status = "investigate"
+        caveats.append("indicator_source_continuity_investigate")
+    elif "acceptable_with_caveat" in acceptability:
+        status = "acceptable_with_caveat"
+        caveats.append("indicator_source_continuity_caveat")
+    elif items:
+        status = "accepted"
+    else:
+        status = "not_applicable"
+    return {
+        "schema_version": "indicator_source_diagnostics.v1",
+        "available": True,
+        "status": status,
+        "row_count": len(items),
+        "items": items,
+        "reason": (
+            "no configured indicators required independent source candles"
+            if not items
+            else None
         ),
         "caveats": caveats,
     }
@@ -4703,9 +4833,27 @@ def _context_material_rows(context: Mapping[str, Any]) -> Dict[str, Any]:
             str(row.get("symbol") or ""),
         )
     )
+    source_diagnostics = [
+        dict(row)
+        for row in _mapping(
+            context.get("indicator_source_diagnostics")
+        ).get("items")
+        or []
+        if isinstance(row, Mapping)
+    ]
+    source_diagnostics.sort(
+        key=lambda row: (
+            str(row.get("strategy_id") or ""),
+            str(row.get("instrument_id") or ""),
+            str(row.get("symbol") or ""),
+            str(row.get("timeframe") or ""),
+            str(row.get("indicator_id") or ""),
+        )
+    )
     return {
         "indicator_snapshots": indicator_rows,
         "market_state": market_rows,
+        "indicator_source_diagnostics": source_diagnostics,
     }
 
 
@@ -5423,6 +5571,27 @@ def _finalize_readiness(
         blocking_reasons.append(readiness.reason)
     if data_quality_status in {"degraded", "unknown"}:
         degraded_sections.append("data_quality")
+    source_diagnostics = _mapping(
+        context.get("indicator_source_diagnostics")
+    )
+    source_diagnostics_status = str(
+        source_diagnostics.get("status") or "unavailable"
+    )
+    if source_diagnostics_status == "unavailable":
+        if data_quality_status == "clean":
+            data_quality_status = "unknown"
+        degraded_sections.extend(
+            ["data_quality", "indicator_source_diagnostics"]
+        )
+        unavailable_sections.append("indicator_source_diagnostics")
+    elif source_diagnostics_status in {
+        "acceptable_with_caveat",
+        "investigate",
+    }:
+        data_quality_status = "degraded"
+        degraded_sections.extend(
+            ["data_quality", "indicator_source_diagnostics"]
+        )
     if execution_quality_status == "degraded":
         degraded_sections.append("execution_quality")
     warmup_evidence = [
@@ -5522,7 +5691,13 @@ def _finalize_readiness(
         caveats.append(str(caveat))
     for caveat in context.get("caveats") or []:
         if str(caveat).endswith("_unavailable"):
-            unavailable_sections.append("indicator_context" if "indicator" in str(caveat) else "market_state")
+            unavailable_sections.append(
+                "indicator_source_diagnostics"
+                if str(caveat) == "indicator_source_diagnostics_unavailable"
+                else "indicator_context"
+                if "indicator" in str(caveat)
+                else "market_state"
+            )
         caveats.append(str(caveat))
     semantic_rows = [row for row in metadata.instrument_semantics if isinstance(row, Mapping)]
     source_types = {
@@ -5657,7 +5832,14 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     summary = _summary_with_portfolio_metrics(summary, portfolio_metrics)
     timeseries = _timeseries(metadata=metadata, trades=trades, summary=summary)
     performance = _performance(run, events)
-    context = _context_dataset(metadata=metadata, decisions=decisions, signals=signals, trades=trades)
+    source_diagnostics = _indicator_source_diagnostics_dataset(run)
+    context = _context_dataset(
+        metadata=metadata,
+        decisions=decisions,
+        signals=signals,
+        trades=trades,
+        indicator_source_diagnostics=source_diagnostics,
+    )
     candidate_lifecycle = _candidate_lifecycle_dataset(metadata=metadata)
     candle_catalog = _candle_catalog(
         metadata=metadata,
@@ -5702,6 +5884,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         performance=performance,
         summary=summary,
         position_ordering=position_ordering,
+        context=context,
         observability_events=observability_events,
         observability_coverage=observability_coverage,
     )

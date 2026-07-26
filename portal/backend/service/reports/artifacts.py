@@ -14,6 +14,9 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from core.candle_snapshot import build_expected_candle_series_inventory
 from core.settings import get_settings
+from indicators.runtime.source_diagnostics import (
+    normalize_indicator_source_diagnostics,
+)
 from utils.log_context import build_log_context, with_log_context
 from ..storage.repos.indicators import get_indicator
 from ..storage.repos.runs import upsert_bot_run
@@ -364,6 +367,17 @@ def _build_series_snapshot(series: Sequence[Any]) -> tuple[list[dict[str, Any]],
     for entry in series:
         meta = dict(getattr(entry, "meta", {}) or {})
         candle_identity = _runtime_series_candle_identity(entry)
+        source_diagnostics = normalize_indicator_source_diagnostics(
+            meta.get("indicator_source_diagnostics", []),
+            series_identity={
+                "strategy_id": getattr(entry, "strategy_id", None),
+                "instrument_id": candle_identity["instrument_id"],
+                "symbol": getattr(entry, "symbol", None),
+                "timeframe": getattr(entry, "timeframe", None),
+                "datasource": getattr(entry, "datasource", None),
+                "exchange": getattr(entry, "exchange", None),
+            },
+        )
         indicator_links = list(meta.get("indicator_links") or [])
         compiled_strategy = meta.get("compiled_strategy")
         strategy_hash = (
@@ -401,6 +415,12 @@ def _build_series_snapshot(series: Sequence[Any]) -> tuple[list[dict[str, Any]],
                 "window_start": getattr(entry, "window_start", None),
                 "window_end": getattr(entry, "window_end", None),
                 "backtest_warmup": dict(meta.get("backtest_warmup") or {}),
+                "candle_snapshot": dict(meta.get("candle_snapshot") or {}),
+                "candle_continuity": dict(meta.get("candle_continuity") or {}),
+                "candle_gap_classification": _json_safe(
+                    meta.get("candle_gap_classification")
+                ),
+                "indicator_source_diagnostics": _json_safe(source_diagnostics),
                 "indicator_ids": indicator_ids,
                 "strategy_hash": strategy_hash,
                 "variant_id": meta.get("variant_id"),
@@ -426,6 +446,7 @@ def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> 
     symbols: list[str] = []
     strategies: list[dict[str, Any]] = []
     warmup_evidence: list[dict[str, Any]] = []
+    source_diagnostics: list[dict[str, Any]] = []
     strategy_ids_seen: set[str] = set()
     storage = _storage()
     for entry in series:
@@ -434,6 +455,20 @@ def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> 
             symbols.append(symbol)
         strategy_id = str(getattr(entry, "strategy_id", "") or "").strip()
         meta = dict(getattr(entry, "meta", {}) or {})
+        candle_identity = _runtime_series_candle_identity(entry)
+        source_diagnostics.extend(
+            normalize_indicator_source_diagnostics(
+                meta.get("indicator_source_diagnostics", []),
+                series_identity={
+                    "strategy_id": strategy_id or None,
+                    "instrument_id": candle_identity["instrument_id"],
+                    "symbol": symbol or None,
+                    "timeframe": getattr(entry, "timeframe", None),
+                    "datasource": getattr(entry, "datasource", None),
+                    "exchange": getattr(entry, "exchange", None),
+                },
+            )
+        )
         evidence = dict(meta.get("backtest_warmup") or {})
         if evidence:
             warmup_evidence.append(
@@ -513,6 +548,9 @@ def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> 
         "fee_model": (config.get("risk") or {}).get("fee_model"),
         "slippage_model": (config.get("risk") or {}).get("slippage_model"),
         "strategies": strategies,
+        "indicator_source_diagnostics": normalize_indicator_source_diagnostics(
+            source_diagnostics
+        ),
     }
     if warmup_evidence:
         if config.get("backtest_warmup_bars") is not None:
@@ -1014,6 +1052,7 @@ def _build_config_snapshot_from_series_snapshot(
     symbols: list[str] = []
     strategies: list[dict[str, Any]] = []
     warmup_evidence: list[dict[str, Any]] = []
+    source_diagnostics: list[dict[str, Any]] = []
     strategy_ids_seen: set[str] = set()
     timeframe = None
     datasource = None
@@ -1026,6 +1065,11 @@ def _build_config_snapshot_from_series_snapshot(
         datasource = datasource or entry.get("datasource")
         exchange = exchange or entry.get("exchange")
         strategy_id = str(entry.get("strategy_id") or "").strip()
+        source_diagnostics.extend(
+            normalize_indicator_source_diagnostics(
+                entry.get("indicator_source_diagnostics", [])
+            )
+        )
         evidence = dict(entry.get("backtest_warmup") or {})
         if evidence:
             warmup_evidence.append(
@@ -1091,6 +1135,9 @@ def _build_config_snapshot_from_series_snapshot(
         "fee_model": (config.get("risk") or {}).get("fee_model"),
         "slippage_model": (config.get("risk") or {}).get("slippage_model"),
         "strategies": strategies,
+        "indicator_source_diagnostics": normalize_indicator_source_diagnostics(
+            source_diagnostics
+        ),
     }
     if warmup_evidence:
         if config.get("backtest_warmup_bars") is not None:

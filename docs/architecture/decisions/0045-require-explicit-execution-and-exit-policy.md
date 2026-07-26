@@ -59,6 +59,9 @@ contradictory rules fail before they can influence a fill.
   and weighted `exit_price`; projection layers reject missing terminal evidence
   instead of deriving it from leg state.
 - A rejected exit fill leaves the position open and cannot emit a close event.
+- A close-known entry cannot use the signal candle's earlier high/low for a
+  stop or target exit. Explicit terminal liquidation may use the final known
+  close.
 - Instrument economics come from the execution profile, never from ATM policy.
 
 ## Consequences
@@ -87,6 +90,10 @@ inspectable and a missing field cannot activate a hidden risk rule.
 - `tests/integration/runtime/test_reference_execution_scenarios.py` covers
   domain-owned target, stop, mixed, fixed-horizon, and terminal close evidence,
   including weighted exit price and backtest/paper equality.
+- `tests/integration/runtime/test_persisted_runtime_correctness.py` protects
+  signal-close/next-bar exit timing and reconciles explicit target and terminal
+  exits, maker/taker fees, wallet state, and report equity through persisted
+  production artifacts.
 - `tests/integration/runtime/test_runtime_push_stream.py` rejects closed domain
   snapshots missing terminal price or reasons.
 - Cleanup commits `66aac0b` and `c5d3c76` remove implicit breakeven defaults.

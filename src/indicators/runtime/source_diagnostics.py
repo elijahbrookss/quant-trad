@@ -13,6 +13,11 @@ from core.candle_continuity import (
 )
 from data_providers.utils.ohlcv import interval_to_timedelta
 
+SOURCE_CANDLE_CONTINUITY_SCHEMA_VERSION = "indicator_source_candle_continuity.v1"
+SOURCE_CANDLE_CONTINUITY_ACCEPTABILITY = frozenset(
+    {"accepted", "acceptable_with_caveat", "investigate"}
+)
+
 
 def _iso_timestamp(value: Any) -> Optional[str]:
     if value in (None, ""):
@@ -38,7 +43,7 @@ def _empty_source_payload(
     message: str = "No indicator source candles were available.",
 ) -> Dict[str, Any]:
     return {
-        "schema_version": "indicator_source_candle_continuity.v1",
+        "schema_version": SOURCE_CANDLE_CONTINUITY_SCHEMA_VERSION,
         "timeframe": str(timeframe or ""),
         "requested_start": _iso_timestamp(requested_start),
         "requested_end": _iso_timestamp(requested_end),
@@ -175,7 +180,7 @@ def build_source_candle_continuity_payload(
             coverage_end = None
 
     return {
-        "schema_version": "indicator_source_candle_continuity.v1",
+        "schema_version": SOURCE_CANDLE_CONTINUITY_SCHEMA_VERSION,
         "timeframe": str(timeframe or ""),
         "requested_start": _iso_timestamp(requested_start),
         "requested_end": _iso_timestamp(requested_end),
@@ -191,4 +196,124 @@ def build_source_candle_continuity_payload(
     }
 
 
-__all__ = ["build_source_candle_continuity_payload"]
+def normalize_indicator_source_diagnostics(
+    diagnostics: Any,
+    *,
+    series_identity: Mapping[str, Any] | None = None,
+    allow_unrelated_records: bool = False,
+) -> list[Dict[str, Any]]:
+    """Validate and deterministically normalize persisted source diagnostics."""
+
+    if not isinstance(diagnostics, list):
+        raise ValueError("indicator_source_diagnostics must be a list")
+
+    identity = dict(series_identity or {})
+    normalized: list[Dict[str, Any]] = []
+    for index, raw_record in enumerate(diagnostics):
+        if not isinstance(raw_record, Mapping):
+            raise ValueError(
+                "indicator_source_diagnostics entries must be mappings "
+                f"(index={index})"
+            )
+        if "source_candle_continuity" not in raw_record:
+            if allow_unrelated_records:
+                continue
+            raise ValueError(
+                "indicator source diagnostic source_candle_continuity is "
+                f"required (index={index})"
+            )
+
+        source = raw_record.get("source_candle_continuity")
+        if not isinstance(source, Mapping):
+            raise ValueError(
+                "indicator source_candle_continuity must be a mapping "
+                f"(index={index})"
+            )
+        if source.get("schema_version") != SOURCE_CANDLE_CONTINUITY_SCHEMA_VERSION:
+            raise ValueError(
+                "indicator source_candle_continuity schema_version must be "
+                f"{SOURCE_CANDLE_CONTINUITY_SCHEMA_VERSION!r} (index={index})"
+            )
+        acceptability = str(source.get("acceptability") or "").strip()
+        if acceptability not in SOURCE_CANDLE_CONTINUITY_ACCEPTABILITY:
+            raise ValueError(
+                "indicator source_candle_continuity acceptability is invalid "
+                f"(index={index}, acceptability={acceptability!r})"
+            )
+        if not isinstance(source.get("continuity"), Mapping):
+            raise ValueError(
+                "indicator source_candle_continuity continuity must be a mapping "
+                f"(index={index})"
+            )
+        timeframe = str(source.get("timeframe") or "").strip()
+        if not timeframe:
+            raise ValueError(
+                "indicator source_candle_continuity timeframe is required "
+                f"(index={index})"
+            )
+        row_count = source.get("row_count")
+        if (
+            isinstance(row_count, bool)
+            or not isinstance(row_count, int)
+            or row_count < 0
+        ):
+            raise ValueError(
+                "indicator source_candle_continuity row_count must be a "
+                f"nonnegative integer (index={index})"
+            )
+        status = str(source.get("status") or "").strip()
+        severity = str(source.get("severity") or "").strip()
+        if status not in {"ok", "info", "warning"}:
+            raise ValueError(
+                "indicator source_candle_continuity status is invalid "
+                f"(index={index}, status={status!r})"
+            )
+        if severity not in {"ok", "info", "warning"}:
+            raise ValueError(
+                "indicator source_candle_continuity severity is invalid "
+                f"(index={index}, severity={severity!r})"
+            )
+        if not str(source.get("message") or "").strip():
+            raise ValueError(
+                "indicator source_candle_continuity message is required "
+                f"(index={index})"
+            )
+        indicator_id = str(raw_record.get("indicator_id") or "").strip()
+        if not indicator_id:
+            raise ValueError(
+                f"indicator source diagnostic indicator_id is required (index={index})"
+            )
+
+        record = {
+            **dict(raw_record),
+            **identity,
+            "indicator_id": indicator_id,
+            "indicator_type": str(
+                raw_record.get("indicator_type") or ""
+            ).strip(),
+            "source_candle_continuity": dict(source),
+        }
+        normalized.append(record)
+
+    normalized.sort(
+        key=lambda record: (
+            str(record.get("strategy_id") or ""),
+            str(record.get("instrument_id") or ""),
+            str(record.get("symbol") or ""),
+            str(record.get("timeframe") or ""),
+            str(record.get("indicator_id") or ""),
+            str(
+                (record.get("source_candle_continuity") or {}).get("timeframe")
+                or ""
+            ),
+        )
+    )
+    return normalized
+
+
+__all__ = [
+    "SOURCE_CANDLE_CONTINUITY_ACCEPTABILITY",
+    "SOURCE_CANDLE_CONTINUITY_SCHEMA_VERSION",
+    "build_source_candle_continuity_payload",
+    "normalize_indicator_source_diagnostics",
+]
