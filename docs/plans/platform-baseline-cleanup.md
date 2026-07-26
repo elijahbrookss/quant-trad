@@ -27,6 +27,7 @@ engineering guidance; this file records only cleanup-specific state.
 | Baseline hygiene | `feats/baseline-hygiene` | In progress | structural ownership settled |
 | Correctness evidence campaign | `feats/correctness-evidence-campaign` | In progress | all structural cleanup |
 | Architecture decision records | integration baseline | Complete | durable cleanup decisions and evidence |
+| Async job ownership fencing | integration baseline | Complete | shared queue and research persistence ownership |
 
 ## Canonical Decisions
 
@@ -99,6 +100,7 @@ retired tables until that explicit hard cutover is complete.
 | Commented changelog workflow experiment | DELETE | Completed in `7338f56`: the workflow had no executable path. The remote `test` branch still exists, so its active CI trigger remains. |
 | CLI operations | KEEP | `qt` is the canonical operator contract. Every invocation writes a redacted structured audit by default and API calls record method, URL, status, duration, and byte counts. Direct mutation commands do not consistently require plan/apply/confirm, and `--no-audit-log` can disable the record, so unrestricted CLI access is not yet an agent-safe boundary. |
 | MCP operations | VERIFY USAGE | All 44 registrations have handlers and no orphan definitions were found. Mutating tools require confirmation and usually plan by default; paper/live starts require an additional opt-in. External invocation is not visible in the internal call graph, so retain the thin optional adapter until usage evidence supports tool-level deletion. |
+| Async queue ownership and research side effects | CONSOLIDATE | Opaque per-claim tokens, monotonic generations, PostgreSQL-clock bounded heartbeats, heartbeat-based reclaim, and conditional terminal writes are canonical. Queued research-check artifacts and success commit atomically; stale, failed, and duplicate owned effects cannot persist. Atomic request-fingerprint uniqueness suppresses concurrent duplicate dispatch, retry budgets bound timeout reclaim, and the exclusive-access migration requeues pre-fencing running rows only on first installation. |
 | Missing bridge-session fallback to `"legacy"` | DELETE | Completed in `6ed8366` after all production producers were verified to supply an explicit bridge session. |
 
 ## Scale and Agent-Safety Audit
@@ -108,7 +110,7 @@ retired tables until that explicit hard cutover is complete.
 | Report materialization | Input fingerprints, cached materializations, and a single-worker executor prevent duplicate concurrent builds. | `run_research_dataset.py` remains a 5,638-line concentration point mixing projection, quality, readiness, metrics, and presentation assembly. |
 | Runtime projection | Bounded transport queues, revision cursors, batched persistence, and explicit overflow/degradation signals protect runtime truth. | `runtime_push_stream.py` is 3,037 lines and mixes event translation, persistence, diagnostics, transport, and lifecycle projection. |
 | Runtime domain | Deterministic policies and reference scenario tests protect entry, exit, fill, lifecycle, and accounting behavior. | `core/domain/engine.py` is 2,028 lines and still combines sizing, admission, order/fill orchestration, position creation, and summary projection. |
-| Setup and research | Async jobs are fingerprinted, partitioned, retryable, and workers use bounded configured pools. | `setup_prepare.py` is 1,913 lines, `research/checks.py` is 2,023 lines, and series-link loading sizes a thread pool directly from eligible-link count. |
+| Setup and research | Async jobs are fingerprinted, partitioned, retryable, fenced by heartbeat/token/generation, and workers use bounded configured pools. Research-check effects commit atomically with terminal success. | Sweeps restart from immutable input after retry and expose neither partial-progress checkpoints nor mid-job cancellation. `setup_prepare.py` is 1,913 lines, `research/checks.py` is 2,023 lines, and series-link loading sizes a thread pool directly from eligible-link count. |
 | CLI and MCP | CLI audits by default; MCP delegates to shared CLI/API contracts and guards mutation. | `cli/main.py` is 3,351 lines; CLI audits do not persist response payloads or a uniform validation/caveat envelope, and direct CLI mutations lack uniform confirmation gates. |
 
 ## Unsupported or Deferred Workflows
@@ -137,6 +139,9 @@ retired tables until that explicit hard cutover is complete.
   the DSN is constructed from the working PostgreSQL fields.
 - MCP host registration is optional and was not configured in the validated
   local Codex environment.
+- Async research sweeps support bounded restart-only retry, not partial-progress
+  checkpoints or mid-job cancellation. No status may imply those unsupported
+  capabilities.
 - Frontend modernization, L2/order flow, market-state expansion, options, and
   live trading remain outside this campaign.
 
@@ -167,6 +172,7 @@ retired tables until that explicit hard cutover is complete.
 | 2026-07-25 | `3b9e17b` exact runtime candle identity and ADR delivery | exact snapshot/runtime/report/docs profile: 191 passed; complete non-database backend gate with capture disabled: 1,296 passed, 49 pre-existing dependency/deprecation warnings, 24.23s; docs: 2 passed. The repository `backend-check` wrapper hit a pytest temporary-capture `FileNotFoundError` before collection; the identical `QT_OMIT_DB_TESTS=1` scope passed with `-s`. Exact candle values now have fail-loud runtime-produced identity, while quality remains in the existing continuity/readiness contract. ADRs 0042-0049 record accepted and proposed cleanup boundaries without treating incomplete enforcement as complete. |
 | 2026-07-25 | known-at and terminal lifecycle proof | runtime/domain profile: 128 passed with 14 pre-existing dependency warnings; complete non-database backend gate: 1,303 passed with 49 pre-existing dependency/deprecation warnings in 25.33s; docs: 2 passed; affected compileall and whitespace checks passed. Appending adversarial future candles cannot alter the consumed-prefix fingerprint, indicator truth/projections, decisions, orders, fills, lifecycle, or wallet accounting under either adapter. Position state now owns terminal reason and weighted exit price; incomplete closed facts and rejected-exit false closure fail loudly. Persisted CLI/job/report truncation and a credential-free paper runner remain open. |
 | 2026-07-25 | configured-series completeness and exact snapshot coverage | focused series/container/artifact/report profile: 120 passed; complete non-database backend gate: 1,308 passed with 49 pre-existing dependency/deprecation warnings in 22.30s; isolated PostgreSQL profile: 3 passed; docs: 2 passed. Any eligible series-build failure aborts the run, backend-planned expected series survives worker aggregation, and report hashes require exact planned/terminal snapshot-set equality. The shared local database credentials have drifted from its initialized volume, so database evidence used an isolated repository TimescaleDB image. |
+| 2026-07-25 | async job ownership fencing | final non-DB backend profile: 1,323 passed; full PostgreSQL-backed profile: 1,333 passed; docs contract: 2 passed; 49 pre-existing dependency/deprecation warnings in each full profile. Fresh and explicitly migrated PostgreSQL ownership profiles: 7 passed each. The exclusive migration was applied repeatedly without changing migrated job state and rejected a concurrent client. Claims now use hidden tokens, generations, PostgreSQL-clock bounded heartbeats, max-attempt-aware reclaim, stale-owner rejection, atomic research-check side effects, race-safe in-flight request idempotency, and literal-preserving exact fencing schema definition checks. |
 
 Each child branch must record its focused tests, broader regression profile,
 documentation validation, diff review, and remaining-reference search before
@@ -192,8 +198,9 @@ integration.
 - Exact runtime candle values now feed `data_snapshot_hash`; older runs without
   terminal snapshot evidence remain explicitly unavailable, and runtime
   provenance is still not exposed consistently in reports.
-- Long async research jobs have no owner heartbeat/fencing, and abandoned
-  report materializations have no stale-build recovery lease.
+- Async research sweeps still restart from the beginning after retry and expose
+  no partial-progress checkpoint or mid-job cancellation contract. Abandoned
+  report materializations still have no stale-build recovery lease.
 - Sampled transport continuity can report apparent gaps even when producer-owned
   complete-series continuity is clean; the material/diagnostic distinction must
   remain visible to operators.

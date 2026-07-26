@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from typing import Any
 
 import pytest
@@ -15,6 +16,8 @@ from portal.backend.controller import research as research_controller
 from portal.backend.main import app
 from portal.backend.service.research import checks, service
 from portal.backend.service.research import async_dispatch as research_async_dispatch
+from portal.backend.service.async_jobs import ClaimedJob
+from portal.backend.service.async_jobs import EnqueuedJob
 from portal.backend.workers import research_worker
 
 
@@ -396,13 +399,15 @@ def test_research_check_sweep_ranks_metric_contract_and_reuses_scope_cache(
 def test_research_check_sweep_dispatch_enqueues_async_job(monkeypatch: pytest.MonkeyPatch) -> None:
     enqueued: list[dict[str, Any]] = []
 
-    monkeypatch.setattr(research_async_dispatch, "find_reusable_job", lambda **_kwargs: None)
-
-    def fake_enqueue_job(**kwargs):
+    def fake_enqueue_or_reuse_job(**kwargs):
         enqueued.append(kwargs)
-        return "job-1"
+        return EnqueuedJob(id="job-1", status="queued", reused=False)
 
-    monkeypatch.setattr(research_async_dispatch, "enqueue_job", fake_enqueue_job)
+    monkeypatch.setattr(
+        research_async_dispatch,
+        "enqueue_or_reuse_job",
+        fake_enqueue_or_reuse_job,
+    )
 
     payload = research_async_dispatch.dispatch_research_check_sweep(
         {
@@ -445,6 +450,70 @@ def test_research_worker_processes_sweep_job(monkeypatch: pytest.MonkeyPatch) ->
 
     assert payload["schema_version"] == "research_check_sweep.v1"
     assert observed["request"]["title"] == "ATR sweep"
+
+
+def test_research_worker_commits_check_artifacts_under_the_current_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job = ClaimedJob(
+        id="job-1",
+        job_type=research_async_dispatch.JOB_TYPE_RESEARCH_CHECK_RUN,
+        payload={"request": {"title": "ATR check"}},
+        attempts=1,
+        max_attempts=2,
+        partition_key=None,
+        partition_hash=0,
+        lock_owner="worker-1",
+        claim_token="token-1",
+        claim_generation=1,
+    )
+    evaluation = {
+        "schema_version": "research_check_evaluation.v1",
+        "check_family": "indicator_forward_outcome",
+    }
+    observed: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        research_worker,
+        "maintain_job_heartbeat",
+        lambda claimed: nullcontext(),
+    )
+    monkeypatch.setattr(
+        research_worker.research_service,
+        "evaluate_research_check",
+        lambda request: evaluation,
+    )
+
+    def fake_persist(request, *, evaluation, session):
+        observed["request"] = request
+        observed["evaluation"] = evaluation
+        observed["session"] = session
+        return {"schema_version": "research_check_run.v1", "status": "completed"}
+
+    def fake_complete(claimed, effect):
+        observed["claim"] = claimed
+        return dict(effect("owned-session"))
+
+    monkeypatch.setattr(
+        research_worker.research_service,
+        "persist_research_check",
+        fake_persist,
+    )
+    monkeypatch.setattr(
+        research_worker,
+        "complete_job_with_owned_effect",
+        fake_complete,
+    )
+
+    result = research_worker.execute_claimed_research_job(job)
+
+    assert result["status"] == "completed"
+    assert observed == {
+        "request": {"title": "ATR check"},
+        "evaluation": evaluation,
+        "session": "owned-session",
+        "claim": job,
+    }
 
 
 def test_research_check_sweep_fails_when_rank_metric_missing(monkeypatch: pytest.MonkeyPatch) -> None:

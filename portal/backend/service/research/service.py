@@ -7,6 +7,7 @@ from collections import Counter
 from time import perf_counter
 from typing import Any, Mapping
 import uuid
+from sqlalchemy.orm import Session
 
 from portal.backend.service.indicators.indicator_service.runtime_validation import (
     collect_runtime_output_evidence_for_instance,
@@ -308,8 +309,23 @@ def evaluate_research_check(
 
 def run_research_check(payload: Mapping[str, Any]) -> dict[str, Any]:
     request = dict(payload or {})
-    existing_observation = _existing_observation(request)
     evaluation = evaluate_research_check(request)
+    return persist_research_check(
+        request,
+        evaluation=evaluation,
+    )
+
+
+def persist_research_check(
+    payload: Mapping[str, Any],
+    *,
+    evaluation: Mapping[str, Any],
+    session: Session | None = None,
+) -> dict[str, Any]:
+    """Persist a precomputed check, optionally inside an owned job transaction."""
+
+    request = dict(payload or {})
+    existing_observation = _existing_observation(request, session=session)
     check_family = evaluation["check_family"]
     title = str(request.get("title") or "").strip()
     detector = dict(evaluation["detector"])
@@ -321,6 +337,7 @@ def run_research_check(payload: Mapping[str, Any]) -> dict[str, Any]:
         request,
         scope=normalized_scope,
         title=title,
+        session=session,
     )
 
     check_id = str(uuid.uuid4())
@@ -355,6 +372,7 @@ def run_research_check(payload: Mapping[str, Any]) -> dict[str, Any]:
             "result": {**result, "check_id": check_id},
         },
         source_revision=_source_revision(),
+        **({"session": session} if session is not None else {}),
     )
     links = [
         repository.create_link(
@@ -363,6 +381,7 @@ def run_research_check(payload: Mapping[str, Any]) -> dict[str, Any]:
             target_id=observation["id"],
             relation="tests",
             metadata={"target_kind": observation.get("kind")},
+            **({"session": session} if session is not None else {}),
         )
     ]
     if normalized_scope.get("run_id"):
@@ -373,6 +392,7 @@ def run_research_check(payload: Mapping[str, Any]) -> dict[str, Any]:
                 target_id=str(normalized_scope["run_id"]),
                 relation="analyzes",
                 metadata={"check_family": check_family},
+                **({"session": session} if session is not None else {}),
             )
         )
     return {
@@ -640,10 +660,17 @@ def _evaluate_research_check_request(
     return normalized_scope, result
 
 
-def _existing_observation(request: Mapping[str, Any]) -> dict[str, Any] | None:
+def _existing_observation(
+    request: Mapping[str, Any],
+    *,
+    session: Session | None = None,
+) -> dict[str, Any] | None:
     observation_id = str(request.get("observation_id") or "").strip()
     if observation_id:
-        observation = repository.get_item(observation_id)
+        observation = repository.get_item(
+            observation_id,
+            **({"session": session} if session is not None else {}),
+        )
         if observation.get("kind") != "observation":
             raise ValueError("observation_id must reference an observation item")
         return observation
@@ -655,6 +682,7 @@ def _create_auto_observation(
     *,
     scope: Mapping[str, Any],
     title: str,
+    session: Session | None = None,
 ) -> dict[str, Any]:
     raw_observation = request.get("observation")
     observation_payload = _mapping_or_empty(raw_observation)
@@ -678,6 +706,7 @@ def _create_auto_observation(
             "scope": dict(scope),
         },
         source_revision=_source_revision(),
+        **({"session": session} if session is not None else {}),
     )
 
 

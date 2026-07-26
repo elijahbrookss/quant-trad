@@ -5,7 +5,10 @@ import json
 import logging
 from typing import Any, Dict, Mapping, Optional
 
-from portal.backend.service.async_jobs import enqueue_job, find_reusable_job, get_job
+from portal.backend.service.async_jobs import (
+    enqueue_or_reuse_job,
+    get_job,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -136,29 +139,20 @@ def dispatch_research_job(*, job_type: str, request: Mapping[str, Any]) -> dict[
         request=normalized_request,
         request_fingerprint=request_fingerprint,
     )
-    reusable = find_reusable_job(
+    outcome = enqueue_or_reuse_job(
         job_type=job_type,
+        payload={
+            "schema_version": "research_async_job_request.v1",
+            "request": normalized_request,
+            "request_fingerprint": request_fingerprint,
+        },
         partition_key=partition_key,
         request_fingerprint=request_fingerprint,
-        result_ttl_seconds=0.0,
+        max_attempts=2,
     )
-    if reusable and reusable.get("id") and reusable.get("status") in {"queued", "running", "retry"}:
-        job_id = str(reusable["id"])
-        status = str(reusable["status"])
-        reused = True
-    else:
-        job_id = enqueue_job(
-            job_type=job_type,
-            payload={
-                "schema_version": "research_async_job_request.v1",
-                "request": normalized_request,
-                "request_fingerprint": request_fingerprint,
-            },
-            partition_key=partition_key,
-            max_attempts=2,
-        )
-        status = "queued"
-        reused = False
+    job_id = outcome.id
+    status = outcome.status
+    reused = outcome.reused
     logger.info(
         "research_job_dispatched | job_id=%s job_type=%s status=%s reused=%s check_family=%s",
         job_id,

@@ -8,6 +8,7 @@ from typing import Any, Dict
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Float,
@@ -17,6 +18,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     and_,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
@@ -78,6 +80,21 @@ REQUIRED_RESEARCH_LINK_INDEXES = frozenset(
 REQUIRED_PROVIDER_CREDENTIAL_INDEXES = frozenset(
     {
         "ix_provider_credential_refs_provider_venue",
+    }
+)
+
+REQUIRED_ASYNC_JOB_INDEXES = frozenset(
+    {
+        "ix_portal_async_jobs_claimable",
+        "ix_portal_async_jobs_running_heartbeat",
+        "uq_portal_async_jobs_inflight_request",
+    }
+)
+
+REQUIRED_ASYNC_JOB_CONSTRAINTS = frozenset(
+    {
+        "ck_portal_async_jobs_claim_generation_nonnegative",
+        "ck_portal_async_jobs_claim_state",
     }
 )
 
@@ -1302,6 +1319,48 @@ class AsyncJobRecord(Base):
     """Database-backed async job used by API and worker processes."""
 
     __tablename__ = "portal_async_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "claim_generation >= 0",
+            name="ck_portal_async_jobs_claim_generation_nonnegative",
+        ),
+        CheckConstraint(
+            "("
+            "status = 'running' AND lock_owner IS NOT NULL "
+            "AND locked_at IS NOT NULL AND heartbeat_at IS NOT NULL "
+            "AND claim_token_hash IS NOT NULL"
+            ") OR ("
+            "status <> 'running' AND lock_owner IS NULL "
+            "AND locked_at IS NULL AND heartbeat_at IS NULL "
+            "AND claim_token_hash IS NULL"
+            ")",
+            name="ck_portal_async_jobs_claim_state",
+        ),
+        Index(
+            "ix_portal_async_jobs_claimable",
+            "status",
+            "job_type",
+            "available_at",
+            "created_at",
+        ),
+        Index(
+            "ix_portal_async_jobs_running_heartbeat",
+            "status",
+            "job_type",
+            "heartbeat_at",
+        ),
+        Index(
+            "uq_portal_async_jobs_inflight_request",
+            "job_type",
+            "partition_key",
+            "request_fingerprint",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('queued', 'running', 'retry') "
+                "AND request_fingerprint IS NOT NULL"
+            ),
+        ),
+    )
 
     id = Column(String(64), primary_key=True)
     job_type = Column(String(64), nullable=False)
@@ -1311,10 +1370,14 @@ class AsyncJobRecord(Base):
     error = Column(String(2048), nullable=True)
     partition_key = Column(String(255), nullable=True)
     partition_hash = Column(Integer, nullable=False, default=0)
+    request_fingerprint = Column(String(64), nullable=True)
     attempts = Column(Integer, nullable=False, default=0)
     max_attempts = Column(Integer, nullable=False, default=3)
     lock_owner = Column(String(128), nullable=True)
     locked_at = Column(DateTime, nullable=True)
+    heartbeat_at = Column(DateTime, nullable=True)
+    claim_token_hash = Column(String(64), nullable=True)
+    claim_generation = Column(Integer, nullable=False, default=0)
     available_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
@@ -1331,10 +1394,13 @@ class AsyncJobRecord(Base):
             "error": self.error,
             "partition_key": self.partition_key,
             "partition_hash": int(self.partition_hash or 0),
+            "request_fingerprint": self.request_fingerprint,
             "attempts": int(self.attempts or 0),
             "max_attempts": int(self.max_attempts or 0),
             "lock_owner": self.lock_owner,
             "locked_at": (self.locked_at.isoformat() + "Z") if self.locked_at else None,
+            "heartbeat_at": (self.heartbeat_at.isoformat() + "Z") if self.heartbeat_at else None,
+            "claim_generation": int(self.claim_generation or 0),
             "available_at": (self.available_at.isoformat() + "Z") if self.available_at else None,
             "started_at": (self.started_at.isoformat() + "Z") if self.started_at else None,
             "finished_at": (self.finished_at.isoformat() + "Z") if self.finished_at else None,

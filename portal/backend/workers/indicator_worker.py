@@ -12,9 +12,11 @@ import indicators  # noqa: F401
 from overlays.builtins import ensure_builtin_overlays_registered
 
 from portal.backend.service.async_jobs import (
+    AsyncJobOwnershipError,
     claim_next_job,
     complete_job,
     fail_job,
+    maintain_job_heartbeat,
     wait_for_database_ready,
 )
 from portal.backend.service.indicators.async_dispatch import JOB_TYPE_OVERLAYS, JOB_TYPE_SIGNALS
@@ -180,13 +182,17 @@ def main() -> int:
             job.payload.get("cursor_epoch"),
         )
         try:
-            if job.job_type == JOB_TYPE_OVERLAYS:
-                result = _process_overlays(job.payload, ctx=indicator_ctx)
-            elif job.job_type == JOB_TYPE_SIGNALS:
-                result = _process_signals(job.payload, ctx=indicator_ctx)
-            else:
-                raise RuntimeError(f"unknown_job_type: {job.job_type}")
-            complete_job(job.id, result=result if isinstance(result, dict) else {"result": result})
+            with maintain_job_heartbeat(job):
+                if job.job_type == JOB_TYPE_OVERLAYS:
+                    result = _process_overlays(job.payload, ctx=indicator_ctx)
+                elif job.job_type == JOB_TYPE_SIGNALS:
+                    result = _process_signals(job.payload, ctx=indicator_ctx)
+                else:
+                    raise RuntimeError(f"unknown_job_type: {job.job_type}")
+            complete_job(
+                job,
+                result=result if isinstance(result, dict) else {"result": result},
+            )
             signals_count = _signal_response_count(result if isinstance(result, dict) else {})
             overlays_count = _signal_overlay_count(result if isinstance(result, dict) else {})
             logger.info(
@@ -199,12 +205,42 @@ def main() -> int:
                 signals_count,
                 result.get("runtime_path") if isinstance(result, dict) else None,
             )
-        except Exception as exc:
-            fail_job(
+        except AsyncJobOwnershipError:
+            logger.exception(
+                "indicator_worker_job_ownership_lost | worker_id=%s job_id=%s job_type=%s generation=%s duration_ms=%s",
+                worker_id,
                 job.id,
-                error=f"{exc.__class__.__name__}: {exc}",
-                retry_delay_seconds=0.5,
+                job.job_type,
+                job.claim_generation,
+                int((time.monotonic() - started) * 1000),
             )
+        except Exception as exc:
+            try:
+                fail_job(
+                    job,
+                    error=f"{exc.__class__.__name__}: {exc}",
+                    retry_delay_seconds=0.5,
+                )
+            except AsyncJobOwnershipError:
+                logger.exception(
+                    "indicator_worker_job_failure_not_committed_ownership_lost | worker_id=%s job_id=%s job_type=%s generation=%s original_error=%s",
+                    worker_id,
+                    job.id,
+                    job.job_type,
+                    job.claim_generation,
+                    exc,
+                )
+                continue
+            except Exception:
+                logger.exception(
+                    "indicator_worker_job_failure_persist_failed | worker_id=%s job_id=%s job_type=%s generation=%s original_error=%s",
+                    worker_id,
+                    job.id,
+                    job.job_type,
+                    job.claim_generation,
+                    exc,
+                )
+                continue
             logger.exception(
                 "indicator_worker_job_failed | worker_id=%s job_id=%s job_type=%s duration_ms=%s",
                 worker_id,

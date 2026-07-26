@@ -12,9 +12,13 @@ import indicators  # noqa: F401
 from overlays.builtins import ensure_builtin_overlays_registered
 
 from portal.backend.service.async_jobs import (
+    AsyncJobOwnershipError,
+    ClaimedJob,
     claim_next_job,
     complete_job,
+    complete_job_with_owned_effect,
     fail_job,
+    maintain_job_heartbeat,
     wait_for_database_ready,
 )
 from portal.backend.service.research import service as research_service
@@ -55,11 +59,44 @@ def process_research_job(job_type: str, payload: Dict[str, Any]) -> Dict[str, An
     request = payload.get("request")
     if not isinstance(request, dict):
         raise ValueError("research async job payload requires request object")
-    if job_type == JOB_TYPE_RESEARCH_CHECK_RUN:
-        return research_service.run_research_check(request)
     if job_type == JOB_TYPE_RESEARCH_CHECK_SWEEP:
         return research_service.sweep_research_checks(request)
+    if job_type == JOB_TYPE_RESEARCH_CHECK_RUN:
+        raise RuntimeError(
+            "research_check_run_requires_claimed_transactional_execution"
+        )
     raise RuntimeError(f"unknown_research_job_type: {job_type}")
+
+
+def execute_claimed_research_job(job: ClaimedJob) -> Dict[str, Any]:
+    request = job.payload.get("request")
+    if not isinstance(request, dict):
+        raise ValueError("research async job payload requires request object")
+
+    with maintain_job_heartbeat(job):
+        if job.job_type == JOB_TYPE_RESEARCH_CHECK_RUN:
+            evaluation = research_service.evaluate_research_check(request)
+            result = None
+        else:
+            evaluation = None
+            result = process_research_job(job.job_type, job.payload)
+
+    if job.job_type == JOB_TYPE_RESEARCH_CHECK_RUN:
+        assert evaluation is not None
+        return complete_job_with_owned_effect(
+            job,
+            lambda session: research_service.persist_research_check(
+                request,
+                evaluation=evaluation,
+                session=session,
+            ),
+        )
+
+    normalized_result = (
+        result if isinstance(result, dict) else {"result": result}
+    )
+    complete_job(job, result=normalized_result)
+    return normalized_result
 
 
 def main() -> int:
@@ -127,8 +164,7 @@ def main() -> int:
             scope.get("end"),
         )
         try:
-            result = process_research_job(job.job_type, job.payload)
-            complete_job(job.id, result=result if isinstance(result, dict) else {"result": result})
+            result = execute_claimed_research_job(job)
             logger.info(
                 "research_worker_job_succeeded | worker_id=%s job_id=%s job_type=%s duration_ms=%s",
                 worker_id,
@@ -136,8 +172,42 @@ def main() -> int:
                 job.job_type,
                 int((time.monotonic() - started) * 1000),
             )
+        except AsyncJobOwnershipError:
+            logger.exception(
+                "research_worker_job_ownership_lost | worker_id=%s job_id=%s job_type=%s generation=%s duration_ms=%s",
+                worker_id,
+                job.id,
+                job.job_type,
+                job.claim_generation,
+                int((time.monotonic() - started) * 1000),
+            )
         except Exception as exc:
-            fail_job(job.id, error=f"{exc.__class__.__name__}: {exc}", retry_delay_seconds=0.5)
+            try:
+                fail_job(
+                    job,
+                    error=f"{exc.__class__.__name__}: {exc}",
+                    retry_delay_seconds=0.5,
+                )
+            except AsyncJobOwnershipError:
+                logger.exception(
+                    "research_worker_job_failure_not_committed_ownership_lost | worker_id=%s job_id=%s job_type=%s generation=%s original_error=%s",
+                    worker_id,
+                    job.id,
+                    job.job_type,
+                    job.claim_generation,
+                    exc,
+                )
+                continue
+            except Exception:
+                logger.exception(
+                    "research_worker_job_failure_persist_failed | worker_id=%s job_id=%s job_type=%s generation=%s original_error=%s",
+                    worker_id,
+                    job.id,
+                    job.job_type,
+                    job.claim_generation,
+                    exc,
+                )
+                continue
             logger.exception(
                 "research_worker_job_failed | worker_id=%s job_id=%s job_type=%s duration_ms=%s",
                 worker_id,

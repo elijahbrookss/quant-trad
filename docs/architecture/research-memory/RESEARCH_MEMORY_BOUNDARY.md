@@ -23,6 +23,7 @@ code_paths:
   - portal/backend/db/session.py
   - cli/main.py
   - scripts/db/manual_migration_research_memory_v1.sql
+  - scripts/db/manual_migration_async_job_fencing_v1.sql
 ---
 # Research Memory Boundary
 
@@ -123,11 +124,12 @@ research checks and sweeps may be submitted as async research jobs:
 - `GET /api/research/jobs/{job_id}/result`
 
 Async research jobs use the shared `portal_async_jobs` table for queue state,
-attempts, locking, result storage, and failure visibility. The research worker
-executes the same `run_research_check` and `sweep_research_checks` service
-functions used by synchronous routes. The job layer is orchestration only; it
-does not introduce a new detector, indicator, candle, report, or strategy
-truth path.
+attempts, fenced ownership, heartbeats, result storage, and failure visibility.
+Queued research-check evaluation uses the same service contract as synchronous
+routes, then persists its observation, check, links, and terminal result under
+one current-claim transaction. Sweeps remain read-only until their terminal
+result. The job layer is orchestration only; it does not introduce a new
+detector, indicator, candle, report, or strategy truth path.
 
 Job status responses are compact operator read models. Completed job results
 carry the original research check or sweep contract so downstream analysis can

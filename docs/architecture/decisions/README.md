@@ -72,6 +72,6 @@ respect.
 | [0044](0044-enforce-known-at-prefix-invariance.md) | Enforce known-at prefix invariance | Accepted, retroactive cleanup; proof incomplete |
 | [0045](0045-require-explicit-execution-and-exit-policy.md) | Require explicit execution and exit policy | Accepted, retroactive cleanup |
 | [0046](0046-fingerprint-exact-candle-inputs-and-keep-quality-separate.md) | Fingerprint exact candle inputs and keep quality separate | Accepted, retroactive cleanup |
-| [0047](0047-fence-async-job-ownership.md) | Fence async job ownership | Proposed |
+| [0047](0047-fence-async-job-ownership.md) | Fence async job ownership | Accepted |
 | [0048](0048-gate-agent-mutation-and-research-promotion.md) | Gate agent mutation and research promotion | Proposed |
 | [0049](0049-keep-live-order-submission-closed.md) | Keep live order submission closed | Accepted, retroactive cleanup |

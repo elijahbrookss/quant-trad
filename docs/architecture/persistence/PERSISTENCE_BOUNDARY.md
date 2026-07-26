@@ -31,6 +31,7 @@ code_paths:
   - docs/architecture/persistence/diagrams/runtime-event-ledger-flow.mmd
   - scripts/db/manual_migration_versioning_hard_cutover.sql
   - scripts/db/manual_migration_canonical_lifecycle_ledger_v1.sql
+  - scripts/db/manual_migration_async_job_fencing_v1.sql
 ---
 # Persistence Boundary
 
@@ -144,6 +145,11 @@ Active schema surfaces are justified by role:
   worker result long enough for the waiting API request to return, but succeeded
   QuantLab jobs are not reusable result-cache truth. Finished result payloads are
   pruned to bounded summaries after the configured short retention window.
+  Running ownership is a fenced lease: only the current owner/token/generation
+  may heartbeat, fail, complete, or commit a job-owned effect. Status reads
+  expose heartbeat and generation but never claim tokens or token hashes.
+  Bootstrap validates the definitions of fencing-critical constraints and
+  indexes; a matching object name alone is not accepted as schema conformance.
 - Removed from active contract:
   `observability_metrics.botlens_backend_metric_samples_v1`; raw samples are not
   a durable database surface.

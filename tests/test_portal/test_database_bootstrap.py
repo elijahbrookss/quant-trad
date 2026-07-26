@@ -5,11 +5,14 @@ import logging
 from typing import Any, Iterable
 
 import pytest
+from sqlalchemy import CheckConstraint
 from sqlalchemy.schema import CreateIndex, CreateSchema, CreateTable
 
 from portal.backend.db import session as db_session
 from portal.backend.db.models import (
     Base,
+    REQUIRED_ASYNC_JOB_CONSTRAINTS,
+    REQUIRED_ASYNC_JOB_INDEXES,
     REQUIRED_BOT_RUN_EVENT_INDEXES,
     REQUIRED_BOT_RUN_INDEXES,
     REQUIRED_PROVIDER_CREDENTIAL_INDEXES,
@@ -38,6 +41,9 @@ class _Inspector:
         tables: Iterable[tuple[str | None, str]] = (),
         indexes: dict[tuple[str | None, str], set[str]] | None = None,
         missing_columns: dict[tuple[str | None, str], set[str]] | None = None,
+        missing_constraints: dict[tuple[str | None, str], set[str]] | None = None,
+        constraint_overrides: dict[str, dict[str, Any]] | None = None,
+        index_overrides: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.schemas = {str(schema) for schema in schemas}
         self.tables: dict[str | None, set[str]] = {}
@@ -45,6 +51,9 @@ class _Inspector:
             self.tables.setdefault(schema, set()).add(table)
         self.indexes = indexes or {}
         self.missing_columns = missing_columns or {}
+        self.missing_constraints = missing_constraints or {}
+        self.constraint_overrides = constraint_overrides or {}
+        self.index_overrides = index_overrides or {}
 
     def get_schema_names(self) -> list[str]:
         return sorted(self.schemas)
@@ -58,8 +67,65 @@ class _Inspector:
         missing = self.missing_columns.get((schema, name), set())
         return [{"name": column.name} for column in table.columns if column.name not in missing]
 
-    def get_indexes(self, name: str, schema: str | None = None) -> list[dict[str, str]]:
-        return [{"name": index_name} for index_name in sorted(self.indexes.get((schema, name), set()))]
+    def get_indexes(
+        self,
+        name: str,
+        schema: str | None = None,
+    ) -> list[dict[str, Any]]:
+        metadata_key = f"{schema}.{name}" if schema else name
+        table = Base.metadata.tables[metadata_key]
+        model_indexes = {
+            str(index.name): index
+            for index in table.indexes
+            if index.name
+        }
+        payloads = []
+        for index_name in sorted(self.indexes.get((schema, name), set())):
+            index = model_indexes[index_name]
+            where = index.dialect_options["postgresql"].get("where")
+            payload = {
+                "name": index_name,
+                "unique": bool(index.unique),
+                "column_names": [
+                    str(column.name)
+                    for column in index.columns
+                ],
+                "dialect_options": {
+                    **(
+                        {"postgresql_where": str(where)}
+                        if where is not None
+                        else {}
+                    )
+                },
+            }
+            payload.update(self.index_overrides.get(index_name, {}))
+            payloads.append(payload)
+        return payloads
+
+    def get_check_constraints(
+        self,
+        name: str,
+        schema: str | None = None,
+) -> list[dict[str, str]]:
+        metadata_key = f"{schema}.{name}" if schema else name
+        table = Base.metadata.tables[metadata_key]
+        missing = self.missing_constraints.get((schema, name), set())
+        payloads = []
+        for constraint in table.constraints:
+            if (
+                not isinstance(constraint, CheckConstraint)
+                or not constraint.name
+                or str(constraint.name) in missing
+            ):
+                continue
+            name = str(constraint.name)
+            payload = {
+                "name": name,
+                "sqltext": str(constraint.sqltext),
+            }
+            payload.update(self.constraint_overrides.get(name, {}))
+            payloads.append(payload)
+        return payloads
 
 
 class _Connection:
@@ -161,6 +227,13 @@ def test_bootstrap_fresh_database_creates_current_tables_and_indexes(monkeypatch
     assert REQUIRED_BOT_RUN_INDEXES <= created_indexes
     assert REQUIRED_PROVIDER_CREDENTIAL_INDEXES <= created_indexes
     assert REQUIRED_REPORT_MATERIALIZATION_INDEXES <= created_indexes
+    assert REQUIRED_ASYNC_JOB_INDEXES <= created_indexes
+    async_constraints = {
+        str(constraint.name)
+        for constraint in Base.metadata.tables["portal_async_jobs"].constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    assert REQUIRED_ASYNC_JOB_CONSTRAINTS <= async_constraints
     assert "observability_events" in inspector.schemas
     assert "observability_metrics" in inspector.schemas
 
@@ -210,3 +283,166 @@ def test_bootstrap_fails_loud_on_existing_column_drift_before_index_repair(monke
 
     created_indexes = [statement for statement in connection.executed if isinstance(statement, CreateIndex)]
     assert created_indexes == []
+
+
+def test_bootstrap_fails_loud_when_async_fencing_constraint_is_missing(
+    monkeypatch,
+) -> None:
+    inspector = _Inspector(
+        schemas={"public", "observability_events", "observability_metrics"},
+        tables=[_table_key(table) for table in Base.metadata.sorted_tables],
+        missing_constraints={
+            (None, "portal_async_jobs"): {
+                "ck_portal_async_jobs_claim_state",
+            }
+        },
+    )
+    database, connection = _database_with_fake_engine(monkeypatch, inspector)
+
+    with pytest.raises(
+        RuntimeError,
+        match="portal_async_jobs.*ck_portal_async_jobs_claim_state",
+    ):
+        database._bootstrap_schema_contract()
+
+    created_indexes = [
+        statement
+        for statement in connection.executed
+        if isinstance(statement, CreateIndex)
+    ]
+    assert created_indexes == []
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        (
+            "status = 'running' AND ("
+            "lock_owner IS NOT NULL "
+            "AND locked_at IS NOT NULL "
+            "AND heartbeat_at IS NOT NULL "
+            "AND claim_token_hash IS NOT NULL "
+            "OR status <> 'running'"
+            ") AND lock_owner IS NULL "
+            "AND locked_at IS NULL "
+            "AND heartbeat_at IS NULL "
+            "AND claim_token_hash IS NULL"
+        ),
+        (
+            "status = 'RUNNING' AND lock_owner IS NOT NULL "
+            "AND locked_at IS NOT NULL "
+            "AND heartbeat_at IS NOT NULL "
+            "AND claim_token_hash IS NOT NULL "
+            "OR status <> 'RUNNING' AND lock_owner IS NULL "
+            "AND locked_at IS NULL "
+            "AND heartbeat_at IS NULL "
+            "AND claim_token_hash IS NULL"
+        ),
+    ],
+)
+def test_bootstrap_fails_loud_on_same_named_constraint_definition_drift(
+    monkeypatch,
+    definition: str,
+) -> None:
+    inspector = _Inspector(
+        schemas={"public", "observability_events", "observability_metrics"},
+        tables=[_table_key(table) for table in Base.metadata.sorted_tables],
+        constraint_overrides={
+            "ck_portal_async_jobs_claim_state": {
+                "sqltext": definition,
+            }
+        },
+    )
+    database, connection = _database_with_fake_engine(monkeypatch, inspector)
+
+    with pytest.raises(
+        RuntimeError,
+        match="mismatched constraint definitions.*claim_state",
+    ):
+        database._bootstrap_schema_contract()
+
+    assert not any(
+        isinstance(statement, CreateIndex)
+        for statement in connection.executed
+    )
+
+
+def test_bootstrap_fails_loud_on_same_named_async_index_definition_drift(
+    monkeypatch,
+) -> None:
+    async_index_names = {
+        str(index.name)
+        for index in Base.metadata.tables["portal_async_jobs"].indexes
+        if index.name
+    }
+    inspector = _Inspector(
+        schemas={"public", "observability_events", "observability_metrics"},
+        tables=[_table_key(table) for table in Base.metadata.sorted_tables],
+        indexes={(None, "portal_async_jobs"): async_index_names},
+        index_overrides={
+            "uq_portal_async_jobs_inflight_request": {
+                "unique": False,
+            }
+        },
+    )
+    database, _connection = _database_with_fake_engine(
+        monkeypatch,
+        inspector,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="mismatched index definitions.*inflight_request",
+    ):
+        database._bootstrap_schema_contract()
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        (
+            "status NOT IN ('queued', 'running', 'retry') "
+            "AND request_fingerprint IS NOT NULL"
+        ),
+        (
+            "status IN ('queued', 'running', 'retry') "
+            "AND request_fingerprint IS NOT NULL "
+            "AND partition_key IS NOT NULL"
+        ),
+        (
+            "status IN ('queued', 'RUNNING', 'retry') "
+            "AND request_fingerprint IS NOT NULL"
+        ),
+    ],
+)
+def test_bootstrap_rejects_async_index_predicate_semantic_drift(
+    monkeypatch,
+    predicate: str,
+) -> None:
+    async_index_names = {
+        str(index.name)
+        for index in Base.metadata.tables["portal_async_jobs"].indexes
+        if index.name
+    }
+    inspector = _Inspector(
+        schemas={"public", "observability_events", "observability_metrics"},
+        tables=[_table_key(table) for table in Base.metadata.sorted_tables],
+        indexes={(None, "portal_async_jobs"): async_index_names},
+        index_overrides={
+            "uq_portal_async_jobs_inflight_request": {
+                "dialect_options": {
+                    "postgresql_where": predicate,
+                },
+            }
+        },
+    )
+    database, _connection = _database_with_fake_engine(
+        monkeypatch,
+        inspector,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="mismatched index definitions.*inflight_request",
+    ):
+        database._bootstrap_schema_contract()
