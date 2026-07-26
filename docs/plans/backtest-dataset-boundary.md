@@ -62,8 +62,8 @@ Python-owned bottleneck without changing semantic results.
 | Mandatory dataset contract | implemented; pre-commit validation green | canonical dataset/store contracts | focused contract/runtime/database tests |
 | Preparation and execution CLI separation | implemented; pre-commit validation green | mandatory contract | CLI, experiment, API, and MCP tests |
 | Provider/latest-state isolation proof | implemented; pre-commit validation green | execution binding | bound-read, range-expansion, substitution, and post-freeze correction tests |
-| One-year public dataset | acquisition in progress; half-open CCXT boundary fixed | preparation workflow, public provider | pre-acquisition contract and coverage recorded |
-| Three-run deterministic baseline | pending | accepted dataset | pending |
+| One-year public dataset | complete and admitted | preparation workflow, public provider | frozen dataset identity and independent integrity audit recorded |
+| Three-run deterministic baseline | in progress; first attempt exposed a fail-loudly runtime persistence defect | accepted dataset | failed run preserved; narrow ownership correction validated |
 | Accounting/lifecycle reconciliation | pending | accepted runs | pending |
 | Phase-level observability | preparation phases implemented; execution/report phases pending | run/report contracts | preparation payload timings |
 | Opt-in profiling | pending | accepted baseline | pending |
@@ -148,6 +148,21 @@ Dataset preparation now emits low-overhead wall/CPU timings for requirement
 resolution, coverage inspection, provider acquisition, ingestion validation,
 dataset hashing/freezing, and dataset admission. Execution baselines remain pending.
 
+The accepted dataset is
+`mds_3e5c6926722d852bd43a3fc79a859c40`, with semantic hash
+`3e5c6926722d852bd43a3fc79a859c403e7e1206513127c1ef10b3227567d1d9`
+and frozen commit watermark `10155`. It contains 8,804 ordered one-hour candles:
+20 warmup bars and exactly 8,784 decision-window bars. Its material,
+provenance, and quality hashes are respectively
+`b7dd56c3628413cef2b85d027b06c2a81f72c1dfcc620789f9449e28196f22b8`,
+`4a1b108b8ce825cf6d636c39b451f952dff7b546b6ee542110f2841952adcb00`,
+and
+`6927b8cacc119a3e3b312f51839c37e300882d5c622cc39c0c5cd0fcafe5f0bb`.
+Independent SQL validation found zero duplicate opens, non-hourly transitions,
+pre-close known-at values, malformed OHLC rows, negative volumes, or
+post-initial revisions. Repeated preparation reused the same semantic identity,
+performed no provider call, and completed in 6.04 seconds wall time.
+
 ## Validation Ledger
 
 | Date | Revision | Command or evidence | Result | Duration | Notes |
@@ -163,6 +178,10 @@ dataset hashing/freezing, and dataset admission. Execution baselines remain pend
 | 2026-07-26 | worktree | production provider-reference audit under backtest execution paths | no acquisition call path found | n/a | provider use remains in explicit preparation and paper intake |
 | 2026-07-26 | worktree | `git diff --check` | passed | <1s | no whitespace errors |
 | 2026-07-26 | worktree | CCXT pagination and historical-ingestion regressions | 8 passed | 2.33s | real segmented acquisition exposed an inclusive provider end; adapter now returns canonical half-open windows |
+| 2026-07-26 | `b3ecadf` | public Coinbase BTC/USD 1h acquisition, dataset admission, and independent SQL integrity audit | 8,804 rows accepted; 8,784 evaluation rows; no gaps or malformed material | provider acquisition and freeze completed before client timeout | backend completion was verified before retry; retry reused identity without acquisition |
+| 2026-07-26 | `b3ecadf` | first one-year execution attempt, run `f933be2c-18d4-479b-a6d6-47526c52fcde` | rejected as `degraded_terminal` | stopped after first trading event | producer canonical-fact persistence incorrectly required a transport bridge session; incomplete result excluded from baseline |
+| 2026-07-26 | worktree | canonical-fact, domain-event, artifact, appender, runtime-push, and container-transport regressions | 171 passed; 14 pre-existing deprecation warnings in first group | 4.67s combined | producer persistence no longer fabricates transport identity; bridge ingress still rejects a missing session |
+| 2026-07-26 | worktree | changed runtime modules compile audit and `git diff --check` | passed | <1s | narrow correction ready for commit |
 
 ## Discovered Defects And Disagreements
 
@@ -174,6 +193,7 @@ dataset hashing/freezing, and dataset admission. Execution baselines remain pend
 | Content reuse was inferred from global commit movement | fixed; repository reports the actual dataset insert-conflict outcome |
 | Runtime used an implicit 100-bar warmup floor and inclusive replay end | fixed; declared warmup plus ATR requirement and half-open end are canonical |
 | Segmented CCXT acquisition returned the shared boundary candle from both adjacent requests | fixed at the provider adapter: canonical fetch results now enforce `start <= timestamp < end`; duplicate source rows within a segment still fail loudly |
+| Producer-owned canonical-fact persistence reused the transport projection constructor and therefore demanded a nonexistent bridge session | fixed by separating producer persistence batch construction from transport ingress construction; transport still enforces bridge identity and the failed acceptance run remains preserved as disagreement evidence |
 | Data-boundary documentation still says backtests do not automatically create reusable manifests | pending documentation correction before final campaign validation |
 | Repository default local database credentials are stale for an existing user container | isolated campaign Timescale database used; user volume and secrets untouched |
 

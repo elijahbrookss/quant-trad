@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Tuple
 from ..storage.repos.runtime_events import record_bot_runtime_events_batch
 from .botlens_domain_events import build_botlens_domain_events_from_fact_batch
 from .botlens_event_retention import retention_summary_for_events, split_events_by_retention
-from .botlens_projection_batches import projection_batch_from_payload, runtime_event_rows_from_batch
+from .botlens_projection_batches import canonical_fact_batch_from_payload, runtime_event_rows_from_batch
 
 
 def _build_canonical_fact_rows(
@@ -25,7 +25,7 @@ def _build_canonical_fact_rows(
         run_id=str(run_id),
         payload=payload,
     )
-    batch = projection_batch_from_payload(
+    batch = canonical_fact_batch_from_payload(
         batch_kind=batch_kind,
         run_id=str(run_id),
         bot_id=str(bot_id),
