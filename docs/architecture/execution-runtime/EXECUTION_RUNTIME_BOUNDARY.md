@@ -230,6 +230,12 @@ source; `portal_bots` remains a bot definition row and must not carry
 must fail loud if they lose the lease or cannot renew it before continuing to
 emit run facts.
 
+The backend-owned `run_id` is mandatory container input. A runtime container
+must fail before loading config, claiming a lease, emitting lifecycle facts, or
+mutating wallet state when `QT_BOT_RUNTIME_RUN_ID` is absent. Generating a
+local replacement would create a disconnected lifecycle and accounting
+identity.
+
 ## Execution Semantics
 
 FAST and FULL are execution semantics, not playback modes.

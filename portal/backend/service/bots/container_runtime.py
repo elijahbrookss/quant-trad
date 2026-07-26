@@ -476,13 +476,10 @@ def _resolve_backend_run_id(bot_id: str) -> str:
     run_id = str(os.environ.get("QT_BOT_RUNTIME_RUN_ID") or "").strip()
     if run_id:
         return run_id
-    fallback = str(uuid.uuid4())
-    logger.warning(
-        "bot_runtime_run_id_missing | bot_id=%s | generated_fallback_run_id=%s",
-        bot_id,
-        fallback,
+    raise RuntimeError(
+        "QT_BOT_RUNTIME_RUN_ID is required for bot runtime containers. "
+        f"bot_id={bot_id}"
     )
-    return fallback
 
 
 def _resolve_backend_request_id() -> str | None:
