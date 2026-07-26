@@ -547,7 +547,7 @@ class CCXTProvider(BaseDataProvider):
         df = pd.DataFrame(batches, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
         df = df.drop_duplicates(subset="timestamp", keep="last")
-        df = df[(df["timestamp"] >= start_ts) & (df["timestamp"] <= end_ts)]
+        df = df[(df["timestamp"] >= start_ts) & (df["timestamp"] < end_ts)]
 
         # Align with downstream expectations
         return df[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)

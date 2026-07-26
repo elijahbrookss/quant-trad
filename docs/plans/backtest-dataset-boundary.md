@@ -62,7 +62,7 @@ Python-owned bottleneck without changing semantic results.
 | Mandatory dataset contract | implemented; pre-commit validation green | canonical dataset/store contracts | focused contract/runtime/database tests |
 | Preparation and execution CLI separation | implemented; pre-commit validation green | mandatory contract | CLI, experiment, API, and MCP tests |
 | Provider/latest-state isolation proof | implemented; pre-commit validation green | execution binding | bound-read, range-expansion, substitution, and post-freeze correction tests |
-| One-year public dataset | pending | preparation workflow, public provider | pending |
+| One-year public dataset | acquisition in progress; half-open CCXT boundary fixed | preparation workflow, public provider | pre-acquisition contract and coverage recorded |
 | Three-run deterministic baseline | pending | accepted dataset | pending |
 | Accounting/lifecycle reconciliation | pending | accepted runs | pending |
 | Phase-level observability | preparation phases implemented; execution/report phases pending | run/report contracts | preparation payload timings |
@@ -95,6 +95,49 @@ unordered candles, undisclosed gaps, hash/provenance/quality disagreement, and
 post-freeze revisions. Warmup initializes state only; the decision range is the
 half-open evaluation range.
 
+## One-Year Acceptance Contract
+
+Recorded before public provider acquisition on revision `da8a44f`:
+
+- Bot: `e487b31e-750b-4dbc-af5e-310188d271bb`
+  (`baseline-atr-expansion-btcusd`).
+- Strategy: `a6e95615-9a5b-42eb-ad5e-310188d271bb`
+  (`Baseline ATR Expansion BTC/USD`), variant
+  `ab70d825-7751-4126-9a1f-6af6a2ee5480` (`default`).
+- Compiled strategy hash:
+  `f9d2ebaed75dc76ece4be14c19ee6e865b6ca408a74c317e8911816dbfafc827`.
+- Effective strategy configuration hash:
+  `7618d7c35d4e9309a56339a4b3abf4293f828e0edc799b2c3d36b05835716345`.
+- Execution-policy hash:
+  `7bfb83ed0549847f1bc02fed967279730ad45c93be7ae15ec3ec335aca880eb4`.
+- Run-effective execution configuration hash:
+  `d7fb05b46cd99f9444fa7fea00754a213933d0447c601a6171cc3f865e88bd6c`.
+- Instrument: `f2eea7b3-a5b1-43f2-927a-eb8723efc21a`, `BTC/USD`,
+  `CCXT` / `COINBASE`, spot; immutable execution snapshot hash
+  `90f315ae3a2b3532addafaeee3972a954812b877ddff0da07132dfafe4a1f9e3`.
+- Required fact: `candle.ohlcv` / `candle.ohlcv.v1`, one-hour
+  (`3600` seconds).
+- Evaluation and decision range:
+  `[2024-01-01T00:00:00Z, 2025-01-01T00:00:00Z)`.
+- Warmup: 20 one-hour bars, derived from the attached
+  `candle_stats` indicator; range
+  `[2023-12-31T04:00:00Z, 2024-01-01T00:00:00Z)`. Runtime ATR needs
+  14 bars and is covered by the larger declared requirement.
+- Complete materialization range:
+  `[2023-12-31T04:00:00Z, 2025-01-01T00:00:00Z)`.
+- Execution: deterministic backtest simulator, full execution mode, spot
+  semantics, initial wallet `USD 100000`.
+- Fees: no configured fee model and no instrument maker/taker rates; expected
+  zero-fee simulation must be reported as a realism caveat.
+- Slippage: no configured model; expected zero-slippage simulation must be
+  reported as a realism caveat.
+- Exit policy: explicit ATR(14) 1x initial stop and one full-size 1R target;
+  breakeven, trailing, fixed-horizon, and stop-adjustment rules are disabled.
+- Known limitations: public provider candle availability and continuity remain
+  to be proven; no interpolation or forward-fill is permitted; this acceptance
+  run proves deterministic platform semantics, not live execution quality or
+  strategy profitability.
+
 ## Performance Evidence
 
 No campaign performance claim exists yet. The previous cleanup campaign measured
@@ -119,6 +162,7 @@ dataset hashing/freezing, and dataset admission. Execution baselines remain pend
 | 2026-07-26 | worktree | architecture index regeneration and documentation contract | 2 passed | 0.02s tests | generated index unchanged |
 | 2026-07-26 | worktree | production provider-reference audit under backtest execution paths | no acquisition call path found | n/a | provider use remains in explicit preparation and paper intake |
 | 2026-07-26 | worktree | `git diff --check` | passed | <1s | no whitespace errors |
+| 2026-07-26 | worktree | CCXT pagination and historical-ingestion regressions | 8 passed | 2.33s | real segmented acquisition exposed an inclusive provider end; adapter now returns canonical half-open windows |
 
 ## Discovered Defects And Disagreements
 
@@ -129,6 +173,7 @@ dataset hashing/freezing, and dataset admission. Execution baselines remain pend
 | Experiment and MCP starts could bypass dataset preparation/admission | fixed; backtest starts require and propagate `dataset_id` |
 | Content reuse was inferred from global commit movement | fixed; repository reports the actual dataset insert-conflict outcome |
 | Runtime used an implicit 100-bar warmup floor and inclusive replay end | fixed; declared warmup plus ATR requirement and half-open end are canonical |
+| Segmented CCXT acquisition returned the shared boundary candle from both adjacent requests | fixed at the provider adapter: canonical fetch results now enforce `start <= timestamp < end`; duplicate source rows within a segment still fail loudly |
 | Data-boundary documentation still says backtests do not automatically create reusable manifests | pending documentation correction before final campaign validation |
 | Repository default local database credentials are stale for an existing user container | isolated campaign Timescale database used; user volume and secrets untouched |
 
