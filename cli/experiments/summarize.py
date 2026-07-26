@@ -142,6 +142,11 @@ def _run_summary(record: dict[str, Any], plan_variant: dict[str, Any], summary: 
         variant.update(record["variant"])
     execution = _run_execution(record)
     readiness = summary.get("readiness") if summary and isinstance(summary.get("readiness"), dict) else {}
+    dataset_identity = (
+        summary.get("dataset_identity")
+        if summary and isinstance(summary.get("dataset_identity"), dict)
+        else {}
+    )
     symbols = summary.get("symbols") if summary and isinstance(summary.get("symbols"), list) else execution.get("symbols")
     timeframe = summary.get("timeframe") if summary and summary.get("timeframe") else execution.get("timeframe")
     research_ref = record.get("research_summary") if isinstance(record.get("research_summary"), dict) else {}
@@ -162,11 +167,23 @@ def _run_summary(record: dict[str, Any], plan_variant: dict[str, Any], summary: 
         "execution": execution,
         "window": record.get("window"),
         "metrics": _compact_metrics(summary, record),
+        "dataset_identity": dict(dataset_identity),
         "readiness": {
             "comparison_status": readiness.get("comparison_status"),
             "safe_to_compare": readiness.get("safe_to_compare"),
             "dataset_status": readiness.get("dataset_status"),
             "results_status": readiness.get("results_status"),
+            "golden_candidate_status": readiness.get("golden_candidate_status"),
+            "repeatability_status": readiness.get("repeatability_status"),
+            "data_quality_status": readiness.get("data_quality_status"),
+            "execution_quality_status": readiness.get(
+                "execution_quality_status"
+            ),
+            "blocking_reasons": readiness.get("blocking_reasons") or [],
+            "golden_blocking_reasons": readiness.get(
+                "golden_blocking_reasons"
+            )
+            or [],
             "caveats": readiness.get("caveats") or [],
             "degraded_sections": readiness.get("degraded_sections") or [],
             "unavailable_sections": readiness.get("unavailable_sections") or [],

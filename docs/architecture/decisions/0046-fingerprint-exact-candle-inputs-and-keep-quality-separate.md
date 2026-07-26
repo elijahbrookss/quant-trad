@@ -109,6 +109,12 @@ contract. Older runs without value snapshots cannot claim a complete data hash.
   the available worker series are partial.
 - `tests/test_portal/test_container_runtime_transport.py` verifies container
   worker planning consumes the backend preflight instrument inventory.
+- `tests/test_portal/test_report_execution_mode_contract.py`,
+  `tests/test_cli/test_experiments_orchestration.py`, and
+  `tests/test_cli/test_mcp_server.py` verify canonical dataset identity,
+  quality, blockers, repeatability, and caveats survive compact report,
+  persisted experiment, and thin MCP projections without a second quality
+  contract.
 
 ## References
 

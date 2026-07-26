@@ -581,6 +581,16 @@ def get_run_research_summary(run_id: str) -> Dict[str, Any]:
             "end": simulated_window.get("end") or metadata.get("backtest_end"),
         },
         "strategy": _strategy_snapshot_summary(dataset),
+        "dataset_identity": {
+            "strategy_hash": metadata.get("strategy_hash"),
+            "config_hash": metadata.get("config_hash"),
+            "material_config_hash": metadata.get("material_config_hash"),
+            "data_snapshot_hash": metadata.get("data_snapshot_hash"),
+            "semantic_fingerprint": readiness.get("semantic_fingerprint")
+            or metadata.get("report_semantic_fingerprint"),
+            "operational_fingerprint": readiness.get("operational_fingerprint")
+            or metadata.get("report_operational_fingerprint"),
+        },
         "readiness": {
             "dataset_ready": readiness.get("dataset_ready"),
             "results_ready": readiness.get("results_ready"),
@@ -591,6 +601,13 @@ def get_run_research_summary(run_id: str) -> Dict[str, Any]:
             "comparison_status": readiness.get("comparison_status"),
             "export_status": readiness.get("export_status"),
             "golden_candidate_status": readiness.get("golden_candidate_status"),
+            "repeatability_status": readiness.get("repeatability_status"),
+            "data_quality_status": readiness.get("data_quality_status"),
+            "execution_quality_status": readiness.get("execution_quality_status"),
+            "blocking_reasons": list(readiness.get("blocking_reasons") or []),
+            "golden_blocking_reasons": list(
+                readiness.get("golden_blocking_reasons") or []
+            ),
             "degraded_sections": list(readiness.get("degraded_sections") or []),
             "unavailable_sections": list(readiness.get("unavailable_sections") or []),
             "caveats": list(readiness.get("caveats") or []),

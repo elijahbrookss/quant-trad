@@ -240,6 +240,11 @@ The experiment layer is intentionally file-backed and small. It proves the
 automation seam without introducing a separate experiment database, scheduler,
 or variant generation system.
 
+Collected run and experiment summaries preserve the report dataset's canonical
+identity hashes, repeatability state, data/execution quality, blockers, and
+caveats. They do not define another quality model or infer promotion readiness
+from performance metrics.
+
 ## Current MCP Surface
 
 `qt mcp serve` starts the stdio MCP server for agent hosts. The server exposes:

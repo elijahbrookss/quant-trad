@@ -310,11 +310,25 @@ def test_experiments_summarize_compacts_local_artifacts(tmp_path, capsys):
                 "timeframe": "1h",
                 "run_type": "backtest",
                 "metrics": {"trades": 4, "net_pnl": 12.5, "profit_factor": 1.4, "max_drawdown_pct": 0.04},
+                "dataset_identity": {
+                    "strategy_hash": "strategy-hash",
+                    "config_hash": "config-hash",
+                    "material_config_hash": "material-config-hash",
+                    "data_snapshot_hash": "data-snapshot-hash",
+                    "semantic_fingerprint": "semantic-fingerprint",
+                    "operational_fingerprint": "operational-fingerprint",
+                },
                 "readiness": {
                     "comparison_status": "ready_with_caveats",
                     "safe_to_compare": True,
                     "dataset_status": "ready",
                     "results_status": "ready",
+                    "golden_candidate_status": "blocked",
+                    "repeatability_status": "fingerprinted",
+                    "data_quality_status": "degraded",
+                    "execution_quality_status": "clean",
+                    "blocking_reasons": [],
+                    "golden_blocking_reasons": ["provider_missing_data"],
                     "caveats": ["candle_continuity_degraded"],
                     "degraded_sections": ["data_quality"],
                 },
@@ -408,6 +422,24 @@ def test_experiments_summarize_compacts_local_artifacts(tmp_path, capsys):
     assert payload["counts"]["completed_runs"] == 1
     assert payload["instrument_semantics"]["contains_proxy_derivative"] is True
     assert payload["runs"][0]["metrics"]["net_pnl"] == 12.5
+    assert payload["runs"][0]["dataset_identity"]["data_snapshot_hash"] == (
+        "data-snapshot-hash"
+    )
+    assert payload["runs"][0]["readiness"] == {
+        "comparison_status": "ready_with_caveats",
+        "safe_to_compare": True,
+        "dataset_status": "ready",
+        "results_status": "ready",
+        "golden_candidate_status": "blocked",
+        "repeatability_status": "fingerprinted",
+        "data_quality_status": "degraded",
+        "execution_quality_status": "clean",
+        "blocking_reasons": [],
+        "golden_blocking_reasons": ["provider_missing_data"],
+        "caveats": ["candle_continuity_degraded"],
+        "degraded_sections": ["data_quality"],
+        "unavailable_sections": [],
+    }
     assert payload["runs"][0]["sections"]["trades"]["row_count"] == 4
     assert payload["comparisons"][0]["performance_delta"]["net_pnl"]["delta"] == 7.5
     assert payload["data_preflight"]["checks"][0]["continuity"]["gap_count_by_type"] == {"provider_missing_data": 1}

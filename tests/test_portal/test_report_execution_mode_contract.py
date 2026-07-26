@@ -276,6 +276,51 @@ def test_run_research_dataset_contract_exposes_execution_mode_and_diagnostics(mo
     assert payload["diagnostics"]["items"][0]["code"] == "intrabar_fallback_pessimistic"
 
 
+def test_run_research_summary_preserves_dataset_identity_and_quality(
+    monkeypatch,
+) -> None:
+    dataset = _run_report_dataset()
+    dataset["readiness"].update(
+        {
+            "results_ready": False,
+            "safe_to_compare": False,
+            "reason": "results_not_ready",
+            "results_status": "partial",
+            "comparison_status": "blocked",
+            "golden_candidate_status": "blocked",
+            "data_quality_status": "degraded",
+            "execution_quality_status": "clean",
+            "blocking_reasons": ["results_not_ready"],
+            "golden_blocking_reasons": ["provider_missing_data"],
+            "caveats": ["candle_continuity_provider_sparse"],
+            "degraded_sections": ["data_quality"],
+        }
+    )
+    _install_run_report_dataset(monkeypatch, dataset)
+
+    payload = contract.get_run_research_summary("run-1")
+
+    assert payload["dataset_identity"] == {
+        "strategy_hash": "strategy-hash",
+        "config_hash": "config-hash",
+        "material_config_hash": "material-config-hash",
+        "data_snapshot_hash": "canonical-data-hash",
+        "semantic_fingerprint": "semantic-fingerprint",
+        "operational_fingerprint": "operational-fingerprint",
+    }
+    assert payload["readiness"]["golden_candidate_status"] == "blocked"
+    assert payload["readiness"]["repeatability_status"] == "fingerprinted"
+    assert payload["readiness"]["data_quality_status"] == "degraded"
+    assert payload["readiness"]["execution_quality_status"] == "clean"
+    assert payload["readiness"]["blocking_reasons"] == ["results_not_ready"]
+    assert payload["readiness"]["golden_blocking_reasons"] == [
+        "provider_missing_data"
+    ]
+    assert payload["readiness"]["caveats"] == [
+        "candle_continuity_provider_sparse"
+    ]
+
+
 def test_metric_explanation_reads_portfolio_metrics(monkeypatch) -> None:
     dataset = _dataset()
     dataset["portfolio_metrics"] = {"schema_version": "portfolio_metrics.v1", "sharpe": 1.25}

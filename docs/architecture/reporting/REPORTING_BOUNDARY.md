@@ -74,6 +74,12 @@ artifact, and `run_report_comparison_summary.v1` for pairwise comparison. These
 projections are derived from the same dataset and materialized report truth;
 they are not alternate report semantics.
 
+The compact research summary preserves the canonical dataset identity hashes,
+semantic and operational fingerprints, repeatability state, data and execution
+quality states, blockers, degraded/unavailable sections, and caveats. Persisted
+experiment summaries carry that projection unchanged so CLI and MCP research
+workflows cannot mistake missing or degraded evidence for a complete run.
+
 Reporting does not mutate strategy, execution, fee, wallet, trade, or BotLens semantics.
 
 ## Diagram Walkthrough

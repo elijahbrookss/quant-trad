@@ -58,7 +58,19 @@ class _FakeClient:
         if method == "GET" and path == "/api/instruments/instrument-1/runtime-profile":
             return {"schema_version": "series_execution_profile.v1", "params": params}
         if method == "GET" and path == "/api/reports/run-1/research-summary":
-            return {"schema_version": "run_research_summary.v1", "run_id": "run-1"}
+            return {
+                "schema_version": "run_research_summary.v1",
+                "run_id": "run-1",
+                "dataset_identity": {
+                    "data_snapshot_hash": "data-snapshot-hash",
+                    "semantic_fingerprint": "semantic-fingerprint",
+                },
+                "readiness": {
+                    "data_quality_status": "degraded",
+                    "golden_blocking_reasons": ["provider_missing_data"],
+                    "caveats": ["candle_continuity_provider_sparse"],
+                },
+            }
         if method == "GET" and path == "/api/reports/compare/summary":
             return {"schema_version": "run_report_comparison_summary.v1", **params}
         if method == "POST" and path == "/api/indicators/validate-config":
@@ -142,6 +154,14 @@ def test_mcp_resource_read_routes_to_backend_contracts(tmp_path):
     assert bots["items"][0]["bot_id"] == "bot-1"
     assert runs["limit"] == 7
     assert summary["schema_version"] == "run_research_summary.v1"
+    assert summary["dataset_identity"]["data_snapshot_hash"] == (
+        "data-snapshot-hash"
+    )
+    assert summary["readiness"] == {
+        "data_quality_status": "degraded",
+        "golden_blocking_reasons": ["provider_missing_data"],
+        "caveats": ["candle_continuity_provider_sparse"],
+    }
     assert ("GET", "/api/bots/run-contexts", None, None) in client.calls
     assert ("GET", "/api/reports/run-1/research-summary", None, None) in client.calls
 
