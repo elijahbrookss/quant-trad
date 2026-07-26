@@ -257,8 +257,8 @@ def _build_canonical_wallet_initialized_fact(
             "bot_id": str(bot_id),
             "run_seq": int(run_seq),
             "run_seq_status": "runtime_assigned",
-            "source_run_seq": int(run_seq),
-            "source_run_seq_status": "runtime_assigned",
+            "source_run_seq": wallet_commit_seq,
+            "source_run_seq_status": "run_initialization",
             "wallet_commit_seq": wallet_commit_seq,
             "wallet_commit_seq_status": "runtime_assigned",
             "wallet_eval_seq": 0,
@@ -307,13 +307,19 @@ def _append_canonical_wallet_initialized_fact(
     run_id: str,
     balances: Mapping[str, float],
     shared_wallet_proxy: Mapping[str, Any],
+    initialized_at: str,
 ) -> Dict[str, Any]:
     run_seq = _next_run_event_seq(shared_wallet_proxy)
-    observed_at = utc_now_iso()
+    observed_at = str(initialized_at or "").strip()
+    if not observed_at:
+        raise RuntimeError(
+            f"wallet initialization requires authoritative run started_at | bot_id={bot_id} run_id={run_id}"
+        )
     payload = {
         "kind": BRIDGE_FACTS_KIND,
         "bot_id": str(bot_id),
         "run_id": str(run_id),
+        "bridge_session_id": f"container-wallet-initialization:{run_id}",
         "worker_id": _WALLET_INITIALIZATION_OWNER_CONTAINER,
         "source_emitter": "container_runtime",
         "source_reason": "wallet_initialized",
@@ -349,20 +355,26 @@ def _append_canonical_wallet_initialized_fact(
     )
     row_count = int(append_result.get("row_count") or 0)
     inserted_rows = int(append_result.get("inserted_rows") or 0)
-    if row_count <= 0 or inserted_rows != row_count:
+    if row_count <= 0 or inserted_rows not in {0, row_count}:
         raise RuntimeError(
-            "canonical wallet initialization fact did not persist exactly once"
+            "canonical wallet initialization fact did not persist atomically"
             f" | bot_id={bot_id} run_id={run_id} row_count={row_count} inserted_rows={inserted_rows}"
         )
+    idempotent_replay = inserted_rows == 0
     logger.info(
-        "bot_runtime_wallet_initialized_canonical_appended | bot_id=%s | run_id=%s | run_seq=%s | owner=%s | inserted_rows=%s",
+        "bot_runtime_wallet_initialized_canonical_appended | bot_id=%s | run_id=%s | run_seq=%s | owner=%s | inserted_rows=%s | idempotent_replay=%s",
         bot_id,
         run_id,
         run_seq,
         _WALLET_INITIALIZATION_OWNER_CONTAINER,
         inserted_rows,
+        idempotent_replay,
     )
-    return {"payload": payload, "append_result": append_result}
+    return {
+        "payload": payload,
+        "append_result": append_result,
+        "idempotent_replay": idempotent_replay,
+    }
 
 
 def _next_run_event_seq(shared_wallet_proxy: Mapping[str, Any]) -> int:
@@ -1559,6 +1571,11 @@ def load_container_startup_context(
             f"Strategy {strategy_id} has {len(all_symbols)} symbols but runtime limit is {max_symbols}. "
             "Reduce symbols or increase BOT_MAX_SYMBOLS_PER_STRATEGY."
         )
+    run_started_at = str((run_snapshot or {}).get("started_at") or "").strip()
+    if not run_started_at:
+        raise RuntimeError(
+            f"Run {run_id} has no authoritative started_at for wallet initialization"
+        )
 
     preparing_wallet_state = _persist_lifecycle_phase(
         bot_id=bot_id,
@@ -1585,6 +1602,7 @@ def load_container_startup_context(
         run_id=run_id,
         balances=_normalise_balances(balances),
         shared_wallet_proxy=shared_wallet_proxy,
+        initialized_at=run_started_at,
     )
 
     _persist_lifecycle_phase(

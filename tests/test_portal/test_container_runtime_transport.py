@@ -11,6 +11,7 @@ import pytest
 
 pytest.importorskip("sqlalchemy")
 
+import portal.backend.service.bots.botlens_canonical_facts as canonical_facts_mod
 import portal.backend.service.bots.container_runtime as runtime_mod
 import portal.backend.service.bots.container_runtime_telemetry as telemetry_mod
 from portal.backend.service.bots.botlens_runtime_state import BotLensRuntimeState
@@ -442,6 +443,8 @@ def test_build_canonical_wallet_initialized_fact_is_run_scoped_and_absolute() ->
     assert wallet_event["event_name"] == "WALLET_INITIALIZED"
     assert "series_key" not in wallet_event or wallet_event["series_key"] is None
     assert wallet_event["run_seq"] == 7
+    assert wallet_event["source_run_seq"] == 0
+    assert wallet_event["source_run_seq_status"] == "run_initialization"
     assert wallet_event["wallet_commit_seq"] == 0
     assert wallet_event["wallet_commit_seq_status"] == "runtime_assigned"
     assert wallet_event["wallet_event_order"] == 0
@@ -456,20 +459,18 @@ def test_build_canonical_wallet_initialized_fact_is_run_scoped_and_absolute() ->
 def test_append_canonical_wallet_initialized_fact_allocates_one_run_seq_and_persists_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    append_calls: list[dict[str, object]] = []
+    persistence_calls: list[dict[str, object]] = []
 
-    def _append_batch(**kwargs):  # noqa: ANN003
-        append_calls.append(dict(kwargs))
-        return {
-            "seq": kwargs["seq"],
-            "event_count": 1,
-            "row_count": 1,
-            "inserted_rows": 1,
-            "event_ids": ("event-1",),
-            "retention_summary": {},
-        }
+    def _record(rows, *, context=None):  # noqa: ANN001
+        persistence_calls.append(
+            {
+                "rows": [dict(row) for row in rows],
+                "context": dict(context or {}),
+            }
+        )
+        return len(rows)
 
-    monkeypatch.setattr(runtime_mod, "append_botlens_canonical_fact_batch", _append_batch)
+    monkeypatch.setattr(canonical_facts_mod, "record_bot_runtime_events_batch", _record)
     proxy = {
         "runtime_event_seq": _ProxySeqCounter(11),
         "lock": _ProxyLock(),
@@ -480,23 +481,64 @@ def test_append_canonical_wallet_initialized_fact_allocates_one_run_seq_and_pers
         run_id="run-1",
         balances={"USD": 10_000.0},
         shared_wallet_proxy=proxy,
+        initialized_at="2026-01-01T00:00:00Z",
     )
 
-    assert len(append_calls) == 1
+    assert len(persistence_calls) == 1
     assert proxy["runtime_event_seq"].get() == 12
-    assert append_calls[0]["bot_id"] == "bot-1"
-    assert append_calls[0]["run_id"] == "run-1"
-    assert append_calls[0]["seq"] == 12
-    assert append_calls[0]["batch_kind"] == "botlens_runtime_facts"
     payload = result["payload"]
     assert payload["run_seq"] == 12
+    assert payload["bridge_session_id"] == "container-wallet-initialization:run-1"
+    assert payload["known_at"] == "2026-01-01T00:00:00Z"
+    assert payload["event_time"] == "2026-01-01T00:00:00Z"
     assert payload["worker_id"] == "container"
     assert len(payload["facts"]) == 1
     assert payload["facts"][0]["wallet_event"]["event_name"] == "WALLET_INITIALIZED"
     assert payload["facts"][0]["wallet_event"]["run_seq"] == 12
     assert payload["facts"][0]["wallet_event"]["wallet_commit_seq"] == 0
     assert payload["facts"][0]["wallet_event"]["wallet_commit_seq_status"] == "runtime_assigned"
+    persisted_row = persistence_calls[0]["rows"][0]
+    assert persisted_row["bot_id"] == "bot-1"
+    assert persisted_row["run_id"] == "run-1"
+    assert persisted_row["seq"] == 12
+    assert persisted_row["payload"]["event_name"] == "WALLET_INITIALIZED"
+    assert persistence_calls[0]["context"]["message_kind"] == "botlens_runtime_facts"
+    assert persistence_calls[0]["context"]["source_reason"] == "wallet_initialized"
+    assert result["append_result"]["row_count"] == 1
     assert result["append_result"]["inserted_rows"] == 1
+    assert result["idempotent_replay"] is False
+
+
+def test_append_canonical_wallet_initialized_fact_accepts_exact_persistence_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        runtime_mod,
+        "append_botlens_canonical_fact_batch",
+        lambda **_kwargs: {
+            "seq": 23,
+            "event_count": 1,
+            "row_count": 1,
+            "inserted_rows": 0,
+            "event_ids": ("event-1",),
+            "retention_summary": {},
+        },
+    )
+    proxy = {
+        "runtime_event_seq": _ProxySeqCounter(22),
+        "lock": _ProxyLock(),
+    }
+
+    result = runtime_mod._append_canonical_wallet_initialized_fact(
+        bot_id="bot-1",
+        run_id="run-1",
+        balances={"USD": 10_000.0},
+        shared_wallet_proxy=proxy,
+        initialized_at="2026-01-01T00:00:00Z",
+    )
+
+    assert result["append_result"]["inserted_rows"] == 0
+    assert result["idempotent_replay"] is True
 
 
 def _large_runtime_facts_payload(
