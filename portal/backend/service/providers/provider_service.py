@@ -167,17 +167,6 @@ def translate_market(provider_id: Optional[str], venue_id: Optional[str]) -> Tup
     return provider, exchange
 
 
-def venue_from_exchange_slug(exchange: Optional[str]) -> Optional[str]:
-    if not exchange:
-        return None
-    slug = str(exchange).strip().lower()
-    for venue in list_venues():
-        venue_slug = exchange_slug_for_venue(venue.id)
-        if venue_slug and venue_slug.lower() == slug:
-            return venue.id
-    return None
-
-
 def tick_metadata(
     provider_id: Optional[str],
     venue_id: Optional[str],

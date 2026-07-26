@@ -90,8 +90,6 @@ def test_strategy_read_routes_return_split_contracts(monkeypatch) -> None:
             "timeframe": "5m",
             "datasource": "ALPACA",
             "exchange": "cme",
-            "provider_id": "ALPACA",
-            "venue_id": "ALPACA",
             "atm_template_id": "atm-1",
             "atm_template": {"name": "ATM"},
             "risk_config": {"base_risk_per_trade": 100.0},

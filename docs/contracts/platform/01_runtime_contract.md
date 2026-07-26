@@ -52,6 +52,11 @@ runtime data routing must follow each strategy-instrument link's canonical
 instrument record. Strategy-level datasource/exchange fields are defaults, not
 authority over linked instruments.
 
+Strategy persistence and strategy API contracts use `datasource` and `exchange`
+as those defaults. `provider_id` and `venue_id` belong to provider selection,
+credentials, and instrument admission; strategy-level writes reject them
+instead of translating or emitting duplicate aliases.
+
 Backtest replay admission must reject candle frames carrying
 `ingestion_failure` gap evidence. Provider sparse-data evidence may flow into
 continuity diagnostics and reports, but a failed provider call is not a valid

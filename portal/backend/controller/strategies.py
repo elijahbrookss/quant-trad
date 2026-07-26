@@ -6,7 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..service.market import instrument_service
 from ..service.providers import provider_service
@@ -15,23 +15,6 @@ from ..service.strategies.strategy_service import facade as strategy_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-
-def _apply_market_aliases(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Translate provider/venue identifiers into legacy datasource/exchange fields."""
-
-    provider_id = payload.pop("provider_id", None)
-    venue_id = payload.pop("venue_id", None)
-    datasource = payload.get("datasource")
-    exchange = payload.get("exchange")
-
-    if provider_id or venue_id:
-        provider, venue_exchange = provider_service.translate_market(provider_id, venue_id)
-        if provider:
-            payload["datasource"] = datasource or provider
-        if venue_exchange:
-            payload["exchange"] = exchange or venue_exchange
-    return payload
 
 
 def _slot_payload(raw: Any) -> Dict[str, Any]:
@@ -82,19 +65,6 @@ def _resolve_slot_instrument(payload: Dict[str, Any], slot_payload: Dict[str, An
     return enriched
 
 
-def _attach_market_aliases(record: Dict[str, Any]) -> Dict[str, Any]:
-    """Add provider/venue hints to strategy responses."""
-
-    datasource = (record.get("datasource") or "").strip().upper() or None
-    exchange = (record.get("exchange") or "").strip().lower() or None
-    venue_id = provider_service.venue_from_exchange_slug(exchange)
-    provider_id = datasource
-    _, _, normalized = provider_service.validate_provider_venue(provider_id, venue_id)
-    record["provider_id"] = normalized.get("provider_id") or provider_id
-    record["venue_id"] = normalized.get("venue_id") or exchange or None
-    return record
-
-
 def _strategy_core(record: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "id": record.get("id"),
@@ -103,23 +73,11 @@ def _strategy_core(record: Dict[str, Any]) -> Dict[str, Any]:
         "timeframe": record.get("timeframe"),
         "datasource": record.get("datasource"),
         "exchange": record.get("exchange"),
-        "provider_id": record.get("provider_id"),
-        "venue_id": record.get("venue_id"),
         "atm_template_id": record.get("atm_template_id"),
         "atm_template": dict(record.get("atm_template") or {}),
         "risk_config": dict(record.get("risk_config") or {}),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
-    }
-
-
-def _strategy_bindings(record: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "symbols": list(record.get("symbols") or []),
-        "instrument_slots": list(record.get("instrument_slots") or []),
-        "instruments": list(record.get("instruments") or []),
-        "indicator_ids": list(record.get("indicator_ids") or []),
-        "indicators": list(record.get("indicators") or []),
     }
 
 
@@ -145,15 +103,14 @@ def _indicator_binding_summary(entry: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _compact_bindings(record: Dict[str, Any]) -> Dict[str, Any]:
-    shaped = _attach_market_aliases(dict(record))
     return {
-        "symbols": list(shaped.get("symbols") or []),
-        "instrument_slots": list(shaped.get("instrument_slots") or []),
-        "instruments": list(shaped.get("instruments") or []),
-        "indicator_ids": list(shaped.get("indicator_ids") or []),
+        "symbols": list(record.get("symbols") or []),
+        "instrument_slots": list(record.get("instrument_slots") or []),
+        "instruments": list(record.get("instruments") or []),
+        "indicator_ids": list(record.get("indicator_ids") or []),
         "indicators": [
             _indicator_binding_summary(entry)
-            for entry in (shaped.get("indicators") or [])
+            for entry in (record.get("indicators") or [])
             if isinstance(entry, dict)
         ],
     }
@@ -167,7 +124,7 @@ def _read_context(record: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _build_strategy_inventory_item(record: Dict[str, Any], *, variant_count: int = 0) -> Dict[str, Any]:
-    shaped = _attach_market_aliases(dict(record))
+    shaped = dict(record)
     bindings = _compact_bindings(shaped)
     read_context = _read_context(shaped)
     return {
@@ -185,7 +142,7 @@ def _build_strategy_inventory_item(record: Dict[str, Any], *, variant_count: int
 
 
 def _build_strategy_definition(record: Dict[str, Any]) -> Dict[str, Any]:
-    shaped = _attach_market_aliases(dict(record))
+    shaped = dict(record)
     return {
         "schema_version": "strategy_definition.v1",
         "strategy": _strategy_core(shaped),
@@ -199,7 +156,7 @@ def _build_strategy_definition(record: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _build_strategy_bindings_doc(record: Dict[str, Any]) -> Dict[str, Any]:
-    shaped = _attach_market_aliases(dict(record))
+    shaped = dict(record)
     bindings = _compact_bindings(shaped)
     return {
         "schema_version": "strategy_bindings.v1",
@@ -214,7 +171,7 @@ def _build_strategy_bindings_doc(record: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _build_strategy_rules_doc(record: Dict[str, Any]) -> Dict[str, Any]:
-    shaped = _attach_market_aliases(dict(record))
+    shaped = dict(record)
     rules = list(shaped.get("rules") or [])
     return {
         "schema_version": "strategy_rules.v1",
@@ -264,14 +221,14 @@ class InstrumentSlotIn(BaseModel):
 class StrategyCreateRequest(BaseModel):
     """Payload for creating a new strategy."""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     instrument_slots: List[InstrumentSlotIn] = Field(default_factory=list)
     timeframe: str
     description: Optional[str] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
-    provider_id: Optional[str] = None
-    venue_id: Optional[str] = None
     indicator_ids: List[str] = Field(default_factory=list)
     atm_template: Optional[Dict[str, Any]] = None
     atm_template_id: Optional[str] = None
@@ -281,14 +238,14 @@ class StrategyCreateRequest(BaseModel):
 class StrategyUpdateRequest(BaseModel):
     """Payload for updating a strategy."""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: Optional[str] = None
     instrument_slots: Optional[List[InstrumentSlotIn]] = None
     timeframe: Optional[str] = None
     description: Optional[str] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
-    provider_id: Optional[str] = None
-    venue_id: Optional[str] = None
     indicator_ids: Optional[List[str]] = None
     atm_template: Optional[Dict[str, Any]] = None
     atm_template_id: Optional[str] = None
@@ -411,12 +368,12 @@ class StrategyPreviewCompareRequest(BaseModel):
 class SymbolPresetRequest(BaseModel):
     """Payload describing a datasource/exchange/timeframe/symbol combination."""
 
+    model_config = ConfigDict(extra="forbid")
+
     id: Optional[str] = None
     label: str
     datasource: Optional[str] = None
     exchange: Optional[str] = None
-    provider_id: Optional[str] = None
-    venue_id: Optional[str] = None
     timeframe: str
     symbol: str
 
@@ -453,7 +410,7 @@ async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
     """Create a new strategy record."""
 
     try:
-        payload = _apply_market_aliases(body.model_dump())
+        payload = body.model_dump()
         slots = payload.get("instrument_slots") or body.instrument_slots or []
 
         # Resolve or create instruments for each provided slot and embed instrument_id in metadata
@@ -691,7 +648,7 @@ async def update_strategy(strategy_id: str, body: StrategyUpdateRequest) -> Dict
     """Update an existing strategy."""
 
     try:
-        payload = _apply_market_aliases(body.model_dump(exclude_unset=True))
+        payload = body.model_dump(exclude_unset=True)
         record = strategy_service.update_strategy(strategy_id, **payload)
         return _build_strategy_definition(record)
     except KeyError as exc:
@@ -885,8 +842,7 @@ async def get_preview_signal_detail(strategy_id: str, preview_id: str, signal_id
 async def list_symbol_presets() -> List[Dict[str, Any]]:
     """Return saved symbol presets."""
 
-    presets = strategy_service.list_symbol_presets_service()
-    return [_attach_market_aliases(preset) for preset in presets]
+    return strategy_service.list_symbol_presets_service()
 
 
 @router.post("/presets/symbols", response_model=SymbolPresetOut, status_code=201)
@@ -894,7 +850,7 @@ async def save_symbol_preset(body: SymbolPresetRequest) -> Dict[str, Any]:
     """Create or update a symbol preset."""
 
     try:
-        payload = _apply_market_aliases(body.model_dump())
+        payload = body.model_dump()
         record = strategy_service.save_symbol_preset_service(
             preset_id=payload.get("id"),
             label=payload.get("label"),
@@ -903,7 +859,7 @@ async def save_symbol_preset(body: SymbolPresetRequest) -> Dict[str, Any]:
             timeframe=payload.get("timeframe"),
             symbol=payload.get("symbol"),
         )
-        return _attach_market_aliases(record)
+        return record
     except RuntimeError as exc:
         raise HTTPException(500, str(exc)) from exc
 
