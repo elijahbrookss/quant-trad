@@ -438,9 +438,7 @@ class SeriesBuilderConstructionMixin:
             params=strategy_params,
         )
 
-        # Convert strategy to dict for backward compatibility with meta field
-        series_meta = strategy.to_dict()
-        series_meta.setdefault("rules", deepcopy(getattr(strategy, "rules", {}) or {}))
+        series_meta = strategy.to_series_metadata()
         series_meta["compiled_strategy"] = compiled_strategy
         if instrument:
             series_meta["instrument"] = instrument

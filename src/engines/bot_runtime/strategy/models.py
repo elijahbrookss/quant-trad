@@ -15,22 +15,11 @@ from strategies.template import StrategyTemplate
 
 @dataclass(frozen=True)
 class StrategyIndicatorLink:
-    """Link between strategy and indicator instance (no snapshot - loads fresh from DB)."""
+    """Link between a strategy and a canonical indicator instance."""
 
     id: str
     strategy_id: str
     indicator_id: str
-    # REMOVED: indicator_snapshot - indicators loaded fresh from DB
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> StrategyIndicatorLink:
-        """Create from database dict."""
-        return cls(
-            id=data["id"],
-            strategy_id=data["strategy_id"],
-            indicator_id=data["indicator_id"],
-            # REMOVED: indicator_snapshot - indicators loaded fresh from DB
-        )
 
 
 @dataclass(frozen=True)
@@ -51,17 +40,6 @@ class StrategyInstrumentLink:
     def risk_multiplier(self) -> Optional[float]:
         """Extract risk multiplier from snapshot."""
         return self.instrument_snapshot.get("risk_multiplier")
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> StrategyInstrumentLink:
-        """Create from database dict."""
-        return cls(
-            id=data["id"],
-            strategy_id=data["strategy_id"],
-            instrument_id=data["instrument_id"],
-            instrument_snapshot=data.get("instrument_snapshot") or {},
-        )
-
 
 @dataclass(frozen=True)
 class Strategy:
@@ -151,11 +129,8 @@ class Strategy:
         """Return the concrete rule/param pair consumed by compile_strategy."""
         return deepcopy(self.rules), deepcopy(self.resolved_params)
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dict format for backward compatibility.
-
-        This allows gradual migration from dict-based code.
-        """
+    def to_series_metadata(self) -> Dict[str, Any]:
+        """Project the typed strategy into detached per-series metadata."""
         payload = {
             "id": self.id,
             "name": self.name,
@@ -163,14 +138,13 @@ class Strategy:
             "datasource": self.datasource,
             "exchange": self.exchange,
             "atm_template_id": self.atm_template_id,
-            "atm_template": self.atm_template,
+            "atm_template": deepcopy(self.atm_template),
             "risk_config": deepcopy(self.risk_config),
             "indicator_links": [
                 {
                     "id": link.id,
                     "strategy_id": link.strategy_id,
                     "indicator_id": link.indicator_id,
-                    # REMOVED: indicator_snapshot - indicators loaded fresh from DB
                 }
                 for link in self.indicator_links
             ],
@@ -179,11 +153,10 @@ class Strategy:
                     "id": link.id,
                     "strategy_id": link.strategy_id,
                     "instrument_id": link.instrument_id,
-                    "instrument_snapshot": link.instrument_snapshot,
+                    "instrument_snapshot": deepcopy(link.instrument_snapshot),
                 }
                 for link in self.instrument_links
             ],
-            # Runtime consumes rules from series.meta["rules"].
             "rules": deepcopy(self.rules),
         }
         if self.template_id is not None:

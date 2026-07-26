@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Protocol
 
 from core.settings import get_settings
+from engines.bot_runtime.strategy.models import Strategy
 
 from ..provenance import RUNTIME_CONTRACT_VERSION, RUNTIME_STORAGE_SCHEMA_VERSION, source_revision
 from .botlens_lifecycle_bridge import emit_lifecycle_event
@@ -168,7 +169,10 @@ class BotStartupOrchestrator:
             )
             artifacts = self.config_service.prepare_startup_artifacts(ctx.bot_record)
             ctx.strategy_id = str(artifacts.get("strategy_id") or ctx.strategy_id)
-            ctx.strategy_snapshot = artifacts.get("strategy")
+            strategy = artifacts.get("strategy")
+            if not isinstance(strategy, Strategy):
+                raise TypeError("startup artifacts must contain a typed Strategy")
+            ctx.strategy_snapshot = strategy
             ctx.wallet_config = dict(artifacts.get("wallet_config") or {})
             ctx.runtime_readiness = dict(artifacts.get("runtime_readiness") or {})
             symbols = list(ctx.runtime_readiness.get("symbols") or [])
@@ -180,15 +184,12 @@ class BotStartupOrchestrator:
             }
             ctx.bot_record["wallet_config"] = dict(ctx.wallet_config)
 
-            strategy = ctx.strategy_snapshot
-            strategy_payload = strategy.to_dict() if hasattr(strategy, "to_dict") else {}
-            if isinstance(strategy_payload, dict):
-                ctx.bot_record["resolved_params"] = dict(strategy_payload.get("resolved_params") or {})
-                ctx.bot_record["atm_template_id"] = strategy_payload.get("atm_template_id")
-                ctx.bot_record["strategy_variant_name"] = strategy_payload.get(
-                    "variant_name",
-                    ctx.bot_record.get("strategy_variant_name"),
-                )
+            ctx.bot_record["resolved_params"] = dict(strategy.resolved_params)
+            ctx.bot_record["atm_template_id"] = strategy.atm_template_id
+            ctx.bot_record["strategy_variant_name"] = (
+                strategy.variant_name
+                or ctx.bot_record.get("strategy_variant_name")
+            )
             self._record_phase(
                 ctx,
                 BotLifecyclePhase.RESOLVING_STRATEGY.value,
@@ -336,17 +337,10 @@ class BotStartupOrchestrator:
 
     def _prepare_run_record(self, ctx: BotStartupContext) -> None:
         strategy = ctx.strategy_snapshot
-        strategy_payload = strategy.to_dict() if hasattr(strategy, "to_dict") else {}
-        run_strategy_snapshot = (
-            dict(strategy_payload.get("run_strategy_snapshot") or {})
-            if isinstance(strategy_payload, dict)
-            else {}
-        )
-        effective_strategy_config = (
-            dict(strategy_payload.get("effective_strategy_config") or {})
-            if isinstance(strategy_payload, dict)
-            else {}
-        )
+        if not isinstance(strategy, Strategy):
+            raise TypeError("startup context requires a typed Strategy")
+        run_strategy_snapshot = dict(strategy.run_strategy_snapshot)
+        effective_strategy_config = dict(strategy.effective_strategy_config)
         execution_mode = _execution_mode_from_bot(ctx.bot_record)
         execution_behavior = execution_behavior_from_bot(ctx.bot_record)
         duration_seconds = _duration_seconds_from_bot(ctx.bot_record)
@@ -361,8 +355,7 @@ class BotStartupOrchestrator:
         if isinstance(ctx.bot_record.get("market_data_stream_policy"), Mapping):
             start_request_overrides["market_data_stream_policy"] = dict(ctx.bot_record["market_data_stream_policy"])
         strategy_hash = (
-            _clean_hash(strategy_payload.get("strategy_hash"))
-            or _clean_hash(run_strategy_snapshot.get("strategy_hash"))
+            _clean_hash(run_strategy_snapshot.get("strategy_hash"))
             or _clean_hash(effective_strategy_config.get("strategy_hash"))
         )
         self.storage.upsert_bot_run(

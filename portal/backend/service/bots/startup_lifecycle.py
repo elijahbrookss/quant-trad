@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, Dict, Mapping, MutableMapping, Optional
+from typing import TYPE_CHECKING, Any, Dict, Mapping, MutableMapping, Optional
+
+if TYPE_CHECKING:
+    from engines.bot_runtime.strategy.models import Strategy
 
 
 def utc_now() -> datetime:
@@ -307,7 +310,7 @@ class BotStartupContext:
     persisted_bot_record: Dict[str, Any]
     run_id: str
     strategy_id: str
-    strategy_snapshot: Any
+    strategy_snapshot: Optional["Strategy"]
     wallet_config: Dict[str, Any]
     runtime_readiness: Dict[str, Any]
     runtime_dependency_metadata: Dict[str, Any]

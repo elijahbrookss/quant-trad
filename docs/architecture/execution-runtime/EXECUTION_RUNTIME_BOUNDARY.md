@@ -46,6 +46,12 @@ Runtime consumes:
 - bot/strategy/instrument config,
 - wallet and execution-mode settings.
 
+`StrategyLoader` is the sole runtime strategy-loading boundary and returns the
+typed `Strategy` domain model. Backend startup rejects loose mappings and
+duck-typed strategy objects. The model exposes `to_series_metadata()` only for
+the per-series projection consumed by runtime; startup reads run snapshots,
+effective config, variants, and resolved parameters directly from typed fields.
+
 Runtime emits:
 
 - accepted/rejected decision events,
