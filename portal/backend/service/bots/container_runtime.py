@@ -52,6 +52,8 @@ from portal.backend.service.bots.runtime_dependencies import build_bot_runtime_d
 from portal.backend.service.bots.execution_behavior import OBSERVE_ONLY_BEHAVIOR, is_observe_only_bot
 from portal.backend.service.bots.observe_only_runtime import run_observe_only_market_intake
 from portal.backend.service.bots.paper_market_stream import PaperMarketStreamRunner
+from portal.backend.service.market.feed_service import paper_candle_persistence_sink
+from portal.backend.service.storage.repos.market_data import market_data_repo
 from portal.backend.service.bots.run_lease import RunLeaseRenewer, default_run_lease_runner_id
 from engines.bot_runtime.live_market import LiveCandleStore
 from portal.backend.service.reports.artifacts import finalize_run_artifact_bundle_from_workers
@@ -138,6 +140,41 @@ def _materialize_bot_config(bot_payload: Mapping[str, Any]) -> Dict[str, Any]:
                 continue
             materialized[key] = raw_value
     return materialized
+
+
+def _bind_backtest_market_data_scope(
+    runtime_bot_config: Dict[str, Any],
+    *,
+    run_id: str,
+) -> Dict[str, Any] | None:
+    """Pin every backtest worker and nested strategy read to one market commit."""
+
+    run_type = str(runtime_bot_config.get("run_type") or "backtest").strip().lower()
+    if run_type != "backtest":
+        return None
+    configured = runtime_bot_config.get("market_data_as_of_commit_seq")
+    watermark = int(configured) if configured is not None else market_data_repo.current_commit_seq()
+    if watermark <= 0:
+        raise RuntimeError(
+            "backtest_market_data_unavailable: no accepted canonical candle facts exist"
+        )
+    scope = {
+        "schema_version": "market_data_read_scope.v1",
+        "as_of_commit_seq": watermark,
+        "contract_version": "candle.ohlcv.v1",
+    }
+    runtime_bot_config["market_data_as_of_commit_seq"] = watermark
+    runtime_bot_config["market_data_read_scope"] = dict(scope)
+
+    run = get_bot_run(run_id) or {}
+    config_snapshot = (
+        dict(run.get("config_snapshot") or {})
+        if isinstance(run.get("config_snapshot"), Mapping)
+        else {}
+    )
+    config_snapshot["market_data_read_scope"] = dict(scope)
+    upsert_bot_run({"run_id": run_id, "config_snapshot": config_snapshot})
+    return scope
 
 
 def _normalise_balances(raw_balances: Mapping[str, Any]) -> Dict[str, float]:
@@ -1537,6 +1574,9 @@ def load_container_startup_context(
     runtime_bot_config = _materialize_bot_config(bot)
     if request_id:
         runtime_bot_config["request_id"] = request_id
+    _bind_backtest_market_data_scope(
+        runtime_bot_config, run_id=run_id
+    )
     _persist_lifecycle_phase(
         bot_id=bot_id,
         run_id=run_id,
@@ -1748,7 +1788,15 @@ def _series_worker(
     ):
         child_config["BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY"] = _PUSH_SETTINGS.payload_bytes_sample_every
     runtime_error: Dict[str, str] = {}
-    runtime = BotRuntime(bot_id=bot_id, config=child_config, deps=build_bot_runtime_deps())
+    runtime = BotRuntime(
+        bot_id=bot_id,
+        config=child_config,
+        deps=build_bot_runtime_deps(
+            market_data_as_of_commit_seq=child_config.get(
+                "market_data_as_of_commit_seq"
+            )
+        ),
+    )
 
     def _queue_worker_event(payload: Mapping[str, Any], *, timeout_s: float = 0.25) -> bool:
         try:
@@ -2065,6 +2113,12 @@ def _series_worker(
                 store=paper_live_store,
                 series=runtime.runtime_series(),
                 provisional_candle_sink=_emit_provisional_market_fact,
+                closed_candle_sink=lambda candle, meta: paper_candle_persistence_sink.persist(
+                    candle,
+                    instrument_id=str(meta.get("instrument_id") or ""),
+                    bot_id=bot_id,
+                    run_id=run_id,
+                ),
                 market_data_stream_policy=child_config.get("market_data_stream_policy")
                 if isinstance(child_config.get("market_data_stream_policy"), Mapping)
                 else None,

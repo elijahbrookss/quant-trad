@@ -13,9 +13,11 @@ tags:
   - postgres
 code_paths:
   - portal/backend/db/models.py
+  - portal/backend/db/market_data_models.py
   - portal/backend/db/session.py
   - portal/backend/service/provenance.py
   - portal/backend/service/storage
+  - portal/backend/service/storage/repos/market_data.py
   - portal/backend/service/bots/storage_gateway.py
   - portal/backend/service/storage/repos/lifecycle.py
   - portal/backend/service/storage/repos/run_leases.py
@@ -78,14 +80,16 @@ are still absent after bootstrap attempts to create model-declared indexes,
 startup fails. Historical SQL files under `scripts/db/` are repair/reference
 artifacts for old local databases, not normal fresh-start instructions.
 
-Provider market-data storage follows the same rule for
-`market_candles_raw`, `derivatives_market_state`, and
-`portal_candle_closures`: inspect the configured table names, create missing
-tables once, assert existing columns, create required indexes, and fail loud if
-the contract still does not hold. Provider credential helpers do not create
-their own table; `portal_provider_credential_refs` is owned by the portal ORM
-metadata and credential helpers only validate that the bootstrapped table and
-lookup index exist.
+Market-data persistence is model-declared in
+`portal/backend/db/market_data_models.py` under schema `market`. It owns
+source and typed-series identity, ingestion operations, append-only candle
+revisions, gap evidence, and frozen dataset manifests. Fresh bootstrap creates
+that schema, converts candle revisions to a TimescaleDB hypertable, and installs
+immutability triggers. Startup fails if active legacy tables remain in `public`;
+the explicit v2 hard-cutover migration verifies and archives them instead of
+supporting dual readers or writers. Provider credential helpers do not create
+their own table; `portal_provider_credential_refs` remains owned by portal ORM
+metadata.
 
 ## Diagram Walkthrough
 
@@ -124,7 +128,9 @@ Active schema surfaces are justified by role:
 - Keep as durable truth: `portal_bot_runs`, `portal_bot_run_events`,
   `portal_bot_run_event_seq_allocators`, `portal_bot_trades`,
   `portal_bot_trade_events`, `portal_bot_run_leases`, strategy/bot/instrument
-  config tables, and market data source tables.
+  config tables, plus `market.sources`, `market.series`,
+  `market.ingestion_runs`, `market.candle_versions`, `market.gap_evidence`,
+  `market.datasets`, and `market.dataset_series`.
 - Keep as definition only: `portal_bots`. Runtime state belongs to
   `portal_bot_runs`, canonical lifecycle events, run leases, and report
   materialization tables. Fleet cards and API responses may project those rows

@@ -75,3 +75,4 @@ respect.
 | [0047](0047-fence-async-job-ownership.md) | Fence async job ownership | Accepted |
 | [0048](0048-gate-agent-mutation-and-research-promotion.md) | Gate agent mutation and research promotion | Proposed |
 | [0049](0049-keep-live-order-submission-closed.md) | Keep live order submission closed | Accepted, retroactive cleanup |
+| [0050](0050-use-one-canonical-append-only-market-data-store.md) | Use one canonical append-only market-data store | Accepted, retroactive cleanup |

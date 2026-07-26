@@ -128,11 +128,9 @@ class CoinbaseProvider(BaseDataProvider):
     def __init__(
         self,
         *,
-        persistence=None,
-        settings=None,
         timeout: int = 30,
     ) -> None:
-        super().__init__(persistence=persistence, settings=settings)
+        super().__init__()
 
         if not COINBASE_SDK_AVAILABLE:
             raise ImportError(

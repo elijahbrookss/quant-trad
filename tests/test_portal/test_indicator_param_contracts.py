@@ -103,6 +103,24 @@ def test_manifest_serialization_preserves_rich_option_metadata() -> None:
     payload = serialize_indicator_manifest(manifest)
     options = payload["params"][0]["options"]
 
+    assert payload["market_inputs"] == [
+        {
+            "role": "primary_bars",
+            "fact_type": "candle.ohlcv",
+            "contract_version": "candle.ohlcv.v1",
+            "required_fields": [
+                "open_time",
+                "close_time",
+                "open",
+                "high",
+                "low",
+                "close",
+                "known_at",
+            ],
+            "known_at_required": True,
+        }
+    ]
+
     assert options == [
         {
             "value": "1h",

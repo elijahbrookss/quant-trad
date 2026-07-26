@@ -16,8 +16,8 @@ from .base import BaseDataProvider, DataSource, InstrumentMetadata, InstrumentTy
 _ALPACA_SETTINGS = get_settings().providers.alpaca
 
 class AlpacaProvider(BaseDataProvider):
-    def __init__(self, *, persistence=None, settings=None):
-        super().__init__(persistence=persistence, settings=settings)
+    def __init__(self):
+        super().__init__()
 
         credentials = self._resolve_credentials()
         self._api_key = credentials.get("ALPACA_API_KEY")

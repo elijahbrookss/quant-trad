@@ -150,9 +150,6 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
         ("bot_runtime", "watchdog", "docker_lifecycle_retry_interval_seconds"),
     ),
     ("QT_PROVIDERS_RUNTIME_HISTORY_SEGMENT_POINTS", ("providers", "runtime", "history_segment_points")),
-    ("QT_PROVIDERS_RUNTIME_CANDLES_RAW_TABLE", ("providers", "runtime", "persistence", "candles_raw_table")),
-    ("QT_PROVIDERS_RUNTIME_DERIVATIVES_STATE_TABLE", ("providers", "runtime", "persistence", "derivatives_state_table")),
-    ("QT_PROVIDERS_RUNTIME_CLOSURES_TABLE", ("providers", "runtime", "persistence", "closures_table")),
     ("QT_PROVIDERS_IBKR_HOST", ("providers", "ibkr", "host")),
     ("QT_PROVIDERS_IBKR_PORT", ("providers", "ibkr", "port")),
     ("QT_PROVIDERS_IBKR_CLIENT_ID", ("providers", "ibkr", "client_id")),
@@ -423,17 +420,11 @@ class ObservabilitySettings:
     high_volume_metric_max_lag_ms: int
 
 
-@dataclass(frozen=True)
-class ProviderPersistenceSettings:
-    candles_raw_table: str
-    derivatives_state_table: str
-    closures_table: str
 
 
 @dataclass(frozen=True)
 class ProviderRuntimeSettings:
     history_segment_points: int
-    persistence: ProviderPersistenceSettings
 
 
 @dataclass(frozen=True)
@@ -692,7 +683,6 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
     watchdog_payload = _coerce_mapping(bot_runtime_payload.get("watchdog"))
     providers_payload = _coerce_mapping(payload.get("providers"))
     provider_runtime_payload = _coerce_mapping(providers_payload.get("runtime"))
-    persistence_payload = _coerce_mapping(provider_runtime_payload.get("persistence"))
     ibkr_payload = _coerce_mapping(providers_payload.get("ibkr"))
     ccxt_payload = _coerce_mapping(providers_payload.get("ccxt"))
     alpaca_payload = _coerce_mapping(providers_payload.get("alpaca"))
@@ -958,15 +948,6 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             runtime=ProviderRuntimeSettings(
                 history_segment_points=_coerce_int(
                     provider_runtime_payload.get("history_segment_points"), 1000, minimum=1
-                ),
-                persistence=ProviderPersistenceSettings(
-                    candles_raw_table=_coerce_str(persistence_payload.get("candles_raw_table"), "market_candles_raw"),
-                    derivatives_state_table=_coerce_str(
-                        persistence_payload.get("derivatives_state_table"), "derivatives_market_state"
-                    ),
-                    closures_table=_coerce_str(
-                        persistence_payload.get("closures_table"), "portal_candle_closures"
-                    ),
                 ),
             ),
             ibkr=IbkrSettings(

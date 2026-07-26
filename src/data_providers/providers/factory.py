@@ -11,7 +11,6 @@ from typing import Optional, Tuple
 from core.logger import logger
 from utils.perf_log import get_obs_enabled
 
-from ..config import runtime_config_from_env
 from ..registry import (
     ProviderConfig,
     exchange_slug_for_venue,
@@ -19,9 +18,7 @@ from ..registry import (
     get_venue_config,
     normalize_provider_id,
     normalize_venue_id,
-    provider_for_venue,
 )
-from ..services import DataPersistence, NullPersistence
 from .base import BaseDataProvider
 
 
@@ -40,22 +37,14 @@ def _provider_class(provider_cfg: ProviderConfig):
 def _build_provider_instance(
     *,
     provider_cfg: ProviderConfig,
-    persistence: DataPersistence,
-    runtime_config: object,
     exchange: Optional[str],
     resolved_venue: Optional[str],
 ) -> BaseDataProvider:
     provider_cls = _provider_class(provider_cfg)
     signature = inspect.signature(provider_cls)
     parameters = signature.parameters
-    accepts_var_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values())
-
     kwargs = {}
-    if "persistence" in parameters or accepts_var_kwargs:
-        kwargs["persistence"] = persistence
-    if "settings" in parameters or accepts_var_kwargs:
-        kwargs["settings"] = runtime_config
-    if "exchange" in parameters or accepts_var_kwargs:
+    if "exchange" in parameters:
         kwargs["exchange"] = exchange or resolved_venue
     if "exchange_id" in parameters:
         slug = exchange_slug_for_venue(resolved_venue) or (exchange or "").lower()
@@ -70,25 +59,9 @@ def _build_provider_instance(
 
 @dataclass
 class ProviderRegistry:
-    """Registry for provider instances and persistence wiring."""
+    """Registry for acquisition adapter instances."""
 
-    runtime_config: object = field(default_factory=runtime_config_from_env)
-    persistence_factory: Optional[callable] = None
-    persistence: Optional[DataPersistence] = None
     cache: dict[Tuple[str, str], BaseDataProvider] = field(default_factory=dict)
-
-    def configure_persistence_factory(self, factory) -> None:
-        self.persistence_factory = factory
-        self.persistence = None
-        self.cache = {}
-
-    def get_persistence(self) -> DataPersistence:
-        if self.persistence is None:
-            if self.persistence_factory is None:
-                self.persistence = NullPersistence()
-            else:
-                self.persistence = self.persistence_factory()
-        return self.persistence
 
     def get_provider(
         self,
@@ -124,11 +97,8 @@ class ProviderRegistry:
         if not provider_cfg:
             raise ValueError(f"Unsupported provider: {provider}")
 
-        persistence = self.get_persistence()
         instance = _build_provider_instance(
             provider_cfg=provider_cfg,
-            persistence=persistence,
-            runtime_config=self.runtime_config,
             exchange=exchange,
             resolved_venue=resolved_venue,
         )
@@ -151,18 +121,11 @@ class ProviderRegistry:
 _REGISTRY = ProviderRegistry()
 
 
-def configure_persistence_factory(factory):
-    """Provide a service-layer persistence builder for provider instances."""
-
-    _REGISTRY.configure_persistence_factory(factory)
-
-
 def _resolve_ids(provider_id: Optional[str], venue_id: Optional[str]) -> Tuple[str, Optional[str]]:
-    provider = normalize_provider_id(provider_id) or "ALPACA"
+    provider = normalize_provider_id(provider_id)
+    if not provider:
+        raise ValueError("provider_id is required")
     venue = normalize_venue_id(venue_id)
-
-    if venue and not provider_id:
-        provider = provider_for_venue(venue) or provider
 
     if venue:
         venue_cfg = get_venue_config(venue)

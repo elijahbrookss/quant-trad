@@ -39,6 +39,7 @@ def runtime_indicator_builder_for_type(indicator_type: str) -> Callable[..., Any
 
 @dataclass(frozen=True)
 class IndicatorRuntimeInputSpec:
+    market_input_role: str = "primary_bars"
     source_timeframe: Optional[str] = None
     source_timeframe_param: Optional[str] = None
     lookback_bars: Optional[int] = None
@@ -113,6 +114,7 @@ class IndicatorFactory:
         for raw in manifest_runtime_input_specs(manifest):
             specs.append(
                 IndicatorRuntimeInputSpec(
+                    market_input_role=str(raw.market_input_role),
                     source_timeframe=(str(raw.source_timeframe).strip() or None)
                     if raw.source_timeframe is not None
                     else None,

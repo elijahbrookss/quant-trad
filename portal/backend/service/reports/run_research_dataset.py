@@ -30,7 +30,7 @@ from indicators.runtime.source_diagnostics import (
 from ..provenance import REPORT_DATASET_SCHEMA_VERSION
 from ..storage.repos.candles import (
     get_candle_storage_summary,
-    list_candle_closure_evidence,
+    list_candle_provider_gap_evidence,
     list_candles_for_series,
 )
 from ..storage.repos.lifecycle import list_bot_run_lifecycle_events
@@ -40,7 +40,7 @@ from ..storage.repos.runtime_events import list_bot_run_steps_for_run
 from ..storage.repos.trades import list_bot_trades_for_run
 from . import artifacts as report_artifacts
 from . import report_data
-from .candle_continuity import classify_unknown_gaps_from_closures
+from .candle_continuity import classify_unknown_gaps_from_provider_evidence
 from .instrument_semantics import merge_fill_instrument_semantics
 from .metrics import compute_expectancy, compute_max_drawdown, compute_profit_factor
 from .summary_metrics import ANNUALIZATION_PERIODS, compute_summary as compute_portfolio_metric_summary
@@ -1133,7 +1133,7 @@ def _fetch_excursion_candles(trade: Mapping[str, Any]) -> tuple[List[Dict[str, A
             continue
         metadata = {
             "status": "available",
-            "source": "market_candles_raw",
+            "source": "market.candle_versions",
             "source_timeframe": timeframe,
             "candle_count": len(normalized),
             "caveats": [],
@@ -2055,7 +2055,7 @@ def _candle_gaps(
         )
     for row in observability_events:
         sources.append((row, _mapping(row.get("details")), str(row.get("event_name") or "").strip().lower()))
-    closure_cache: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+    provider_gap_cache: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
     for row, summary_context, name in sources:
         if name not in {"candle_continuity_summary", "candle_gap_observed"} and "gap_count_by_type" not in summary_context:
             continue
@@ -2075,12 +2075,12 @@ def _candle_gaps(
             symbol = "UNKNOWN"
         gap_counts = _mapping(summary_context.get("gap_count_by_type"))
         gaps = summary_context.get("gaps") if isinstance(summary_context.get("gaps"), list) else []
-        gaps = _reclassify_unknown_candle_gaps_from_closures(
+        gaps = _reclassify_unknown_candle_gaps_from_provider_evidence(
             gaps,
             instrument_id=str(instrument_id or ""),
             timeframe=str(summary_context.get("timeframe") or row.get("timeframe") or ""),
             metadata=metadata,
-            closure_cache=closure_cache,
+            provider_gap_cache=provider_gap_cache,
         )
         detected = _safe_int(summary_context.get("detected_gap_count")) or sum(
             int(_safe_int(value) or 0) for value in gap_counts.values()
@@ -2166,22 +2166,22 @@ def _candle_continuity_evidence_scope(
     return "noncanonical"
 
 
-def _load_candle_closure_evidence(
+def _load_candle_provider_gap_evidence(
     *,
     instrument_id: str,
     timeframe: str,
     metadata: Optional[RunResearchMetadata],
-    closure_cache: Dict[tuple[str, str], List[Dict[str, Any]]],
+    provider_gap_cache: Dict[tuple[str, str], List[Dict[str, Any]]],
 ) -> List[Dict[str, Any]]:
     instrument = str(instrument_id or "").strip()
     interval = str(timeframe or "").strip()
     if not instrument or not interval or metadata is None:
         return []
     key = (instrument, interval)
-    if key in closure_cache:
-        return closure_cache[key]
+    if key in provider_gap_cache:
+        return provider_gap_cache[key]
     try:
-        rows = list_candle_closure_evidence(
+        rows = list_candle_provider_gap_evidence(
             instrument_id=instrument,
             timeframe=interval,
             start=metadata.simulated_window.get("start"),
@@ -2190,7 +2190,7 @@ def _load_candle_closure_evidence(
     except Exception as exc:  # noqa: BLE001 - diagnostics must not hide report construction
         logger.warning(
             with_log_context(
-                "run_research_dataset_candle_closure_evidence_unavailable",
+                "run_research_dataset_candle_provider_gap_evidence_unavailable",
                 build_log_context(
                     run_id=metadata.run_id,
                     instrument_id=instrument,
@@ -2200,28 +2200,28 @@ def _load_candle_closure_evidence(
             )
         )
         rows = []
-    closure_cache[key] = [dict(row) for row in rows if isinstance(row, Mapping)]
-    return closure_cache[key]
+    provider_gap_cache[key] = [dict(row) for row in rows if isinstance(row, Mapping)]
+    return provider_gap_cache[key]
 
 
-def _reclassify_unknown_candle_gaps_from_closures(
+def _reclassify_unknown_candle_gaps_from_provider_evidence(
     gaps: Sequence[Any],
     *,
     instrument_id: str,
     timeframe: str,
     metadata: Optional[RunResearchMetadata],
-    closure_cache: Dict[tuple[str, str], List[Dict[str, Any]]],
+    provider_gap_cache: Dict[tuple[str, str], List[Dict[str, Any]]],
 ) -> List[Dict[str, Any]]:
     normalized = [dict(gap) for gap in gaps if isinstance(gap, Mapping)]
     if not normalized or not any(str(gap.get("classification") or "unknown_gap") == "unknown_gap" for gap in normalized):
         return normalized
-    closures = _load_candle_closure_evidence(
+    provider_evidence = _load_candle_provider_gap_evidence(
         instrument_id=instrument_id,
         timeframe=timeframe,
         metadata=metadata,
-        closure_cache=closure_cache,
+        provider_gap_cache=provider_gap_cache,
     )
-    return classify_unknown_gaps_from_closures(normalized, closures)
+    return classify_unknown_gaps_from_provider_evidence(normalized, provider_evidence)
 
 
 def _normalized_gap_counts(value: Any) -> Dict[str, int]:
@@ -4582,7 +4582,7 @@ def _candle_catalog(
                 "continuity_status": continuity_status,
                 "candle_snapshot": _mapping(fact.get("candle_snapshot")),
                 "available_resolutions": available_resolutions,
-                "storage_source": "market_candles_raw" if stored else "candle_continuity_summary" if fact else "unresolved_instrument",
+                "storage_source": "market.candle_versions" if stored else "candle_continuity_summary" if fact else "unresolved_instrument",
                 "series_key": series_key,
             }
         )

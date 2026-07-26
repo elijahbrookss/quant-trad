@@ -1,0 +1,1063 @@
+"""Canonical PostgreSQL repository for market-data facts and datasets."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import uuid
+from collections import Counter
+from collections.abc import Iterable, Mapping, Sequence
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from market_data.contracts import (
+    CANDLE_FACT_TYPE,
+    CandleFact,
+    CandleRecord,
+    DatasetSeriesRequest,
+    SourceIdentity,
+    build_candle_material_hash,
+    build_dataset_identity_hash,
+    build_provenance_hash,
+    build_quality_hash,
+)
+from market_data.store import FrozenDataset, IngestionOutcome
+from sqlalchemy import text
+
+from ....db import db
+
+
+_SERIES_IDENTITY_VERSION = "market_series.v1"
+
+
+def _json_text(value: Mapping[str, Any] | None) -> str:
+    return json.dumps(dict(value or {}), sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _stable_hash(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(_json_text(value).encode("utf-8")).hexdigest()
+
+
+def _iso(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _row_to_record(row: Mapping[str, Any]) -> CandleRecord:
+    fact = CandleFact(
+        open_time=row["candle_open_time"],
+        close_time=row["candle_close_time"],
+        open=row["open"],
+        high=row["high"],
+        low=row["low"],
+        close=row["close"],
+        volume=row.get("volume"),
+        trade_count=row.get("trade_count"),
+        source_published_at=row.get("source_published_at"),
+        received_at=row.get("received_at"),
+        accepted_at=row["accepted_at"],
+        known_at=row["known_at"],
+        known_at_method=row["known_at_method"],
+    )
+    stored_hash = str(row.get("row_hash") or "")
+    if fact.row_hash != stored_hash:
+        raise RuntimeError(
+            "market_data_corrupt: candle row hash mismatch "
+            f"series_id={row.get('series_id')} open_time={_iso(fact.open_time)}"
+        )
+    return CandleRecord(
+        series_id=int(row["series_id"]),
+        revision=int(row["revision"]),
+        market_commit_seq=int(row["market_commit_seq"]),
+        ingestion_run_id=str(row["ingestion_run_id"]),
+        source_identity_key=str(row["source_identity_key"]),
+        source=SourceIdentity(
+            provider=str(row["source_provider"]),
+            venue=str(row["source_venue"]),
+            source_kind=str(row["source_kind"]),
+            adapter_version=str(row["source_adapter_version"]),
+        ),
+        provenance=dict(row.get("provenance") or {}),
+        fact=fact,
+    )
+
+
+class PostgresMarketDataRepository:
+    """Single PostgreSQL owner for accepted candle facts and frozen datasets."""
+
+    def current_commit_seq(self) -> int:
+        """Return the latest accepted market-fact commit sequence."""
+
+        with db.session() as session:
+            return int(
+                session.execute(
+                    text(
+                        "SELECT COALESCE(MAX(market_commit_seq), 0) "
+                        "FROM market.candle_versions"
+                    )
+                ).scalar_one()
+            )
+
+    def list_series(self, *, instrument_id: Optional[str] = None) -> list[dict[str, Any]]:
+        """Return canonical logical series and accepted-version counts."""
+
+        predicates: list[str] = []
+        params: dict[str, Any] = {}
+        if instrument_id is not None:
+            normalized = str(instrument_id or "").strip()
+            if not normalized:
+                raise ValueError("market_data_series_invalid: instrument_id is empty")
+            predicates.append("series.instrument_id = :instrument_id")
+            params["instrument_id"] = normalized
+        where_sql = "WHERE " + " AND ".join(predicates) if predicates else ""
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    f"""
+                    SELECT series.id, series.identity_key, series.instrument_id,
+                           series.fact_type, series.timeframe_seconds,
+                           series.contract_version,
+                           count(versions.market_commit_seq) AS version_count,
+                           count(DISTINCT versions.candle_open_time) AS candle_count,
+                           min(versions.candle_open_time) AS first_open_time,
+                           max(versions.candle_open_time) AS last_open_time,
+                           max(versions.market_commit_seq) AS max_commit_seq
+                    FROM market.series AS series
+                    LEFT JOIN market.candle_versions AS versions
+                      ON versions.series_id = series.id
+                    {where_sql}
+                    GROUP BY series.id
+                    ORDER BY series.instrument_id, series.fact_type,
+                             series.timeframe_seconds NULLS FIRST, series.id
+                    """
+                ),
+                params,
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def get_dataset(self, dataset_id: str) -> FrozenDataset:
+        """Load an immutable dataset manifest by exact ID."""
+
+        normalized = str(dataset_id or "").strip()
+        if not normalized:
+            raise ValueError("market_dataset_invalid: dataset_id is required")
+        with db.session() as session:
+            dataset = session.execute(
+                text(
+                    """
+                    SELECT id, dataset_hash, max_commit_seq
+                    FROM market.datasets
+                    WHERE id = :dataset_id
+                    """
+                ),
+                {"dataset_id": normalized},
+            ).mappings().first()
+            if dataset is None:
+                raise ValueError(f"market_dataset_unknown: dataset_id={normalized}")
+            rows = session.execute(
+                text(
+                    """
+                    SELECT series_id, range_start, range_end, max_commit_seq,
+                           row_count, material_hash, provenance_hash, source_summary,
+                           quality_hash, quality_summary
+                    FROM market.dataset_series
+                    WHERE dataset_id = :dataset_id
+                    ORDER BY series_id, range_start, range_end
+                    """
+                ),
+                {"dataset_id": normalized},
+            ).mappings().all()
+        return FrozenDataset(
+            dataset_id=str(dataset["id"]),
+            dataset_hash=str(dataset["dataset_hash"]),
+            max_commit_seq=int(dataset["max_commit_seq"]),
+            series=tuple(dict(row) for row in rows),
+        )
+
+    def register_source(
+        self,
+        identity: SourceIdentity,
+        *,
+        lineage: Optional[Mapping[str, Any]] = None,
+    ) -> int:
+        with db.session() as session:
+            session.execute(
+                text(
+                    """
+                    INSERT INTO market.sources (
+                        identity_key, provider, venue, source_kind, adapter_version, lineage
+                    ) VALUES (
+                        :identity_key, :provider, :venue, :source_kind, :adapter_version,
+                        CAST(:lineage AS jsonb)
+                    )
+                    ON CONFLICT (identity_key) DO NOTHING
+                    """
+                ),
+                {
+                    "identity_key": identity.identity_key,
+                    "provider": identity.provider,
+                    "venue": identity.venue,
+                    "source_kind": identity.source_kind,
+                    "adapter_version": identity.adapter_version,
+                    "lineage": _json_text(lineage),
+                },
+            )
+            row = session.execute(
+                text(
+                    """
+                    SELECT id, provider, venue, source_kind, adapter_version
+                    FROM market.sources
+                    WHERE identity_key = :identity_key
+                    """
+                ),
+                {"identity_key": identity.identity_key},
+            ).mappings().one()
+        actual = (
+            str(row["provider"]),
+            str(row["venue"]),
+            str(row["source_kind"]),
+            str(row["adapter_version"]),
+        )
+        expected = (
+            identity.provider,
+            identity.venue,
+            identity.source_kind,
+            identity.adapter_version,
+        )
+        if actual != expected:
+            raise RuntimeError(
+                "market_data_source_conflict: identity hash resolved to different source"
+            )
+        return int(row["id"])
+
+    def register_series(
+        self,
+        *,
+        instrument_id: str,
+        fact_type: str,
+        timeframe_seconds: Optional[int],
+        contract_version: str,
+    ) -> int:
+        instrument_id = str(instrument_id or "").strip()
+        fact_type = str(fact_type or "").strip().lower()
+        contract_version = str(contract_version or "").strip()
+        timeframe = int(timeframe_seconds) if timeframe_seconds is not None else None
+        if not instrument_id or not fact_type or not contract_version:
+            raise ValueError("market_data_series_invalid: complete series identity is required")
+        if fact_type == CANDLE_FACT_TYPE and (timeframe is None or timeframe <= 0):
+            raise ValueError("market_data_series_invalid: candle timeframe must be positive")
+
+        identity_key = _stable_hash(
+            {
+                "schema_version": _SERIES_IDENTITY_VERSION,
+                "instrument_id": instrument_id,
+                "fact_type": fact_type,
+                "timeframe_seconds": timeframe,
+                "contract_version": contract_version,
+            }
+        )
+        with db.session() as session:
+            session.execute(
+                text(
+                    """
+                    INSERT INTO market.series (
+                        identity_key, instrument_id, fact_type,
+                        timeframe_seconds, contract_version
+                    ) VALUES (
+                        :identity_key, :instrument_id, :fact_type,
+                        :timeframe_seconds, :contract_version
+                    )
+                    ON CONFLICT (identity_key) DO NOTHING
+                    """
+                ),
+                {
+                    "identity_key": identity_key,
+                    "instrument_id": instrument_id,
+                    "fact_type": fact_type,
+                    "timeframe_seconds": timeframe,
+                    "contract_version": contract_version,
+                },
+            )
+            row = session.execute(
+                text(
+                    """
+                    SELECT id, instrument_id, fact_type,
+                           timeframe_seconds, contract_version
+                    FROM market.series
+                    WHERE identity_key = :identity_key
+                    """
+                ),
+                {"identity_key": identity_key},
+            ).mappings().one()
+        actual = (
+            str(row["instrument_id"]),
+            str(row["fact_type"]),
+            row.get("timeframe_seconds"),
+            str(row["contract_version"]),
+        )
+        expected = (instrument_id, fact_type, timeframe, contract_version)
+        if actual != expected:
+            raise RuntimeError(
+                "market_data_series_conflict: identity hash resolved to different series"
+            )
+        return int(row["id"])
+
+    def resolve_series_id(
+        self,
+        *,
+        instrument_id: str,
+        fact_type: str,
+        timeframe_seconds: Optional[int],
+        contract_version: str,
+    ) -> int:
+        """Resolve one canonical logical series or fail without provider fallback."""
+
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM market.series
+                    WHERE instrument_id = :instrument_id
+                      AND fact_type = :fact_type
+                      AND timeframe_seconds IS NOT DISTINCT FROM :timeframe_seconds
+                      AND contract_version = :contract_version
+                    ORDER BY id
+                    """
+                ),
+                {
+                    "instrument_id": str(instrument_id or "").strip(),
+                    "fact_type": str(fact_type or "").strip().lower(),
+                    "timeframe_seconds": (
+                        int(timeframe_seconds) if timeframe_seconds is not None else None
+                    ),
+                    "contract_version": str(contract_version or "").strip(),
+                },
+            ).scalars().all()
+        if not rows:
+            raise ValueError(
+                "market_data_series_missing: explicit ingestion is required before read"
+            )
+        if len(rows) != 1:
+            raise RuntimeError(
+                "market_data_series_ambiguous: canonical series uniqueness is violated"
+            )
+        return int(rows[0])
+
+    def ingest_candles(
+        self,
+        *,
+        series_id: int,
+        source_id: int,
+        facts: Iterable[CandleFact],
+        request: Optional[Mapping[str, Any]] = None,
+        source_revision: Optional[str] = None,
+        ingestion_run_id: Optional[str] = None,
+        allow_corrections: bool = True,
+    ) -> IngestionOutcome:
+        series_id = int(series_id)
+        source_id = int(source_id)
+        rows = sorted(list(facts), key=lambda item: item.open_time)
+        if series_id <= 0:
+            raise ValueError("market_data_ingest_invalid: series_id must be positive")
+        if source_id <= 0:
+            raise ValueError("market_data_ingest_invalid: source_id must be positive")
+        if not rows:
+            raise ValueError("market_data_ingest_invalid: at least one candle is required")
+        duplicate_times = [
+            current.open_time
+            for previous, current in zip(rows, rows[1:])
+            if previous.open_time == current.open_time
+        ]
+        if duplicate_times:
+            raise ValueError(
+                "market_data_ingest_invalid: duplicate candle open_time "
+                f"{_iso(duplicate_times[0])}"
+            )
+
+        run_id = str(ingestion_run_id or uuid.uuid4().hex).strip()
+        if not run_id or len(run_id) > 64:
+            raise ValueError("market_data_ingest_invalid: ingestion_run_id is invalid")
+        series = self._get_series(series_id)
+        if str(series["fact_type"]) != CANDLE_FACT_TYPE:
+            raise ValueError(
+                f"market_data_ingest_invalid: series_id={series_id} is not a candle series"
+            )
+        timeframe_seconds = int(series["timeframe_seconds"])
+        for fact in rows:
+            duration = int((fact.close_time - fact.open_time).total_seconds())
+            if duration != timeframe_seconds:
+                raise ValueError(
+                    "market_data_ingest_invalid: candle duration does not match series "
+                    f"open_time={_iso(fact.open_time)} expected_seconds={timeframe_seconds} "
+                    f"actual_seconds={duration}"
+                )
+
+        self._start_ingestion_run(
+            run_id=run_id,
+            source_id=source_id,
+            request=request,
+            source_revision=source_revision,
+            rows=rows,
+        )
+        try:
+            outcome = self._ingest_candle_rows(
+                run_id=run_id,
+                series_id=series_id,
+                rows=rows,
+                allow_corrections=bool(allow_corrections),
+            )
+        except Exception as exc:
+            self._fail_ingestion_run(run_id, exc)
+            raise
+        return outcome
+
+    def _start_ingestion_run(
+        self,
+        *,
+        run_id: str,
+        source_id: int,
+        request: Optional[Mapping[str, Any]],
+        source_revision: Optional[str],
+        rows: Sequence[CandleFact],
+    ) -> None:
+        with db.session() as session:
+            session.execute(
+                text(
+                    """
+                    INSERT INTO market.ingestion_runs (
+                        id, source_id, status, request, source_revision,
+                        requested_start, requested_end, requested_count
+                    ) VALUES (
+                        :id, :source_id, 'running', CAST(:request AS jsonb), :source_revision,
+                        :requested_start, :requested_end, :requested_count
+                    )
+                    """
+                ),
+                {
+                    "id": run_id,
+                    "source_id": source_id,
+                    "request": _json_text(request),
+                    "source_revision": str(source_revision).strip() if source_revision else None,
+                    "requested_start": rows[0].open_time,
+                    "requested_end": rows[-1].close_time,
+                    "requested_count": len(rows),
+                },
+            )
+
+    def _ingest_candle_rows(
+        self,
+        *,
+        run_id: str,
+        series_id: int,
+        rows: Sequence[CandleFact],
+        allow_corrections: bool,
+    ) -> IngestionOutcome:
+        with db.session() as session:
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(:series_id)"),
+                {"series_id": series_id},
+            )
+            session.execute(
+                text(
+                    """
+                    CREATE TEMP TABLE market_candle_ingest_stage (
+                        candle_open_time timestamptz PRIMARY KEY,
+                        candle_close_time timestamptz NOT NULL,
+                        open double precision NOT NULL,
+                        high double precision NOT NULL,
+                        low double precision NOT NULL,
+                        close double precision NOT NULL,
+                        volume double precision,
+                        trade_count bigint,
+                        source_published_at timestamptz,
+                        received_at timestamptz,
+                        accepted_at timestamptz NOT NULL,
+                        known_at timestamptz NOT NULL,
+                        known_at_method varchar(64) NOT NULL,
+                        row_hash varchar(64) NOT NULL
+                    ) ON COMMIT DROP
+                    """
+                )
+            )
+            stage_rows = [fact.to_dict() for fact in rows]
+            session.execute(
+                text(
+                    """
+                    INSERT INTO market_candle_ingest_stage (
+                        candle_open_time, candle_close_time, open, high, low, close,
+                        volume, trade_count, source_published_at, received_at,
+                        accepted_at, known_at, known_at_method, row_hash
+                    ) VALUES (
+                        :open_time, :close_time, :open, :high, :low, :close,
+                        :volume, :trade_count, :source_published_at, :received_at,
+                        :accepted_at, :known_at, :known_at_method, :row_hash
+                    )
+                    """
+                ),
+                stage_rows,
+            )
+            conflicting_count = int(
+                session.execute(
+                    text(
+                        """
+                        SELECT count(*)
+                        FROM market_candle_ingest_stage AS stage
+                        JOIN LATERAL (
+                            SELECT current.row_hash
+                            FROM market.candle_versions AS current
+                            WHERE current.series_id = :series_id
+                              AND current.candle_open_time = stage.candle_open_time
+                            ORDER BY current.revision DESC
+                            LIMIT 1
+                        ) AS latest ON TRUE
+                        WHERE latest.row_hash IS DISTINCT FROM stage.row_hash
+                        """
+                    ),
+                    {"series_id": series_id},
+                ).scalar_one()
+            )
+            if conflicting_count and not allow_corrections:
+                raise RuntimeError(
+                    "market_data_correction_rejected: immutable consumer path cannot "
+                    f"accept {conflicting_count} changed closed candle(s) "
+                    f"series_id={series_id}"
+                )
+            inserted = session.execute(
+                text(
+                    """
+                    INSERT INTO market.candle_versions (
+                        series_id, candle_open_time, revision, ingestion_run_id,
+                        candle_close_time, open, high, low, close, volume, trade_count,
+                        source_published_at, received_at, accepted_at, known_at,
+                        known_at_method, row_hash
+                    )
+                    SELECT
+                        :series_id,
+                        stage.candle_open_time,
+                        COALESCE(latest.revision, 0) + 1,
+                        :run_id,
+                        stage.candle_close_time,
+                        stage.open,
+                        stage.high,
+                        stage.low,
+                        stage.close,
+                        stage.volume,
+                        stage.trade_count,
+                        stage.source_published_at,
+                        stage.received_at,
+                        stage.accepted_at,
+                        stage.known_at,
+                        stage.known_at_method,
+                        stage.row_hash
+                    FROM market_candle_ingest_stage AS stage
+                    LEFT JOIN LATERAL (
+                        SELECT current.revision, current.row_hash
+                        FROM market.candle_versions AS current
+                        WHERE current.series_id = :series_id
+                          AND current.candle_open_time = stage.candle_open_time
+                        ORDER BY current.revision DESC
+                        LIMIT 1
+                    ) AS latest ON TRUE
+                    WHERE latest.row_hash IS DISTINCT FROM stage.row_hash
+                    RETURNING revision, market_commit_seq
+                    """
+                ),
+                {"series_id": series_id, "run_id": run_id},
+            ).mappings().all()
+            new_count = sum(1 for row in inserted if int(row["revision"]) == 1)
+            corrected_count = sum(1 for row in inserted if int(row["revision"]) > 1)
+            noop_count = len(rows) - len(inserted)
+            max_commit_seq = int(
+                session.execute(
+                    text(
+                        """
+                        SELECT COALESCE(MAX(latest.market_commit_seq), 0)
+                        FROM market_candle_ingest_stage AS stage
+                        JOIN LATERAL (
+                            SELECT current.market_commit_seq
+                            FROM market.candle_versions AS current
+                            WHERE current.series_id = :series_id
+                              AND current.candle_open_time = stage.candle_open_time
+                            ORDER BY current.revision DESC
+                            LIMIT 1
+                        ) AS latest ON TRUE
+                        """
+                    ),
+                    {"series_id": series_id},
+                ).scalar_one()
+            )
+            session.execute(
+                text(
+                    """
+                    UPDATE market.ingestion_runs
+                    SET status = 'completed', finished_at = now(),
+                        inserted_count = :inserted_count,
+                        corrected_count = :corrected_count,
+                        noop_count = :noop_count
+                    WHERE id = :run_id AND status = 'running'
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "inserted_count": new_count,
+                    "corrected_count": corrected_count,
+                    "noop_count": noop_count,
+                },
+            )
+        return IngestionOutcome(
+            ingestion_run_id=run_id,
+            requested_count=len(rows),
+            inserted_count=new_count,
+            corrected_count=corrected_count,
+            noop_count=noop_count,
+            max_commit_seq=max_commit_seq,
+        )
+
+    def _fail_ingestion_run(self, run_id: str, exc: Exception) -> None:
+        with db.session() as session:
+            session.execute(
+                text(
+                    """
+                    UPDATE market.ingestion_runs
+                    SET status = 'failed', finished_at = now(), error = :error
+                    WHERE id = :run_id AND status = 'running'
+                    """
+                ),
+                {"run_id": run_id, "error": str(exc)[:4000]},
+            )
+
+    def _get_series(self, series_id: int) -> Mapping[str, Any]:
+        with db.session() as session:
+            row = session.execute(
+                text(
+                    """
+                    SELECT id, identity_key, instrument_id, fact_type,
+                           timeframe_seconds, contract_version
+                    FROM market.series
+                    WHERE id = :series_id
+                    """
+                ),
+                {"series_id": int(series_id)},
+            ).mappings().first()
+        if row is None:
+            raise ValueError(f"market_data_series_unknown: series_id={series_id}")
+        return dict(row)
+
+    @staticmethod
+    def _read_candles_with_session(
+        session,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int],
+        known_at_lte: Optional[datetime],
+    ) -> list[CandleRecord]:
+        request = DatasetSeriesRequest(series_id=series_id, start=start, end=end)
+        predicates = [
+            "series_id = :series_id",
+            "candle_open_time >= :start",
+            "candle_open_time < :end",
+        ]
+        params: dict[str, Any] = {
+            "series_id": request.series_id,
+            "start": request.start,
+            "end": request.end,
+        }
+        if as_of_commit_seq is not None:
+            predicates.append("market_commit_seq <= :as_of_commit_seq")
+            params["as_of_commit_seq"] = int(as_of_commit_seq)
+        if known_at_lte is not None:
+            predicates.append("known_at <= :known_at_lte")
+            params["known_at_lte"] = known_at_lte
+        rows = session.execute(
+            text(
+                f"""
+                WITH visible AS (
+                    SELECT DISTINCT ON (candle_open_time) *
+                    FROM market.candle_versions
+                    WHERE {' AND '.join(predicates)}
+                    ORDER BY candle_open_time, revision DESC
+                )
+                SELECT visible.*,
+                       sources.identity_key AS source_identity_key,
+                       sources.provider AS source_provider,
+                       sources.venue AS source_venue,
+                       sources.source_kind,
+                       sources.adapter_version AS source_adapter_version
+                FROM visible
+                JOIN market.ingestion_runs AS runs
+                  ON runs.id = visible.ingestion_run_id
+                JOIN market.sources AS sources
+                  ON sources.id = runs.source_id
+                ORDER BY visible.candle_open_time
+                """
+            ),
+            params,
+        ).mappings().all()
+        return [_row_to_record(row) for row in rows]
+
+    def read_candles(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+    ) -> list[CandleRecord]:
+        with db.session() as session:
+            return self._read_candles_with_session(
+                session,
+                series_id=series_id,
+                start=start,
+                end=end,
+                as_of_commit_seq=as_of_commit_seq,
+                known_at_lte=known_at_lte,
+            )
+
+    def record_gap_evidence(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        classification: str,
+        expected_count: int,
+        observed_count: int,
+        evidence: Mapping[str, Any],
+        ingestion_run_id: Optional[str] = None,
+        detected_as_of_commit_seq: Optional[int] = None,
+    ) -> str:
+        request = DatasetSeriesRequest(series_id=series_id, start=start, end=end)
+        classification = str(classification or "").strip().lower()
+        if not classification:
+            raise ValueError("market_gap_evidence_invalid: classification is required")
+        payload = {
+            "series_id": request.series_id,
+            "start": _iso(request.start),
+            "end": _iso(request.end),
+            "classification": classification,
+            "expected_count": int(expected_count),
+            "observed_count": int(observed_count),
+            "evidence": dict(evidence),
+        }
+        evidence_hash = build_quality_hash([payload])
+        with db.session() as session:
+            watermark = detected_as_of_commit_seq
+            if watermark is None:
+                watermark = int(
+                    session.execute(
+                        text(
+                            "SELECT COALESCE(MAX(market_commit_seq), 0) "
+                            "FROM market.candle_versions"
+                        )
+                    ).scalar_one()
+                )
+            session.execute(
+                text(
+                    """
+                    INSERT INTO market.gap_evidence (
+                        series_id, ingestion_run_id, start_time, end_time,
+                        classification, expected_count, observed_count,
+                        detected_as_of_commit_seq, evidence_hash, evidence
+                    ) VALUES (
+                        :series_id, :ingestion_run_id, :start_time, :end_time,
+                        :classification, :expected_count, :observed_count,
+                        :watermark, :evidence_hash, CAST(:evidence AS jsonb)
+                    )
+                    ON CONFLICT (
+                        series_id, start_time, end_time, evidence_hash
+                    ) DO NOTHING
+                    """
+                ),
+                {
+                    "series_id": request.series_id,
+                    "ingestion_run_id": ingestion_run_id,
+                    "start_time": request.start,
+                    "end_time": request.end,
+                    "classification": classification,
+                    "expected_count": int(expected_count),
+                    "observed_count": int(observed_count),
+                    "watermark": int(watermark),
+                    "evidence_hash": evidence_hash,
+                    "evidence": _json_text(evidence),
+                },
+            )
+        return evidence_hash
+
+    @staticmethod
+    def _gap_evidence_with_session(
+        session,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: int,
+    ) -> list[dict[str, Any]]:
+        rows = session.execute(
+            text(
+                """
+                SELECT start_time, end_time, classification, expected_count,
+                       observed_count, detected_as_of_commit_seq, evidence_hash, evidence
+                FROM market.gap_evidence
+                WHERE series_id = :series_id
+                  AND end_time > :start
+                  AND start_time < :end
+                  AND detected_as_of_commit_seq <= :watermark
+                ORDER BY start_time, end_time, evidence_hash
+                """
+            ),
+            {
+                "series_id": series_id,
+                "start": start,
+                "end": end,
+                "watermark": as_of_commit_seq,
+            },
+        ).mappings().all()
+        return [
+            {
+                "start": _iso(row["start_time"]),
+                "end": _iso(row["end_time"]),
+                "classification": str(row["classification"]),
+                "expected_count": int(row["expected_count"]),
+                "observed_count": int(row["observed_count"]),
+                "detected_as_of_commit_seq": int(row["detected_as_of_commit_seq"]),
+                "evidence_hash": str(row["evidence_hash"]),
+                "evidence": dict(row["evidence"] or {}),
+            }
+            for row in rows
+        ]
+
+    def list_gap_evidence(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        request = DatasetSeriesRequest(series_id=series_id, start=start, end=end)
+        with db.session() as session:
+            watermark = as_of_commit_seq
+            if watermark is None:
+                watermark = int(
+                    session.execute(
+                        text(
+                            "SELECT COALESCE(MAX(market_commit_seq), 0) "
+                            "FROM market.candle_versions"
+                        )
+                    ).scalar_one()
+                )
+            return self._gap_evidence_with_session(
+                session,
+                series_id=request.series_id,
+                start=request.start,
+                end=request.end,
+                as_of_commit_seq=int(watermark),
+            )
+
+    def freeze_dataset(
+        self,
+        requests: Sequence[DatasetSeriesRequest],
+        *,
+        name: Optional[str] = None,
+        purpose: str = "research",
+        created_by: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> FrozenDataset:
+        normalized = sorted(
+            [DatasetSeriesRequest(item.series_id, item.start, item.end) for item in requests],
+            key=lambda item: (item.series_id, item.start, item.end),
+        )
+        if not normalized:
+            raise ValueError("market_dataset_invalid: at least one series is required")
+        keys = [(item.series_id, item.start, item.end) for item in normalized]
+        if len(keys) != len(set(keys)):
+            raise ValueError("market_dataset_invalid: duplicate series range")
+        purpose = str(purpose or "").strip().lower()
+        if not purpose:
+            raise ValueError("market_dataset_invalid: purpose is required")
+
+        with db.session() as session:
+            session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+            watermark = int(
+                session.execute(
+                    text(
+                        "SELECT COALESCE(MAX(market_commit_seq), 0) "
+                        "FROM market.candle_versions"
+                    )
+                ).scalar_one()
+            )
+            manifest_series: list[dict[str, Any]] = []
+            for item in normalized:
+                identity = session.execute(
+                    text(
+                        """
+                        SELECT identity_key, instrument_id, fact_type,
+                               timeframe_seconds, contract_version
+                        FROM market.series
+                        WHERE id = :series_id
+                        """
+                    ),
+                    {"series_id": item.series_id},
+                ).mappings().first()
+                if identity is None:
+                    raise ValueError(
+                        f"market_dataset_invalid: unknown series_id={item.series_id}"
+                    )
+                records = self._read_candles_with_session(
+                    session,
+                    series_id=item.series_id,
+                    start=item.start,
+                    end=item.end,
+                    as_of_commit_seq=watermark,
+                    known_at_lte=None,
+                )
+                if not records:
+                    raise RuntimeError(
+                        "market_dataset_incomplete: no candle facts for "
+                        f"series_id={item.series_id} start={_iso(item.start)} "
+                        f"end={_iso(item.end)}"
+                    )
+                series_identity = dict(identity)
+                quality = self._gap_evidence_with_session(
+                    session,
+                    series_id=item.series_id,
+                    start=item.start,
+                    end=item.end,
+                    as_of_commit_seq=watermark,
+                )
+                source_counts = Counter(record.source_identity_key for record in records)
+                source_details = {
+                    record.source_identity_key: {
+                        "provider": record.source.provider,
+                        "venue": record.source.venue,
+                        "source_kind": record.source.source_kind,
+                        "adapter_version": record.source.adapter_version,
+                    }
+                    for record in records
+                }
+                classifications = Counter(
+                    str(entry["classification"]) for entry in quality
+                )
+                manifest_series.append(
+                    {
+                        "series_id": item.series_id,
+                        "range_start": _iso(item.start),
+                        "range_end": _iso(item.end),
+                        "max_commit_seq": watermark,
+                        "row_count": len(records),
+                        "material_hash": build_candle_material_hash(
+                            series_identity=series_identity,
+                            records=records,
+                        ),
+                        "provenance_hash": build_provenance_hash(records),
+                        "source_summary": {
+                            "counts": dict(sorted(source_counts.items())),
+                            "sources": {key: source_details[key] for key in sorted(source_details)},
+                        },
+                        "quality_hash": build_quality_hash(quality),
+                        "quality_summary": {
+                            "evidence_count": len(quality),
+                            "classifications": dict(sorted(classifications.items())),
+                        },
+                    }
+                )
+            dataset_hash = build_dataset_identity_hash(manifest_series)
+            dataset_id = f"mds_{dataset_hash[:32]}"
+            session.execute(
+                text(
+                    """
+                    INSERT INTO market.datasets (
+                        id, dataset_hash, name, purpose, max_commit_seq,
+                        created_by, metadata
+                    ) VALUES (
+                        :id, :dataset_hash, :name, :purpose, :max_commit_seq,
+                        :created_by, CAST(:metadata AS jsonb)
+                    )
+                    ON CONFLICT (dataset_hash) DO NOTHING
+                    """
+                ),
+                {
+                    "id": dataset_id,
+                    "dataset_hash": dataset_hash,
+                    "name": str(name).strip() if name else None,
+                    "purpose": purpose,
+                    "max_commit_seq": watermark,
+                    "created_by": str(created_by).strip() if created_by else None,
+                    "metadata": _json_text(metadata),
+                },
+            )
+            for entry in manifest_series:
+                session.execute(
+                    text(
+                        """
+                        INSERT INTO market.dataset_series (
+                            dataset_id, series_id, range_start, range_end,
+                            max_commit_seq, row_count, material_hash,
+                            provenance_hash, source_summary, quality_hash, quality_summary
+                        ) VALUES (
+                            :dataset_id, :series_id, :range_start, :range_end,
+                            :max_commit_seq, :row_count, :material_hash,
+                            :provenance_hash, CAST(:source_summary AS jsonb),
+                            :quality_hash, CAST(:quality_summary AS jsonb)
+                        )
+                        ON CONFLICT DO NOTHING
+                        """
+                    ),
+                    {
+                        **entry,
+                        "dataset_id": dataset_id,
+                        "source_summary": _json_text(entry["source_summary"]),
+                        "quality_summary": _json_text(entry["quality_summary"]),
+                    },
+                )
+        return FrozenDataset(
+            dataset_id=dataset_id,
+            dataset_hash=dataset_hash,
+            max_commit_seq=watermark,
+            series=tuple(manifest_series),
+        )
+
+    def read_dataset_series(
+        self,
+        *,
+        dataset_id: str,
+        series_id: int,
+        known_at_lte: Optional[datetime] = None,
+    ) -> list[CandleRecord]:
+        with db.session() as session:
+            entry = session.execute(
+                text(
+                    """
+                    SELECT range_start, range_end, max_commit_seq
+                    FROM market.dataset_series
+                    WHERE dataset_id = :dataset_id AND series_id = :series_id
+                    """
+                ),
+                {"dataset_id": str(dataset_id), "series_id": int(series_id)},
+            ).mappings().first()
+            if entry is None:
+                raise ValueError(
+                    "market_dataset_series_unknown: "
+                    f"dataset_id={dataset_id} series_id={series_id}"
+                )
+            return self._read_candles_with_session(
+                session,
+                series_id=int(series_id),
+                start=entry["range_start"],
+                end=entry["range_end"],
+                as_of_commit_seq=int(entry["max_commit_seq"]),
+                known_at_lte=known_at_lte,
+            )
+
+
+market_data_repo = PostgresMarketDataRepository()
+
+
+__all__ = ["PostgresMarketDataRepository", "market_data_repo"]

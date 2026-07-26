@@ -300,7 +300,7 @@ def test_series_worker_reports_structured_startup_error_before_process_exit(
 
     monkeypatch.setattr(runtime_mod.db, "reset_for_fork", lambda: None)
     monkeypatch.setattr(runtime_mod, "BotRuntime", _FakeRuntime)
-    monkeypatch.setattr(runtime_mod, "build_bot_runtime_deps", lambda: object())
+    monkeypatch.setattr(runtime_mod, "build_bot_runtime_deps", lambda **_kwargs: object())
 
     runtime_mod._series_worker(
         run_id="run-1",
@@ -1546,3 +1546,52 @@ def test_handle_worker_phase_event_ignores_stale_runtime_subscribing_after_await
     assert ctx.runtime_state == BotLensRuntimeState.AWAITING_FIRST_SNAPSHOT.value
     assert persisted == []
     assert ctx.series_states["BTC"]["status"] == "awaiting_first_snapshot"
+
+
+def test_backtest_market_data_scope_captures_and_persists_one_watermark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted: list[dict] = []
+    monkeypatch.setattr(
+        runtime_mod.market_data_repo, "current_commit_seq", lambda: 73
+    )
+    monkeypatch.setattr(
+        runtime_mod,
+        "get_bot_run",
+        lambda run_id: {
+            "run_id": run_id,
+            "config_snapshot": {"existing": "value"},
+        },
+    )
+    monkeypatch.setattr(
+        runtime_mod, "upsert_bot_run", lambda payload: persisted.append(payload) or payload
+    )
+    config = {"run_type": "backtest"}
+
+    scope = runtime_mod._bind_backtest_market_data_scope(config, run_id="run-1")
+
+    assert scope == {
+        "schema_version": "market_data_read_scope.v1",
+        "as_of_commit_seq": 73,
+        "contract_version": "candle.ohlcv.v1",
+    }
+    assert config["market_data_as_of_commit_seq"] == 73
+    assert persisted == [
+        {
+            "run_id": "run-1",
+            "config_snapshot": {
+                "existing": "value",
+                "market_data_read_scope": scope,
+            },
+        }
+    ]
+
+
+def test_paper_market_data_scope_does_not_pin_live_reads() -> None:
+    config = {"run_type": "paper"}
+
+    assert (
+        runtime_mod._bind_backtest_market_data_scope(config, run_id="run-1")
+        is None
+    )
+    assert "market_data_as_of_commit_seq" not in config

@@ -1,27 +1,31 @@
 flowchart TD
-    config["Operator/provider config"]
-    registry["Provider registry<br/>provider + venue metadata"]
-    factory["Provider factory<br/>adapter construction/cache"]
-    adapter["Provider adapter<br/>external API anti-corruption"]
-    credentials["Credential store"]
+    request["Audited CLI / API<br/>explicit acquisition request"]
+    registry["Provider registry<br/>provider + venue capability"]
+    adapter["Acquisition-only adapter<br/>external anti-corruption"]
+    credentials["Credential references"]
     api["External provider API"]
-    persistence["Provider persistence/cache<br/>raw candles + closures"]
-    continuity["Continuity classifier<br/>sparse/gap summary"]
-    market["Market services<br/>candle/instrument APIs"]
-    runtime["Indicator + bot runtime"]
+    normalize["Feed intake<br/>validate closure + known-at"]
+    stream["Paper closed-candle stream"]
+    store["Canonical market store<br/>append-only revisions + gaps"]
+    feed["Provider-free causal feed<br/>window + commit watermark"]
+    dataset["Frozen dataset manifest<br/>material + provenance + quality"]
+    consumers["Research / indicators /<br/>backtest / paper / reports"]
 
-    config --> registry
-    registry --> factory
-    factory --> adapter
+    request --> registry
+    registry --> adapter
     credentials --> adapter
     adapter <--> api
-    adapter --> persistence
-    persistence --> continuity
-    adapter --> continuity
-    continuity --> market
-    market --> runtime
+    adapter --> normalize
+    stream --> normalize
+    normalize --> store
+    store --> feed
+    store --> dataset
+    feed --> consumers
+    dataset --> consumers
 
     classDef boundary fill:#13251d,stroke:#34d399,color:#dcfce7
+    classDef truth fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
     classDef external fill:#1f2937,stroke:#94a3b8,color:#f8fafc
-    class registry,factory,adapter,credentials,persistence,continuity,market boundary
+    class request,registry,adapter,credentials,normalize,feed boundary
+    class stream,store,dataset,consumers truth
     class api external

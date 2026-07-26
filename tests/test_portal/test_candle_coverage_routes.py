@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 pytest.importorskip("fastapi")
@@ -8,6 +10,7 @@ from fastapi.testclient import TestClient
 from portal.backend.controller import candles as candles_controller
 from portal.backend.controller import instruments as instruments_controller
 from portal.backend.main import app
+from market_data.store import IngestionOutcome
 
 
 def test_candle_coverage_route_resolves_symbol_to_instrument(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -139,3 +142,101 @@ def test_instrument_coverage_matrix_filters_and_summarizes(monkeypatch: pytest.M
             "interval": "1h",
         }
     ]
+
+
+def test_candle_ingestion_route_is_explicit_and_returns_auditable_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = {}
+    monkeypatch.setattr(
+        candles_controller.instrument_service,
+        "get_instrument_record",
+        lambda instrument_id: {
+            "id": instrument_id,
+            "datasource": "CCXT",
+            "exchange": "coinbase",
+            "symbol": "BTC/USD",
+        },
+    )
+
+    def fake_ingest(instrument, **kwargs):
+        observed.update(instrument=instrument, kwargs=kwargs)
+        return SimpleNamespace(
+            source_id=3,
+            series_id=7,
+            gap_evidence_count=1,
+            outcome=IngestionOutcome(
+                ingestion_run_id="ingest-1",
+                requested_count=24,
+                inserted_count=23,
+                corrected_count=0,
+                noop_count=0,
+                max_commit_seq=42,
+            ),
+        )
+
+    monkeypatch.setattr(
+        candles_controller.historical_candle_ingestor,
+        "ingest_by_instrument",
+        fake_ingest,
+    )
+    response = TestClient(app).post(
+        "/api/candles/ingest",
+        json={
+            "instrument_id": "inst-btc",
+            "start": "2026-01-01T00:00:00Z",
+            "end": "2026-01-02T00:00:00Z",
+            "timeframe": "1h",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["outcome"]["ingestion_run_id"] == "ingest-1"
+    assert observed["kwargs"]["interval"] == "1h"
+
+
+def test_dataset_freeze_route_resolves_canonical_series_and_returns_hashes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = {}
+    def fake_resolve_series_id(**kwargs):
+        observed["identity"] = kwargs
+        return 7
+
+    monkeypatch.setattr(
+        candles_controller.market_data_repo,
+        "resolve_series_id",
+        fake_resolve_series_id,
+    )
+
+    def fake_freeze(requests, **kwargs):
+        observed["requests"] = requests
+        observed["freeze"] = kwargs
+        return SimpleNamespace(
+            dataset_id="mds_abc",
+            dataset_hash="abc",
+            max_commit_seq=42,
+            series=({"series_id": 7, "material_hash": "material"},),
+        )
+
+    monkeypatch.setattr(candles_controller.market_data_repo, "freeze_dataset", fake_freeze)
+    response = TestClient(app).post(
+        "/api/candles/datasets/freeze",
+        json={
+            "series": [
+                {
+                    "instrument_id": "inst-btc",
+                    "start": "2026-01-01T00:00:00Z",
+                    "end": "2026-01-02T00:00:00Z",
+                    "timeframe": "1h",
+                }
+            ],
+            "name": "reference",
+            "created_by": "operator",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["dataset_id"] == "mds_abc"
+    assert observed["identity"]["contract_version"] == "candle.ohlcv.v1"
+    assert observed["requests"][0].series_id == 7

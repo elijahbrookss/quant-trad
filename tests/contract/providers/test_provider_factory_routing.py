@@ -16,7 +16,7 @@ class _DummyProvider:
 
 
 def test_registry_instantiates_provider_from_provider_config(monkeypatch):
-    registry = factory.ProviderRegistry(runtime_config={"mode": "test"})
+    registry = factory.ProviderRegistry()
 
     monkeypatch.setattr(factory, "_resolve_ids", lambda provider_id, venue_id: ("DUMMY", None))
     monkeypatch.setattr(
@@ -37,11 +37,11 @@ def test_registry_instantiates_provider_from_provider_config(monkeypatch):
     instance = registry.get_provider("DUMMY")
 
     assert isinstance(instance, _DummyProvider)
-    assert instance.kwargs["settings"] == {"mode": "test"}
+    assert instance.kwargs == {}
 
 
 def test_registry_fails_loud_when_provider_implementation_missing(monkeypatch):
-    registry = factory.ProviderRegistry(runtime_config={"mode": "test"})
+    registry = factory.ProviderRegistry()
 
     monkeypatch.setattr(factory, "_resolve_ids", lambda provider_id, venue_id: ("BROKEN", None))
     monkeypatch.setattr(
@@ -59,7 +59,7 @@ def test_registry_fails_loud_when_provider_implementation_missing(monkeypatch):
 
 
 def test_registry_passes_exchange_slug_when_provider_requires_exchange_id(monkeypatch):
-    registry = factory.ProviderRegistry(runtime_config={"mode": "test"})
+    registry = factory.ProviderRegistry()
 
     monkeypatch.setattr(factory, "_resolve_ids", lambda provider_id, venue_id: ("CCXT", "BINANCE_US"))
     monkeypatch.setattr(
@@ -75,10 +75,8 @@ def test_registry_passes_exchange_slug_when_provider_requires_exchange_id(monkey
     )
 
     class _DummyCcxtProvider:
-        def __init__(self, exchange_id: str, persistence=None, settings=None):
+        def __init__(self, exchange_id: str):
             self.exchange_id = exchange_id
-            self.persistence = persistence
-            self.settings = settings
 
     module = types.SimpleNamespace(DummyCcxtProvider=_DummyCcxtProvider)
     monkeypatch.setattr(factory, "import_module", lambda _name: module)

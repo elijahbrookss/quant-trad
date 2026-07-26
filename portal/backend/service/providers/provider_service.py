@@ -17,7 +17,6 @@ from data_providers.registry import (
     provider_for_venue,
 )
 
-from . import persistence_bootstrap  # noqa: F401
 from .secret_status import optional_keys, resolve_status, required_keys
 from data_providers.services.credential_store import (
     default_credential_ref,

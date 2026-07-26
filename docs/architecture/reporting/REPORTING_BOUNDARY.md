@@ -299,8 +299,9 @@ semantics.
   candle storage facts when storage is available; terminal `run_final` compact
   continuity summaries supply classification and first-gap evidence. If a
   compact continuity summary lost provider classification, reporting may
-  reclassify unknown gaps from `portal_candle_closures` evidence for the same
-  instrument/timeframe/window. Unknown continuity is a data quality caveat, and
+  reclassify an unknown gap only from canonical `market.gap_evidence` explicitly
+  classified `provider_missing_data` for the same instrument, timeframe, and
+  window. Generic missing and ingestion-failure evidence cannot reclassify it. Unknown continuity is a data quality caveat, and
   unclassified/runtime/projection/ingestion gaps block golden readiness.
 - `reports/candle_continuity.py` owns the pure reporting-time transformation of
   unknown gap rows against already-loaded closure evidence. The dataset builder

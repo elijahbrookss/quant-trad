@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from contextlib import nullcontext
+from typing import Any, Callable, Optional
 
 from engines.bot_runtime.deps import BotRuntimeDeps
 
@@ -15,7 +16,11 @@ from ..indicators.indicator_service import (
     get_instance_meta,
     runtime_input_plan_for_instance,
 )
-from ..market.candle_service import fetch_ohlcv, fetch_ohlcv_by_instrument
+from ..market.candle_service import (
+    fetch_ohlcv,
+    fetch_ohlcv_by_instrument,
+    market_data_read_scope,
+)
 from ..market.instrument_service import get_instrument_record, resolve_instrument
 from ..reports.artifacts import build_run_artifact_bundle
 from ..storage.repos.runtime_events import (
@@ -109,15 +114,33 @@ def _record_bot_runtime_diagnostic_event(payload: Any) -> None:
     record_observability_events_batch([payload])
 
 
-def build_bot_runtime_deps() -> BotRuntimeDeps:
+def build_bot_runtime_deps(
+    *, market_data_as_of_commit_seq: Optional[int] = None
+) -> BotRuntimeDeps:
+    """Build runtime dependencies, optionally pinned to one market commit."""
+
+    def scoped(callable_: Callable[..., Any]) -> Callable[..., Any]:
+        def invoke(*args: Any, **kwargs: Any) -> Any:
+            context = (
+                market_data_read_scope(
+                    as_of_commit_seq=int(market_data_as_of_commit_seq)
+                )
+                if market_data_as_of_commit_seq is not None
+                else nullcontext()
+            )
+            with context:
+                return callable_(*args, **kwargs)
+
+        return invoke
+
     return BotRuntimeDeps(
         fetch_strategy=StrategyLoader.fetch_strategy,
-        fetch_ohlcv=fetch_ohlcv,
-        fetch_ohlcv_by_instrument=fetch_ohlcv_by_instrument,
+        fetch_ohlcv=scoped(fetch_ohlcv),
+        fetch_ohlcv_by_instrument=scoped(fetch_ohlcv_by_instrument),
         get_instrument_record=get_instrument_record,
         resolve_instrument=resolve_instrument,
-        strategy_evaluate=run_strategy_preview,
-        strategy_run_preview=run_strategy_preview,
+        strategy_evaluate=scoped(run_strategy_preview),
+        strategy_run_preview=scoped(run_strategy_preview),
         indicator_get_instance_meta=_get_indicator_instance_meta,
         indicator_build_runtime_graph=_build_runtime_indicator_graph,
         indicator_build_runtime_instance=_build_runtime_indicator_instance,

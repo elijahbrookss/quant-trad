@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from data_providers.streams import CanonicalMarketEvent
-from engines.bot_runtime.live_market import LiveCandleStore
+from engines.bot_runtime.live_market import ClosedLiveCandle, LiveCandleStore
 from portal.backend.service.bots.paper_market_stream import PaperMarketStreamRunner
 
 
@@ -228,3 +229,50 @@ def test_paper_market_stream_fails_after_continuous_disconnect_budget_exhausted(
     assert snapshot["stream_diagnostics"]["disconnect_count"] == 1
     assert snapshot["stream_diagnostics"]["reconnect_attempt_count"] >= 1
     assert snapshot["event_counts"]["disconnect_budget_exhausted"] == 1
+
+
+def test_closed_candle_is_persisted_before_runtime_store_visibility() -> None:
+    order: list[str] = []
+
+    class OrderingStore(LiveCandleStore):
+        def append(self, candle):
+            assert order == ["persist"]
+            order.append("append")
+            return super().append(candle)
+
+    candle = ClosedLiveCandle(
+        provider="COINBASE",
+        venue="COINBASE_DIRECT",
+        symbol="BTC-PERP",
+        product_id="BIP-20DEC30-CDE",
+        timeframe="1h",
+        time=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        end=datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
+        open=100.0,
+        high=102.0,
+        low=99.0,
+        close=101.0,
+        volume=10.0,
+    )
+    aggregator = SimpleNamespace(
+        process=lambda event: [candle],
+        snapshot=lambda: {},
+        provisional_from_event=lambda event: None,
+    )
+    runner = PaperMarketStreamRunner(
+        bot_id="bot-1",
+        run_id="run-1",
+        store=OrderingStore(),
+        series=[],
+        closed_candle_sink=lambda closed, meta: order.append("persist"),
+    )
+    runner._aggregators["BTC-PERP"] = aggregator
+    runner._series_meta_by_symbol["BTC-PERP"] = {
+        "instrument_id": "instrument-1",
+        "timeframe": "1h",
+    }
+
+    runner._handle_event(_ticker_event().to_dict())
+
+    assert order == ["persist", "append"]
+    assert runner.snapshot()["event_counts"]["closed_live_candle_persisted"] == 1

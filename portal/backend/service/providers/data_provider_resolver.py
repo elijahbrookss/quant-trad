@@ -7,7 +7,6 @@ from typing import Optional
 from data_providers import DataSource
 from data_providers.providers.factory import get_provider
 
-from . import persistence_bootstrap  # noqa: F401
 
 
 class DataProviderResolver:

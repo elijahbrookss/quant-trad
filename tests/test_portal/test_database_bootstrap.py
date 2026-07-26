@@ -32,6 +32,14 @@ class _Result:
     def one(self) -> tuple[Any, ...]:
         return self._row
 
+    def scalar_one_or_none(self) -> Any | None:
+        return self._row[0] if self._row else None
+
+    def scalar_one(self) -> Any:
+        if not self._row:
+            raise AssertionError("fake scalar result is empty")
+        return self._row[0]
+
 
 class _Inspector:
     def __init__(
@@ -135,6 +143,11 @@ class _Connection:
 
     def execute(self, statement: Any, params: dict[str, Any] | None = None) -> _Result:
         self.executed.append(statement)
+        statement_text = str(statement)
+        if "FROM pg_extension" in statement_text:
+            return _Result(("2.14.2",))
+        if "timescaledb_information.hypertables" in statement_text:
+            return _Result((True,))
         if isinstance(statement, CreateSchema):
             self.inspector.schemas.add(str(statement.element))
             return _Result(())

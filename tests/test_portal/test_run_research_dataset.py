@@ -18,7 +18,7 @@ class _ResearchDatasetStorage:
         steps: list[dict[str, Any]] | None = None,
         observability_events: list[dict[str, Any]] | None = None,
         candle_summaries: dict[tuple[str, str], dict[str, Any]] | None = None,
-        candle_closures: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
+        candle_provider_gaps: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
         candles: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
     ) -> None:
         self._run = dict(run)
@@ -27,9 +27,9 @@ class _ResearchDatasetStorage:
         self._steps = [dict(row) for row in steps or []]
         self._observability_events = [dict(row) for row in observability_events or []]
         self._candle_summaries = {tuple(key): dict(value) for key, value in (candle_summaries or {}).items()}
-        self._candle_closures = {
+        self._candle_provider_gaps = {
             tuple(key): [dict(row) for row in value]
-            for key, value in (candle_closures or {}).items()
+            for key, value in (candle_provider_gaps or {}).items()
         }
         self._candles = {
             tuple(key): [dict(row) for row in value]
@@ -60,9 +60,9 @@ class _ResearchDatasetStorage:
         summary = self._candle_summaries.get((instrument_id, timeframe))
         return dict(summary) if summary else None
 
-    def list_candle_closure_evidence(self, *, instrument_id: str, timeframe: str, start, end):
+    def list_candle_provider_gap_evidence(self, *, instrument_id: str, timeframe: str, start, end):
         _ = start, end
-        return [dict(row) for row in self._candle_closures.get((instrument_id, timeframe), [])]
+        return [dict(row) for row in self._candle_provider_gaps.get((instrument_id, timeframe), [])]
 
     def list_candles_for_series(
         self,
@@ -523,7 +523,7 @@ def _install(monkeypatch: pytest.MonkeyPatch, storage: _ResearchDatasetStorage) 
         "list_bot_run_lifecycle_events",
         "list_observability_events",
         "get_candle_storage_summary",
-        "list_candle_closure_evidence",
+        "list_candle_provider_gap_evidence",
         "list_candles_for_series",
     ):
         monkeypatch.setattr(run_research_dataset, name, getattr(storage, name))
@@ -553,7 +553,7 @@ def _build(
     trades=None,
     observability_events=None,
     candle_summaries=None,
-    candle_closures=None,
+    candle_provider_gaps=None,
     candles=None,
 ):
     fake_storage = _ResearchDatasetStorage(
@@ -563,7 +563,7 @@ def _build(
         steps=_steps(),
         observability_events=observability_events,
         candle_summaries=candle_summaries,
-        candle_closures=candle_closures,
+        candle_provider_gaps=candle_provider_gaps,
         candles=candles,
     )
     _install(monkeypatch, fake_storage)
@@ -1316,7 +1316,7 @@ def test_candle_catalog_prefers_storage_continuity_over_run_gap_diagnostics(monk
     assert btc["gap_count"] == 0
     assert btc["missing_count"] == 0
     assert btc["continuity_status"] == "clean"
-    assert btc["storage_source"] == "market_candles_raw"
+    assert btc["storage_source"] == "market.candle_versions"
 
 
 def test_readiness_data_quality_unknown_when_candle_continuity_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2273,16 +2273,17 @@ def test_unknown_candle_gaps_still_block_golden_candidate(monkeypatch: pytest.Mo
     assert "candle_continuity_degraded" in dataset["readiness"]["golden_blocking_reasons"]
 
 
-def test_unknown_candle_gaps_reclassify_from_closure_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unknown_candle_gaps_reclassify_from_provider_gap_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
     events = [row for row in _events() if _event_name(row) != "candle_continuity_summary"]
     events.append(_unknown_gap(20))
 
     dataset = _build(
         monkeypatch,
         events=events,
-        candle_closures={
+        candle_provider_gaps={
             ("instrument-btc", "1h"): [
                 {
+                    "classification": "provider_missing_data",
                     "start": "2026-03-06T22:00:00Z",
                     "end": "2026-03-06T23:00:00Z",
                     "metadata": {

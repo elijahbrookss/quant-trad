@@ -1,4 +1,4 @@
-"""Pure reporting-time candle gap classification from closure evidence."""
+"""Pure reporting-time candle gap classification from provider-missing gap evidence."""
 
 from __future__ import annotations
 
@@ -57,27 +57,37 @@ def _gap_missing_window(gap: Mapping[str, Any]) -> tuple[Optional[datetime], Opt
     )
 
 
-def _closure_covers_gap(closure: Mapping[str, Any], gap_start: datetime, gap_end: datetime) -> bool:
-    closure_start = _parse_iso(closure.get("start") or closure.get("start_ts"))
-    closure_end = _parse_iso(closure.get("end") or closure.get("end_ts"))
-    if closure_start is None or closure_end is None:
+def _provider_evidence_covers_gap(provider_gap: Mapping[str, Any], gap_start: datetime, gap_end: datetime) -> bool:
+    provider_gap_start = _parse_iso(provider_gap.get("start") or provider_gap.get("start_ts"))
+    provider_gap_end = _parse_iso(provider_gap.get("end") or provider_gap.get("end_ts"))
+    if provider_gap_start is None or provider_gap_end is None:
         return False
-    return closure_start <= gap_start and closure_end >= gap_end
+    return provider_gap_start <= gap_start and provider_gap_end >= gap_end
 
 
-def classify_unknown_gaps_from_closures(
+def classify_unknown_gaps_from_provider_evidence(
     gaps: Sequence[Any],
-    closures: Sequence[Mapping[str, Any]],
+    provider_evidence: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Reclassify fully closure-covered unknown gaps without mutating inputs.
+    """Reclassify unknown gaps fully covered by provider-missing evidence without mutating inputs.
 
-    Input gap order and closure order are significant. The first closure that
+    Input gap and evidence order are significant. The first evidence range that
     fully covers a gap supplies the provider evidence, matching the historical
     RunResearchDataset behavior.
     """
 
     normalized = [dict(gap) for gap in gaps if isinstance(gap, Mapping)]
-    if not normalized or not closures:
+    invalid = [
+        row
+        for row in provider_evidence
+        if str(row.get("classification") or "") != "provider_missing_data"
+    ]
+    if invalid:
+        raise ValueError(
+            "candle_provider_gap_evidence_invalid: "
+            "classification must be provider_missing_data"
+        )
+    if not normalized or not provider_evidence:
         return normalized
 
     reclassified: list[dict[str, Any]] = []
@@ -90,21 +100,21 @@ def classify_unknown_gaps_from_closures(
         if gap_start is None or gap_end is None:
             reclassified.append(gap)
             continue
-        closure = next((row for row in closures if _closure_covers_gap(row, gap_start, gap_end)), None)
-        if closure is None:
+        provider_gap = next((row for row in provider_evidence if _provider_evidence_covers_gap(row, gap_start, gap_end)), None)
+        if provider_gap is None:
             reclassified.append(gap)
             continue
-        closure_metadata = _mapping(closure.get("metadata"))
-        provider_evidence = _mapping(closure_metadata.get("provider_evidence"))
+        provider_gap_metadata = _mapping(provider_gap.get("metadata"))
+        provider_details = _mapping(provider_gap_metadata.get("provider_evidence"))
         evidence = {
             **gap,
             "classification": "provider_missing_data",
-            "reason_code": str(closure_metadata.get("reason_code") or "source_sparse"),
-            "evidence": str(closure_metadata.get("evidence") or "portal_candle_closure"),
-            "closure_start": _iso(_parse_iso(closure.get("start"))),
-            "closure_end": _iso(_parse_iso(closure.get("end"))),
+            "reason_code": str(provider_gap_metadata.get("reason_code") or "source_sparse"),
+            "evidence": str(provider_gap_metadata.get("evidence") or "canonical_provider_gap_evidence"),
+            "provider_gap_start": _iso(_parse_iso(provider_gap.get("start"))),
+            "provider_gap_end": _iso(_parse_iso(provider_gap.get("end"))),
         }
-        if provider_evidence:
-            evidence["provider_evidence"] = provider_evidence
+        if provider_details:
+            evidence["provider_evidence"] = provider_details
         reclassified.append(evidence)
     return reclassified

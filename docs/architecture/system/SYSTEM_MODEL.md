@@ -42,7 +42,7 @@ Reports, charts, fleet cards, exports, and narrative summaries are views. They d
 
 [system-runtime-truth-flow.mmd](diagrams/system-runtime-truth-flow.mmd) shows the platform as a truth pipeline:
 
-1. Provider adapters and caches supply source candle and instrument facts.
+1. Explicit provider intake appends canonical candle facts; causal feeds and instrument services supply them downstream.
 2. Indicator runtime advances state and publishes typed outputs.
 3. The decision layer evaluates strategy rules against typed outputs and bounded history.
 4. Execution runtime applies deterministic ordering, FAST/FULL semantics, fees, margin, wallet, settlement, and trade lifecycle changes.
@@ -54,7 +54,7 @@ Reports, charts, fleet cards, exports, and narrative summaries are views. They d
 
 | Boundary | Owns | Must Not Own |
 | --- | --- | --- |
-| Data | Provider access, candles, instruments, cache, gap classification | Decisions or fills |
+| Data | Explicit provider intake, immutable market facts, instruments, causal reads, provenance, and gap classification | Decisions or fills |
 | Indicator runtime | Private indicator state, typed outputs, overlays, details | Strategy rule evaluation |
 | Decision layer | Signals, guards, rules, decision artifacts, rejected reasons | Wallet, fills, settlement |
 | Execution runtime | Ordering, FAST/FULL execution, fees, margin, wallet, lifecycle, events | UI playback semantics |

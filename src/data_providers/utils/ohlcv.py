@@ -53,7 +53,7 @@ def collect_missing_ranges(
     requested_end: pd.Timestamp,
     interval: str,
 ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
-    """Return gaps between cached timestamps and the requested window."""
+    """Return gaps between available timestamps and the requested window."""
 
     ordered = sorted(set(pd.to_datetime(list(timestamps), utc=True)))
     if not ordered:
