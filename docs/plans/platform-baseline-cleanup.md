@@ -187,6 +187,7 @@ retired tables until that explicit hard cutover is complete.
 | 2026-07-25 | compact dataset-quality evidence propagation | focused report/experiment profile: 17 passed; MCP passthrough profile: 16 passed; reporting profile: 136 passed; CLI profile: 64 passed; complete non-database backend gate: 1,343 passed with 49 pre-existing dependency/deprecation warnings in 30.42s; docs: 2 passed; affected compileall and whitespace checks passed. `run_research_summary.v1` and persisted experiment summaries now retain canonical dataset/config/strategy hashes, semantic and operational fingerprints, repeatability, data/execution quality, blockers, degraded/unavailable sections, and caveats. The existing CLI commands and thin MCP adapter remain unchanged, and no agent-policy documentation or second quality envelope was added. |
 | 2026-07-25 | persisted causal harness and source-diagnostics closure | focused runtime/artifact/report/persisted harness: 87 passed; runtime profile: 462 passed, 887 deselected; reporting profile: 141 passed, 1,208 deselected; complete non-database backend gate: 1,349 passed with 49 dependency/deprecation warnings in 44.66s; clean/repeated isolated Timescale bootstrap and complete PostgreSQL-enabled gate: 1,359 passed with 49 warnings in 45.21s; docs: 2 passed. Repeated backtests, prefix truncation, and bounded paper replay use the production Strategy/SeriesBuilder/BotRuntime/compiler/risk/adapters/artifact/persistence path and prove exact semantic repeatability, signal-close causality, adapter agreement, lifecycle/accounting reconciliation, and explicit no-breakeven behavior. Existing indicator source continuity now persists and reaches readiness, caveats, diagnostics, golden gating, and operational identity; malformed evidence fails loudly. |
 | 2026-07-25 | final integration publication | correctness head `13278b6` was pushed without history rewriting; PR [#186](https://github.com/elijahbrookss/quant-trad/pull/186) targets `develop`, is mergeable, has passing PR/changelog/security checks, contains the final 1,349-test non-database and 1,359-test PostgreSQL evidence, and is ready for review. It has not been merged. Two unrelated user-owned documentation changes remain deliberately unstaged and are the only reason the literal local-worktree cleanliness item remains open. |
+| 2026-07-26 | `522c6eb` replay-safe wallet initialization | A current-image backtest exposed a missing BotLens bridge session before strategy evaluation. Container-owned wallet initialization now uses deterministic run-scoped producer identity, authoritative run-start `known_at`, exact-replay idempotency, and fail-loud divergent-event rejection. Independent review identified and the final patch closed retry divergence. Focused runtime/fact profile: 106 passed; complete non-database backend gate: 1,350 passed with 49 pre-existing warnings in 42.21s; complete PostgreSQL-enabled gate on a clean temporary database: 1,361 passed with 49 warnings in 29.81s. The temporary database was removed and the isolated service stopped without deleting its volume. |
 
 Each child branch must record its focused tests, broader regression profile,
 documentation validation, diff review, and remaining-reference search before
@@ -253,6 +254,13 @@ integration.
   local BTC/USD fixture without live orders or credentialed/paid market-data
   calls. Failed strict-contract discovery runs remain in the developer database
   as auditable degraded-terminal evidence.
+- The first final database-container attempt passed 1,343 tests but had 18
+  provenance failures because the container could not see checkout Git metadata.
+  Supplying the authoritative `SOURCE_REVISION` made the identical 1,361-test
+  PostgreSQL scope green and repeated bootstrap successfully.
+- Unrelated work in `docs/README.md` and
+  `docs/plans/derivatives-context-datafeed.md` is preserved outside this PR in
+  the named stash `user docs before platform baseline cleanup closure`.
 
 ## Final Acceptance
 
@@ -271,7 +279,5 @@ integration.
 - [x] Durable cleanup decisions captured in an ADR index with invariants,
   rejected alternatives, and enforcing evidence
 - [x] Architecture and operator documentation aligned
-- [ ] Integration branch clean, pushed, and ready for review. The branch is
-  pushed and PR #186 is ready; only unrelated user-owned changes in
-  `docs/README.md` and `docs/plans/derivatives-context-datafeed.md` prevent a
-  literal clean local worktree.
+- [x] Integration branch clean, pushed, and ready for review; PR #186 targets
+  `develop`, with unrelated documentation preserved outside the integration.
