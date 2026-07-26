@@ -155,7 +155,7 @@ export const reportListItemView = (item = {}) => {
     readinessStatus: readiness.results_status || readiness.dataset_status || readinessStatus(readiness),
     researchStatus: readiness.research_status || readiness.results_status || readinessStatus(readiness),
     goldenStatus: readiness.golden_candidate_status || 'not_available',
-    semanticFingerprint: readiness.semantic_fingerprint || readiness.material_fingerprint || null,
+    semanticFingerprint: readiness.semantic_fingerprint || null,
     operationalFingerprint: readiness.operational_fingerprint || null,
     operationalDriftStatus: readiness.operational_drift_status || 'not_computed',
     netPnl: summary.net_pnl,

@@ -109,6 +109,35 @@ def _series(symbol: str, strategy_id: str, indicator_id: str):
             "atm_template": {"name": "ATM 1"},
             "rules": {"rule-1": {"id": "rule-1", "intent": "enter_long"}},
             "instrument_links": [{"instrument_id": f"{symbol}-instrument", "symbol": symbol}],
+            "backtest_warmup": {
+                "schema_version": "backtest_warmup_evidence.v1",
+                "status": "ready",
+                "requested_bars": 100,
+                "required_bars": 100,
+                "loaded_bars": 100,
+                "missing_bars": 0,
+                "request_satisfies_requirements": True,
+                "indicator_requirements": [],
+            },
+            "indicator_source_diagnostics": [
+                {
+                    "indicator_id": indicator_id,
+                    "indicator_type": "test_indicator",
+                    "source_candle_continuity": {
+                        "schema_version": "indicator_source_candle_continuity.v1",
+                        "timeframe": "5m",
+                        "row_count": 2,
+                        "status": "ok",
+                        "severity": "ok",
+                        "acceptability": "accepted",
+                        "message": "Indicator source candle continuity is healthy.",
+                        "continuity": {
+                            "candle_count": 2,
+                            "final_status": "healthy",
+                        },
+                    },
+                }
+            ],
         },
     )
 
@@ -121,6 +150,7 @@ def _worker_config(worker_id: str) -> dict:
         "report_artifact_role": "worker",
         "wallet_config": {"balances": {"USD": 1000}},
         "risk": {},
+        "backtest_warmup_bars": 100,
         "backtest_start": "2026-01-01T00:00:00Z",
         "backtest_end": "2026-01-02T00:00:00Z",
     }
@@ -166,6 +196,40 @@ def test_record_indicator_frame_uses_current_frame_overlays_not_stale_state(monk
     bundle.record_indicator_frame(state=state, candle=series.candles[0], frame=SimpleNamespace(overlays={}))
 
     assert not (bundle._series_spool_dir(series) / "overlays").exists()
+
+
+def test_config_snapshot_preserves_planned_inventory_when_worker_series_are_partial(
+    monkeypatch,
+) -> None:
+    storage = _FakeStorage()
+    monkeypatch.setattr(artifacts, "_storage", lambda: storage)
+    planned = [
+        {
+            "strategy_id": "strategy-1",
+            "instrument_id": "BTC-instrument",
+            "symbol": "BTC",
+            "timeframe": "1h",
+        },
+        {
+            "strategy_id": "strategy-1",
+            "instrument_id": "ETH-instrument",
+            "symbol": "ETH",
+            "timeframe": "1h",
+        },
+    ]
+    series_snapshot, _ = artifacts._build_series_snapshot(
+        [_series("BTC", "strategy-1", "indicator-1")]
+    )
+
+    config_snapshot = artifacts._build_config_snapshot_from_series_snapshot(
+        {
+            **_worker_config("worker-1"),
+            "expected_candle_series": planned,
+        },
+        series_snapshot,
+    )
+
+    assert config_snapshot["expected_candle_series"] == planned
 
 
 def test_finalize_run_artifact_bundle_from_workers_aggregates_worker_outputs(monkeypatch, tmp_path: Path) -> None:
@@ -217,6 +281,12 @@ def test_finalize_run_artifact_bundle_from_workers_aggregates_worker_outputs(mon
     assert len(artifacts._read_jsonl(run_dir / "execution" / "runtime_events.jsonl")) == 2
     series_snapshot = artifacts._read_json(run_dir / "run" / "series.json")
     assert len(series_snapshot["series"]) == 2
+    assert (
+        series_snapshot["series"][0]["indicator_source_diagnostics"][0][
+            "source_candle_continuity"
+        ]["schema_version"]
+        == "indicator_source_candle_continuity.v1"
+    )
     assert len(storage.upserts) == 1
     config_snapshot = storage.upserts[0]["config_snapshot"]
     strategy_snapshot = config_snapshot["strategies"][0]
@@ -226,3 +296,27 @@ def test_finalize_run_artifact_bundle_from_workers_aggregates_worker_outputs(mon
     assert strategy_snapshot["run_strategy_snapshot"]["effective_params"] == {}
     assert strategy_snapshot["rules"] == {"rule-1": {"id": "rule-1", "intent": "enter_long"}}
     assert strategy_snapshot["atm_template"] == {"name": "ATM 1"}
+    assert config_snapshot["backtest_warmup_bars"] == 100
+    assert len(config_snapshot["backtest_warmup_evidence"]) == 2
+    assert len(config_snapshot["indicator_source_diagnostics"]) == 2
+    assert config_snapshot["indicator_source_diagnostics"][0]["instrument_id"] == (
+        "BTC-instrument"
+    )
+    assert config_snapshot["indicator_source_diagnostics"][1]["instrument_id"] == (
+        "ETH-instrument"
+    )
+    assert config_snapshot["backtest_warmup_evidence"][0]["status"] == "ready"
+    assert config_snapshot["expected_candle_series"] == [
+        {
+            "strategy_id": "strategy-1",
+            "instrument_id": "BTC-instrument",
+            "symbol": "BTC",
+            "timeframe": "1h",
+        },
+        {
+            "strategy_id": "strategy-1",
+            "instrument_id": "ETH-instrument",
+            "symbol": "ETH",
+            "timeframe": "1h",
+        },
+    ]

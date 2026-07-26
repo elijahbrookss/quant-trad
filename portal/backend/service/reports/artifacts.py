@@ -9,11 +9,21 @@ import json
 import logging
 from pathlib import Path
 import shutil
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from core.candle_snapshot import build_expected_candle_series_inventory
 from core.settings import get_settings
+from indicators.runtime.source_diagnostics import (
+    normalize_indicator_source_diagnostics,
+)
 from utils.log_context import build_log_context, with_log_context
+from ..storage.repos.indicators import get_indicator
+from ..storage.repos.runs import upsert_bot_run
+from ..storage.repos.trades import (
+    list_bot_trade_events_for_trades,
+    list_bot_trades_for_run,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -24,10 +34,47 @@ _SUPPORTED_OUTPUT_FORMATS = {"csv", "parquet"}
 _MANIFEST_VERSION = 1
 
 
-def _storage():
-    from portal.backend.service.storage import storage
+class ArtifactStorage(Protocol):
+    """Persistence operations required to materialize report artifacts."""
 
-    return storage
+    def get_indicator(self, indicator_id: str) -> Optional[Dict[str, Any]]: ...
+
+    def list_bot_trades_for_run(self, run_id: str) -> List[Dict[str, Any]]: ...
+
+    def list_bot_trade_events_for_trades(
+        self,
+        trade_ids: Iterable[str],
+    ) -> List[Dict[str, Any]]: ...
+
+    def upsert_bot_run(self, payload: Dict[str, Any]) -> Dict[str, Any]: ...
+
+
+class RepositoryArtifactStorage:
+    """Report artifact gateway over explicitly owned repositories."""
+
+    def get_indicator(self, indicator_id: str) -> Optional[Dict[str, Any]]:
+        return get_indicator(indicator_id)
+
+    def list_bot_trades_for_run(self, run_id: str) -> List[Dict[str, Any]]:
+        return list_bot_trades_for_run(run_id)
+
+    def list_bot_trade_events_for_trades(
+        self,
+        trade_ids: Iterable[str],
+    ) -> List[Dict[str, Any]]:
+        return list_bot_trade_events_for_trades(trade_ids)
+
+    def upsert_bot_run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return upsert_bot_run(payload)
+
+
+_ARTIFACT_STORAGE: ArtifactStorage = RepositoryArtifactStorage()
+
+
+def _storage() -> ArtifactStorage:
+    """Return the report-artifact-specific persistence gateway."""
+
+    return _ARTIFACT_STORAGE
 
 
 def _report_helpers():
@@ -231,12 +278,106 @@ def _stream_zip_bytes(root: Path) -> bytes:
     return buffer.getvalue()
 
 
+def _runtime_series_candle_identity(entry: Any) -> Dict[str, Any]:
+    if isinstance(entry, Mapping):
+        strategy_id = entry.get("strategy_id")
+        symbol = entry.get("symbol")
+        timeframe = entry.get("timeframe")
+        instrument = entry.get("instrument")
+        meta = dict(entry)
+    else:
+        strategy_id = getattr(entry, "strategy_id", None)
+        symbol = getattr(entry, "symbol", None)
+        timeframe = getattr(entry, "timeframe", None)
+        instrument = getattr(entry, "instrument", None)
+        meta = dict(getattr(entry, "meta", {}) or {})
+
+    candle_snapshot = (
+        dict(meta.get("candle_snapshot") or {})
+        if isinstance(meta.get("candle_snapshot"), Mapping)
+        else {}
+    )
+    instrument_id = (
+        entry.get("instrument_id")
+        if isinstance(entry, Mapping)
+        else None
+    )
+    instrument_id = instrument_id or candle_snapshot.get("instrument_id")
+    if not instrument_id and isinstance(instrument, Mapping):
+        instrument_id = instrument.get("id") or instrument.get("instrument_id")
+
+    if not instrument_id:
+        links = list(meta.get("instrument_links") or meta.get("instruments") or [])
+        normalized_symbol = str(symbol or "").strip().upper()
+        matching_ids: list[str] = []
+        fallback_ids: list[str] = []
+        for link in links:
+            if not isinstance(link, Mapping):
+                continue
+            candidate_id = str(link.get("instrument_id") or link.get("id") or "").strip()
+            if not candidate_id:
+                continue
+            fallback_ids.append(candidate_id)
+            link_snapshot = (
+                dict(link.get("instrument_snapshot") or {})
+                if isinstance(link.get("instrument_snapshot"), Mapping)
+                else {}
+            )
+            link_symbol = str(
+                link_snapshot.get("symbol") or link.get("symbol") or ""
+            ).strip().upper()
+            if normalized_symbol and link_symbol == normalized_symbol:
+                matching_ids.append(candidate_id)
+        if len(set(matching_ids)) == 1:
+            instrument_id = matching_ids[0]
+        elif len(set(fallback_ids)) == 1:
+            instrument_id = fallback_ids[0]
+
+    return build_expected_candle_series_inventory(
+        [
+            {
+                "strategy_id": strategy_id or candle_snapshot.get("strategy_id"),
+                "instrument_id": instrument_id,
+                "symbol": symbol or candle_snapshot.get("symbol"),
+                "timeframe": timeframe or candle_snapshot.get("timeframe"),
+            }
+        ]
+    )[0]
+
+
+def _expected_candle_series(
+    *,
+    config: Mapping[str, Any],
+    series: Sequence[Any],
+) -> list[Dict[str, Any]]:
+    planned = config.get("expected_candle_series")
+    if planned is not None:
+        if not isinstance(planned, list):
+            raise ValueError("expected_candle_series must be a list")
+        return build_expected_candle_series_inventory(planned)
+    return build_expected_candle_series_inventory(
+        [_runtime_series_candle_identity(entry) for entry in series]
+    )
+
+
 def _build_series_snapshot(series: Sequence[Any]) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     snapshots: list[dict[str, Any]] = []
     indicator_meta_by_id: dict[str, dict[str, Any]] = {}
     storage = _storage()
     for entry in series:
         meta = dict(getattr(entry, "meta", {}) or {})
+        candle_identity = _runtime_series_candle_identity(entry)
+        source_diagnostics = normalize_indicator_source_diagnostics(
+            meta.get("indicator_source_diagnostics", []),
+            series_identity={
+                "strategy_id": getattr(entry, "strategy_id", None),
+                "instrument_id": candle_identity["instrument_id"],
+                "symbol": getattr(entry, "symbol", None),
+                "timeframe": getattr(entry, "timeframe", None),
+                "datasource": getattr(entry, "datasource", None),
+                "exchange": getattr(entry, "exchange", None),
+            },
+        )
         indicator_links = list(meta.get("indicator_links") or [])
         compiled_strategy = meta.get("compiled_strategy")
         strategy_hash = (
@@ -265,6 +406,7 @@ def _build_series_snapshot(series: Sequence[Any]) -> tuple[list[dict[str, Any]],
         snapshots.append(
             {
                 "strategy_id": getattr(entry, "strategy_id", None),
+                "instrument_id": candle_identity["instrument_id"],
                 "name": getattr(entry, "name", None),
                 "symbol": getattr(entry, "symbol", None),
                 "timeframe": getattr(entry, "timeframe", None),
@@ -272,6 +414,13 @@ def _build_series_snapshot(series: Sequence[Any]) -> tuple[list[dict[str, Any]],
                 "exchange": getattr(entry, "exchange", None),
                 "window_start": getattr(entry, "window_start", None),
                 "window_end": getattr(entry, "window_end", None),
+                "backtest_warmup": dict(meta.get("backtest_warmup") or {}),
+                "candle_snapshot": dict(meta.get("candle_snapshot") or {}),
+                "candle_continuity": dict(meta.get("candle_continuity") or {}),
+                "candle_gap_classification": _json_safe(
+                    meta.get("candle_gap_classification")
+                ),
+                "indicator_source_diagnostics": _json_safe(source_diagnostics),
                 "indicator_ids": indicator_ids,
                 "strategy_hash": strategy_hash,
                 "variant_id": meta.get("variant_id"),
@@ -296,6 +445,8 @@ def _build_series_snapshot(series: Sequence[Any]) -> tuple[list[dict[str, Any]],
 def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> dict[str, Any]:
     symbols: list[str] = []
     strategies: list[dict[str, Any]] = []
+    warmup_evidence: list[dict[str, Any]] = []
+    source_diagnostics: list[dict[str, Any]] = []
     strategy_ids_seen: set[str] = set()
     storage = _storage()
     for entry in series:
@@ -303,10 +454,34 @@ def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> 
         if symbol and symbol not in symbols:
             symbols.append(symbol)
         strategy_id = str(getattr(entry, "strategy_id", "") or "").strip()
+        meta = dict(getattr(entry, "meta", {}) or {})
+        candle_identity = _runtime_series_candle_identity(entry)
+        source_diagnostics.extend(
+            normalize_indicator_source_diagnostics(
+                meta.get("indicator_source_diagnostics", []),
+                series_identity={
+                    "strategy_id": strategy_id or None,
+                    "instrument_id": candle_identity["instrument_id"],
+                    "symbol": symbol or None,
+                    "timeframe": getattr(entry, "timeframe", None),
+                    "datasource": getattr(entry, "datasource", None),
+                    "exchange": getattr(entry, "exchange", None),
+                },
+            )
+        )
+        evidence = dict(meta.get("backtest_warmup") or {})
+        if evidence:
+            warmup_evidence.append(
+                {
+                    "strategy_id": strategy_id,
+                    "symbol": symbol or None,
+                    "timeframe": getattr(entry, "timeframe", None),
+                    **evidence,
+                }
+            )
         if not strategy_id or strategy_id in strategy_ids_seen:
             continue
         strategy_ids_seen.add(strategy_id)
-        meta = dict(getattr(entry, "meta", {}) or {})
         indicator_links = list(meta.get("indicator_links") or [])
         indicator_params = []
         for link in indicator_links:
@@ -353,7 +528,7 @@ def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> 
     timeframe = getattr(series[0], "timeframe", None) if series else None
     datasource = getattr(series[0], "datasource", None) if series else None
     exchange = getattr(series[0], "exchange", None) if series else None
-    return {
+    snapshot = {
         "execution_mode": _execution_mode_from_config(config),
         "request_id": str(config.get("request_id") or config.get("_runtime_request_id") or "").strip() or None,
         "wallet_start": dict(config.get("wallet_config") or {}),
@@ -366,10 +541,24 @@ def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> 
         "timeframe": timeframe,
         "datasource": datasource,
         "exchange": exchange,
+        "expected_candle_series": _expected_candle_series(
+            config=config,
+            series=series,
+        ),
         "fee_model": (config.get("risk") or {}).get("fee_model"),
         "slippage_model": (config.get("risk") or {}).get("slippage_model"),
         "strategies": strategies,
+        "indicator_source_diagnostics": normalize_indicator_source_diagnostics(
+            source_diagnostics
+        ),
     }
+    if warmup_evidence:
+        if config.get("backtest_warmup_bars") is not None:
+            snapshot["backtest_warmup_bars"] = int(
+                config["backtest_warmup_bars"]
+            )
+        snapshot["backtest_warmup_evidence"] = warmup_evidence
+    return snapshot
 
 
 class RunArtifactBundle:
@@ -697,10 +886,6 @@ class RunArtifactBundle:
         self._upsert_run_index(
             config_snapshot=config_snapshot,
             summary=summary,
-            status=runtime_status,
-            started_at=artifact.get("started_at"),
-            ended_at=artifact.get("ended_at"),
-            decision_trace=list(artifact.get("decision_trace") or []),
         )
         if self.spool_dir.exists():
             shutil.rmtree(self.spool_dir)
@@ -795,10 +980,6 @@ class RunArtifactBundle:
         *,
         config_snapshot: Mapping[str, Any],
         summary: Mapping[str, Any],
-        status: str,
-        started_at: Any,
-        ended_at: Any,
-        decision_trace: Sequence[Mapping[str, Any]],
     ) -> None:
         strategy = next(iter(config_snapshot.get("strategies") or []), {})
         _storage().upsert_bot_run(
@@ -809,18 +990,14 @@ class RunArtifactBundle:
                 "strategy_id": strategy.get("id"),
                 "strategy_name": strategy.get("name"),
                 "run_type": self.run_type,
-                "status": status,
                 "timeframe": config_snapshot.get("timeframe"),
                 "datasource": config_snapshot.get("datasource"),
                 "exchange": config_snapshot.get("exchange"),
                 "symbols": list(config_snapshot.get("symbols") or []),
                 "backtest_start": self.config.get("backtest_start"),
                 "backtest_end": self.config.get("backtest_end"),
-                "started_at": started_at,
-                "ended_at": ended_at,
                 "summary": dict(summary or {}),
                 "config_snapshot": dict(config_snapshot or {}),
-                "decision_ledger": list(decision_trace or []),
             }
         )
 
@@ -874,6 +1051,8 @@ def _build_config_snapshot_from_series_snapshot(
     storage = _storage()
     symbols: list[str] = []
     strategies: list[dict[str, Any]] = []
+    warmup_evidence: list[dict[str, Any]] = []
+    source_diagnostics: list[dict[str, Any]] = []
     strategy_ids_seen: set[str] = set()
     timeframe = None
     datasource = None
@@ -886,6 +1065,21 @@ def _build_config_snapshot_from_series_snapshot(
         datasource = datasource or entry.get("datasource")
         exchange = exchange or entry.get("exchange")
         strategy_id = str(entry.get("strategy_id") or "").strip()
+        source_diagnostics.extend(
+            normalize_indicator_source_diagnostics(
+                entry.get("indicator_source_diagnostics", [])
+            )
+        )
+        evidence = dict(entry.get("backtest_warmup") or {})
+        if evidence:
+            warmup_evidence.append(
+                {
+                    "strategy_id": strategy_id or None,
+                    "symbol": symbol or None,
+                    "timeframe": entry.get("timeframe"),
+                    **evidence,
+                }
+            )
         if not strategy_id or strategy_id in strategy_ids_seen:
             continue
         strategy_ids_seen.add(strategy_id)
@@ -921,7 +1115,7 @@ def _build_config_snapshot_from_series_snapshot(
                 "instruments": list(entry.get("instruments") or []),
             }
         )
-    return {
+    snapshot = {
         "execution_mode": _execution_mode_from_config(config),
         "request_id": str(config.get("request_id") or config.get("_runtime_request_id") or "").strip() or None,
         "wallet_start": dict(config.get("wallet_config") or {}),
@@ -934,10 +1128,24 @@ def _build_config_snapshot_from_series_snapshot(
         "timeframe": timeframe,
         "datasource": datasource,
         "exchange": exchange,
+        "expected_candle_series": _expected_candle_series(
+            config=config,
+            series=series_snapshot,
+        ),
         "fee_model": (config.get("risk") or {}).get("fee_model"),
         "slippage_model": (config.get("risk") or {}).get("slippage_model"),
         "strategies": strategies,
+        "indicator_source_diagnostics": normalize_indicator_source_diagnostics(
+            source_diagnostics
+        ),
     }
+    if warmup_evidence:
+        if config.get("backtest_warmup_bars") is not None:
+            snapshot["backtest_warmup_bars"] = int(
+                config["backtest_warmup_bars"]
+            )
+        snapshot["backtest_warmup_evidence"] = warmup_evidence
+    return snapshot
 
 
 def _aggregate_worker_artifact(
@@ -1239,18 +1447,14 @@ def finalize_run_artifact_bundle_from_workers(
             "strategy_id": next(iter(config_snapshot.get("strategies") or []), {}).get("id"),
             "strategy_name": next(iter(config_snapshot.get("strategies") or []), {}).get("name"),
             "run_type": run_type,
-            "status": runtime_status,
             "timeframe": config_snapshot.get("timeframe"),
             "datasource": config_snapshot.get("datasource"),
             "exchange": config_snapshot.get("exchange"),
             "symbols": list(config_snapshot.get("symbols") or []),
             "backtest_start": config.get("backtest_start"),
             "backtest_end": config.get("backtest_end"),
-            "started_at": aggregate_artifact.get("started_at"),
-            "ended_at": aggregate_artifact.get("ended_at"),
             "summary": dict(summary or {}),
             "config_snapshot": dict(config_snapshot or {}),
-            "decision_ledger": decision_trace,
         }
     )
     if spool_dir.exists():

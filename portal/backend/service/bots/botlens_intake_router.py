@@ -30,12 +30,11 @@ from typing import Any, Dict
 from core.settings import get_settings
 
 from ..observability import BackendObserver
-from ..storage.storage import record_bot_runtime_events_batch
+from ..storage.repos.runtime_events import record_bot_runtime_events_batch
 from .botlens_contract import (
     BRIDGE_BOOTSTRAP_KIND,
     BRIDGE_FACTS_KIND,
     LIFECYCLE_KIND,
-    PROJECTION_REFRESH_KIND,
     RUN_SCOPE_KEY,
     normalize_bridge_seq,
     normalize_bridge_session_id,
@@ -462,9 +461,11 @@ class IntakeRouter:
                 timeframe=identity.get("timeframe"),
                 message_kind=LIFECYCLE_KIND,
                 source_reason=reason,
-                boundary_name="run_final",
+                boundary_name="transport_run_final",
                 extra={
-                    "scope": "run_final",
+                    "scope": "transport_run_final",
+                    "materiality": "diagnostic",
+                    "diagnostic_scope": "transport_continuity",
                     "final_status": summary.final_status,
                 },
             )
@@ -556,17 +557,6 @@ class IntakeRouter:
 
             elif kind == LIFECYCLE_KIND:
                 await self._route_lifecycle(run_id=run_id, bot_id=bot_id, payload=raw_payload)
-
-            elif kind == PROJECTION_REFRESH_KIND:
-                _OBSERVER.event(
-                    "intake_unknown_kind",
-                    level=logging.WARN,
-                    bot_id=bot_id,
-                    run_id=run_id,
-                    worker_id=worker_id,
-                    message_kind=kind,
-                    failure_mode="projection_refresh_deprecated",
-                )
 
             else:
                 _OBSERVER.increment(

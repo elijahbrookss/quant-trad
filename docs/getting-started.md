@@ -45,7 +45,7 @@ make deps PY=python3.12
 
 ## Provider Credentials
 
-Backtests from local or cached data do not require Coinbase credentials.
+Backtests from canonically stored market data do not require Coinbase credentials.
 Provider-backed paper/streaming workflows do.
 
 After the core stack is running:

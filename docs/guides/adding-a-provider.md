@@ -49,9 +49,9 @@ Candles must preserve source-data truth:
 - expose missing data instead of silently filling it,
 - carry enough provider/venue/symbol/timeframe context for diagnostics.
 
-## Caching
+## Canonical Intake
 
-Provider caching should preserve runtime semantics. Cache keys must include semantic request inputs, and cached results must be equivalent to a fresh provider fetch for that request.
+Adapters acquire rows only. Explicit historical intake validates and persists them through `HistoricalCandleIngestor`; paper intake persists closed candles before runtime visibility. Consumer reads use `CanonicalCandleFeed` and must never call the adapter on a miss. New providers must not add provider-owned candle tables, caches, repair paths, or fallback reads.
 
 ## Gap Handling
 
@@ -69,7 +69,7 @@ Add focused tests for:
 - candle normalization,
 - error handling and credential failures,
 - gap/sparse-data behavior,
-- cache semantics if caching is changed.
+- explicit intake, known-at, provenance, and provider-gap behavior.
 
 Useful examples:
 

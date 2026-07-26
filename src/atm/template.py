@@ -4,83 +4,117 @@ from __future__ import annotations
 
 import math
 from copy import deepcopy
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence
 
-from .schema import DEFAULT_ATM_TEMPLATE
+from .schema import (
+    ATM_BREAKEVEN_FIELDS,
+    ATM_EXIT_PLAN_FIELDS,
+    ATM_FIXED_HORIZON_FIELDS,
+    ATM_INITIAL_STOP_FIELDS,
+    ATM_LIMIT_MAKER_FIELDS,
+    ATM_SCHEMA_VERSION,
+    ATM_STOP_ADJUSTMENT_FIELDS,
+    ATM_TAKE_PROFIT_FIELDS,
+    ATM_TEMPLATE_FIELDS,
+    ATM_TRAILING_FIELDS,
+    DEFAULT_ATM_TEMPLATE,
+)
 
 
-def _coerce_int(value: Optional[object], default: Optional[int] = None) -> Optional[int]:
+def _required_float(value: object, *, path: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{path} must be a finite number")
     try:
-        if value is None:
-            return default
-        numeric = int(float(value))
-    except (TypeError, ValueError):
-        return default
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{path} must be a finite number") from exc
+    if not math.isfinite(numeric):
+        raise ValueError(f"{path} must be a finite number")
     return numeric
 
 
-def _coerce_float(value: Optional[object], default: Optional[float] = None) -> Optional[float]:
-    try:
-        if value is None:
-            return default
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return default
+def _required_int(value: object, *, path: str) -> int:
+    numeric = _required_float(value, path=path)
+    if not numeric.is_integer():
+        raise ValueError(f"{path} must be an integer")
+    return int(numeric)
+
+
+def _required_bool(value: object, *, path: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{path} must be a boolean")
+    return value
+
+
+def _reject_unknown_fields(
+    payload: Mapping[str, Any],
+    allowed: frozenset[str],
+    *,
+    path: str,
+) -> None:
+    unknown = sorted(set(payload) - set(allowed))
+    if unknown:
+        raise ValueError(f"{path} contains unsupported fields: {unknown!r}")
+
+
+def _positive_float(value: object, *, path: str) -> float:
+    numeric = _required_float(value, path=path)
+    if numeric <= 0:
+        raise ValueError(f"{path} must be > 0")
     return numeric
 
 
 def _normalise_take_profits(
     entries: Sequence[Mapping[str, Any]],
-    fallback_contracts: Optional[int],
-) -> Tuple[Sequence[Dict[str, Any]], int]:
+) -> Sequence[Dict[str, Any]]:
     if not entries:
-        return [], 0
+        raise ValueError("take_profit_orders must contain at least one target")
 
     cleaned: list[Dict[str, Any]] = []
-    fallback = max(int(fallback_contracts or len(entries)), len(entries) or 1)
-
-    fractions: list[Optional[float]] = []
-    for entry in entries:
-        # v2 schema: size_fraction (0-1 range)
-        raw_fraction = entry.get("size_fraction")
-        value = _coerce_float(raw_fraction)
-        # Keep as fraction (0-1 range) for consistency
-        if value is not None and 0 <= value <= 1:
-            fractions.append(value)
-        elif value is not None and value > 1:
-            # If value > 1, assume it's a percentage and convert to fraction
-            fractions.append(value / 100)
-        else:
-            fractions.append(None)
-
-    has_fraction = any(value is not None for value in fractions)
-
-    # Normalize fractions to sum to 1.0
-    if has_fraction:
-        weights = [max(value or 0, 0.0) for value in fractions]
-        weight_total = sum(weights)
-        if weight_total > 0:
-            # Normalize so fractions sum to 1.0
-            normalized_fractions = [weight / weight_total for weight in weights]
-        else:
-            # Equal distribution if no weights
-            normalized_fractions = [1.0 / len(entries) for _ in entries]
-    else:
-        # Equal distribution if no fractions specified
-        normalized_fractions = [1.0 / len(entries) for _ in entries]
-
+    seen_ids: set[str] = set()
+    fraction_total = 0.0
     for idx, entry in enumerate(entries):
-        ticks = _coerce_int(
-            entry.get("ticks")
-            or entry.get("target_ticks")
-            or entry.get("offset_ticks"),
-            0,
-        ) or 0
-        label = (entry.get("label") or entry.get("name") or f"Target {idx + 1}").strip()
-        order_id = entry.get("id") or f"tp-{idx + 1}"
-        r_multiple = _coerce_float(entry.get("r_multiple"))
-        price = _coerce_float(entry.get("price"))
-        size_fraction = normalized_fractions[idx] if idx < len(normalized_fractions) else (1.0 / len(entries))
+        path = f"take_profit_orders[{idx}]"
+        if not isinstance(entry, Mapping):
+            raise ValueError(f"{path} must be a mapping")
+        _reject_unknown_fields(entry, ATM_TAKE_PROFIT_FIELDS, path=path)
+
+        order_id = str(entry.get("id") or "").strip()
+        if not order_id:
+            raise ValueError(f"{path}.id must be non-empty text")
+        if order_id in seen_ids:
+            raise ValueError(f"{path}.id duplicates target id {order_id!r}")
+        seen_ids.add(order_id)
+
+        raw_ticks = entry.get("ticks")
+        ticks = _required_int(raw_ticks, path=f"{path}.ticks") if raw_ticks is not None else None
+        if ticks is not None and ticks <= 0:
+            raise ValueError(f"{path}.ticks must be > 0")
+        r_multiple = (
+            _positive_float(entry.get("r_multiple"), path=f"{path}.r_multiple")
+            if entry.get("r_multiple") is not None
+            else None
+        )
+        price = (
+            _positive_float(entry.get("price"), path=f"{path}.price")
+            if entry.get("price") is not None
+            else None
+        )
+        if sum(value is not None for value in (ticks, r_multiple, price)) != 1:
+            raise ValueError(
+                f"{path} must define exactly one positive target: ticks, r_multiple, or price"
+            )
+        if entry.get("size_fraction") is None:
+            raise ValueError(f"{path}.size_fraction is required")
+        size_fraction = _positive_float(
+            entry.get("size_fraction"),
+            path=f"{path}.size_fraction",
+        )
+        if size_fraction > 1:
+            raise ValueError(f"{path}.size_fraction must be <= 1")
+        fraction_total += size_fraction
+
+        label = str(entry.get("label") or f"Target {idx + 1}").strip()
         cleaned.append(
             {
                 "id": order_id,
@@ -92,106 +126,100 @@ def _normalise_take_profits(
             }
         )
 
-    return cleaned, 0  # No longer calculating contracts
+    if not math.isclose(fraction_total, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError(
+            "take_profit_orders size_fraction values must sum to 1.0; "
+            f"got {fraction_total!r}"
+        )
+    return cleaned
 
 
-def _extract_take_profits(payload: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
-    for key in (
-        "take_profit_orders",
-        "take_profit_targets",
-        "take_profits",
-        "targets",
-    ):
-        value = payload.get(key)
-        if isinstance(value, Sequence) and value:
-            if key == "targets" and all(isinstance(item, (int, float)) for item in value):
-                return [
-                    {"id": f"tp-{idx + 1}", "label": f"TP +{int(item)}", "ticks": int(item)}
-                    for idx, item in enumerate(value)
-                ]
-            return value  # type: ignore[return-value]
-    return []
+def _extract_take_profits(payload: Mapping[str, Any]) -> Optional[Sequence[Mapping[str, Any]]]:
+    if "take_profit_orders" not in payload:
+        return None
+    value = payload.get("take_profit_orders")
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise ValueError("take_profit_orders must be a sequence")
+    if not value:
+        raise ValueError("take_profit_orders must contain at least one target")
+    return value  # type: ignore[return-value]
 
 
 def _normalise_stop_adjustments(payload: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
+    if "stop_adjustments" not in payload:
+        return []
     source = payload.get("stop_adjustments")
     if not isinstance(source, Sequence) or isinstance(source, (str, bytes)):
-        return []
+        raise ValueError("stop_adjustments must be a sequence")
 
     rules: list[Dict[str, Any]] = []
-    for entry in source:
+    seen_ids: set[str] = set()
+    for idx, entry in enumerate(source):
+        path = f"stop_adjustments[{idx}]"
         if not isinstance(entry, Mapping):
-            continue
+            raise ValueError(f"{path} must be a mapping")
+        _reject_unknown_fields(entry, ATM_STOP_ADJUSTMENT_FIELDS, path=path)
 
-        trigger = entry.get("trigger") if isinstance(entry.get("trigger"), Mapping) else {}
-        action = entry.get("action") if isinstance(entry.get("action"), Mapping) else {}
-
-        trigger_type = str(
-            trigger.get("type")
-            or entry.get("trigger_type")
-            or ""
-        ).replace("_reached", "").lower()
-        trigger_value = trigger.get("value")
-        if trigger_value is None:
-            trigger_value = (
-                entry.get("trigger_value")
-                or entry.get("trigger_target_id")
-                or entry.get("target_id")
-            )
-        trigger_ticks = _coerce_float(entry.get("trigger_ticks"))
-        action_type = str(action.get("type") or entry.get("action_type") or "").lower()
-
+        rule_id = str(entry.get("id") or "").strip()
+        if not rule_id:
+            raise ValueError(f"{path}.id must be non-empty text")
+        if rule_id in seen_ids:
+            raise ValueError(f"{path}.id duplicates stop-adjustment id {rule_id!r}")
+        seen_ids.add(rule_id)
+        trigger_type = str(entry.get("trigger_type") or "").strip().lower()
         if trigger_type not in {"r_multiple", "target_hit"}:
-            continue
+            raise ValueError(
+                f"{path}.trigger_type={trigger_type!r} is unsupported; "
+                "supported=['r_multiple', 'target_hit']"
+            )
+        trigger_value = entry.get("trigger_value")
+        trigger_ticks = (
+            _positive_float(entry.get("trigger_ticks"), path=f"{path}.trigger_ticks")
+            if entry.get("trigger_ticks") is not None
+            else None
+        )
+        action_type = str(entry.get("action_type") or "").strip().lower()
+        if action_type not in {"move_to_breakeven", "move_to_r"}:
+            raise ValueError(
+                f"{path}.action_type={action_type!r} is unsupported; "
+                "supported=['move_to_breakeven', 'move_to_r']"
+            )
 
-        # Validate trigger value
         if trigger_type == "r_multiple":
-            trigger_value = _coerce_float(trigger_value)
-            if (trigger_value is None or trigger_value <= 0) and (
-                trigger_ticks is None or trigger_ticks <= 0
-            ):
-                continue
-        if trigger_type == "target_hit" and trigger_value is None:
-            continue
+            numeric_trigger = (
+                _positive_float(trigger_value, path=f"{path}.trigger_value")
+                if trigger_value is not None
+                else None
+            )
+            if (numeric_trigger is not None) == (trigger_ticks is not None):
+                raise ValueError(
+                    f"{path} must define exactly one r_multiple trigger: "
+                    "trigger_value or trigger_ticks"
+                )
+            trigger_value = numeric_trigger
+        else:
+            trigger_value = str(trigger_value or "").strip()
+            if not trigger_value:
+                raise ValueError(f"{path}.trigger_value must reference a target id")
+            if trigger_ticks is not None:
+                raise ValueError(f"{path}.trigger_ticks is invalid for target_hit")
 
-        # Parse action
         action_value = None
-        atr_period = None
-        atr_multiplier = None
-
         if action_type == "move_to_r":
-            action_value = _coerce_float(
-                action.get("value")
-                if action.get("value") is not None
-                else entry.get("action_value") or entry.get("action_r")
+            action_value = _positive_float(
+                entry.get("action_value"),
+                path=f"{path}.action_value",
             )
-            if action_value is None or action_value <= 0:
-                continue
-        elif action_type == "trail_atr":
-            atr_period = _coerce_int(
-                action.get("atr_period")
-                if action.get("atr_period") is not None
-                else entry.get("atr_period"),
-                14,
-            )
-            atr_multiplier = _coerce_float(
-                action.get("atr_multiplier")
-                if action.get("atr_multiplier") is not None
-                else entry.get("atr_multiplier"),
-                1.0,
-            )
-        elif action_type != "move_to_breakeven":
-            continue
+        elif entry.get("action_value") is not None:
+            raise ValueError(f"{path}.action_value is invalid for move_to_breakeven")
 
         rules.append({
-            "id": entry.get("id"),
+            "id": rule_id,
             "trigger_type": trigger_type,
             "trigger_value": trigger_value,
-            "trigger_ticks": trigger_ticks if trigger_ticks and trigger_ticks > 0 else None,
+            "trigger_ticks": trigger_ticks,
             "action_type": action_type,
             "action_value": action_value,
-            "atr_period": atr_period,
-            "atr_multiplier": atr_multiplier,
         })
 
     return rules
@@ -204,25 +232,35 @@ def _normalise_breakeven(
     config = dict(base)
     source = payload.get("breakeven")
     if isinstance(source, Mapping):
+        _reject_unknown_fields(source, ATM_BREAKEVEN_FIELDS, path="breakeven")
         if "enabled" in source:
-            config["enabled"] = bool(source.get("enabled"))
-        if source.get("target_index") is not None:
-            config["target_index"] = max(_coerce_int(source.get("target_index"), 0) or 0, 0)
-        if source.get("ticks") is not None:
-            config["ticks"] = max(_coerce_int(source.get("ticks"), 0) or 0, 0)
-        if source.get("r_multiple") is not None:
-            config["r_multiple"] = float(source.get("r_multiple") or 0.0)
+            config["enabled"] = _required_bool(source.get("enabled"), path="breakeven.enabled")
+        if source.get("activation_type") is not None:
+            activation_type = str(source.get("activation_type") or "").strip().lower()
+            if activation_type != "r_multiple":
+                raise ValueError("breakeven.activation_type must be 'r_multiple'")
+            config["activation_type"] = activation_type
+        if "ticks" in source:
+            ticks = _required_int(source.get("ticks"), path="breakeven.ticks")
+            if ticks < 0:
+                raise ValueError("breakeven.ticks must be >= 0")
+            if ticks > 0 and source.get("r_multiple") is not None:
+                raise ValueError("breakeven must define ticks or r_multiple, not both")
+            config["ticks"] = ticks
+            if ticks > 0:
+                config["r_multiple"] = None
+        if "r_multiple" in source:
+            raw_r_multiple = source.get("r_multiple")
+            if raw_r_multiple is None:
+                config["r_multiple"] = None
+            else:
+                config["r_multiple"] = _positive_float(
+                    raw_r_multiple,
+                    path="breakeven.r_multiple",
+                )
+                config["ticks"] = 0
     elif source is not None:
-        config["ticks"] = max(_coerce_int(source, 0) or 0, 0)
-
-    legacy_ticks = _coerce_int(payload.get("breakeven_trigger_ticks"))
-    if legacy_ticks is not None:
-        config["enabled"] = legacy_ticks > 0
-        config["ticks"] = max(legacy_ticks, 0)
-    legacy_target = _coerce_int(payload.get("breakeven_target_index"))
-    if legacy_target is not None:
-        config["enabled"] = True
-        config["target_index"] = max(legacy_target, 0)
+        raise ValueError("breakeven must be a mapping")
     return config
 
 
@@ -232,49 +270,56 @@ def _normalise_trailing(
 ) -> Dict[str, Any]:
     config = dict(base)
     source = payload.get("trailing")
-    if source is None:
-        source = payload.get("trailing_stop")
     if isinstance(source, Mapping):
+        _reject_unknown_fields(source, ATM_TRAILING_FIELDS, path="trailing")
         if "enabled" in source:
-            config["enabled"] = bool(source.get("enabled"))
+            config["enabled"] = _required_bool(source.get("enabled"), path="trailing.enabled")
         activation_type = str(
-            source.get("activation_type")
-            or ("target_hit" if source.get("target_index") is not None else "r_multiple")
-            or "r_multiple"
-        ).lower()
+            source.get("activation_type", config.get("activation_type", "r_multiple"))
+        ).strip().lower()
         if activation_type not in {"r_multiple", "target_hit"}:
-            activation_type = "r_multiple"
+            raise ValueError(
+                "trailing.activation_type must be 'r_multiple' or 'target_hit'"
+            )
         config["activation_type"] = activation_type
-        if source.get("target_index") is not None:
-            config["target_index"] = max(_coerce_int(source.get("target_index"), 0) or 0, 0)
-        if source.get("target_id") is not None:
-            config["target_id"] = source.get("target_id")
-        if source.get("ticks") is not None:
-            config["ticks"] = max(_coerce_int(source.get("ticks"), 0) or 0, 0)
-        if source.get("atr_multiplier") is not None:
-            config["atr_multiplier"] = float(source.get("atr_multiplier") or 1.0)
-        if source.get("atr_period") is not None:
-            config["atr_period"] = max(_coerce_int(source.get("atr_period"), 14) or 14, 1)
-        if source.get("r_multiple") is not None:
-            config["r_multiple"] = float(source.get("r_multiple") or 0.0)
-    elif isinstance(source, bool):
-        config["enabled"] = source
-
-    legacy_target = _coerce_int(payload.get("trail_after_target_index"))
-    if legacy_target is not None:
-        config["target_index"] = max(legacy_target, 0)
-        config["activation_type"] = "target_hit"
-    legacy_ticks = _coerce_int(payload.get("trail_after_ticks"))
-    if legacy_ticks is not None:
-        config["enabled"] = legacy_ticks > 0
-        config["ticks"] = max(legacy_ticks, 0)
-    legacy_multiplier = _coerce_float(payload.get("trail_atr_multiplier"))
-    if legacy_multiplier is not None:
-        config["enabled"] = legacy_multiplier > 0
-        config["atr_multiplier"] = float(legacy_multiplier)
-    legacy_period = _coerce_int(payload.get("trail_atr_period"))
-    if legacy_period is not None:
-        config["atr_period"] = max(legacy_period, 1)
+        if "target_index" in source:
+            raw_target_index = source.get("target_index")
+            if raw_target_index is None:
+                config["target_index"] = None
+            else:
+                target_index = _required_int(raw_target_index, path="trailing.target_index")
+                if target_index < 0:
+                    raise ValueError("trailing.target_index must be >= 0")
+                config["target_index"] = target_index
+        if "target_id" in source:
+            config["target_id"] = str(source.get("target_id") or "").strip() or None
+        if "ticks" in source:
+            ticks = _required_int(source.get("ticks"), path="trailing.ticks")
+            if ticks < 0:
+                raise ValueError("trailing.ticks must be >= 0")
+            config["ticks"] = ticks
+        if "atr_multiplier" in source:
+            raw_atr_multiplier = source.get("atr_multiplier")
+            config["atr_multiplier"] = (
+                _positive_float(
+                    raw_atr_multiplier,
+                    path="trailing.atr_multiplier",
+                )
+                if raw_atr_multiplier is not None
+                else None
+            )
+        if "r_multiple" in source:
+            config["r_multiple"] = (
+                _positive_float(source.get("r_multiple"), path="trailing.r_multiple")
+                if source.get("r_multiple") is not None
+                else None
+            )
+        if activation_type == "target_hit":
+            if source.get("r_multiple") is not None:
+                raise ValueError("trailing.r_multiple is invalid for target_hit activation")
+            config["r_multiple"] = None
+    elif source is not None:
+        raise ValueError("trailing must be a mapping")
     return config
 
 
@@ -284,38 +329,53 @@ def _normalise_exit_plan(
 ) -> Dict[str, Any]:
     config = deepcopy(dict(base))
     source = payload.get("exit_plan")
-    if not isinstance(source, Mapping):
+    if source is None:
         source = {}
+    elif not isinstance(source, Mapping):
+        raise ValueError("exit_plan must be a mapping")
+    _reject_unknown_fields(source, ATM_EXIT_PLAN_FIELDS, path="exit_plan")
 
     fixed_base = config.get("fixed_horizon")
     fixed_config = dict(fixed_base) if isinstance(fixed_base, Mapping) else {}
-    fixed_source = source.get("fixed_horizon") or source.get("fixedHorizon")
-    if fixed_source is None:
-        fixed_source = payload.get("fixed_horizon")
+    fixed_source = source.get("fixed_horizon")
     if isinstance(fixed_source, Mapping):
+        _reject_unknown_fields(
+            fixed_source,
+            ATM_FIXED_HORIZON_FIELDS,
+            path="exit_plan.fixed_horizon",
+        )
         if "enabled" in fixed_source:
-            fixed_config["enabled"] = bool(fixed_source.get("enabled"))
-        bars = _coerce_int(fixed_source.get("bars") or fixed_source.get("hold_bars"))
-        if bars is not None:
-            fixed_config["bars"] = max(bars, 0) or None
-            if bars > 0 and "enabled" not in fixed_source:
-                fixed_config["enabled"] = True
+            fixed_config["enabled"] = _required_bool(
+                fixed_source.get("enabled"),
+                path="exit_plan.fixed_horizon.enabled",
+            )
+        if "bars" in fixed_source:
+            raw_bars = fixed_source.get("bars")
+            bars = (
+                _required_int(raw_bars, path="exit_plan.fixed_horizon.bars")
+                if raw_bars is not None
+                else None
+            )
+            if bars is not None and bars <= 0:
+                raise ValueError("exit_plan.fixed_horizon.bars must be > 0")
+            fixed_config["bars"] = bars
         if fixed_source.get("price") is not None:
-            fixed_config["price"] = str(fixed_source.get("price") or "close").lower()
+            price = str(fixed_source.get("price") or "").strip().lower()
+            if price != "close":
+                raise ValueError("exit_plan.fixed_horizon.price must be 'close'")
+            fixed_config["price"] = price
         if fixed_source.get("order_type") is not None:
-            fixed_config["order_type"] = str(fixed_source.get("order_type") or "market").lower()
-    else:
-        legacy_bars = _coerce_int(payload.get("fixed_horizon_bars") or payload.get("hold_bars"))
-        if legacy_bars is not None:
-            fixed_config["bars"] = max(legacy_bars, 0) or None
-            fixed_config["enabled"] = legacy_bars > 0
+            order_type = str(fixed_source.get("order_type") or "").strip().lower()
+            if order_type != "market":
+                raise ValueError("exit_plan.fixed_horizon.order_type must be 'market'")
+            fixed_config["order_type"] = order_type
+    elif fixed_source is not None:
+        raise ValueError("exit_plan.fixed_horizon must be a mapping")
 
-    if fixed_config.get("price") not in {"close"}:
-        fixed_config["price"] = "close"
-    if fixed_config.get("order_type") not in {"market"}:
-        fixed_config["order_type"] = "market"
-    if not fixed_config.get("bars"):
-        fixed_config["enabled"] = False
+    if fixed_config.get("enabled") and not fixed_config.get("bars"):
+        raise ValueError("exit_plan.fixed_horizon.bars is required when enabled")
+    if not fixed_config.get("enabled") and fixed_config.get("bars") is not None:
+        raise ValueError("exit_plan.fixed_horizon.bars must be null when disabled")
     config["fixed_horizon"] = fixed_config
     return config
 
@@ -323,28 +383,29 @@ def _normalise_exit_plan(
 def normalise_template(
     template: Optional[Mapping[str, Any]],
     *,
-    base: Optional[Mapping[str, Any]] = None,
     require_template: bool = False,
 ) -> Dict[str, Any]:
-    """Return a fully-populated ATM template merged with defaults."""
+    """Return a fully populated canonical ATM execution-policy template."""
 
     if require_template and not template:
         raise ValueError("ATM template must be provided.")
 
-    result = deepcopy(base or DEFAULT_ATM_TEMPLATE)
+    if template is not None and not isinstance(template, Mapping):
+        raise ValueError("ATM template must be a mapping.")
+    result = deepcopy(DEFAULT_ATM_TEMPLATE)
     if isinstance(result.get("stop_adjustments"), list):
         result["stop_adjustments"] = list(_normalise_stop_adjustments(result))
-    if not template:
-        return result
+    if isinstance(result.get("take_profit_orders"), Sequence) and not isinstance(
+        result.get("take_profit_orders"),
+        (str, bytes),
+    ):
+        result["take_profit_orders"] = list(
+            _normalise_take_profits(result["take_profit_orders"])
+        )
 
-    payload: Mapping[str, Any]
-    if "atm_template" in template and isinstance(template["atm_template"], Mapping):
-        payload = template["atm_template"]  # type: ignore[assignment]
-    else:
-        payload = template
+    payload: Mapping[str, Any] = template or {}
+    _reject_unknown_fields(payload, ATM_TEMPLATE_FIELDS, path="ATM template")
 
-    payload_meta = payload.get("_meta") if isinstance(payload.get("_meta"), Mapping) else {}
-    meta: Dict[str, Any] = dict(result.get("_meta") or {})
     template_provided = template is not None
 
     if payload.get("name") is not None:
@@ -356,56 +417,103 @@ def normalise_template(
         raise ValueError("ATM template name is required.")
     result["name"] = resolved_name or DEFAULT_ATM_TEMPLATE["name"]
 
-    # Handle schema_version
-    schema_version = payload.get("schema_version", 1)
+    schema_version = _required_int(
+        payload.get("schema_version", result.get("schema_version", DEFAULT_ATM_TEMPLATE["schema_version"])),
+        path="schema_version",
+    )
+    if schema_version != ATM_SCHEMA_VERSION:
+        raise ValueError(
+            f"schema_version={schema_version} is unsupported; expected {ATM_SCHEMA_VERSION}"
+        )
     result["schema_version"] = schema_version
 
-    execution_mode = payload.get("execution_mode") or payload.get("executionMode")
+    execution_mode = payload.get("execution_mode")
     if execution_mode is not None:
-        result["execution_mode"] = str(execution_mode or "market").lower()
+        normalized_mode = str(execution_mode or "").strip().lower()
+        if normalized_mode not in {"market", "limit_maker"}:
+            raise ValueError(
+                "execution_mode must be 'market' or 'limit_maker'"
+            )
+        result["execution_mode"] = normalized_mode
 
-    limit_maker_payload = payload.get("limit_maker") or payload.get("limitMaker")
-    if isinstance(limit_maker_payload, Mapping):
+    limit_maker_payload = payload.get("limit_maker")
+    if limit_maker_payload is not None:
+        if not isinstance(limit_maker_payload, Mapping):
+            raise ValueError("limit_maker must be a mapping")
+        _reject_unknown_fields(
+            limit_maker_payload, ATM_LIMIT_MAKER_FIELDS, path="limit_maker"
+        )
         if "limit_maker" not in result or not isinstance(result["limit_maker"], Mapping):
             result["limit_maker"] = {}
-        anchor_price = limit_maker_payload.get("anchor_price") or limit_maker_payload.get("anchorPrice")
+        anchor_price = limit_maker_payload.get("anchor_price")
         if anchor_price is not None:
-            result["limit_maker"]["anchor_price"] = str(anchor_price or "").lower()
-        offset = limit_maker_payload.get("offset")
-        if isinstance(offset, Mapping):
-            offset_type = offset.get("type") or offset.get("offset_type") or offset.get("offsetType")
-            offset_value = offset.get("value") or offset.get("offset_value") or offset.get("offsetValue")
-            if offset_type is not None:
-                result["limit_maker"]["offset_type"] = str(offset_type or "").lower()
-            if offset_value is not None:
-                result["limit_maker"]["offset_value"] = _coerce_float(offset_value, 0.0) or 0.0
-        else:
-            offset_type = limit_maker_payload.get("offset_type") or limit_maker_payload.get("offsetType")
-            offset_value = limit_maker_payload.get("offset_value") or limit_maker_payload.get("offsetValue")
-            if offset_type is not None:
-                result["limit_maker"]["offset_type"] = str(offset_type or "").lower()
-            if offset_value is not None:
-                result["limit_maker"]["offset_value"] = _coerce_float(offset_value, 0.0) or 0.0
-        validity_window = limit_maker_payload.get("validity_window") or limit_maker_payload.get("validityWindow")
+            normalized_anchor = str(anchor_price or "").strip().lower()
+            if normalized_anchor != "signal_price":
+                raise ValueError(
+                    "unsupported entry anchor "
+                    f"anchor_price={normalized_anchor!r}. "
+                    "Next-bar entry requires an explicit pending signal-entry lifecycle."
+                )
+            result["limit_maker"]["anchor_price"] = normalized_anchor
+        offset_type = limit_maker_payload.get("offset_type")
+        offset_value = limit_maker_payload.get("offset_value")
+        if offset_type is not None:
+            normalized_offset_type = str(offset_type or "").strip().lower()
+            if normalized_offset_type not in {"ticks", "atr_pct", "r_fraction"}:
+                raise ValueError(
+                    "limit_maker.offset_type must be 'ticks', 'atr_pct', or 'r_fraction'"
+                )
+            result["limit_maker"]["offset_type"] = normalized_offset_type
+        if offset_value is not None:
+            normalized_offset = _required_float(offset_value, path="limit_maker.offset_value")
+            if normalized_offset < 0:
+                raise ValueError("limit_maker.offset_value must be >= 0")
+            result["limit_maker"]["offset_value"] = normalized_offset
+        validity_window = limit_maker_payload.get("validity_window")
         if validity_window is not None:
-            result["limit_maker"]["validity_window"] = max(_coerce_int(validity_window, 1) or 1, 1)
+            normalized_validity = _required_int(
+                validity_window,
+                path="limit_maker.validity_window",
+            )
+            if normalized_validity <= 0:
+                raise ValueError("limit_maker.validity_window must be > 0")
+            result["limit_maker"]["validity_window"] = normalized_validity
         fallback = limit_maker_payload.get("fallback")
         if fallback is not None:
-            result["limit_maker"]["fallback"] = str(fallback or "").lower()
+            normalized_fallback = str(fallback or "").strip().lower()
+            if normalized_fallback not in {"cancel", "convert_to_market"}:
+                raise ValueError(
+                    "limit_maker.fallback must be 'cancel' or 'convert_to_market'"
+                )
+            result["limit_maker"]["fallback"] = normalized_fallback
 
-    # Handle nested initial_stop object (schema v2)
     initial_stop_config = payload.get("initial_stop")
-    # Schema v2: nested initial_stop object
     if isinstance(initial_stop_config, Mapping):
+        _reject_unknown_fields(
+            initial_stop_config, ATM_INITIAL_STOP_FIELDS, path="initial_stop"
+        )
         if "initial_stop" not in result or not isinstance(result["initial_stop"], dict):
             result["initial_stop"] = {}
-
         if initial_stop_config.get("mode") is not None:
-            result["initial_stop"]["mode"] = str(initial_stop_config.get("mode") or "atr")
+            mode = str(initial_stop_config.get("mode") or "").strip().lower()
+            if mode != "atr":
+                raise ValueError("initial_stop.mode must be 'atr'")
+            result["initial_stop"]["mode"] = mode
         if initial_stop_config.get("atr_period") is not None:
-            result["initial_stop"]["atr_period"] = max(_coerce_int(initial_stop_config.get("atr_period"), 14) or 14, 1)
+            atr_period = _required_int(
+                initial_stop_config.get("atr_period"),
+                path="initial_stop.atr_period",
+            )
+            if atr_period <= 0:
+                raise ValueError("initial_stop.atr_period must be > 0")
+            result["initial_stop"]["atr_period"] = atr_period
         if initial_stop_config.get("atr_multiplier") is not None:
-            result["initial_stop"]["atr_multiplier"] = float(initial_stop_config.get("atr_multiplier") or 1.0)
+            result["initial_stop"]["atr_multiplier"] = _positive_float(
+                initial_stop_config.get("atr_multiplier"),
+                path="initial_stop.atr_multiplier",
+            )
+    elif initial_stop_config is not None:
+        raise ValueError("initial_stop must be a mapping")
 
     result["exit_plan"] = _normalise_exit_plan(
         payload,
@@ -421,116 +529,18 @@ def normalise_template(
     )
 
     entries = _extract_take_profits(payload)
-    if entries:
-        orders, total_contracts = _normalise_take_profits(entries, result.get("contracts"))
-        if orders:
-            result["take_profit_orders"] = list(orders)
-            if total_contracts:
-                result["contracts"] = total_contracts
+    if entries is not None:
+        result["take_profit_orders"] = list(_normalise_take_profits(entries))
 
-    stop_ticks = _coerce_int(
-        payload.get("stop_ticks")
-        or payload.get("stop_loss_ticks")
-        or payload.get("stop"),
-        result.get("stop_ticks"),
-    )
-    if stop_ticks is not None:
-        result["stop_ticks"] = max(stop_ticks, 1)
-
-    stop_r_multiple = _coerce_float(payload.get("stop_r") or payload.get("stop_r_multiple"))
-    if stop_r_multiple is not None:
-        value = float(stop_r_multiple)
-        if value == 0:
-            result["stop_r_multiple"] = result.get("stop_r_multiple") or 1.0
-        else:
-            result["stop_r_multiple"] = abs(value)
-
-    stop_price = _coerce_float(payload.get("stop_price"))
-    if stop_price is not None:
-        result["stop_price"] = float(stop_price)
-
-    # Handle stop adjustments
     stop_adjustments = list(_normalise_stop_adjustments(payload))
     if "stop_adjustments" in payload:
-        result["stop_adjustments"] = stop_adjustments
-    elif stop_adjustments:
         result["stop_adjustments"] = stop_adjustments
     elif not isinstance(result.get("stop_adjustments"), list):
         result["stop_adjustments"] = []
 
-    def _should_override(field: str, provided: Any) -> bool:
-        flag = payload_meta.get(f"{field}_override")
-        if flag is not None:
-            return bool(flag)
-        if provided is None:
-            return False
-        current = result.get(field)
-        return provided != current
-
-    for key in (
-        "tick_size",
-        "tick_value",
-        "contract_size",
-        "maker_fee_rate",
-        "taker_fee_rate",
-        "quote_currency",
-    ):
-        provided = payload.get(key) if isinstance(payload, Mapping) else None
-        if _should_override(key, provided):
-            result[key] = provided
-            meta[f"{key}_override"] = True
-        else:
-            meta[f"{key}_override"] = False
-
-    if meta:
-        result["_meta"] = meta
-    elif "_meta" in result:
-        result.pop("_meta", None)
-
     return result
 
 
-def template_metrics(template: Optional[Mapping[str, Any]]) -> Dict[str, Optional[float]]:
-    """Compute aggregate metrics such as average reward and R:R."""
-
-    config = normalise_template(template)
-    take_profits: Sequence[Mapping[str, Any]] = config.get("take_profit_orders") or []
-    total_contracts = max(int(config.get("contracts") or 0), 0)
-    weighted_reward = 0.0
-    max_reward = 0.0
-    actual_contracts = 0
-    for order in take_profits:
-        ticks = abs(float(order.get("ticks") or 0.0))
-        contracts = max(int(order.get("contracts") or 0), 0)
-        weighted_reward += ticks * contracts
-        max_reward = max(max_reward, ticks)
-        actual_contracts += contracts
-    if total_contracts == 0 and actual_contracts > 0:
-        total_contracts = actual_contracts
-    avg_reward = weighted_reward / total_contracts if total_contracts else 0.0
-    stop_ticks = abs(float(config.get("stop_ticks") or 0.0))
-    reward_to_risk = (avg_reward / stop_ticks) if stop_ticks else None
-    return {
-        "average_reward_ticks": round(avg_reward, 4),
-        "max_reward_ticks": round(max_reward, 4),
-        "stop_ticks": round(stop_ticks, 4),
-        "reward_to_risk": round(reward_to_risk, 4) if reward_to_risk is not None else None,
-        "contracts": total_contracts,
-    }
-
-
-def merge_templates(*templates: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
-    """Merge multiple template sources from left to right."""
-
-    merged = deepcopy(DEFAULT_ATM_TEMPLATE)
-    for template in templates:
-        if template:
-            merged = normalise_template(template, base=merged)
-    return merged
-
-
 __all__ = [
-    "merge_templates",
     "normalise_template",
-    "template_metrics",
 ]

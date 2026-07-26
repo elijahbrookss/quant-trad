@@ -439,7 +439,9 @@ def test_intake_router_emits_final_per_series_continuity_summary() -> None:
     router._emit_final_continuity_summaries(run_id="run-1", bot_id="bot-1", reason="completed")
 
     event = next(event for event in get_observability_sink().snapshot()["events"] if event["name"] == "candle_continuity_summary")
-    assert event["context"]["boundary_name"] == "run_final"
+    assert event["context"]["boundary_name"] == "transport_run_final"
+    assert event["context"]["materiality"] == "diagnostic"
+    assert event["context"]["diagnostic_scope"] == "transport_continuity"
     assert event["context"]["series_key"] == "instrument-btc|1m"
     assert event["context"]["detected_gap_count"] == 1
     assert event["context"]["gap_count_by_type"]["unknown_gap"] == 1
@@ -463,7 +465,6 @@ async def test_intake_router_bounds_message_kind_metric_labels() -> None:
     router = IntakeRouter(registry=registry)
 
     await router.route({"kind": "future-kind-v99", "bot_id": "bot-1", "run_id": "run-1"})
-    await router.route({"kind": "bot_projection_refresh", "bot_id": "bot-1", "run_id": "run-1"})
 
     ingest_metrics = [
         metric
@@ -472,7 +473,6 @@ async def test_intake_router_bounds_message_kind_metric_labels() -> None:
     ]
 
     assert any(metric["tags"].get("message_kind") == "unknown" for metric in ingest_metrics)
-    assert any(metric["tags"].get("message_kind") == "deprecated" for metric in ingest_metrics)
 
 
 def test_symbol_mailbox_overflow_emits_drop_metrics() -> None:

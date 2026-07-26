@@ -5,13 +5,31 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, Sequence
 
-from ..storage import storage
+from ..storage.repos.instruments import find_instrument as find_instrument_record
+from ..storage.repos.observability import (
+    list_observability_events as list_observability_event_rows,
+)
+from ..storage.repos.report_materializations import (
+    claim_report_materialization_build as claim_report_build,
+    compute_report_input_fingerprint as compute_report_fingerprint,
+    get_materialized_run_report as get_materialized_report,
+    get_report_materialization_status as get_materialization_status,
+    mark_report_materialization_failed as mark_materialization_failed,
+    store_materialized_run_report as store_materialized_report,
+)
+from ..storage.repos.runs import get_bot_run, list_bot_runs
+from ..storage.repos.runtime_events import list_bot_runtime_events
+from ..storage.repos.trades import (
+    list_bot_trade_events_for_trades,
+    list_bot_trades_for_run,
+)
 
 
 BOTLENS_DOMAIN_PREFIX = "botlens_domain."
 BOTLENS_DECISION_EVENT_TYPE = f"{BOTLENS_DOMAIN_PREFIX}decision_emitted"
 BOTLENS_TRADE_OPENED_EVENT_TYPE = f"{BOTLENS_DOMAIN_PREFIX}trade_opened"
 BOTLENS_TRADE_CLOSED_EVENT_TYPE = f"{BOTLENS_DOMAIN_PREFIX}trade_closed"
+REPORT_OBSERVABILITY_EVENT_LIMIT = 2000
 
 
 def list_runs(
@@ -23,7 +41,7 @@ def list_runs(
     started_after: Optional[str] = None,
     started_before: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    return storage.list_bot_runs(
+    return list_bot_runs(
         run_type=run_type,
         status=status,
         bot_id=bot_id,
@@ -34,19 +52,19 @@ def list_runs(
 
 
 def get_run(run_id: str) -> Optional[Dict[str, Any]]:
-    return storage.get_bot_run(run_id)
+    return get_bot_run(run_id)
 
 
 def get_report_materialization_status(run_id: str) -> Dict[str, Any]:
-    return storage.get_report_materialization_status(run_id)
+    return get_materialization_status(run_id)
 
 
 def get_materialized_run_report(run_id: str) -> Optional[Dict[str, Any]]:
-    return storage.get_materialized_run_report(run_id)
+    return get_materialized_report(run_id)
 
 
 def compute_report_input_fingerprint(run_id: str) -> Dict[str, Any]:
-    return storage.compute_report_input_fingerprint(run_id)
+    return compute_report_fingerprint(run_id)
 
 
 def claim_report_materialization_build(
@@ -57,7 +75,7 @@ def claim_report_materialization_build(
     input_fingerprint_payload: Optional[Mapping[str, Any]] = None,
     force: bool = False,
 ) -> tuple[Dict[str, Any], bool, bool]:
-    return storage.claim_report_materialization_build(
+    return claim_report_build(
         run_id,
         cache_key=cache_key,
         input_fingerprint=input_fingerprint,
@@ -75,7 +93,7 @@ def store_materialized_run_report(
     input_fingerprint_payload: Optional[Mapping[str, Any]] = None,
     duration_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
-    return storage.store_materialized_run_report(
+    return store_materialized_report(
         run_id,
         payload,
         cache_key=cache_key,
@@ -94,7 +112,7 @@ def mark_report_materialization_failed(
     input_fingerprint_payload: Optional[Mapping[str, Any]] = None,
     duration_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
-    return storage.mark_report_materialization_failed(
+    return mark_materialization_failed(
         run_id,
         error=error,
         cache_key=cache_key,
@@ -199,7 +217,7 @@ def list_run_events(
     after_row_id = 0
     rows: List[Dict[str, Any]] = []
     while True:
-        batch = storage.list_bot_runtime_events(
+        batch = list_bot_runtime_events(
             bot_id=bot_id,
             run_id=run_id,
             after_seq=after_seq,
@@ -232,17 +250,21 @@ def list_decision_ledger(run_id: str) -> List[Dict[str, Any]]:
     return ledger
 
 
-def list_observability_events(run_id: str, *, limit: int = 2000) -> List[Dict[str, Any]]:
+def list_observability_events(
+    run_id: str,
+    *,
+    limit: int = REPORT_OBSERVABILITY_EVENT_LIMIT,
+) -> List[Dict[str, Any]]:
     """Return operational observability rows for report diagnostics.
 
     Observability rows are diagnostic-only. Callers must not treat them as
     canonical report identity unless a later contract explicitly promotes them.
     """
 
-    list_events = getattr(storage, "list_observability_events", None)
-    if not callable(list_events):
-        return []
-    return [dict(row) for row in list_events(run_id=run_id, limit=limit)]
+    return [
+        dict(row)
+        for row in list_observability_event_rows(run_id=run_id, limit=limit)
+    ]
 
 
 def summarize_decision_ledger(ledger: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
@@ -324,7 +346,7 @@ def get_result_readiness(
     ledger = list_decision_ledger(run_id)
     opened_rows = list_run_events(run_id, event_types=[BOTLENS_TRADE_OPENED_EVENT_TYPE])
     closed_rows = list_run_events(run_id, event_types=[BOTLENS_TRADE_CLOSED_EVENT_TYPE])
-    stored_trades = storage.list_bot_trades_for_run(run_id)
+    stored_trades = list_bot_trades_for_run(run_id)
 
     accepted_trade_ids = {
         str(entry.get("trade_id") or "").strip()
@@ -434,11 +456,11 @@ def get_result_readiness(
 
 
 def list_trades_for_run(run_id: str) -> List[Dict[str, Any]]:
-    return storage.list_bot_trades_for_run(run_id)
+    return list_bot_trades_for_run(run_id)
 
 
 def list_trade_events_for_trades(trade_ids: Sequence[str]) -> List[Dict[str, Any]]:
-    return storage.list_bot_trade_events_for_trades(trade_ids)
+    return list_bot_trade_events_for_trades(trade_ids)
 
 
 def find_instrument(
@@ -446,10 +468,11 @@ def find_instrument(
     exchange: Optional[str],
     symbol: str,
 ) -> Optional[Dict[str, Any]]:
-    return storage.find_instrument(datasource, exchange, symbol)
+    return find_instrument_record(datasource, exchange, symbol)
 
 
 __all__ = [
+    "REPORT_OBSERVABILITY_EVENT_LIMIT",
     "find_instrument",
     "get_run",
     "get_result_readiness",

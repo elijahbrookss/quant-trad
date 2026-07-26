@@ -12,6 +12,7 @@ from engines.indicator_engine.contracts import (
     OutputRef,
     RuntimeOverlay,
     RuntimeOutput,
+    require_overlay_history_bars,
 )
 from indicators.manifest import build_runtime_spec
 from overlays.schema import build_overlay
@@ -152,16 +153,10 @@ class TypedRegimeIndicator(Indicator):
         self._overlay_cache_bar_time: datetime | None = None
         self._overlay_cache: dict[str, RuntimeOverlay] | None = None
 
-    def configure_replay_window(self, *, history_bars: int | None = None) -> None:
-        if history_bars is None:
-            return
-        try:
-            parsed = int(history_bars)
-        except (TypeError, ValueError):
-            return
-        if parsed <= 0:
-            return
-        self._overlay_history_limit_bars = max(parsed, 1)
+    def configure_overlay_history(self, *, history_bars: int) -> None:
+        self._overlay_history_limit_bars = require_overlay_history_bars(
+            history_bars
+        )
         self._candles = deque(
             list(self._candles)[-self._overlay_history_limit_bars :],
             maxlen=self._overlay_history_limit_bars,

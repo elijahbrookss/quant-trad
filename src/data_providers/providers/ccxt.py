@@ -25,10 +25,8 @@ class CCXTProvider(BaseDataProvider):
         exchange_id: str,
         *,
         sandbox: Optional[bool] = None,
-        persistence=None,
-        settings=None,
     ):
-        super().__init__(persistence=persistence, settings=settings)
+        super().__init__()
         if not exchange_id:
             raise ValueError("exchange_id is required for CCXTProvider")
 

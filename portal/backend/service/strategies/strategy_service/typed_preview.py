@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from engines.bot_runtime.core.domain import Candle, StrategySignal
+from engines.bot_runtime.core.domain.candle_factory import build_candles_from_dataframe
+from engines.indicator_engine.contracts import configure_indicator_overlay_history
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
 from indicators.config import IndicatorExecutionContext
 from overlays.schema import build_overlay
@@ -40,24 +42,7 @@ def _parse_iso(value: str) -> datetime:
 
 
 def _build_candles(df: Any) -> List[Candle]:
-    import pandas as pd
-
-    if df is None or getattr(df, "empty", False):
-        return []
-    candles: List[Candle] = []
-    timestamps = pd.to_datetime(df.index, utc=True)
-    for timestamp, (_, row) in zip(timestamps, df.iterrows()):
-        candles.append(
-            Candle(
-                time=timestamp.to_pydatetime(),
-                open=float(row["open"]),
-                high=float(row["high"]),
-                low=float(row["low"]),
-                close=float(row["close"]),
-                volume=float(row["volume"]) if row.get("volume") is not None else None,
-            )
-        )
-    return candles
+    return build_candles_from_dataframe(df)
 
 
 def _build_marker(*, artifact: Mapping[str, Any], candle: Candle) -> Dict[str, Any]:
@@ -317,13 +302,6 @@ def _collect_ready_overlays(
         payload.setdefault("overlay_name", overlay_name)
         collected.append(payload)
     return collected
-
-
-def _configure_replay_window(indicators: Sequence[Any], *, history_bars: int) -> None:
-    for indicator in indicators:
-        configure = getattr(indicator, "configure_replay_window", None)
-        if callable(configure):
-            configure(history_bars=history_bars)
 
 
 def _require_mapping(payload: Mapping[str, Any], key: str) -> Mapping[str, Any]:
@@ -755,7 +733,7 @@ def evaluate_strategy_preview(
         candle_fetch_ms = max((time.perf_counter() - fetch_started) * 1000.0, 0.0)
         if not candles:
             raise ValueError(f"No candles returned for {instrument_id}")
-        _configure_replay_window(indicators, history_bars=len(candles))
+        configure_indicator_overlay_history(indicators, history_bars=len(candles))
 
         strategy_markers: List[Dict[str, Any]] = []
         strategy_signals: List[Dict[str, Any]] = []

@@ -8,6 +8,7 @@ import pytest
 
 pytest.importorskip("sqlalchemy")
 
+from engines.bot_runtime.strategy.models import Strategy
 from portal.backend.service.bots.runtime_control_service import BotRuntimeControlService
 
 
@@ -20,6 +21,21 @@ def _stub_lifecycle_bridge(monkeypatch):
     monkeypatch.setattr(
         "portal.backend.service.bots.runtime_control_service.emit_lifecycle_event",
         lambda payload: None,
+    )
+
+
+def _strategy() -> Strategy:
+    return Strategy(
+        id="strategy-1",
+        name="Strategy 1",
+        timeframe="1m",
+        datasource="demo",
+        exchange="paper",
+        atm_template_id=None,
+        atm_template={},
+        risk_config={},
+        indicator_links=[],
+        instrument_links=[],
     )
 
 
@@ -50,13 +66,7 @@ class _FakeConfigService:
         return {
             "strategy_id": "strategy-1",
             "wallet_config": {"balances": {"USDC": 100.0}},
-            "strategy": SimpleNamespace(
-                id="strategy-1",
-                name="Strategy 1",
-                timeframe="1m",
-                datasource="demo",
-                exchange="paper",
-            ),
+            "strategy": _strategy(),
             "runtime_readiness": {
                 "symbols": ["BTCUSDT"],
                 "profiles": [{"symbol": "BTCUSDT"}],
@@ -144,12 +154,8 @@ class _FakeStorage:
         row = dict(payload)
         assert str(row["run_id"]) in self.runs, "lifecycle checkpoints require an existing run row"
         self.lifecycle.setdefault(str(row["bot_id"]), []).append(row)
+        self.runs[str(row["run_id"])]["status"] = row["status"]
         return row
-
-    def update_bot_runtime_status(self, *, bot_id, run_id, status, telemetry_degraded=False):
-        _ = bot_id, telemetry_degraded
-        if str(run_id) in self.runs:
-            self.runs[str(run_id)]["status"] = status
 
 
 class _RecordingRunner:

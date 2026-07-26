@@ -41,6 +41,102 @@ def test_wallet_buy_and_sell_projection():
     assert abs(state.balances["USDC"] - 418.5) <= 1e-9
 
 
+def test_canonical_spot_fill_replay_orders_and_validates_wallet_before() -> None:
+    initialized = {
+        "event_id": "wallet-init",
+        "event_name": "WALLET_INITIALIZED",
+        "context": {
+            "currency": "USD",
+            "wallet_commit_seq": 0,
+            "wallet_event_order": 0,
+            "balance_before": 0.0,
+            "balance_after": 1000.0,
+            "wallet_after": {
+                "balances": {"USD": 1000.0},
+                "locked_margin": {},
+                "free_collateral": {"USD": 1000.0},
+                "margin_positions": {},
+            },
+        },
+    }
+    entry = {
+        "event_id": "entry-fill",
+        "event_name": "ENTRY_FILLED",
+        "context": {
+            "wallet_commit_seq": 1,
+            "trade_id": "trade-1",
+            "side": "buy",
+            "qty": 1.0,
+            "price": 100.0,
+            "notional": 100.0,
+            "base_currency": "BTC",
+            "quote_currency": "USD",
+            "accounting_mode": "spot",
+            "wallet_delta": {
+                "collateral_reserved": 0.0,
+                "collateral_released": 0.0,
+                "fee_paid": 1.0,
+            },
+            "wallet_before": {
+                "balances": {"USD": 1000.0},
+                "locked_margin": {},
+                "free_collateral": {"USD": 1000.0},
+            },
+        },
+    }
+    exit_fill = {
+        "event_id": "exit-fill",
+        "event_name": "EXIT_FILLED",
+        "context": {
+            "wallet_commit_seq": 2,
+            "trade_id": "trade-1",
+            "side": "sell",
+            "qty": 1.0,
+            "price": 110.0,
+            "notional": 110.0,
+            "base_currency": "BTC",
+            "quote_currency": "USD",
+            "accounting_mode": "spot",
+            "wallet_delta": {
+                "collateral_reserved": 0.0,
+                "collateral_released": 0.0,
+                "fee_paid": 1.0,
+            },
+            "wallet_before": {
+                "balances": {"BTC": 1.0, "USD": 899.0},
+                "locked_margin": {},
+                "free_collateral": {"BTC": 1.0, "USD": 899.0},
+            },
+        },
+    }
+
+    ordered = canonical_wallet_ledger_events([exit_fill, initialized, entry])
+    assert [event["event_name"] for event in ordered] == [
+        "WALLET_INITIALIZED",
+        "ENTRY_FILLED",
+        "EXIT_FILLED",
+    ]
+    validate_wallet_ledger_state(ordered)
+    state = project_wallet(ordered)
+
+    assert state.balances["BTC"] == pytest.approx(0.0)
+    assert state.balances["USD"] == pytest.approx(1008.0)
+
+    malformed_exit = {
+        **exit_fill,
+        "context": {
+            **exit_fill["context"],
+            "wallet_before": {
+                "balances": {"BTC": 1.0, "USD": 900.0},
+                "locked_margin": {},
+                "free_collateral": {"BTC": 1.0, "USD": 900.0},
+            },
+        },
+    }
+    with pytest.raises(ValueError, match="wallet_fill_state_mismatch"):
+        validate_wallet_ledger_state([initialized, entry, malformed_exit])
+
+
 def test_wallet_can_apply_rejections():
     ledger = WalletLedger()
     ledger.deposit({"USDC": 50, "BTC": 0.1})

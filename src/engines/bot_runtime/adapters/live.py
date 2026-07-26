@@ -23,26 +23,6 @@ class LiveAdapter(ExecutionAdapter):
         self._spot_adapter = spot_adapter
         self._derivatives_adapter = derivatives_adapter
 
-    def fill_market(
-        self,
-        *,
-        side: str,
-        requested_qty: float,
-        price: float,
-        fee_rate: float,
-        enforce_price_tick: bool,
-    ) -> Tuple[Optional[FillResult], Optional[FillRejection]]:
-        adapter = self._spot_adapter if self._short_requires_borrow else self._derivatives_adapter
-        if not adapter:
-            raise ValueError("LiveAdapter requires a configured execution adapter for this instrument.")
-        return adapter.fill_market(
-            side=side,
-            requested_qty=requested_qty,
-            price=price,
-            fee_rate=fee_rate,
-            enforce_price_tick=enforce_price_tick,
-        )
-
     def execute_order(
         self,
         order: FillOrder,
@@ -50,16 +30,7 @@ class LiveAdapter(ExecutionAdapter):
         adapter = self._spot_adapter if self._short_requires_borrow else self._derivatives_adapter
         if not adapter:
             raise ValueError("LiveAdapter requires a configured execution adapter for this instrument.")
-        execute_order = getattr(adapter, "execute_order", None)
-        if callable(execute_order):
-            return execute_order(order)
-        return adapter.fill_market(
-            side=order.side,
-            requested_qty=order.requested_qty,
-            price=order.price,
-            fee_rate=order.fee_rate,
-            enforce_price_tick=order.enforce_price_tick,
-        )
+        return adapter.execute_order(order)
 
 
 __all__ = ["LiveAdapter"]

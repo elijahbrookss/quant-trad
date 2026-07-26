@@ -1,6 +1,6 @@
 flowchart LR
     provider["Provider adapters<br/>source candles + metadata"]
-    cache["Candle/cache boundary<br/>sparse source truth"]
+    store["Canonical market feed<br/>causal source facts + gaps"]
     indicator["Indicator runtime<br/>initialize -> apply_bar -> snapshot"]
     strategy["Strategy evaluator<br/>typed outputs -> decision artifacts"]
     runtime["Bot runtime<br/>ordering, fills, fees, margin, wallet, settlement"]
@@ -10,8 +10,8 @@ flowchart LR
     ui["Frontend / BotLens<br/>inspection, not execution truth"]
     observability["Observability<br/>logs, metrics, Grafana, Loki"]
 
-    provider --> cache
-    cache --> indicator
+    provider --> store
+    store --> indicator
     indicator --> strategy
     strategy --> runtime
     runtime --> events
@@ -27,6 +27,6 @@ flowchart LR
     classDef truth fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
     classDef view fill:#111827,stroke:#a78bfa,color:#ede9fe
     classDef source fill:#13251d,stroke:#34d399,color:#dcfce7
-    class provider,cache source
+    class provider,store source
     class indicator,strategy,runtime,events truth
     class projections,reports,ui,observability view

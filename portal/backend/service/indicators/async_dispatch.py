@@ -8,7 +8,12 @@ import logging
 from typing import Any, Dict, Mapping, Optional
 
 from core.settings import get_settings
-from portal.backend.service.async_jobs import enqueue_job, find_reusable_job, get_job
+from portal.backend.service.async_jobs import (
+    enqueue_job,
+    enqueue_or_reuse_job,
+    find_reusable_job,
+    get_job,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -205,13 +210,21 @@ def enqueue_signal_job(
     }
     if request_fingerprint:
         payload["request_fingerprint"] = str(request_fingerprint)
-    job_id = enqueue_job(
+    partition_key = _series_partition_key(payload)
+    if request_fingerprint:
+        return enqueue_or_reuse_job(
+            job_type=JOB_TYPE_SIGNALS,
+            payload=payload,
+            partition_key=partition_key,
+            request_fingerprint=request_fingerprint,
+            max_attempts=2,
+        ).id
+    return enqueue_job(
         job_type=JOB_TYPE_SIGNALS,
         payload=payload,
-        partition_key=_series_partition_key(payload),
+        partition_key=partition_key,
         max_attempts=2,
     )
-    return job_id
 
 
 def enqueue_overlay_job(
@@ -242,13 +255,21 @@ def enqueue_overlay_job(
     }
     if request_fingerprint:
         payload["request_fingerprint"] = str(request_fingerprint)
-    job_id = enqueue_job(
+    partition_key = _series_partition_key(payload)
+    if request_fingerprint:
+        return enqueue_or_reuse_job(
+            job_type=JOB_TYPE_OVERLAYS,
+            payload=payload,
+            partition_key=partition_key,
+            request_fingerprint=request_fingerprint,
+            max_attempts=2,
+        ).id
+    return enqueue_job(
         job_type=JOB_TYPE_OVERLAYS,
         payload=payload,
-        partition_key=_series_partition_key(payload),
+        partition_key=partition_key,
         max_attempts=2,
     )
-    return job_id
 
 
 async def wait_for_job(

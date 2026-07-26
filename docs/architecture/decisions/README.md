@@ -3,13 +3,20 @@
 This folder backfills the durable architecture decisions already present in the
 contracts, code, tests, and boundary docs.
 
-The format is intentionally slim:
+The format is intentionally concise. Durable cleanup decisions include:
 
-- status and date,
-- context,
-- decision,
+- status and date, with retroactive decisions clearly marked,
+- context and decision,
+- invariants,
 - consequences,
+- rejected alternatives,
+- enforcing tests or evidence,
 - references.
+
+Use ADRs for choices that constrain future architecture or safety. Do not write
+an ADR for routine file movement, symbol renaming, or a mechanical extraction.
+A proposed ADR records a required direction whose enforcement is incomplete; it
+must not be cited as completed behavior.
 
 These records do not replace the platform contracts. Contracts remain normative;
 ADRs explain why the current shape exists and what tradeoffs future changes must
@@ -60,3 +67,12 @@ respect.
 | [0039](0039-use-shared-async-jobs-for-research-dispatch.md) | Use shared async jobs for research dispatch | Accepted |
 | [0040](0040-use-runtime-exit-plans-and-liquidity-roles.md) | Use runtime exit plans and liquidity roles | Accepted |
 | [0041](0041-use-canonical-execution-plan-and-order-fill-semantics.md) | Use canonical execution plans and order fill semantics | Accepted |
+| [0042](0042-use-runtime-event-ledger-as-lifecycle-truth.md) | Use the runtime event ledger as lifecycle truth | Accepted, retroactive cleanup |
+| [0043](0043-reconcile-accounting-from-canonical-fills-and-wallet-ledger.md) | Reconcile accounting from canonical fills and wallet ledger | Accepted, retroactive cleanup |
+| [0044](0044-enforce-known-at-prefix-invariance.md) | Enforce known-at prefix invariance | Accepted, retroactive cleanup |
+| [0045](0045-require-explicit-execution-and-exit-policy.md) | Require explicit execution and exit policy | Accepted, retroactive cleanup |
+| [0046](0046-fingerprint-exact-candle-inputs-and-keep-quality-separate.md) | Fingerprint exact candle inputs and keep quality separate | Accepted, retroactive cleanup |
+| [0047](0047-fence-async-job-ownership.md) | Fence async job ownership | Accepted |
+| [0048](0048-gate-agent-mutation-and-research-promotion.md) | Gate agent mutation and research promotion | Proposed |
+| [0049](0049-keep-live-order-submission-closed.md) | Keep live order submission closed | Accepted, retroactive cleanup |
+| [0050](0050-use-one-canonical-append-only-market-data-store.md) | Use one canonical append-only market-data store | Accepted, retroactive cleanup |

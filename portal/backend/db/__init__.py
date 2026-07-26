@@ -9,8 +9,6 @@ from .models import (
     BotRecord,
     BotTradeEventRecord,
     BotTradeRecord,
-    BotRunLifecycleEventRecord,
-    BotRunLifecycleRecord,
     BotRunLeaseRecord,
     BotRunStepRollupRecord,
     BotRunEventSeqAllocatorRecord,
@@ -29,6 +27,15 @@ from .models import (
     StrategyVariantRecord,
     SymbolPresetRecord,
 )
+from .market_data_models import (
+    MarketCandleVersionRecord,
+    MarketDataIngestionRunRecord,
+    MarketDataSeriesRecord,
+    MarketDataSourceRecord,
+    MarketDatasetRecord,
+    MarketDatasetSeriesRecord,
+    MarketGapEvidenceRecord,
+)
 from .session import Database, db
 
 __all__ = [
@@ -41,8 +48,6 @@ __all__ = [
     "BotRecord",
     "BotTradeEventRecord",
     "BotTradeRecord",
-    "BotRunLifecycleEventRecord",
-    "BotRunLifecycleRecord",
     "BotRunLeaseRecord",
     "BotRunStepRollupRecord",
     "BotRunEventSeqAllocatorRecord",
@@ -60,5 +65,12 @@ __all__ = [
     "StrategyRuleRecord",
     "StrategyVariantRecord",
     "SymbolPresetRecord",
+    "MarketCandleVersionRecord",
+    "MarketDataIngestionRunRecord",
+    "MarketDataSeriesRecord",
+    "MarketDataSourceRecord",
+    "MarketDatasetRecord",
+    "MarketDatasetSeriesRecord",
+    "MarketGapEvidenceRecord",
     "db",
 ]

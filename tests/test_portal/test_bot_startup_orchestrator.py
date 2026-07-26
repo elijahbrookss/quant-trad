@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
+from engines.bot_runtime.strategy.models import Strategy
 import portal.backend.service.bots.startup_service as startup_mod
 from portal.backend.service.bots.startup_lifecycle import BotLifecyclePhase
 from portal.backend.service.bots.startup_service import BotStartupOrchestrator
@@ -12,6 +11,21 @@ from portal.backend.service.bots.startup_service import BotStartupOrchestrator
 @pytest.fixture(autouse=True)
 def _disable_lifecycle_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(startup_mod, "emit_lifecycle_event", lambda _payload: None)
+
+
+def _strategy() -> Strategy:
+    return Strategy(
+        id="strategy-1",
+        name="Strategy 1",
+        timeframe="1m",
+        datasource="demo",
+        exchange="paper",
+        atm_template_id=None,
+        atm_template={},
+        risk_config={},
+        indicator_links=[],
+        instrument_links=[],
+    )
 
 
 class _FakeConfig:
@@ -38,13 +52,7 @@ class _FakeConfig:
         return {
             "strategy_id": "strategy-1",
             "wallet_config": {"balances": {"USDC": 100.0}},
-            "strategy": SimpleNamespace(
-                id="strategy-1",
-                name="Strategy 1",
-                timeframe="1m",
-                datasource="demo",
-                exchange="paper",
-            ),
+            "strategy": _strategy(),
             "runtime_readiness": {
                 "symbols": ["BTCUSDT", "ETHUSDT"],
                 "profiles": [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}],
@@ -92,11 +100,6 @@ class _FakeStorage:
         self._next_lifecycle_seq = max(self._next_lifecycle_seq, persisted["seq"] + 1)
         self.lifecycle.append(dict(persisted))
         return persisted
-
-    def update_bot_runtime_status(self, *, bot_id, run_id, status, telemetry_degraded=False):
-        _ = bot_id, run_id, status, telemetry_degraded
-        self.order.append(f"status:{status}")
-
 
 class _FakeRunner:
     def __init__(self, order: list[str]) -> None:
@@ -149,7 +152,7 @@ def test_startup_orchestrator_creates_run_before_container_launch():
     ]
     assert storage.lifecycle[-1]["phase"] == BotLifecyclePhase.AWAITING_CONTAINER_BOOT.value
     assert storage.lifecycle[0]["metadata"]["run_lease"]["runner_id"] == "runner-test"
-    assert [entry for entry in order if entry.startswith("status:")] == ["status:starting"]
+    assert {row["status"] for row in storage.lifecycle} == {"starting"}
 
 
 def test_startup_orchestrator_persists_startup_failed_phase():
@@ -180,7 +183,27 @@ def test_startup_orchestrator_persists_startup_failed_phase():
     assert storage.released_leases[-1]["status"] == "released"
     assert storage.lifecycle[-1]["phase"] == BotLifecyclePhase.STARTUP_FAILED.value
     assert "docker launch failed" in storage.lifecycle[-1]["message"]
-    assert [entry for entry in order if entry.startswith("status:")] == [
-        "status:starting",
-        "status:startup_failed",
-    ]
+    assert storage.lifecycle[-1]["status"] == "startup_failed"
+
+
+def test_startup_orchestrator_rejects_untyped_strategy_artifact() -> None:
+    order: list[str] = []
+    storage = _FakeStorage(order)
+
+    class _UntypedConfig(_FakeConfig):
+        def prepare_startup_artifacts(self, bot):
+            artifacts = super().prepare_startup_artifacts(bot)
+            artifacts["strategy"] = {"id": "strategy-1"}
+            return artifacts
+
+    orchestrator = BotStartupOrchestrator(
+        config_service=_UntypedConfig(),
+        storage=storage,
+        runner=_FakeRunner(order),
+        watchdog=_FakeWatchdog(order),
+    )
+
+    with pytest.raises(TypeError, match="typed Strategy"):
+        orchestrator.start_bot("bot-1")
+
+    assert storage.lifecycle[-1]["phase"] == BotLifecyclePhase.STARTUP_FAILED.value

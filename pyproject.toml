@@ -26,6 +26,7 @@ include = [
     "data_providers*",
     "engines*",
     "indicators*",
+    "market_data*",
     "overlays*",
     "portal*",
     "risk*",

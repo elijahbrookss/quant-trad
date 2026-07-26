@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import risk as risk_math
-from atm import merge_templates
+from atm import normalise_template
 from risk import normalise_risk_config
 
 from utils.log_context import build_log_context, merge_log_context, with_log_context
@@ -65,18 +65,15 @@ class LadderRiskEngine:
         risk_config: Optional[Mapping[str, Any]] = None,
     ):
         provided_template = config or {}
-        self.template = merge_templates(provided_template)
+        self.template = normalise_template(provided_template)
+        self.execution_plan = compile_runtime_execution_plan(self.template)
         self.instrument = instrument or {}
         self.risk_config = normalise_risk_config(risk_config)
         self.execution_profile = execution_profile or compile_series_execution_profile(
             self.instrument,
-            template=self.template,
             risk_config=self.risk_config,
         )
         self._runtime_log_context = build_log_context(
-            strategy_id=self.template.get("strategy_id"),
-            strategy_name=self.template.get("strategy_name"),
-            timeframe=self.template.get("timeframe"),
             symbol=self.instrument.get("symbol"),
             datasource=self.instrument.get("datasource"),
             exchange=self.instrument.get("exchange"),
@@ -92,26 +89,17 @@ class LadderRiskEngine:
             ),
         )
 
-        # Always validate - same for all modes (backtest, sim_trade, paper, live)
-        self._validate_template(self.template)
+        # Instrument validation is identical in backtest, sim, paper, and live modes.
         self._validate_instrument(self.instrument)
 
         self.tick_size = float(self.execution_profile.constraints.tick_size)
         if self.tick_size == 0:
             raise ValueError("tick_size required from compiled execution profile")
 
-        self.stop_ticks = max(int(self.template.get("stop_ticks") or 0), 0)
 
-        initial_stop_config = self.template.get("initial_stop")
-        if not isinstance(initial_stop_config, dict):
-            initial_stop_config = {}
-        self.r_multiple = float(initial_stop_config.get("atr_multiplier") or 1.0)
+        self.r_multiple = self.execution_plan.initial_stop.atr_multiplier
 
         self.base_risk_per_trade = coerce_float(self.execution_profile.risk.base_risk_per_trade)
-        self.stop_r_multiple = coerce_float(self.template.get("stop_r_multiple"))
-
-        self.execution_plan = compile_runtime_execution_plan(self.template)
-        self.execution_mode = self.execution_plan.entry.order_type
 
         self.contract_size = float(self.execution_profile.constraints.contract_size)
         if self.contract_size in (None, 0):
@@ -120,13 +108,6 @@ class LadderRiskEngine:
         if self.tick_value in (None, 0):
             raise ValueError("tick_value required from compiled execution profile")
 
-        risk_mode = str(initial_stop_config.get("mode") or "atr").lower()
-        self.risk_unit_mode = risk_mode if risk_mode in {"atr", "ticks"} else "atr"
-        self.ticks_stop = int(
-            self.template.get("ticks_stop")
-            or self.template.get("stop_ticks")
-            or self.stop_ticks
-        )
         self.global_risk_multiplier = float(self.execution_profile.risk.global_risk_multiplier)
         self.instrument_risk_multiplier = float(self.execution_profile.risk.instrument_risk_multiplier)
         self.amount_constraints = self.execution_profile.constraints.amount_constraints
@@ -154,7 +135,7 @@ class LadderRiskEngine:
         self.can_short = bool(self.execution_profile.capabilities.supports_short)
         self.short_requires_borrow = bool(self.execution_profile.capabilities.short_requires_borrow)
 
-        self.orders = self._orders_from_template()
+        self.orders = self._orders_from_execution_plan()
         self.targets = [int(order.get("ticks") or 0) for order in self.orders]
         self.quote_currency = str(self.execution_profile.instrument.quote_currency or "USD").upper()
         self.maker_fee = float(self.execution_profile.fees.maker_fee_rate)
@@ -180,9 +161,8 @@ class LadderRiskEngine:
         self._trade_change_log_max: int = 8192
         configured_context = self.runtime_log_context(
             targets=",".join(str(order.get("ticks") or order.get("r_multiple") or "?") for order in self.orders),
-            stop_ticks=self.stop_ticks,
             tick_size=self.tick_size,
-            execution_mode=self.execution_mode,
+            execution_mode=self.execution_plan.entry.order_type,
             fixed_horizon_bars=self._fixed_horizon_bars(),
             instrument_type=self.execution_profile.instrument.instrument_type if self.execution_profile is not None else None,
             accounting_mode=self.execution_profile.accounting_mode if self.execution_profile is not None else None,
@@ -274,62 +254,25 @@ class LadderRiskEngine:
             logger.warning(with_log_context("wallet_entry_settlement_rolled_back", context))
         return metadata
 
-    def _validate_template(self, template: Dict[str, Any]) -> None:
-        """Validate that required fields are present in template - same for all modes."""
-        missing_fields = []
-
-        # Validate stop configuration exists
-        if not template.get("initial_stop"):
-            missing_fields.append("initial_stop")
-
-        # Validate take profit orders exist
-        if not template.get("take_profit_orders"):
-            missing_fields.append("take_profit_orders")
-
-        if missing_fields:
-            raise ValueError(
-                f"Incomplete ATM template. Missing required fields: {', '.join(missing_fields)}. "
-                f"All modes (backtest/sim_trade/paper/live) require complete templates."
-            )
-
     def _validate_instrument(self, instrument: Dict[str, Any]) -> None:
         """Validate that instrument configuration is complete."""
         if not instrument:
             raise ValueError("Instrument configuration is required. Cannot proceed without instrument metadata.")
 
-    def _orders_from_template(self) -> List[Dict[str, Any]]:
-        orders: List[Dict[str, Any]] = []
-        entries = self.template.get("take_profit_orders") or []
-        base_contracts = int(self.template.get("contracts") or len(entries) or 0)
-        for idx, entry in enumerate(entries):
-            ticks = coerce_float(entry.get("ticks"))
-            r_multiple = coerce_float(entry.get("r_multiple"))
-            price = coerce_float(entry.get("price"))
-            if ticks is None and r_multiple is None and price is None:
-                continue
-            label = entry.get("label") or f"Target {idx + 1}"
-            size_fraction = coerce_float(entry.get("size_fraction"))
-            size_percent = None
-            if size_fraction is not None and 0 <= size_fraction <= 1:
-                size_percent = size_fraction * 100
+    def _orders_from_execution_plan(self) -> List[Dict[str, Any]]:
+        """Return target dictionaries projected from the validated execution plan."""
 
-            contracts = int(entry.get("contracts") or 0)
-            if contracts <= 0 and size_percent is not None and base_contracts > 0:
-                contracts = int(round((size_percent / 100) * base_contracts))
-            if contracts <= 0:
-                continue
-            orders.append(
-                {
-                    "label": label,
-                    "ticks": int(ticks) if ticks is not None else None,
-                    "r_multiple": r_multiple,
-                    "price": price,
-                    "contracts": contracts,
-                    "size_fraction": size_fraction,
-                    "id": entry.get("id"),
-                }
-            )
-        return orders
+        return [
+            {
+                "label": target.label,
+                "ticks": target.ticks,
+                "r_multiple": target.r_multiple,
+                "price": target.price,
+                "size_fraction": target.size_fraction,
+                "id": target.target_id,
+            }
+            for target in self.execution_plan.take_profits
+        ]
 
     @staticmethod
     def _new_order_intent_id() -> str:
@@ -341,9 +284,9 @@ class LadderRiskEngine:
 
     def _entry_request_id(self, candle: Candle, direction: str) -> str:
         bar_time = candle.time.isoformat() if getattr(candle, "time", None) is not None else ""
-        run_id = getattr(self, "run_id", None) or self.template.get("run_id") or ""
-        strategy_id = getattr(self, "strategy_id", None) or self.template.get("strategy_id") or ""
-        timeframe = self.template.get("timeframe") or self.instrument.get("timeframe") or ""
+        run_id = getattr(self, "run_id", None) or ""
+        strategy_id = getattr(self, "strategy_id", None) or ""
+        timeframe = self.instrument.get("timeframe") or ""
         instrument_id = self.instrument.get("id") or ""
         symbol = self.instrument.get("symbol") or ""
         decision_id = getattr(self, "last_decision_id", None) or ""
@@ -532,16 +475,23 @@ class LadderRiskEngine:
         offset_value: float,
         r_value: Optional[float],
     ) -> float:
-        offset_type = str(offset_type or "ticks").lower()
+        if offset_type == "ticks":
+            return float(offset_value) * float(self.tick_size)
         if offset_type == "atr_pct":
             if not self._has_valid_atr(candle.atr):
-                return 0.0
-            return float(candle.atr) * float(offset_value or 0.0)
+                raise RuntimeError(
+                    "compiled atr_pct limit offset requires valid ATR at entry"
+                )
+            return float(candle.atr) * float(offset_value)
         if offset_type == "r_fraction":
             if r_value in (None, 0):
-                return 0.0
-            return float(r_value) * float(offset_value or 0.0)
-        return float(offset_value or 0.0) * float(self.tick_size)
+                raise RuntimeError(
+                    "compiled r_fraction limit offset requires a positive R value at entry"
+                )
+            return float(r_value) * float(offset_value)
+        raise RuntimeError(
+            f"compiled execution plan contains unsupported offset_type={offset_type!r}"
+        )
 
     def _build_limit_params(
         self,
@@ -576,12 +526,11 @@ class LadderRiskEngine:
 
     def build_entry_request(self, candle: Candle, direction: str) -> EntryRequest:
         entry_request_id = self._entry_request_id(candle, direction)
+        order_type = self.execution_plan.entry.order_type
         atr_at_entry = candle.atr if self._has_valid_atr(candle.atr) else None
         r_ticks = self._compute_r_ticks(candle)
 
         r_value = self._r_value(candle)
-        if self.stop_r_multiple not in (None, 0) and r_value not in (None, 0):
-            r_value = float(self.stop_r_multiple) * float(r_value)
 
         risk_based_qty = self._calculate_total_contracts(r_ticks)
         capped_qty, was_margin_capped, margin_info = self._cap_qty_by_margin(
@@ -607,7 +556,7 @@ class LadderRiskEngine:
                 r_value=r_value,
                 atr_at_entry=atr_at_entry,
                 r_multiple_at_entry=self.r_multiple,
-                order_type="market" if self.execution_mode != "limit_maker" else "limit_maker",
+                order_type=order_type,
                 limit_params=None,
                 side="buy" if direction == "long" else "sell",
                 requested_price=float(candle.close),
@@ -669,7 +618,7 @@ class LadderRiskEngine:
                 r_value=r_value,
                 atr_at_entry=atr_at_entry,
                 r_multiple_at_entry=self.r_multiple,
-                order_type="market" if self.execution_mode != "limit_maker" else "limit_maker",
+                order_type=order_type,
                 limit_params=None,
                 side="buy" if direction == "long" else "sell",
                 requested_price=float(candle.close),
@@ -705,7 +654,7 @@ class LadderRiskEngine:
                 r_value=r_value,
                 atr_at_entry=atr_at_entry,
                 r_multiple_at_entry=self.r_multiple,
-                order_type="market" if self.execution_mode != "limit_maker" else "limit_maker",
+                order_type=order_type,
                 limit_params=None,
                 side="buy" if direction == "long" else "sell",
                 requested_price=float(candle.close),
@@ -724,7 +673,6 @@ class LadderRiskEngine:
 
         requested_qty = float(normalization.qty_final)
 
-        order_type = "market" if self.execution_mode != "limit_maker" else "limit_maker"
         limit_params: Optional[LimitParams] = None
         if order_type == "limit_maker":
             limit_params = self._build_limit_params(candle, direction=direction, r_value=r_value)
@@ -1131,11 +1079,9 @@ class LadderRiskEngine:
                 if idx < len(legs):
                     return max(float(legs[idx].ticks or 0), 0.0)
             return None
-        if trailing.ticks not in (None, 0):
-            return max(float(trailing.ticks), 0.0)
-        if trailing.r_multiple not in (None, 0) and r_ticks not in (None, 0):
+        if trailing.r_multiple is not None and r_ticks not in (None, 0):
             return max(float(trailing.r_multiple) * float(r_ticks), 0.0)
-        return None
+        raise RuntimeError("compiled r_multiple trailing plan has no usable activation")
 
     def _trailing_distance_ticks(self, atr_at_entry: Optional[float]) -> Optional[float]:
         trailing = self.execution_plan.trailing
@@ -1188,14 +1134,19 @@ class LadderRiskEngine:
             trigger_target_id: Optional[str] = None
             trigger_ticks = rule.trigger_ticks
             if rule.trigger_type == "r_multiple":
-                if trigger_ticks in (None, 0):
-                    if rule.trigger_value in (None, 0) or r_ticks in (None, 0):
-                        continue
+                if trigger_ticks is None:
+                    if rule.trigger_value is None or r_ticks in (None, 0):
+                        raise RuntimeError(
+                            "compiled r_multiple stop adjustment has no usable trigger"
+                        )
                     trigger_ticks = float(rule.trigger_value) * float(r_ticks)
             else:
                 trigger_target_id = str(rule.trigger_value or "").strip() or None
                 if trigger_target_id not in leg_ids:
-                    continue
+                    raise RuntimeError(
+                        "compiled target_hit stop adjustment references an unavailable target "
+                        f"target_id={trigger_target_id!r}"
+                    )
             adjustments.append(
                 RuntimeStopAdjustment(
                     trigger_type=rule.trigger_type,
@@ -1531,13 +1482,10 @@ class LadderRiskEngine:
         step = self.qty_step
         if self.execution_profile is not None and self.execution_profile.is_derivatives():
             if step not in (None, 0):
-                if step >= 1 and abs(step - round(step)) <= 1e-9:
-                    return float(step)
-                return None
+                return float(step)
             symbol = self.instrument.get("symbol")
             raise ValueError(f"Missing instrument metadata qty step for TP allocation: {symbol}")
-
-        if step not in (None, 0) and step >= 1 and abs(step - round(step)) <= 1e-9:
+        if step not in (None, 0):
             return float(step)
         return None
 
@@ -1545,20 +1493,24 @@ class LadderRiskEngine:
         self,
         *,
         qty_final: float,
-        tp_leg_count: int,
+        size_fractions: Sequence[float],
         step: float,
     ) -> Tuple[List[float], List[int]]:
+        tp_leg_count = len(size_fractions)
         if tp_leg_count <= 0:
             return [], []
         total_units = int(math.floor((qty_final + 1e-12) / step))
         if total_units <= 0:
             return [0.0 for _ in range(tp_leg_count)], list(range(1, tp_leg_count + 1))
-        if total_units < tp_leg_count:
-            units = [1] * total_units + [0] * (tp_leg_count - total_units)
-        else:
-            base = total_units // tp_leg_count
-            remainder = total_units % tp_leg_count
-            units = [base + (1 if idx < remainder else 0) for idx in range(tp_leg_count)]
+        requested_units = [float(total_units) * fraction for fraction in size_fractions]
+        units = [int(math.floor(value + 1e-12)) for value in requested_units]
+        remaining_units = total_units - sum(units)
+        allocation_order = sorted(
+            range(tp_leg_count),
+            key=lambda idx: (-(requested_units[idx] - units[idx]), idx),
+        )
+        for idx in allocation_order[:remaining_units]:
+            units[idx] += 1
         contracts = [float(unit) * float(step) for unit in units]
         dropped = [idx + 1 for idx, qty in enumerate(contracts) if qty <= 0]
         return contracts, dropped
@@ -1612,7 +1564,9 @@ class LadderRiskEngine:
                 target_ticks = int(round(computed_ticks))
 
             if target_price is None:
-                continue
+                raise RuntimeError(
+                    f"compiled take-profit target {order.get('id')!r} has no executable price"
+                )
 
             leg_specs.append(
                 {
@@ -1633,9 +1587,10 @@ class LadderRiskEngine:
 
         tp_step = self._resolve_tp_step()
         if tp_step is not None:
+            size_fractions = [float(spec["order"]["size_fraction"]) for spec in leg_specs]
             contracts_by_leg, dropped_legs = self._allocate_tp_contracts(
                 qty_final=qty_final_value,
-                tp_leg_count=tp_leg_count,
+                size_fractions=size_fractions,
                 step=tp_step,
             )
         else:
@@ -1889,6 +1844,7 @@ class LadderRiskEngine:
             self._trade_material_value(getattr(trade, "fixed_horizon_bars", None)),
             isoformat(getattr(trade, "closed_at", None)),
             str(getattr(trade, "close_reason", "") or ""),
+            str(getattr(trade, "reason_code", "") or ""),
             self._trade_material_value(getattr(trade, "gross_pnl", None)),
             self._trade_material_value(getattr(trade, "fees_paid", None)),
             self._trade_material_value(getattr(trade, "net_pnl", None)),

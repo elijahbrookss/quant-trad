@@ -2,9 +2,9 @@ name: Tests with Coverage
 
 on:
   push:
-    branches: [develop, test, main]
+    branches: [develop, main]
   pull_request:
-    branches: [develop, test, main]
+    branches: [develop, main]
 
 jobs:
   pr-suite:

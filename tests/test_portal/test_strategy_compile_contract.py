@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -363,3 +364,39 @@ def test_create_strategy_variant_validates_output_filters_against_compile(monkey
 
     assert saved["rules"][0]["guards"][0]["field"] == "expansion_state"
     assert payload["name"] == "expanding-only"
+
+
+def test_save_atm_template_rejects_unresolved_target_before_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted = False
+
+    def _persist(_payload):
+        nonlocal persisted
+        persisted = True
+        return {}
+
+    monkeypatch.setattr(facade, "upsert_atm_template", _persist)
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape("does not reference a configured target"),
+    ):
+        facade.save_atm_template(
+            {
+                "name": "Invalid target reference",
+                "template": {
+                    "take_profit_orders": [{"id": "tp-1", "ticks": 10, "size_fraction": 1.0}],
+                    "stop_adjustments": [
+                        {
+                            "id": "sa-missing-target",
+                            "trigger_type": "target_hit",
+                            "trigger_value": "tp-missing",
+                            "action_type": "move_to_breakeven",
+                        }
+                    ],
+                },
+            }
+        )
+
+    assert persisted is False

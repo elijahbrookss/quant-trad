@@ -257,3 +257,28 @@ def test_strategy_loader_resolves_variant_by_name(monkeypatch) -> None:
     assert strategy.variant_id == "variant-1"
     assert strategy.variant_name == "expanding-only"
     assert strategy.rules["rule-1"]["guards"][0]["field"] == "expansion_state"
+
+
+def test_strategy_loader_rejects_missing_referenced_atm_template(monkeypatch) -> None:
+    db = _SqliteDb()
+    monkeypatch.setattr("portal.backend.service.bots.strategy_loader.db", db)
+
+    with db.session() as session:
+        session.add(
+            StrategyRecord(
+                id="strategy-1",
+                name="Strategy 1",
+                description=None,
+                timeframe="1m",
+                datasource="demo",
+                exchange="demo",
+                atm_template_id="missing-atm",
+                risk_config={},
+            )
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="ATM template not found: missing-atm for strategy strategy-1",
+    ):
+        StrategyLoader.fetch_strategy("strategy-1")

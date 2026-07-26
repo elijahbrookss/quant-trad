@@ -11,6 +11,7 @@ import pytest
 
 pytest.importorskip("sqlalchemy")
 
+import portal.backend.service.bots.botlens_canonical_facts as canonical_facts_mod
 import portal.backend.service.bots.container_runtime as runtime_mod
 import portal.backend.service.bots.container_runtime_telemetry as telemetry_mod
 from portal.backend.service.bots.botlens_runtime_state import BotLensRuntimeState
@@ -26,20 +27,52 @@ def _wait_until(predicate, *, timeout_s: float = 1.0) -> None:
     raise AssertionError("timed out waiting for background transport worker")
 
 
-def test_persist_lifecycle_phase_does_not_write_status_for_non_terminal_phase(
+def test_planned_candle_inventory_comes_from_backend_preflight_metadata() -> None:
+    inventory = runtime_mod._planned_candle_series_inventory(
+        {
+            "timeframe": "1h",
+            "config_snapshot": {
+                "runtime_readiness": {
+                    "timeframe": "1h",
+                    "profiles": [
+                        {
+                            "instrument_id": "instrument-btc",
+                            "symbol": "BTC",
+                        },
+                        {
+                            "instrument_id": "instrument-eth",
+                            "symbol": "ETH",
+                        },
+                    ],
+                }
+            },
+        },
+        strategy_id="strategy-1",
+    )
+
+    assert inventory == [
+        {
+            "strategy_id": "strategy-1",
+            "instrument_id": "instrument-btc",
+            "symbol": "BTC",
+            "timeframe": "1h",
+        },
+        {
+            "strategy_id": "strategy-1",
+            "instrument_id": "instrument-eth",
+            "symbol": "ETH",
+            "timeframe": "1h",
+        },
+    ]
+
+
+def test_persist_lifecycle_phase_uses_canonical_checkpoint_for_non_terminal_phase(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    status_calls: list[dict[str, object]] = []
-
     monkeypatch.setattr(
         runtime_mod,
         "record_bot_run_lifecycle_checkpoint",
         lambda payload: {**dict(payload), "status": "running"},
-    )
-    monkeypatch.setattr(
-        runtime_mod,
-        "update_bot_runtime_status",
-        lambda **kwargs: status_calls.append(dict(kwargs)),
     )
     monkeypatch.setattr(runtime_mod, "_notify_backend_lifecycle_event", lambda **kwargs: True)
 
@@ -54,23 +87,15 @@ def test_persist_lifecycle_phase_does_not_write_status_for_non_terminal_phase(
     )
 
     assert result["status"] == "running"
-    assert status_calls == []
 
 
-def test_persist_lifecycle_phase_writes_status_for_terminal_phase(
+def test_persist_lifecycle_phase_uses_canonical_checkpoint_for_terminal_phase(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    status_calls: list[dict[str, object]] = []
-
     monkeypatch.setattr(
         runtime_mod,
         "record_bot_run_lifecycle_checkpoint",
         lambda payload: {**dict(payload), "status": "completed"},
-    )
-    monkeypatch.setattr(
-        runtime_mod,
-        "update_bot_runtime_status",
-        lambda **kwargs: status_calls.append(dict(kwargs)),
     )
     monkeypatch.setattr(runtime_mod, "_notify_backend_lifecycle_event", lambda **kwargs: True)
 
@@ -85,30 +110,15 @@ def test_persist_lifecycle_phase_writes_status_for_terminal_phase(
     )
 
     assert result["status"] == "completed"
-    assert status_calls == [
-        {
-            "bot_id": "bot-1",
-            "run_id": "run-1",
-            "status": "completed",
-            "telemetry_degraded": False,
-        }
-    ]
 
 
-def test_persist_lifecycle_phase_writes_status_for_startup_failed_phase(
+def test_persist_lifecycle_phase_uses_canonical_checkpoint_for_startup_failed_phase(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    status_calls: list[dict[str, object]] = []
-
     monkeypatch.setattr(
         runtime_mod,
         "record_bot_run_lifecycle_checkpoint",
         lambda payload: {**dict(payload), "status": "startup_failed"},
-    )
-    monkeypatch.setattr(
-        runtime_mod,
-        "update_bot_runtime_status",
-        lambda **kwargs: status_calls.append(dict(kwargs)),
     )
     monkeypatch.setattr(runtime_mod, "_notify_backend_lifecycle_event", lambda **kwargs: True)
 
@@ -123,14 +133,6 @@ def test_persist_lifecycle_phase_writes_status_for_startup_failed_phase(
     )
 
     assert result["status"] == "startup_failed"
-    assert status_calls == [
-        {
-            "bot_id": "bot-1",
-            "run_id": "run-1",
-            "status": "startup_failed",
-            "telemetry_degraded": False,
-        }
-    ]
 
 
 def test_handle_worker_terminal_event_records_explicit_terminal_statuses() -> None:
@@ -263,7 +265,7 @@ def test_persist_paper_market_stream_run_summary_merges_existing_summary(
 
     assert len(persisted) == 1
     assert persisted[0]["run_id"] == "run-1"
-    assert persisted[0]["status"] == "completed"
+    assert "status" not in persisted[0]
     summary = persisted[0]["summary"]
     assert summary["existing_metric"] == 7
     assert summary["paper_market_stream"]["totals"]["event_counts"] == {
@@ -298,7 +300,7 @@ def test_series_worker_reports_structured_startup_error_before_process_exit(
 
     monkeypatch.setattr(runtime_mod.db, "reset_for_fork", lambda: None)
     monkeypatch.setattr(runtime_mod, "BotRuntime", _FakeRuntime)
-    monkeypatch.setattr(runtime_mod, "build_bot_runtime_deps", lambda: object())
+    monkeypatch.setattr(runtime_mod, "build_bot_runtime_deps", lambda **_kwargs: object())
 
     runtime_mod._series_worker(
         run_id="run-1",
@@ -441,6 +443,8 @@ def test_build_canonical_wallet_initialized_fact_is_run_scoped_and_absolute() ->
     assert wallet_event["event_name"] == "WALLET_INITIALIZED"
     assert "series_key" not in wallet_event or wallet_event["series_key"] is None
     assert wallet_event["run_seq"] == 7
+    assert wallet_event["source_run_seq"] == 0
+    assert wallet_event["source_run_seq_status"] == "run_initialization"
     assert wallet_event["wallet_commit_seq"] == 0
     assert wallet_event["wallet_commit_seq_status"] == "runtime_assigned"
     assert wallet_event["wallet_event_order"] == 0
@@ -455,20 +459,18 @@ def test_build_canonical_wallet_initialized_fact_is_run_scoped_and_absolute() ->
 def test_append_canonical_wallet_initialized_fact_allocates_one_run_seq_and_persists_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    append_calls: list[dict[str, object]] = []
+    persistence_calls: list[dict[str, object]] = []
 
-    def _append_batch(**kwargs):  # noqa: ANN003
-        append_calls.append(dict(kwargs))
-        return {
-            "seq": kwargs["seq"],
-            "event_count": 1,
-            "row_count": 1,
-            "inserted_rows": 1,
-            "event_ids": ("event-1",),
-            "retention_summary": {},
-        }
+    def _record(rows, *, context=None):  # noqa: ANN001
+        persistence_calls.append(
+            {
+                "rows": [dict(row) for row in rows],
+                "context": dict(context or {}),
+            }
+        )
+        return len(rows)
 
-    monkeypatch.setattr(runtime_mod, "append_botlens_canonical_fact_batch", _append_batch)
+    monkeypatch.setattr(canonical_facts_mod, "record_bot_runtime_events_batch", _record)
     proxy = {
         "runtime_event_seq": _ProxySeqCounter(11),
         "lock": _ProxyLock(),
@@ -479,23 +481,64 @@ def test_append_canonical_wallet_initialized_fact_allocates_one_run_seq_and_pers
         run_id="run-1",
         balances={"USD": 10_000.0},
         shared_wallet_proxy=proxy,
+        initialized_at="2026-01-01T00:00:00Z",
     )
 
-    assert len(append_calls) == 1
+    assert len(persistence_calls) == 1
     assert proxy["runtime_event_seq"].get() == 12
-    assert append_calls[0]["bot_id"] == "bot-1"
-    assert append_calls[0]["run_id"] == "run-1"
-    assert append_calls[0]["seq"] == 12
-    assert append_calls[0]["batch_kind"] == "botlens_runtime_facts"
     payload = result["payload"]
     assert payload["run_seq"] == 12
+    assert payload["bridge_session_id"] == "container-wallet-initialization:run-1"
+    assert payload["known_at"] == "2026-01-01T00:00:00Z"
+    assert payload["event_time"] == "2026-01-01T00:00:00Z"
     assert payload["worker_id"] == "container"
     assert len(payload["facts"]) == 1
     assert payload["facts"][0]["wallet_event"]["event_name"] == "WALLET_INITIALIZED"
     assert payload["facts"][0]["wallet_event"]["run_seq"] == 12
     assert payload["facts"][0]["wallet_event"]["wallet_commit_seq"] == 0
     assert payload["facts"][0]["wallet_event"]["wallet_commit_seq_status"] == "runtime_assigned"
+    persisted_row = persistence_calls[0]["rows"][0]
+    assert persisted_row["bot_id"] == "bot-1"
+    assert persisted_row["run_id"] == "run-1"
+    assert persisted_row["seq"] == 12
+    assert persisted_row["payload"]["event_name"] == "WALLET_INITIALIZED"
+    assert persistence_calls[0]["context"]["message_kind"] == "botlens_runtime_facts"
+    assert persistence_calls[0]["context"]["source_reason"] == "wallet_initialized"
+    assert result["append_result"]["row_count"] == 1
     assert result["append_result"]["inserted_rows"] == 1
+    assert result["idempotent_replay"] is False
+
+
+def test_append_canonical_wallet_initialized_fact_accepts_exact_persistence_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        runtime_mod,
+        "append_botlens_canonical_fact_batch",
+        lambda **_kwargs: {
+            "seq": 23,
+            "event_count": 1,
+            "row_count": 1,
+            "inserted_rows": 0,
+            "event_ids": ("event-1",),
+            "retention_summary": {},
+        },
+    )
+    proxy = {
+        "runtime_event_seq": _ProxySeqCounter(22),
+        "lock": _ProxyLock(),
+    }
+
+    result = runtime_mod._append_canonical_wallet_initialized_fact(
+        bot_id="bot-1",
+        run_id="run-1",
+        balances={"USD": 10_000.0},
+        shared_wallet_proxy=proxy,
+        initialized_at="2026-01-01T00:00:00Z",
+    )
+
+    assert result["append_result"]["inserted_rows"] == 0
+    assert result["idempotent_replay"] is True
 
 
 def _large_runtime_facts_payload(
@@ -1503,3 +1546,52 @@ def test_handle_worker_phase_event_ignores_stale_runtime_subscribing_after_await
     assert ctx.runtime_state == BotLensRuntimeState.AWAITING_FIRST_SNAPSHOT.value
     assert persisted == []
     assert ctx.series_states["BTC"]["status"] == "awaiting_first_snapshot"
+
+
+def test_backtest_market_data_scope_captures_and_persists_one_watermark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted: list[dict] = []
+    monkeypatch.setattr(
+        runtime_mod.market_data_repo, "current_commit_seq", lambda: 73
+    )
+    monkeypatch.setattr(
+        runtime_mod,
+        "get_bot_run",
+        lambda run_id: {
+            "run_id": run_id,
+            "config_snapshot": {"existing": "value"},
+        },
+    )
+    monkeypatch.setattr(
+        runtime_mod, "upsert_bot_run", lambda payload: persisted.append(payload) or payload
+    )
+    config = {"run_type": "backtest"}
+
+    scope = runtime_mod._bind_backtest_market_data_scope(config, run_id="run-1")
+
+    assert scope == {
+        "schema_version": "market_data_read_scope.v1",
+        "as_of_commit_seq": 73,
+        "contract_version": "candle.ohlcv.v1",
+    }
+    assert config["market_data_as_of_commit_seq"] == 73
+    assert persisted == [
+        {
+            "run_id": "run-1",
+            "config_snapshot": {
+                "existing": "value",
+                "market_data_read_scope": scope,
+            },
+        }
+    ]
+
+
+def test_paper_market_data_scope_does_not_pin_live_reads() -> None:
+    config = {"run_type": "paper"}
+
+    assert (
+        runtime_mod._bind_backtest_market_data_scope(config, run_id="run-1")
+        is None
+    )
+    assert "market_data_as_of_commit_seq" not in config

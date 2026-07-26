@@ -31,7 +31,7 @@ which identifiers carry meaning across boundaries.
 
 - [Architecture overview](engineering/architecture.md): backend, runtime, frontend, storage, and observability relationships.
 - [Runtime engine](engineering/runtime-engine.md): concise runtime internals summary with links to deep design docs.
-- [Data layer](engineering/data-layer.md): provider adapters, candle cache, sparse candles, and gap classification.
+- [Data layer](engineering/data-layer.md): provider adapters, canonical candle intake, causal reads, provenance, and gap classification.
 - [Observability](engineering/observability.md): logs, metrics, runtime events, BotLens diagnostics, Grafana, and Loki.
 - [Security layer](architecture/security/SECURITY_LAYER.md): credential handling, trust boundaries, known gaps, and post-quantum risk points.
 - [Engineering standards](engineering/README.md): testing, CI, observability doctrine, and documentation writing guidance.
@@ -40,7 +40,7 @@ which identifiers carry meaning across boundaries.
 
 - [Creating an indicator](guides/creating-an-indicator.md): minimal authoring checklist and example links.
 - [Creating a strategy](guides/creating-a-strategy.md): typed-output decision flow and test expectations.
-- [Adding a provider](guides/adding-a-provider.md): adapter, candle, cache, gap, and test expectations.
+- [Adding a provider](guides/adding-a-provider.md): adapter, explicit intake, known-at, provider-gap, and test expectations.
 - [Binance futures public data setup](guides/binance-futures-public-data.md): target setup and ingestion contract for archive-backed USD-M perpetual research data.
 - [Coinbase derivatives paper setup](guides/coinbase-derivatives-paper-setup.md): target setup for Coinbase product metadata, WebSockets, and provider-backed paper runs.
 

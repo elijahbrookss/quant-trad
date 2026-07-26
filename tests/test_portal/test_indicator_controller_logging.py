@@ -11,10 +11,10 @@ from portal.backend.controller import indicators
 
 @pytest.mark.asyncio
 async def test_overlay_endpoint_logs_handled_runtime_errors(caplog, monkeypatch):
-    def _raise_runtime_error(**kwargs):
+    def _raise_runtime_error(*args, **kwargs):
         raise RuntimeError("market_profile_profile_missing_known_at: every profile must include known_at")
 
-    monkeypatch.setattr(indicators, "overlays_for_instance", _raise_runtime_error)
+    monkeypatch.setattr(indicators, "get_instance_meta", _raise_runtime_error)
     request = indicators.OverlayRequest(
         start="2025-12-19T23:00:00Z",
         end="2026-03-19T22:00:00Z",

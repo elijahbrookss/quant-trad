@@ -7,7 +7,7 @@ This document describes the current GitHub Actions test topology as it actually 
 - Fail fast on core/runtime contract regressions.
 - Isolate optional-provider and web import boundary failures.
 - Avoid hidden coupling by centralizing suite definitions.
-- Keep the PR gate fast enough that it stays on.
+- Run every backend test that does not require a live database.
 
 ## Current CI Flow
 
@@ -23,12 +23,15 @@ Suite commands are centralized in `scripts/ci/run_test_suite.sh` and run directl
 - Product/runtime behavior is still container-first.
 - These are not the same thing.
 
-The current CI job is intentionally a fast regression screen, not a full runtime-faithful environment.
+The current CI job is a complete non-database backend regression screen, not a
+full runtime-faithful environment.
 
 ## Why this structure
 
 - GitHub runners do not have the project database available.
 - PR CI omits tests marked `db` before collection so DB-backed modules are not imported for a job that cannot run them.
+- The full non-database suite runs in roughly the same time as the retired
+  filename allowlist, so the PR gate has no second source of test ownership.
 - The PR gate is one job to avoid repeated dependency-install and job-rounding overhead.
 - A single suite-runner script reduces drift between workflow YAML and actual test commands.
 - GitHub-host execution avoids spending time fighting container orchestration for every PR.
@@ -55,11 +58,11 @@ If a bug only appears once services are inside the Docker network, host-run PR C
 ## Safe Landing Path
 
 ### Phase 1 (now)
-- Host-run `pr` profile only.
+- Host-run all non-database backend tests.
 - DB-marked tests omitted from GitHub PR CI.
 
 ### Phase 2
-- Continue moving high-value tests into semantic profiles instead of file-list routing.
+- Keep semantic profiles for focused diagnosis and local development.
 - Delete or downgrade low-value tests that only freeze implementation shape.
 
 ### Phase 3
@@ -84,7 +87,8 @@ To mimic the current GitHub job locally:
 
 Useful local-only layers:
 
-- `./scripts/ci/run_test_suite.sh backend` runs all non-DB tests.
+- `./scripts/ci/run_test_suite.sh backend` is an explicit alias for the same
+  all-non-database test boundary as `pr`.
 - `./scripts/ci/run_test_suite.sh full` runs the full pytest suite, with DB tests skipped unless `RUN_DB_TESTS=1`.
 - `./scripts/ci/run_test_suite.sh db` runs DB-marked tests and requires a reachable `PG_DSN`.
 - `./scripts/ci/run_test_suite.sh runtime` runs the runtime profile without DB-marked tests.
@@ -110,7 +114,9 @@ This avoids dependency on executable bits from host mounts and matches the robus
 
 Do not assume GitHub PR CI proves container/runtime correctness.
 
-It proves the selected fast suites passed on a clean runner host. That is still useful. It is just a smaller claim.
+It proves every non-database backend test passed on a clean runner host. That
+is still useful, but it is not evidence for database or composed-service
+behavior.
 
 ## Agent CI Preflight Checklist
 

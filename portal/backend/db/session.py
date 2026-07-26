@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from contextlib import contextmanager
 from typing import Dict, Iterator, Optional
 
@@ -15,10 +16,11 @@ from sqlalchemy.schema import CreateIndex, CreateSchema, CreateTable
 
 from .models import (
     Base,
+    REQUIRED_ASYNC_JOB_CONSTRAINTS,
+    REQUIRED_ASYNC_JOB_INDEXES,
     REQUIRED_BOT_RUN_INDEXES,
     REQUIRED_BOT_RUN_EVENT_INDEXES,
     REQUIRED_BOT_RUN_LEASE_INDEXES,
-    REQUIRED_BOT_RUN_LIFECYCLE_INDEXES,
     REQUIRED_PROVIDER_CREDENTIAL_INDEXES,
     REQUIRED_REPORT_MATERIALIZATION_INDEXES,
     REQUIRED_RESEARCH_ITEM_INDEXES,
@@ -45,6 +47,81 @@ _HARD_CUTOVER_TABLE_RENAMES = {
     ("observability_events", "botlens_backend_events"): "botlens_backend_events_v1",
     ("observability_metrics", "botlens_backend_metric_rollups"): "botlens_backend_metric_rollups_v1",
 }
+
+_RETIRED_TABLES = (
+    (None, "portal_bot_run_lifecycle"),
+    (None, "portal_bot_run_lifecycle_events"),
+)
+
+_LEGACY_MARKET_DATA_TABLES = (
+    "public.market_candles_raw",
+    "public.derivatives_market_state",
+    "public.portal_candle_closures",
+)
+_CANONICAL_MARKET_DATA_TABLE = "market.candle_versions"
+
+_ASYNC_JOB_RUNNING_CLAIM_DEFINITION = (
+    "status='running'andlock_ownerisnotnullandlocked_atisnotnull"
+    "andheartbeat_atisnotnullandclaim_token_hashisnotnull"
+)
+_ASYNC_JOB_RELEASED_CLAIM_DEFINITION = (
+    "status<>'running'andlock_ownerisnullandlocked_atisnull"
+    "andheartbeat_atisnullandclaim_token_hashisnull"
+)
+_ASYNC_JOB_CONSTRAINT_DEFINITIONS = {
+    "ck_portal_async_jobs_claim_generation_nonnegative": {
+        "claim_generation>=0",
+    },
+    "ck_portal_async_jobs_claim_state": {
+        (
+            f"{_ASYNC_JOB_RUNNING_CLAIM_DEFINITION}or"
+            f"{_ASYNC_JOB_RELEASED_CLAIM_DEFINITION}"
+        ),
+        (
+            f"({_ASYNC_JOB_RUNNING_CLAIM_DEFINITION})or"
+            f"({_ASYNC_JOB_RELEASED_CLAIM_DEFINITION})"
+        ),
+    },
+}
+
+_ASYNC_JOB_INDEX_DEFINITIONS = {
+    "ix_portal_async_jobs_claimable": {
+        "unique": False,
+        "columns": ("status", "job_type", "available_at", "created_at"),
+    },
+    "ix_portal_async_jobs_running_heartbeat": {
+        "unique": False,
+        "columns": ("status", "job_type", "heartbeat_at"),
+    },
+    "uq_portal_async_jobs_inflight_request": {
+        "unique": True,
+        "columns": (
+            "job_type",
+            "partition_key",
+            "request_fingerprint",
+        ),
+        "predicates": {
+            (
+                "statusin('queued','running','retry')"
+                "andrequest_fingerprintisnotnull"
+            ),
+            (
+                "(((status)=any((array['queued','running','retry'])[]))"
+                "and(request_fingerprintisnotnull))"
+            ),
+        },
+    },
+}
+
+
+def _normalize_postgres_definition(value: object) -> str:
+    parts = re.split(r"('(?:''|[^'])*')", str(value or ""))
+    for index in range(0, len(parts), 2):
+        normalized = parts[index].lower()
+        normalized = normalized.replace("::character varying", "")
+        normalized = normalized.replace("::text", "")
+        parts[index] = re.sub(r"\s+", "", normalized)
+    return "".join(parts)
 
 
 def _redact_dsn_for_log(dsn: Optional[str]) -> str:
@@ -176,11 +253,16 @@ class Database:
             # Serialize schema DDL across backend + workers.
             conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _SCHEMA_LOCK_KEY})
             try:
+                self._assert_market_data_cutover_state(conn)
                 self._create_missing_schemas(conn)
+                self._assert_retired_tables_absent(conn)
                 self._create_missing_tables(conn)
+                self._ensure_market_data_hypertable(conn)
                 self._assert_columns(conn)
+                self._assert_required_constraints(conn)
                 self._create_missing_indexes(conn)
                 self._assert_required_indexes(conn)
+                self._ensure_market_data_immutability(conn)
                 logger.info("portal_db_schema_contract_ready")
             finally:
                 conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _SCHEMA_LOCK_KEY})
@@ -202,6 +284,139 @@ class Database:
             conn.execute(CreateSchema(schema_name))
             logger.info("portal_db_schema_created | schema=%s", schema_name)
             existing_schemas.add(schema_name)
+
+    def _assert_retired_tables_absent(self, conn) -> None:
+        """Fail loud until explicit lifecycle hard-cutover cleanup is applied."""
+
+        for schema, name in _RETIRED_TABLES:
+            table_ref = f"{schema or 'public'}.{name}"
+            (existing,) = conn.execute(
+                text("SELECT to_regclass(:table_ref)"),
+                {"table_ref": table_ref},
+            ).one()
+            if existing is None:
+                continue
+            logger.error("portal_db_retired_table_present | table=%s", table_ref)
+            raise RuntimeError(
+                f"Retired table '{table_ref}' is still present. "
+                "Run scripts/db/manual_migration_canonical_lifecycle_ledger_v1.sql "
+                "after verifying canonical lifecycle coverage."
+            )
+
+    def _assert_market_data_cutover_state(self, conn) -> None:
+        """Reject legacy active tables instead of creating a dual storage path."""
+
+        legacy_present = []
+        for table_ref in _LEGACY_MARKET_DATA_TABLES:
+            (existing,) = conn.execute(
+                text("SELECT to_regclass(:table_ref)"),
+                {"table_ref": table_ref},
+            ).one()
+            if existing is not None:
+                legacy_present.append(table_ref)
+        (canonical_present,) = conn.execute(
+            text("SELECT to_regclass(:table_ref)"),
+            {"table_ref": _CANONICAL_MARKET_DATA_TABLE},
+        ).one()
+        if not legacy_present:
+            return
+
+        logger.error(
+            "portal_db_legacy_market_data_present | tables=%s canonical_present=%s",
+            ",".join(legacy_present),
+            canonical_present is not None,
+        )
+        raise RuntimeError(
+            "Legacy market-data tables remain active: "
+            f"{', '.join(legacy_present)}. Stop backend and paper writers, then run "
+            "scripts/db/manual_migration_market_data_v2_hard_cutover.sql. "
+            "The canonical service will not start with dual candle ownership."
+        )
+
+    def _ensure_market_data_hypertable(self, conn) -> None:
+        """Require TimescaleDB and make canonical candle versions a hypertable."""
+
+        extension_version = conn.execute(
+            text("SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'")
+        ).scalar_one_or_none()
+        if not extension_version:
+            raise RuntimeError(
+                "TimescaleDB is required for canonical market-data storage. "
+                "Install the extension before starting the backend."
+            )
+        conn.execute(
+            text(
+                "SELECT create_hypertable("
+                "'market.candle_versions', "
+                "by_range('candle_open_time'), "
+                "if_not_exists => TRUE, "
+                "migrate_data => TRUE"
+                ")"
+            )
+        )
+        is_hypertable = conn.execute(
+            text(
+                "SELECT EXISTS ("
+                "SELECT 1 FROM timescaledb_information.hypertables "
+                "WHERE hypertable_schema = 'market' "
+                "AND hypertable_name = 'candle_versions'"
+                ")"
+            )
+        ).scalar_one()
+        if not bool(is_hypertable):
+            raise RuntimeError(
+                "Canonical table market.candle_versions was not created as a hypertable."
+            )
+
+    def _ensure_market_data_immutability(self, conn) -> None:
+        """Protect append-only facts and frozen datasets from in-place mutation."""
+
+        conn.execute(
+            text(
+                """
+                CREATE OR REPLACE FUNCTION market.reject_immutable_mutation()
+                RETURNS trigger
+                LANGUAGE plpgsql
+                AS $$
+                BEGIN
+                    RAISE EXCEPTION 'immutable market-data relation %.% rejects %',
+                        TG_TABLE_SCHEMA, TG_TABLE_NAME, TG_OP;
+                END;
+                $$
+                """
+            )
+        )
+        for table_name in (
+            "sources",
+            "series",
+            "candle_versions",
+            "gap_evidence",
+            "datasets",
+            "dataset_series",
+        ):
+            trigger_name = f"trg_reject_mutation_{table_name}"
+            conn.execute(
+                text(
+                    f"""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1
+                            FROM pg_trigger
+                            WHERE tgname = '{trigger_name}'
+                              AND tgrelid = 'market.{table_name}'::regclass
+                              AND NOT tgisinternal
+                        ) THEN
+                            CREATE TRIGGER {trigger_name}
+                            BEFORE UPDATE OR DELETE ON market.{table_name}
+                            FOR EACH ROW
+                            EXECUTE FUNCTION market.reject_immutable_mutation();
+                        END IF;
+                    END;
+                    $$
+                    """
+                )
+            )
 
     def _create_missing_tables(self, conn) -> None:
         """Create metadata tables that are missing from the configured database."""
@@ -304,6 +519,49 @@ class Database:
                 )
                 existing.add(index_name)
 
+    def _assert_required_constraints(self, conn) -> None:
+        """Fail loud when an existing queue omits ownership constraints."""
+
+        inspector = inspect(conn)
+        constraints = {
+            str(constraint.get("name") or ""): constraint
+            for constraint in inspector.get_check_constraints(
+                "portal_async_jobs",
+                schema=None,
+            )
+        }
+        missing = sorted(REQUIRED_ASYNC_JOB_CONSTRAINTS - constraints.keys())
+        if missing:
+            logger.error(
+                "portal_db_required_constraints_missing | "
+                "schema=public table=portal_async_jobs missing=%s",
+                ",".join(missing),
+            )
+            raise RuntimeError(
+                "Table 'portal_async_jobs' is missing required constraints: "
+                f"{', '.join(missing)}. Run "
+                "scripts/db/manual_migration_async_job_fencing_v1.sql "
+                "with backend and worker processes stopped."
+            )
+
+        mismatched = []
+        for name, expected in _ASYNC_JOB_CONSTRAINT_DEFINITIONS.items():
+            actual = constraints[name].get("sqltext")
+            if _normalize_postgres_definition(actual) not in expected:
+                mismatched.append(name)
+        if mismatched:
+            logger.error(
+                "portal_db_required_constraints_mismatched | "
+                "schema=public table=portal_async_jobs mismatched=%s",
+                ",".join(mismatched),
+            )
+            raise RuntimeError(
+                "Table 'portal_async_jobs' has mismatched constraint "
+                f"definitions: {', '.join(mismatched)}. Run "
+                "scripts/db/manual_migration_async_job_fencing_v1.sql "
+                "with backend and worker processes stopped."
+            )
+
     def _assert_required_indexes(self, conn) -> None:
         """Fail loud when a required operational index is still absent after bootstrap."""
 
@@ -333,11 +591,60 @@ class Database:
         assert_required_indexes("portal_bot_run_events", REQUIRED_BOT_RUN_EVENT_INDEXES)
         assert_required_indexes("portal_bot_runs", REQUIRED_BOT_RUN_INDEXES)
         assert_required_indexes("portal_report_materializations", REQUIRED_REPORT_MATERIALIZATION_INDEXES)
-        assert_required_indexes("portal_bot_run_lifecycle", REQUIRED_BOT_RUN_LIFECYCLE_INDEXES)
         assert_required_indexes("portal_bot_run_leases", REQUIRED_BOT_RUN_LEASE_INDEXES)
         assert_required_indexes("portal_research_items", REQUIRED_RESEARCH_ITEM_INDEXES)
         assert_required_indexes("portal_research_links", REQUIRED_RESEARCH_LINK_INDEXES)
         assert_required_indexes("portal_provider_credential_refs", REQUIRED_PROVIDER_CREDENTIAL_INDEXES)
+        assert_required_indexes("portal_async_jobs", REQUIRED_ASYNC_JOB_INDEXES)
+        self._assert_async_job_index_definitions(inspector)
+
+    def _assert_async_job_index_definitions(self, inspector) -> None:
+        """Reject same-named async indexes with unsafe definitions."""
+
+        indexes = {
+            str(index.get("name") or ""): index
+            for index in inspector.get_indexes(
+                "portal_async_jobs",
+                schema=None,
+            )
+        }
+        mismatched = []
+        for name, expected in _ASYNC_JOB_INDEX_DEFINITIONS.items():
+            index = indexes.get(name)
+            if index is None:
+                continue
+            if bool(index.get("unique")) != bool(expected["unique"]):
+                mismatched.append(name)
+                continue
+            if tuple(index.get("column_names") or ()) != tuple(
+                expected["columns"]
+            ):
+                mismatched.append(name)
+                continue
+            expected_predicates = expected.get("predicates")
+            if expected_predicates is None:
+                continue
+            options = index.get("dialect_options") or {}
+            predicate = str(
+                options.get("postgresql_where")
+                or index.get("filter_definition")
+                or ""
+            )
+            normalized = _normalize_postgres_definition(predicate)
+            if normalized not in expected_predicates:
+                mismatched.append(name)
+        if mismatched:
+            logger.error(
+                "portal_db_required_indexes_mismatched | "
+                "schema=public table=portal_async_jobs mismatched=%s",
+                ",".join(mismatched),
+            )
+            raise RuntimeError(
+                "Table 'portal_async_jobs' has mismatched index "
+                f"definitions: {', '.join(mismatched)}. Run "
+                "scripts/db/manual_migration_async_job_fencing_v1.sql "
+                "with backend and worker processes stopped."
+            )
 
     @property
     def available(self) -> bool:

@@ -10,11 +10,8 @@ class RuntimeScenarioBuilder:
     @staticmethod
     def spot_engine(*, execution_mode: str = "market", limit_maker: dict | None = None, base_risk_per_trade: float = 10.0) -> LadderRiskEngine:
         config = {
-            "tick_size": 1.0,
-            "contract_size": 1.0,
-            "tick_value": 1.0,
             "initial_stop": {"atr_multiplier": 2.0},
-            "take_profit_orders": [{"id": "tp-1", "ticks": 10}],
+            "take_profit_orders": [{"id": "tp-1", "ticks": 10, "size_fraction": 1.0}],
             "execution_mode": execution_mode,
         }
         if limit_maker:

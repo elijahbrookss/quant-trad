@@ -14,6 +14,9 @@ from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence
 
 from core.settings import get_settings
 from indicators.config import IndicatorExecutionContext
+from indicators.runtime.source_diagnostics import (
+    normalize_indicator_source_diagnostics,
+)
 from engines.bot_runtime.deps import BotRuntimeDeps
 from engines.bot_runtime.core.domain import Candle, normalize_epoch
 from engines.bot_runtime.core import SameBarResolutionPolicy
@@ -27,6 +30,7 @@ from engines.bot_runtime.core.runtime_events import (
     build_correlation_id,
 )
 from engines.bot_runtime.strategy.series_builder import SeriesBuilder, StrategySeries
+from engines.indicator_engine.contracts import configure_indicator_overlay_history
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine, IndicatorGuardConfig
 from indicators.runtime.indicator_overlay_cache import default_overlay_cache
 from overlays.builtins import ensure_builtin_overlays_registered
@@ -87,8 +91,7 @@ class RuntimeSetupPrepareMixin:
         self.playback_mode = (self.config.get("playback_mode") or self.config.get("mode") or "instant").lower()
         self.mode = self.playback_mode
         self.execution_mode = ExecutionMode.from_config(
-            self.config.get("execution_mode"),
-            legacy_mode=self.config.get("mode"),
+            self.config.get("execution_mode")
         )
         self.run_type = (self.config.get("run_type") or "backtest").lower()
         self.playback_speed = 0.0
@@ -594,7 +597,9 @@ class RuntimeSetupPrepareMixin:
                 self.state["mode"] = self.mode
                 self.state["playback_mode"] = self.playback_mode
         if "execution_mode" in payload:
-            self.execution_mode = ExecutionMode.from_config(payload.get("execution_mode"), legacy_mode=self.mode)
+            self.execution_mode = ExecutionMode.from_config(
+                payload.get("execution_mode")
+            )
             with self._lock:
                 self.state["execution_mode"] = self.execution_mode.value
         if "focus_symbol" in payload:
@@ -870,7 +875,23 @@ class RuntimeSetupPrepareMixin:
             execution_context=execution_context,
             ctx=self._indicator_ctx,
         )
-        self._configure_indicator_overlay_window(
+        series.meta["indicator_source_diagnostics"] = (
+            normalize_indicator_source_diagnostics(
+                self._deps.indicator_collect_runtime_diagnostics(indicators),
+                allow_unrelated_records=True,
+                series_identity={
+                    "strategy_id": series.strategy_id,
+                    "instrument_id": (
+                        str(instrument_id) if instrument_id is not None else None
+                    ),
+                    "symbol": series.symbol,
+                    "timeframe": series.timeframe,
+                    "datasource": series.datasource,
+                    "exchange": series.exchange,
+                },
+            )
+        )
+        configure_indicator_overlay_history(
             indicators,
             history_bars=self._botlens_overlay_window_bars,
         )
@@ -908,13 +929,6 @@ class RuntimeSetupPrepareMixin:
                 ),
             )
         )
-
-    @staticmethod
-    def _configure_indicator_overlay_window(indicators: List[Any], *, history_bars: int) -> None:
-        for indicator in indicators:
-            configure = getattr(indicator, "configure_replay_window", None)
-            if callable(configure):
-                configure(history_bars=history_bars)
 
     def _build_indicator_guard_config(self) -> IndicatorGuardConfig:
         defaults = _SETTINGS.bot_runtime.indicator_guard

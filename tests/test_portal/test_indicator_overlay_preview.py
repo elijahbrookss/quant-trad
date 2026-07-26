@@ -388,7 +388,14 @@ def test_overlay_preview_can_collect_state_at_requested_cursor_epoch(monkeypatch
     monkeypatch.setattr(
         indicator_api,
         "build_runtime_indicator_graph",
-        lambda *args, **kwargs: (None, [SimpleNamespace()]),
+        lambda *args, **kwargs: (
+            None,
+            [
+                SimpleNamespace(
+                    configure_overlay_history=lambda *, history_bars: None
+                )
+            ],
+        ),
     )
     monkeypatch.setattr(
         indicator_api.candle_service,
@@ -488,7 +495,14 @@ def test_overlay_preview_rejects_cursor_epoch_not_aligned_to_window_candle(monke
     monkeypatch.setattr(
         indicator_api,
         "build_runtime_indicator_graph",
-        lambda *args, **kwargs: (None, [SimpleNamespace()]),
+        lambda *args, **kwargs: (
+            None,
+            [
+                SimpleNamespace(
+                    configure_overlay_history=lambda *, history_bars: None
+                )
+            ],
+        ),
     )
     monkeypatch.setattr(
         indicator_api.candle_service,

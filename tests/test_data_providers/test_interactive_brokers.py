@@ -81,7 +81,7 @@ def test_factory_returns_ib_provider(monkeypatch):
     """The provider factory should instantiate and cache the IB implementation."""
 
     _patch_ib_dependencies(monkeypatch)
-    monkeypatch.setattr(provider_factory, "_PROVIDER_CACHE", {})
+    monkeypatch.setattr(provider_factory._REGISTRY, "cache", {})
 
     provider = provider_factory.get_provider(DataSource.IBKR.value, exchange="SMART")
     assert isinstance(provider, ib_module.InteractiveBrokersProvider)

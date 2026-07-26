@@ -86,8 +86,14 @@ All three can derive from the same indicator-owned state, but only typed outputs
 ## What The Engine Accepts And Publishes
 
 The engine advances indicators from provider-backed candle bars, declared
-dependency outputs by `OutputRef`, runtime specs, params, and replay-window
-hints. It publishes `RuntimeOutput` values typed as `signal`, `context`,
+dependency outputs by `OutputRef`, runtime specs, and params. Preview,
+validation, strategy-preview, and bot-runtime callers configure render-only
+retention through the single `configure_indicator_overlay_history` dispatcher.
+The positive `history_bars` bound may prune overlay geometry, but it must not
+change warmup, source inputs, output readiness, or decision semantics. Runtime
+indicators implement the `configure_overlay_history` contract; a missing or
+malformed contract fails loudly rather than being skipped by capability
+probing. The engine publishes `RuntimeOutput` values typed as `signal`, `context`,
 `metric`, or `lifecycle`, plus output deltas carrying `base_indicator_commit_seq`,
 `indicator_commit_seq`, and `indicator_commit_seq_status=indicator_scoped`.
 Lifecycle outputs are optional public research evidence for stateful candidate
@@ -101,6 +107,13 @@ Visual and debug surfaces leave through separate projection payloads:
 `RuntimeOverlay` for charts and `RuntimeDetail` for inspection. Guard metrics,
 payload warnings, and source-fact diagnostics can explain expensive or invalid
 projection/output behavior, but they do not become strategy inputs.
+
+Indicators that load independent source candles publish the existing
+`indicator_source_candle_continuity.v1` diagnostic. Bot runtime composition
+collects it immediately after graph construction, adds canonical
+strategy/instrument/series identity, and stores it in series metadata before
+artifact creation. The runtime dependency is required: missing, malformed, or
+unattributed source diagnostics fail loudly rather than disappearing.
 
 ## Runtime Validation Surface
 

@@ -13,6 +13,7 @@ tags:
 code_paths:
   - portal/backend/service/provenance.py
   - portal/backend/service/reports
+  - portal/backend/service/reports/candle_continuity.py
   - portal/backend/controller/reports.py
   - portal/backend/service/reports/comparison.py
   - portal/backend/service/reports/golden_evidence.py
@@ -73,6 +74,12 @@ artifact, and `run_report_comparison_summary.v1` for pairwise comparison. These
 projections are derived from the same dataset and materialized report truth;
 they are not alternate report semantics.
 
+The compact research summary preserves the canonical dataset identity hashes,
+semantic and operational fingerprints, repeatability state, data and execution
+quality states, blockers, degraded/unavailable sections, and caveats. Persisted
+experiment summaries carry that projection unchanged so CLI and MCP research
+workflows cannot mistake missing or degraded evidence for a complete run.
+
 Reporting does not mutate strategy, execution, fee, wallet, trade, or BotLens semantics.
 
 ## Diagram Walkthrough
@@ -87,7 +94,8 @@ Reporting does not mutate strategy, execution, fee, wallet, trade, or BotLens se
 
 The dataset is rebuildable from durable DB/read-model truth:
 
-- `portal_bot_runs` for metadata, lean provenance hashes, and bounded config snapshots,
+- `portal_bot_runs` for the rebuildable current-run lifecycle summary projection,
+  metadata, lean provenance hashes, and bounded config snapshots,
 - `portal_bot_trades` and trade events for trade lifecycle and financial outcomes,
 - `portal_bot_run_events` for decisions, execution diagnostics, wallet/fallback facts, and BotLens-domain facts,
 - `portal_bot_run_step_rollups` for phase-duration profiler timings and
@@ -126,6 +134,15 @@ research evidence only. They must not mutate order fills, wallet accounting,
 fee/slippage semantics, stop/target behavior, or trade lifecycle truth. When
 bounded candle evidence is missing or truncated, reporting marks the enrichment
 unavailable or caveated instead of inferring hidden intrabar state.
+
+Instrument semantics prefer the persisted runtime-readiness execution profile.
+When older or reduced run snapshots omit accounting semantics, canonical
+`ENTRY_FILLED` and `EXIT_FILLED` evidence may complete the matching report row.
+Spot fill accounting proves spot execution semantics; margin accounting alone
+does not distinguish derivative from proxy-derivative execution. Conflicting
+configured and fill evidence fails report construction instead of choosing a
+convenient value. Untyped `execution_semantics` fields on fill payloads are not
+authority and cannot alter report identity.
 
 Signal rows may expose `indicator_context` extracted from the typed runtime
 outputs embedded in the selected decision artifact. Indicator-owned signal event
@@ -167,11 +184,10 @@ inventing values or silently treating missing ratios as zero.
   section availability, candle continuity evidence, and run-instance/runtime
   identifiers. Differences here are useful audit evidence but do not by
   themselves prove trading-behavior divergence.
-- `material_fingerprint`: compatibility alias for `semantic_fingerprint`.
 
 Boolean fields such as `dataset_ready`, `results_ready`, and `safe_to_compare`
-are compatibility summaries. Consumers should prefer the status fields for new
-workflows.
+are derived decision conveniences. The status fields remain the canonical
+readiness contract.
 
 `safe_to_compare=true` does not certify a golden run. Golden certification is a
 stricter reporting surface for reproducible run validation and must block on
@@ -214,6 +230,29 @@ continuity evidence is absent, reporting blocks certification with
 `missing_canonical_continuity_evidence` instead of silently certifying from
 observer facts.
 
+`data_snapshot_hash` identifies exact candle values consumed by every expected
+runtime strategy/instrument/timeframe series. Reporting aggregates only the
+runtime-produced `candle_series_snapshot.v1` evidence carried by canonical
+terminal facts. It does not re-fetch candles or derive material identity from
+catalog counts, successful traces, or gap metadata. The backend preflight
+inventory is persisted in run configuration evidence and preserved across
+worker aggregation independently of worker success. It must equal the terminal
+snapshot inventory exactly. Missing snapshot coverage makes the hash
+unavailable and readiness exposes `missing_data_snapshot_hash`. Continuity,
+provenance, warmup, confidence, and caveats continue through the existing
+quality/readiness contract independently of the value hash.
+
+Independent indicator-source continuity uses the existing
+`indicator_source_candle_continuity.v1` payload. Runtime series snapshots and
+both standalone and worker-aggregated config snapshots persist the payload with
+canonical strategy, instrument, symbol, timeframe, datasource, exchange, and
+indicator identity. `RunResearchDataset v1` exposes it as
+`context.indicator_source_diagnostics`, includes it in operational identity,
+and projects its status into data-quality readiness, caveats, diagnostics, and
+golden blocking. It does not enter the semantic fingerprint. An explicitly
+captured empty list means not applicable; a missing list is unavailable
+evidence. Malformed payloads fail report construction.
+
 ## What Reporting Publishes
 
 Reporting publishes report API payloads, compare payloads, compact research and
@@ -241,6 +280,10 @@ semantics.
 ## Invariants
 
 - Reporting is downstream of runtime truth.
+- Report instrument accounting semantics cannot contradict canonical fill
+  evidence, and missing spot semantics are completed from those fills.
+- `GET /run-report` is side-effect free. Materialization starts only through
+  `POST /run-report/build`; unsupported GET query parameters fail validation.
 - Legacy dataset compare uses canonical dataset readiness, not ad hoc
   report-file existence. Materialized run-report compare additionally requires
   both RunReportDTO contract (`run_report.v2`) artifacts to be `ready` so the comparison UI can use
@@ -256,11 +299,26 @@ semantics.
   candle storage facts when storage is available; terminal `run_final` compact
   continuity summaries supply classification and first-gap evidence. If a
   compact continuity summary lost provider classification, reporting may
-  reclassify unknown gaps from `portal_candle_closures` evidence for the same
-  instrument/timeframe/window. Unknown continuity is a data quality caveat, and
+  reclassify an unknown gap only from canonical `market.gap_evidence` explicitly
+  classified `provider_missing_data` for the same instrument, timeframe, and
+  window. Generic missing and ingestion-failure evidence cannot reclassify it. Unknown continuity is a data quality caveat, and
   unclassified/runtime/projection/ingestion gaps block golden readiness.
+- `reports/candle_continuity.py` owns the pure reporting-time transformation of
+  unknown gap rows against already-loaded closure evidence. The dataset builder
+  owns evidence loading, caching, and diagnostics and delegates classification
+  without reordering gaps or reconstructing candle history.
 - Headless research runs must emit canonical `run_final` continuity evidence
   without requiring BotLens to be opened.
+- A run-level data snapshot hash is available only when exact runtime-produced
+  candle snapshots cover every expected series.
+- Observer continuity and diagnostic gap metadata cannot change exact material
+  candle identity.
+- Indicator source-candle diagnostics preserve their existing payload through
+  runtime series metadata, run artifacts, report context, readiness,
+  diagnostics, and operational fingerprinting.
+- Provider-source caveats degrade quality; source defects marked for
+  investigation and missing source-diagnostic evidence block golden
+  certification.
 - Strategy rows in report config snapshots must preserve the run-start
   `run_strategy_snapshot`/`effective_strategy_config` when provided by runtime
   series metadata. Worker aggregation must not replace known rules, params, ATM,
@@ -273,6 +331,8 @@ semantics.
 - [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
 - [ADR 0015: Split semantic and operational golden fingerprints](../decisions/0015-split-semantic-and-operational-golden-fingerprints.md)
 - [ADR 0016: Treat runtime event ledger order as operational evidence](../decisions/0016-treat-runtime-event-ledger-order-as-operational-evidence.md)
+- [ADR 0043: Canonical accounting reconciliation](../decisions/0043-reconcile-accounting-from-canonical-fills-and-wallet-ledger.md)
+- [ADR 0046: Exact candle inputs and separate quality](../decisions/0046-fingerprint-exact-candle-inputs-and-keep-quality-separate.md)
 
 ## Known Gaps
 

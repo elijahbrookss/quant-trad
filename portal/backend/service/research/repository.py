@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 import uuid
 
 from portal.backend.db.models import ResearchItemRecord, ResearchLinkRecord
 from portal.backend.db.session import db
+from sqlalchemy.orm import Session
 
 
 def utcnow() -> datetime:
@@ -28,6 +30,15 @@ def parse_optional_timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(UTC).replace(tzinfo=None) if parsed.tzinfo else parsed
 
 
+@contextmanager
+def _session_scope(session: Session | None) -> Iterator[Session]:
+    if session is not None:
+        yield session
+        return
+    with db.session() as owned_session:
+        yield owned_session
+
+
 def create_item(
     *,
     kind: str,
@@ -45,6 +56,7 @@ def create_item(
     payload: Mapping[str, Any] | None = None,
     source_revision: str | None = None,
     item_id: str | None = None,
+    session: Session | None = None,
 ) -> dict[str, Any]:
     now = utcnow()
     record = ResearchItemRecord(
@@ -66,16 +78,20 @@ def create_item(
         created_at=now,
         updated_at=now,
     )
-    with db.session() as session:
-        session.add(record)
-        session.flush()
+    with _session_scope(session) as active_session:
+        active_session.add(record)
+        active_session.flush()
         return record.to_dict()
 
 
-def get_item(item_id: str) -> dict[str, Any]:
+def get_item(
+    item_id: str,
+    *,
+    session: Session | None = None,
+) -> dict[str, Any]:
     normalized = _required(item_id, "item_id")
-    with db.session() as session:
-        record = session.get(ResearchItemRecord, normalized)
+    with _session_scope(session) as active_session:
+        record = active_session.get(ResearchItemRecord, normalized)
         if record is None:
             raise KeyError("Research item not found")
         return record.to_dict()
@@ -114,18 +130,19 @@ def create_link(
     target_id: str,
     relation: str,
     metadata: Mapping[str, Any] | None = None,
+    session: Session | None = None,
 ) -> dict[str, Any]:
     normalized_source = _required(source_item_id, "source_item_id")
     normalized_target_type = _required(target_type, "target_type")
     normalized_target_id = _required(target_id, "target_id")
     normalized_relation = _required(relation, "relation")
     now = utcnow()
-    with db.session() as session:
-        source = session.get(ResearchItemRecord, normalized_source)
+    with _session_scope(session) as active_session:
+        source = active_session.get(ResearchItemRecord, normalized_source)
         if source is None:
             raise KeyError("Source research item not found")
         existing = (
-            session.query(ResearchLinkRecord)
+            active_session.query(ResearchLinkRecord)
             .filter(
                 ResearchLinkRecord.source_item_id == normalized_source,
                 ResearchLinkRecord.target_type == normalized_target_type,
@@ -137,7 +154,7 @@ def create_link(
         if existing is not None:
             existing.link_metadata = dict(metadata or existing.link_metadata or {})
             existing.updated_at = now
-            session.flush()
+            active_session.flush()
             return existing.to_dict()
         record = ResearchLinkRecord(
             id=str(uuid.uuid4()),
@@ -149,8 +166,8 @@ def create_link(
             created_at=now,
             updated_at=now,
         )
-        session.add(record)
-        session.flush()
+        active_session.add(record)
+        active_session.flush()
         return record.to_dict()
 
 

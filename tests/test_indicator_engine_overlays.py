@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
+import pytest
+
 import engines.indicator_engine.runtime_engine as runtime_engine_module
 from engines.bot_runtime.core.domain import Candle
 from engines.indicator_engine.contracts import (
@@ -15,6 +17,7 @@ from engines.indicator_engine.contracts import (
     RuntimeDetail,
     RuntimeOverlay,
     RuntimeOutput,
+    configure_indicator_overlay_history,
 )
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine, IndicatorGuardConfig
 from indicators.candle_stats.runtime import TypedCandleStatsIndicator
@@ -34,6 +37,12 @@ register_overlay_type(
     renderers={"lightweight": "marker"},
     payload_keys=("markers",),
 )
+
+
+@pytest.mark.parametrize("history_bars", [None, True, 0, -1, 1.5, "10"])
+def test_overlay_history_bound_rejects_malformed_values(history_bars: object) -> None:
+    with pytest.raises(ValueError, match="overlay_history_bars"):
+        configure_indicator_overlay_history([], history_bars=history_bars)
 
 
 class _SourceIndicator(Indicator):
@@ -619,7 +628,7 @@ def test_candle_stats_atr_overlays_do_not_wait_for_full_metric_readiness() -> No
     assert frame.overlays["candle-stats.atr_zscore"].ready is True
 
 
-def test_candle_stats_overlay_history_limit_can_match_replay_window() -> None:
+def test_candle_stats_overlay_history_limit_matches_configured_window() -> None:
     indicator = TypedCandleStatsIndicator(
         indicator_id="candle-stats",
         version="v1",
@@ -638,7 +647,7 @@ def test_candle_stats_overlay_history_limit_can_match_replay_window() -> None:
             "atr_expansion_signal_threshold": 2.0,
         },
     )
-    indicator.configure_replay_window(history_bars=650)
+    indicator.configure_overlay_history(history_bars=650)
     engine = IndicatorExecutionEngine([indicator])
 
     frame = None
@@ -783,6 +792,96 @@ def test_regime_outputs_match_when_overlays_are_disabled() -> None:
 
 def test_market_profile_outputs_match_when_overlays_are_disabled() -> None:
     _assert_output_equivalence([_market_profile()], [_market_profile()])
+
+
+def test_market_profile_future_source_facts_do_not_change_prior_frame() -> None:
+    current_profile = {
+        "start": "2026-01-01T00:00:00Z",
+        "end": "2026-01-01T00:05:00Z",
+        "known_at": "2026-01-01T00:05:00Z",
+        "VAH": 105.0,
+        "VAL": 95.0,
+        "POC": 100.0,
+        "session_count": 1,
+        "precision": 2,
+    }
+    future_profile = {
+        "start": "2026-01-01T00:05:00Z",
+        "end": "2026-01-01T00:10:00Z",
+        "known_at": "2026-01-01T00:10:00Z",
+        "VAH": 125.0,
+        "VAL": 115.0,
+        "POC": 120.0,
+        "session_count": 1,
+        "precision": 2,
+    }
+
+    def engine(profiles: list[dict[str, Any]]) -> IndicatorExecutionEngine:
+        indicator = TypedMarketProfileIndicator(
+            indicator_id="profile-1",
+            version="v1",
+            params={
+                "bin_size": 1.0,
+                "price_precision": 2,
+                "use_merged_value_areas": False,
+                "merge_threshold": 0.5,
+                "min_merge_sessions": 2,
+                "extend_value_area_to_chart_end": True,
+            },
+            source_facts={
+                "symbol": "TEST",
+                "profile_params": {
+                    "use_merged_value_areas": False,
+                    "extend_value_area_to_chart_end": True,
+                },
+                "profiles": profiles,
+            },
+        )
+        return IndicatorExecutionEngine([indicator])
+
+    prior_time = datetime(2026, 1, 1, 0, 6, tzinfo=timezone.utc)
+    prior_bar = Candle(
+        time=prior_time,
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        volume=10.0,
+    )
+    prefix_frame = engine([current_profile]).step(bar=prior_bar, bar_time=prior_time)
+    extended_engine = engine([current_profile, future_profile])
+    extended_prior_frame = extended_engine.step(bar=prior_bar, bar_time=prior_time)
+
+    assert _compact_outputs(extended_prior_frame) == _compact_outputs(prefix_frame)
+    assert {
+        key: (overlay.ready, overlay.value)
+        for key, overlay in extended_prior_frame.overlays.items()
+    } == {
+        key: (overlay.ready, overlay.value)
+        for key, overlay in prefix_frame.overlays.items()
+    }
+
+    future_time = datetime(2026, 1, 1, 0, 11, tzinfo=timezone.utc)
+    future_bar = Candle(
+        time=future_time,
+        open=120.0,
+        high=121.0,
+        low=119.0,
+        close=120.0,
+        volume=10.0,
+    )
+    future_frame = extended_engine.step(bar=future_bar, bar_time=future_time)
+
+    assert future_frame.outputs["profile-1.value_location"].ready is True
+    assert (
+        future_frame.outputs["profile-1.value_location"].value["state_key"]
+        == "inside_value"
+    )
+    assert (
+        future_frame.overlays["profile-1.value_area"]
+        .value["payload"]["summary"]["transform_summary"]["known_profiles"]
+        == 2
+    )
 
 
 def test_strategy_decisions_match_across_overlay_detail_modes() -> None:

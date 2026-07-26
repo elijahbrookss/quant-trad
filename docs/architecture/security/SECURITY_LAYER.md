@@ -57,6 +57,9 @@ remote or multi-tenant hosting.
   UI, CLI, agents, and adapters share one capability contract.
 - Provider adapters resolve credentials through the credential store rather than
   reading provider-specific API key env vars.
+- Provider credential references do not grant venue-trading authority. Current
+  runtime execution is simulated or observe-only; production order submission
+  is a closed boundary.
 - Credential refs can be validated structurally and revoked without deleting
   audit metadata.
 - The `portal_provider_credential_refs` table and lookup index are owned by
@@ -79,6 +82,10 @@ remote or multi-tenant hosting.
   while adapters initialize provider SDK clients.
 - Provider API permissions are operator-managed. Quant-Trad cannot currently
   prove least-privilege scopes on third-party API keys.
+- `RuntimeMode.LIVE` is a reserved composition seam rather than an enforced
+  production-trading security boundary. Live order submission remains
+  unsupported and requires separate admission, authorization, risk, and
+  reconciliation controls.
 - The legacy `portal_provider_credentials` table may exist in old local
   databases. Current code no longer writes or reads it; the manual migration
   imports those rows into credential refs when the table exists.
@@ -166,3 +173,5 @@ Quant-Trad risk points:
 - [NIST NCCoE: Migration to Post-Quantum Cryptography](https://www.nccoe.nist.gov/applied-cryptography/migration-to-pqc)
 - [NCSC: Migrating to Post-Quantum Cryptography](https://www.ncsc.gov.uk/blog-post/migrating-to-post-quantum-cryptography-pqc)
 - [ADR 0024: Provider Credential References](../decisions/0024-use-provider-credential-references.md)
+- [ADR 0048: Gate Agent Mutation And Research Promotion](../decisions/0048-gate-agent-mutation-and-research-promotion.md)
+- [ADR 0049: Keep Live Order Submission Closed](../decisions/0049-keep-live-order-submission-closed.md)

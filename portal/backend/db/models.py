@@ -8,6 +8,7 @@ from typing import Any, Dict
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Float,
@@ -17,6 +18,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     and_,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
@@ -36,12 +38,6 @@ REQUIRED_BOT_RUN_EVENT_INDEXES = frozenset(
         "ix_portal_bot_run_events_bot_run_root_seq_id",
         "ix_portal_bot_run_events_bot_run_bar_time_seq_id",
         "uq_portal_bot_run_events_run_seq",
-    }
-)
-
-REQUIRED_BOT_RUN_LIFECYCLE_INDEXES = frozenset(
-    {
-        "ix_portal_bot_run_lifecycle_bot_checkpoint_updated",
     }
 )
 
@@ -84,6 +80,21 @@ REQUIRED_RESEARCH_LINK_INDEXES = frozenset(
 REQUIRED_PROVIDER_CREDENTIAL_INDEXES = frozenset(
     {
         "ix_provider_credential_refs_provider_venue",
+    }
+)
+
+REQUIRED_ASYNC_JOB_INDEXES = frozenset(
+    {
+        "ix_portal_async_jobs_claimable",
+        "ix_portal_async_jobs_running_heartbeat",
+        "uq_portal_async_jobs_inflight_request",
+    }
+)
+
+REQUIRED_ASYNC_JOB_CONSTRAINTS = frozenset(
+    {
+        "ck_portal_async_jobs_claim_generation_nonnegative",
+        "ck_portal_async_jobs_claim_state",
     }
 )
 
@@ -699,7 +710,7 @@ class BotTradeEventRecord(Base):
 
 
 class BotRunRecord(Base):
-    """Database row representing a completed bot run report snapshot."""
+    """Database row representing run identity and lifecycle-derived summary state."""
 
     __tablename__ = "portal_bot_runs"
     __table_args__ = (
@@ -713,7 +724,7 @@ class BotRunRecord(Base):
     strategy_id = Column(String(64), nullable=True)
     strategy_name = Column(String(255), nullable=True)
     run_type = Column(String(32), nullable=False, default="backtest")
-    status = Column(String(32), nullable=False, default="completed")
+    status = Column(String(32), nullable=False, default="idle")
     timeframe = Column(String(32), nullable=True)
     datasource = Column(String(64), nullable=True)
     exchange = Column(String(64), nullable=True)
@@ -858,83 +869,6 @@ class ReportMaterializationRecord(Base):
             "can_view": can_view,
             "can_build": can_build,
             "can_retry": can_retry,
-        }
-
-
-class BotRunLifecycleRecord(Base):
-    """Current durable lifecycle state for one bot run."""
-
-    __tablename__ = "portal_bot_run_lifecycle"
-    __table_args__ = (
-        Index("ix_portal_bot_run_lifecycle_bot_checkpoint_updated", "bot_id", "checkpoint_at", "updated_at"),
-    )
-
-    run_id = Column(String(64), ForeignKey("portal_bot_runs.run_id", ondelete="CASCADE"), primary_key=True)
-    bot_id = Column(String(64), ForeignKey("portal_bots.id", ondelete="CASCADE"), nullable=False)
-    phase = Column(String(64), nullable=False, default="start_requested")
-    status = Column(String(32), nullable=False, default="starting")
-    owner = Column(String(32), nullable=False, default="backend")
-    message = Column(String(1024), nullable=True)
-    lifecycle_metadata = Column("metadata", JSONB, nullable=False, default=dict)
-    failure = Column(JSONB, nullable=True)
-    checkpoint_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "run_id": self.run_id,
-            "bot_id": self.bot_id,
-            "phase": self.phase,
-            "status": self.status,
-            "owner": self.owner,
-            "message": self.message,
-            "metadata": dict(self.lifecycle_metadata or {}),
-            "failure": dict(self.failure or {}),
-            "checkpoint_at": (self.checkpoint_at or datetime.utcnow()).isoformat() + "Z",
-            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
-            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
-        }
-
-
-class BotRunLifecycleEventRecord(Base):
-    """Append-only lifecycle checkpoints for one bot run."""
-
-    __tablename__ = "portal_bot_run_lifecycle_events"
-    __table_args__ = (
-        UniqueConstraint("event_id", name="uq_portal_bot_run_lifecycle_events_event_id"),
-        UniqueConstraint("run_id", "seq", name="uq_portal_bot_run_lifecycle_events_run_seq"),
-    )
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    event_id = Column(String(128), nullable=False)
-    run_id = Column(String(64), ForeignKey("portal_bot_runs.run_id", ondelete="CASCADE"), nullable=False)
-    bot_id = Column(String(64), ForeignKey("portal_bots.id", ondelete="CASCADE"), nullable=False)
-    seq = Column(Integer, nullable=False)
-    phase = Column(String(64), nullable=False)
-    status = Column(String(32), nullable=False)
-    owner = Column(String(32), nullable=False)
-    message = Column(String(1024), nullable=True)
-    lifecycle_metadata = Column("metadata", JSONB, nullable=False, default=dict)
-    failure = Column(JSONB, nullable=True)
-    checkpoint_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": int(self.id or 0),
-            "event_id": self.event_id,
-            "run_id": self.run_id,
-            "bot_id": self.bot_id,
-            "seq": int(self.seq or 0),
-            "phase": self.phase,
-            "status": self.status,
-            "owner": self.owner,
-            "message": self.message,
-            "metadata": dict(self.lifecycle_metadata or {}),
-            "failure": dict(self.failure or {}),
-            "checkpoint_at": (self.checkpoint_at or datetime.utcnow()).isoformat() + "Z",
-            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
         }
 
 
@@ -1385,6 +1319,48 @@ class AsyncJobRecord(Base):
     """Database-backed async job used by API and worker processes."""
 
     __tablename__ = "portal_async_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "claim_generation >= 0",
+            name="ck_portal_async_jobs_claim_generation_nonnegative",
+        ),
+        CheckConstraint(
+            "("
+            "status = 'running' AND lock_owner IS NOT NULL "
+            "AND locked_at IS NOT NULL AND heartbeat_at IS NOT NULL "
+            "AND claim_token_hash IS NOT NULL"
+            ") OR ("
+            "status <> 'running' AND lock_owner IS NULL "
+            "AND locked_at IS NULL AND heartbeat_at IS NULL "
+            "AND claim_token_hash IS NULL"
+            ")",
+            name="ck_portal_async_jobs_claim_state",
+        ),
+        Index(
+            "ix_portal_async_jobs_claimable",
+            "status",
+            "job_type",
+            "available_at",
+            "created_at",
+        ),
+        Index(
+            "ix_portal_async_jobs_running_heartbeat",
+            "status",
+            "job_type",
+            "heartbeat_at",
+        ),
+        Index(
+            "uq_portal_async_jobs_inflight_request",
+            "job_type",
+            "partition_key",
+            "request_fingerprint",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('queued', 'running', 'retry') "
+                "AND request_fingerprint IS NOT NULL"
+            ),
+        ),
+    )
 
     id = Column(String(64), primary_key=True)
     job_type = Column(String(64), nullable=False)
@@ -1394,10 +1370,14 @@ class AsyncJobRecord(Base):
     error = Column(String(2048), nullable=True)
     partition_key = Column(String(255), nullable=True)
     partition_hash = Column(Integer, nullable=False, default=0)
+    request_fingerprint = Column(String(64), nullable=True)
     attempts = Column(Integer, nullable=False, default=0)
     max_attempts = Column(Integer, nullable=False, default=3)
     lock_owner = Column(String(128), nullable=True)
     locked_at = Column(DateTime, nullable=True)
+    heartbeat_at = Column(DateTime, nullable=True)
+    claim_token_hash = Column(String(64), nullable=True)
+    claim_generation = Column(Integer, nullable=False, default=0)
     available_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
@@ -1414,10 +1394,13 @@ class AsyncJobRecord(Base):
             "error": self.error,
             "partition_key": self.partition_key,
             "partition_hash": int(self.partition_hash or 0),
+            "request_fingerprint": self.request_fingerprint,
             "attempts": int(self.attempts or 0),
             "max_attempts": int(self.max_attempts or 0),
             "lock_owner": self.lock_owner,
             "locked_at": (self.locked_at.isoformat() + "Z") if self.locked_at else None,
+            "heartbeat_at": (self.heartbeat_at.isoformat() + "Z") if self.heartbeat_at else None,
+            "claim_generation": int(self.claim_generation or 0),
             "available_at": (self.available_at.isoformat() + "Z") if self.available_at else None,
             "started_at": (self.started_at.isoformat() + "Z") if self.started_at else None,
             "finished_at": (self.finished_at.isoformat() + "Z") if self.finished_at else None,

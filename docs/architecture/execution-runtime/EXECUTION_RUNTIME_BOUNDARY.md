@@ -46,6 +46,12 @@ Runtime consumes:
 - bot/strategy/instrument config,
 - wallet and execution-mode settings.
 
+`StrategyLoader` is the sole runtime strategy-loading boundary and returns the
+typed `Strategy` domain model. Backend startup rejects loose mappings and
+duck-typed strategy objects. The model exposes `to_series_metadata()` only for
+the per-series projection consumed by runtime; startup reads run snapshots,
+effective config, variants, and resolved parameters directly from typed fields.
+
 Runtime emits:
 
 - accepted/rejected decision events,
@@ -87,26 +93,42 @@ Runtime separates source identity from execution modeling:
 ## Position Lifecycle And Order Semantics
 
 ATM templates declare position lifecycle intent; runtime executes that intent.
-Template compatibility is handled at the ATM boundary. Runtime compiles the
-normalized template into a `RuntimeExecutionPlan` before opening trades.
-Position state consumes resolved runtime policy objects rather than raw
-template dictionaries.
+The ATM boundary accepts only schema-v2 snake-case policy fields and rejects
+unknown or malformed input. Instrument constraints, fees, currencies, and
+margin evidence belong exclusively to `SeriesExecutionProfile`. Runtime
+compiles the normalized template once into a `RuntimeExecutionPlan` before
+constructing execution state. The plan owns
+entry, initial-stop, take-profit, fixed-horizon, breakeven, trailing, and
+stop-adjustment semantics. The engine projects target dictionaries only from
+that plan; position state consumes resolved runtime policy objects rather than
+raw template dictionaries.
+
+Strategy and standalone ATM-template write paths compile this same plan before
+persistence so semantically invalid templates cannot wait until run startup to fail.
 
 The canonical policy fields are:
 
 - `exit_plan.fixed_horizon`: close remaining open legs after `bars` completed
   position bars at the strategy bar close. This is a market/taker close and
   emits a `fixed_horizon` exit fill plus a close reason of `FIXED_HORIZON`.
-- `stop_adjustments`: one-time stop movement rules such as move-to-breakeven
-  at a configured R multiple, an absolute trigger tick value, or after a target
-  hit. Runtime accepts normalized nested template rules and flattened
-  compatibility rules at the template edge, then converts them into canonical
-  runtime stop-adjustment objects.
+- `take_profit_orders`: stable target IDs, exactly one price expression per
+  target, and explicit `size_fraction` values totaling one.
+- `stop_adjustments`: flattened, stable-ID one-time stop movement rules such as
+  move-to-breakeven at a configured R multiple, an absolute trigger tick value,
+  or after a target hit. Runtime converts them into resolved stop-adjustment
+  objects before opening a position. Omitting this field means no stop
+  adjustment; runtime never inserts a move-to-breakeven rule implicitly.
 - `breakeven`: direct breakeven activation for simple strategies when explicit
   stop adjustments are not configured.
-- `trailing`: trailing-stop activation and distance config. A trailing stop may
-  only tighten in the favorable direction; it must never loosen an existing
-  stop.
+- `trailing`: trailing-stop activation and distance config. With
+  `activation_type=r_multiple`, `r_multiple` defines activation and `ticks` or
+  `atr_multiplier` defines distance. With `activation_type=target_hit`, the
+  target ID or index must resolve during compilation. A trailing stop may only
+  tighten in the favorable direction; it must never loosen an existing stop.
+
+Unsupported enums, non-finite or out-of-range numbers, contradictory fixed
+horizons, duplicate targets, invalid allocation fractions, unresolved target
+references, and incomplete stop adjustments are admission failures.
 
 Runtime maps exit event types to liquidity roles:
 
@@ -121,6 +143,13 @@ close and cannot fill from the already-known signal bar range. Once a maker
 order is accepted as resting, later bars may fill it as maker liquidity when
 price trades through the limit for the configured validity window.
 
+The same causal boundary applies to immediate market entries. A close-known
+decision may open at the signal close, but the new position cannot evaluate a
+stop or target against that candle's earlier high/low. Ordinary exit
+eligibility starts with the next candle. A terminal end-of-window liquidation
+may close the position at the same final close because it uses the known close
+rather than replaying an earlier intrabar path.
+
 Execution profiles remain the fee and instrument authority. Templates may
 request order style and exit behavior, but they must not patch missing
 instrument fee, tick, quantity, or margin fields.
@@ -131,10 +160,15 @@ true next-bar entry model requires its own pending signal-entry lifecycle so
 reports can distinguish when the signal was known from when the order became
 executable.
 
-Executable fills use `FillOrder` semantics: side, quantity, price, order type,
-liquidity role, price source, and fee rate are known before the adapter applies
-the fill. The older `fill_market` adapter method remains only as a compatibility
-facade for adapters that have not yet implemented direct order execution.
+Executable fills use the sole adapter contract, `execute_order(FillOrder)`, so
+side, quantity, price, order type, liquidity role, price source, and fee rate
+are known before the adapter applies the fill. Adapters that do not implement
+the typed order surface fail before a fill can be produced.
+
+The runtime reads entry order semantics only from the immutable compiled plan.
+Unknown liquidity roles, exit-event types, and same-bar conflict policies are
+invariant violations; they raise contextual errors instead of selecting a
+market, taker, backtest-end, or optimistic fallback.
 
 ## Slippage Modeling Gap
 
@@ -203,12 +237,20 @@ source; `portal_bots` remains a bot definition row and must not carry
 must fail loud if they lose the lease or cannot renew it before continuing to
 emit run facts.
 
+The backend-owned `run_id` is mandatory container input. A runtime container
+must fail before loading config, claiming a lease, emitting lifecycle facts, or
+mutating wallet state when `QT_BOT_RUNTIME_RUN_ID` is absent. Generating a
+local replacement would create a disconnected lifecycle and accounting
+identity.
+
 ## Execution Semantics
 
 FAST and FULL are execution semantics, not playback modes.
 
 - FAST uses strategy timeframe OHLC and pessimistic same-bar handling.
 - FULL uses lower-timeframe intrabar data when available.
+- Missing execution mode defaults to FAST; all non-`fast`/`full` values fail.
+- Playback values are never interpreted as execution values.
 - Missing/incomplete/ambiguous intrabar data falls back to pessimistic behavior with diagnostics.
 - UI animation can replay events, but it must not change execution truth.
 
@@ -248,6 +290,33 @@ projected viewport changed. Overlay projection pressure degrades BotLens
 overlay freshness; it must not change decisions, fills, wallet effects,
 reports, or execution completion.
 
+## Terminal Trade Facts
+
+`LadderPosition` is the canonical owner of terminal trade state. When all legs
+close, it records market-time `closed_at`, quantity-weighted `exit_price`, a
+composition-level `close_reason` (`TARGET`, `STOP`, or `MIXED`), and the
+canonical execution `reason_code`. Fixed-horizon and terminal liquidation
+retain their explicit policy reason.
+
+A rejected exit fill leaves its leg and position open. Closed-trade fact
+projection requires all terminal fields and fails loudly when the domain
+snapshot is incomplete; it does not infer reasons or prices from legs.
+
+## Live-Order Boundary
+
+The current execution runtime supports deterministic simulated fills and
+observe-only paper ingestion. It does not have an authorized production
+exchange-order adapter. `RuntimeMode.LIVE` is a reserved composition seam, and
+the `live` lifecycle phase means the runtime is actively producing facts;
+neither label grants order-submission capability.
+
+Paper mode must not place external orders. Provider credential references are
+not execution authorization, and agent/CLI/MCP contracts cannot turn a
+simulation or observation run into live trading. Live order submission requires
+a separate accepted architecture decision and explicit risk, identity,
+reconciliation, kill-switch, credential-scope, and operator-authorization
+controls.
+
 ## Failure And Recovery
 
 - Invalid config fails before execution.
@@ -260,11 +329,14 @@ reports, or execution completion.
 
 - All bot runs are walk-forward.
 - Known-at timing governs indicators, decisions, and execution.
+- A position opened from a close-known decision cannot consume the signal
+  candle's earlier range as exit evidence.
 - Runtime truth does not come from frontend playback.
 - Visual overlays are bounded BotLens projection state, not runtime series
   truth.
 - Shared-wallet and symbol-sharded paths must preserve deterministic ordering.
 - Heavy debug/history reads are cold-path behavior.
+- No current runtime mode submits, amends, or cancels an external order.
 
 ## Related Docs
 
@@ -274,3 +346,7 @@ reports, or execution completion.
 - [Runtime composition root](RUNTIME_COMPOSITION_ROOT.md)
 - [Persistence boundary](../persistence/PERSISTENCE_BOUNDARY.md)
 - [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
+- [ADR 0043: Canonical accounting reconciliation](../decisions/0043-reconcile-accounting-from-canonical-fills-and-wallet-ledger.md)
+- [ADR 0044: Known-at prefix invariance](../decisions/0044-enforce-known-at-prefix-invariance.md)
+- [ADR 0045: Explicit execution and exit policy](../decisions/0045-require-explicit-execution-and-exit-policy.md)
+- [ADR 0049: Keep live order submission closed](../decisions/0049-keep-live-order-submission-closed.md)

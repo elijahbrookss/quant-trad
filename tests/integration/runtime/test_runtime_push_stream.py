@@ -20,7 +20,11 @@ from engines.bot_runtime.core.runtime_events import (
     new_runtime_event,
     runtime_event_from_dict,
 )
-from engines.bot_runtime.runtime.mixins.runtime_events import RuntimeEventsMixin
+from engines.bot_runtime.runtime.mixins.runtime_events import (
+    RuntimeEventsMixin,
+    _fill_accounting_mode,
+    _fill_currency_pair,
+)
 from engines.bot_runtime.runtime.mixins.runtime_push_stream import RuntimePushStreamMixin
 from engines.bot_runtime.runtime.components.canonical_facts import (
     CanonicalFactAppender,
@@ -40,6 +44,48 @@ class _FakeRuntime(RuntimePushStreamMixin):
 
     def _runtime_log_context(self, **kwargs):
         return dict(kwargs)
+
+
+def test_fill_accounting_mode_resolves_explicit_spot_semantics_and_rejects_ambiguity() -> None:
+    spot_series = SimpleNamespace(
+        execution_profile=SimpleNamespace(
+            accounting_mode=None,
+            instrument=SimpleNamespace(execution_semantics="spot"),
+        ),
+        instrument={},
+    )
+    margin_series = SimpleNamespace(
+        execution_profile=SimpleNamespace(
+            accounting_mode="margin",
+            instrument=SimpleNamespace(execution_semantics="derivative"),
+        ),
+        instrument={},
+    )
+    ambiguous_series = SimpleNamespace(
+        execution_profile=SimpleNamespace(
+            accounting_mode=None,
+            instrument=SimpleNamespace(execution_semantics="derivative"),
+        ),
+        instrument={},
+    )
+
+    assert _fill_accounting_mode(spot_series) == "spot"
+    assert _fill_accounting_mode(margin_series) == "margin"
+    with pytest.raises(ValueError, match="fill accounting_mode is required"):
+        _fill_accounting_mode(ambiguous_series)
+
+
+def test_fill_currency_pair_uses_execution_profile_and_rejects_conflicts() -> None:
+    series = SimpleNamespace(
+        execution_profile=SimpleNamespace(
+            instrument=SimpleNamespace(base_currency="BTC", quote_currency="USD"),
+        ),
+        instrument={},
+    )
+
+    assert _fill_currency_pair(series, observed_quote="usd") == ("BTC", "USD")
+    with pytest.raises(ValueError, match="fill base_currency conflicts"):
+        _fill_currency_pair(series, observed_base="ETH")
 
 
 class _SimpleLock:
@@ -412,6 +458,9 @@ def test_botlens_bootstrap_payload_emits_fact_batch_for_selected_series() -> Non
                 "status": "closed",
                 "entry_time": "2026-04-09T13:00:00Z",
                 "closed_at": "2026-04-09T13:30:00Z",
+                "exit_price": 100.0,
+                "close_reason": "STOP",
+                "reason_code": "EXEC_EXIT_STOP",
                 "direction": "short",
                 "position_commit_seq": 2,
             },
@@ -563,6 +612,50 @@ def test_wallet_facts_emit_full_entry_ledger_trace_in_logical_order() -> None:
         "POSITION_OPENED",
         "EQUITY_UPDATED",
     ]
+
+
+def test_spot_fill_does_not_emit_derived_margin_ledger_events() -> None:
+    entry = {
+        "event_id": "entry-event-spot-1",
+        "event_name": "ENTRY_FILLED",
+        "seq": 12,
+        "event_ts": "2026-02-01T00:00:00Z",
+        "correlation_id": "trade:trade-spot-1",
+        "context": {
+            "run_id": "run-1",
+            "bot_id": "bot-1",
+            "strategy_id": "strategy-1",
+            "series_key": "instrument-btc|1h",
+            "instrument_id": "instrument-btc",
+            "symbol": "BTC/USD",
+            "timeframe": "1h",
+            "bar_ts": "2026-02-01T00:00:00Z",
+            "trade_id": "trade-spot-1",
+            "wallet_correlation_id": "trade:trade-spot-1",
+            "wallet_commit_seq": 1,
+            "side": "buy",
+            "direction": "long",
+            "qty": 1.0,
+            "price": 100.0,
+            "notional": 100.0,
+            "fee_paid": 1.0,
+            "base_currency": "BTC",
+            "quote_currency": "USD",
+            "accounting_mode": "spot",
+            "wallet_delta": {
+                "collateral_reserved": 0.0,
+                "collateral_released": 0.0,
+                "fee_paid": 1.0,
+            },
+            "wallet_before": {
+                "balances": {"USD": 1000.0},
+                "locked_margin": {},
+                "free_collateral": {"USD": 1000.0},
+            },
+        },
+    }
+
+    assert RuntimePushStreamMixin._wallet_facts_from_runtime_event(entry) == []
 
 
 def test_live_transport_payload_slims_wallet_snapshots_and_log_context() -> None:
@@ -1251,6 +1344,8 @@ def test_trade_facts_emit_open_before_close_when_first_observed_already_closed()
         "status": "closed",
         "entry_time": "2026-04-09T13:55:00Z",
         "closed_at": "2026-04-09T14:00:00Z",
+        "exit_price": 101.0,
+        "close_reason": "BACKTEST_END",
         "direction": "long",
         "reason_code": "BACKTEST_END",
         "position_commit_seq": 2,
@@ -1280,6 +1375,9 @@ def test_trade_facts_same_bar_open_close_emits_deterministic_lifecycle_order() -
         "status": "closed",
         "entry_time": "2026-04-09T14:00:00Z",
         "closed_at": "2026-04-09T14:00:00Z",
+        "exit_price": 105.0,
+        "close_reason": "TARGET",
+        "reason_code": "EXEC_EXIT_TARGET",
         "direction": "long",
         "position_commit_seq": 2,
     }
@@ -1302,6 +1400,9 @@ def test_trade_facts_do_not_duplicate_open_for_previously_opened_trade() -> None
         "status": "closed",
         "entry_time": "2026-04-09T13:00:00Z",
         "closed_at": "2026-04-09T14:00:00Z",
+        "exit_price": 105.0,
+        "close_reason": "TARGET",
+        "reason_code": "EXEC_EXIT_TARGET",
         "direction": "long",
         "position_commit_seq": 2,
     }
@@ -1335,6 +1436,25 @@ def test_trade_facts_reject_missing_position_commit_seq() -> None:
         runtime._trade_facts(series=series, cache={})
 
 
+def test_trade_facts_reject_closed_snapshot_missing_terminal_evidence() -> None:
+    runtime = _runtime()
+    trade_payload = {
+        "trade_id": "trade-1",
+        "status": "closed",
+        "entry_time": "2026-04-09T13:00:00Z",
+        "closed_at": "2026-04-09T14:00:00Z",
+        "direction": "long",
+        "position_commit_seq": 2,
+    }
+    series = _trade_series(trade_payload, revision=1)
+
+    with pytest.raises(
+        RuntimeError,
+        match="domain snapshot missing terminal fields.*exit_price,close_reason,reason_code",
+    ):
+        runtime._trade_facts(series=series, cache={})
+
+
 def test_trade_facts_build_domain_events_with_required_lifecycle_and_simulated_times() -> None:
     runtime = _runtime()
     trade_payload = {
@@ -1342,6 +1462,9 @@ def test_trade_facts_build_domain_events_with_required_lifecycle_and_simulated_t
         "status": "closed",
         "entry_time": "2026-04-09T13:55:00Z",
         "closed_at": "2026-04-09T14:00:00Z",
+        "exit_price": 105.0,
+        "close_reason": "TARGET",
+        "reason_code": "EXEC_EXIT_TARGET",
         "direction": "long",
         "strategy_id": "strategy-1",
         "signal_id": "signal-1",
@@ -1499,6 +1622,9 @@ def test_trade_facts_use_engine_cursor_changes_without_full_trade_serialization(
                     "status": "closed",
                     "entry_time": "2026-02-01T00:05:00Z",
                     "closed_at": "2026-02-01T01:00:00Z",
+                    "exit_price": 105.0,
+                    "close_reason": "TARGET",
+                    "reason_code": "EXEC_EXIT_TARGET",
                     "direction": "long",
                     "position_commit_seq": 2,
                 }
@@ -1566,6 +1692,134 @@ def test_push_update_never_builds_or_emits_overlay_projection_facts() -> None:
     for payload in runtime.broadcast_payloads:
         fact_types = [fact["fact_type"] for fact in payload["facts"]]
         assert "overlay_ops_emitted" not in fact_types
+
+
+def test_push_update_persists_canonical_decisions_without_subscribers() -> None:
+    runtime = _PushRuntime()
+    runtime._subscribers = {}
+    captured = []
+
+    def _append(**kwargs):
+        captured.append(dict(kwargs))
+        return {"inserted_rows": 1}
+
+    runtime._canonical_fact_appender = CanonicalFactAppender(
+        allocate_seq=runtime._allocate_test_canonical_seq,
+        append_batch=_append,
+        consumers=(),
+    )
+    runtime.decision_events = lambda: [
+        {
+            "event_id": "decision-event-1",
+            "event_name": "DECISION_ACCEPTED",
+            "event_ts": "2026-04-09T14:00:00Z",
+            "correlation_id": "signal:signal-1",
+            "context": {
+                "run_id": "run-1",
+                "bot_id": "bot-1",
+                "strategy_id": "strategy-1",
+                "series_key": "instrument-bip|1h",
+                "instrument_id": "instrument-bip",
+                "symbol": "BIP-20DEC30-CDE",
+                "timeframe": "1h",
+                "bar_ts": "2026-04-09T14:00:00Z",
+                "decision_id": "decision-1",
+                "signal_id": "signal-1",
+                "direction": "long",
+                "signal_price": 100.0,
+            },
+        }
+    ]
+    series = SimpleNamespace(
+        instrument={"id": "instrument-bip"},
+        timeframe="1h",
+        strategy_id="strategy-1",
+        symbol="BIP-20DEC30-CDE",
+        datasource="COINBASE",
+        exchange="coinbase_direct",
+        candles=[{"time": 1}, {"time": 2}],
+        risk_engine=SimpleNamespace(trade_revision=0, serialise_trades=lambda: [], stats=lambda: {}),
+    )
+    runtime._series = [series]
+    candle = SimpleNamespace(
+        time=datetime(2026, 4, 9, 14, tzinfo=timezone.utc),
+        to_dict=lambda: {"time": "2026-04-09T14:00:00Z", "open": 1.5, "high": 2.5, "low": 1.0, "close": 2.0},
+    )
+
+    result = runtime._push_update("bar", series=series, candle=candle)
+
+    assert result["subscriber_count"] == 0.0
+    assert len(captured) == 1
+    assert [fact["decision"]["event_name"] for fact in captured[0]["payload"]["facts"]] == [
+        "DECISION_ACCEPTED"
+    ]
+
+
+def test_terminal_continuity_fact_uses_complete_producer_summary() -> None:
+    runtime = _PushRuntime()
+    runtime._subscribers = {}
+    captured = []
+
+    def _append(**kwargs):
+        captured.append(dict(kwargs))
+        return {"inserted_rows": 1}
+
+    runtime._canonical_fact_appender = CanonicalFactAppender(
+        allocate_seq=runtime._allocate_test_canonical_seq,
+        append_batch=_append,
+        consumers=(),
+    )
+    summary = {
+        "candle_count": 169,
+        "first_ts": "2024-01-01T00:00:00Z",
+        "last_ts": "2024-01-08T00:00:00Z",
+        "expected_interval_seconds": 3600,
+        "detected_gap_count": 0,
+        "defect_gap_count": 0,
+        "missing_candle_estimate": 0,
+        "gap_count_by_type": {"unknown_gap": 0},
+        "final_status": "healthy",
+    }
+    candle_snapshot = {
+        "schema_version": "candle_series_snapshot.v1",
+        "strategy_id": "strategy-1",
+        "instrument_id": "instrument-btc",
+        "symbol": "BTC/USD",
+        "timeframe": "1h",
+        "candle_value_hash": "a" * 64,
+        "candle_count": 169,
+        "warmup_candle_count": 100,
+        "replay_candle_count": 69,
+    }
+    runtime._series = [
+        SimpleNamespace(
+            instrument={"id": "instrument-btc"},
+            timeframe="1h",
+            strategy_id="strategy-1",
+            symbol="BTC/USD",
+            datasource="CCXT",
+            exchange="coinbase",
+            candles=[SimpleNamespace(time=datetime(2024, 1, 8, tzinfo=timezone.utc))],
+            meta={
+                "candle_continuity": summary,
+                "candle_snapshot": candle_snapshot,
+            },
+        )
+    ]
+
+    emitted = runtime._emit_terminal_candle_continuity_facts(status="completed")
+
+    assert emitted == 1
+    fact = captured[0]["payload"]["facts"][0]
+    assert fact["fact_type"] == "candle_continuity_summary"
+    assert fact["summary"] == {
+        **summary,
+        "candle_snapshot": candle_snapshot,
+        "boundary_name": "run_final",
+        "evidence_scope": "canonical_terminal",
+        "materiality": "canonical",
+        "source_reason": "completed",
+    }
 
 
 def test_push_update_queues_botlens_projection_dispatch_off_bar_path() -> None:

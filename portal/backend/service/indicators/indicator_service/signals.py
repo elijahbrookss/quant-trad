@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 from engines.bot_runtime.core.series_identity import canonical_series_key
 from engines.bot_runtime.core.domain import timeframe_to_seconds
 from engines.bot_runtime.core.domain import Candle
+from engines.bot_runtime.core.domain.candle_factory import build_candles_from_dataframe
 from engines.indicator_engine.signal_output import (
     assert_signal_output_event,
     assert_signal_output_has_no_execution_fields,
@@ -142,25 +143,8 @@ def _build_signal_id(
     return f"sig_{digest}"
 
 
-def _build_candles(df: pd.DataFrame) -> List[Candle]:
-    import pandas as pd
-
-    if df is None or getattr(df, "empty", False):
-        return []
-    candles: List[Candle] = []
-    timestamps = pd.to_datetime(df.index, utc=True)
-    for timestamp, (_, row) in zip(timestamps, df.iterrows()):
-        candles.append(
-            Candle(
-                time=timestamp.to_pydatetime(),
-                open=float(row["open"]),
-                high=float(row["high"]),
-                low=float(row["low"]),
-                close=float(row["close"]),
-                volume=float(row["volume"]) if row.get("volume") is not None else None,
-            )
-        )
-    return candles
+def _build_candles(df: Any) -> List[Candle]:
+    return build_candles_from_dataframe(df)
 
 
 class IndicatorSignalExecutor:

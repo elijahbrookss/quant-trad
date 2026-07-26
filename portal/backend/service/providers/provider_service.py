@@ -17,7 +17,6 @@ from data_providers.registry import (
     provider_for_venue,
 )
 
-from . import persistence_bootstrap  # noqa: F401
 from .secret_status import optional_keys, resolve_status, required_keys
 from data_providers.services.credential_store import (
     default_credential_ref,
@@ -165,17 +164,6 @@ def translate_market(provider_id: Optional[str], venue_id: Optional[str]) -> Tup
     venue = normalized.get("venue_id")
     exchange = exchange_slug_for_venue(venue)
     return provider, exchange
-
-
-def venue_from_exchange_slug(exchange: Optional[str]) -> Optional[str]:
-    if not exchange:
-        return None
-    slug = str(exchange).strip().lower()
-    for venue in list_venues():
-        venue_slug = exchange_slug_for_venue(venue.id)
-        if venue_slug and venue_slug.lower() == slug:
-            return venue.id
-    return None
 
 
 def tick_metadata(

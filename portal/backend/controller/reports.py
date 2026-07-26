@@ -6,7 +6,7 @@ import io
 import logging
 from typing import Any, Callable, Dict, Optional, TypeVar
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -344,28 +344,34 @@ async def build_run_report_materialization(
 )
 async def get_run_report(
     run_id: str,
-    build: bool = Query(False, description="Deprecated. Report reads are side-effect free; use POST /run-report/build."),
-    force_rebuild: bool = Query(False, description="Deprecated on GET. Use POST /run-report/build?force_rebuild=true."),
+    request: Request,
 ) -> Any:
     """Return a materialized Run Report DTO contract for a terminal run."""
 
-    context = build_log_context(run_id=run_id, build=build, force_rebuild=force_rebuild)
+    context = build_log_context(run_id=run_id)
     logger.info(with_log_context("run_report_request", context))
-    try:
-        if build or force_rebuild:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "code": "report_build_requires_post",
-                    "message": "GET /run-report is read-only. Use POST /run-report/build to build or force rebuild.",
-                    "run_id": run_id,
-                },
+    unexpected_query = sorted(set(request.query_params.keys()))
+    if unexpected_query:
+        logger.warning(
+            with_log_context(
+                "run_report_unsupported_query_parameters",
+                context | {"parameters": ",".join(unexpected_query)},
             )
-        if not force_rebuild:
-            materialized = await _run_report_task(_materialized_run_report, run_id)
-            if materialized is not None:
-                logger.info(with_log_context("run_report_materialized_success", context))
-                return RunReportDTO.model_validate(materialized)
+        )
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "unsupported_query_parameters",
+                "message": "GET /run-report accepts no query parameters.",
+                "parameters": unexpected_query,
+                "run_id": run_id,
+            },
+        )
+    try:
+        materialized = await _run_report_task(_materialized_run_report, run_id)
+        if materialized is not None:
+            logger.info(with_log_context("run_report_materialized_success", context))
+            return RunReportDTO.model_validate(materialized)
 
         status_payload = await _run_report_task(
             _report_materialization_status,

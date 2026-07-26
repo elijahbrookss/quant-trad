@@ -8,11 +8,13 @@ pytestmark = pytest.mark.db
 from fastapi.testclient import TestClient
 
 from portal.backend.main import app
-from portal.backend.service.storage import storage
+from portal.backend.service.storage.repos.runs import get_bot_run, upsert_bot_run
+from portal.backend.service.storage.repos.trades import record_bot_trade
 from tests.helpers.builders.report_storage_builder import (
     build_run_payload,
     build_trade_payload,
     ensure_report_bot,
+    record_completed_run_lifecycle,
 )
 
 
@@ -25,7 +27,7 @@ def test_bot_run_config_snapshot_is_json_safe():
     bot_id = f"bot-{uuid.uuid4().hex[:6]}"
     ensure_report_bot(bot_id, name="Config Snapshot Bot", strategy_id="strategy-1")
 
-    storage.upsert_bot_run(
+    upsert_bot_run(
         build_run_payload(
             run_id=run_id,
             bot_id=bot_id,
@@ -39,8 +41,14 @@ def test_bot_run_config_snapshot_is_json_safe():
             },
         )
     )
+    record_completed_run_lifecycle(
+        run_id=run_id,
+        bot_id=bot_id,
+        started_at="2024-01-01T00:00:00Z",
+        ended_at="2024-01-31T00:00:00Z",
+    )
 
-    persisted = storage.get_bot_run(run_id)
+    persisted = get_bot_run(run_id)
     assert persisted is not None
     assert persisted["config_snapshot"]["started_at"] == "2026-05-17T07:45:00Z"
     assert persisted["config_snapshot"]["bot"]["updated_at"] == "2026-05-17T07:46:00Z"
@@ -57,7 +65,7 @@ def test_reports_list_and_fetch():
         "total_trades": 2,
     }
     ensure_report_bot(bot_id, name="Test Bot", strategy_id="strategy-1")
-    storage.upsert_bot_run(
+    upsert_bot_run(
         build_run_payload(
             run_id=run_id,
             bot_id=bot_id,
@@ -71,7 +79,13 @@ def test_reports_list_and_fetch():
             summary=summary,
         )
     )
-    storage.record_bot_trade(
+    record_completed_run_lifecycle(
+        run_id=run_id,
+        bot_id=bot_id,
+        started_at="2024-01-01T00:00:00Z",
+        ended_at="2024-01-31T00:00:00Z",
+    )
+    record_bot_trade(
         build_trade_payload(
             trade_id=f"trade-{uuid.uuid4().hex[:8]}",
             run_id=run_id,
@@ -85,7 +99,7 @@ def test_reports_list_and_fetch():
             net_pnl=14.0,
         )
     )
-    storage.record_bot_trade(
+    record_bot_trade(
         build_trade_payload(
             trade_id=f"trade-{uuid.uuid4().hex[:8]}",
             run_id=run_id,
@@ -164,7 +178,7 @@ def test_compare_returns_blocked_result_when_runs_are_not_ready():
     bot_id = f"bot-{uuid.uuid4().hex[:6]}"
     ensure_report_bot(bot_id, name="Test Bot", strategy_id="strategy-1")
     for run_id, pnl in ((run_a, 10.0), (run_b, 15.0)):
-        storage.upsert_bot_run(
+        upsert_bot_run(
             build_run_payload(
                 run_id=run_id,
                 bot_id=bot_id,
@@ -175,6 +189,12 @@ def test_compare_returns_blocked_result_when_runs_are_not_ready():
                 timeframe="1h",
                 summary={"net_pnl": pnl, "total_trades": 0},
             )
+        )
+        record_completed_run_lifecycle(
+            run_id=run_id,
+            bot_id=bot_id,
+            started_at="2024-01-01T00:00:00Z",
+            ended_at="2024-01-31T00:00:00Z",
         )
 
     client = TestClient(app)

@@ -80,6 +80,41 @@ class _FakeStorage:
     def get_report_materialization_status(self, run_id: str):
         return {"run_id": run_id, "status": "not_started", "can_view": False}
 
+    def list_latest_bot_runs_by_bot_ids(self, bot_ids):
+        return {
+            bot_id: dict(self.run)
+            for bot_id in bot_ids
+            if str(bot_id) == "bot-1"
+        }
+
+    def list_latest_bot_run_lifecycles(self, bot_ids, *, run_ids_by_bot=None):
+        _ = run_ids_by_bot
+        return {
+            bot_id: dict(self.lifecycle)
+            for bot_id in bot_ids
+            if str(bot_id) == "bot-1"
+        }
+
+    def list_bot_runs_by_ids(self, run_ids):
+        return {
+            run_id: dict(self.run)
+            for run_id in run_ids
+            if str(run_id) == "run-1"
+        }
+
+    def list_bot_run_leases_by_run_ids(self, run_ids):
+        return {
+            run_id: dict(self.lease)
+            for run_id in run_ids
+            if str(run_id) == "run-1"
+        }
+
+    def list_report_materialization_statuses(self, run_ids):
+        return {
+            run_id: self.get_report_materialization_status(run_id)
+            for run_id in run_ids
+        }
+
     def list_bot_runs(self, bot_id: str):
         return [dict(self.run)] if str(bot_id) == "bot-1" else []
 

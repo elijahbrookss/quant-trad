@@ -187,6 +187,13 @@ backend snapshot remains the execution truth for what actually ran.
 | Makefile | Local development, Docker, DB, validation, and forensic audit support index. |
 | QuantLab/UI | Human visualization and inspection surface, especially for candles, indicators, overlays, BotLens, playback, and reports. |
 
+Agent mutation and research promotion are not yet a fully enforced security
+boundary. Current MCP mutations are guarded and usually plan by default, while
+CLI audit is enabled by default, but direct CLI commands are not uniformly
+plan/apply/confirm gated and audit can be disabled. [ADR 0048](../decisions/0048-gate-agent-mutation-and-research-promotion.md)
+is therefore `proposed`: agents should use approved wrappers, and no workflow
+may represent recommendation or profitability as completed promotion.
+
 ## Current CLI Surface
 
 `qt` is the primary agent/tool command surface. It exposes API-backed commands
@@ -232,6 +239,11 @@ for:
 The experiment layer is intentionally file-backed and small. It proves the
 automation seam without introducing a separate experiment database, scheduler,
 or variant generation system.
+
+Collected run and experiment summaries preserve the report dataset's canonical
+identity hashes, repeatability state, data/execution quality, blockers, and
+caveats. They do not define another quality model or infer promotion readiness
+from performance metrics.
 
 ## Current MCP Surface
 
@@ -315,6 +327,9 @@ returns unsupported/failed rather than inventing a metric.
   access is an explicit forensic path, not the default orchestration path.
 - Run-aware Make diagnostics should use a `forensic-` prefix so they are not
   confused with normal `qt` workflows.
+- Agent mutation/promotion cannot be called fully enforced until ADR 0048's
+  actor, idempotency, durable audit, validation, and negative-bypass evidence
+  exists.
 
 ## Known Gaps
 
@@ -322,4 +337,6 @@ returns unsupported/failed rather than inventing a metric.
   auth boundary.
 - Detached/background orchestration and bounded parallel run execution are
   deferred until foreground plan execution proves insufficient.
+- Agent mutation and research promotion have partial guards but no uniform,
+  durable enforcement contract yet.
 - Email/SMS notification sinks are deferred; the current sinks are console/file.

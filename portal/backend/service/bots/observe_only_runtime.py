@@ -77,7 +77,7 @@ async def run_observe_only_market_intake(
         if hasattr(result, "__await__"):
             await result
 
-    async def _record_summary(status: str, *, ended_at: str | None = None, error: str | None = None) -> None:
+    async def _record_summary(*, error: str | None = None) -> None:
         summary: dict[str, Any] = {
             "execution_behavior": OBSERVE_ONLY_BEHAVIOR,
             "market_event_counts": dict(counts),
@@ -93,9 +93,7 @@ async def run_observe_only_market_intake(
             {
                 "run_id": run_id,
                 "bot_id": bot_id,
-                "status": status,
                 "summary": summary,
-                "ended_at": ended_at,
             }
         )
         if hasattr(result, "__await__"):
@@ -170,9 +168,8 @@ async def run_observe_only_market_intake(
                     status=BotLifecycleStatus.RUNNING.value,
                 )
             if sum(counts.values()) % 100 == 0:
-                await _record_summary(BotLifecycleStatus.RUNNING.value)
-        ended_at = _utc_now_iso()
-        await _record_summary(BotLifecycleStatus.COMPLETED.value, ended_at=ended_at)
+                await _record_summary()
+        await _record_summary()
         await _record_phase(
             BotLifecyclePhase.COMPLETED.value,
             "Observe-only runtime completed configured duration.",
@@ -190,9 +187,8 @@ async def run_observe_only_market_intake(
         )
         return 0
     except Exception as exc:  # noqa: BLE001
-        ended_at = _utc_now_iso()
         message = str(exc)
-        await _record_summary(BotLifecycleStatus.FAILED.value, ended_at=ended_at, error=message)
+        await _record_summary(error=message)
         await _record_phase(
             BotLifecyclePhase.FAILED.value,
             message,

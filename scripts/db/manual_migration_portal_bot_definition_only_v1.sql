@@ -1,8 +1,8 @@
 -- Cut portal_bots to bot definitions only.
 --
 -- Run this only with backend/frontend code that reads runtime state from
--- portal_bot_runs, portal_bot_run_lifecycle, portal_bot_run_leases, and report
--- materialization tables. Existing live processes that still read/write these
+-- portal_bot_runs, portal_bot_run_events, portal_bot_run_leases, and report
+-- materialization tables. Existing live processes that still read/write bot
 -- columns must be stopped before this migration is applied.
 
 BEGIN;

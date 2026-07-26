@@ -20,10 +20,28 @@ from typing import Any, Dict, List, Optional
 
 from utils.log_context import build_log_context, with_log_context
 
+from core.candle_snapshot import (
+    aggregate_candle_series_snapshots,
+    build_expected_candle_series_inventory,
+)
+from indicators.runtime.source_diagnostics import (
+    normalize_indicator_source_diagnostics,
+)
 from ..provenance import REPORT_DATASET_SCHEMA_VERSION
-from ..storage import storage
+from ..storage.repos.candles import (
+    get_candle_storage_summary,
+    list_candle_provider_gap_evidence,
+    list_candles_for_series,
+)
+from ..storage.repos.lifecycle import list_bot_run_lifecycle_events
+from ..storage.repos.observability import list_observability_events
+from ..storage.repos.runs import get_bot_run
+from ..storage.repos.runtime_events import list_bot_run_steps_for_run
+from ..storage.repos.trades import list_bot_trades_for_run
 from . import artifacts as report_artifacts
 from . import report_data
+from .candle_continuity import classify_unknown_gaps_from_provider_evidence
+from .instrument_semantics import merge_fill_instrument_semantics
 from .metrics import compute_expectancy, compute_max_drawdown, compute_profit_factor
 from .summary_metrics import ANNUALIZATION_PERIODS, compute_summary as compute_portfolio_metric_summary
 
@@ -103,7 +121,6 @@ class RunResearchMetadata:
     config_hash: Optional[str]
     material_config_hash: Optional[str]
     data_snapshot_hash: Optional[str]
-    report_material_fingerprint: Optional[str]
     report_semantic_fingerprint: Optional[str]
     report_operational_fingerprint: Optional[str]
     dataset_schema_version: str
@@ -131,7 +148,6 @@ class RunResearchReadiness:
     golden_candidate_status: str = "unknown"
     golden_blocking_reasons: List[str] = field(default_factory=list)
     repeatability_status: str = "unknown"
-    material_fingerprint: Optional[str] = None
     semantic_fingerprint: Optional[str] = None
     operational_fingerprint: Optional[str] = None
 
@@ -314,6 +330,7 @@ def _config_hash(config: Mapping[str, Any]) -> Optional[str]:
 
 
 _NON_MATERIAL_CONFIG_KEYS = {
+    "backtest_warmup_evidence",
     "generated_at",
     "report_generated_at",
     "report_warnings",
@@ -416,11 +433,12 @@ def _strategy_config_sections(config: Mapping[str, Any]) -> Dict[str, Any]:
         or _first_config_section(strategy_map, "indicators", "indicator_config", "indicator_bindings")
         or _first_config_section(bot, "indicators", "indicator_config")
     )
+    atm_template = _mapping(strategy_map.get("atm_template"))
+    atm_template_id = str(strategy_map.get("atm_template_id") or "").strip() or None
     atm_config = (
-        _first_config_section(config, "atm", "atm_template", "atm_config", "bracket_template")
-        or _first_config_section(strategy_map, "atm", "atm_template", "atm_config", "bracket_template")
-        or _first_config_section(risk, "atm", "atm_template", "bracket_template")
-        or _first_config_section(bot, "atm", "atm_template", "atm_config")
+        {"template_id": atm_template_id, "template": atm_template}
+        if atm_template_id or atm_template
+        else {}
     )
     execution_config = {
         "execution_mode": config.get("execution_mode") or bot.get("execution_mode") or risk.get("execution_mode"),
@@ -429,6 +447,8 @@ def _strategy_config_sections(config: Mapping[str, Any]) -> Dict[str, Any]:
         "slippage_bps": slippage_bps,
     }
     data_config = {
+        "backtest_warmup_bars": config.get("backtest_warmup_bars"),
+        "backtest_warmup_evidence": config.get("backtest_warmup_evidence"),
         "symbols": config.get("symbols"),
         "instrument_ids": config.get("instrument_ids"),
         "timeframe": config.get("timeframe"),
@@ -578,17 +598,11 @@ def _metadata_instrument_semantics(run: Mapping[str, Any]) -> List[Dict[str, Any
     readiness = _mapping(config.get("runtime_readiness"))
     profiles = readiness.get("profiles") if isinstance(readiness.get("profiles"), list) else []
     rows: List[Dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-
     for profile in profiles:
         if not isinstance(profile, Mapping):
             continue
         symbol = _clean_text(profile.get("symbol"))
         instrument_id = _clean_text(profile.get("instrument_id"))
-        key = (instrument_id or "", symbol or "")
-        if key in seen:
-            continue
-        seen.add(key)
         instrument_type = _clean_text(profile.get("instrument_type") or profile.get("source_instrument_type"))
         rows.append(
             {
@@ -614,10 +628,6 @@ def _metadata_instrument_semantics(run: Mapping[str, Any]) -> List[Dict[str, Any
             snapshot = _mapping(instrument.get("instrument_snapshot")) or instrument
             symbol = _clean_text(snapshot.get("symbol"))
             instrument_id = _clean_text(instrument.get("instrument_id") or snapshot.get("id"))
-            key = (instrument_id or "", symbol or "")
-            if key in seen:
-                continue
-            seen.add(key)
             instrument_type = _clean_text(snapshot.get("instrument_type"))
             rows.append(
                 {
@@ -641,6 +651,70 @@ def _metadata_timeframes(run: Mapping[str, Any]) -> List[str]:
         if isinstance(strategy, Mapping):
             values.append(strategy.get("timeframe"))
     return _unique_text(values)
+
+
+def _expected_candle_series(run: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    config = _mapping(run.get("config_snapshot"))
+    if "expected_candle_series" in config:
+        explicit = config.get("expected_candle_series")
+        if not isinstance(explicit, list):
+            raise ValueError(
+                "run config expected_candle_series must be a list"
+            )
+        return build_expected_candle_series_inventory(explicit)
+
+    readiness = _mapping(config.get("runtime_readiness"))
+    raw_profiles = readiness.get("profiles") or []
+    if not isinstance(raw_profiles, list):
+        raise ValueError("run config runtime_readiness.profiles must be a list")
+    profiles = list(raw_profiles)
+    if profiles:
+        if any(not isinstance(row, Mapping) for row in profiles):
+            raise ValueError(
+                "run config runtime_readiness.profiles entries must be mappings"
+            )
+        strategy_id = str(run.get("strategy_id") or "").strip()
+        timeframe = (
+            readiness.get("timeframe")
+            or run.get("timeframe")
+            or config.get("timeframe")
+        )
+        return build_expected_candle_series_inventory(
+            {
+                "strategy_id": strategy_id,
+                "instrument_id": row.get("instrument_id"),
+                "symbol": row.get("symbol"),
+                "timeframe": timeframe,
+            }
+            for row in profiles
+        )
+
+    configured: List[Dict[str, Any]] = []
+    for strategy in config.get("strategies") or []:
+        if not isinstance(strategy, Mapping):
+            continue
+        strategy_id = strategy.get("id") or run.get("strategy_id")
+        timeframe = (
+            strategy.get("timeframe")
+            or run.get("timeframe")
+            or config.get("timeframe")
+        )
+        for instrument in strategy.get("instruments") or []:
+            if not isinstance(instrument, Mapping):
+                continue
+            snapshot = _mapping(instrument.get("instrument_snapshot"))
+            configured.append(
+                {
+                    "strategy_id": strategy_id,
+                    "instrument_id": (
+                        instrument.get("instrument_id")
+                        or snapshot.get("id")
+                    ),
+                    "symbol": snapshot.get("symbol") or instrument.get("symbol"),
+                    "timeframe": timeframe,
+                }
+            )
+    return build_expected_candle_series_inventory(configured)
 
 
 def _trade_metrics(trade: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1022,9 +1096,6 @@ def _candle_dt(row: Mapping[str, Any]) -> Optional[datetime]:
 
 
 def _fetch_excursion_candles(trade: Mapping[str, Any]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    list_candles = getattr(storage, "list_candles_for_series", None)
-    if not callable(list_candles):
-        return [], {"status": "unavailable", "caveats": ["candle_window_storage_unavailable"]}
     instrument_id = str(trade.get("instrument_id") or "").strip()
     entry_dt = _parse_iso(trade.get("entry_time"))
     exit_dt = _parse_iso(trade.get("exit_time"))
@@ -1039,7 +1110,7 @@ def _fetch_excursion_candles(trade: Mapping[str, Any]) -> tuple[List[Dict[str, A
         limit = max(1, min(expected_limit, 2000))
         end = exit_dt + timedelta(seconds=seconds)
         try:
-            rows = list_candles(
+            rows = list_candles_for_series(
                 instrument_id=instrument_id,
                 timeframe=timeframe,
                 start=_iso(entry_dt),
@@ -1062,7 +1133,7 @@ def _fetch_excursion_candles(trade: Mapping[str, Any]) -> tuple[List[Dict[str, A
             continue
         metadata = {
             "status": "available",
-            "source": "market_candles_raw",
+            "source": "market.candle_versions",
             "source_timeframe": timeframe,
             "candle_count": len(normalized),
             "caveats": [],
@@ -1647,6 +1718,10 @@ def _wallet_accounting(
         name = _event_name_key(row)
         context = _context(row)
         if name in _WALLET_EVENT_NAMES:
+            if name in {"entry_filled", "exit_filled"} and str(
+                context.get("accounting_mode") or ""
+            ).strip().lower() == "margin":
+                continue
             wallet_events.append(_payload(row))
     wallet_events_by_decision: Dict[str, List[Dict[str, Any]]] = {}
     for payload in wallet_events:
@@ -1871,9 +1946,41 @@ def _execution_section(
     for key in ("report_warnings", "runtime_warnings", "warnings"):
         warnings.extend(dict(entry) for entry in config.get(key) or [] if isinstance(entry, Mapping))
     fallback_rows: Dict[str, Dict[str, Any]] = {}
+    fill_rows: List[Dict[str, Any]] = []
     for row in events:
         name = _event_name_key(row)
         context = _context(row)
+        if name in {"entry_filled", "exit_filled"}:
+            fill_rows.append(
+                {
+                    "event_id": row.get("event_id") or _payload(row).get("event_id"),
+                    "event_name": name,
+                    "event_time": _payload(row).get("event_ts"),
+                    "known_at": context.get("bar_time") or row.get("known_at"),
+                    "series_key": context.get("series_key"),
+                    "instrument_id": context.get("instrument_id"),
+                    "symbol": context.get("symbol"),
+                    "timeframe": context.get("timeframe"),
+                    "trade_id": context.get("trade_id"),
+                    "side": context.get("side"),
+                    "direction": context.get("direction"),
+                    "qty": context.get("qty"),
+                    "price": context.get("price"),
+                    "notional": context.get("notional"),
+                    "fee_paid": context.get("fee_paid"),
+                    "fee_rate": context.get("fee_rate"),
+                    "fee_type": context.get("fee_type"),
+                    "fee_source": context.get("fee_source"),
+                    "accounting_mode": context.get("accounting_mode"),
+                    "wallet_commit_seq": context.get("wallet_commit_seq"),
+                    "position_commit_seq": context.get("position_commit_seq"),
+                    "exit_kind": context.get("exit_kind"),
+                    "realized_pnl": context.get("realized_pnl"),
+                    "correlation_id": _payload(row).get("correlation_id"),
+                    "root_id": _payload(row).get("root_id"),
+                    "parent_id": _payload(row).get("parent_id"),
+                }
+            )
         if name == "execution_intrabar_fallback_pessimistic":
             event_id = str(row.get("event_id") or _payload(row).get("event_id") or len(fallback_rows))
             fallback_rows[event_id] = {
@@ -1907,6 +2014,8 @@ def _execution_section(
         "intrabar_fallback_count": len(fallback_rows),
         "fallback_reason_distribution": dict(reason_distribution),
         "fallback_bars": list(fallback_rows.values()),
+        "fill_count": len(fill_rows),
+        "fills": fill_rows,
         "fast_full_caveats": fast_full_caveats,
     }
 
@@ -1932,10 +2041,21 @@ def _candle_gaps(
     noncanonical_summary_count = 0
     for row in events:
         context = _context(row)
-        sources.append((row, context if "gap_count_by_type" in context else _mapping(_payload(row).get("details")), _event_name_key(row)))
+        nested_details = _mapping(context.get("details"))
+        sources.append(
+            (
+                row,
+                context
+                if "gap_count_by_type" in context
+                else nested_details
+                if "gap_count_by_type" in nested_details
+                else _mapping(_payload(row).get("details")),
+                _event_name_key(row),
+            )
+        )
     for row in observability_events:
         sources.append((row, _mapping(row.get("details")), str(row.get("event_name") or "").strip().lower()))
-    closure_cache: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+    provider_gap_cache: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
     for row, summary_context, name in sources:
         if name not in {"candle_continuity_summary", "candle_gap_observed"} and "gap_count_by_type" not in summary_context:
             continue
@@ -1955,12 +2075,12 @@ def _candle_gaps(
             symbol = "UNKNOWN"
         gap_counts = _mapping(summary_context.get("gap_count_by_type"))
         gaps = summary_context.get("gaps") if isinstance(summary_context.get("gaps"), list) else []
-        gaps = _reclassify_unknown_candle_gaps_from_closures(
+        gaps = _reclassify_unknown_candle_gaps_from_provider_evidence(
             gaps,
             instrument_id=str(instrument_id or ""),
             timeframe=str(summary_context.get("timeframe") or row.get("timeframe") or ""),
             metadata=metadata,
-            closure_cache=closure_cache,
+            provider_gap_cache=provider_gap_cache,
         )
         detected = _safe_int(summary_context.get("detected_gap_count")) or sum(
             int(_safe_int(value) or 0) for value in gap_counts.values()
@@ -1985,6 +2105,7 @@ def _candle_gaps(
             "gap_count_by_type": gap_counts,
             "detected_gap_count": detected,
             "candle_count": summary_context.get("candle_count"),
+            "candle_snapshot": _mapping(summary_context.get("candle_snapshot")),
             "missing_candle_estimate": summary_context.get("missing_candle_estimate"),
             "gaps": gaps,
             "observed_at": row.get("observed_at"),
@@ -2045,38 +2166,22 @@ def _candle_continuity_evidence_scope(
     return "noncanonical"
 
 
-def _candle_gap_missing_window(gap: Mapping[str, Any]) -> tuple[Optional[datetime], Optional[datetime]]:
-    previous_ts = _parse_iso(gap.get("previous_ts") or gap.get("previous_time") or gap.get("previous"))
-    current_ts = _parse_iso(gap.get("current_ts") or gap.get("current_time") or gap.get("current"))
-    expected_seconds = _safe_int(gap.get("expected_interval_seconds"))
-    if previous_ts is not None and current_ts is not None and expected_seconds and expected_seconds > 0:
-        return previous_ts + timedelta(seconds=int(expected_seconds)), current_ts
-    return (
-        _parse_iso(gap.get("start") or gap.get("start_ts") or gap.get("missing_start")),
-        _parse_iso(gap.get("end") or gap.get("end_ts") or gap.get("missing_end")),
-    )
-
-
-def _load_candle_closure_evidence(
+def _load_candle_provider_gap_evidence(
     *,
     instrument_id: str,
     timeframe: str,
     metadata: Optional[RunResearchMetadata],
-    closure_cache: Dict[tuple[str, str], List[Dict[str, Any]]],
+    provider_gap_cache: Dict[tuple[str, str], List[Dict[str, Any]]],
 ) -> List[Dict[str, Any]]:
     instrument = str(instrument_id or "").strip()
     interval = str(timeframe or "").strip()
     if not instrument or not interval or metadata is None:
         return []
     key = (instrument, interval)
-    if key in closure_cache:
-        return closure_cache[key]
-    loader = getattr(storage, "list_candle_closure_evidence", None)
-    if not callable(loader):
-        closure_cache[key] = []
-        return []
+    if key in provider_gap_cache:
+        return provider_gap_cache[key]
     try:
-        rows = loader(
+        rows = list_candle_provider_gap_evidence(
             instrument_id=instrument,
             timeframe=interval,
             start=metadata.simulated_window.get("start"),
@@ -2085,7 +2190,7 @@ def _load_candle_closure_evidence(
     except Exception as exc:  # noqa: BLE001 - diagnostics must not hide report construction
         logger.warning(
             with_log_context(
-                "run_research_dataset_candle_closure_evidence_unavailable",
+                "run_research_dataset_candle_provider_gap_evidence_unavailable",
                 build_log_context(
                     run_id=metadata.run_id,
                     instrument_id=instrument,
@@ -2095,65 +2200,28 @@ def _load_candle_closure_evidence(
             )
         )
         rows = []
-    closure_cache[key] = [dict(row) for row in rows if isinstance(row, Mapping)]
-    return closure_cache[key]
+    provider_gap_cache[key] = [dict(row) for row in rows if isinstance(row, Mapping)]
+    return provider_gap_cache[key]
 
 
-def _closure_covers_gap(closure: Mapping[str, Any], gap_start: datetime, gap_end: datetime) -> bool:
-    closure_start = _parse_iso(closure.get("start") or closure.get("start_ts"))
-    closure_end = _parse_iso(closure.get("end") or closure.get("end_ts"))
-    if closure_start is None or closure_end is None:
-        return False
-    return closure_start <= gap_start and closure_end >= gap_end
-
-
-def _reclassify_unknown_candle_gaps_from_closures(
+def _reclassify_unknown_candle_gaps_from_provider_evidence(
     gaps: Sequence[Any],
     *,
     instrument_id: str,
     timeframe: str,
     metadata: Optional[RunResearchMetadata],
-    closure_cache: Dict[tuple[str, str], List[Dict[str, Any]]],
+    provider_gap_cache: Dict[tuple[str, str], List[Dict[str, Any]]],
 ) -> List[Dict[str, Any]]:
     normalized = [dict(gap) for gap in gaps if isinstance(gap, Mapping)]
     if not normalized or not any(str(gap.get("classification") or "unknown_gap") == "unknown_gap" for gap in normalized):
         return normalized
-    closures = _load_candle_closure_evidence(
+    provider_evidence = _load_candle_provider_gap_evidence(
         instrument_id=instrument_id,
         timeframe=timeframe,
         metadata=metadata,
-        closure_cache=closure_cache,
+        provider_gap_cache=provider_gap_cache,
     )
-    if not closures:
-        return normalized
-    reclassified: List[Dict[str, Any]] = []
-    for gap in normalized:
-        classification = str(gap.get("classification") or "unknown_gap")
-        if classification != "unknown_gap":
-            reclassified.append(gap)
-            continue
-        gap_start, gap_end = _candle_gap_missing_window(gap)
-        if gap_start is None or gap_end is None:
-            reclassified.append(gap)
-            continue
-        closure = next((row for row in closures if _closure_covers_gap(row, gap_start, gap_end)), None)
-        if closure is None:
-            reclassified.append(gap)
-            continue
-        closure_metadata = _mapping(closure.get("metadata"))
-        provider_evidence = _mapping(closure_metadata.get("provider_evidence"))
-        evidence = {
-            **gap,
-            "classification": "provider_missing_data",
-            "reason_code": str(closure_metadata.get("reason_code") or "source_sparse"),
-            "evidence": str(closure_metadata.get("evidence") or "portal_candle_closure"),
-            "closure_start": _iso(_parse_iso(closure.get("start"))),
-            "closure_end": _iso(_parse_iso(closure.get("end"))),
-        }
-        if provider_evidence:
-            evidence["provider_evidence"] = provider_evidence
-        reclassified.append(evidence)
-    return reclassified
+    return classify_unknown_gaps_from_provider_evidence(normalized, provider_evidence)
 
 
 def _normalized_gap_counts(value: Any) -> Dict[str, int]:
@@ -2276,15 +2344,28 @@ def _diagnostic_summary(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def _observability_events_for_run(run_id: str) -> List[Dict[str, Any]]:
-    list_events = getattr(storage, "list_observability_events", None)
-    if not callable(list_events):
-        return []
+def _observability_events_for_run(
+    run_id: str,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     try:
-        return [dict(row) for row in list_events(run_id=run_id, limit=2000)]
-    except TypeError:
-        rows = list_events(limit=5000)
-        return [dict(row) for row in rows if str(row.get("run_id") or "") == run_id]
+        rows = [
+            dict(row)
+            for row in list_observability_events(
+                run_id=run_id,
+                limit=report_data.REPORT_OBSERVABILITY_EVENT_LIMIT + 1,
+            )
+        ]
+        truncated = len(rows) > report_data.REPORT_OBSERVABILITY_EVENT_LIMIT
+        retained = rows[: report_data.REPORT_OBSERVABILITY_EVENT_LIMIT]
+        return retained, {
+            "schema_version": "observability_event_coverage.v1",
+            "status": "truncated" if truncated else "complete",
+            "retained_count": len(retained),
+            "probe_count": len(rows),
+            "limit": report_data.REPORT_OBSERVABILITY_EVENT_LIMIT,
+            "has_more": truncated,
+            "ordering": "observed_at_desc",
+        }
     except Exception as exc:  # noqa: BLE001 - diagnostics should report source gaps, not fail report builds.
         logger.warning(
             with_log_context(
@@ -2292,7 +2373,16 @@ def _observability_events_for_run(run_id: str) -> List[Dict[str, Any]]:
                 build_log_context(run_id=run_id, error=str(exc)),
             )
         )
-        return []
+        return [], {
+            "schema_version": "observability_event_coverage.v1",
+            "status": "unavailable",
+            "retained_count": 0,
+            "probe_count": 0,
+            "limit": report_data.REPORT_OBSERVABILITY_EVENT_LIMIT,
+            "has_more": None,
+            "ordering": "observed_at_desc",
+            "reason": type(exc).__name__,
+        }
 
 
 def _failure_payload(row: Mapping[str, Any]) -> Dict[str, Any]:
@@ -2576,6 +2666,8 @@ def _position_ordering_health(events: Sequence[Mapping[str, Any]]) -> Dict[str, 
         caveats.append("position_commit_seq_status_invalid")
     if duplicates:
         caveats.append("position_ordering_duplicate")
+    if non_monotonic:
+        caveats.append("position_ordering_non_monotonic")
     if open_seq_invalid:
         caveats.append("position_open_seq_invalid")
     status = "ready" if not caveats else "inconsistent"
@@ -2601,11 +2693,8 @@ def _position_ordering_health(events: Sequence[Mapping[str, Any]]) -> Dict[str, 
 
 
 def _lifecycle_events_for_run(run_id: str) -> List[Dict[str, Any]]:
-    list_events = getattr(storage, "list_bot_run_lifecycle_events", None)
-    if not callable(list_events):
-        return []
     try:
-        return [dict(row) for row in list_events(run_id)]
+        return [dict(row) for row in list_bot_run_lifecycle_events(run_id)]
     except Exception as exc:  # noqa: BLE001 - diagnostics should report source gaps, not fail report builds.
         logger.warning(
             with_log_context(
@@ -2628,11 +2717,105 @@ def _report_diagnostics(
     performance: Mapping[str, Any],
     summary: RunResearchSummary,
     position_ordering: Mapping[str, Any],
+    context: Mapping[str, Any],
     observability_events: Sequence[Mapping[str, Any]] = (),
+    observability_coverage: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     run_id = str(run.get("run_id") or "")
     bot_id = str(run.get("bot_id") or "").strip() or None
     items: List[Dict[str, Any]] = []
+
+    source_diagnostics = _mapping(context.get("indicator_source_diagnostics"))
+    if not source_diagnostics.get("available"):
+        items.append(
+            _diagnostic(
+                severity="warning",
+                source="indicator_source_data",
+                code="indicator_source_diagnostics_unavailable",
+                message=(
+                    "Indicator source-candle diagnostics were not captured for "
+                    "this run."
+                ),
+                affected_identity={"run_id": run_id, "bot_id": bot_id},
+                readiness_impact="blocks_golden",
+                suggested_next_step=(
+                    "Repeat the run with canonical runtime artifact capture "
+                    "before certifying its indicator-derived outputs."
+                ),
+            )
+        )
+    else:
+        for record in source_diagnostics.get("items") or []:
+            if not isinstance(record, Mapping):
+                continue
+            source = _mapping(record.get("source_candle_continuity"))
+            acceptability = str(source.get("acceptability") or "")
+            if acceptability == "accepted":
+                continue
+            investigate = acceptability == "investigate"
+            items.append(
+                _diagnostic(
+                    severity="warning",
+                    source="indicator_source_data",
+                    code=(
+                        "indicator_source_continuity_investigate"
+                        if investigate
+                        else "indicator_source_continuity_caveat"
+                    ),
+                    message=str(
+                        source.get("message")
+                        or "Indicator source-candle continuity requires review."
+                    ),
+                    affected_identity={
+                        "run_id": run_id,
+                        "bot_id": bot_id,
+                        "strategy_id": record.get("strategy_id"),
+                        "instrument_id": record.get("instrument_id"),
+                        "symbol": record.get("symbol"),
+                        "timeframe": record.get("timeframe"),
+                        "indicator_id": record.get("indicator_id"),
+                        "indicator_type": record.get("indicator_type"),
+                        "source_candle_continuity": _json_safe(source),
+                    },
+                    readiness_impact=(
+                        "blocks_golden" if investigate else "degrades_metrics"
+                    ),
+                    suggested_next_step=(
+                        "Repair or classify the indicator source-candle defects "
+                        "before certifying this run."
+                        if investigate
+                        else "Retain this provider-source caveat when comparing results."
+                    ),
+                )
+            )
+
+    coverage = _mapping(observability_coverage)
+    coverage_status = str(coverage.get("status") or "")
+    if coverage_status in {"truncated", "unavailable"}:
+        coverage_code = f"observability_events_{coverage_status}"
+        items.append(
+            _diagnostic(
+                severity="warning",
+                source="observability",
+                code=coverage_code,
+                message=(
+                    "Observability diagnostics were truncated to the newest "
+                    f"{coverage.get('retained_count')} rows."
+                    if coverage_status == "truncated"
+                    else "Observability diagnostics were unavailable."
+                ),
+                affected_identity={
+                    "run_id": run_id,
+                    "bot_id": bot_id,
+                    "coverage": coverage,
+                },
+                readiness_impact="blocks_golden",
+                suggested_next_step=(
+                    "Inspect the complete observability event history before "
+                    "certifying this run."
+                ),
+            )
+        )
 
     if not readiness.results_ready:
         items.append(
@@ -3100,6 +3283,7 @@ def _sections(
         _mapping(context.get("decision_context")),
         _mapping(context.get("trade_context")),
         _mapping(context.get("market_state")),
+        _mapping(context.get("indicator_source_diagnostics")),
     ]
     context_rows = sum(int(section_payload.get("row_count") or 0) for section_payload in context_sections)
     wallet = _mapping(wallet_diagnostics)
@@ -3119,12 +3303,20 @@ def _sections(
             section("decision_context", available=bool(context.get("decision_context", {}).get("available")), row_count=int(context.get("decision_context", {}).get("row_count") or 0), reason=context.get("decision_context", {}).get("reason")),
             section("trade_context", available=bool(context.get("trade_context", {}).get("available")), row_count=int(context.get("trade_context", {}).get("row_count") or 0), reason=context.get("trade_context", {}).get("reason")),
             section("market_state", available=bool(context.get("market_state", {}).get("available")), row_count=int(context.get("market_state", {}).get("row_count") or 0), reason=context.get("market_state", {}).get("reason")),
+            section("indicator_source_diagnostics", available=bool(context.get("indicator_source_diagnostics", {}).get("available")), row_count=int(context.get("indicator_source_diagnostics", {}).get("row_count") or 0), reason=context.get("indicator_source_diagnostics", {}).get("reason"), status=context.get("indicator_source_diagnostics", {}).get("status")),
             section("candidate_lifecycle", available=bool(candidate_lifecycle.get("available")), row_count=int(candidate_lifecycle.get("row_count") or 0), reason=candidate_lifecycle.get("reason")),
             section("candle_catalog", available=bool(candle_catalog.get("items")), row_count=len(candle_catalog.get("items") or []), reason=None if candle_catalog.get("items") else "candle_catalog_unavailable"),
             section("diagnostics", available=True, row_count=int(_mapping(diagnostics.get("summary")).get("total") or 0)),
             section("wallet_diagnostics", available=bool(wallet), row_count=int(wallet.get("wallet_event_count") or 0), reason=None if wallet else "wallet_diagnostics_unavailable"),
             section("metrics", available=True),
-            section("execution", available=True, row_count=int(execution.get("intrabar_fallback_count") or 0)),
+            section(
+                "execution",
+                available=True,
+                row_count=(
+                    int(execution.get("intrabar_fallback_count") or 0)
+                    + int(execution.get("fill_count") or 0)
+                ),
+            ),
             section("data_quality", available=True, row_count=len(candle_gaps.get("gap_counts_by_symbol") or []), status=readiness.data_quality_status),
             section("operational_health", available=bool(operational), row_count=len(operational.get("per_stage_latency") or []), reason=None if operational else "operational_health_unavailable"),
             section("export", available=readiness.export_status in {"available", "partial"}, status=readiness.export_status, reason=None if readiness.export_status == "available" else readiness.reason),
@@ -3626,8 +3818,7 @@ def _timeseries(
 
 
 def _performance(run: Mapping[str, Any], events: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
-    steps_func = getattr(storage, "list_bot_run_steps_for_run", None)
-    steps = steps_func(str(run.get("run_id") or "")) if callable(steps_func) else []
+    steps = list_bot_run_steps_for_run(str(run.get("run_id") or ""))
     durations = [_safe_float(step.get("p95_value", step.get("duration_ms"))) for step in steps]
     clean_durations = [float(value) for value in durations if value is not None]
     by_step: Dict[str, Dict[str, Any]] = {}
@@ -4069,6 +4260,7 @@ def _context_dataset(
     decisions: Sequence[Mapping[str, Any]],
     signals: Sequence[Mapping[str, Any]],
     trades: Sequence[Mapping[str, Any]],
+    indicator_source_diagnostics: Mapping[str, Any],
 ) -> Dict[str, Any]:
     indicator_rows: List[Dict[str, Any]] = []
     decision_context_rows: List[Dict[str, Any]] = []
@@ -4185,6 +4377,11 @@ def _context_dataset(
         for row in trade_context_rows
     ):
         caveats.append("exit_market_state_runtime_capture_incomplete")
+    caveats.extend(
+        str(caveat)
+        for caveat in indicator_source_diagnostics.get("caveats") or []
+        if str(caveat).strip()
+    )
     return {
         "schema_version": "report_context.v1",
         "indicator_snapshots": _series_payload(
@@ -4207,6 +4404,60 @@ def _context_dataset(
             rows=market_state_rows,
             reason="requires captured market-state context values",
         ),
+        "indicator_source_diagnostics": dict(indicator_source_diagnostics),
+        "caveats": sorted(dict.fromkeys(caveats)),
+    }
+
+
+def _indicator_source_diagnostics_dataset(
+    run: Mapping[str, Any],
+) -> Dict[str, Any]:
+    config = _mapping(run.get("config_snapshot"))
+    if "indicator_source_diagnostics" not in config:
+        return {
+            "schema_version": "indicator_source_diagnostics.v1",
+            "available": False,
+            "status": "unavailable",
+            "row_count": 0,
+            "items": [],
+            "reason": "canonical runtime source diagnostics were not captured",
+            "caveats": ["indicator_source_diagnostics_unavailable"],
+        }
+
+    items = normalize_indicator_source_diagnostics(
+        config.get("indicator_source_diagnostics")
+    )
+    acceptability = {
+        str(
+            _mapping(record.get("source_candle_continuity")).get(
+                "acceptability"
+            )
+            or ""
+        )
+        for record in items
+    }
+    caveats: list[str] = []
+    if "investigate" in acceptability:
+        status = "investigate"
+        caveats.append("indicator_source_continuity_investigate")
+    elif "acceptable_with_caveat" in acceptability:
+        status = "acceptable_with_caveat"
+        caveats.append("indicator_source_continuity_caveat")
+    elif items:
+        status = "accepted"
+    else:
+        status = "not_applicable"
+    return {
+        "schema_version": "indicator_source_diagnostics.v1",
+        "available": True,
+        "status": status,
+        "row_count": len(items),
+        "items": items,
+        "reason": (
+            "no configured indicators required independent source candles"
+            if not items
+            else None
+        ),
         "caveats": caveats,
     }
 
@@ -4216,10 +4467,25 @@ def _candle_catalog(
     metadata: RunResearchMetadata,
     traces: Sequence[Mapping[str, Any]],
     candle_gaps: Mapping[str, Any],
+    expected_series: Sequence[Mapping[str, Any]] = (),
 ) -> Dict[str, Any]:
     facts = [dict(row) for row in candle_gaps.get("facts") or [] if isinstance(row, Mapping)]
     gap_by_series = {str(row.get("series_key") or ""): row for row in facts if row.get("series_key")}
     combos: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for row in expected_series:
+        instrument_id = str(row.get("instrument_id") or "").strip()
+        timeframe = str(row.get("timeframe") or "").strip()
+        if not instrument_id or not timeframe:
+            continue
+        combos.setdefault(
+            (instrument_id, timeframe),
+            {
+                "run_id": metadata.run_id,
+                "instrument_id": instrument_id,
+                "symbol": _clean_text(row.get("symbol")),
+                "timeframe": timeframe,
+            },
+        )
     for row in traces:
         instrument_id = str(row.get("instrument_id") or "").strip()
         timeframe = str(row.get("timeframe") or metadata.timeframe or "").strip()
@@ -4258,14 +4524,13 @@ def _candle_catalog(
                         },
                     )
     items: List[Dict[str, Any]] = []
-    storage_summary = getattr(storage, "get_candle_storage_summary", None)
     for entry in combos.values():
         series_key = f"{entry.get('instrument_id')}|{entry.get('timeframe')}" if entry.get("instrument_id") and entry.get("timeframe") else None
         fact = gap_by_series.get(str(series_key or "")) or {}
         stored: Dict[str, Any] = {}
-        if callable(storage_summary) and entry.get("instrument_id") and entry.get("timeframe"):
+        if entry.get("instrument_id") and entry.get("timeframe"):
             stored = _mapping(
-                storage_summary(
+                get_candle_storage_summary(
                     instrument_id=str(entry.get("instrument_id")),
                     timeframe=str(entry.get("timeframe")),
                     start=metadata.simulated_window.get("start"),
@@ -4309,10 +4574,15 @@ def _candle_catalog(
                 "expected_gap_count": semantics.get("expected_gap_count"),
                 "unclassified_gap_count": semantics.get("unclassified_gap_count"),
                 "readiness_impact": semantics.get("readiness_impact"),
-                "first_gap_evidence": next((gap for gap in fact.get("gaps") or [] if isinstance(gap, Mapping)), None),
+                "first_gap_evidence": (
+                    next((gap for gap in fact.get("gaps") or [] if isinstance(gap, Mapping)), None)
+                    if int(gap_count or 0) > 0
+                    else None
+                ),
                 "continuity_status": continuity_status,
+                "candle_snapshot": _mapping(fact.get("candle_snapshot")),
                 "available_resolutions": available_resolutions,
-                "storage_source": "market_candles_raw" if stored else "candle_continuity_summary" if fact else "unresolved_instrument",
+                "storage_source": "market.candle_versions" if stored else "candle_continuity_summary" if fact else "unresolved_instrument",
                 "series_key": series_key,
             }
         )
@@ -4340,16 +4610,85 @@ def _stable_hash(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _data_snapshot_hash(candle_catalog: Mapping[str, Any]) -> Optional[str]:
-    rows = []
-    for item in candle_catalog.get("items") or []:
-        if not isinstance(item, Mapping):
-            continue
-        rows.append(_candle_catalog_material_row(item))
-    if not rows:
+def _data_snapshot_hash(
+    candle_catalog: Mapping[str, Any],
+    *,
+    candle_gaps: Optional[Mapping[str, Any]] = None,
+    expected_series: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> Optional[str]:
+    items = [
+        item
+        for item in candle_catalog.get("items") or []
+        if isinstance(item, Mapping)
+    ]
+    if not items:
         return None
-    rows.sort(key=lambda row: (str(row.get("instrument_id") or ""), str(row.get("timeframe") or "")))
-    return _stable_hash({"candle_catalog": rows})
+    if any(
+        not str(item.get("instrument_id") or "").strip()
+        or not str(item.get("timeframe") or "").strip()
+        for item in items
+    ):
+        return None
+    if candle_gaps is not None:
+        snapshots = [
+            _mapping(fact.get("candle_snapshot"))
+            for fact in candle_gaps.get("facts") or []
+            if isinstance(fact, Mapping)
+            and _mapping(fact.get("candle_snapshot"))
+        ]
+    else:
+        snapshots = [
+            _mapping(item.get("candle_snapshot"))
+            for item in items
+            if _mapping(item.get("candle_snapshot"))
+        ]
+    if expected_series is None:
+        derived_expected: List[Dict[str, Any]] = []
+        for item in items:
+            snapshot = _mapping(item.get("candle_snapshot"))
+            derived_expected.append(
+                {
+                    "strategy_id": item.get("strategy_id") or snapshot.get("strategy_id"),
+                    "instrument_id": item.get("instrument_id") or snapshot.get("instrument_id"),
+                    "symbol": item.get("symbol") or snapshot.get("symbol"),
+                    "timeframe": item.get("timeframe") or snapshot.get("timeframe"),
+                }
+            )
+        try:
+            expected_inventory = build_expected_candle_series_inventory(
+                derived_expected
+            )
+        except ValueError:
+            return None
+    else:
+        expected_inventory = build_expected_candle_series_inventory(
+            expected_series
+        )
+    if not snapshots or not expected_inventory:
+        return None
+    covered_inventory = build_expected_candle_series_inventory(snapshots)
+    expected_identities = {
+        (
+            str(row["strategy_id"]),
+            str(row["instrument_id"]),
+            str(row["timeframe"]),
+        )
+        for row in expected_inventory
+    }
+    covered_identities = {
+        (
+            str(row["strategy_id"]),
+            str(row["instrument_id"]),
+            str(row["timeframe"]),
+        )
+        for row in covered_inventory
+    }
+    if expected_identities != covered_identities:
+        return None
+    return str(
+        aggregate_candle_series_snapshots(snapshots).get("data_snapshot_hash")
+        or ""
+    ).strip() or None
 
 
 def _candle_catalog_material_row(item: Mapping[str, Any]) -> Dict[str, Any]:
@@ -4494,9 +4833,27 @@ def _context_material_rows(context: Mapping[str, Any]) -> Dict[str, Any]:
             str(row.get("symbol") or ""),
         )
     )
+    source_diagnostics = [
+        dict(row)
+        for row in _mapping(
+            context.get("indicator_source_diagnostics")
+        ).get("items")
+        or []
+        if isinstance(row, Mapping)
+    ]
+    source_diagnostics.sort(
+        key=lambda row: (
+            str(row.get("strategy_id") or ""),
+            str(row.get("instrument_id") or ""),
+            str(row.get("symbol") or ""),
+            str(row.get("timeframe") or ""),
+            str(row.get("indicator_id") or ""),
+        )
+    )
     return {
         "indicator_snapshots": indicator_rows,
         "market_state": market_rows,
+        "indicator_source_diagnostics": source_diagnostics,
     }
 
 
@@ -4857,8 +5214,8 @@ def _golden_blocking_reasons(
         reasons.append("missing_material_config_hash")
     if not metadata.data_snapshot_hash:
         reasons.append("missing_data_snapshot_hash")
-    if not readiness.material_fingerprint:
-        reasons.append("missing_material_fingerprint")
+    if not readiness.semantic_fingerprint:
+        reasons.append("missing_semantic_fingerprint")
     for caveat in readiness.caveats:
         normalized = str(caveat or "").strip()
         if normalized in {
@@ -4874,7 +5231,6 @@ def _golden_blocking_reasons(
             "position_ordering_missing",
             "position_commit_seq_status_invalid",
             "position_ordering_duplicate",
-            "position_ordering_gap",
             "position_ordering_non_monotonic",
             "position_open_seq_invalid",
             "wallet_runtime_events_unavailable",
@@ -4886,6 +5242,11 @@ def _golden_blocking_reasons(
             "margin_rejection_evidence_incomplete",
             "wallet_margin_rejection_trace_incomplete",
             "wallet_replay_failed",
+            "backtest_warmup_insufficient",
+            "backtest_warmup_evidence_malformed",
+            "backtest_warmup_evidence_unavailable",
+            "observability_events_truncated",
+            "observability_events_unavailable",
         }:
             reasons.append(normalized)
     if any(str(item.get("continuity_status") or "") in {"unknown", "unavailable"} for item in candle_catalog.get("items") or [] if isinstance(item, Mapping)):
@@ -4917,7 +5278,6 @@ def _with_golden_status(
 ) -> RunResearchReadiness:
     staged = replace(
         readiness,
-        material_fingerprint=semantic_fingerprint,
         semantic_fingerprint=semantic_fingerprint,
         operational_fingerprint=operational_fingerprint,
     )
@@ -4946,6 +5306,7 @@ def _operational_health(
     sections: Mapping[str, Any],
     diagnostics: Mapping[str, Any],
     observability_events: Sequence[Mapping[str, Any]],
+    observability_coverage: Mapping[str, Any],
 ) -> Dict[str, Any]:
     event_type_counts = Counter(str(row.get("event_type") or "unknown") for row in events)
     event_name_counts = Counter(_event_name_key(row) or "unknown" for row in events)
@@ -4983,6 +5344,12 @@ def _operational_health(
         }
         for item in diagnostics_items
     ]
+    coverage_status = str(observability_coverage.get("status") or "")
+    coverage_caveats = (
+        [f"observability_events_{coverage_status}"]
+        if coverage_status in {"truncated", "unavailable"}
+        else []
+    )
     return {
         "schema_version": "operational_health.v1",
         "run_id": metadata.run_id,
@@ -4998,14 +5365,21 @@ def _operational_health(
             "by_event_type": dict(event_type_counts),
             "by_event_name": dict(event_name_counts),
         },
+        "observability_event_coverage": dict(observability_coverage),
         "rows_produced_by_section": rows_by_section,
         "slow_write_diagnostics": slow_write_rows,
-        "persistence_query_caveats": list(performance.get("performance_caveats") or []),
+        "persistence_query_caveats": [
+            *list(performance.get("performance_caveats") or []),
+            *coverage_caveats,
+        ],
         "symbol_level_runtime_load": dict(symbol_counts),
         "diagnostic_timeline": diagnostic_timeline,
         "event_volume_timeline": [],
         "projection_health_timeline": projection_rows,
-        "caveats": list(performance.get("performance_caveats") or []),
+        "caveats": [
+            *list(performance.get("performance_caveats") or []),
+            *coverage_caveats,
+        ],
     }
 
 
@@ -5111,7 +5485,6 @@ def _metadata(run: Mapping[str, Any]) -> RunResearchMetadata:
         config_hash=explicit_hash or _config_hash(config),
         material_config_hash=material_hash,
         data_snapshot_hash=str(run.get("data_snapshot_hash") or "").strip() or None,
-        report_material_fingerprint=None,
         report_semantic_fingerprint=None,
         report_operational_fingerprint=None,
         dataset_schema_version=DATASET_SCHEMA_VERSION,
@@ -5162,6 +5535,7 @@ def _finalize_readiness(
     run: Mapping[str, Any],
     events: Sequence[Mapping[str, Any]],
     observability_events: Sequence[Mapping[str, Any]],
+    observability_coverage: Mapping[str, Any],
     readiness: RunResearchReadiness,
     execution: Mapping[str, Any],
     candle_gaps: Mapping[str, Any],
@@ -5197,8 +5571,82 @@ def _finalize_readiness(
         blocking_reasons.append(readiness.reason)
     if data_quality_status in {"degraded", "unknown"}:
         degraded_sections.append("data_quality")
+    source_diagnostics = _mapping(
+        context.get("indicator_source_diagnostics")
+    )
+    source_diagnostics_status = str(
+        source_diagnostics.get("status") or "unavailable"
+    )
+    if source_diagnostics_status == "unavailable":
+        if data_quality_status == "clean":
+            data_quality_status = "unknown"
+        degraded_sections.extend(
+            ["data_quality", "indicator_source_diagnostics"]
+        )
+        unavailable_sections.append("indicator_source_diagnostics")
+    elif source_diagnostics_status in {
+        "acceptable_with_caveat",
+        "investigate",
+    }:
+        data_quality_status = "degraded"
+        degraded_sections.extend(
+            ["data_quality", "indicator_source_diagnostics"]
+        )
     if execution_quality_status == "degraded":
         degraded_sections.append("execution_quality")
+    warmup_evidence = [
+        dict(row)
+        for row in _mapping(metadata.configuration.get("data")).get(
+            "backtest_warmup_evidence"
+        )
+        or []
+        if isinstance(row, Mapping)
+    ]
+    warmup_caveat: Optional[str] = None
+    if str(metadata.run_type or "").strip().lower() == "backtest":
+        if not warmup_evidence:
+            warmup_caveat = "backtest_warmup_evidence_unavailable"
+        else:
+            evidence_malformed = False
+            evidence_insufficient = False
+            for row in warmup_evidence:
+                try:
+                    requested_bars = int(row.get("requested_bars"))
+                    required_bars = int(row.get("required_bars"))
+                    loaded_bars = int(row.get("loaded_bars"))
+                except (TypeError, ValueError):
+                    evidence_malformed = True
+                    continue
+                if (
+                    isinstance(row.get("requested_bars"), bool)
+                    or isinstance(row.get("required_bars"), bool)
+                    or isinstance(row.get("loaded_bars"), bool)
+                    or requested_bars <= 0
+                    or required_bars <= 0
+                    or loaded_bars < 0
+                ):
+                    evidence_malformed = True
+                    continue
+                expected_status = (
+                    "ready" if loaded_bars >= required_bars else "insufficient"
+                )
+                if str(row.get("status") or "") != expected_status:
+                    evidence_malformed = True
+                if expected_status == "insufficient":
+                    evidence_insufficient = True
+            if evidence_malformed:
+                warmup_caveat = "backtest_warmup_evidence_malformed"
+            elif evidence_insufficient:
+                warmup_caveat = "backtest_warmup_insufficient"
+    if warmup_caveat:
+        if data_quality_status == "clean":
+            data_quality_status = (
+                "degraded"
+                if warmup_caveat == "backtest_warmup_insufficient"
+                else "unknown"
+            )
+        degraded_sections.extend(["data_quality", "indicator_warmup"])
+        caveats.append(warmup_caveat)
     for caveat in candle_caveats:
         normalized = str(caveat or "").strip()
         if not normalized:
@@ -5224,6 +5672,14 @@ def _finalize_readiness(
     if any(str(row.get("event_name") or "").strip() == "run_notification_queue_overflow" for row in observability_events):
         degraded_sections.append("projection_health")
         caveats.append("projection_replay_resolved" if projection_replay_resolved else "run_notification_queue_overflow")
+    observability_coverage_status = str(
+        observability_coverage.get("status") or ""
+    )
+    if observability_coverage_status in {"truncated", "unavailable"}:
+        degraded_sections.append("operational_health")
+        caveats.append(
+            f"observability_events_{observability_coverage_status}"
+        )
     for caveat in wallet_accounting.get("caveats") or []:
         degraded_sections.append("wallet_accounting")
         caveats.append(str(caveat))
@@ -5235,7 +5691,13 @@ def _finalize_readiness(
         caveats.append(str(caveat))
     for caveat in context.get("caveats") or []:
         if str(caveat).endswith("_unavailable"):
-            unavailable_sections.append("indicator_context" if "indicator" in str(caveat) else "market_state")
+            unavailable_sections.append(
+                "indicator_source_diagnostics"
+                if str(caveat) == "indicator_source_diagnostics_unavailable"
+                else "indicator_context"
+                if "indicator" in str(caveat)
+                else "market_state"
+            )
         caveats.append(str(caveat))
     semantic_rows = [row for row in metadata.instrument_semantics if isinstance(row, Mapping)]
     source_types = {
@@ -5302,7 +5764,7 @@ def _finalize_readiness(
 def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     """Build the canonical research dataset for a bot run from durable DB truth."""
 
-    run = storage.get_bot_run(run_id)
+    run = get_bot_run(run_id)
     if not run:
         raise KeyError(f"Run {run_id} was not found")
     run = dict(run)
@@ -5312,19 +5774,29 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     decisions = [_decision_row(entry) for entry in report_data.list_decision_ledger(run_id)]
     signals = _signal_rows(events)
     trade_closed_by_id = _trade_closed_context_by_id(events)
-    raw_trades = [dict(row) for row in storage.list_bot_trades_for_run(run_id)]
+    raw_trades = [dict(row) for row in list_bot_trades_for_run(run_id)]
     trades = _normalize_trades(raw_trades, trade_closed_context_by_id=trade_closed_by_id)
     decisions, signals, trades = _link_trace_rows(decisions=decisions, signals=signals, trades=trades)
     metadata = _metadata(run)
-    trace_rows = [*decisions, *signals, *trades]
+    expected_candle_series = _expected_candle_series(run)
+    execution = _execution_section(run=run, events=events)
+    fill_rows = [
+        row
+        for row in execution.get("fills", [])
+        if isinstance(row, Mapping)
+    ]
+    trace_rows = [*decisions, *signals, *trades, *fill_rows]
     metadata = replace(
         metadata,
         symbols=_unique_text([*metadata.symbols, *(row.get("symbol") for row in trace_rows)]),
         instrument_ids=_unique_text([*metadata.instrument_ids, *(row.get("instrument_id") for row in trace_rows)]),
         timeframes=_unique_text([*metadata.timeframes, *(row.get("timeframe") for row in trace_rows)]),
         strategy_hash=metadata.strategy_hash or _first_trace_value(trace_rows, "strategy_hash"),
+        instrument_semantics=merge_fill_instrument_semantics(
+            metadata.instrument_semantics,
+            fill_rows,
+        ),
     )
-    execution = _execution_section(run=run, events=events)
     trades = _enrich_trades_for_research(trades, execution=execution)
     trace_rows = [*decisions, *signals, *trades]
     summary = _summary(decisions=decisions, trades=trades, starting_capital=metadata.starting_capital)
@@ -5352,15 +5824,29 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     fee_accounting = _fee_accounting(trades, summary, events=events)
     wallet_accounting = _wallet_accounting(run=run, decisions=decisions, events=events, summary=summary)
     wallet_diagnostics = _mapping(wallet_accounting.get("wallet_diagnostics"))
-    observability_events = _observability_events_for_run(run_id)
+    observability_events, observability_coverage = (
+        _observability_events_for_run(run_id)
+    )
     candle_gaps = _candle_gaps(events, observability_events, metadata=metadata)
     portfolio_metrics = _portfolio_metrics(run=run, trades=trades, summary=summary)
     summary = _summary_with_portfolio_metrics(summary, portfolio_metrics)
     timeseries = _timeseries(metadata=metadata, trades=trades, summary=summary)
     performance = _performance(run, events)
-    context = _context_dataset(metadata=metadata, decisions=decisions, signals=signals, trades=trades)
+    source_diagnostics = _indicator_source_diagnostics_dataset(run)
+    context = _context_dataset(
+        metadata=metadata,
+        decisions=decisions,
+        signals=signals,
+        trades=trades,
+        indicator_source_diagnostics=source_diagnostics,
+    )
     candidate_lifecycle = _candidate_lifecycle_dataset(metadata=metadata)
-    candle_catalog = _candle_catalog(metadata=metadata, traces=trace_rows, candle_gaps=candle_gaps)
+    candle_catalog = _candle_catalog(
+        metadata=metadata,
+        traces=trace_rows,
+        candle_gaps=candle_gaps,
+        expected_series=expected_candle_series,
+    )
     position_ordering = _position_ordering_health(events)
     execution = dict(execution)
     execution["position_ordering"] = dict(position_ordering)
@@ -5375,6 +5861,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         run=run,
         events=events,
         observability_events=observability_events,
+        observability_coverage=observability_coverage,
         readiness=readiness,
         execution=execution,
         candle_gaps=candle_gaps,
@@ -5397,7 +5884,9 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         performance=performance,
         summary=summary,
         position_ordering=position_ordering,
+        context=context,
         observability_events=observability_events,
+        observability_coverage=observability_coverage,
     )
     sections = _sections(
         readiness=readiness,
@@ -5420,6 +5909,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         sections=sections,
         diagnostics=diagnostics,
         observability_events=observability_events,
+        observability_coverage=observability_coverage,
     )
     sections = _sections(
         readiness=readiness,
@@ -5436,7 +5926,11 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         wallet_diagnostics=wallet_diagnostics,
         operational_health=operational_health,
     )
-    data_snapshot_hash = _data_snapshot_hash(candle_catalog)
+    data_snapshot_hash = _data_snapshot_hash(
+        candle_catalog,
+        candle_gaps=candle_gaps,
+        expected_series=expected_candle_series,
+    )
     metadata = replace(metadata, data_snapshot_hash=data_snapshot_hash)
     semantic_fingerprint = _report_semantic_fingerprint(
         metadata=metadata,
@@ -5461,7 +5955,6 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     )
     metadata = replace(
         metadata,
-        report_material_fingerprint=semantic_fingerprint,
         report_semantic_fingerprint=semantic_fingerprint,
         report_operational_fingerprint=operational_fingerprint,
     )

@@ -1028,7 +1028,7 @@ def test_regime_overlay_uses_context_regime_not_committed_structure() -> None:
 
 def test_regime_runtime_bounds_retained_candle_history() -> None:
     indicator = _runtime_indicator()
-    indicator.configure_replay_window(history_bars=5)
+    indicator.configure_overlay_history(history_bars=5)
 
     for index in range(12):
         candle = _candle(index, close=100_000.0 + index * 15.0)
@@ -1046,7 +1046,7 @@ def test_regime_runtime_bounds_retained_candle_history() -> None:
 
 def test_regime_runtime_prunes_regime_rows_with_retained_window() -> None:
     indicator = _runtime_indicator()
-    indicator.configure_replay_window(history_bars=5)
+    indicator.configure_overlay_history(history_bars=5)
 
     for index in range(12):
         candle = _candle(index, close=100_000.0 + index * 12.0)
@@ -1067,7 +1067,7 @@ def test_regime_runtime_prunes_regime_rows_with_retained_window() -> None:
 
 def test_regime_overlay_payload_stays_render_only_after_history_limit() -> None:
     indicator = _runtime_indicator()
-    indicator.configure_replay_window(history_bars=6)
+    indicator.configure_overlay_history(history_bars=6)
 
     for index in range(24):
         candle = _candle(index, close=100_000.0 + index * 20.0)
@@ -1089,7 +1089,7 @@ def test_regime_overlay_payload_stays_render_only_after_history_limit() -> None:
 
 def test_regime_runtime_no_longer_emits_detail_snapshot() -> None:
     indicator = _runtime_indicator()
-    indicator.configure_replay_window(history_bars=6)
+    indicator.configure_overlay_history(history_bars=6)
 
     for index in range(24):
         candle = _candle(index, close=100_000.0 + index * 20.0)

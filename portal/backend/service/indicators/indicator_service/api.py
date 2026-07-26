@@ -8,6 +8,7 @@ from time import perf_counter
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from engines.bot_runtime.core.domain import Candle
+from engines.indicator_engine.contracts import configure_indicator_overlay_history
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
 from indicators.config import IndicatorExecutionContext
 from indicators.definition_contract import definition_supports_compute, definition_supports_runtime
@@ -283,13 +284,6 @@ def _collect_runtime_overlays(
     return collected
 
 
-def _configure_replay_window(indicators: Sequence[Any], *, history_bars: int) -> None:
-    for indicator in indicators:
-        configure = getattr(indicator, "configure_replay_window", None)
-        if callable(configure):
-            configure(history_bars=history_bars)
-
-
 def _resolve_logged_source_timeframe(meta: Mapping[str, Any], interval: str) -> str:
     indicator_type = str(meta.get("type") or "").strip()
     if not indicator_type:
@@ -371,7 +365,7 @@ def overlays_for_instance(
     candles = _build_runtime_candles(df)
     candle_build_duration_ms = (perf_counter() - t_candles_start) * 1000.0
     if candles:
-        _configure_replay_window(indicators, history_bars=len(candles))
+        configure_indicator_overlay_history(indicators, history_bars=len(candles))
     if not candles:
         logger.info(
             "event=indicator_overlay_execute_complete indicator_id=%s indicator_type=%s symbol=%s timeframe=%s source_timeframe=%s bars=0 overlays=0 duration_total_ms=%.3f duration_graph_ms=%.3f duration_fetch_ms=%.3f duration_candle_build_ms=%.3f duration_engine_ms=0.000 duration_overlay_collect_ms=0.000",

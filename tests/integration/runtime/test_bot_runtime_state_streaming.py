@@ -4,7 +4,9 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from engines.bot_runtime.core.domain import Candle
-from engines.bot_runtime.runtime.mixins.state_streaming import RuntimeStateStreamingMixin
+from engines.bot_runtime.runtime.mixins.runtime_persistence import RuntimePersistenceMixin
+from engines.bot_runtime.runtime.mixins.runtime_projection import RuntimeProjectionMixin
+from engines.bot_runtime.runtime.mixins.runtime_push_stream import RuntimePushStreamMixin
 from overlays.schema import build_overlay
 from utils.log_context import build_log_context
 
@@ -23,7 +25,11 @@ class _FailingStepTraceBuffer:
         }
 
 
-class _DummyRuntime(RuntimeStateStreamingMixin):
+class _DummyRuntime(
+    RuntimePersistenceMixin,
+    RuntimeProjectionMixin,
+    RuntimePushStreamMixin,
+):
     def __init__(self) -> None:
         self.bot_id = "bot-1"
         self.run_type = "backtest"

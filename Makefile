@@ -335,8 +335,8 @@ mcp-register-codex: venv ## Register the Quant-Trad MCP stdio server with Codex 
 	forensic-run-seq-gaps forensic-run-write-latency forensic-observability-storage-budget \
 	forensic-run-logs forensic-logs-doctor \
 	forensic-botlens-check forensic-wallet-diagnostics forensic-golden-compare \
-	test-reporting test-reporting-api test-botlens test-runtime validate-docs frontend-test frontend-build frontend-check \
-	git-status git-diff git-check check
+	test-reporting test-reporting-api test-botlens test-runtime backend-check validate-docs frontend-test frontend-build frontend-check \
+	git-status git-diff git-check check check-all
 
 status: ## Show service status without docker compose ps sandbox friction
 	@echo "Core stack:"
@@ -459,6 +459,9 @@ test-botlens: venv ## Run focused BotLens and runtime projection tests
 
 test-runtime: test-botlens ## Alias for focused BotLens/runtime tests
 
+backend-check: venv ## Run every non-database backend test
+	@$(PYTEST_ENV) QT_OMIT_DB_TESTS=1 $(PYTHON) -m pytest -q
+
 validate-docs: venv ## Refresh architecture index and run docs contract validation
 	@$(PYTHON) scripts/docs/build_architecture_index.py
 	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_architecture_docs_index.py
@@ -482,7 +485,9 @@ git-check: ## Show status and run git diff whitespace checks
 	@git status --short
 	@git diff --check
 
-check: git-check validate-docs test-reporting test-botlens frontend-check ## Run standard developer/audit checks
+check: git-check validate-docs backend-check ## Run standard backend developer/audit checks
+
+check-all: check frontend-check ## Run backend checks plus optional legacy frontend checks
 
 ## =============================== QUALITY ================================ ##
 .PHONY: test clean

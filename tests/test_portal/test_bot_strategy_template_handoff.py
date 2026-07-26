@@ -203,7 +203,7 @@ def test_existing_non_template_strategy_flow_still_compiles() -> None:
     assert guard.value == 1.5
 
 
-def test_template_strategy_to_dict_preserves_runtime_shape_and_provenance() -> None:
+def test_template_strategy_series_metadata_preserves_runtime_shape_and_provenance() -> None:
     indicator_links, instrument_links = _strategy_links()
     strategy = Strategy.from_template(
         id="strategy-1",
@@ -216,7 +216,7 @@ def test_template_strategy_to_dict_preserves_runtime_shape_and_provenance() -> N
         param_values={"conviction_min": 0.55},
     )
 
-    payload = strategy.to_dict()
+    payload = strategy.to_series_metadata()
 
     assert payload["rules"]["r1"]["guards"][0]["value"] == "$params.conviction_min"
     assert payload["template_id"] == "regime-template"

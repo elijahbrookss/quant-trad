@@ -56,9 +56,6 @@ class _FakeStorage:
     def record_bot_run_lifecycle_checkpoint(self, payload):
         return dict(payload)
 
-    def update_bot_runtime_status(self, *, bot_id, run_id, status, telemetry_degraded=False):
-        return None
-
     def list_bot_runs(self, *, bot_id=None, limit=None):
         return []
 

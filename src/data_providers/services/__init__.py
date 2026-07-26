@@ -1,5 +1,3 @@
-"""Supporting services for data provider persistence."""
+"""Credential and provider-support services; market-data persistence lives elsewhere."""
 
-from .persistence import DataPersistence, NullPersistence
-
-__all__ = ["DataPersistence", "NullPersistence"]
+__all__: list[str] = []

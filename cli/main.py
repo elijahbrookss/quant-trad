@@ -1215,6 +1215,77 @@ def _cmd_data_coverage(args: argparse.Namespace) -> int:
     return 1
 
 
+def _cmd_data_ingest_candles(args: argparse.Namespace) -> int:
+    """Explicitly acquire and persist one bounded candle window."""
+
+    payload = {
+        "instrument_id": args.instrument_id,
+        "start": args.start,
+        "end": args.end,
+        "timeframe": args.timeframe,
+        "source_revision": args.source_revision,
+    }
+    _print_json(
+        _client(args).request_json("POST", "/api/candles/ingest", payload=payload)
+    )
+    return 0
+
+
+def _cmd_data_series(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/candles/series",
+            params={"instrument_id": args.instrument_id},
+        )
+    )
+    return 0
+
+
+def _cmd_data_freeze_dataset(args: argparse.Namespace) -> int:
+    payload = _read_json_object_arg(args.request_json, label="--request-json")
+    if not payload:
+        missing = [
+            name
+            for name in ("instrument_id", "start", "end", "timeframe")
+            if not getattr(args, name, None)
+        ]
+        if missing:
+            raise ValueError(
+                "--request-json or --instrument-id/--start/--end/--timeframe is required"
+            )
+        metadata = _read_json_object_arg(args.metadata_json, label="--metadata-json")
+        payload = {
+            "series": [
+                {
+                    "instrument_id": args.instrument_id,
+                    "start": args.start,
+                    "end": args.end,
+                    "timeframe": args.timeframe,
+                }
+            ],
+            "name": args.name,
+            "purpose": args.purpose,
+            "created_by": args.created_by,
+            "metadata": metadata,
+        }
+    _print_json(
+        _client(args).request_json(
+            "POST", "/api/candles/datasets/freeze", payload=payload
+        )
+    )
+    return 0
+
+
+def _cmd_data_dataset(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET", f"/api/candles/datasets/{quote(args.dataset_id, safe='')}"
+        )
+    )
+    return 0
+
+
 def _cmd_research_items_list(args: argparse.Namespace) -> int:
     payload = _client(args).request_json(
         "GET",
@@ -2872,6 +2943,45 @@ def build_parser() -> argparse.ArgumentParser:
     data_coverage.add_argument("--timeframe", required=True)
     data_coverage.add_argument("--fail-on-warning", action="store_true")
     data_coverage.set_defaults(func=_cmd_data_coverage)
+    data_ingest = data_sub.add_parser(
+        "ingest-candles",
+        help="Explicitly fetch a bounded provider window and persist accepted candles.",
+    )
+    data_ingest.add_argument("--instrument-id", required=True)
+    data_ingest.add_argument("--start", required=True)
+    data_ingest.add_argument("--end", required=True)
+    data_ingest.add_argument("--timeframe", required=True)
+    data_ingest.add_argument("--source-revision")
+    data_ingest.set_defaults(func=_cmd_data_ingest_candles)
+    data_series = data_sub.add_parser(
+        "series", help="Inspect canonical logical market-data series."
+    )
+    data_series.add_argument("--instrument-id")
+    data_series.set_defaults(func=_cmd_data_series)
+    data_freeze = data_sub.add_parser(
+        "freeze-dataset",
+        help="Freeze exact candle facts, provenance, and quality evidence.",
+    )
+    data_freeze.add_argument(
+        "--request-json",
+        help="Full market dataset request as a path, inline object, or '-' for stdin.",
+    )
+    data_freeze.add_argument("--instrument-id")
+    data_freeze.add_argument("--start")
+    data_freeze.add_argument("--end")
+    data_freeze.add_argument("--timeframe")
+    data_freeze.add_argument("--name")
+    data_freeze.add_argument("--purpose", default="research")
+    data_freeze.add_argument("--created-by")
+    data_freeze.add_argument(
+        "--metadata-json", help="Optional metadata object as a path or inline JSON."
+    )
+    data_freeze.set_defaults(func=_cmd_data_freeze_dataset)
+    data_dataset = data_sub.add_parser(
+        "dataset", help="Inspect an immutable market dataset manifest."
+    )
+    data_dataset.add_argument("dataset_id")
+    data_dataset.set_defaults(func=_cmd_data_dataset)
 
     research = subparsers.add_parser("research", help="Research memory and lightweight historical checks.")
     research_sub = research.add_subparsers(dest="research_command", required=True)

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Sequence
 
+from core.candle_snapshot import build_expected_candle_series_inventory
 from core.settings import get_settings
 from engines.bot_runtime.runtime.runtime import BotRuntime
 from engines.bot_runtime.core.runtime_events import (
@@ -51,6 +52,8 @@ from portal.backend.service.bots.runtime_dependencies import build_bot_runtime_d
 from portal.backend.service.bots.execution_behavior import OBSERVE_ONLY_BEHAVIOR, is_observe_only_bot
 from portal.backend.service.bots.observe_only_runtime import run_observe_only_market_intake
 from portal.backend.service.bots.paper_market_stream import PaperMarketStreamRunner
+from portal.backend.service.market.feed_service import paper_candle_persistence_sink
+from portal.backend.service.storage.repos.market_data import market_data_repo
 from portal.backend.service.bots.run_lease import RunLeaseRenewer, default_run_lease_runner_id
 from engines.bot_runtime.live_market import LiveCandleStore
 from portal.backend.service.reports.artifacts import finalize_run_artifact_bundle_from_workers
@@ -72,13 +75,11 @@ from portal.backend.service.observability_exporter import (
 from portal.backend.service.observability import BackendObserver
 from portal.backend.service.bots.startup_validation import validate_wallet_config
 from portal.backend.service.bots.strategy_loader import StrategyLoader
-from portal.backend.service.storage.storage import (
-    get_bot_run,
-    load_bots,
+from portal.backend.service.storage.repos.bots import load_bots
+from portal.backend.service.storage.repos.lifecycle import (
     record_bot_run_lifecycle_checkpoint,
-    upsert_bot_run,
-    update_bot_runtime_status,
 )
+from portal.backend.service.storage.repos.runs import get_bot_run, upsert_bot_run
 
 logger = logging.getLogger(__name__)
 _OBSERVER = BackendObserver(component="container_runtime", event_logger=logger)
@@ -139,6 +140,41 @@ def _materialize_bot_config(bot_payload: Mapping[str, Any]) -> Dict[str, Any]:
                 continue
             materialized[key] = raw_value
     return materialized
+
+
+def _bind_backtest_market_data_scope(
+    runtime_bot_config: Dict[str, Any],
+    *,
+    run_id: str,
+) -> Dict[str, Any] | None:
+    """Pin every backtest worker and nested strategy read to one market commit."""
+
+    run_type = str(runtime_bot_config.get("run_type") or "backtest").strip().lower()
+    if run_type != "backtest":
+        return None
+    configured = runtime_bot_config.get("market_data_as_of_commit_seq")
+    watermark = int(configured) if configured is not None else market_data_repo.current_commit_seq()
+    if watermark <= 0:
+        raise RuntimeError(
+            "backtest_market_data_unavailable: no accepted canonical candle facts exist"
+        )
+    scope = {
+        "schema_version": "market_data_read_scope.v1",
+        "as_of_commit_seq": watermark,
+        "contract_version": "candle.ohlcv.v1",
+    }
+    runtime_bot_config["market_data_as_of_commit_seq"] = watermark
+    runtime_bot_config["market_data_read_scope"] = dict(scope)
+
+    run = get_bot_run(run_id) or {}
+    config_snapshot = (
+        dict(run.get("config_snapshot") or {})
+        if isinstance(run.get("config_snapshot"), Mapping)
+        else {}
+    )
+    config_snapshot["market_data_read_scope"] = dict(scope)
+    upsert_bot_run({"run_id": run_id, "config_snapshot": config_snapshot})
+    return scope
 
 
 def _normalise_balances(raw_balances: Mapping[str, Any]) -> Dict[str, float]:
@@ -258,8 +294,8 @@ def _build_canonical_wallet_initialized_fact(
             "bot_id": str(bot_id),
             "run_seq": int(run_seq),
             "run_seq_status": "runtime_assigned",
-            "source_run_seq": int(run_seq),
-            "source_run_seq_status": "runtime_assigned",
+            "source_run_seq": wallet_commit_seq,
+            "source_run_seq_status": "run_initialization",
             "wallet_commit_seq": wallet_commit_seq,
             "wallet_commit_seq_status": "runtime_assigned",
             "wallet_eval_seq": 0,
@@ -308,13 +344,19 @@ def _append_canonical_wallet_initialized_fact(
     run_id: str,
     balances: Mapping[str, float],
     shared_wallet_proxy: Mapping[str, Any],
+    initialized_at: str,
 ) -> Dict[str, Any]:
     run_seq = _next_run_event_seq(shared_wallet_proxy)
-    observed_at = utc_now_iso()
+    observed_at = str(initialized_at or "").strip()
+    if not observed_at:
+        raise RuntimeError(
+            f"wallet initialization requires authoritative run started_at | bot_id={bot_id} run_id={run_id}"
+        )
     payload = {
         "kind": BRIDGE_FACTS_KIND,
         "bot_id": str(bot_id),
         "run_id": str(run_id),
+        "bridge_session_id": f"container-wallet-initialization:{run_id}",
         "worker_id": _WALLET_INITIALIZATION_OWNER_CONTAINER,
         "source_emitter": "container_runtime",
         "source_reason": "wallet_initialized",
@@ -350,20 +392,26 @@ def _append_canonical_wallet_initialized_fact(
     )
     row_count = int(append_result.get("row_count") or 0)
     inserted_rows = int(append_result.get("inserted_rows") or 0)
-    if row_count <= 0 or inserted_rows != row_count:
+    if row_count <= 0 or inserted_rows not in {0, row_count}:
         raise RuntimeError(
-            "canonical wallet initialization fact did not persist exactly once"
+            "canonical wallet initialization fact did not persist atomically"
             f" | bot_id={bot_id} run_id={run_id} row_count={row_count} inserted_rows={inserted_rows}"
         )
+    idempotent_replay = inserted_rows == 0
     logger.info(
-        "bot_runtime_wallet_initialized_canonical_appended | bot_id=%s | run_id=%s | run_seq=%s | owner=%s | inserted_rows=%s",
+        "bot_runtime_wallet_initialized_canonical_appended | bot_id=%s | run_id=%s | run_seq=%s | owner=%s | inserted_rows=%s | idempotent_replay=%s",
         bot_id,
         run_id,
         run_seq,
         _WALLET_INITIALIZATION_OWNER_CONTAINER,
         inserted_rows,
+        idempotent_replay,
     )
-    return {"payload": payload, "append_result": append_result}
+    return {
+        "payload": payload,
+        "append_result": append_result,
+        "idempotent_replay": idempotent_replay,
+    }
 
 
 def _next_run_event_seq(shared_wallet_proxy: Mapping[str, Any]) -> int:
@@ -477,13 +525,10 @@ def _resolve_backend_run_id(bot_id: str) -> str:
     run_id = str(os.environ.get("QT_BOT_RUNTIME_RUN_ID") or "").strip()
     if run_id:
         return run_id
-    fallback = str(uuid.uuid4())
-    logger.warning(
-        "bot_runtime_run_id_missing | bot_id=%s | generated_fallback_run_id=%s",
-        bot_id,
-        fallback,
+    raise RuntimeError(
+        "QT_BOT_RUNTIME_RUN_ID is required for bot runtime containers. "
+        f"bot_id={bot_id}"
     )
-    return fallback
 
 
 def _resolve_backend_request_id() -> str | None:
@@ -528,6 +573,52 @@ def _runtime_readiness_from_run_or_strategy(run: Mapping[str, Any], strategy: An
     }
 
 
+def _planned_candle_series_inventory(
+    run: Mapping[str, Any],
+    *,
+    strategy_id: str,
+) -> List[Dict[str, Any]]:
+    config_snapshot = (
+        dict(run.get("config_snapshot") or {})
+        if isinstance(run.get("config_snapshot"), Mapping)
+        else {}
+    )
+    planned = config_snapshot.get("expected_candle_series")
+    if planned is not None:
+        if not isinstance(planned, list):
+            raise ValueError(
+                "run config expected_candle_series must be a list"
+            )
+        return build_expected_candle_series_inventory(planned)
+
+    readiness = (
+        dict(config_snapshot.get("runtime_readiness") or {})
+        if isinstance(config_snapshot.get("runtime_readiness"), Mapping)
+        else {}
+    )
+    profiles = readiness.get("profiles") or []
+    if not isinstance(profiles, list):
+        raise ValueError("run config runtime_readiness.profiles must be a list")
+    if any(not isinstance(row, Mapping) for row in profiles):
+        raise ValueError(
+            "run config runtime_readiness.profiles entries must be mappings"
+        )
+    timeframe = (
+        readiness.get("timeframe")
+        or run.get("timeframe")
+        or config_snapshot.get("timeframe")
+    )
+    return build_expected_candle_series_inventory(
+        {
+            "strategy_id": strategy_id,
+            "instrument_id": row.get("instrument_id"),
+            "symbol": row.get("symbol"),
+            "timeframe": timeframe,
+        }
+        for row in profiles
+    )
+
+
 def _duration_seconds_from_runtime_snapshot(bot: Mapping[str, Any], run: Mapping[str, Any]) -> float | None:
     config_snapshot = run.get("config_snapshot") if isinstance(run.get("config_snapshot"), Mapping) else {}
     start_request = config_snapshot.get("start_request") if isinstance(config_snapshot.get("start_request"), Mapping) else {}
@@ -569,22 +660,6 @@ def _persist_lifecycle_phase(
     )
     lifecycle_state = record_bot_run_lifecycle_checkpoint(checkpoint)
     resolved_status = str(lifecycle_state.get("status") or checkpoint["status"]).strip()
-    if resolved_status in {
-        BotLifecycleStatus.STOPPED.value,
-        "failed",
-        BotLifecycleStatus.FAILED.value,
-        BotLifecycleStatus.STARTUP_FAILED.value,
-        BotLifecycleStatus.CRASHED.value,
-        BotLifecycleStatus.COMPLETED.value,
-        BotLifecycleStatus.CANCELED.value,
-        BotLifecycleStatus.DEGRADED_TERMINAL.value,
-    }:
-        update_bot_runtime_status(
-            bot_id=bot_id,
-            run_id=run_id,
-            status=resolved_status,
-            telemetry_degraded=resolved_status == BotLifecycleStatus.TELEMETRY_DEGRADED.value,
-        )
     lifecycle_event_delivered = _notify_backend_lifecycle_event(
         lifecycle_state={
             **dict(lifecycle_state or {}),
@@ -1137,7 +1212,6 @@ def _persist_paper_market_stream_run_summary(ctx: ContainerStartupContext) -> No
         {
             "run_id": ctx.run_id,
             "bot_id": ctx.bot_id,
-            "status": ctx.terminal_status_value or run.get("status") or BotLifecycleStatus.STOPPED.value,
             "summary": summary,
         }
     )
@@ -1500,6 +1574,9 @@ def load_container_startup_context(
     runtime_bot_config = _materialize_bot_config(bot)
     if request_id:
         runtime_bot_config["request_id"] = request_id
+    _bind_backtest_market_data_scope(
+        runtime_bot_config, run_id=run_id
+    )
     _persist_lifecycle_phase(
         bot_id=bot_id,
         run_id=run_id,
@@ -1512,6 +1589,12 @@ def load_container_startup_context(
     strategy_id = str(bot.get("strategy_id") or "").strip()
     if not strategy_id:
         raise RuntimeError(f"Bot {bot_id} has no strategy_id configured")
+    planned_candle_series = _planned_candle_series_inventory(
+        run_snapshot or {},
+        strategy_id=strategy_id,
+    )
+    if planned_candle_series:
+        runtime_bot_config["expected_candle_series"] = planned_candle_series
     _persist_lifecycle_phase(
         bot_id=bot_id,
         run_id=run_id,
@@ -1527,6 +1610,11 @@ def load_container_startup_context(
         raise RuntimeError(
             f"Strategy {strategy_id} has {len(all_symbols)} symbols but runtime limit is {max_symbols}. "
             "Reduce symbols or increase BOT_MAX_SYMBOLS_PER_STRATEGY."
+        )
+    run_started_at = str((run_snapshot or {}).get("started_at") or "").strip()
+    if not run_started_at:
+        raise RuntimeError(
+            f"Run {run_id} has no authoritative started_at for wallet initialization"
         )
 
     preparing_wallet_state = _persist_lifecycle_phase(
@@ -1554,6 +1642,7 @@ def load_container_startup_context(
         run_id=run_id,
         balances=_normalise_balances(balances),
         shared_wallet_proxy=shared_wallet_proxy,
+        initialized_at=run_started_at,
     )
 
     _persist_lifecycle_phase(
@@ -1699,7 +1788,15 @@ def _series_worker(
     ):
         child_config["BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY"] = _PUSH_SETTINGS.payload_bytes_sample_every
     runtime_error: Dict[str, str] = {}
-    runtime = BotRuntime(bot_id=bot_id, config=child_config, deps=build_bot_runtime_deps())
+    runtime = BotRuntime(
+        bot_id=bot_id,
+        config=child_config,
+        deps=build_bot_runtime_deps(
+            market_data_as_of_commit_seq=child_config.get(
+                "market_data_as_of_commit_seq"
+            )
+        ),
+    )
 
     def _queue_worker_event(payload: Mapping[str, Any], *, timeout_s: float = 0.25) -> bool:
         try:
@@ -2016,6 +2113,12 @@ def _series_worker(
                 store=paper_live_store,
                 series=runtime.runtime_series(),
                 provisional_candle_sink=_emit_provisional_market_fact,
+                closed_candle_sink=lambda candle, meta: paper_candle_persistence_sink.persist(
+                    candle,
+                    instrument_id=str(meta.get("instrument_id") or ""),
+                    bot_id=bot_id,
+                    run_id=run_id,
+                ),
                 market_data_stream_policy=child_config.get("market_data_stream_policy")
                 if isinstance(child_config.get("market_data_stream_policy"), Mapping)
                 else None,
@@ -3479,8 +3582,6 @@ def run_observe_only_container_runtime(
             {
                 "run_id": run_id,
                 "bot_id": bot_id,
-                "status": BotLifecycleStatus.FAILED.value,
-                "ended_at": utc_now_iso(),
                 "summary": {
                     "execution_behavior": OBSERVE_ONLY_BEHAVIOR,
                     "error": message,

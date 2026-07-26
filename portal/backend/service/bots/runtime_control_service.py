@@ -9,7 +9,7 @@ import threading
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any, Callable, Dict, Optional, Protocol
+from typing import Any, Callable, Dict, Optional
 
 from core.settings import get_settings
 
@@ -31,44 +31,12 @@ from .startup_lifecycle import (
     lifecycle_checkpoint_payload,
 )
 from .startup_service import BotStartupOrchestrator
-from ..storage import storage as storage_module
+from .storage_gateway import BotStorageGateway, build_bot_storage_gateway
 
 logger = logging.getLogger(__name__)
 _BOT_RUNTIME_SETTINGS = get_settings().bot_runtime
 _START_LOCKS: dict[str, threading.Lock] = {}
 _START_LOCKS_GUARD = threading.Lock()
-
-
-class BotControlStorage(Protocol):
-    def upsert_bot_run(self, payload: Dict[str, Any]) -> Dict[str, Any]: ...
-    def get_bot_run(self, run_id: str) -> Optional[Dict[str, Any]]: ...
-    def list_bot_runs(self, *, bot_id: Optional[str] = None) -> list[Dict[str, Any]]: ...
-    def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]: ...
-    def get_bot_run_lifecycle(self, run_id: str) -> Optional[Dict[str, Any]]: ...
-    def get_bot_run_lease(self, run_id: str) -> Optional[Dict[str, Any]]: ...
-    def acquire_bot_run_lease(
-        self,
-        *,
-        bot_id: str,
-        run_id: str,
-        runner_id: str,
-        lease_token: str,
-        ttl_seconds: float | int | None = None,
-        metadata: Mapping[str, Any] | None = None,
-    ) -> Dict[str, Any]: ...
-    def release_bot_run_lease(
-        self,
-        *,
-        bot_id: str,
-        run_id: str,
-        runner_id: str | None = None,
-        lease_token: str | None = None,
-        status: str = "released",
-        metadata: Mapping[str, Any] | None = None,
-    ) -> Optional[Dict[str, Any]]: ...
-    def get_latest_bot_run_lifecycle(self, bot_id: str) -> Optional[Dict[str, Any]]: ...
-    def record_bot_run_lifecycle_checkpoint(self, payload: Dict[str, Any]) -> Dict[str, Any]: ...
-    def update_bot_runtime_status(self, *, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None: ...
 
 
 def _lock_for_bot(bot_id: str) -> threading.Lock:
@@ -170,13 +138,13 @@ class BotRuntimeControlService:
         config_service: BotConfigService,
         stream_manager: BotStreamManager,
         *,
-        storage: Optional[BotControlStorage] = None,
+        storage: Optional[BotStorageGateway] = None,
         watchdog: Optional[Any] = None,
         runner_factory: Optional[Callable[[], BotRunner]] = None,
     ) -> None:
         self._config = config_service
         self._stream_manager = stream_manager
-        self._storage = storage
+        self._storage = storage or build_bot_storage_gateway()
         self._watchdog = watchdog
         self._runner_factory = runner_factory
 
@@ -204,82 +172,8 @@ class BotRuntimeControlService:
             "Set QT_BOT_RUNTIME_TARGET=docker."
         )
 
-    def _storage_gateway(self) -> BotControlStorage:
-        if self._storage is not None:
-            return self._storage
-
-        class _DefaultStorage:
-            def upsert_bot_run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-                return storage_module.upsert_bot_run(dict(payload))
-
-            def get_bot_run(self, run_id: str) -> Optional[Dict[str, Any]]:
-                return storage_module.get_bot_run(str(run_id))
-
-            def list_bot_runs(self, *, bot_id: Optional[str] = None) -> list[Dict[str, Any]]:
-                return storage_module.list_bot_runs(bot_id=str(bot_id)) if bot_id else storage_module.list_bot_runs()
-
-            def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]:
-                return storage_module.get_latest_bot_runtime_run_id(str(bot_id))
-
-            def get_bot_run_lifecycle(self, run_id: str) -> Optional[Dict[str, Any]]:
-                return storage_module.get_bot_run_lifecycle(str(run_id))
-
-            def get_bot_run_lease(self, run_id: str) -> Optional[Dict[str, Any]]:
-                return storage_module.get_bot_run_lease(str(run_id))
-
-            def acquire_bot_run_lease(
-                self,
-                *,
-                bot_id: str,
-                run_id: str,
-                runner_id: str,
-                lease_token: str,
-                ttl_seconds: float | int | None = None,
-                metadata: Mapping[str, Any] | None = None,
-            ) -> Dict[str, Any]:
-                return storage_module.acquire_bot_run_lease(
-                    bot_id=bot_id,
-                    run_id=run_id,
-                    runner_id=runner_id,
-                    lease_token=lease_token,
-                    ttl_seconds=ttl_seconds,
-                    metadata=metadata,
-                )
-
-            def release_bot_run_lease(
-                self,
-                *,
-                bot_id: str,
-                run_id: str,
-                runner_id: str | None = None,
-                lease_token: str | None = None,
-                status: str = "released",
-                metadata: Mapping[str, Any] | None = None,
-            ) -> Optional[Dict[str, Any]]:
-                return storage_module.release_bot_run_lease(
-                    bot_id=bot_id,
-                    run_id=run_id,
-                    runner_id=runner_id,
-                    lease_token=lease_token,
-                    status=status,
-                    metadata=metadata,
-                )
-
-            def get_latest_bot_run_lifecycle(self, bot_id: str) -> Optional[Dict[str, Any]]:
-                return storage_module.get_latest_bot_run_lifecycle(str(bot_id))
-
-            def record_bot_run_lifecycle_checkpoint(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-                return storage_module.record_bot_run_lifecycle_checkpoint(dict(payload))
-
-            def update_bot_runtime_status(self, *, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None:
-                storage_module.update_bot_runtime_status(
-                    bot_id=bot_id,
-                    run_id=run_id,
-                    status=status,
-                    telemetry_degraded=telemetry_degraded,
-                )
-
-        return _DefaultStorage()
+    def _storage_gateway(self) -> BotStorageGateway:
+        return self._storage
 
     def _watchdog_instance(self):
         return self._watchdog if self._watchdog is not None else get_watchdog()
@@ -396,17 +290,12 @@ class BotRuntimeControlService:
                 "failure": dict(failure or {}),
             }
         )
-        self._storage_gateway().update_bot_runtime_status(
-            bot_id=bot_id,
-            run_id=run_id,
-            status=checkpoint["status"],
-        )
         return lifecycle_state
 
     @staticmethod
     def _reconciled_failure_phase(lifecycle: Mapping[str, Any] | None, run: Mapping[str, Any] | None) -> str:
         phase = str((lifecycle or {}).get("phase") or "").strip().lower()
-        status = str((run or {}).get("status") or (lifecycle or {}).get("status") or "").strip().lower()
+        status = str((lifecycle or {}).get("status") or "").strip().lower()
         if phase in {"live", "degraded", "telemetry_degraded", "awaiting_first_snapshot"}:
             return BotLifecyclePhase.CRASHED.value
         if status in {"running", "degraded", "telemetry_degraded"}:
@@ -465,22 +354,11 @@ class BotRuntimeControlService:
 
     def _active_runs_for_bot(self, bot_id: str) -> list[Dict[str, Any]]:
         storage = self._storage_gateway()
-        if hasattr(storage, "list_bot_runs"):
-            rows = [dict(row) for row in storage.list_bot_runs(bot_id=bot_id)]
-        else:
-            latest_run_id = str(storage.get_latest_bot_runtime_run_id(bot_id) or "").strip()
-            latest = storage.get_bot_run(latest_run_id) if latest_run_id else None
-            rows = [dict(latest)] if latest else []
+        rows = [dict(row) for row in storage.list_bot_runs(bot_id=bot_id)]
         active: list[Dict[str, Any]] = []
         for row in rows:
             run_id = str(row.get("run_id") or "").strip()
-            lifecycle = (
-                storage.get_bot_run_lifecycle(run_id)
-                if run_id and hasattr(storage, "get_bot_run_lifecycle")
-                else storage.get_latest_bot_run_lifecycle(bot_id)
-                if run_id and hasattr(storage, "get_latest_bot_run_lifecycle")
-                else None
-            )
+            lifecycle = storage.get_bot_run_lifecycle(run_id) if run_id else None
             if is_active_run_state(status=row.get("status"), phase=(lifecycle or {}).get("phase")) or is_active_run_state(
                 status=(lifecycle or {}).get("status"),
                 phase=(lifecycle or {}).get("phase"),
@@ -626,13 +504,11 @@ class BotRuntimeControlService:
 
         latest_run_id = storage.get_latest_bot_runtime_run_id(bot_id)
         if latest_run_id and runner is not None:
-            latest_lifecycle = (
-                storage.get_bot_run_lifecycle(latest_run_id)
-                if hasattr(storage, "get_bot_run_lifecycle")
-                else storage.get_latest_bot_run_lifecycle(bot_id)
-            )
-            latest_run = storage.get_bot_run(latest_run_id) or {}
-            if is_terminal_run_state(status=latest_run.get("status"), phase=(latest_lifecycle or {}).get("phase")):
+            latest_lifecycle = storage.get_bot_run_lifecycle(latest_run_id)
+            if is_terminal_run_state(
+                status=(latest_lifecycle or {}).get("status"),
+                phase=(latest_lifecycle or {}).get("phase"),
+            ):
                 self._cleanup_terminal_container_before_start(bot_id=bot_id, run_id=latest_run_id, runner=runner)
         if runner is None:
             raise RuntimeError("docker runner resolution failed for bot start")
@@ -724,15 +600,11 @@ class BotRuntimeControlService:
             )
 
         run = storage.get_bot_run(target_run_id) or {}
-        lifecycle = (
-            storage.get_bot_run_lifecycle(target_run_id)
-            if hasattr(storage, "get_bot_run_lifecycle")
-            else storage.get_latest_bot_run_lifecycle(bot_id)
-        ) or {}
+        lifecycle = storage.get_bot_run_lifecycle(target_run_id) or {}
         if str(run.get("bot_id") or lifecycle.get("bot_id") or bot_id) != str(bot_id):
             raise RuntimeError(f"run {target_run_id} does not belong to bot {bot_id}")
 
-        if is_terminal_run_state(status=run.get("status"), phase=lifecycle.get("phase")) or is_terminal_run_state(
+        if is_terminal_run_state(
             status=lifecycle.get("status"),
             phase=lifecycle.get("phase"),
         ):

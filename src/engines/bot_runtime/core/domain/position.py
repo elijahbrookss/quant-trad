@@ -43,10 +43,14 @@ class SameBarResolutionPolicy(str, Enum):
     def normalize(cls, value: Optional[object]) -> "SameBarResolutionPolicy":
         if isinstance(value, SameBarResolutionPolicy):
             return value
-        normalized = str(value or cls.PESSIMISTIC_STOP.value).strip().lower()
-        if normalized in {"pessimistic", "pessimistic_stop", "stop_first", "stop"}:
-            return cls.PESSIMISTIC_STOP
-        return cls.TARGET_FIRST
+        normalized = str(value or "").strip().lower()
+        try:
+            return cls(normalized)
+        except ValueError:
+            raise ValueError(
+                f"same_bar_policy={normalized!r} is unsupported; "
+                "supported=['pessimistic_stop', 'target_first']"
+            ) from None
 
 
 @dataclass
@@ -67,7 +71,7 @@ class LadderPosition:
     base_currency: Optional[str] = None
     quote_currency_code: Optional[str] = None
     legs: List[Leg] = field(default_factory=list)
-    breakeven_trigger_ticks: float = 20.0
+    breakeven_trigger_ticks: float = 0.0
     tick_value: float = 1.0
     contract_size: float = 1.0
     maker_fee_rate: float = 0.0
@@ -108,6 +112,7 @@ class LadderPosition:
     position_commit_seq: int = 0
     stop_adjustments: List[RuntimeStopAdjustment] = field(default_factory=list)
     close_reason: Optional[str] = None
+    reason_code: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.best_price = self.entry_price
@@ -389,7 +394,17 @@ class LadderPosition:
         elif self.direction == "short" and candle.high >= self.stop_price:
             triggered = True
         if triggered:
-            tick_distance = round(self._ticks_from_entry(self.stop_price), 4)
+            gap_through = self.opens_at_or_beyond_stop(candle)
+            fill_reference_price = float(candle.open) if gap_through else self.stop_price
+            fill_price_source = (
+                "bar_open_gap_through_stop" if gap_through else policy.price_source
+            )
+            execution_policy = (
+                replace(policy, price_source=fill_price_source)
+                if gap_through
+                else policy
+            )
+            trigger_tick_distance = round(self._ticks_from_entry(self.stop_price), 4)
             for leg in self.legs:
                 if leg.status != "open":
                     continue
@@ -397,10 +412,10 @@ class LadderPosition:
                 side = "sell" if self.direction == "long" else "buy"
                 if self._uses_wallet_execution():
                     fill_result, rejection = self._execute_spot_fill(
-                        self.stop_price,
+                        fill_reference_price,
                         leg.contracts,
                         side=side,
-                        policy=policy,
+                        policy=execution_policy,
                     )
                     if rejection:
                         context = build_log_context(
@@ -408,28 +423,39 @@ class LadderPosition:
                             leg_id=leg.leg_id,
                             leg=leg.name,
                             reason=rejection.reason,
-                            price=round(self.stop_price, 4),
+                            price=round(fill_reference_price, 4),
                             direction=self.direction,
+                            stop_price=round(self.stop_price, 4),
+                            gap_through=gap_through,
                         )
                         logger.warning(with_log_context("spot_stop_rejected", context))
                         events.append(
                             {
                                 "type": "execution_rejected",
                                 "trade_id": self.trade_id,
-                                "price": round(self.stop_price, 4),
+                                "price": round(fill_reference_price, 4),
                                 "time": isoformat(candle.time),
                                 "currency": self.quote_currency,
                                 "leg": leg.name,
                                 "leg_id": leg.leg_id,
                                 "contracts": leg.contracts,
-                                "ticks": tick_distance,
+                                "ticks": round(
+                                    self._ticks_from_entry(fill_reference_price),
+                                    4,
+                                ),
+                                "stop_trigger_price": round(self.stop_price, 4),
+                                "stop_trigger_ticks": trigger_tick_distance,
+                                "gap_through": gap_through,
                                 "direction": self.direction,
                                 "reason": rejection.reason,
                             }
                         )
                         continue
-                exit_price = fill_result.fill_price if fill_result else self.stop_price
+                exit_price = (
+                    fill_result.fill_price if fill_result else fill_reference_price
+                )
                 exit_qty = fill_result.filled_qty if fill_result else leg.contracts
+                fill_tick_distance = round(self._ticks_from_entry(exit_price), 4)
                 pnl = self._pnl_for_exit(exit_price, exit_qty)
                 leg.status = "stop"
                 leg.exit_price = exit_price
@@ -479,7 +505,10 @@ class LadderPosition:
                         "leg_id": leg.leg_id,
                         "contracts": exit_qty,
                         "pnl": round(pnl, 4),
-                        "ticks": tick_distance,
+                        "ticks": fill_tick_distance,
+                        "stop_trigger_price": round(self.stop_price, 4),
+                        "stop_trigger_ticks": trigger_tick_distance,
+                        "gap_through": gap_through,
                         "direction": self.direction,
                         "notional": notional,
                         "fee_paid": fee_value,
@@ -487,16 +516,56 @@ class LadderPosition:
                         "fee_type": fee_metadata["fee_type"],
                         "fee_source": fee_metadata["fee_source"],
                         "fee_version": fee_metadata["fee_version"],
-                        "order_type": policy.order_type,
-                        "price_source": policy.price_source,
-                        "reason_code": policy.reason_code,
+                        "order_type": execution_policy.order_type,
+                        "price_source": execution_policy.price_source,
+                        "reason_code": execution_policy.reason_code,
                         "settlement": settlement_payload,
                     }
                 )
+        if all(leg.status != "open" for leg in self.legs):
             self.closed_at = candle.time
-        elif all(leg.status != "open" for leg in self.legs):
-            self.closed_at = candle.time
+            self._set_terminal_reason_from_legs()
         return events
+
+    def _set_terminal_reason_from_legs(self) -> None:
+        statuses = {
+            str(leg.status or "").strip().lower()
+            for leg in self.legs
+            if str(leg.status or "").strip().lower() != "open"
+        }
+        if not statuses:
+            raise RuntimeError(
+                f"position_close_invalid: no closed legs trade_id={self.trade_id}"
+            )
+        if statuses <= {"target"}:
+            self.close_reason = "TARGET"
+            self.reason_code = exit_policy_for("target").reason_code
+            return
+        if statuses <= {"stop"}:
+            self.close_reason = "STOP"
+            self.reason_code = exit_policy_for("stop").reason_code
+            return
+        if statuses <= {"target", "stop"}:
+            self.close_reason = "MIXED"
+            self.reason_code = "EXEC_EXIT_CLOSE"
+            return
+        raise RuntimeError(
+            "position_close_invalid: unsupported terminal leg statuses "
+            f"trade_id={self.trade_id} statuses={sorted(statuses)}"
+        )
+
+    def _weighted_exit_price(self) -> Optional[float]:
+        weighted_price = 0.0
+        contracts_total = 0.0
+        for leg in self.legs:
+            if leg.status == "open" or leg.exit_price is None:
+                continue
+            contracts = max(float(leg.contracts or 0.0), 0.0)
+            weighted_price += float(leg.exit_price) * contracts
+            contracts_total += contracts
+        if contracts_total <= 0.0:
+            return None
+        return weighted_price / contracts_total
 
     def hits_open_target(self, candle: Candle) -> bool:
         """Return True when the bar range reaches any open take-profit target."""
@@ -519,6 +588,27 @@ class LadderPosition:
             return candle.high >= self.stop_price
         return False
 
+    def opens_at_or_beyond_stop(self, candle: Candle) -> bool:
+        """Return whether the first tradable bar price has crossed the stop."""
+
+        if self.direction == "long":
+            return candle.open <= self.stop_price
+        if self.direction == "short":
+            return candle.open >= self.stop_price
+        return False
+
+    def opens_at_or_beyond_target(self, candle: Candle) -> bool:
+        """Return whether the bar open has crossed any resting target."""
+
+        for leg in self.legs:
+            if leg.status != "open":
+                continue
+            if self.direction == "long" and candle.open >= leg.target_price:
+                return True
+            if self.direction == "short" and candle.open <= leg.target_price:
+                return True
+        return False
+
     def hits_target_and_stop(self, candle: Candle) -> bool:
         """Return True when TP and stop are both inside the same bar range."""
 
@@ -535,9 +625,17 @@ class LadderPosition:
         events: List[Dict[str, Any]] = []
         policy = SameBarResolutionPolicy.normalize(same_bar_policy)
         same_bar_target_and_stop = self.hits_target_and_stop(candle)
+        open_hits_stop = self.opens_at_or_beyond_stop(candle)
+        open_hits_target = self.opens_at_or_beyond_target(candle)
         self._update_excursions(candle)
 
-        if policy == SameBarResolutionPolicy.PESSIMISTIC_STOP and same_bar_target_and_stop:
+        if open_hits_stop:
+            stop_events = self._apply_stop(candle)
+        elif (
+            policy == SameBarResolutionPolicy.PESSIMISTIC_STOP
+            and same_bar_target_and_stop
+            and not open_hits_target
+        ):
             stop_events = self._apply_stop(candle)
         else:
             leg_events = self._apply_leg_fills(candle)
@@ -553,6 +651,17 @@ class LadderPosition:
             if fixed_horizon_events:
                 events.extend(fixed_horizon_events)
         if not self.is_active() and not any(event.get("type") == "close" for event in events):
+            if not self.close_reason or not self.reason_code:
+                raise RuntimeError(
+                    "position_close_invalid: terminal reason missing "
+                    f"trade_id={self.trade_id}"
+                )
+            exit_price = self._weighted_exit_price()
+            if exit_price is None:
+                raise RuntimeError(
+                    "position_close_invalid: terminal exit price missing "
+                    f"trade_id={self.trade_id}"
+                )
             events.append(
                 {
                     "type": "close",
@@ -565,6 +674,9 @@ class LadderPosition:
                     "contracts": sum(max(leg.contracts, 0) for leg in self.legs),
                     "direction": self.direction,
                     "metrics": self._metrics_snapshot(),
+                    "reason_code": self.reason_code,
+                    "close_reason": self.close_reason,
+                    "exit_price": round(exit_price, 4),
                 }
             )
         return events
@@ -591,12 +703,15 @@ class LadderPosition:
         if not self.is_active():
             return []
 
-        normalized_reason = str(reason_code or "BACKTEST_END").strip().upper() or "BACKTEST_END"
+        normalized_reason = str(reason_code or "").strip().upper()
+        if normalized_reason not in {"BACKTEST_END", "TERMINAL_LIQUIDATION"}:
+            raise ValueError(
+                f"terminal reason_code={normalized_reason!r} is unsupported; "
+                "supported=['BACKTEST_END', 'TERMINAL_LIQUIDATION']"
+            )
         policy = exit_policy_for(
             "terminal_liquidation" if normalized_reason == "TERMINAL_LIQUIDATION" else "backtest_end"
         )
-        if normalized_reason != policy.reason_code:
-            policy = replace(policy, reason_code=normalized_reason)
         return self._close_open_legs_at_price(
             candle,
             exit_price_source=float(candle.close),
@@ -712,6 +827,13 @@ class LadderPosition:
         if events or all(leg.status != "open" for leg in self.legs):
             self.closed_at = candle.time
             self.close_reason = policy.reason_code
+            self.reason_code = policy.reason_code
+            terminal_exit_price = self._weighted_exit_price()
+            if terminal_exit_price is None:
+                raise RuntimeError(
+                    "position_close_invalid: terminal exit price missing "
+                    f"trade_id={self.trade_id}"
+                )
             events.append(
                 {
                     "type": "close",
@@ -726,7 +848,7 @@ class LadderPosition:
                     "metrics": self._metrics_snapshot(),
                     "reason_code": policy.reason_code,
                     "close_reason": policy.reason_code,
-                    "exit_price": round(exit_price_source, 4),
+                    "exit_price": round(terminal_exit_price, 4),
                 }
             )
         return events
@@ -769,22 +891,22 @@ class LadderPosition:
             "position_commit_seq": int(self.position_commit_seq),
             "position_commit_seq_status": "position_scoped",
         }
-        if self.close_reason:
+        if self.closed_at is not None:
+            if not self.close_reason or not self.reason_code:
+                raise RuntimeError(
+                    "position_serialize_invalid: closed position missing terminal reason "
+                    f"trade_id={self.trade_id}"
+                )
             payload["close_reason"] = self.close_reason
-            payload["reason_code"] = self.close_reason
+            payload["reason_code"] = self.reason_code
             payload["exit_time"] = isoformat(self.closed_at)
-            closed_legs = [leg for leg in self.legs if leg.status != "open" and leg.exit_price is not None]
-            if closed_legs:
-                total_contracts = sum(max(float(leg.contracts or 0.0), 0.0) for leg in closed_legs)
-                if total_contracts > 0:
-                    weighted_exit = sum(
-                        float(leg.exit_price or 0.0) * max(float(leg.contracts or 0.0), 0.0)
-                        for leg in closed_legs
-                    )
-                    payload["exit_price"] = round(
-                        weighted_exit / total_contracts,
-                        4,
-                    )
+            exit_price = self._weighted_exit_price()
+            if exit_price is None:
+                raise RuntimeError(
+                    "position_serialize_invalid: closed position missing terminal exit price "
+                    f"trade_id={self.trade_id}"
+                )
+            payload["exit_price"] = round(exit_price, 4)
         return payload
 
     def _pnl_for_exit(self, exit_price: float, contracts: float) -> float:

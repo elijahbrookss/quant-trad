@@ -17,40 +17,12 @@ class ExecutionAdapter(Protocol):
     ) -> Tuple[Optional[FillResult], Optional[FillRejection]]:
         ...
 
-    def fill_market(
-        self,
-        *,
-        side: str,
-        requested_qty: float,
-        price: float,
-        fee_rate: float,
-        enforce_price_tick: bool,
-    ) -> Tuple[Optional[FillResult], Optional[FillRejection]]:
-        ...
-
 
 class SpotExecutionAdapter:
-    """Adapter that forwards to the existing spot execution model."""
+    """Adapter that forwards typed orders to the spot execution model."""
 
     def __init__(self, model: SpotExecutionModel) -> None:
         self._model = model
-
-    def fill_market(
-        self,
-        *,
-        side: str,
-        requested_qty: float,
-        price: float,
-        fee_rate: float,
-        enforce_price_tick: bool,
-    ) -> Tuple[Optional[FillResult], Optional[FillRejection]]:
-        return self._model.fill_market(
-            side=side,
-            requested_qty=requested_qty,
-            price=price,
-            fee_rate=fee_rate,
-            enforce_price_tick=enforce_price_tick,
-        )
 
     def execute_order(
         self,
@@ -60,27 +32,10 @@ class SpotExecutionAdapter:
 
 
 class DerivativesExecutionAdapter:
-    """Adapter that forwards to the derivatives execution model."""
+    """Adapter that forwards typed orders to the derivatives execution model."""
 
     def __init__(self, model: DerivativesExecutionModel) -> None:
         self._model = model
-
-    def fill_market(
-        self,
-        *,
-        side: str,
-        requested_qty: float,
-        price: float,
-        fee_rate: float,
-        enforce_price_tick: bool,
-    ) -> Tuple[Optional[FillResult], Optional[FillRejection]]:
-        return self._model.fill_market(
-            side=side,
-            requested_qty=requested_qty,
-            price=price,
-            fee_rate=fee_rate,
-            enforce_price_tick=enforce_price_tick,
-        )
 
     def execute_order(
         self,

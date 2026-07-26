@@ -581,6 +581,16 @@ def get_run_research_summary(run_id: str) -> Dict[str, Any]:
             "end": simulated_window.get("end") or metadata.get("backtest_end"),
         },
         "strategy": _strategy_snapshot_summary(dataset),
+        "dataset_identity": {
+            "strategy_hash": metadata.get("strategy_hash"),
+            "config_hash": metadata.get("config_hash"),
+            "material_config_hash": metadata.get("material_config_hash"),
+            "data_snapshot_hash": metadata.get("data_snapshot_hash"),
+            "semantic_fingerprint": readiness.get("semantic_fingerprint")
+            or metadata.get("report_semantic_fingerprint"),
+            "operational_fingerprint": readiness.get("operational_fingerprint")
+            or metadata.get("report_operational_fingerprint"),
+        },
         "readiness": {
             "dataset_ready": readiness.get("dataset_ready"),
             "results_ready": readiness.get("results_ready"),
@@ -591,6 +601,13 @@ def get_run_research_summary(run_id: str) -> Dict[str, Any]:
             "comparison_status": readiness.get("comparison_status"),
             "export_status": readiness.get("export_status"),
             "golden_candidate_status": readiness.get("golden_candidate_status"),
+            "repeatability_status": readiness.get("repeatability_status"),
+            "data_quality_status": readiness.get("data_quality_status"),
+            "execution_quality_status": readiness.get("execution_quality_status"),
+            "blocking_reasons": list(readiness.get("blocking_reasons") or []),
+            "golden_blocking_reasons": list(
+                readiness.get("golden_blocking_reasons") or []
+            ),
             "degraded_sections": list(readiness.get("degraded_sections") or []),
             "unavailable_sections": list(readiness.get("unavailable_sections") or []),
             "caveats": list(readiness.get("caveats") or []),
@@ -1201,10 +1218,15 @@ def _wait_watermarks(wait: Mapping[str, Any], *keys: str) -> List[Dict[str, Any]
 
 
 def _coordinator_waits(run_id: str) -> Dict[str, Any]:
+    truncated = False
+    unavailable = False
+    limit = report_data.REPORT_OBSERVABILITY_EVENT_LIMIT
     try:
+        rows = report_data.list_observability_events(run_id, limit=limit + 1)
+        truncated = len(rows) > limit
         events = [
             row
-            for row in report_data.list_observability_events(run_id, limit=2000)
+            for row in rows[:limit]
             if str(row.get("event_name") or "") == "decision_order_top_waits_merged"
         ]
     except Exception as exc:  # noqa: BLE001 - coordinator waits are diagnostic, not material truth.
@@ -1215,12 +1237,17 @@ def _coordinator_waits(run_id: str) -> Dict[str, Any]:
             )
         )
         events = []
+        unavailable = True
     event = _latest_event(events)
     if event is None:
         return {
             "status": "not_available",
             "top_waits": [],
-            "caveats": ["decision_order_top_waits_merged_unavailable"],
+            "caveats": [
+                "decision_order_top_waits_merged_unavailable",
+                *(["observability_events_truncated"] if truncated else []),
+                *(["observability_events_unavailable"] if unavailable else []),
+            ],
         }
     details = _details(event)
     waits = []
@@ -1255,6 +1282,8 @@ def _coordinator_waits(run_id: str) -> Dict[str, Any]:
             }
         )
     caveats = []
+    if truncated:
+        caveats.append("observability_events_truncated")
     if details.get("release_count") is None or details.get("fail_count") is None:
         caveats.append("decision_order_release_fail_counts_unavailable")
     return {

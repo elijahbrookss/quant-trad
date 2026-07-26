@@ -142,10 +142,6 @@ bot_runtime:
 providers:
   runtime:
     history_segment_points: 1000
-    persistence:
-      candles_raw_table: market_candles_raw
-      derivatives_state_table: derivatives_market_state
-      closures_table: portal_candle_closures
   ibkr:
     host: ibkr-gateway
     port: 4002

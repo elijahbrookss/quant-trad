@@ -15,7 +15,7 @@ from .botlens_candle_continuity import (
 )
 from .botlens_state import empty_run_projection_snapshot, select_default_symbol_key
 from .botlens_transport import run_bootstrap_contract
-from ..storage.storage import get_bot_run
+from ..storage.repos.runs import get_bot_run
 
 _ACTIVE_STATUSES = {"starting", "running", "paused", "degraded", "telemetry_degraded"}
 logger = logging.getLogger(__name__)

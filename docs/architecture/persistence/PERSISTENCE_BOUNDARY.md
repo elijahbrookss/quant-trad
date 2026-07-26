@@ -13,9 +13,13 @@ tags:
   - postgres
 code_paths:
   - portal/backend/db/models.py
+  - portal/backend/db/market_data_models.py
   - portal/backend/db/session.py
   - portal/backend/service/provenance.py
   - portal/backend/service/storage
+  - portal/backend/service/storage/repos/market_data.py
+  - portal/backend/service/bots/storage_gateway.py
+  - portal/backend/service/storage/repos/lifecycle.py
   - portal/backend/service/storage/repos/run_leases.py
   - portal/backend/service/storage/repos/runtime_events.py
   - portal/backend/service/bots/botlens_domain_events.py
@@ -28,6 +32,8 @@ code_paths:
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
   - docs/architecture/persistence/diagrams/runtime-event-ledger-flow.mmd
   - scripts/db/manual_migration_versioning_hard_cutover.sql
+  - scripts/db/manual_migration_canonical_lifecycle_ledger_v1.sql
+  - scripts/db/manual_migration_async_job_fencing_v1.sql
 ---
 # Persistence Boundary
 
@@ -39,7 +45,13 @@ Related diagram: [runtime-event-ledger-flow.mmd](diagrams/runtime-event-ledger-f
 
 ## Boundary Contract
 
-`PG_DSN` is the only runtime persistence DSN. Runtime services should write through explicit repository or gateway boundaries, not hidden globals or alternate data stores.
+`PG_DSN` is the only runtime persistence DSN. Each persistence responsibility
+is owned by one named module under `portal/backend/service/storage/repos`.
+Services import those owners directly unless orchestration needs an injectable
+protocol, in which case the protocol and its repository-backed implementation
+live at the consuming service boundary. The bot runtime uses
+`bots/storage_gateway.py` for that purpose. The storage packages do not
+re-export repository functions, and there is no aggregate storage facade.
 
 Persistence owns durable storage. It does not own execution decisions or projection interpretation.
 
@@ -68,14 +80,16 @@ are still absent after bootstrap attempts to create model-declared indexes,
 startup fails. Historical SQL files under `scripts/db/` are repair/reference
 artifacts for old local databases, not normal fresh-start instructions.
 
-Provider market-data storage follows the same rule for
-`market_candles_raw`, `derivatives_market_state`, and
-`portal_candle_closures`: inspect the configured table names, create missing
-tables once, assert existing columns, create required indexes, and fail loud if
-the contract still does not hold. Provider credential helpers do not create
-their own table; `portal_provider_credential_refs` is owned by the portal ORM
-metadata and credential helpers only validate that the bootstrapped table and
-lookup index exist.
+Market-data persistence is model-declared in
+`portal/backend/db/market_data_models.py` under schema `market`. It owns
+source and typed-series identity, ingestion operations, append-only candle
+revisions, gap evidence, and frozen dataset manifests. Fresh bootstrap creates
+that schema, converts candle revisions to a TimescaleDB hypertable, and installs
+immutability triggers. Startup fails if active legacy tables remain in `public`;
+the explicit v2 hard-cutover migration verifies and archives them instead of
+supporting dual readers or writers. Provider credential helpers do not create
+their own table; `portal_provider_credential_refs` remains owned by portal ORM
+metadata.
 
 ## Diagram Walkthrough
 
@@ -91,7 +105,7 @@ lookup index exist.
 
 Persistence stores the rows needed to recover a run without asking projections
 what they last displayed. `portal_bot_runs`, trade rows/events, run leases,
-runtime events, and lifecycle checkpoint rows are durable runtime evidence.
+and runtime events including lifecycle events are durable runtime evidence.
 Reports, BotLens rebuilds, and forensics should be able to start from those
 rows and explain the run again.
 
@@ -101,8 +115,8 @@ config, execution settings, and environment config. It should not become the
 place to recover run status, runner ownership, summaries, heartbeats, or report
 artifacts.
 
-BotLens projections, lifecycle helper views, observability rows, and report
-artifact status are convenience or diagnostic state. They can be rebuilt,
+BotLens projections, observability rows, and report artifact status are
+convenience or diagnostic state. They can be rebuilt,
 unavailable, stale, or degraded, but they must not contradict durable runtime
 evidence. Viewer/debug writes also must not become material run identity just
 because they share a `run_id`, symbol, or continuity payload shape.
@@ -113,11 +127,12 @@ Active schema surfaces are justified by role:
 
 - Keep as durable truth: `portal_bot_runs`, `portal_bot_run_events`,
   `portal_bot_run_event_seq_allocators`, `portal_bot_trades`,
-  `portal_bot_trade_events`, `portal_bot_run_leases`, `portal_bot_run_lifecycle`,
-  `portal_bot_run_lifecycle_events`, strategy/bot/instrument config tables, and
-  market data source tables.
+  `portal_bot_trade_events`, `portal_bot_run_leases`, strategy/bot/instrument
+  config tables, plus `market.sources`, `market.series`,
+  `market.ingestion_runs`, `market.candle_versions`, `market.gap_evidence`,
+  `market.datasets`, and `market.dataset_series`.
 - Keep as definition only: `portal_bots`. Runtime state belongs to
-  `portal_bot_runs`, lifecycle checkpoints, run leases, and report
+  `portal_bot_runs`, canonical lifecycle events, run leases, and report
   materialization tables. Fleet cards and API responses may project those rows
   together, but readers must not recover runtime truth from bot definition
   columns.
@@ -136,6 +151,11 @@ Active schema surfaces are justified by role:
   worker result long enough for the waiting API request to return, but succeeded
   QuantLab jobs are not reusable result-cache truth. Finished result payloads are
   pruned to bounded summaries after the configured short retention window.
+  Running ownership is a fenced lease: only the current owner/token/generation
+  may heartbeat, fail, complete, or commit a job-owned effect. Status reads
+  expose heartbeat and generation but never claim tokens or token hashes.
+  Bootstrap validates the definitions of fencing-critical constraints and
+  indexes; a matching object name alone is not accepted as schema conformance.
 - Removed from active contract:
   `observability_metrics.botlens_backend_metric_samples_v1`; raw samples are not
   a durable database surface.
@@ -193,6 +213,13 @@ persistence boundary at canonical append time. `run_seq` starts at 1 for a run
 and is stamped into durable event context with `run_seq_status=runtime_assigned`.
 It is not assigned by frontend, projection, reporting, or export code.
 
+Within one producer/batch `seq`, persistence preserves the producer's semantic
+event order while assigning dense `run_seq` values. Event IDs are idempotency
+keys and never determine replay order. Reusing an event ID is a no-op only when
+the bot, run, event type, schema, criticality, event time, and semantic payload
+match. Allocator-owned `run_seq` fields are excluded from that comparison;
+divergent event material fails loudly.
+
 Runtime event persistence allocates `run_seq` from
 `portal_bot_run_event_seq_allocators` inside the same transaction that inserts
 the committed event rows. Duplicate event ids are removed before allocation, so
@@ -201,12 +228,21 @@ ledger stores `run_seq` both as a typed hot column and in payload context; the
 allocator table is the hot-path source of truth, not a JSON `MAX(run_seq)` scan
 over `portal_bot_run_events`.
 
-Lifecycle checkpoint reads use the canonical runtime-event `run_seq` as their
-visible lifecycle `seq`. The legacy `portal_bot_run_lifecycle_events` table is a
-compatibility mirror: it reuses the canonical lifecycle event id and canonical
-`run_seq` when available. If a legacy-only write must allocate a fallback `seq`,
-that allocation happens under the same per-run transaction lock as the insert;
-it must not precompute `MAX(seq) + 1` in a separate transaction.
+Lifecycle checkpoint reads filter canonical lifecycle event names from
+`portal_bot_run_events` and expose the runtime-event `run_seq` as lifecycle
+`seq`. `portal_bot_runs.status` and its start/end timestamps are a rebuildable
+current-run summary projection. No lifecycle-specific history or current-state
+mirror is part of the schema contract.
+The canonical lifecycle append and run-summary projection commit in one
+database transaction; a projection failure rolls back both so terminal state
+cannot leave a permanently stale summary. Non-lifecycle run upserts reject
+`status`, `started_at`, and `ended_at`; startup, runtime control, reporting, and
+artifact writers cannot bypass the lifecycle ledger. Lifecycle admission
+rejects unknown phase/status/owner values, phase/status mismatches, backdated
+checkpoints, and checkpoints after a terminal state. The explicit
+`rebuild_bot_run_lifecycle_summary` operation restores projected status and
+timestamps from the ordered ledger while preserving independently stored run
+configuration, provenance, and report summary data.
 
 Runtime fact transport and durable persistence must not compete to write the
 same event id. Source-owned canonical facts, including wallet ledger facts, are
@@ -276,3 +312,5 @@ fact without `wallet_commit_seq` is malformed and must block certification.
 - [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
 - [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)
 - [ADR 0016: Treat runtime event ledger order as operational evidence](../decisions/0016-treat-runtime-event-ledger-order-as-operational-evidence.md)
+- [ADR 0042: Runtime event ledger as lifecycle truth](../decisions/0042-use-runtime-event-ledger-as-lifecycle-truth.md)
+- [ADR 0043: Canonical accounting reconciliation](../decisions/0043-reconcile-accounting-from-canonical-fills-and-wallet-ledger.md)

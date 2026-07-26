@@ -24,6 +24,7 @@ from .context import IndicatorServiceContext
 from .runtime_graph import (
     build_runtime_indicator_graph,
     build_runtime_indicator_instance,
+    collect_runtime_indicator_diagnostics,
     collect_runtime_indicator_metas,
 )
 from .runtime_validation import validate_runtime_for_instance
@@ -38,6 +39,7 @@ __all__ = [
     "bulk_set_enabled",
     "build_runtime_indicator_graph",
     "clear_overlay_cache",
+    "collect_runtime_indicator_diagnostics",
     "collect_runtime_indicator_metas",
     "create_instance",
     "default_service",

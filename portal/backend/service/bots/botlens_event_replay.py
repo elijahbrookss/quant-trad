@@ -50,7 +50,7 @@ def _ordered_event_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _list_bot_runtime_events(**kwargs):
-    from ..storage.storage import list_bot_runtime_events
+    from ..storage.repos.runtime_events import list_bot_runtime_events
 
     return list_bot_runtime_events(**kwargs)
 

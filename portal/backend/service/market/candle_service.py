@@ -1,21 +1,68 @@
-import logging
-import os
-import threading
-import time
-from typing import Any, Dict, Optional
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import Any, Dict, Iterator, Optional
 
 import pandas as pd
 
 from core.candle_continuity import expected_interval_seconds, summarize_candle_continuity
-from data_providers.providers.factory import get_provider
-from data_providers.utils.ohlcv import interval_to_timedelta
+from data_providers.utils.ohlcv import compute_tr_atr, interval_to_timedelta
 from indicators.config import DataContext
-from utils.perf_log import get_obs_enabled, get_obs_step_sample_rate, should_sample
 
-from ..providers import persistence_bootstrap  # noqa: F401
 from . import instrument_service
+from .feed_service import canonical_candle_feed
 
-logger = logging.getLogger(__name__)
+
+_DERIVED_CANDLE_FEATURE_VERSION = "runtime_candle_features.wilder_atr_14.v1"
+
+
+@dataclass(frozen=True)
+class MarketDataReadScope:
+    as_of_commit_seq: int
+
+    def __post_init__(self) -> None:
+        if int(self.as_of_commit_seq) < 0:
+            raise ValueError("market_data_read_scope_invalid: commit sequence must be nonnegative")
+        object.__setattr__(self, "as_of_commit_seq", int(self.as_of_commit_seq))
+
+
+_MARKET_DATA_READ_SCOPE: ContextVar[Optional[MarketDataReadScope]] = ContextVar(
+    "market_data_read_scope", default=None
+)
+
+
+@contextmanager
+def market_data_read_scope(*, as_of_commit_seq: int) -> Iterator[MarketDataReadScope]:
+    """Bind nested candle/indicator reads to one immutable commit watermark."""
+
+    scope = MarketDataReadScope(as_of_commit_seq=as_of_commit_seq)
+    token = _MARKET_DATA_READ_SCOPE.set(scope)
+    try:
+        yield scope
+    finally:
+        _MARKET_DATA_READ_SCOPE.reset(token)
+
+
+def current_market_data_read_scope() -> Optional[MarketDataReadScope]:
+    return _MARKET_DATA_READ_SCOPE.get()
+
+
+def _with_runtime_candle_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """Derive execution inputs explicitly without storing them as source facts."""
+
+    if frame is None or frame.empty:
+        return frame
+    enriched = compute_tr_atr(frame.copy(), period=14)
+    enriched.attrs.update(getattr(frame, "attrs", {}))
+    enriched.attrs["derived_candle_features"] = {
+        "schema_version": _DERIVED_CANDLE_FEATURE_VERSION,
+        "atr": {
+            "method": "wilder_ewm",
+            "period": 14,
+            "source_fields": ["high", "low", "close"],
+        },
+    }
+    return enriched
 
 
 def fetch_ohlcv(
@@ -27,38 +74,12 @@ def fetch_ohlcv(
     datasource: Optional[str] = None,
     exchange: Optional[str] = None,
 ) -> pd.DataFrame:
-    """
-    Fetch OHLCV data for a given symbol and time range.
-    """
-    # NOTE: NO CACHE – repeated fetch_ohlcv calls with identical windows will re-hit provider/persistence.
-    instrument_id = instrument_service.require_instrument_id(datasource, exchange, symbol)
-    ctx = DataContext(
-        symbol=symbol,
-        start=start,
-        end=end,
-        interval=interval,
-        instrument_id=instrument_id,
+    """Read canonical stored candles; missing data requires explicit ingestion."""
+
+    instrument_id = instrument_service.require_instrument_id(
+        datasource, exchange, symbol
     )
-    provider = get_provider(datasource, exchange=exchange)
-    should_log = get_obs_enabled() and should_sample(get_obs_step_sample_rate())
-    started = time.perf_counter() if should_log else 0.0
-    df = provider.get_ohlcv(ctx)
-    if should_log:
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
-        logger.debug(
-            "event=cache.absent operation_name=fetch_ohlcv time_taken_ms=%.4f pid=%s thread_name=%s "
-            "symbol=%s interval=%s datasource=%s exchange=%s start=%s end=%s",
-            elapsed_ms,
-            os.getpid(),
-            threading.current_thread().name,
-            symbol,
-            interval,
-            datasource,
-            exchange,
-            start,
-            end,
-        )
-    return df
+    return fetch_ohlcv_by_instrument(instrument_id, start, end, interval)
 
 
 def fetch_ohlcv_by_instrument(
@@ -67,46 +88,27 @@ def fetch_ohlcv_by_instrument(
     end: str,
     interval: str,
 ) -> pd.DataFrame:
-    """Fetch OHLCV data for a canonical instrument."""
+    """Read one canonical instrument series without provider/API fallback."""
 
     try:
         instrument = instrument_service.get_instrument_record(instrument_id)
     except KeyError as exc:
         raise ValueError(str(exc)) from exc
-    datasource = instrument.get("datasource")
-    exchange = instrument.get("exchange")
-    symbol = instrument.get("symbol")
-    if not datasource or not symbol:
-        raise ValueError(f"Instrument {instrument_id} is missing datasource or symbol.")
-
-    ctx = DataContext(
-        symbol=symbol,
+    scope = current_market_data_read_scope()
+    frame = canonical_candle_feed.read_by_instrument(
+        instrument,
         start=start,
         end=end,
         interval=interval,
-        instrument_id=instrument_id,
+        as_of_commit_seq=(scope.as_of_commit_seq if scope is not None else None),
     )
-    provider = get_provider(datasource, exchange=exchange)
-    should_log = get_obs_enabled() and should_sample(get_obs_step_sample_rate())
-    started = time.perf_counter() if should_log else 0.0
-    df = provider.get_ohlcv(ctx)
-    if should_log:
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
-        logger.debug(
-            "event=cache.absent operation_name=fetch_ohlcv_by_instrument time_taken_ms=%.4f pid=%s thread_name=%s "
-            "symbol=%s interval=%s datasource=%s exchange=%s start=%s end=%s instrument_id=%s",
-            elapsed_ms,
-            os.getpid(),
-            threading.current_thread().name,
-            symbol,
-            interval,
-            datasource,
-            exchange,
-            start,
-            end,
-            instrument_id,
-        )
-    return df
+    enriched = _with_runtime_candle_features(frame)
+    if scope is not None:
+        enriched.attrs["market_data_read_scope"] = {
+            "schema_version": "market_data_read_scope.v1",
+            "as_of_commit_seq": scope.as_of_commit_seq,
+        }
+    return enriched
 
 
 def _iso(value: Any) -> str | None:

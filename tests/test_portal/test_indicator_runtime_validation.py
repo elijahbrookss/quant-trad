@@ -26,6 +26,12 @@ def _frame() -> pd.DataFrame:
     )
 
 
+def _indicator_stub() -> SimpleNamespace:
+    return SimpleNamespace(
+        configure_overlay_history=lambda *, history_bars: None
+    )
+
+
 def test_runtime_validation_summarizes_output_presence_and_readiness(monkeypatch) -> None:
     monkeypatch.setattr(runtime_validation, "load_indicator_record", lambda inst_id, ctx=None: {"id": inst_id})
     monkeypatch.setattr(
@@ -50,7 +56,7 @@ def test_runtime_validation_summarizes_output_presence_and_readiness(monkeypatch
     monkeypatch.setattr(
         runtime_validation,
         "build_runtime_indicator_graph",
-        lambda *args, **kwargs: ({}, ["indicator"]),
+        lambda *args, **kwargs: ({}, [_indicator_stub()]),
     )
     monkeypatch.setattr(
         runtime_validation.candle_service,
@@ -126,7 +132,11 @@ def test_runtime_output_evidence_collects_per_bar_declared_values(monkeypatch) -
             "exchange": "cme",
         },
     )
-    monkeypatch.setattr(runtime_validation, "build_runtime_indicator_graph", lambda *args, **kwargs: ({}, ["indicator"]))
+    monkeypatch.setattr(
+        runtime_validation,
+        "build_runtime_indicator_graph",
+        lambda *args, **kwargs: ({}, [_indicator_stub()]),
+    )
     monkeypatch.setattr(runtime_validation.candle_service, "fetch_ohlcv_by_instrument", lambda *args, **kwargs: _frame())
 
     class _FakeEngine:
@@ -197,7 +207,7 @@ def test_runtime_output_evidence_applies_explicit_param_overrides(monkeypatch) -
 
     def fake_build_runtime_indicator_graph(*args, **kwargs):
         captured["preloaded_metas"] = kwargs["preloaded_metas"]
-        return {}, ["indicator"]
+        return {}, [_indicator_stub()]
 
     monkeypatch.setattr(runtime_validation, "build_runtime_indicator_graph", fake_build_runtime_indicator_graph)
     monkeypatch.setattr(runtime_validation.candle_service, "fetch_ohlcv_by_instrument", lambda *args, **kwargs: _frame())
@@ -250,7 +260,11 @@ def test_runtime_validation_reports_readiness_assertion_failures(monkeypatch) ->
             "runtime_supported": True,
         },
     )
-    monkeypatch.setattr(runtime_validation, "build_runtime_indicator_graph", lambda *args, **kwargs: ({}, ["indicator"]))
+    monkeypatch.setattr(
+        runtime_validation,
+        "build_runtime_indicator_graph",
+        lambda *args, **kwargs: ({}, [_indicator_stub()]),
+    )
     monkeypatch.setattr(runtime_validation.candle_service, "fetch_ohlcv", lambda *args, **kwargs: _frame())
 
     class _NeverReadyEngine:

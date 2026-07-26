@@ -279,6 +279,96 @@ class _FakeDb:
         yield self.session_handle
 
 
+def _runtime_event_payload() -> dict:
+    return {
+        "event_id": "evt-transaction",
+        "bot_id": "bot-1",
+        "run_id": "run-1",
+        "seq": 1,
+        "event_type": "botlens_domain.run_phase_reported",
+        "payload": {
+            "schema_version": 1,
+            "event_id": "evt-transaction",
+            "event_ts": "2026-07-24T12:00:00Z",
+            "event_name": "RUN_PHASE_REPORTED",
+            "root_id": "evt-transaction",
+            "parent_id": None,
+            "correlation_id": "corr-transaction",
+            "context": {
+                "run_id": "run-1",
+                "bot_id": "bot-1",
+                "phase": "container_booting",
+                "status": "starting",
+            },
+        },
+    }
+
+
+def test_runtime_event_transactional_projection_runs_before_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _TransactionDb(_FakeDb):
+        committed = False
+        rolled_back = False
+
+        @contextmanager
+        def session(self):
+            try:
+                yield self.session_handle
+            except Exception:
+                self.rolled_back = True
+                raise
+            else:
+                self.committed = True
+
+    fake_db = _TransactionDb([[], ["evt-transaction"]])
+    projected: list[object] = []
+    monkeypatch.setattr(runtime_events, "db", fake_db)
+
+    result = runtime_events.record_bot_runtime_events_batch(
+        [_runtime_event_payload()],
+        transactional_projection=lambda session: projected.append(session),
+    )
+
+    assert result == 1
+    assert projected == [fake_db.session_handle]
+    assert fake_db.committed is True
+    assert fake_db.rolled_back is False
+
+
+def test_runtime_event_transactional_projection_failure_rolls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _TransactionDb(_FakeDb):
+        committed = False
+        rolled_back = False
+
+        @contextmanager
+        def session(self):
+            try:
+                yield self.session_handle
+            except Exception:
+                self.rolled_back = True
+                raise
+            else:
+                self.committed = True
+
+    fake_db = _TransactionDb([[], ["evt-transaction"]])
+    monkeypatch.setattr(runtime_events, "db", fake_db)
+
+    def _fail_projection(_session) -> None:
+        raise RuntimeError("projection failed")
+
+    with pytest.raises(RuntimeError, match="projection failed"):
+        runtime_events.record_bot_runtime_events_batch(
+            [_runtime_event_payload()],
+            transactional_projection=_fail_projection,
+        )
+
+    assert fake_db.committed is False
+    assert fake_db.rolled_back is True
+
+
 def _statement_sql(statement) -> str:
     return str(statement.compile(dialect=postgresql.dialect()))
 
@@ -779,11 +869,11 @@ def test_record_bot_runtime_events_batch_counts_same_batch_event_id_duplicates(
                 "payload": {
                     "schema_version": 1,
                     "event_id": "evt-dup",
-                    "event_ts": "2026-02-01T00:00:01Z",
+                    "event_ts": "2026-02-01T00:00:00Z",
                     "event_name": "HEALTH_STATUS_REPORTED",
                     "root_id": "evt-dup",
                     "parent_id": None,
-                    "correlation_id": "corr-2",
+                    "correlation_id": "corr-1",
                         "context": {"run_id": "run-1", "bot_id": "bot-1", "status": "running", "warning_types": ["runtime"]},
                 },
             },
@@ -798,6 +888,81 @@ def test_record_bot_runtime_events_batch_counts_same_batch_event_id_duplicates(
     assert outcome.duplicate_rows == 1
     assert outcome.duplicate_reasons == {"same_batch_event_id_duplicate": 1}
     assert observed["error"] is None
+
+
+def test_runtime_event_idempotency_rejects_divergent_payload() -> None:
+    existing = {
+        "event_id": "evt-1",
+        "bot_id": "bot-1",
+        "run_id": "run-1",
+        "event_type": "botlens_domain.health_status_reported",
+        "critical": False,
+        "schema_version": 1,
+        "event_time": "2026-02-01T00:00:00Z",
+        "payload": {
+            "event_id": "evt-1",
+            "event_name": "HEALTH_STATUS_REPORTED",
+            "context": {
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "status": "running",
+                "run_seq": 7,
+                "run_seq_status": "runtime_assigned",
+            },
+        },
+    }
+    retry = {
+        **existing,
+        "payload": {
+            "event_id": "evt-1",
+            "event_name": "HEALTH_STATUS_REPORTED",
+            "context": {
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "status": "degraded",
+            },
+        },
+    }
+
+    with pytest.raises(ValueError, match="divergent event material"):
+        runtime_events._assert_equivalent_runtime_event_id(existing, retry)
+
+
+def test_runtime_event_idempotency_ignores_allocator_owned_order_fields() -> None:
+    existing = {
+        "event_id": "evt-1",
+        "bot_id": "bot-1",
+        "run_id": "run-1",
+        "event_type": "botlens_domain.health_status_reported",
+        "critical": False,
+        "schema_version": 1,
+        "event_time": "2026-02-01T00:00:00Z",
+        "payload": {
+            "event_id": "evt-1",
+            "event_name": "HEALTH_STATUS_REPORTED",
+            "context": {
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "status": "running",
+                "run_seq": 7,
+                "run_seq_status": "runtime_assigned",
+            },
+        },
+    }
+    retry = {
+        **existing,
+        "payload": {
+            "event_id": "evt-1",
+            "event_name": "HEALTH_STATUS_REPORTED",
+            "context": {
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "status": "running",
+            },
+        },
+    }
+
+    runtime_events._assert_equivalent_runtime_event_id(existing, retry)
 
 
 def test_record_bot_runtime_events_batch_skips_existing_event_ids_before_run_seq_allocation(
@@ -1173,6 +1338,65 @@ def test_record_bot_runtime_events_batch_assigns_dense_run_seq_with_duplicate_so
     compiled = fake_db.session_handle.statements[1].compile(dialect=postgresql.dialect())
     assert result == 3
     assert [_compiled_param(compiled.params, f"payload_m{index}")["context"]["run_seq"] for index in range(3)] == [1, 2, 3]
+
+
+def test_record_bot_runtime_events_batch_preserves_producer_order_within_source_seq(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_db = _FakeDb([[], ["z-open", "a-close"]])
+    monkeypatch.setattr(runtime_events, "db", fake_db)
+
+    def _row(event_id: str, event_name: str, position_commit_seq: int) -> dict[str, Any]:
+        return {
+            "event_id": event_id,
+            "bot_id": "bot-1",
+            "run_id": "run-1",
+            "seq": 8,
+            "event_type": f"botlens_domain.{event_name.lower()}",
+            "payload": {
+                "schema_version": 1,
+                "event_id": event_id,
+                "event_ts": "2026-02-01T00:00:00Z",
+                "event_name": event_name,
+                "root_id": event_id,
+                "parent_id": None,
+                "correlation_id": "trade-1",
+                "context": {
+                    "run_id": "run-1",
+                    "bot_id": "bot-1",
+                    "series_key": "instrument-btc|1m",
+                    "instrument_id": "instrument-btc",
+                    "symbol": "BTC",
+                    "timeframe": "1m",
+                    "trade_id": "trade-1",
+                    "bar_time": "2026-02-01T00:00:00Z",
+                    "event_time": "2026-02-01T00:00:00Z",
+                    "trade_state": "open" if event_name == "TRADE_OPENED" else "closed",
+                    "direction": "long",
+                    "closed_at": (
+                        None
+                        if event_name == "TRADE_OPENED"
+                        else "2026-02-01T00:00:00Z"
+                    ),
+                    "position_commit_seq": position_commit_seq,
+                    "position_commit_seq_status": "position_scoped",
+                },
+            },
+        }
+
+    result = runtime_events.record_bot_runtime_events_batch(
+        [
+            _row("z-open", "TRADE_OPENED", 1),
+            _row("a-close", "TRADE_CLOSED", 2),
+        ]
+    )
+
+    compiled = fake_db.session_handle.statements[1].compile(dialect=postgresql.dialect())
+    assert result == 2
+    assert _compiled_param(compiled.params, "event_id_m0") == "z-open"
+    assert _compiled_param(compiled.params, "event_id_m1") == "a-close"
+    assert _compiled_param(compiled.params, "run_seq_m0") == 1
+    assert _compiled_param(compiled.params, "run_seq_m1") == 2
 
 
 def test_record_bot_runtime_events_batch_allows_existing_botlens_source_seq(

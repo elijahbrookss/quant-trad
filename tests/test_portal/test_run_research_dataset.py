@@ -18,7 +18,7 @@ class _ResearchDatasetStorage:
         steps: list[dict[str, Any]] | None = None,
         observability_events: list[dict[str, Any]] | None = None,
         candle_summaries: dict[tuple[str, str], dict[str, Any]] | None = None,
-        candle_closures: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
+        candle_provider_gaps: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
         candles: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
     ) -> None:
         self._run = dict(run)
@@ -27,9 +27,9 @@ class _ResearchDatasetStorage:
         self._steps = [dict(row) for row in steps or []]
         self._observability_events = [dict(row) for row in observability_events or []]
         self._candle_summaries = {tuple(key): dict(value) for key, value in (candle_summaries or {}).items()}
-        self._candle_closures = {
+        self._candle_provider_gaps = {
             tuple(key): [dict(row) for row in value]
-            for key, value in (candle_closures or {}).items()
+            for key, value in (candle_provider_gaps or {}).items()
         }
         self._candles = {
             tuple(key): [dict(row) for row in value]
@@ -47,6 +47,10 @@ class _ResearchDatasetStorage:
         _ = run_id
         return [dict(row) for row in self._steps]
 
+    def list_bot_run_lifecycle_events(self, run_id: str):
+        _ = run_id
+        return []
+
     def list_observability_events(self, run_id: str, limit: int = 2000):
         _ = run_id
         return [dict(row) for row in self._observability_events[:limit]]
@@ -56,9 +60,9 @@ class _ResearchDatasetStorage:
         summary = self._candle_summaries.get((instrument_id, timeframe))
         return dict(summary) if summary else None
 
-    def list_candle_closure_evidence(self, *, instrument_id: str, timeframe: str, start, end):
+    def list_candle_provider_gap_evidence(self, *, instrument_id: str, timeframe: str, start, end):
         _ = start, end
-        return [dict(row) for row in self._candle_closures.get((instrument_id, timeframe), [])]
+        return [dict(row) for row in self._candle_provider_gaps.get((instrument_id, timeframe), [])]
 
     def list_candles_for_series(
         self,
@@ -116,6 +120,20 @@ def _run() -> dict[str, Any]:
         "config_snapshot": {
             "execution_mode": "full",
             "playback_mode": "instant",
+            "backtest_warmup_bars": 100,
+            "backtest_warmup_evidence": [
+                {
+                    "schema_version": "backtest_warmup_evidence.v1",
+                    "strategy_id": "strategy-1",
+                    "symbol": "BTC",
+                    "timeframe": "1h",
+                    "status": "ready",
+                    "requested_bars": 100,
+                    "required_bars": 100,
+                    "loaded_bars": 100,
+                    "missing_bars": 0,
+                }
+            ],
             "wallet_start": {"balances": {"USDC": 1000}},
             "date_range": {
                 "start": "2026-03-01T00:00:00Z",
@@ -125,8 +143,55 @@ def _run() -> dict[str, Any]:
             "timeframe": "1h",
             "material_config_hash": "material-1",
             "risk_settings": {"risk_per_trade": 0.01, "slippage_bps": 0.0},
-            "atm_template": {"id": "atm-1", "targets": [1, 2, 3]},
+            "strategies": [
+                {
+                    "id": "strategy-1",
+                    "atm_template_id": "atm-1",
+                    "atm_template": {
+                        "schema_version": 2,
+                        "name": "Research fixture ATM",
+                        "take_profit_orders": [
+                            {"id": "tp-1", "r_multiple": 1.0, "size_fraction": 1.0}
+                        ],
+                    },
+                }
+            ],
             "indicators": [{"id": "ind-1", "type": "market_profile"}],
+            "indicator_source_diagnostics": [],
+        },
+    }
+
+
+def _source_diagnostic(acceptability: str) -> dict[str, Any]:
+    source_status = "ok" if acceptability == "accepted" else "warning"
+    final_status = (
+        "healthy"
+        if acceptability == "accepted"
+        else "source_sparse"
+        if acceptability == "acceptable_with_caveat"
+        else "degraded"
+    )
+    return {
+        "strategy_id": "strategy-1",
+        "instrument_id": "instrument-btc",
+        "symbol": "BTC",
+        "timeframe": "1h",
+        "datasource": "coinbase",
+        "exchange": "CBI",
+        "indicator_id": "ind-1",
+        "indicator_type": "market_profile",
+        "source_candle_continuity": {
+            "schema_version": "indicator_source_candle_continuity.v1",
+            "timeframe": "5m",
+            "row_count": 10,
+            "status": source_status,
+            "severity": source_status,
+            "acceptability": acceptability,
+            "message": f"source continuity is {acceptability}",
+            "continuity": {
+                "candle_count": 10,
+                "final_status": final_status,
+            },
         },
     }
 
@@ -451,28 +516,54 @@ def _steps() -> list[dict[str, Any]]:
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, storage: _ResearchDatasetStorage) -> None:
-    monkeypatch.setattr(run_research_dataset, "storage", storage)
-    monkeypatch.setattr(report_data, "storage", storage)
+    for name in (
+        "get_bot_run",
+        "list_bot_trades_for_run",
+        "list_bot_run_steps_for_run",
+        "list_bot_run_lifecycle_events",
+        "list_observability_events",
+        "get_candle_storage_summary",
+        "list_candle_provider_gap_evidence",
+        "list_candles_for_series",
+    ):
+        monkeypatch.setattr(run_research_dataset, name, getattr(storage, name))
+    monkeypatch.setattr(report_data, "get_bot_run", storage.get_bot_run)
+    monkeypatch.setattr(
+        report_data,
+        "list_bot_runtime_events",
+        storage.list_bot_runtime_events,
+    )
+    monkeypatch.setattr(
+        report_data,
+        "list_bot_trades_for_run",
+        storage.list_bot_trades_for_run,
+    )
+    monkeypatch.setattr(
+        report_data,
+        "list_observability_event_rows",
+        storage.list_observability_events,
+    )
 
 
 def _build(
     monkeypatch: pytest.MonkeyPatch,
     *,
+    run=None,
     events=None,
     trades=None,
     observability_events=None,
     candle_summaries=None,
-    candle_closures=None,
+    candle_provider_gaps=None,
     candles=None,
 ):
     fake_storage = _ResearchDatasetStorage(
-        run=_run(),
+        run=_run() if run is None else run,
         events=_events() if events is None else events,
         trades=_trades() if trades is None else trades,
         steps=_steps(),
         observability_events=observability_events,
         candle_summaries=candle_summaries,
-        candle_closures=candle_closures,
+        candle_provider_gaps=candle_provider_gaps,
         candles=candles,
     )
     _install(monkeypatch, fake_storage)
@@ -496,6 +587,192 @@ def test_dataset_builds_from_db_truth_without_artifact_directory(monkeypatch: py
     assert dataset["context"]["schema_version"] == "report_context.v1"
     assert dataset["candle_catalog"]["schema_version"] == "candle_catalog.v1"
     assert dataset["operational_health"]["schema_version"] == "operational_health.v1"
+
+
+@pytest.mark.parametrize(
+    (
+        "acceptability",
+        "expected_status",
+        "expected_caveat",
+        "expected_code",
+        "expected_impact",
+    ),
+    [
+        (
+            "acceptable_with_caveat",
+            "acceptable_with_caveat",
+            "indicator_source_continuity_caveat",
+            "indicator_source_continuity_caveat",
+            "degrades_metrics",
+        ),
+        (
+            "investigate",
+            "investigate",
+            "indicator_source_continuity_investigate",
+            "indicator_source_continuity_investigate",
+            "blocks_golden",
+        ),
+    ],
+)
+def test_dataset_propagates_indicator_source_diagnostics_into_trust_sections(
+    monkeypatch: pytest.MonkeyPatch,
+    acceptability: str,
+    expected_status: str,
+    expected_caveat: str,
+    expected_code: str,
+    expected_impact: str,
+) -> None:
+    run = _run()
+    diagnostic = _source_diagnostic(acceptability)
+    run["config_snapshot"]["indicator_source_diagnostics"] = [diagnostic]
+
+    dataset = _build(monkeypatch, run=run)
+
+    source = dataset["context"]["indicator_source_diagnostics"]
+    assert source["schema_version"] == "indicator_source_diagnostics.v1"
+    assert source["available"] is True
+    assert source["status"] == expected_status
+    assert source["items"] == [diagnostic]
+    assert expected_caveat in source["caveats"]
+    assert dataset["readiness"]["data_quality_status"] == "degraded"
+    assert expected_caveat in dataset["readiness"]["caveats"]
+    report_diagnostic = next(
+        item
+        for item in dataset["diagnostics"]["items"]
+        if item["code"] == expected_code
+    )
+    assert report_diagnostic["readiness_impact"] == expected_impact
+    assert (
+        report_diagnostic["affected_identity"]["source_candle_continuity"]
+        == diagnostic["source_candle_continuity"]
+    )
+    if expected_impact == "blocks_golden":
+        assert expected_code in dataset["readiness"]["golden_blocking_reasons"]
+
+
+def test_dataset_marks_missing_indicator_source_diagnostics_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _run()
+    del run["config_snapshot"]["indicator_source_diagnostics"]
+
+    dataset = _build(monkeypatch, run=run)
+
+    source = dataset["context"]["indicator_source_diagnostics"]
+    assert source["available"] is False
+    assert source["status"] == "unavailable"
+    assert (
+        "indicator_source_diagnostics_unavailable"
+        in dataset["readiness"]["caveats"]
+    )
+    assert (
+        "indicator_source_diagnostics_unavailable"
+        in dataset["readiness"]["golden_blocking_reasons"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda diagnostic: diagnostic.pop("source_candle_continuity"),
+            "source_candle_continuity is required",
+        ),
+        (
+            lambda diagnostic: diagnostic["source_candle_continuity"].update(
+                {"continuity": "not-a-mapping"}
+            ),
+            "source_candle_continuity continuity must be a mapping",
+        ),
+    ],
+)
+def test_dataset_rejects_malformed_indicator_source_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    mutate,
+    message: str,
+) -> None:
+    run = _run()
+    diagnostic = _source_diagnostic("accepted")
+    mutate(diagnostic)
+    run["config_snapshot"]["indicator_source_diagnostics"] = [diagnostic]
+
+    with pytest.raises(ValueError, match=message):
+        _build(monkeypatch, run=run)
+
+
+def test_dataset_surfaces_insufficient_backtest_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _run()
+    run["config_snapshot"]["backtest_warmup_bars"] = 100
+    run["config_snapshot"]["backtest_warmup_evidence"] = [
+        {
+            "schema_version": "backtest_warmup_evidence.v1",
+            "strategy_id": "strategy-1",
+            "symbol": "BTC",
+            "timeframe": "1h",
+            "status": "insufficient",
+            "requested_bars": 100,
+            "required_bars": 100,
+            "loaded_bars": 72,
+            "missing_bars": 28,
+        }
+    ]
+
+    dataset = _build(monkeypatch, run=run)
+
+    data_config = dataset["metadata"]["configuration"]["data"]
+    assert data_config["backtest_warmup_bars"] == 100
+    assert data_config["backtest_warmup_evidence"][0]["loaded_bars"] == 72
+    assert dataset["readiness"]["data_quality_status"] == "degraded"
+    assert "indicator_warmup" in dataset["readiness"]["degraded_sections"]
+    assert "backtest_warmup_insufficient" in dataset["readiness"]["caveats"]
+    assert (
+        "backtest_warmup_insufficient"
+        in dataset["readiness"]["golden_blocking_reasons"]
+    )
+
+
+def test_loaded_warmup_evidence_is_operational_not_material_configuration() -> None:
+    left = {
+        "backtest_warmup_bars": 100,
+        "backtest_warmup_evidence": [
+            {"symbol": "BTC", "requested_bars": 100, "loaded_bars": 100}
+        ],
+    }
+    right = {
+        "backtest_warmup_bars": 100,
+        "backtest_warmup_evidence": [
+            {"symbol": "BTC", "requested_bars": 100, "loaded_bars": 72}
+        ],
+    }
+
+    assert run_research_dataset._config_hash(left) != (
+        run_research_dataset._config_hash(right)
+    )
+    assert run_research_dataset._material_config_hash(left) == (
+        run_research_dataset._material_config_hash(right)
+    )
+
+
+def test_dataset_marks_missing_backtest_warmup_evidence_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _run()
+    run["config_snapshot"].pop("backtest_warmup_evidence")
+
+    dataset = _build(monkeypatch, run=run)
+
+    assert dataset["readiness"]["data_quality_status"] != "clean"
+    assert "indicator_warmup" in dataset["readiness"]["degraded_sections"]
+    assert (
+        "backtest_warmup_evidence_unavailable"
+        in dataset["readiness"]["caveats"]
+    )
+    assert (
+        "backtest_warmup_evidence_unavailable"
+        in dataset["readiness"]["golden_blocking_reasons"]
+    )
 
 
 def test_dataset_exposes_candidate_lifecycle_from_report_indicator_artifacts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -659,6 +936,29 @@ def test_position_ordering_gap_is_informational_for_sparse_trade_events(monkeypa
     assert "position_ordering_gap" not in diagnostic_codes
 
 
+def test_position_ordering_non_monotonic_blocks_golden_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _events()
+    events[4] = _trade_event(6, "TRADE_OPENED", "trade-1", "BTC")
+    events[5] = _trade_event(
+        5,
+        "TRADE_CLOSED",
+        "trade-1",
+        "BTC",
+        close_reason="TARGET",
+    )
+
+    dataset = _build(monkeypatch, events=events)
+
+    position_ordering = dataset["execution"]["position_ordering"]
+    diagnostic_codes = {item["code"] for item in dataset["diagnostics"]["items"]}
+    assert position_ordering["non_monotonic_count"] == 1
+    assert "position_ordering_non_monotonic" in dataset["readiness"]["caveats"]
+    assert "position_ordering_non_monotonic" in dataset["readiness"]["golden_blocking_reasons"]
+    assert "position_ordering_non_monotonic" in diagnostic_codes
+
+
 def test_trade_closed_context_uses_highest_position_commit_seq() -> None:
     closed = _trade_event(6, "TRADE_CLOSED", "trade-1", "BTC", close_reason="TARGET", position_commit_seq=2)
     stale = _trade_event(20, "TRADE_CLOSED", "trade-1", "BTC", close_reason="STALE", position_commit_seq=1)
@@ -682,7 +982,9 @@ def test_dataset_includes_execution_mode_and_intrabar_fallback_summary(monkeypat
 
     assert dataset["metadata"]["execution_mode"] == "full"
     assert dataset["metadata"]["configuration"]["risk"]["slippage_bps"] == 0.0
-    assert dataset["metadata"]["configuration"]["atm"]["id"] == "atm-1"
+    atm = dataset["metadata"]["configuration"]["atm"]
+    assert atm["template_id"] == "atm-1"
+    assert atm["template"]["take_profit_orders"][0]["id"] == "tp-1"
     assert dataset["metadata"]["configuration"]["indicators"][0]["type"] == "market_profile"
     assert dataset["execution"]["execution_mode"] == "full"
     assert dataset["execution"]["slippage"]["total_slippage_cost"] == 0.0
@@ -777,6 +1079,48 @@ def test_dataset_includes_timeseries_context_and_candle_catalog(monkeypatch: pyt
     assert dataset["context"]["trade_context"]["row_count"] == 3
     assert dataset["candle_catalog"]["items"]
     assert dataset["operational_health"]["event_volume_summary"]["total"] >= 1
+
+
+def test_dataset_reports_observability_event_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observability_events = [
+        {
+            "event_name": "diagnostic_event",
+            "level": "INFO",
+            "observed_at": "2026-04-01T00:00:00Z",
+            "details": {"index": index},
+        }
+        for index in range(2001)
+    ]
+
+    dataset = _build(
+        monkeypatch,
+        observability_events=observability_events,
+    )
+
+    coverage = dataset["operational_health"]["observability_event_coverage"]
+    assert coverage == {
+        "schema_version": "observability_event_coverage.v1",
+        "status": "truncated",
+        "retained_count": 2000,
+        "probe_count": 2001,
+        "limit": 2000,
+        "has_more": True,
+        "ordering": "observed_at_desc",
+    }
+    assert "observability_events_truncated" in dataset["readiness"]["caveats"]
+    assert (
+        "observability_events_truncated"
+        in dataset["readiness"]["golden_blocking_reasons"]
+    )
+    diagnostics = {
+        row["code"]: row for row in dataset["diagnostics"]["items"]
+    }
+    assert (
+        diagnostics["observability_events_truncated"]["readiness_impact"]
+        == "blocks_golden"
+    )
 
 
 def test_dataset_extracts_runtime_indicator_and_market_context_from_signal_artifact(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -972,7 +1316,7 @@ def test_candle_catalog_prefers_storage_continuity_over_run_gap_diagnostics(monk
     assert btc["gap_count"] == 0
     assert btc["missing_count"] == 0
     assert btc["continuity_status"] == "clean"
-    assert btc["storage_source"] == "market_candles_raw"
+    assert btc["storage_source"] == "market.candle_versions"
 
 
 def test_readiness_data_quality_unknown_when_candle_continuity_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1270,6 +1614,180 @@ def test_wallet_ledger_state_mismatch_blocks_golden_candidate(monkeypatch: pytes
     assert "wallet_ledger_state_mismatch" in dataset["diagnostics"]["summary"]["blocking_codes"]
 
 
+def test_spot_fills_drive_wallet_replay_and_execution_trace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _run()
+    run["config_snapshot"]["strategies"][0]["instruments"] = [
+        {
+            "instrument_id": "instrument-btc",
+            "instrument_snapshot": {
+                "id": "instrument-btc",
+                "symbol": "BTC",
+                "instrument_type": "spot",
+            },
+        }
+    ]
+    events = _events()
+    events.extend(
+        [
+            _event(
+                14,
+                "WALLET_INITIALIZED",
+                {
+                    "currency": "USD",
+                    "wallet_commit_seq": 0,
+                    "wallet_event_order": 0,
+                    "balance_before": 0.0,
+                    "balance_after": 1000.0,
+                    "wallet_after": {
+                        "balances": {"USD": 1000.0},
+                        "locked_margin": {},
+                        "free_collateral": {"USD": 1000.0},
+                        "margin_positions": {},
+                    },
+                },
+            ),
+            _event(
+                15,
+                "ENTRY_FILLED",
+                {
+                    "trade_id": "trade-spot-1",
+                    "instrument_id": "instrument-btc",
+                    "symbol": "BTC",
+                    "timeframe": "1h",
+                    "bar_time": "2026-03-15T00:00:00Z",
+                    "wallet_commit_seq": 1,
+                    "side": "buy",
+                    "direction": "long",
+                    "qty": 1.0,
+                    "price": 100.0,
+                    "notional": 100.0,
+                    "fee_paid": 1.0,
+                    "fee_rate": 0.01,
+                    "fee_type": "taker",
+                    "fee_source": "test",
+                    "base_currency": "BTC",
+                    "quote_currency": "USD",
+                    "accounting_mode": "spot",
+                    "wallet_delta": {
+                        "collateral_reserved": 0.0,
+                        "collateral_released": 0.0,
+                        "fee_paid": 1.0,
+                    },
+                    "wallet_before": {
+                        "balances": {"USD": 1000.0},
+                        "locked_margin": {},
+                        "free_collateral": {"USD": 1000.0},
+                    },
+                },
+            ),
+            _event(
+                16,
+                "EXIT_FILLED",
+                {
+                    "trade_id": "trade-spot-1",
+                    "instrument_id": "instrument-btc",
+                    "symbol": "BTC",
+                    "timeframe": "1h",
+                    "bar_time": "2026-03-16T00:00:00Z",
+                    "wallet_commit_seq": 2,
+                    "side": "sell",
+                    "direction": "long",
+                    "qty": 1.0,
+                    "price": 155.0,
+                    "notional": 155.0,
+                    "fee_paid": 1.0,
+                    "fee_rate": 0.01,
+                    "fee_type": "taker",
+                    "fee_source": "test",
+                    "realized_pnl": 55.0,
+                    "exit_kind": "target",
+                    "base_currency": "BTC",
+                    "quote_currency": "USD",
+                    "accounting_mode": "spot",
+                    "wallet_delta": {
+                        "collateral_reserved": 0.0,
+                        "collateral_released": 0.0,
+                        "fee_paid": 1.0,
+                    },
+                    "wallet_before": {
+                        "balances": {"BTC": 1.0, "USD": 899.0},
+                        "locked_margin": {},
+                        "free_collateral": {"BTC": 1.0, "USD": 899.0},
+                    },
+                },
+            ),
+        ]
+    )
+
+    dataset = _build(monkeypatch, run=run, events=events)
+
+    assert dataset["wallet_accounting"]["wallet_replay_status"] == "passed"
+    assert dataset["wallet_accounting"]["locked_margin_final"] == {}
+    assert dataset["wallet_accounting"]["wallet_diagnostics"]["replay_projection"]["balances"] == {
+        "BTC": 0.0,
+        "USD": 1053.0,
+    }
+    assert dataset["execution"]["fill_count"] == 2
+    assert [row["event_name"] for row in dataset["execution"]["fills"]] == [
+        "entry_filled",
+        "exit_filled",
+    ]
+    assert dataset["metadata"]["instrument_semantics"] == [
+        {
+            "instrument_id": "instrument-btc",
+            "symbol": "BTC",
+            "instrument_type": "spot",
+            "source_instrument_type": "spot",
+            "execution_semantics": "spot",
+            "research_market_role": None,
+            "accounting_mode": "spot",
+            "margin_calc_type": None,
+        }
+    ]
+    assert "instrument-btc" in dataset["metadata"]["instrument_ids"]
+
+
+def test_report_rejects_conflicting_fill_and_configured_instrument_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _run()
+    run["config_snapshot"]["runtime_readiness"] = {
+        "profiles": [
+            {
+                "instrument_id": "instrument-btc",
+                "symbol": "BTC",
+                "instrument_type": "future",
+                "source_instrument_type": "future",
+                "execution_semantics": "derivative",
+                "accounting_mode": "margin",
+            }
+        ]
+    }
+    events = [
+        *_events(),
+        _event(
+            14,
+            "ENTRY_FILLED",
+            {
+                "trade_id": "trade-conflict",
+                "instrument_id": "instrument-btc",
+                "symbol": "BTC",
+                "timeframe": "1h",
+                "bar_time": "2026-03-15T00:00:00Z",
+                "accounting_mode": "spot",
+            },
+        ),
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match=r"conflicting report (execution_semantics|accounting_mode)",
+    ):
+        _build(monkeypatch, run=run, events=events)
+
+
 def test_operational_fingerprint_changes_when_runtime_event_order_changes(monkeypatch: pytest.MonkeyPatch) -> None:
     baseline = _build(monkeypatch, events=_events())
     reordered_events = _events()
@@ -1283,12 +1801,11 @@ def test_operational_fingerprint_changes_when_runtime_event_order_changes(monkey
 
     reordered = _build(monkeypatch, events=reordered_events)
 
-    assert reordered["readiness"]["material_fingerprint"] == baseline["readiness"]["material_fingerprint"]
     assert reordered["readiness"]["semantic_fingerprint"] == baseline["readiness"]["semantic_fingerprint"]
     assert reordered["readiness"]["operational_fingerprint"] != baseline["readiness"]["operational_fingerprint"]
 
 
-def test_material_fingerprint_changes_when_runtime_context_evidence_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_semantic_fingerprint_changes_when_runtime_context_evidence_changes(monkeypatch: pytest.MonkeyPatch) -> None:
     def signal_event(*, bias: str) -> dict[str, Any]:
         return _event(
             1,
@@ -1327,7 +1844,7 @@ def test_material_fingerprint_changes_when_runtime_context_evidence_changes(monk
     baseline = _build(monkeypatch, events=[signal_event(bias="long")], trades=[])
     changed = _build(monkeypatch, events=[signal_event(bias="short")], trades=[])
 
-    assert changed["readiness"]["material_fingerprint"] != baseline["readiness"]["material_fingerprint"]
+    assert changed["readiness"]["semantic_fingerprint"] != baseline["readiness"]["semantic_fingerprint"]
 
 
 def test_semantic_fingerprint_ignores_run_instance_identifiers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1348,25 +1865,147 @@ def test_semantic_fingerprint_ignores_run_instance_identifiers(monkeypatch: pyte
     changed = _build(monkeypatch, events=changed_events, trades=changed_trades)
 
     assert changed["readiness"]["semantic_fingerprint"] == baseline["readiness"]["semantic_fingerprint"]
-    assert changed["readiness"]["material_fingerprint"] == baseline["readiness"]["material_fingerprint"]
     assert changed["metadata"]["report_semantic_fingerprint"] == baseline["metadata"]["report_semantic_fingerprint"]
     assert changed["readiness"]["operational_fingerprint"] != baseline["readiness"]["operational_fingerprint"]
     assert changed["metadata"]["report_operational_fingerprint"] != baseline["metadata"]["report_operational_fingerprint"]
 
 
-def test_data_snapshot_hash_changes_when_candle_gap_window_changes(monkeypatch: pytest.MonkeyPatch) -> None:
-    baseline_events = [row for row in _events() if _event_name(row) != "candle_continuity_summary"]
-    changed_events = [row for row in _events() if _event_name(row) != "candle_continuity_summary"]
-    baseline_events.append(_provider_gap(20))
-    changed_gap = _provider_gap(20)
-    changed_gap["payload"]["context"]["gaps"][0]["previous_ts"] = "2026-03-07T00:00:00Z"
-    changed_gap["payload"]["context"]["gaps"][0]["current_ts"] = "2026-03-07T02:00:00Z"
-    changed_events.append(changed_gap)
+def test_data_snapshot_hash_uses_runtime_candle_values_not_gap_metadata() -> None:
+    snapshot = {
+        "schema_version": "candle_series_snapshot.v1",
+        "strategy_id": "strategy-1",
+        "instrument_id": "instrument-btc",
+        "symbol": "BTC",
+        "timeframe": "1h",
+        "datasource": "coinbase",
+        "exchange": "cbi",
+        "candle_value_hash": "a" * 64,
+        "candle_count": 10,
+        "warmup_candle_count": 2,
+        "replay_candle_count": 8,
+        "first_ts": "2026-03-01T00:00:00Z",
+        "last_ts": "2026-03-01T09:00:00Z",
+        "fields": ["time", "open", "high", "low", "close", "atr", "volume"],
+    }
+    baseline = {
+        "items": [
+            {
+                "instrument_id": "instrument-btc",
+                "timeframe": "1h",
+                "gap_count": 0,
+                "candle_snapshot": snapshot,
+            }
+        ]
+    }
+    changed_gap = copy.deepcopy(baseline)
+    changed_gap["items"][0]["gap_count"] = 3
 
-    baseline = _build(monkeypatch, events=baseline_events)
-    changed = _build(monkeypatch, events=changed_events)
+    assert run_research_dataset._data_snapshot_hash(
+        changed_gap
+    ) == run_research_dataset._data_snapshot_hash(baseline)
 
-    assert changed["metadata"]["data_snapshot_hash"] != baseline["metadata"]["data_snapshot_hash"]
+    changed_values = copy.deepcopy(baseline)
+    changed_values["items"][0]["candle_snapshot"]["candle_value_hash"] = "b" * 64
+    assert run_research_dataset._data_snapshot_hash(
+        changed_values
+    ) != run_research_dataset._data_snapshot_hash(baseline)
+
+
+def test_data_snapshot_hash_is_unavailable_when_any_series_lacks_runtime_evidence() -> None:
+    catalog = {
+        "items": [
+            {
+                "instrument_id": "instrument-btc",
+                "timeframe": "1h",
+                "candle_snapshot": {
+                    "schema_version": "candle_series_snapshot.v1",
+                    "strategy_id": "strategy-1",
+                    "instrument_id": "instrument-btc",
+                    "symbol": "BTC",
+                    "timeframe": "1h",
+                    "candle_value_hash": "a" * 64,
+                    "candle_count": 10,
+                    "warmup_candle_count": 2,
+                    "replay_candle_count": 8,
+                },
+            },
+            {
+                "instrument_id": "instrument-eth",
+                "timeframe": "1h",
+                "candle_snapshot": {},
+            },
+        ]
+    }
+
+    assert run_research_dataset._data_snapshot_hash(catalog) is None
+
+
+def test_data_snapshot_hash_requires_exact_configured_terminal_snapshot_set() -> None:
+    run = _run()
+    run["config_snapshot"]["expected_candle_series"] = [
+        {
+            "strategy_id": "strategy-1",
+            "instrument_id": "instrument-btc",
+            "symbol": "BTC",
+            "timeframe": "1h",
+        },
+        {
+            "strategy_id": "strategy-1",
+            "instrument_id": "instrument-eth",
+            "symbol": "ETH",
+            "timeframe": "1h",
+        },
+    ]
+    expected = run_research_dataset._expected_candle_series(run)
+    btc_snapshot = {
+        "schema_version": "candle_series_snapshot.v1",
+        "strategy_id": "strategy-1",
+        "instrument_id": "instrument-btc",
+        "symbol": "BTC",
+        "timeframe": "1h",
+        "datasource": "coinbase",
+        "exchange": "cbi",
+        "candle_value_hash": "a" * 64,
+        "candle_count": 10,
+        "warmup_candle_count": 2,
+        "replay_candle_count": 8,
+        "first_ts": "2026-03-01T00:00:00Z",
+        "last_ts": "2026-03-01T09:00:00Z",
+        "fields": ["time", "open", "high", "low", "close", "atr", "volume"],
+    }
+    catalog = {
+        "items": [
+            {
+                "instrument_id": "instrument-btc",
+                "symbol": "BTC",
+                "timeframe": "1h",
+                "candle_snapshot": btc_snapshot,
+            }
+        ]
+    }
+
+    assert run_research_dataset._data_snapshot_hash(
+        catalog,
+        candle_gaps={"facts": [{"candle_snapshot": btc_snapshot}]},
+        expected_series=expected,
+    ) is None
+
+    eth_snapshot = {
+        **btc_snapshot,
+        "instrument_id": "instrument-eth",
+        "symbol": "ETH",
+        "candle_value_hash": "b" * 64,
+    }
+    assert run_research_dataset._data_snapshot_hash(
+        catalog,
+        candle_gaps={
+            "facts": [
+                {"candle_snapshot": btc_snapshot},
+                {"candle_snapshot": eth_snapshot},
+            ]
+        },
+        expected_series=expected,
+    )
 
 
 def test_observer_continuity_facts_do_not_change_material_identity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1385,7 +2024,6 @@ def test_observer_continuity_facts_do_not_change_material_identity(monkeypatch: 
 
     assert observed["metadata"]["data_snapshot_hash"] == baseline["metadata"]["data_snapshot_hash"]
     assert observed["readiness"]["semantic_fingerprint"] == baseline["readiness"]["semantic_fingerprint"]
-    assert observed["readiness"]["material_fingerprint"] == baseline["readiness"]["material_fingerprint"]
     assert observed["readiness"]["golden_candidate_status"] == baseline["readiness"]["golden_candidate_status"]
     assert observed["readiness"]["golden_blocking_reasons"] == baseline["readiness"]["golden_blocking_reasons"]
     assert observed["candle_gaps"]["noncanonical_fact_count"] == 2
@@ -1543,6 +2181,67 @@ def test_candle_gap_diagnostics_skip_zero_gap_identity_rows(monkeypatch: pytest.
     assert "68694ebd-dfa6-4757-99da-9b3a2b4f4aa8|1h" not in symbols
 
 
+def test_producer_terminal_continuity_details_are_canonical_and_transport_is_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = [row for row in _events() if _event_name(row) != "candle_continuity_summary"]
+    events.append(
+        _event(
+            20,
+            "DIAGNOSTIC_RECORDED",
+            {
+                "series_key": "instrument-btc|1h",
+                "instrument_id": "instrument-btc",
+                "symbol": "BTC",
+                "timeframe": "1h",
+                "diagnostic_code": "candle_continuity_summary",
+                "details": {
+                    "series_key": "instrument-btc|1h",
+                    "instrument_id": "instrument-btc",
+                    "symbol": "BTC",
+                    "timeframe": "1h",
+                    "boundary_name": "run_final",
+                    "materiality": "canonical",
+                    "evidence_scope": "canonical_terminal",
+                    "candle_count": 169,
+                    "detected_gap_count": 0,
+                    "missing_candle_estimate": 0,
+                    "gap_count_by_type": {"unknown_gap": 0},
+                },
+            },
+        )
+    )
+    transport = _observer_gap(
+        boundary_name="transport_run_final",
+        pipeline_stage="botlens_run_final",
+        message_kind="lifecycle",
+        detected_gap_count=35,
+    )
+    transport["details"]["diagnostic_scope"] = "transport_continuity"
+
+    dataset = _build(
+        monkeypatch,
+        events=events,
+        observability_events=[transport],
+        candle_summaries={
+            ("instrument-btc", "1h"): {
+                "candle_count": 169,
+                "gap_count": 0,
+                "missing_count": 0,
+                "available_resolutions": ["1h"],
+            }
+        },
+    )
+
+    assert dataset["candle_gaps"]["canonical_evidence_status"] == "present"
+    assert dataset["candle_gaps"]["blocking_gap_count"] == 0
+    assert dataset["candle_gaps"]["facts"][0]["candle_count"] == 169
+    assert dataset["candle_gaps"]["diagnostic_facts"][0]["detected_gap_count"] == 35
+    catalog = next(row for row in dataset["candle_catalog"]["items"] if row["instrument_id"] == "instrument-btc")
+    assert catalog["continuity_status"] == "clean"
+    assert catalog["first_gap_evidence"] is None
+
+
 def test_provider_sparse_candle_gaps_degrade_without_golden_blocker(monkeypatch: pytest.MonkeyPatch) -> None:
     events = [row for row in _events() if _event_name(row) != "candle_continuity_summary"]
     events.append(_provider_gap(20))
@@ -1574,16 +2273,17 @@ def test_unknown_candle_gaps_still_block_golden_candidate(monkeypatch: pytest.Mo
     assert "candle_continuity_degraded" in dataset["readiness"]["golden_blocking_reasons"]
 
 
-def test_unknown_candle_gaps_reclassify_from_closure_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unknown_candle_gaps_reclassify_from_provider_gap_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
     events = [row for row in _events() if _event_name(row) != "candle_continuity_summary"]
     events.append(_unknown_gap(20))
 
     dataset = _build(
         monkeypatch,
         events=events,
-        candle_closures={
+        candle_provider_gaps={
             ("instrument-btc", "1h"): [
                 {
+                    "classification": "provider_missing_data",
                     "start": "2026-03-06T22:00:00Z",
                     "end": "2026-03-06T23:00:00Z",
                     "metadata": {

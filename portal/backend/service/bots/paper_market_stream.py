@@ -35,6 +35,7 @@ class PaperMarketStreamRunner:
         series: Sequence[Any],
         channels: Sequence[str] = PAPER_MARKET_STREAM_CHANNELS,
         provisional_candle_sink: Callable[[Mapping[str, Any]], bool] | None = None,
+        closed_candle_sink: Callable[[Any, Mapping[str, Any]], Any] | None = None,
         provisional_emit_interval_ms: int = 1000,
         market_data_stream_policy: Mapping[str, Any] | None = None,
         stream_factory: Callable[[Sequence[MarketSubscription]], ProviderMarketDataStream] | None = None,
@@ -45,6 +46,7 @@ class PaperMarketStreamRunner:
         self.series = list(series or [])
         self.channels = tuple(str(channel).strip().lower() for channel in channels if str(channel).strip())
         self.provisional_candle_sink = provisional_candle_sink
+        self.closed_candle_sink = closed_candle_sink
         self.provisional_emit_interval_ms = max(int(provisional_emit_interval_ms or 0), 0)
         self.market_data_stream_policy = normalize_market_data_stream_policy(market_data_stream_policy)
         self._stream_factory = stream_factory
@@ -404,6 +406,13 @@ class PaperMarketStreamRunner:
         if aggregator is None:
             return
         for candle in aggregator.process(event):
+            if self.closed_candle_sink is None:
+                raise RuntimeError(
+                    "paper closed-candle persistence sink is required before runtime visibility"
+                )
+            series_meta = self._series_meta_by_symbol.get(symbol) or {}
+            self.closed_candle_sink(candle, series_meta)
+            self._increment("closed_live_candle_persisted")
             appended = self.store.append(candle)
             self._increment("closed_live_candle_appended" if appended else "closed_live_candle_duplicate")
             if appended:

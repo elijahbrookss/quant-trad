@@ -16,16 +16,18 @@ from .execution_behavior import execution_behavior_from_bot, normalize_execution
 from .market_data_stream_policy import normalize_market_data_stream_policy
 from .startup_lifecycle import is_active_run_state
 from ..market import instrument_service
-from ..storage.storage import (
+from ..storage.repos.atm import get_atm_template
+from ..storage.repos.bots import (
     delete_bot,
     get_bot as get_bot_record,
-    get_atm_template,
-    get_latest_bot_run_lifecycle,
+    load_bots,
+    upsert_bot,
+)
+from ..storage.repos.lifecycle import get_latest_bot_run_lifecycle
+from ..storage.repos.strategies import (
     get_strategy_variant,
     list_strategy_variants,
-    load_bots,
     load_strategies,
-    upsert_bot,
 )
 from ..strategy_variant_resolution import EffectiveStrategyConfig, resolve_strategy_variant
 from risk import normalise_risk_config
@@ -133,8 +135,7 @@ class BotConfigService:
         )
 
         execution_mode = self.validate_execution_mode(
-            payload.get("execution_mode"),
-            legacy_mode=payload.get("mode"),
+            payload.get("execution_mode")
         )
         risk_payload = dict(payload.get("risk") or {})
         risk_payload["execution_mode"] = execution_mode
@@ -211,8 +212,7 @@ class BotConfigService:
             record["mode"] = str(payload["mode"]).lower()
         if "execution_mode" in payload:
             execution_mode = self.validate_execution_mode(
-                payload.get("execution_mode"),
-                legacy_mode=record.get("mode"),
+                payload.get("execution_mode")
             )
             record["execution_mode"] = execution_mode
             risk = dict(record.get("risk") or {})
@@ -303,8 +303,8 @@ class BotConfigService:
         return 0.0
 
     @staticmethod
-    def validate_execution_mode(value: Optional[object], *, legacy_mode: Optional[object] = None) -> str:
-        return ExecutionMode.from_config(value, legacy_mode=legacy_mode).value
+    def validate_execution_mode(value: Optional[object]) -> str:
+        return ExecutionMode.from_config(value).value
 
     @staticmethod
     def coerce_isoformat(value: Optional[object]) -> Optional[str]:

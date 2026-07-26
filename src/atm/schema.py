@@ -2,10 +2,65 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, FrozenSet
+
+ATM_SCHEMA_VERSION = 2
+
+ATM_TEMPLATE_FIELDS: FrozenSet[str] = frozenset(
+    {
+        "schema_version",
+        "name",
+        "execution_mode",
+        "limit_maker",
+        "initial_stop",
+        "take_profit_orders",
+        "exit_plan",
+        "breakeven",
+        "trailing",
+        "stop_adjustments",
+    }
+)
+ATM_LIMIT_MAKER_FIELDS: FrozenSet[str] = frozenset(
+    {"anchor_price", "offset_type", "offset_value", "validity_window", "fallback"}
+)
+ATM_INITIAL_STOP_FIELDS: FrozenSet[str] = frozenset(
+    {"mode", "atr_period", "atr_multiplier"}
+)
+ATM_TAKE_PROFIT_FIELDS: FrozenSet[str] = frozenset(
+    {"id", "label", "ticks", "r_multiple", "price", "size_fraction"}
+)
+ATM_EXIT_PLAN_FIELDS: FrozenSet[str] = frozenset({"fixed_horizon"})
+ATM_FIXED_HORIZON_FIELDS: FrozenSet[str] = frozenset(
+    {"enabled", "bars", "price", "order_type"}
+)
+ATM_BREAKEVEN_FIELDS: FrozenSet[str] = frozenset(
+    {"enabled", "activation_type", "ticks", "r_multiple"}
+)
+ATM_TRAILING_FIELDS: FrozenSet[str] = frozenset(
+    {
+        "enabled",
+        "activation_type",
+        "ticks",
+        "atr_multiplier",
+        "r_multiple",
+        "target_index",
+        "target_id",
+    }
+)
+ATM_STOP_ADJUSTMENT_FIELDS: FrozenSet[str] = frozenset(
+    {
+        "id",
+        "trigger_type",
+        "trigger_value",
+        "trigger_ticks",
+        "action_type",
+        "action_value",
+    }
+)
+
 
 DEFAULT_ATM_TEMPLATE: Dict[str, Any] = {
-    "schema_version": 2,
+    "schema_version": ATM_SCHEMA_VERSION,
     "name": "New ATM template",
     "execution_mode": "market",
     "limit_maker": {
@@ -38,8 +93,6 @@ DEFAULT_ATM_TEMPLATE: Dict[str, Any] = {
         "activation_type": "r_multiple",
         "ticks": 0,
         "r_multiple": 1.0,
-        "target_index": None,
-        "target_id": None,
     },
     "trailing": {
         "enabled": False,
@@ -50,15 +103,20 @@ DEFAULT_ATM_TEMPLATE: Dict[str, Any] = {
         "target_index": None,
         "target_id": None,
     },
-    "stop_adjustments": [
-        {
-            "id": "sa-1",
-            "trigger": {"type": "r_multiple_reached", "value": 1.0},
-            "action": {"type": "move_to_breakeven"},
-        }
-    ],
-    "_meta": {"instrument_overrides": False},
+    "stop_adjustments": [],
 }
 
 
-__all__ = ["DEFAULT_ATM_TEMPLATE"]
+__all__ = [
+    "ATM_BREAKEVEN_FIELDS",
+    "ATM_EXIT_PLAN_FIELDS",
+    "ATM_FIXED_HORIZON_FIELDS",
+    "ATM_INITIAL_STOP_FIELDS",
+    "ATM_LIMIT_MAKER_FIELDS",
+    "ATM_SCHEMA_VERSION",
+    "ATM_STOP_ADJUSTMENT_FIELDS",
+    "ATM_TAKE_PROFIT_FIELDS",
+    "ATM_TEMPLATE_FIELDS",
+    "ATM_TRAILING_FIELDS",
+    "DEFAULT_ATM_TEMPLATE",
+]

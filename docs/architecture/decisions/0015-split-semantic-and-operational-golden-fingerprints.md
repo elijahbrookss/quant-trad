@@ -49,9 +49,6 @@ The operational fingerprint covers diagnostics, section availability, candle
 continuity evidence, generated identifiers, runtime/logging evidence, and other
 operational traces.
 
-`material_fingerprint` remains a compatibility alias for the semantic
-fingerprint.
-
 ## Consequences
 
 - Golden PASS can still report operational fingerprint drift when semantic
@@ -61,9 +58,6 @@ fingerprint.
 - Operational drift remains inspectable instead of being discarded.
 - Consumers should use `semantic_fingerprint` for trading-behavior
   certification and `operational_fingerprint` for runtime audit.
-- Existing consumers that read `material_fingerprint` continue to receive the
-  semantic compatibility value.
-
 ## References
 
 - [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)

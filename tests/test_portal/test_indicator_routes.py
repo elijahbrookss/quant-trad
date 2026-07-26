@@ -11,7 +11,9 @@ def test_indicator_type_routes_are_registered_before_dynamic_instance_route():
     paths = [route.path for route in indicators.router.routes]
 
     assert "/types" in paths
+    assert "-types" not in paths
     assert "/{inst_id}" in paths
     assert paths.index("/types") < paths.index("/{inst_id}")
     assert "/types/{type_id}" in paths
+    assert "-types/{type_id}" not in paths
     assert paths.index("/types/{type_id}") < paths.index("/{inst_id}")

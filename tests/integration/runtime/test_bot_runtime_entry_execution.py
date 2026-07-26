@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import threading
 from typing import Optional
 
-from engines.bot_runtime.core import CandleSnapshot, EntryFill, EntryFillResult, PendingEntry
+from engines.bot_runtime.core import CandleSnapshot, EntryFill, EntryFillResult, FillOrder, PendingEntry
 from engines.bot_runtime.core.domain import Candle, EntryRequest, EntryValidation, LadderRiskEngine
 from engines.bot_runtime.core.execution import FillRejection, FillResult
 from engines.bot_runtime.core.execution_intent import ExecutionIntent, ExecutionOutcome
@@ -24,13 +24,12 @@ def _build_spot_engine(
     base_risk_per_trade: float = 100,
     take_profit_orders: Optional[list[dict]] = None,
     extra_config: Optional[dict] = None,
+    maker_fee_rate: float = 0.0,
+    taker_fee_rate: float = 0.0,
 ) -> LadderRiskEngine:
     config = {
-        "tick_size": 1.0,
-        "contract_size": 1.0,
-        "tick_value": 1.0,
         "initial_stop": {"atr_multiplier": 2.0},
-        "take_profit_orders": take_profit_orders or [{"id": "tp-1", "ticks": 10}],
+        "take_profit_orders": take_profit_orders or [{"id": "tp-1", "ticks": 10, "size_fraction": 1.0}],
         "execution_mode": execution_mode,
     }
     if limit_maker is not None:
@@ -46,6 +45,8 @@ def _build_spot_engine(
         "min_order_size": 1,
         "base_currency": "BTC",
         "quote_currency": "USD",
+        "maker_fee_rate": maker_fee_rate,
+        "taker_fee_rate": taker_fee_rate,
         "metadata": {
             "info": {"base_increment": "1"},
         },
@@ -59,11 +60,8 @@ def _build_spot_engine(
 
 def _build_future_engine() -> LadderRiskEngine:
     config = {
-        "tick_size": 5.0,
-        "contract_size": 0.01,
-        "tick_value": 0.05,
         "initial_stop": {"atr_multiplier": 1.0},
-        "take_profit_orders": [{"id": "tp-1", "ticks": 10}],
+        "take_profit_orders": [{"id": "tp-1", "ticks": 10, "size_fraction": 1.0}],
         "execution_mode": "market",
     }
     instrument = {
@@ -107,29 +105,35 @@ def _build_candle(*, close: float, atr: float) -> Candle:
 
 
 class _FillAdapter:
-    def fill_market(
-        self,
-        *,
-        side: str,
-        requested_qty: float,
-        price: float,
-        fee_rate: float,
-        enforce_price_tick: bool,
-    ):
-        _ = enforce_price_tick
-        notional = executed_notional(price=price, quantity=requested_qty, contract_size=1.0)
+    def execute_order(self, order: FillOrder):
+        notional = executed_notional(price=order.price, quantity=order.requested_qty, contract_size=1.0)
         return (
             FillResult(
-                filled_qty=float(requested_qty),
-                fill_price=float(price),
+                filled_qty=float(order.requested_qty),
+                fill_price=float(order.price),
                 notional=notional,
-                fee=executed_fee(price=price, quantity=requested_qty, contract_size=1.0, fee_rate=fee_rate),
-                fee_rate=float(fee_rate or 0.0),
-                side=side,
+                fee=executed_fee(
+                    price=order.price,
+                    quantity=order.requested_qty,
+                    contract_size=1.0,
+                    fee_rate=order.fee_rate,
+                ),
+                fee_rate=float(order.fee_rate or 0.0),
+                side=order.side,
                 metadata={"source": "test"},
             ),
             None,
         )
+
+
+class _RejectSellAdapter(_FillAdapter):
+    def execute_order(self, order: FillOrder):
+        if order.side == "sell":
+            return None, FillRejection(
+                reason="TEST_EXIT_REJECTED",
+                metadata={"order_type": order.order_type},
+            )
+        return super().execute_order(order)
 
 
 def _enable_runtime_execution(engine: LadderRiskEngine) -> None:
@@ -378,14 +382,15 @@ def test_runtime_rejects_unimplemented_stop_adjustment_trail_atr_action():
                 "stop_adjustments": [
                     {
                         "id": "sa-trail",
-                        "trigger": {"type": "r_multiple_reached", "value": 1.0},
-                        "action": {"type": "trail_atr", "atr_period": 14, "atr_multiplier": 1.0},
+                        "trigger_type": "r_multiple",
+                        "trigger_value": 1.0,
+                        "action_type": "trail_atr",
                     }
                 ]
             }
         )
     except ValueError as exc:
-        assert "Use top-level trailing config for trailing stops" in str(exc)
+        assert "action_type='trail_atr' is unsupported" in str(exc)
     else:
         raise AssertionError("expected trail_atr stop adjustment to fail loud")
 
@@ -492,7 +497,7 @@ def test_stop_movement_bumps_trade_revision_without_trade_event():
 def test_trailing_stop_from_normalized_config_only_tightens():
     engine = _build_spot_engine(
         base_risk_per_trade=8,
-        take_profit_orders=[{"id": "tp-1", "ticks": 100}],
+        take_profit_orders=[{"id": "tp-1", "ticks": 100, "size_fraction": 1.0}],
         extra_config={
             "stop_adjustments": [],
             "trailing": {
@@ -546,7 +551,7 @@ def test_trailing_stop_from_normalized_config_only_tightens():
 def test_disabled_trailing_config_with_stale_distance_fields_does_not_activate():
     engine = _build_spot_engine(
         base_risk_per_trade=8,
-        take_profit_orders=[{"id": "tp-1", "ticks": 100}],
+        take_profit_orders=[{"id": "tp-1", "ticks": 100, "size_fraction": 1.0}],
         extra_config={
             "stop_adjustments": [],
             "trailing": {
@@ -581,7 +586,7 @@ def test_disabled_trailing_config_with_stale_distance_fields_does_not_activate()
 def test_flattened_stop_adjustment_rule_executes_after_normalization():
     engine = _build_spot_engine(
         base_risk_per_trade=8,
-        take_profit_orders=[{"id": "tp-1", "ticks": 100}],
+        take_profit_orders=[{"id": "tp-1", "ticks": 100, "size_fraction": 1.0}],
         extra_config={
             "stop_adjustments": [
                 {
@@ -589,7 +594,7 @@ def test_flattened_stop_adjustment_rule_executes_after_normalization():
                     "trigger_type": "r_multiple",
                     "trigger_ticks": 5,
                     "action_type": "move_to_r",
-                    "action_r": 0.5,
+                    "action_value": 0.5,
                 }
             ],
         },
@@ -613,11 +618,10 @@ def test_flattened_stop_adjustment_rule_executes_after_normalization():
     assert position.stop_price == 102.0
 
 
-def test_empty_stop_adjustments_do_not_enable_implicit_breakeven():
+def test_omitted_stop_adjustments_do_not_enable_implicit_breakeven():
     engine = _build_spot_engine(
         base_risk_per_trade=8,
-        take_profit_orders=[{"id": "tp-1", "ticks": 10}],
-        extra_config={"stop_adjustments": []},
+        take_profit_orders=[{"id": "tp-1", "ticks": 10, "size_fraction": 1.0}],
     )
     _enable_runtime_execution(engine)
     entry = _build_candle(close=100.0, atr=2.0)
@@ -641,11 +645,11 @@ def test_empty_stop_adjustments_do_not_enable_implicit_breakeven():
 def test_fixed_horizon_exit_closes_after_configured_bars_with_taker_fee():
     engine = _build_spot_engine(
         base_risk_per_trade=8,
-        take_profit_orders=[{"id": "tp-1", "ticks": 100}],
+        take_profit_orders=[{"id": "tp-1", "ticks": 100, "size_fraction": 1.0}],
+        maker_fee_rate=0.001,
+        taker_fee_rate=0.002,
         extra_config={
             "stop_adjustments": [],
-            "maker_fee_rate": 0.001,
-            "taker_fee_rate": 0.002,
             "exit_plan": {"fixed_horizon": {"enabled": True, "bars": 2}},
         },
     )
@@ -688,8 +692,9 @@ def test_fixed_horizon_exit_closes_after_configured_bars_with_taker_fee():
 def test_target_exit_uses_maker_fee_and_stop_exit_uses_taker_fee():
     maker_engine = _build_spot_engine(
         base_risk_per_trade=8,
-        take_profit_orders=[{"id": "tp-1", "ticks": 5}],
-        extra_config={"maker_fee_rate": 0.001, "taker_fee_rate": 0.002},
+        take_profit_orders=[{"id": "tp-1", "ticks": 5, "size_fraction": 1.0}],
+        maker_fee_rate=0.001,
+        taker_fee_rate=0.002,
     )
     _enable_runtime_execution(maker_engine)
     entry = _build_candle(close=100.0, atr=2.0)
@@ -711,8 +716,10 @@ def test_target_exit_uses_maker_fee_and_stop_exit_uses_taker_fee():
 
     taker_engine = _build_spot_engine(
         base_risk_per_trade=8,
-        take_profit_orders=[{"id": "tp-1", "ticks": 100}],
-        extra_config={"stop_adjustments": [], "maker_fee_rate": 0.001, "taker_fee_rate": 0.002},
+        take_profit_orders=[{"id": "tp-1", "ticks": 100, "size_fraction": 1.0}],
+        maker_fee_rate=0.001,
+        taker_fee_rate=0.002,
+        extra_config={"stop_adjustments": []},
     )
     _enable_runtime_execution(taker_engine)
     stop_position = taker_engine.maybe_enter(entry, "long")
@@ -732,12 +739,44 @@ def test_target_exit_uses_maker_fee_and_stop_exit_uses_taker_fee():
     assert stop["order_type"] == "stop_market"
 
 
+def test_rejected_stop_fill_keeps_position_open_without_terminal_metadata():
+    engine = _build_spot_engine(
+        base_risk_per_trade=8,
+        take_profit_orders=[{"id": "tp-1", "ticks": 100, "size_fraction": 1.0}],
+        extra_config={"stop_adjustments": []},
+    )
+    engine.attach_wallet_gateway(
+        SharedWalletGateway(_wallet_proxy({"USD": 1_000_000.0}))
+    )
+    engine.attach_execution_adapter(_RejectSellAdapter())
+    entry = _build_candle(close=100.0, atr=2.0)
+    position = engine.maybe_enter(entry, "long")
+    assert position is not None
+    stop_bar = Candle(
+        time=datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=95.0,
+        close=96.0,
+        atr=2.0,
+    )
+
+    events = engine.step(stop_bar)
+
+    assert [event["type"] for event in events] == ["execution_rejected"]
+    assert engine.active_trade is position
+    assert position.is_active()
+    assert position.close_reason is None
+    assert position.reason_code is None
+    assert position.serialize()["closed_at"] is None
+
+
 def test_target_fill_status_and_quantity_change_bumps_trade_revision():
     engine = _build_spot_engine(
         base_risk_per_trade=8,
         take_profit_orders=[
-            {"id": "tp-1", "ticks": 5},
-            {"id": "tp-2", "ticks": 10},
+            {"id": "tp-1", "ticks": 5, "size_fraction": 0.5},
+            {"id": "tp-2", "ticks": 10, "size_fraction": 0.5},
         ],
     )
     _enable_runtime_execution(engine)
@@ -760,6 +799,23 @@ def test_target_fill_status_and_quantity_change_bumps_trade_revision():
     assert position.is_active()
     assert [leg.status for leg in position.legs] == ["target", "open"]
     assert engine.trade_revision == revision_after_open + 1
+
+
+def test_take_profit_size_fractions_drive_integer_contract_allocation():
+    engine = _build_spot_engine(
+        base_risk_per_trade=40,
+        take_profit_orders=[
+            {"id": "tp-small", "ticks": 5, "size_fraction": 0.1},
+            {"id": "tp-large", "ticks": 10, "size_fraction": 0.9},
+        ],
+    )
+    _enable_runtime_execution(engine)
+    position = engine.maybe_enter(_build_candle(close=100.0, atr=2.0), "long")
+
+    assert position is not None
+    expected = [("tp-small", 1.0), ("tp-large", 9.0)]
+    assert [(leg.leg_id, leg.contracts) for leg in position.legs] == expected
+    assert sum(leg.contracts for leg in position.legs) == 10.0
 
 
 def test_pre_order_insufficient_margin_rejection_has_entry_request_identity():

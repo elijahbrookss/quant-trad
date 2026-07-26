@@ -5,8 +5,10 @@ from types import SimpleNamespace
 from typing import Any
 
 import pandas as pd
+import pytest
 
 from engines.bot_runtime.core.domain import Candle, LadderPosition, Leg, SameBarResolutionPolicy
+from engines.bot_runtime.core.execution_policy import exit_policy_for, normalize_liquidity_role
 from engines.bot_runtime.core.runtime_events import RuntimeEventName
 from engines.bot_runtime.deps import BotRuntimeDeps
 from engines.bot_runtime.runtime.components.run_context import RunContext
@@ -65,6 +67,36 @@ def _engine_with_position(direction: str = "long"):
     return engine
 
 
+def test_ladder_position_default_does_not_enable_breakeven() -> None:
+    position = _position("long")
+
+    assert position.breakeven_trigger_ticks == 0.0
+
+
+@pytest.mark.parametrize("value", [None, "", "stop", "optimistic", "unknown"])
+def test_same_bar_policy_rejects_noncanonical_values(value: object) -> None:
+    with pytest.raises(ValueError, match="same_bar_policy=.* is unsupported"):
+        SameBarResolutionPolicy.normalize(value)
+
+
+@pytest.mark.parametrize("value", [None, "", "passive", "market"])
+def test_liquidity_role_rejects_unknown_values(value: object) -> None:
+    with pytest.raises(ValueError, match="liquidity_role=.* is unsupported"):
+        normalize_liquidity_role(value)
+
+
+def test_exit_policy_rejects_unknown_event_type() -> None:
+    with pytest.raises(ValueError, match="exit event_type='partial_close' is unsupported"):
+        exit_policy_for("partial_close")
+
+
+def test_terminal_close_rejects_unknown_reason_code() -> None:
+    position = _position("long")
+
+    with pytest.raises(ValueError, match="terminal reason_code='EXPIRED' is unsupported"):
+        position.force_close_at_backtest_end(_candle(1), reason_code="expired")
+
+
 def _runtime_deps(fetch_ohlcv) -> BotRuntimeDeps:
     return BotRuntimeDeps(
         fetch_strategy=lambda _strategy_id: None,
@@ -75,6 +107,7 @@ def _runtime_deps(fetch_ohlcv) -> BotRuntimeDeps:
         indicator_get_instance_meta=lambda *args, **kwargs: {},
         indicator_build_runtime_graph=lambda *args, **kwargs: ({}, []),
         indicator_build_runtime_instance=lambda *args, **kwargs: None,
+        indicator_collect_runtime_diagnostics=lambda _indicators: [],
         indicator_runtime_input_plan_for_instance=lambda *args, **kwargs: {},
         build_indicator_context=lambda bot_id, _overlay_cache: SimpleNamespace(
             cache_owner="test",
@@ -235,10 +268,16 @@ def test_full_complete_intrabar_sequence_does_not_emit_fallback_warning() -> Non
 
 def test_execution_mode_is_separate_from_playback_mode() -> None:
     runtime = _runtime_for_intrabar(lambda *args, **kwargs: None, execution_mode="fast")
-    runtime.apply_config({"mode": "walk-forward"})
+    runtime.apply_config({"playback_mode": "walk-forward"})
 
     assert runtime.playback_mode == "walk-forward"
     assert runtime.execution_mode == ExecutionMode.FAST
+
+
+@pytest.mark.parametrize("value", ["instant", "walk-forward", "walkforward"])
+def test_execution_mode_rejects_playback_values(value: str) -> None:
+    with pytest.raises(ValueError, match="execution_mode"):
+        ExecutionMode.from_config(value)
 
 
 def test_full_intrabar_resolution_is_repeatable_for_same_inputs() -> None:

@@ -55,9 +55,6 @@ RUN_SCOPE_KEY = "__run__"
 BRIDGE_BOOTSTRAP_KIND = "botlens_runtime_bootstrap_facts"
 BRIDGE_FACTS_KIND = "botlens_runtime_facts"
 LIFECYCLE_KIND = "botlens_lifecycle_event"
-# Legacy compatibility kind. Intake treats this as deprecated and does not
-# project it into the BotLens runtime state model.
-PROJECTION_REFRESH_KIND = "bot_projection_refresh"
 
 EVENT_TYPE_RUNTIME_BOOTSTRAP = "botlens.runtime_bootstrap_facts"
 EVENT_TYPE_RUNTIME_FACTS = "botlens.runtime_facts"
@@ -66,6 +63,7 @@ EVENT_TYPE_LIFECYCLE = "botlens.lifecycle_event"
 FACT_TYPE_RUNTIME_STATE = "runtime_state_observed"
 FACT_TYPE_SERIES_STATE = "series_state_observed"
 FACT_TYPE_CANDLE_UPSERTED = "candle_upserted"
+FACT_TYPE_CANDLE_CONTINUITY_SUMMARY = "candle_continuity_summary"
 FACT_TYPE_PROVISIONAL_CANDLE_UPDATED = "provisional_candle_updated"
 FACT_TYPE_OVERLAY_OPS = "overlay_ops_emitted"
 FACT_TYPE_SERIES_STATS = "series_stats_updated"
@@ -133,13 +131,10 @@ def normalize_ingest_kind(value: Any) -> str:
 
 
 def normalize_bridge_session_id(payload: Mapping[str, Any]) -> str:
-    session_id = str(
-        payload.get("bridge_session_id")
-        or payload.get("stream_session_id")
-        or payload.get("session_id")
-        or "legacy"
-    ).strip()
-    return session_id or "legacy"
+    session_id = str(payload.get("bridge_session_id") or "").strip()
+    if not session_id:
+        raise ValueError("bridge_session_id is required for BotLens bridge batches")
+    return session_id
 
 
 def normalize_bridge_seq(payload: Mapping[str, Any]) -> int:
@@ -196,6 +191,7 @@ __all__ = [
     "EVENT_TYPE_RUNTIME_BOOTSTRAP",
     "EVENT_TYPE_RUNTIME_FACTS",
     "FACT_TYPE_CANDLE_UPSERTED",
+    "FACT_TYPE_CANDLE_CONTINUITY_SUMMARY",
     "FACT_TYPE_DECISION_EMITTED",
     "FACT_TYPE_LOG_EMITTED",
     "FACT_TYPE_OVERLAY_OPS",
@@ -207,7 +203,6 @@ __all__ = [
     "FACT_TYPE_TRADE_OPENED",
     "FACT_TYPE_TRADE_UPDATED",
     "LIFECYCLE_KIND",
-    "PROJECTION_REFRESH_KIND",
     "RUN_SCOPE_KEY",
     "SCHEMA_VERSION",
     "STREAM_CONNECTED_TYPE",

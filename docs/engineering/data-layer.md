@@ -1,57 +1,64 @@
 # Data Layer
 
-The data layer connects Quant-Trad to market data providers while preserving source-data truth.
+The data layer connects Quant-Trad to market-data providers while preserving one
+canonical, auditable source-fact truth.
 
-## What It Is
+## Canonical Ownership
 
-Provider adapters normalize external provider behavior into the candle and metadata shapes used by services, runtime, indicators, BotLens, and reports.
+Provider adapters under `src/data_providers/` acquire and normalize external API
+responses. They do not persist, cache, repair, or serve consumer reads.
 
-Current provider code lives under:
+Typed facts and identity contracts live under `src/market_data/`. The explicit
+intake and provider-free read boundary lives in
+`portal/backend/service/market/feed_service.py`; PostgreSQL ownership lives in
+`portal/backend/service/storage/repos/market_data.py` and schema `market`.
 
-- `src/data_providers/`
-- `portal/backend/service/providers/`
-- `portal/backend/service/market/`
+## Candle Intake
 
-## Provider Adapters
+Historical candles enter only through an explicit audited CLI or API operation.
+The request is split into bounded provider segments, validated, and appended as
+`candle.ohlcv.v1` revisions. Empty segments, exceptions, and coverage gaps remain
+structured evidence.
 
-Adapters should hide provider-specific client details without hiding data quality problems. Provider/venue validation, credentials, and factory routing belong at provider boundaries, not in strategy or runtime logic.
+Paper candles are persisted after closure and before runtime visibility. Replay,
+research, reports, indicators, and backtests read the same canonical revisions;
+a read miss never calls a provider.
 
-Provider API keys flow through credential refs. Do not add provider-specific API
-key fields to settings, bot env, or run config.
+## Causal And Dataset Reads
 
-## Candle Cache
+Every candle has an explicit close time, known-at value and method, acceptance
+time, source identity, ingestion operation, exact hash, revision, and commit
+sequence. Readers use half-open windows and may pin a commit watermark and
+known-at cutoff. Backtests pin one watermark across nested reads.
 
-The candle cache exists to avoid repeated provider fetches while preserving runtime semantics. Cache keys must include semantic inputs such as provider, venue/exchange, symbol, timeframe, and requested window.
+Frozen dataset manifests hash exact selected candle material, provenance, and
+quality evidence. Runtime separately hashes the final derived candle/ATR frames
+it consumed, so source identity and execution input identity are both visible.
 
-Cached candles must match provider-backed truth for the same request.
+## Sparse Data And Corrections
 
-## Sparse Candles
+Sparse truth remains sparse. Gap evidence is stored separately from candle
+material and is never replaced by synthetic OHLCV. Corrections append revisions;
+accepted facts and evidence cannot be updated or deleted.
 
-Sparse source data remains sparse truth. A missing candle should not be silently replaced with synthetic OHLCV unless a future feature explicitly models synthetic candles as their own artifact type.
+## Legacy Data
 
-## Gap Classification
+The market-data v2 hard-cutover migration verifies and copies usable legacy
+candles, then archives old tables under `legacy_market_v1`. That archive is a
+snapshot for manual reasoning only. There is no application fallback logic or
+supported legacy reader/writer path.
 
-Candle gaps should be classified conservatively:
+## Extending The Feed
 
-- expected session gaps,
-- provider missing data,
-- ingestion failures,
-- runtime missing data,
-- projection missing data,
-- unknown gaps.
+New observations such as open interest or basis should define a new fact
+contract and typed series semantics, then reuse source identity, ingestion,
+known-at, provenance, quality, and dataset concepts. They should not become
+optional columns on the candle table. No additional fact type is implemented or
+claimed yet.
 
-If session/calendar proof is unavailable, prefer `unknown_gap` over assuming the gap is expected.
+## References
 
-## How It Fits
-
-Provider data feeds indicators and runtime. Runtime and BotLens can surface gap diagnostics, but they should not mutate source series to make charts look complete.
-
-## Next
-
-- Minimal extension guide: [adding a provider](../guides/adding-a-provider.md).
-- Archive-backed research data setup: [Binance futures public data](../guides/binance-futures-public-data.md).
-- Live-stream/paper setup: [Coinbase derivatives paper setup](../guides/coinbase-derivatives-paper-setup.md).
-- Provider and candle architecture: [data boundary](../architecture/data/DATA_BOUNDARY.md).
-- Credential and trust-boundary reference: [security layer](../architecture/security/SECURITY_LAYER.md).
-- Runtime contract: [runtime contract](../contracts/platform/01_runtime_contract.md).
-- Runtime diagnostics: [execution runtime boundary](../architecture/execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md).
+- [Data boundary](../architecture/data/DATA_BOUNDARY.md)
+- [Canonical market-data ADR](../architecture/decisions/0050-use-one-canonical-append-only-market-data-store.md)
+- [Adding a provider](../guides/adding-a-provider.md)
+- [Runtime contract](../contracts/platform/01_runtime_contract.md)

@@ -54,7 +54,6 @@ class ReportReadinessResponse(BaseModel):
     golden_candidate_status: str = "unknown"
     golden_blocking_reasons: List[str] = Field(default_factory=list)
     repeatability_status: str = "unknown"
-    material_fingerprint: Optional[str] = None
     semantic_fingerprint: Optional[str] = None
     operational_fingerprint: Optional[str] = None
     caveats: List[str] = Field(default_factory=list)
@@ -447,6 +446,7 @@ class GoldenEvidenceDTO(BaseModel):
     entry_decision_order_timeout_right: Optional[int] = None
     runtime_ordering_left: Dict[str, Any] = Field(default_factory=dict)
     runtime_ordering_right: Dict[str, Any] = Field(default_factory=dict)
+    disagreement_trace: Dict[str, Any] = Field(default_factory=dict)
     first_divergence: FirstDivergenceDTO = Field(
         default_factory=lambda: FirstDivergenceDTO(
             present=False,

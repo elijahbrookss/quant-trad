@@ -276,6 +276,51 @@ def test_run_research_dataset_contract_exposes_execution_mode_and_diagnostics(mo
     assert payload["diagnostics"]["items"][0]["code"] == "intrabar_fallback_pessimistic"
 
 
+def test_run_research_summary_preserves_dataset_identity_and_quality(
+    monkeypatch,
+) -> None:
+    dataset = _run_report_dataset()
+    dataset["readiness"].update(
+        {
+            "results_ready": False,
+            "safe_to_compare": False,
+            "reason": "results_not_ready",
+            "results_status": "partial",
+            "comparison_status": "blocked",
+            "golden_candidate_status": "blocked",
+            "data_quality_status": "degraded",
+            "execution_quality_status": "clean",
+            "blocking_reasons": ["results_not_ready"],
+            "golden_blocking_reasons": ["provider_missing_data"],
+            "caveats": ["candle_continuity_provider_sparse"],
+            "degraded_sections": ["data_quality"],
+        }
+    )
+    _install_run_report_dataset(monkeypatch, dataset)
+
+    payload = contract.get_run_research_summary("run-1")
+
+    assert payload["dataset_identity"] == {
+        "strategy_hash": "strategy-hash",
+        "config_hash": "config-hash",
+        "material_config_hash": "material-config-hash",
+        "data_snapshot_hash": "canonical-data-hash",
+        "semantic_fingerprint": "semantic-fingerprint",
+        "operational_fingerprint": "operational-fingerprint",
+    }
+    assert payload["readiness"]["golden_candidate_status"] == "blocked"
+    assert payload["readiness"]["repeatability_status"] == "fingerprinted"
+    assert payload["readiness"]["data_quality_status"] == "degraded"
+    assert payload["readiness"]["execution_quality_status"] == "clean"
+    assert payload["readiness"]["blocking_reasons"] == ["results_not_ready"]
+    assert payload["readiness"]["golden_blocking_reasons"] == [
+        "provider_missing_data"
+    ]
+    assert payload["readiness"]["caveats"] == [
+        "candle_continuity_provider_sparse"
+    ]
+
+
 def test_metric_explanation_reads_portfolio_metrics(monkeypatch) -> None:
     dataset = _dataset()
     dataset["portfolio_metrics"] = {"schema_version": "portfolio_metrics.v1", "sharpe": 1.25}
@@ -504,3 +549,44 @@ def test_run_report_observer_diagnostics_stay_non_material(monkeypatch) -> None:
     assert payload["trust"]["semantic_fingerprint"] == "semantic-fingerprint"
     assert payload["trust"]["observer_invariance_status"] == "observer_diagnostics_ignored"
     assert payload["coordinator_waits"]["top_waits"][0]["blocker_symbols"] == ["ETHUSDT"]
+
+
+def test_coordinator_waits_reports_observability_truncation(monkeypatch) -> None:
+    rows = [
+        {
+            "event_name": "decision_order_top_waits_merged",
+            "observed_at": "2026-05-01T00:10:00Z",
+            "details": {
+                "total_wait_ms": 5.0,
+                "wait_count": 1,
+                "max_wait_ms": 5.0,
+                "release_count": 1,
+                "fail_count": 0,
+                "top_waits": [],
+            },
+        },
+        *[
+            {
+                "event_name": "diagnostic_event",
+                "observed_at": "2026-05-01T00:09:00Z",
+            }
+            for _ in range(2000)
+        ],
+    ]
+    observed = {}
+
+    def _list_events(_run_id, *, limit):
+        observed["limit"] = limit
+        return rows[:limit]
+
+    monkeypatch.setattr(
+        contract.report_data,
+        "list_observability_events",
+        _list_events,
+    )
+
+    payload = contract._coordinator_waits("run-1")
+
+    assert observed["limit"] == 2001
+    assert payload["status"] == "available"
+    assert "observability_events_truncated" in payload["caveats"]

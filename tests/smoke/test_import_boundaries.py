@@ -15,7 +15,7 @@ pytest.importorskip("pandas")
     "module_name",
     [
         "portal.backend.service.indicators.indicator_service.signals",
-        "portal.backend.service.providers.persistence_bootstrap",
+        "portal.backend.service.market.feed_service",
         "data_providers.providers.factory",
     ],
 )

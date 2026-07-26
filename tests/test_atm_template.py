@@ -1,15 +1,31 @@
 from __future__ import annotations
 
+import pytest
+
 from atm.template import normalise_template
 
 
-def test_normalise_template_accepts_runtime_exit_policy_fields() -> None:
+def test_omitted_stop_adjustments_normalize_to_empty() -> None:
+    config = normalise_template({})
+
+    assert config["stop_adjustments"] == []
+
+
+def test_normalise_template_accepts_canonical_runtime_exit_policy() -> None:
     config = normalise_template(
         {
             "name": "Runtime policy test",
-            "fixed_horizon_bars": "12",
-            "breakeven_trigger_ticks": "8",
-            "trailing_stop": {
+            "exit_plan": {
+                "fixed_horizon": {
+                    "enabled": True,
+                    "bars": "12",
+                }
+            },
+            "breakeven": {
+                "enabled": True,
+                "ticks": "8",
+            },
+            "trailing": {
                 "enabled": True,
                 "activation_type": "r_multiple",
                 "r_multiple": "1.5",
@@ -35,32 +51,28 @@ def test_normalise_template_accepts_runtime_exit_policy_fields() -> None:
     assert config["stop_adjustments"] == []
 
 
-def test_normalise_template_flattens_nested_stop_adjustments() -> None:
-    config = normalise_template(
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"fixed_horizon_bars": 12},
+        {"executionMode": "market"},
+        {"limitMaker": {"offset_type": "ticks"}},
+        {"trailing_stop": {"enabled": True}},
+        {"breakeven": 8},
         {
-            "name": "Nested stop adjustment test",
             "stop_adjustments": [
                 {
                     "id": "sa-1",
                     "trigger": {"type": "r_multiple_reached", "value": 1.0},
                     "action": {"type": "move_to_breakeven"},
                 }
-            ],
-        }
-    )
-
-    assert config["stop_adjustments"] == [
-        {
-            "id": "sa-1",
-            "trigger_type": "r_multiple",
-            "trigger_value": 1.0,
-            "trigger_ticks": None,
-            "action_type": "move_to_breakeven",
-            "action_value": None,
-            "atr_period": None,
-            "atr_multiplier": None,
-        }
-    ]
+            ]
+        },
+    ],
+)
+def test_normalise_template_rejects_noncanonical_aliases(payload: dict) -> None:
+    with pytest.raises(ValueError):
+        normalise_template(payload)
 
 
 def test_normalise_template_preserves_flattened_stop_adjustments() -> None:
@@ -73,7 +85,7 @@ def test_normalise_template_preserves_flattened_stop_adjustments() -> None:
                     "trigger_type": "r_multiple",
                     "trigger_ticks": 12,
                     "action_type": "move_to_r",
-                    "action_r": 0.5,
+                    "action_value": 0.5,
                 }
             ],
         }
@@ -87,7 +99,5 @@ def test_normalise_template_preserves_flattened_stop_adjustments() -> None:
             "trigger_ticks": 12.0,
             "action_type": "move_to_r",
             "action_value": 0.5,
-            "atr_period": None,
-            "atr_multiplier": None,
         }
     ]

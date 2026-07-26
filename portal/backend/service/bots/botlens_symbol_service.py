@@ -32,7 +32,7 @@ _OBSERVER = BackendObserver(component="botlens_symbol_service", event_logger=log
 
 
 def get_bot_run(run_id: str):
-    from ..storage.storage import get_bot_run as _get_bot_run
+    from ..storage.repos.runs import get_bot_run as _get_bot_run
 
     return _get_bot_run(run_id)
 

@@ -19,6 +19,12 @@ Supported runtime exit policies include:
   completed position bars using market/taker semantics,
 - terminal backtest closes: final market/taker close of otherwise open legs.
 
+A strategy decision from candle `t` is known only when candle `t` closes. An
+immediate market entry may fill at that close, but the new position must not
+use candle `t`'s earlier high/low for a target or stop exit. Normal exit
+eligibility begins with the next candle. A terminal backtest close may use the
+final candle close without replaying that candle's prior range.
+
 Stop movement must be monotonic:
 - stop-to-breakeven and stop-adjustment rules may tighten the stop only,
 - trailing stops may activate only from known-at bar evidence and may tighten
@@ -68,6 +74,9 @@ Playback mode controls pacing/debug visualization only. It must not change which
 ## Contract Exposure
 
 Bot configuration must expose `execution_mode` as `fast` or `full`.
+A missing value defaults to `fast`. Every other value is rejected:
+`instant`, `walk-forward`, and `walkforward` are playback values, not execution
+aliases. Playback configuration must never supply the execution default.
 
 The selected execution mode must flow through:
 - persisted bot config,

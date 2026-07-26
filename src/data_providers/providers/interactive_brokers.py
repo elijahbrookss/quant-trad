@@ -81,8 +81,8 @@ class InteractiveBrokersProvider(BaseDataProvider):
 
     _lock = threading.Lock()
 
-    def __init__(self, *, exchange: Optional[str] = None, persistence=None, settings=None):
-        super().__init__(persistence=persistence, settings=settings)
+    def __init__(self, *, exchange: Optional[str] = None):
+        super().__init__()
 
         self._host = _IBKR_SETTINGS.host
         # The IB Gateway paper-trading endpoint defaults to 4002 while the

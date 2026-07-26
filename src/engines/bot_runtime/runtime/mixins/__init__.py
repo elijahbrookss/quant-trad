@@ -4,7 +4,6 @@ from .runtime_events import RuntimeEventsMixin
 from .runtime_persistence import RuntimePersistenceMixin
 from .runtime_projection import RuntimeProjectionMixin
 from .runtime_push_stream import RuntimePushStreamMixin
-from .state_streaming import RuntimeStateStreamingMixin
 
 __all__ = [
     "RuntimeSetupPrepareMixin",
@@ -13,5 +12,4 @@ __all__ = [
     "RuntimePersistenceMixin",
     "RuntimeProjectionMixin",
     "RuntimePushStreamMixin",
-    "RuntimeStateStreamingMixin",
 ]

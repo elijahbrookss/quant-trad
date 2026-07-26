@@ -331,14 +331,29 @@ def test_run_report_route_returns_status_without_building(monkeypatch: pytest.Mo
     assert response.json()["report_status"]["status"] == "not_started"
 
 
-def test_run_report_get_rejects_build_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(reports_controller, "_materialized_run_report", lambda _run_id: None)
+def test_run_report_get_exposes_no_legacy_build_query_parameters() -> None:
+    operation = app.openapi()["paths"]["/api/reports/{run_id}/run-report"]["get"]
+    query_parameters = {
+        parameter["name"]
+        for parameter in operation.get("parameters", [])
+        if parameter.get("in") == "query"
+    }
 
+    assert "build" not in query_parameters
+    assert "force_rebuild" not in query_parameters
+
+
+def test_run_report_get_rejects_unknown_query_parameters() -> None:
     client = TestClient(app)
-    response = client.get("/api/reports/run-queued/run-report?build=true")
+    response = client.get("/api/reports/run-queued/run-report?unexpected=true")
 
-    assert response.status_code == 400
-    assert response.json()["detail"]["code"] == "report_build_requires_post"
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "code": "unsupported_query_parameters",
+        "message": "GET /run-report accepts no query parameters.",
+        "parameters": ["unexpected"],
+        "run_id": "run-queued",
+    }
 
 
 def test_report_export_contract_uses_manifest_and_zip(monkeypatch: pytest.MonkeyPatch) -> None:
