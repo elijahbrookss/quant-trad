@@ -282,26 +282,13 @@ class IndicatorBulkDeleteRequest(BaseModel):
     ids: List[str] = Field(default_factory=list)
 
 # ===== Types =====
-@router.get("-types", response_model=List[str])
+@router.get("/types", response_model=List[str])
 async def list_indicator_types():
     return list_types()
 
 
-@router.get("/types", response_model=List[str])
-async def list_indicator_types_alias():
-    return list_types()
-
-
-@router.get("-types/{type_id}")
-async def get_indicator_type(type_id: str):
-    try:
-        return get_type_details(type_id)
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-
-
 @router.get("/types/{type_id}")
-async def get_indicator_type_alias(type_id: str):
+async def get_indicator_type(type_id: str):
     try:
         return get_type_details(type_id)
     except KeyError as e:

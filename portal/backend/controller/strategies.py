@@ -526,10 +526,7 @@ async def save_atm_template(body: ATMTemplateRequest) -> Dict[str, Any]:
     """Create or update an ATM template."""
 
     try:
-        # `owner_id` was removed from the schema; do not pass it through.
-        payload = body.model_dump()
-        payload.pop("owner_id", None)
-        return strategy_service.save_atm_template(payload)
+        return strategy_service.save_atm_template(body.model_dump())
     except Exception as exc:  # noqa: BLE001
         logger.exception("atm_template_save_failed")
         raise HTTPException(400, str(exc)) from exc
