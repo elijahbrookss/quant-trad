@@ -76,7 +76,7 @@ supporting/internal sources. They are not the reporting contract.
 |---|---|---|
 | `GET /api/reports` | `ReportList` | Lightweight catalog rows with summary and readiness state. |
 | `GET /api/reports/{run_id}` | `RunResearchDataset` | Canonical complete dataset. |
-| `GET /api/reports/{run_id}/run-report` | `RunReportDTO` or materialization status | Typed research cockpit contract over the canonical dataset. Terminal runs return a ready materialized artifact when available, enqueue materialization and return `202` when building, and reject active runs. |
+| `GET /api/reports/{run_id}/run-report` | `RunReportDTO` or materialization status | Side-effect-free typed research cockpit read. Terminal runs return a ready materialized artifact when available or `202` with the current status when no artifact exists; builds are requested only through `POST /run-report/build`, and active runs are rejected. |
 | `GET /api/reports/{run_id}/run-report/status` | `ReportMaterializationStatusDTO` | Materialized report artifact lifecycle (`not_started`, `building`, `ready`, `failed`, `stale`) for UI actions and automation. |
 | `GET /api/reports/compare?left_run_id=...&right_run_id=...` | `RunComparisonDTO` | Frontend comparison contract over ready materialized RunReportDTO contract (`run_report.v2`) artifacts. It returns structured blocked states when either artifact is unavailable, reads existing golden evidence when available, and does not enqueue cold report or golden builds by default. |
 | `GET /api/reports/{run_id}/readiness` | `ReportReadiness` | Cheap readiness/status read. |

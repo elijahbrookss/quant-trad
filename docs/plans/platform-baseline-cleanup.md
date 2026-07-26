@@ -97,6 +97,7 @@ retired tables until that explicit hard cutover is complete.
 | Margin fill plus derived-ledger dual representation | CONSOLIDATE | Raw margin fills are retained for execution evidence while the existing derived margin ledger remains wallet truth. Report replay excludes raw margin fills to prevent double application; one canonical margin accounting representation remains deferred. |
 | Tracked `portal/frontend/.vite/deps` | DELETE | Completed in `7338f56`: the generated cache was removed, ignored, and a repository-wide tracked-artifact audit is clean. |
 | Filename-routed PR profile and stale controller test seam | DELETE | Completed in `35949fe`: the full non-database backend suite replaces the 70-line filename allowlist, and the overlay logging test now fails through the current metadata-service boundary. |
+| Deprecated GET report-build flags | DELETE | Removed from the read-only `GET /run-report` contract; report materialization is owned only by `POST /run-report/build`, and the stale architecture route description was corrected. |
 | Commented changelog workflow experiment | DELETE | Completed in `7338f56`: the workflow had no executable path. The remote `test` branch still exists, so its active CI trigger remains. |
 | CLI operations | KEEP | `qt` is the canonical operator contract. Every invocation writes a redacted structured audit by default and API calls record method, URL, status, duration, and byte counts. Direct mutation commands do not consistently require plan/apply/confirm, and `--no-audit-log` can disable the record, so unrestricted CLI access is not yet an agent-safe boundary. |
 | MCP operations | VERIFY USAGE | All 44 registrations have handlers and no orphan definitions were found. Mutating tools require confirmation and usually plan by default; paper/live starts require an additional opt-in. External invocation is not visible in the internal call graph, so retain the thin optional adapter until usage evidence supports tool-level deletion. |
@@ -130,10 +131,6 @@ retired tables until that explicit hard cutover is complete.
 - Golden candidacy remains blocked when market-state capture is unavailable,
   even when deterministic semantic comparison succeeds. Market-state expansion
   remains intentionally out of scope.
-- The report instrument-semantics row can still show null `accounting_mode` and
-  `execution_semantics` for a spot instrument even though canonical fills carry
-  explicit `spot` accounting. This is a metadata-propagation gap, not a fill
-  replay ambiguity.
 - The local `LOCAL_PG_ENV` loader prefers a quoted/stale `PG_DSN` from
   `secrets.env`; repository forensic targets fail in this environment unless
   the DSN is constructed from the working PostgreSQL fields.
@@ -173,6 +170,7 @@ retired tables until that explicit hard cutover is complete.
 | 2026-07-25 | known-at and terminal lifecycle proof | runtime/domain profile: 128 passed with 14 pre-existing dependency warnings; complete non-database backend gate: 1,303 passed with 49 pre-existing dependency/deprecation warnings in 25.33s; docs: 2 passed; affected compileall and whitespace checks passed. Appending adversarial future candles cannot alter the consumed-prefix fingerprint, indicator truth/projections, decisions, orders, fills, lifecycle, or wallet accounting under either adapter. Position state now owns terminal reason and weighted exit price; incomplete closed facts and rejected-exit false closure fail loudly. Persisted CLI/job/report truncation and a credential-free paper runner remain open. |
 | 2026-07-25 | configured-series completeness and exact snapshot coverage | focused series/container/artifact/report profile: 120 passed; complete non-database backend gate: 1,308 passed with 49 pre-existing dependency/deprecation warnings in 22.30s; isolated PostgreSQL profile: 3 passed; docs: 2 passed. Any eligible series-build failure aborts the run, backend-planned expected series survives worker aggregation, and report hashes require exact planned/terminal snapshot-set equality. The shared local database credentials have drifted from its initialized volume, so database evidence used an isolated repository TimescaleDB image. |
 | 2026-07-25 | async job ownership fencing | final non-DB backend profile: 1,323 passed; full PostgreSQL-backed profile: 1,333 passed; docs contract: 2 passed; 49 pre-existing dependency/deprecation warnings in each full profile. Fresh and explicitly migrated PostgreSQL ownership profiles: 7 passed each. The exclusive migration was applied repeatedly without changing migrated job state and rejected a concurrent client. Claims now use hidden tokens, generations, PostgreSQL-clock bounded heartbeats, max-attempt-aware reclaim, stale-owner rejection, atomic research-check side effects, race-safe in-flight request idempotency, and literal-preserving exact fencing schema definition checks. |
+| 2026-07-25 | canonical report instrument semantics and read-only GET hard cutover | affected report profile: 77 passed; complete reporting service profile: 103 passed; report API profile: 8 passed and 3 opt-in DB tests skipped; complete non-database backend gate: 1,334 passed with 49 pre-existing dependency/deprecation warnings in 31.88s; docs: 2 passed; affected compileall, whitespace, generated architecture-index, and retired-query reference audits passed. Independent diff review found and the final implementation closed three edge cases: untyped fill execution semantics cannot change report identity, configured contradictions remain fail-loud even with zero fills, and the ADR states the exact spot-versus-margin rule. Canonical spot fills now complete missing report accounting/execution semantics in deterministic identity order; margin fills do not invent derivative semantics; conflicting or ambiguous evidence fails loudly. Deprecated GET build flags are absent from OpenAPI, unsupported query parameters are rejected generically, and materialization remains POST-owned. This slice changed no schema; the environment denied reading the running container password for a redundant DB-endpoint rerun, so the preceding 1,333-test PostgreSQL baseline remains the database evidence. |
 
 Each child branch must record its focused tests, broader regression profile,
 documentation validation, diff review, and remaining-reference search before
@@ -198,6 +196,9 @@ integration.
 - Exact runtime candle values now feed `data_snapshot_hash`; older runs without
   terminal snapshot evidence remain explicitly unavailable, and runtime
   provenance is still not exposed consistently in reports.
+- Canonical spot fill accounting now completes missing report instrument
+  accounting/execution semantics. Conflicting configured and fill evidence
+  blocks report construction rather than silently selecting one source.
 - Async research sweeps still restart from the beginning after retry and expose
   no partial-progress checkpoint or mid-job cancellation contract. Abandoned
   report materializations still have no stale-build recovery lease.
@@ -215,6 +216,11 @@ integration.
   validation when the DSN was constructed from `POSTGRES_*`. The Make forensic
   environment preferred a quoted/stale `PG_DSN` and required an explicit local
   environment workaround.
+- A later report-only slice did not repeat its three opt-in DB endpoint tests
+  because access to the running container password was denied by the local
+  credential safeguard. The service remained healthy, the slice changed no
+  schema or repository code, and the immediately preceding complete
+  PostgreSQL-backed baseline remained green.
 - Strict execution scope expanded to compile ATM templates at strategy and
   standalone-template persistence boundaries and to include execution-contract
   tests in the PR profile; this closes an admission-timing gap found in review.
@@ -235,7 +241,7 @@ integration.
 - [x] Explicit, reconstructable, transactionally updated run summary projection
 - [x] Malformed canonical execution configuration fails before runtime
 - [ ] Proven dead and compatibility-only production paths removed
-- [ ] Explicit storage ownership and nonduplicated temporal dispatch
+- [x] Explicit storage ownership and nonduplicated temporal dispatch
 - [x] Accurate backend CI with optional frontend checks
 - [ ] Deterministic reference and repeated backtests
 - [ ] No-lookahead checks

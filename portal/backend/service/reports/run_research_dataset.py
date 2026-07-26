@@ -38,6 +38,7 @@ from ..storage.repos.trades import list_bot_trades_for_run
 from . import artifacts as report_artifacts
 from . import report_data
 from .candle_continuity import classify_unknown_gaps_from_closures
+from .instrument_semantics import merge_fill_instrument_semantics
 from .metrics import compute_expectancy, compute_max_drawdown, compute_profit_factor
 from .summary_metrics import ANNUALIZATION_PERIODS, compute_summary as compute_portfolio_metric_summary
 
@@ -594,17 +595,11 @@ def _metadata_instrument_semantics(run: Mapping[str, Any]) -> List[Dict[str, Any
     readiness = _mapping(config.get("runtime_readiness"))
     profiles = readiness.get("profiles") if isinstance(readiness.get("profiles"), list) else []
     rows: List[Dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-
     for profile in profiles:
         if not isinstance(profile, Mapping):
             continue
         symbol = _clean_text(profile.get("symbol"))
         instrument_id = _clean_text(profile.get("instrument_id"))
-        key = (instrument_id or "", symbol or "")
-        if key in seen:
-            continue
-        seen.add(key)
         instrument_type = _clean_text(profile.get("instrument_type") or profile.get("source_instrument_type"))
         rows.append(
             {
@@ -630,10 +625,6 @@ def _metadata_instrument_semantics(run: Mapping[str, Any]) -> List[Dict[str, Any
             snapshot = _mapping(instrument.get("instrument_snapshot")) or instrument
             symbol = _clean_text(snapshot.get("symbol"))
             instrument_id = _clean_text(instrument.get("instrument_id") or snapshot.get("id"))
-            key = (instrument_id or "", symbol or "")
-            if key in seen:
-                continue
-            seen.add(key)
             instrument_type = _clean_text(snapshot.get("instrument_type"))
             rows.append(
                 {
@@ -5613,15 +5604,24 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     decisions, signals, trades = _link_trace_rows(decisions=decisions, signals=signals, trades=trades)
     metadata = _metadata(run)
     expected_candle_series = _expected_candle_series(run)
-    trace_rows = [*decisions, *signals, *trades]
+    execution = _execution_section(run=run, events=events)
+    fill_rows = [
+        row
+        for row in execution.get("fills", [])
+        if isinstance(row, Mapping)
+    ]
+    trace_rows = [*decisions, *signals, *trades, *fill_rows]
     metadata = replace(
         metadata,
         symbols=_unique_text([*metadata.symbols, *(row.get("symbol") for row in trace_rows)]),
         instrument_ids=_unique_text([*metadata.instrument_ids, *(row.get("instrument_id") for row in trace_rows)]),
         timeframes=_unique_text([*metadata.timeframes, *(row.get("timeframe") for row in trace_rows)]),
         strategy_hash=metadata.strategy_hash or _first_trace_value(trace_rows, "strategy_hash"),
+        instrument_semantics=merge_fill_instrument_semantics(
+            metadata.instrument_semantics,
+            fill_rows,
+        ),
     )
-    execution = _execution_section(run=run, events=events)
     trades = _enrich_trades_for_research(trades, execution=execution)
     trace_rows = [*decisions, *signals, *trades]
     summary = _summary(decisions=decisions, trades=trades, starting_capital=metadata.starting_capital)

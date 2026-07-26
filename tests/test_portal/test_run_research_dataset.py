@@ -1471,6 +1471,17 @@ def test_wallet_ledger_state_mismatch_blocks_golden_candidate(monkeypatch: pytes
 def test_spot_fills_drive_wallet_replay_and_execution_trace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    run = _run()
+    run["config_snapshot"]["strategies"][0]["instruments"] = [
+        {
+            "instrument_id": "instrument-btc",
+            "instrument_snapshot": {
+                "id": "instrument-btc",
+                "symbol": "BTC",
+                "instrument_type": "spot",
+            },
+        }
+    ]
     events = _events()
     events.extend(
         [
@@ -1496,6 +1507,9 @@ def test_spot_fills_drive_wallet_replay_and_execution_trace(
                 "ENTRY_FILLED",
                 {
                     "trade_id": "trade-spot-1",
+                    "instrument_id": "instrument-btc",
+                    "symbol": "BTC",
+                    "timeframe": "1h",
                     "bar_time": "2026-03-15T00:00:00Z",
                     "wallet_commit_seq": 1,
                     "side": "buy",
@@ -1527,6 +1541,9 @@ def test_spot_fills_drive_wallet_replay_and_execution_trace(
                 "EXIT_FILLED",
                 {
                     "trade_id": "trade-spot-1",
+                    "instrument_id": "instrument-btc",
+                    "symbol": "BTC",
+                    "timeframe": "1h",
                     "bar_time": "2026-03-16T00:00:00Z",
                     "wallet_commit_seq": 2,
                     "side": "sell",
@@ -1558,7 +1575,7 @@ def test_spot_fills_drive_wallet_replay_and_execution_trace(
         ]
     )
 
-    dataset = _build(monkeypatch, events=events)
+    dataset = _build(monkeypatch, run=run, events=events)
 
     assert dataset["wallet_accounting"]["wallet_replay_status"] == "passed"
     assert dataset["wallet_accounting"]["locked_margin_final"] == {}
@@ -1571,6 +1588,58 @@ def test_spot_fills_drive_wallet_replay_and_execution_trace(
         "entry_filled",
         "exit_filled",
     ]
+    assert dataset["metadata"]["instrument_semantics"] == [
+        {
+            "instrument_id": "instrument-btc",
+            "symbol": "BTC",
+            "instrument_type": "spot",
+            "source_instrument_type": "spot",
+            "execution_semantics": "spot",
+            "research_market_role": None,
+            "accounting_mode": "spot",
+            "margin_calc_type": None,
+        }
+    ]
+    assert "instrument-btc" in dataset["metadata"]["instrument_ids"]
+
+
+def test_report_rejects_conflicting_fill_and_configured_instrument_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _run()
+    run["config_snapshot"]["runtime_readiness"] = {
+        "profiles": [
+            {
+                "instrument_id": "instrument-btc",
+                "symbol": "BTC",
+                "instrument_type": "future",
+                "source_instrument_type": "future",
+                "execution_semantics": "derivative",
+                "accounting_mode": "margin",
+            }
+        ]
+    }
+    events = [
+        *_events(),
+        _event(
+            14,
+            "ENTRY_FILLED",
+            {
+                "trade_id": "trade-conflict",
+                "instrument_id": "instrument-btc",
+                "symbol": "BTC",
+                "timeframe": "1h",
+                "bar_time": "2026-03-15T00:00:00Z",
+                "accounting_mode": "spot",
+            },
+        ),
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match=r"conflicting report (execution_semantics|accounting_mode)",
+    ):
+        _build(monkeypatch, run=run, events=events)
 
 
 def test_operational_fingerprint_changes_when_runtime_event_order_changes(monkeypatch: pytest.MonkeyPatch) -> None:

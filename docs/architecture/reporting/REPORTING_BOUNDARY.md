@@ -88,7 +88,8 @@ Reporting does not mutate strategy, execution, fee, wallet, trade, or BotLens se
 
 The dataset is rebuildable from durable DB/read-model truth:
 
-- `portal_bot_runs` for metadata, lean provenance hashes, and bounded config snapshots,
+- `portal_bot_runs` for the rebuildable current-run lifecycle summary projection,
+  metadata, lean provenance hashes, and bounded config snapshots,
 - `portal_bot_trades` and trade events for trade lifecycle and financial outcomes,
 - `portal_bot_run_events` for decisions, execution diagnostics, wallet/fallback facts, and BotLens-domain facts,
 - `portal_bot_run_step_rollups` for phase-duration profiler timings and
@@ -127,6 +128,15 @@ research evidence only. They must not mutate order fills, wallet accounting,
 fee/slippage semantics, stop/target behavior, or trade lifecycle truth. When
 bounded candle evidence is missing or truncated, reporting marks the enrichment
 unavailable or caveated instead of inferring hidden intrabar state.
+
+Instrument semantics prefer the persisted runtime-readiness execution profile.
+When older or reduced run snapshots omit accounting semantics, canonical
+`ENTRY_FILLED` and `EXIT_FILLED` evidence may complete the matching report row.
+Spot fill accounting proves spot execution semantics; margin accounting alone
+does not distinguish derivative from proxy-derivative execution. Conflicting
+configured and fill evidence fails report construction instead of choosing a
+convenient value. Untyped `execution_semantics` fields on fill payloads are not
+authority and cannot alter report identity.
 
 Signal rows may expose `indicator_context` extracted from the typed runtime
 outputs embedded in the selected decision artifact. Indicator-owned signal event
@@ -253,6 +263,10 @@ semantics.
 ## Invariants
 
 - Reporting is downstream of runtime truth.
+- Report instrument accounting semantics cannot contradict canonical fill
+  evidence, and missing spot semantics are completed from those fills.
+- `GET /run-report` is side-effect free. Materialization starts only through
+  `POST /run-report/build`; unsupported GET query parameters fail validation.
 - Legacy dataset compare uses canonical dataset readiness, not ad hoc
   report-file existence. Materialized run-report compare additionally requires
   both RunReportDTO contract (`run_report.v2`) artifacts to be `ready` so the comparison UI can use

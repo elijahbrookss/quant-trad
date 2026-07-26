@@ -15,6 +15,7 @@ code_paths:
   - src/engines/bot_runtime/core/execution_adapter.py
   - src/engines/bot_runtime/core/wallet.py
   - src/engines/bot_runtime/core/wallet_gateway.py
+  - portal/backend/service/reports/instrument_semantics.py
   - portal/backend/service/reports/run_research_dataset.py
   - docs/architecture/execution-runtime/WALLET_AND_CAPITAL_BOUNDARY.md
 ---
@@ -47,6 +48,14 @@ lifecycle evidence and performs independent reconciliation. A mismatch is a
 blocking correctness defect or explicit caveat, never an opportunity for the
 report to silently repair runtime state.
 
+Report instrument semantics prefer the persisted runtime-readiness execution
+profile. Canonical fill `accounting_mode` may complete missing report
+accounting metadata. Spot accounting also proves spot execution semantics;
+margin accounting does not distinguish derivative from proxy-derivative and
+cannot invent either. Untyped execution-semantics fields on fill payloads are
+not authority. Duplicate, ambiguous, invalid, or conflicting configured/fill
+evidence blocks report construction.
+
 ## Invariants
 
 - Every accepted fill affects position and accounting exactly once.
@@ -60,12 +69,20 @@ report to silently repair runtime state.
 - Cash, fees, realized P&L, unrealized P&L, locked collateral, free collateral,
   and ending equity must reconcile to the run's durable economic events.
 - Terminal runs cannot retain unexplained open exposure or locked margin.
+- Report instrument identity is unique by instrument ID, with symbol-only
+  matching permitted only when an ID is unavailable.
+- Spot fill accounting may complete spot execution semantics; margin fill
+  accounting cannot infer derivative or proxy-derivative semantics.
+- Untyped fill fields cannot change configured execution semantics or report
+  semantic fingerprints.
 
 ## Consequences
 
 Runtime and reporting can be checked independently against a small reference
 dataset. Additional projections may summarize accounting, but must remain
 rebuildable and must expose disagreement rather than choose a convenient view.
+Stricter report reconstruction may reject runs whose configured instrument
+profiles are ambiguous or internally contradictory.
 
 ## Rejected Alternatives
 
@@ -74,6 +91,9 @@ rebuildable and must expose disagreement rather than choose a convenient view.
 - Maintain separate backtest and paper accounting implementations.
 - Apply fees in both execution and reporting.
 - Resolve duplicate events by applying the latest value again.
+- Trust an untyped fill payload to override configured execution semantics.
+- Infer derivative execution semantics from margin accounting alone.
+- Keep the first duplicate instrument profile and silently discard the rest.
 
 ## Enforcing Tests Or Evidence
 
@@ -86,6 +106,10 @@ rebuildable and must expose disagreement rather than choose a convenient view.
   idempotent settlement, commit order, and terminal margin release.
 - `tests/test_portal/test_fee_notional_cleanup.py` covers notional, fee
   symmetry, deterministic fees, and duplicate-fill protection.
+- `tests/test_portal/test_report_instrument_semantics.py` and
+  `tests/test_portal/test_run_research_dataset.py` prove canonical spot fills
+  complete missing report instrument semantics deterministically and
+  conflicting configured accounting evidence fails loudly.
 - Cleanup evidence commit `a0e196e` records persisted wallet/fill/trade
   reconciliation for repeated representative runs.
 
