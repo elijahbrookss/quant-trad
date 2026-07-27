@@ -73,7 +73,7 @@ Python-owned bottleneck without changing semantic results.
 | Phase-level observability | implemented; validation green | run/report contracts | preparation timings, persisted runtime step rollups, report materialization duration, corrected weighted averages and explicit histogram method |
 | Opt-in profiling | complete | accepted baseline | one-year run `5af4731c-f8b8-4e8a-98a5-2f6eb5fdba3a`; bounded cProfile/pstats/tracemalloc artifact exposed in canonical report |
 | Evidence-backed optimization | complete; target exceeded with semantic parity | three baseline and three post-change samples plus completed profile | `93a6701` selects raw events by marker before serializing only new decision facts; `step_push_update` median fell 81.980% and runtime-loop median fell 43.324% |
-| Complete validation and PR | pending | all workstreams | pending |
+| Complete validation and PR | validation green; commit, synchronization, and PR pending | all workstreams | complete non-DB and PostgreSQL profiles, clean and repeated bootstrap, documentation contracts, and source-isolation audits |
 
 ## Dataset Contract
 
@@ -326,6 +326,14 @@ tolerance and is identical across all three runs. No open position remains.
 | 2026-07-27 | `cf94f84` | three post-optimization one-year backtests | all completed with 508 trades, `-2200` net P&L, zero fees, and 2,500 maximum drawdown | runtime loops 475.473s, 477.477s, 476.940s | exact accepted dataset and configuration; no external orders |
 | 2026-07-27 | `cf94f84` | three canonical report builds and comparisons against accepted pre-change baseline 3 | all `semantic_match_operational_drift`; no first divergence | report builds 28.034s, 28.937s, 29.254s | semantic fingerprint and complete wallet projection match; all material deltas zero |
 | 2026-07-27 | `cf94f84` | persisted pre/post runtime rollup median comparison | target exceeded: push update `289.124s -> 52.100s` (`81.980%`); loop `841.525s -> 476.940s` (`43.324%`) | six comparable unprofiled runs | medians computed from three samples per cohort in isolated acceptance database |
+| 2026-07-27 | `9891b9e` + bootstrap worktree | complete non-PostgreSQL pytest profile with capture disabled | 1,420 passed; 49 warnings | 35.47s | warnings are dependency deprecations plus the known stale local-credential import warning; no failures |
+| 2026-07-27 | `9891b9e` + bootstrap worktree | complete PostgreSQL-marked pytest profile | 14 passed; 1,420 deselected; 19 warnings | 9.72s | isolated validation database; acceptance dataset and existing user containers untouched |
+| 2026-07-27 | bootstrap worktree | fresh Timescale/PostgreSQL extension and schema bootstrap | passed; canonical market and observability schemas created | 15.49s | optional `system_stats` is unavailable and remains an explicit non-fatal warning |
+| 2026-07-27 | bootstrap worktree | repeated bootstrap against the same clean database | passed without schema mutation | 0.85s | proves idempotent startup |
+| 2026-07-27 | bootstrap worktree | optional-extension savepoint regression against real PostgreSQL | passed | <1s | an intentionally missing extension no longer poisons readiness queries in the surrounding startup transaction |
+| 2026-07-27 | `cf94f84` | post-optimization golden repeatability check, samples 1 and 3 | no decision, trade, lifecycle, order, wallet, ordering, or summary divergence | n/a | golden promotion remains correctly blocked by unavailable market-state evidence and truncated observability-event retention |
+| 2026-07-27 | `cf94f84` | independent post-optimization lifecycle and accounting reconciliation | exact reconciliation | n/a | 508 accepted decisions, entries, opens, exits, and closes; 91 reasoned rejections; ending equity `97800`; equation delta zero |
+| 2026-07-27 | `9891b9e` + bootstrap worktree | Python compile, architecture-index regeneration, documentation contracts, and source-isolation audits | passed; generated architecture index unchanged | <1s compile plus focused checks | no backtest execution provider caller, mutable-latest fallback, or `AGENTS.md` modification found |
 
 ## Discovered Defects And Disagreements
 
@@ -348,6 +356,7 @@ tolerance and is identical across all three runs. No open position remains.
 | Push-stream decision fact emission serialized the same bounded historical decision window on every bar before applying its marker | fixed in `93a6701`; raw marker selection now precedes serialization and protected payload/order/fallback semantics are unchanged; three-run proof measured an 81.980% targeted-phase median reduction with exact semantic parity |
 | Persisted prefix-invariance fixture described N one-minute bars with `end=start+(N-1)m` after half-open ranges became canonical | fixed in fixture-only `28878ce`; the isolated committed pre-optimization revision reproduced the premature terminal close, and the corrected test now includes the intended final decision bar |
 | Data-boundary documentation still said backtests did not automatically create reusable manifests | fixed; data and reporting boundaries plus ADR 0051 now describe the required preparation/admission flow |
+| An unavailable optional PostgreSQL extension aborted the surrounding startup transaction, causing later readiness queries to fail with `InFailedSqlTransaction` | fixed with one savepoint per optional extension creation; a real PostgreSQL regression proves that a failed optional create is isolated and subsequent readiness SQL succeeds |
 | Repository default local database credentials are stale for an existing user container | isolated campaign Timescale database used; user volume and secrets untouched |
 
 ## Deferred Limitations
@@ -356,6 +365,12 @@ tolerance and is identical across all three runs. No open position remains.
 - Generic market-data collection plane.
 - Open interest, basis, funding, L2, order flow, options, and market-state
   expansion.
+- Golden promotion remains blocked by unavailable market-state evidence and the
+  deliberately bounded observability-event projection; neither gate was
+  weakened to make this campaign appear complete.
+- Fee and slippage models are unconfigured for the acceptance strategy, so the
+  deterministic result proves platform semantics rather than venue execution
+  realism.
 - Live trading and distributed execution.
 
 ## Final Acceptance

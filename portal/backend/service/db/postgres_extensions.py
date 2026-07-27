@@ -39,7 +39,12 @@ def _load_extensions(conn) -> Set[str]:
 
 def _safe_create_extension(conn, name: str) -> Optional[str]:
     try:
-        conn.execute(text(f"CREATE EXTENSION IF NOT EXISTS {name}"))
+        # PostgreSQL marks the surrounding transaction failed after any DDL
+        # error. Optional extensions must therefore run in a savepoint so an
+        # unavailable control file cannot poison the readiness queries that
+        # follow in the outer startup transaction.
+        with conn.begin_nested():
+            conn.execute(text(f"CREATE EXTENSION IF NOT EXISTS {name}"))
         return None
     except SQLAlchemyError as exc:
         return str(exc)
