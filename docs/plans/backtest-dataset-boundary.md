@@ -31,6 +31,10 @@ code_paths:
 - Branch policy: retain the reviewed cleanup head as ancestry; after PR #186
   merges, merge updated `origin/develop` into this branch without rebasing before
   preparing the final PR.
+- Current integrated head: `0caf796f57db05e6f44e2bfb0fb4bf7614116a26`,
+  which merges reviewed `develop` baseline
+  `9dd4858f54ab56fa3bb711f2b4a997d2b818128a` without rewriting campaign
+  history.
 - Unrelated worktree state: none; worktree was clean.
 
 ## Mission
@@ -67,8 +71,8 @@ Python-owned bottleneck without changing semantic results.
 | Three-run deterministic baseline | complete | accepted dataset | three one-year runs share semantic fingerprint `864f268c...`; canonical comparisons report semantic match with operational drift only |
 | Accounting/lifecycle reconciliation | complete for accepted baseline | accepted runs | gapless event ledger, 508 closed trades, wallet replay, P&L/equity and report totals reconcile within the recorded representation tolerance |
 | Phase-level observability | implemented; validation green | run/report contracts | preparation timings, persisted runtime step rollups, report materialization duration, corrected weighted averages and explicit histogram method |
-| Opt-in profiling | implemented; one-year profiled run pending | accepted baseline | backtest-only CLI/API control, cProfile/pstats/tracemalloc bounded summary, report exposure |
-| Evidence-backed optimization | pending | three baseline profiles | pending |
+| Opt-in profiling | complete | accepted baseline | one-year run `5af4731c-f8b8-4e8a-98a5-2f6eb5fdba3a`; bounded cProfile/pstats/tracemalloc artifact exposed in canonical report |
+| Evidence-backed optimization | target selected; implementation pending | three baseline samples and completed profile | eliminate repeated serialization of already-emitted decision events from `step_push_update` without changing fact payloads or ordering |
 | Complete validation and PR | pending | all workstreams | pending |
 
 ## Dataset Contract
@@ -188,8 +192,49 @@ The median nested runtime timing evidence is: series state 842.071s, finalize
 332.547s, push update 289.124s, decision flow 224.787s, settlement 160.645s,
 execution prime 37.627s, trade-event processing 37.198s, signal evaluation
 33.322s, and state update 20.430s. These timings overlap by design and must not
-be added together. Opt-in profiling is required before selecting the Python-owned
-optimization target.
+be added together.
+
+The opt-in full-year profile ran revision `0caf796` as
+`5af4731c-f8b8-4e8a-98a5-2f6eb5fdba3a` against the exact accepted dataset and
+configuration. It completed in 4,620.413s wall and 4,439.989s CPU, reported
+268,506,113 bytes peak traced memory, and processed 8,804 materialized rows.
+Profiling overhead is intentionally excluded from the unprofiled timing baseline.
+The container sampler observed a separate transient peak near 840 MiB while
+pstats finalized the 2.198-billion-call profile; this post-execution peak is a
+profiler cost, not an unprofiled runtime claim.
+
+The function evidence identifies repeated historical decision serialization as
+the dominant controllable Python path:
+
+- `RuntimePushStreamMixin._decision_facts` ran once per bar and accumulated
+  1,561.761 profiled seconds.
+- `RuntimeProjectionMixin.decision_events` accumulated 1,133.820 seconds.
+- `EventEnvelope.serialize` was called 1,719,442 times and accumulated
+  2,294.743 seconds.
+- recursive `serialize_value` executed 99,556,074 calls and consumed 873.493
+  seconds of self time.
+
+These cumulative values overlap and are distorted upward by cProfile plus
+tracemalloc, so they are ranking evidence rather than additive wall time. The
+root behavior is direct: every bar serializes the bounded historical decision
+window before the existing event marker discards already-emitted entries.
+
+**Optimization target recorded before code change:** make decision-fact emission
+select immutable raw events by `event_id` under the existing lock, preserve the
+current 200-entry visibility window and configured batch truncation semantics,
+and serialize only the selected new events. Public decision snapshots, canonical
+fact shapes, event ordering, marker fallback, truncation warnings, persistence,
+and report behavior must remain unchanged. The measured target phase is
+`step_push_update`, whose pre-optimization median is 289.124s; success requires
+at least a 20% median reduction in that phase across three comparable unprofiled
+post-change runs, or a precise constraint-backed explanation.
+
+The profiled run produced the same 3,253 contiguous canonical events and the
+canonical comparator reported `semantic_match_operational_drift` against
+baseline run `9042e4c7-a2ee-47e8-89d6-b4e3e5fa3892`. Dataset snapshot,
+strategy/config hashes, 508 trades, `-2200` net P&L, zero fees, 2,500 maximum
+drawdown, semantic fingerprint, and final wallet value `97800.00006863201` all
+match exactly.
 
 Each accepted run has 3,253 canonical events with contiguous, unique run sequence
 `1..3253`, runtime-assigned ordering, no missing known-at value, and no event with
@@ -224,6 +269,8 @@ tolerance and is identical across all three runs. No open position remains.
 | 2026-07-27 | worktree | profiler, CLI, experiment, dataset, report, container-transport, runtime-control, startup, and projection regressions | 184 passed across focused groups | 15.60s combined | includes fixture-only mandatory-dataset correction, semantic-hash exclusion for profiling, and profiler-failure isolation |
 | 2026-07-27 | worktree | changed production module compile audit and `git diff --check` | passed | <1s | no syntax or whitespace defects |
 | 2026-07-27 | worktree | architecture index regeneration and documentation contract | 2 passed | 0.03s | default pytest capture hit the known local temporary-file defect; `-s` validation passed |
+| 2026-07-27 | `0caf796` | opt-in one-year cProfile/pstats/tracemalloc run `5af4731c-f8b8-4e8a-98a5-2f6eb5fdba3a` | completed; 3,253 events; profile artifact ready | 4,620.413s profiled wall; report 28.650s | 8,804 rows; 4,439.989s CPU; 268,506,113-byte traced peak; no external orders |
+| 2026-07-27 | `0caf796` | current-builder report rebuild and canonical comparison against baseline 3 | `semantic_match_operational_drift`; no first divergence | 28.202s baseline rebuild; comparison <1s | semantic fingerprint, snapshot/config hashes, trades, P&L, fees, drawdown, and wallet all match |
 
 ## Discovered Defects And Disagreements
 
@@ -243,6 +290,7 @@ tolerance and is identical across all three runs. No open position remains.
 | Terminal run projections could display stale in-memory `starting` status after persisted completion | fixed; persisted terminal truth now wins over stale telemetry snapshots |
 | Runtime step `avg_ms` averaged per-bucket p95 values instead of dividing total duration by sample count | fixed; averages are weighted and exact, merged histogram p95 values state their upper-bound method, and run-level rollup aggregation is caveated |
 | Runtime telemetry WebSocket transport repeatedly disconnected during all accepted runs | deferred operational durability defect; canonical producer persistence remained gapless and semantic results were observer-invariant, but terminal auto-materialization required an explicit build request |
+| Push-stream decision fact emission serialized the same bounded historical decision window on every bar before applying its marker | measured optimization target; profile recorded 1.72 million event serializations and 99.56 million recursive value-serialization calls; replace with raw-event marker selection followed by serialization of new entries only |
 | Data-boundary documentation still said backtests did not automatically create reusable manifests | fixed; data and reporting boundaries plus ADR 0051 now describe the required preparation/admission flow |
 | Repository default local database credentials are stale for an existing user container | isolated campaign Timescale database used; user volume and secrets untouched |
 
