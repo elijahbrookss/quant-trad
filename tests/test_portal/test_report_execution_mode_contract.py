@@ -71,6 +71,8 @@ def _run_report_dataset() -> dict:
         **dataset["metadata"],
         "status": "completed",
         "run_type": "backtest",
+        "dataset_id": "mds_test",
+        "dataset_hash": "dataset-hash",
         "strategy_hash": "strategy-hash",
         "config_hash": "config-hash",
         "material_config_hash": "material-config-hash",
@@ -301,6 +303,8 @@ def test_run_research_summary_preserves_dataset_identity_and_quality(
     payload = contract.get_run_research_summary("run-1")
 
     assert payload["dataset_identity"] == {
+        "dataset_id": "mds_test",
+        "dataset_hash": "dataset-hash",
         "strategy_hash": "strategy-hash",
         "config_hash": "config-hash",
         "material_config_hash": "material-config-hash",
@@ -496,6 +500,8 @@ def test_run_report_builds_from_existing_dataset(monkeypatch) -> None:
 
     assert payload["contract_version"] == "run_report.v2"
     assert payload["identity"]["run_id"] == "run-1"
+    assert payload["identity"]["dataset_id"] == "mds_test"
+    assert payload["identity"]["dataset_hash"] == "dataset-hash"
     assert payload["trust"]["research_status"] == "research_valid"
     assert payload["performance"]["net_pnl"]["value"] == 14.0
     assert payload["behavior"]["total_decisions"] == 2
@@ -534,6 +540,8 @@ def test_run_report_trust_fields_are_backend_computed(monkeypatch) -> None:
     assert trust["semantic_fingerprint"] == "semantic-fingerprint"
     assert trust["operational_fingerprint"] == "operational-fingerprint"
     assert trust["data_snapshot_hash"] == "canonical-data-hash"
+    assert trust["dataset_id"] == "mds_test"
+    assert trust["dataset_hash"] == "dataset-hash"
     assert trust["runtime_ordering_status"] == "gapless"
     assert trust["wallet_market_time_overtake_count"] == 0
     assert trust["entry_decision_order_timeout_count"] == 0

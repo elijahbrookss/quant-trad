@@ -64,7 +64,7 @@ Python-owned bottleneck without changing semantic results.
 | Provider/latest-state isolation proof | implemented; pre-commit validation green | execution binding | bound-read, range-expansion, substitution, and post-freeze correction tests |
 | One-year public dataset | complete and admitted | preparation workflow, public provider | frozen dataset identity and independent integrity audit recorded |
 | Three-run deterministic baseline | in progress; first attempt exposed a fail-loudly runtime persistence defect | accepted dataset | failed run preserved; narrow ownership correction validated |
-| Accounting/lifecycle reconciliation | pending | accepted runs | pending |
+| Accounting/lifecycle reconciliation | in progress; first completed run exposed a report-summary ownership disagreement | accepted runs | trade-path drawdown ownership corrected; rerun pending |
 | Phase-level observability | preparation phases implemented; execution/report phases pending | run/report contracts | preparation payload timings |
 | Opt-in profiling | pending | accepted baseline | pending |
 | Evidence-backed optimization | pending | three baseline profiles | pending |
@@ -182,6 +182,7 @@ performed no provider call, and completed in 6.04 seconds wall time.
 | 2026-07-26 | `b3ecadf` | first one-year execution attempt, run `f933be2c-18d4-479b-a6d6-47526c52fcde` | rejected as `degraded_terminal` | stopped after first trading event | producer canonical-fact persistence incorrectly required a transport bridge session; incomplete result excluded from baseline |
 | 2026-07-26 | worktree | canonical-fact, domain-event, artifact, appender, runtime-push, and container-transport regressions | 171 passed; 14 pre-existing deprecation warnings in first group | 4.67s combined | producer persistence no longer fabricates transport identity; bridge ingress still rejects a missing session |
 | 2026-07-26 | worktree | changed runtime modules compile audit and `git diff --check` | passed | <1s | narrow correction ready for commit |
+| 2026-07-26 | worktree | drawdown, artifact-binding, report-identity, trust, and research-dataset regressions | 84 passed | 6.29s | first completed year run disagreement converted into protected canonical ownership rules |
 
 ## Discovered Defects And Disagreements
 
@@ -194,7 +195,10 @@ performed no provider call, and completed in 6.04 seconds wall time.
 | Runtime used an implicit 100-bar warmup floor and inclusive replay end | fixed; declared warmup plus ATR requirement and half-open end are canonical |
 | Segmented CCXT acquisition returned the shared boundary candle from both adjacent requests | fixed at the provider adapter: canonical fetch results now enforce `start <= timestamp < end`; duplicate source rows within a segment still fail loudly |
 | Producer-owned canonical-fact persistence reused the transport projection constructor and therefore demanded a nonexistent bridge session | fixed by separating producer persistence batch construction from transport ingress construction; transport still enforces bridge identity and the failed acceptance run remains preserved as disagreement evidence |
-| Data-boundary documentation still says backtests do not automatically create reusable manifests | pending documentation correction before final campaign validation |
+| Runtime and canonical report calculated 2,500 maximum drawdown, but artifact finalization replaced the run summary with a 2,400 daily-close drawdown | fixed; maximum drawdown now preserves every ordered closed-trade equity transition, while daily aggregation remains limited to daily analytics |
+| Artifact finalization dropped the admitted dataset binding and report instrument identity mixed a strategy-link row ID with the canonical instrument ID | fixed; artifact snapshots retain the binding, reports expose dataset ID/hash, semantic fingerprints include them, and instrument identity uses the canonical ID |
+| Fee and slippage limitations were present in detailed sections but absent from top-level trust caveats | fixed; missing fee role/rate and slippage evidence now degrades the relevant report sections and remains visible in readiness/trust caveats |
+| Data-boundary documentation still said backtests did not automatically create reusable manifests | fixed; data and reporting boundaries plus ADR 0051 now describe the required preparation/admission flow |
 | Repository default local database credentials are stale for an existing user container | isolated campaign Timescale database used; user volume and secrets untouched |
 
 ## Deferred Limitations

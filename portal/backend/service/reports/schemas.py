@@ -94,6 +94,8 @@ class ResearchTrustDTO(BaseModel):
     caveats: List[str] = Field(default_factory=list)
     config_hash: Optional[str] = None
     material_config_hash: Optional[str] = None
+    dataset_id: Optional[str] = None
+    dataset_hash: Optional[str] = None
     data_snapshot_hash: Optional[str] = None
     strategy_hash: Optional[str] = None
     semantic_fingerprint: Optional[str] = None

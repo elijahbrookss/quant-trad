@@ -125,6 +125,8 @@ class RunResearchMetadata:
     report_operational_fingerprint: Optional[str]
     dataset_schema_version: str
     generated_at: str
+    dataset_id: Optional[str] = None
+    dataset_hash: Optional[str] = None
     configuration: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -446,7 +448,13 @@ def _strategy_config_sections(config: Mapping[str, Any]) -> Dict[str, Any]:
         "execution_profile": config.get("execution_profile") or bot.get("execution_profile") or risk.get("execution_profile"),
         "slippage_bps": slippage_bps,
     }
+    dataset_binding = _mapping(config.get("dataset_binding"))
     data_config = {
+        "dataset_id": dataset_binding.get("dataset_id"),
+        "dataset_hash": dataset_binding.get("dataset_hash"),
+        "dataset_contract_version": dataset_binding.get(
+            "dataset_contract_version"
+        ),
         "backtest_warmup_bars": config.get("backtest_warmup_bars"),
         "backtest_warmup_evidence": config.get("backtest_warmup_evidence"),
         "symbols": config.get("symbols"),
@@ -584,13 +592,22 @@ def _metadata_instrument_ids(run: Mapping[str, Any]) -> List[str]:
         for instrument in strategy.get("instruments") or []:
             if not isinstance(instrument, Mapping):
                 continue
-            values.extend(
-                [
-                    instrument.get("instrument_id"),
-                    instrument.get("id"),
-                ]
-            )
+            # Instrument-link row IDs identify the strategy/instrument
+            # association, not the traded instrument. Use them only for old
+            # snapshots that genuinely lack the canonical instrument_id.
+            values.append(instrument.get("instrument_id") or instrument.get("id"))
     return _unique_text(values)
+
+
+def _metadata_dataset_identity(
+    run: Mapping[str, Any],
+) -> tuple[Optional[str], Optional[str]]:
+    config = _mapping(run.get("config_snapshot"))
+    binding = _mapping(config.get("dataset_binding"))
+    return (
+        _clean_text(binding.get("dataset_id")),
+        _clean_text(binding.get("dataset_hash")),
+    )
 
 
 def _metadata_instrument_semantics(run: Mapping[str, Any]) -> List[Dict[str, Any]]:
@@ -4992,6 +5009,8 @@ def _report_semantic_fingerprint(
         "schema_version": DATASET_SCHEMA_VERSION,
         "fingerprint_type": "semantic",
         "identity": {
+            "dataset_id": metadata.dataset_id,
+            "dataset_hash": metadata.dataset_hash,
             "strategy_id": metadata.strategy_id,
             "strategy_hash": metadata.strategy_hash,
             "material_config_hash": metadata.material_config_hash,
@@ -5136,6 +5155,8 @@ def _report_operational_fingerprint(
         "schema_version": DATASET_SCHEMA_VERSION,
         "fingerprint_type": "operational",
         "identity": {
+            "dataset_id": metadata.dataset_id,
+            "dataset_hash": metadata.dataset_hash,
             "strategy_id": metadata.strategy_id,
             "strategy_hash": metadata.strategy_hash,
             "material_config_hash": metadata.material_config_hash,
@@ -5208,6 +5229,11 @@ def _golden_blocking_reasons(
     reasons: List[str] = []
     if not readiness.results_ready:
         reasons.append(readiness.reason or "results_not_ready")
+    if str(metadata.run_type or "").strip().lower() == "backtest":
+        if not metadata.dataset_id:
+            reasons.append("missing_dataset_id")
+        if not metadata.dataset_hash:
+            reasons.append("missing_dataset_hash")
     if not metadata.strategy_hash:
         reasons.append("missing_strategy_hash")
     if not metadata.material_config_hash:
@@ -5458,6 +5484,7 @@ def _metadata(run: Mapping[str, Any]) -> RunResearchMetadata:
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     timeframes = _metadata_timeframes(run)
     datasource = str(run.get("provider") or run.get("datasource") or config.get("datasource") or "").strip() or None
+    dataset_id, dataset_hash = _metadata_dataset_identity(run)
     return RunResearchMetadata(
         run_id=str(run.get("run_id") or ""),
         bot_id=str(run.get("bot_id") or "").strip() or None,
@@ -5489,6 +5516,8 @@ def _metadata(run: Mapping[str, Any]) -> RunResearchMetadata:
         report_operational_fingerprint=None,
         dataset_schema_version=DATASET_SCHEMA_VERSION,
         generated_at=generated_at,
+        dataset_id=dataset_id,
+        dataset_hash=dataset_hash,
         configuration=_configuration_metadata(config),
     )
 
@@ -5538,6 +5567,7 @@ def _finalize_readiness(
     observability_coverage: Mapping[str, Any],
     readiness: RunResearchReadiness,
     execution: Mapping[str, Any],
+    fee_accounting: Mapping[str, Any],
     candle_gaps: Mapping[str, Any],
     wallet_accounting: Mapping[str, Any],
     portfolio_metrics: Mapping[str, Any],
@@ -5594,6 +5624,12 @@ def _finalize_readiness(
         )
     if execution_quality_status == "degraded":
         degraded_sections.append("execution_quality")
+    for caveat in fee_accounting.get("caveats") or []:
+        degraded_sections.append("fee_accounting")
+        caveats.append(str(caveat))
+    for caveat in _mapping(execution.get("slippage")).get("caveats") or []:
+        degraded_sections.append("execution_quality")
+        caveats.append(str(caveat))
     warmup_evidence = [
         dict(row)
         for row in _mapping(metadata.configuration.get("data")).get(
@@ -5864,6 +5900,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         observability_coverage=observability_coverage,
         readiness=readiness,
         execution=execution,
+        fee_accounting=fee_accounting,
         candle_gaps=candle_gaps,
         wallet_accounting=wallet_accounting,
         portfolio_metrics=portfolio_metrics,

@@ -75,8 +75,10 @@ intake paths and one read path:
    runtime-visible store.
 6. Research, backtest, indicator, reporting, and API consumers read only the
    canonical store. Missing series fail with an explicit-ingestion error.
-7. Backtests capture one market commit watermark before execution; nested
-   strategy and indicator reads inherit that scope.
+7. Backtest preparation freezes the complete required ranges into one immutable
+   dataset manifest. Startup admits that dataset against the exact strategy,
+   indicator, execution-policy, instrument, warmup, and run configuration;
+   nested strategy and indicator reads inherit the admitted commit scope.
 
 ## Source-Fact Contract
 
@@ -158,6 +160,8 @@ until measured provider and database evidence justifies widening it.
 - Known-at cannot precede candle close, publication, or receipt evidence.
 - Paper runtime cannot observe a closed candle before canonical persistence.
 - One backtest uses one recorded market-data watermark across nested reads.
+- Every canonical backtest names one frozen dataset ID; execution cannot create,
+  expand, or substitute that dataset.
 - Exact material identity and quality evidence remain distinct.
 - Missing or malformed evidence is unavailable, never optimistic empty proof.
 - Instrument metadata is validated before execution depends on tick size,
@@ -174,6 +178,7 @@ until measured provider and database evidence justifies widening it.
 - [ADR 0044: Known-at prefix invariance](../decisions/0044-enforce-known-at-prefix-invariance.md)
 - [ADR 0046: Exact candle inputs and separate quality](../decisions/0046-fingerprint-exact-candle-inputs-and-keep-quality-separate.md)
 - [ADR 0050: Canonical append-only market data](../decisions/0050-use-one-canonical-append-only-market-data-store.md)
+- [ADR 0051: Frozen datasets for canonical backtests](../decisions/0051-require-frozen-datasets-for-canonical-backtests.md)
 
 ## Known Gaps
 
@@ -183,7 +188,5 @@ until measured provider and database evidence justifies widening it.
 - Provider publication timestamps are not available from every historical API;
   interval-close inference remains an explicit provenance limitation.
 - Session/calendar evidence is not complete enough to classify every closure.
-- Backtests record a causal commit scope and exact consumed-row snapshot but do
-  not yet automatically create a reusable multi-series frozen dataset manifest.
 - Historical provider segments are bounded and sequential; concurrency has not
   yet been justified by measured throughput.
