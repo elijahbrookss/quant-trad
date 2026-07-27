@@ -787,19 +787,34 @@ class RuntimePushStreamMixin:
         resolved_limit = max(int(limit or 0), 1)
         dropped = max(len(new_entries) - resolved_limit, 0)
         if dropped > 0:
-            logger.warning(
-                with_log_context(
-                    "botlens_fact_stream_batch_truncated",
-                    self._runtime_log_context(
-                        fact_type=fact_type,
-                        emitted_entries=resolved_limit,
-                        dropped_entries=dropped,
-                        limit=resolved_limit,
-                    ),
-                )
+            self._warn_fact_stream_batch_truncated(
+                fact_type=fact_type,
+                emitted_entries=resolved_limit,
+                dropped_entries=dropped,
+                limit=resolved_limit,
             )
             new_entries = new_entries[-resolved_limit:]
         return new_entries, marker, dropped
+
+    def _warn_fact_stream_batch_truncated(
+        self,
+        *,
+        fact_type: str,
+        emitted_entries: int,
+        dropped_entries: int,
+        limit: int,
+    ) -> None:
+        logger.warning(
+            with_log_context(
+                "botlens_fact_stream_batch_truncated",
+                self._runtime_log_context(
+                    fact_type=fact_type,
+                    emitted_entries=emitted_entries,
+                    dropped_entries=dropped_entries,
+                    limit=limit,
+                ),
+            )
+        )
 
     @staticmethod
     def _series_identity(series: StrategySeries) -> Dict[str, Any]:
@@ -1155,19 +1170,39 @@ class RuntimePushStreamMixin:
         return [{"fact_type": BOTLENS_FACT_LOG_EMITTED, "log": entry} for entry in new_entries], dropped
 
     def _decision_facts(self) -> Tuple[List[Dict[str, Any]], int]:
+        resolved_limit = int(
+            getattr(
+                self,
+                "_botlens_fact_stream_decision_fact_limit",
+                BOTLENS_FACT_STREAM_DECISION_FACT_LIMIT,
+            )
+            or BOTLENS_FACT_STREAM_DECISION_FACT_LIMIT
+        )
+        incremental_loader = getattr(self, "_decision_events_after_marker", None)
+        if callable(incremental_loader):
+            new_entries, marker, dropped = incremental_loader(
+                previous_marker=getattr(self, "_push_decision_marker", None),
+                result_limit=resolved_limit,
+            )
+            self._push_decision_marker = marker
+            if dropped > 0:
+                self._warn_fact_stream_batch_truncated(
+                    fact_type=BOTLENS_FACT_DECISION_EMITTED,
+                    emitted_entries=max(resolved_limit, 1),
+                    dropped_entries=dropped,
+                    limit=max(resolved_limit, 1),
+                )
+            return [
+                {"fact_type": BOTLENS_FACT_DECISION_EMITTED, "decision": entry}
+                for entry in new_entries
+            ], dropped
+
         entries = self.decision_events()
         new_entries, marker, dropped = self._bounded_entries_after_marker(
             entries,
             marker_field="event_id",
             previous_marker=getattr(self, "_push_decision_marker", None),
-            limit=int(
-                getattr(
-                    self,
-                    "_botlens_fact_stream_decision_fact_limit",
-                    BOTLENS_FACT_STREAM_DECISION_FACT_LIMIT,
-                )
-                or BOTLENS_FACT_STREAM_DECISION_FACT_LIMIT
-            ),
+            limit=resolved_limit,
             fact_type=BOTLENS_FACT_DECISION_EMITTED,
         )
         self._push_decision_marker = marker
