@@ -31,10 +31,14 @@ code_paths:
 - Branch policy: retain the reviewed cleanup head as ancestry; after PR #186
   merges, merge updated `origin/develop` into this branch without rebasing before
   preparing the final PR.
-- Current measured head: `cf94f840b090b47b7f222ca5700d30eb3602cbfa`,
+- Measured execution head: `cf94f840b090b47b7f222ca5700d30eb3602cbfa`,
   which contains reviewed `develop` baseline
   `9dd4858f54ab56fa3bb711f2b4a997d2b818128a` without rewriting campaign
   history.
+- Validated implementation head: `88fb256f3eb0f685774c640bb23e73be8d15b377`.
+- Integration PR: [#187](https://github.com/elijahbrookss/quant-trad/pull/187),
+  `feat/backtest-dataset-boundary` into `develop`; open, ready for review,
+  mergeable, and green at acceptance.
 - Unrelated worktree state: none; worktree was clean.
 
 ## Mission
@@ -73,7 +77,7 @@ Python-owned bottleneck without changing semantic results.
 | Phase-level observability | implemented; validation green | run/report contracts | preparation timings, persisted runtime step rollups, report materialization duration, corrected weighted averages and explicit histogram method |
 | Opt-in profiling | complete | accepted baseline | one-year run `5af4731c-f8b8-4e8a-98a5-2f6eb5fdba3a`; bounded cProfile/pstats/tracemalloc artifact exposed in canonical report |
 | Evidence-backed optimization | complete; target exceeded with semantic parity | three baseline and three post-change samples plus completed profile | `93a6701` selects raw events by marker before serializing only new decision facts; `step_push_update` median fell 81.980% and runtime-loop median fell 43.324% |
-| Complete validation and PR | validation green; commit, synchronization, and PR pending | all workstreams | complete non-DB and PostgreSQL profiles, clean and repeated bootstrap, documentation contracts, and source-isolation audits |
+| Complete validation and PR | complete | all workstreams | complete non-DB and PostgreSQL profiles, clean and repeated bootstrap, documentation contracts, source-isolation audits, synchronized branch, and green PR #187 |
 
 ## Dataset Contract
 
@@ -334,6 +338,7 @@ tolerance and is identical across all three runs. No open position remains.
 | 2026-07-27 | `cf94f84` | post-optimization golden repeatability check, samples 1 and 3 | no decision, trade, lifecycle, order, wallet, ordering, or summary divergence | n/a | golden promotion remains correctly blocked by unavailable market-state evidence and truncated observability-event retention |
 | 2026-07-27 | `cf94f84` | independent post-optimization lifecycle and accounting reconciliation | exact reconciliation | n/a | 508 accepted decisions, entries, opens, exits, and closes; 91 reasoned rejections; ending equity `97800`; equation delta zero |
 | 2026-07-27 | `9891b9e` + bootstrap worktree | Python compile, architecture-index regeneration, documentation contracts, and source-isolation audits | passed; generated architecture index unchanged | <1s compile plus focused checks | no backtest execution provider caller, mutable-latest fallback, or `AGENTS.md` modification found |
+| 2026-07-27 | `88fb256` | PR #187 checks and mergeability | mergeable; PR suite, changelog, and security checks passed | PR suite 1m26s | open, ready-for-review PR from campaign branch into `develop`; not merged |
 
 ## Discovered Defects And Disagreements
 
@@ -375,7 +380,13 @@ tolerance and is identical across all three runs. No open position remains.
 
 ## Final Acceptance
 
-Status: **not accepted**. Completion requires every item in the campaign
-objective, including one-year repeated semantic proof, reconciliation,
-before/after performance evidence, complete validation, synchronized branch,
-and one unmerged PR into `develop`.
+Status: **accepted** on 2026-07-27. The campaign completed mandatory frozen
+dataset admission, provider-free execution, one-year repeated semantic proof,
+lifecycle and accounting reconciliation, before/after performance evidence,
+complete local and PostgreSQL validation, clean and repeated bootstrap,
+synchronized branch publication, and one green unmerged PR into `develop`.
+
+Acceptance preserves the deferred limitations above. In particular, it does
+not promote the run as golden while market-state and complete observability
+evidence are unavailable, and it does not claim fee, slippage, collector,
+non-candle fact, frontend, or live-trading capability.
