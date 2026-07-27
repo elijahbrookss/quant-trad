@@ -72,7 +72,7 @@ Python-owned bottleneck without changing semantic results.
 | Accounting/lifecycle reconciliation | complete for accepted baseline | accepted runs | gapless event ledger, 508 closed trades, wallet replay, P&L/equity and report totals reconcile within the recorded representation tolerance |
 | Phase-level observability | implemented; validation green | run/report contracts | preparation timings, persisted runtime step rollups, report materialization duration, corrected weighted averages and explicit histogram method |
 | Opt-in profiling | complete | accepted baseline | one-year run `5af4731c-f8b8-4e8a-98a5-2f6eb5fdba3a`; bounded cProfile/pstats/tracemalloc artifact exposed in canonical report |
-| Evidence-backed optimization | target selected; implementation pending | three baseline samples and completed profile | eliminate repeated serialization of already-emitted decision events from `step_push_update` without changing fact payloads or ordering |
+| Evidence-backed optimization | implementation validated; repeated measurement pending | three baseline samples and completed profile | `93a6701` selects raw events by marker before serializing only new decision facts; post-change one-year timing and semantic proof remain pending |
 | Complete validation and PR | pending | all workstreams | pending |
 
 ## Dataset Contract
@@ -236,6 +236,15 @@ strategy/config hashes, 508 trades, `-2200` net P&L, zero fees, 2,500 maximum
 drawdown, semantic fingerprint, and final wallet value `97800.00006863201` all
 match exactly.
 
+Revision `93a6701` implements the recorded target without changing the public
+`decision_events()` snapshot. The production push path copies at most the same
+200 immutable raw events under the existing runtime lock, applies the existing
+event-ID marker and batch limit, and serializes only the selected new suffix.
+Missing-marker fallback, newest-entry truncation, warnings, ordering, and fact
+payload shape remain unchanged. Focused tests count serialization calls and
+prove that repeated pushes serialize nothing, a newly appended event is
+serialized once, and an evicted marker retains the prior bounded fallback.
+
 Each accepted run has 3,253 canonical events with contiguous, unique run sequence
 `1..3253`, runtime-assigned ordering, no missing known-at value, and no event with
 `known_at < bar_time`. Baseline 3 independently persisted 508 closed trades with
@@ -271,6 +280,10 @@ tolerance and is identical across all three runs. No open position remains.
 | 2026-07-27 | worktree | architecture index regeneration and documentation contract | 2 passed | 0.03s | default pytest capture hit the known local temporary-file defect; `-s` validation passed |
 | 2026-07-27 | `0caf796` | opt-in one-year cProfile/pstats/tracemalloc run `5af4731c-f8b8-4e8a-98a5-2f6eb5fdba3a` | completed; 3,253 events; profile artifact ready | 4,620.413s profiled wall; report 28.650s | 8,804 rows; 4,439.989s CPU; 268,506,113-byte traced peak; no external orders |
 | 2026-07-27 | `0caf796` | current-builder report rebuild and canonical comparison against baseline 3 | `semantic_match_operational_drift`; no first divergence | 28.202s baseline rebuild; comparison <1s | semantic fingerprint, snapshot/config hashes, trades, P&L, fees, drawdown, and wallet all match |
+| 2026-07-27 | `3124c15` | persisted causal prefix test reproduced in isolated pre-optimization worktree | failed with excluded minute-3 boundary bar | 12.02s | proves disagreement predates optimization; fixture encoded four half-open bars with `end=start+3m` |
+| 2026-07-27 | `28878ce` | persisted runtime repeatability, prefix invariance, and adapter parity | 1 passed; 14 dependency deprecation warnings | 11.85s | fixture now expresses N one-minute bars as `[start, start+N minutes)`; production semantics unchanged |
+| 2026-07-27 | `93a6701` | affected runtime, persistence, projection, transport, control, and canonical-event regression set | 237 passed; 14 dependency deprecation warnings | 13.83s | includes marker-before-serialization call-count proof and persisted known-at prefix invariance |
+| 2026-07-27 | `93a6701` | changed production module compile audit and `git diff --check` | passed | <1s | no syntax or whitespace defects |
 
 ## Discovered Defects And Disagreements
 
@@ -290,7 +303,8 @@ tolerance and is identical across all three runs. No open position remains.
 | Terminal run projections could display stale in-memory `starting` status after persisted completion | fixed; persisted terminal truth now wins over stale telemetry snapshots |
 | Runtime step `avg_ms` averaged per-bucket p95 values instead of dividing total duration by sample count | fixed; averages are weighted and exact, merged histogram p95 values state their upper-bound method, and run-level rollup aggregation is caveated |
 | Runtime telemetry WebSocket transport repeatedly disconnected during all accepted runs | deferred operational durability defect; canonical producer persistence remained gapless and semantic results were observer-invariant, but terminal auto-materialization required an explicit build request |
-| Push-stream decision fact emission serialized the same bounded historical decision window on every bar before applying its marker | measured optimization target; profile recorded 1.72 million event serializations and 99.56 million recursive value-serialization calls; replace with raw-event marker selection followed by serialization of new entries only |
+| Push-stream decision fact emission serialized the same bounded historical decision window on every bar before applying its marker | fixed in `93a6701`; raw marker selection now precedes serialization and protected payload/order/fallback semantics are unchanged; three-run one-year performance proof remains pending |
+| Persisted prefix-invariance fixture described N one-minute bars with `end=start+(N-1)m` after half-open ranges became canonical | fixed in fixture-only `28878ce`; the isolated committed pre-optimization revision reproduced the premature terminal close, and the corrected test now includes the intended final decision bar |
 | Data-boundary documentation still said backtests did not automatically create reusable manifests | fixed; data and reporting boundaries plus ADR 0051 now describe the required preparation/admission flow |
 | Repository default local database credentials are stale for an existing user container | isolated campaign Timescale database used; user volume and secrets untouched |
 
