@@ -31,8 +31,8 @@ code_paths:
 - Branch policy: retain the reviewed cleanup head as ancestry; after PR #186
   merges, merge updated `origin/develop` into this branch without rebasing before
   preparing the final PR.
-- Current integrated head: `0caf796f57db05e6f44e2bfb0fb4bf7614116a26`,
-  which merges reviewed `develop` baseline
+- Current measured head: `cf94f840b090b47b7f222ca5700d30eb3602cbfa`,
+  which contains reviewed `develop` baseline
   `9dd4858f54ab56fa3bb711f2b4a997d2b818128a` without rewriting campaign
   history.
 - Unrelated worktree state: none; worktree was clean.
@@ -72,7 +72,7 @@ Python-owned bottleneck without changing semantic results.
 | Accounting/lifecycle reconciliation | complete for accepted baseline | accepted runs | gapless event ledger, 508 closed trades, wallet replay, P&L/equity and report totals reconcile within the recorded representation tolerance |
 | Phase-level observability | implemented; validation green | run/report contracts | preparation timings, persisted runtime step rollups, report materialization duration, corrected weighted averages and explicit histogram method |
 | Opt-in profiling | complete | accepted baseline | one-year run `5af4731c-f8b8-4e8a-98a5-2f6eb5fdba3a`; bounded cProfile/pstats/tracemalloc artifact exposed in canonical report |
-| Evidence-backed optimization | implementation validated; repeated measurement pending | three baseline samples and completed profile | `93a6701` selects raw events by marker before serializing only new decision facts; post-change one-year timing and semantic proof remain pending |
+| Evidence-backed optimization | complete; target exceeded with semantic parity | three baseline and three post-change samples plus completed profile | `93a6701` selects raw events by marker before serializing only new decision facts; `step_push_update` median fell 81.980% and runtime-loop median fell 43.324% |
 | Complete validation and PR | pending | all workstreams | pending |
 
 ## Dataset Contract
@@ -245,6 +245,45 @@ payload shape remain unchanged. Focused tests count serialization calls and
 prove that repeated pushes serialize nothing, a newly appended event is
 serialized once, and an evicted marker retains the prior bounded fallback.
 
+Three comparable post-optimization runs executed measured head `cf94f84`
+against the exact same dataset, strategy, configuration, execution mode, fee
+assumptions, and slippage assumptions:
+
+| Sample | Run | Persisted wall | Runtime loop | `step_push_update` | Report build | Result |
+| ---: | --- | ---: | ---: | ---: | ---: | --- |
+| 1 | `72d65acf-2b00-4b22-b210-40dc5b282bad` | 498.997s | 475.473s | 52.100s | 28.034s | accepted |
+| 2 | `68c8432b-1c30-4358-bc98-1f317bb0af2e` | 505.037s | 477.477s | 51.969s | 28.937s | accepted |
+| 3 | `abb5d2f3-81bb-4fed-a6e2-5dc2c83a5f11` | 505.354s | 476.940s | 52.209s | 29.254s | accepted |
+| **Median** |  | **505.037s** | **476.940s** | **52.100s** | **28.937s** | accepted |
+
+The targeted phase median fell from 289.124s to 52.100s, an **81.980%**
+reduction. Median runtime loop fell from 841.525s to 476.940s, a **43.324%**
+reduction. The required work was not removed: each run still processed 8,804
+loaded bars and 8,784 decision bars, persisted 3,253 canonical events, produced
+599 decisions, 508 accepted entries, 91 explicit rejections, 508 exits, and 508
+closed trades, and materialized the canonical report. Persisted wall time
+includes startup and finalization; runtime-loop timing is the comparable
+execution-only measure.
+
+Every post-change report comparison against accepted pre-change run
+`9042e4c7-a2ee-47e8-89d6-b4e3e5fa3892` returned
+`semantic_match_operational_drift` with no first divergence. Dataset, candle
+snapshot, strategy, and material configuration identities match; all behavior,
+trade, fee, P&L, drawdown, and report deltas are zero; the semantic fingerprint
+remains
+`864f268ccc0d364718ee73dc965e94e03338a71ac4667809729f8d5eac16eb44`;
+and wallet replay remains exactly `97800.00006863201` with complete trace and no
+open position. Only run IDs, request IDs, wall timestamps, operational event
+identity, durations, and other explicitly operational evidence differ.
+
+After optimization, the largest separately useful nested phases are decision
+flow (174.136s median) and settlement/accounting application (121.667s median).
+Finalize-bar is 83.828s and push update is 52.100s. These phases overlap and are
+not additive. Report materialization remains a separate 28.937s median. Further
+optimization is intentionally deferred until a new profile establishes the
+next dominant controllable path; this campaign does not infer a target from
+nested timing alone.
+
 Each accepted run has 3,253 canonical events with contiguous, unique run sequence
 `1..3253`, runtime-assigned ordering, no missing known-at value, and no event with
 `known_at < bar_time`. Baseline 3 independently persisted 508 closed trades with
@@ -284,6 +323,9 @@ tolerance and is identical across all three runs. No open position remains.
 | 2026-07-27 | `28878ce` | persisted runtime repeatability, prefix invariance, and adapter parity | 1 passed; 14 dependency deprecation warnings | 11.85s | fixture now expresses N one-minute bars as `[start, start+N minutes)`; production semantics unchanged |
 | 2026-07-27 | `93a6701` | affected runtime, persistence, projection, transport, control, and canonical-event regression set | 237 passed; 14 dependency deprecation warnings | 13.83s | includes marker-before-serialization call-count proof and persisted known-at prefix invariance |
 | 2026-07-27 | `93a6701` | changed production module compile audit and `git diff --check` | passed | <1s | no syntax or whitespace defects |
+| 2026-07-27 | `cf94f84` | three post-optimization one-year backtests | all completed with 508 trades, `-2200` net P&L, zero fees, and 2,500 maximum drawdown | runtime loops 475.473s, 477.477s, 476.940s | exact accepted dataset and configuration; no external orders |
+| 2026-07-27 | `cf94f84` | three canonical report builds and comparisons against accepted pre-change baseline 3 | all `semantic_match_operational_drift`; no first divergence | report builds 28.034s, 28.937s, 29.254s | semantic fingerprint and complete wallet projection match; all material deltas zero |
+| 2026-07-27 | `cf94f84` | persisted pre/post runtime rollup median comparison | target exceeded: push update `289.124s -> 52.100s` (`81.980%`); loop `841.525s -> 476.940s` (`43.324%`) | six comparable unprofiled runs | medians computed from three samples per cohort in isolated acceptance database |
 
 ## Discovered Defects And Disagreements
 
@@ -303,7 +345,7 @@ tolerance and is identical across all three runs. No open position remains.
 | Terminal run projections could display stale in-memory `starting` status after persisted completion | fixed; persisted terminal truth now wins over stale telemetry snapshots |
 | Runtime step `avg_ms` averaged per-bucket p95 values instead of dividing total duration by sample count | fixed; averages are weighted and exact, merged histogram p95 values state their upper-bound method, and run-level rollup aggregation is caveated |
 | Runtime telemetry WebSocket transport repeatedly disconnected during all accepted runs | deferred operational durability defect; canonical producer persistence remained gapless and semantic results were observer-invariant, but terminal auto-materialization required an explicit build request |
-| Push-stream decision fact emission serialized the same bounded historical decision window on every bar before applying its marker | fixed in `93a6701`; raw marker selection now precedes serialization and protected payload/order/fallback semantics are unchanged; three-run one-year performance proof remains pending |
+| Push-stream decision fact emission serialized the same bounded historical decision window on every bar before applying its marker | fixed in `93a6701`; raw marker selection now precedes serialization and protected payload/order/fallback semantics are unchanged; three-run proof measured an 81.980% targeted-phase median reduction with exact semantic parity |
 | Persisted prefix-invariance fixture described N one-minute bars with `end=start+(N-1)m` after half-open ranges became canonical | fixed in fixture-only `28878ce`; the isolated committed pre-optimization revision reproduced the premature terminal close, and the corrected test now includes the intended final decision bar |
 | Data-boundary documentation still said backtests did not automatically create reusable manifests | fixed; data and reporting boundaries plus ADR 0051 now describe the required preparation/admission flow |
 | Repository default local database credentials are stale for an existing user container | isolated campaign Timescale database used; user volume and secrets untouched |
