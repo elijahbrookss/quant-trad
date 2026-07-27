@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Mapping, Sequence
 from core.candle_snapshot import build_expected_candle_series_inventory
 from core.settings import get_settings
 from engines.bot_runtime.runtime.runtime import BotRuntime
+from engines.bot_runtime.runtime.profiling import PythonProfileSession
 from engines.bot_runtime.core.runtime_events import (
     RuntimeEventName,
     WalletInitializedContext,
@@ -1875,6 +1876,43 @@ def _series_worker(
     first_live_progress_signaled = False
     paper_market_stream: PaperMarketStreamRunner | None = None
     paper_market_stream_snapshot: Dict[str, Any] | None = None
+    profile_enabled = (
+        bool(child_config.get("profile"))
+        and str(child_config.get("run_type") or "").strip().lower() == "backtest"
+    )
+    profile_work_units = 0
+    profile_context: dict[str, Any] = {}
+    if profile_enabled:
+        dataset_binding = (
+            child_config.get("dataset_binding")
+            if isinstance(child_config.get("dataset_binding"), Mapping)
+            else {}
+        )
+        dataset_series = [
+            row
+            for row in dataset_binding.get("series") or []
+            if isinstance(row, Mapping)
+        ]
+        profile_work_units = sum(
+            max(int(row.get("row_count") or 0), 0) for row in dataset_series
+        )
+        profile_context = {
+            "bot_id": bot_id,
+            "run_id": run_id,
+            "worker_id": worker_id,
+            "dataset_id": dataset_binding.get("dataset_id"),
+            "dataset_hash": dataset_binding.get("dataset_hash"),
+            "strategy_id": strategy_id,
+            "strategy_hash": dataset_binding.get("strategy_hash"),
+            "execution_mode": child_config.get("execution_mode"),
+            "source_revision": os.getenv("SOURCE_REVISION"),
+            "materialized_row_count": profile_work_units,
+        }
+    profile_session = PythonProfileSession(
+        enabled=profile_enabled,
+        work_units=profile_work_units,
+        context=profile_context,
+    )
 
     def _schedule_bridge_resync(reason: str) -> None:
         nonlocal bridge_session_id, bridge_seq, bridge_resync_reason
@@ -2115,6 +2153,7 @@ def _series_worker(
                     continue
             _schedule_bridge_resync("bridge_queue_backpressure")
 
+    profile_session.start()
     try:
         if not _queue_control_event(
             {
@@ -2188,40 +2227,54 @@ def _series_worker(
         runtime_error["exception_type"] = type(exc).__name__
         runtime_error["traceback"] = traceback.format_exc().strip()
     finally:
-        if paper_market_stream is not None:
-            try:
-                paper_market_stream.stop()
-                paper_market_stream_snapshot = json_safe(paper_market_stream.snapshot())
-                logger.info(
-                    "paper_market_stream_stopped | bot_id=%s | run_id=%s | worker_id=%s | symbols=%s | snapshot=%s",
-                    bot_id,
-                    run_id,
-                    worker_id,
-                    list(symbols),
-                    paper_market_stream_snapshot,
-                )
-            except Exception as exc:  # noqa: BLE001
+        try:
+            if paper_market_stream is not None:
                 try:
-                    paper_market_stream_snapshot = json_safe(
-                        {
-                            **paper_market_stream.snapshot(),
-                            "stop_error": str(exc),
-                        }
+                    paper_market_stream.stop()
+                    paper_market_stream_snapshot = json_safe(paper_market_stream.snapshot())
+                    logger.info(
+                        "paper_market_stream_stopped | bot_id=%s | run_id=%s | worker_id=%s | symbols=%s | snapshot=%s",
+                        bot_id,
+                        run_id,
+                        worker_id,
+                        list(symbols),
+                        paper_market_stream_snapshot,
                     )
-                except Exception:  # noqa: BLE001
-                    paper_market_stream_snapshot = {"stop_error": str(exc)}
+                except Exception as exc:  # noqa: BLE001
+                    try:
+                        paper_market_stream_snapshot = json_safe(
+                            {
+                                **paper_market_stream.snapshot(),
+                                "stop_error": str(exc),
+                            }
+                        )
+                    except Exception:  # noqa: BLE001
+                        paper_market_stream_snapshot = {"stop_error": str(exc)}
+                    logger.warning(
+                        "paper_market_stream_stop_failed | bot_id=%s | run_id=%s | worker_id=%s | error=%s",
+                        bot_id,
+                        run_id,
+                        worker_id,
+                        exc,
+                    )
+            stream_stop.set()
+            if emitter_thread is not None:
+                emitter_thread.join(timeout=1.0)
+            if subscription_token is not None:
+                runtime.unsubscribe(subscription_token)
+        finally:
+            try:
+                profile_session.stop(error=runtime_error.get("message"))
+            except Exception as exc:  # noqa: BLE001 - profiling cannot alter run truth.
+                profile_session.record_failure(exc)
                 logger.warning(
-                    "paper_market_stream_stop_failed | bot_id=%s | run_id=%s | worker_id=%s | error=%s",
+                    "runtime_profile_finalize_failed | bot_id=%s | run_id=%s | "
+                    "worker_id=%s | error=%s",
                     bot_id,
                     run_id,
                     worker_id,
                     exc,
                 )
-        stream_stop.set()
-        if emitter_thread is not None:
-            emitter_thread.join(timeout=1.0)
-        if subscription_token is not None:
-            runtime.unsubscribe(subscription_token)
     status = str((runtime.snapshot() or {}).get("status") or "").strip().lower() or ("error" if runtime_error else "stopped")
     if runtime_error:
         queued = _queue_control_event(
@@ -2251,6 +2304,8 @@ def _series_worker(
         }
         if paper_market_stream_snapshot is not None:
             terminal_event["paper_market_stream"] = paper_market_stream_snapshot
+        if profile_session.summary is not None:
+            terminal_event["profile_artifact"] = dict(profile_session.summary)
         _queue_control_event(
             terminal_event
         )
@@ -2269,6 +2324,8 @@ def _series_worker(
     }
     if paper_market_stream_snapshot is not None:
         terminal_event["paper_market_stream"] = paper_market_stream_snapshot
+    if profile_session.summary is not None:
+        terminal_event["profile_artifact"] = dict(profile_session.summary)
     _queue_control_event(terminal_event)
     if status in {"error", "failed", "crashed", "degraded"}:
         _queue_control_event(
@@ -2336,6 +2393,17 @@ def _handle_worker_terminal_event(ctx: ContainerStartupContext, event: Mapping[s
     if not worker_id or not status:
         return
     ctx.reported_worker_terminal_statuses[worker_id] = status
+    profile_artifact = event.get("profile_artifact") if isinstance(event.get("profile_artifact"), Mapping) else None
+    if profile_artifact is not None:
+        _OBSERVER.event(
+            "runtime_profile_completed",
+            bot_id=ctx.bot_id,
+            run_id=ctx.run_id,
+            worker_id=worker_id,
+            capture_policy="opt_in",
+            profile_status=profile_artifact.get("status"),
+            details=dict(profile_artifact),
+        )
     _handle_worker_paper_market_stream_summary(ctx, event)
     for symbol in event.get("symbols") or []:
         normalized_symbol = str(symbol).strip().upper()

@@ -26,7 +26,8 @@ code_paths:
 - Starting commit: `3fc84b1aaa3121fc8559cfe1db30463b38f0a012`
 - Starting source branch: `feat/platform-baseline-cleanup`
 - Upstream: `origin/feat/backtest-dataset-boundary`
-- PR #186 state at campaign start: open, green, not merged
+- PR #186 state at campaign start: open, green, not merged; merged into
+  `develop` on 2026-07-26 as `9dd4858f54ab56fa3bb711f2b4a997d2b818128a`.
 - Branch policy: retain the reviewed cleanup head as ancestry; after PR #186
   merges, merge updated `origin/develop` into this branch without rebasing before
   preparing the final PR.
@@ -63,10 +64,10 @@ Python-owned bottleneck without changing semantic results.
 | Preparation and execution CLI separation | implemented; pre-commit validation green | mandatory contract | CLI, experiment, API, and MCP tests |
 | Provider/latest-state isolation proof | implemented; pre-commit validation green | execution binding | bound-read, range-expansion, substitution, and post-freeze correction tests |
 | One-year public dataset | complete and admitted | preparation workflow, public provider | frozen dataset identity and independent integrity audit recorded |
-| Three-run deterministic baseline | in progress; first attempt exposed a fail-loudly runtime persistence defect | accepted dataset | failed run preserved; narrow ownership correction validated |
-| Accounting/lifecycle reconciliation | in progress; first completed run exposed a report-summary ownership disagreement | accepted runs | trade-path drawdown ownership corrected; rerun pending |
-| Phase-level observability | preparation phases implemented; execution/report phases pending | run/report contracts | preparation payload timings |
-| Opt-in profiling | pending | accepted baseline | pending |
+| Three-run deterministic baseline | complete | accepted dataset | three one-year runs share semantic fingerprint `864f268c...`; canonical comparisons report semantic match with operational drift only |
+| Accounting/lifecycle reconciliation | complete for accepted baseline | accepted runs | gapless event ledger, 508 closed trades, wallet replay, P&L/equity and report totals reconcile within the recorded representation tolerance |
+| Phase-level observability | implemented; validation green | run/report contracts | preparation timings, persisted runtime step rollups, report materialization duration, corrected weighted averages and explicit histogram method |
+| Opt-in profiling | implemented; one-year profiled run pending | accepted baseline | backtest-only CLI/API control, cProfile/pstats/tracemalloc bounded summary, report exposure |
 | Evidence-backed optimization | pending | three baseline profiles | pending |
 | Complete validation and PR | pending | all workstreams | pending |
 
@@ -140,13 +141,14 @@ Recorded before public provider acquisition on revision `da8a44f`:
 
 ## Performance Evidence
 
-No campaign performance claim exists yet. The previous cleanup campaign measured
-canonical candle storage independently; those measurements are not a backtest
-execution baseline.
+The three-sample pre-optimization baseline is established below. No optimization
+claim exists yet. Measurements from the previous cleanup campaign remain separate
+and are not used as this backtest execution baseline.
 
-Dataset preparation now emits low-overhead wall/CPU timings for requirement
+Dataset preparation emits low-overhead wall/CPU timings for requirement
 resolution, coverage inspection, provider acquisition, ingestion validation,
-dataset hashing/freezing, and dataset admission. Execution baselines remain pending.
+dataset hashing/freezing, and dataset admission. The accepted execution baseline
+below uses persisted runtime step rollups and separately timed report builds.
 
 The accepted dataset is
 `mds_3e5c6926722d852bd43a3fc79a859c40`, with semantic hash
@@ -162,6 +164,40 @@ Independent SQL validation found zero duplicate opens, non-hourly transitions,
 pre-close known-at values, malformed OHLC rows, negative volumes, or
 post-initial revisions. Repeated preparation reused the same semantic identity,
 performed no provider call, and completed in 6.04 seconds wall time.
+
+Three accepted pre-optimization runs executed revision `93f41b1` against that
+exact dataset and configuration:
+
+| Run | Runtime loop | Total runtime summary | Report build | Result |
+| --- | ---: | ---: | ---: | --- |
+| `8d6faa48-19c1-4a6a-86a0-c2783bd68a11` | 841.525s | 842.761s | 38.139s | accepted |
+| `d1fd2f75-5098-4c96-b985-5a69e6ab9616` | 850.158s | 851.431s | 39.385s | accepted |
+| `9042e4c7-a2ee-47e8-89d6-b4e3e5fa3892` | 832.090s | 833.168s | 39.685s | accepted |
+| **Median** | **841.525s** | **842.761s** | **39.385s** | baseline |
+
+Every run produced 599 signals and decisions, 508 accepted entries, 91 explicit
+decision rejections, 508 exits, 508 closed trades, gross/net P&L `-2200`, fees
+`0`, ending report equity `97800`, maximum drawdown `2500`, and exact semantic
+fingerprint
+`864f268ccc0d364718ee73dc965e94e03338a71ac4667809729f8d5eac16eb44`.
+The canonical report comparator found no first semantic divergence and classified
+each pair as `semantic_match_operational_drift`; data snapshot, strategy,
+configuration, decisions, trades, P&L, drawdown, and wallet projection all match.
+
+The median nested runtime timing evidence is: series state 842.071s, finalize
+332.547s, push update 289.124s, decision flow 224.787s, settlement 160.645s,
+execution prime 37.627s, trade-event processing 37.198s, signal evaluation
+33.322s, and state update 20.430s. These timings overlap by design and must not
+be added together. Opt-in profiling is required before selecting the Python-owned
+optimization target.
+
+Each accepted run has 3,253 canonical events with contiguous, unique run sequence
+`1..3253`, runtime-assigned ordering, no missing known-at value, and no event with
+`known_at < bar_time`. Baseline 3 independently persisted 508 closed trades with
+gross/net P&L `-2200` and fees `0`. Wallet replay ends at
+`97800.00006863201`, while rounded trade/report accounting ends at `97800`; the
+`0.00006863201` difference is accepted only as floating quantity/representation
+tolerance and is identical across all three runs. No open position remains.
 
 ## Validation Ledger
 
@@ -183,6 +219,11 @@ performed no provider call, and completed in 6.04 seconds wall time.
 | 2026-07-26 | worktree | canonical-fact, domain-event, artifact, appender, runtime-push, and container-transport regressions | 171 passed; 14 pre-existing deprecation warnings in first group | 4.67s combined | producer persistence no longer fabricates transport identity; bridge ingress still rejects a missing session |
 | 2026-07-26 | worktree | changed runtime modules compile audit and `git diff --check` | passed | <1s | narrow correction ready for commit |
 | 2026-07-26 | worktree | drawdown, artifact-binding, report-identity, trust, and research-dataset regressions | 84 passed | 6.29s | first completed year run disagreement converted into protected canonical ownership rules |
+| 2026-07-27 | `93f41b1` | three one-year accepted backtests and materialized report comparisons | all completed; semantic fingerprints identical | runtime loops 841.525s, 850.158s, 832.090s | operational fingerprints differ as expected; golden remains blocked only by out-of-scope market state |
+| 2026-07-27 | `93f41b1` | baseline 3 canonical SQL reconciliation | 3,253 gapless events; 508 closed trades; no known-at ordering defects; P&L/fees/report/wallet reconciled | n/a | no external orders; zero fee and absent slippage remain realism caveats |
+| 2026-07-27 | worktree | profiler, CLI, experiment, dataset, report, container-transport, runtime-control, startup, and projection regressions | 184 passed across focused groups | 15.60s combined | includes fixture-only mandatory-dataset correction, semantic-hash exclusion for profiling, and profiler-failure isolation |
+| 2026-07-27 | worktree | changed production module compile audit and `git diff --check` | passed | <1s | no syntax or whitespace defects |
+| 2026-07-27 | worktree | architecture index regeneration and documentation contract | 2 passed | 0.03s | default pytest capture hit the known local temporary-file defect; `-s` validation passed |
 
 ## Discovered Defects And Disagreements
 
@@ -198,6 +239,10 @@ performed no provider call, and completed in 6.04 seconds wall time.
 | Runtime and canonical report calculated 2,500 maximum drawdown, but artifact finalization replaced the run summary with a 2,400 daily-close drawdown | fixed; maximum drawdown now preserves every ordered closed-trade equity transition, while daily aggregation remains limited to daily analytics |
 | Artifact finalization dropped the admitted dataset binding and report instrument identity mixed a strategy-link row ID with the canonical instrument ID | fixed; artifact snapshots retain the binding, reports expose dataset ID/hash, semantic fingerprints include them, and instrument identity uses the canonical ID |
 | Fee and slippage limitations were present in detailed sections but absent from top-level trust caveats | fixed; missing fee role/rate and slippage evidence now degrades the relevant report sections and remains visible in readiness/trust caveats |
+| Trades explicitly used the unconfigured `default_zero` fee source, but readiness did not name that assumption | fixed; `unconfigured_zero_fee_model` is now a top-level trust caveat |
+| Terminal run projections could display stale in-memory `starting` status after persisted completion | fixed; persisted terminal truth now wins over stale telemetry snapshots |
+| Runtime step `avg_ms` averaged per-bucket p95 values instead of dividing total duration by sample count | fixed; averages are weighted and exact, merged histogram p95 values state their upper-bound method, and run-level rollup aggregation is caveated |
+| Runtime telemetry WebSocket transport repeatedly disconnected during all accepted runs | deferred operational durability defect; canonical producer persistence remained gapless and semantic results were observer-invariant, but terminal auto-materialization required an explicit build request |
 | Data-boundary documentation still said backtests did not automatically create reusable manifests | fixed; data and reporting boundaries plus ADR 0051 now describe the required preparation/admission flow |
 | Repository default local database credentials are stale for an existing user container | isolated campaign Timescale database used; user volume and secrets untouched |
 

@@ -620,6 +620,12 @@ def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
             continue
         summary_state = _telemetry_hub().get_run_snapshot(run_id=run_id)
         runtime_payload = summary_state.health.to_dict() if summary_state is not None else {}
+        persisted_status = str(run.get("status") or "")
+        runtime_status = (
+            persisted_status
+            if is_terminal_run_state(status=persisted_status)
+            else str(runtime_payload.get("status") or persisted_status)
+        )
         summary = dict(run.get("summary") or {})
         if not summary:
             symbol_index = summary_state.symbol_catalog.entries if summary_state is not None else {}
@@ -635,7 +641,7 @@ def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
             {
                 **dict(run),
                 "is_active": run_id == active_run_id,
-                "runtime_status": str(runtime_payload.get("status") or run.get("status") or ""),
+                "runtime_status": runtime_status,
                 "botlens_available": summary_state is not None,
                 "botlens_reason": None if summary_state is not None else "snapshot_unavailable",
                 "last_snapshot_at": runtime_payload.get("last_event_at"),

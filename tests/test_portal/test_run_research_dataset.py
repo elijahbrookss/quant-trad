@@ -556,6 +556,7 @@ def _build(
     run=None,
     events=None,
     trades=None,
+    steps=None,
     observability_events=None,
     candle_summaries=None,
     candle_provider_gaps=None,
@@ -565,7 +566,7 @@ def _build(
         run=_run() if run is None else run,
         events=_events() if events is None else events,
         trades=_trades() if trades is None else trades,
-        steps=_steps(),
+        steps=_steps() if steps is None else steps,
         observability_events=observability_events,
         candle_summaries=candle_summaries,
         candle_provider_gaps=candle_provider_gaps,
@@ -592,6 +593,41 @@ def test_dataset_builds_from_db_truth_without_artifact_directory(monkeypatch: py
     assert dataset["context"]["schema_version"] == "report_context.v1"
     assert dataset["candle_catalog"]["schema_version"] == "candle_catalog.v1"
     assert dataset["operational_health"]["schema_version"] == "operational_health.v1"
+
+
+def test_runtime_step_timings_use_weighted_average_and_merged_histogram(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    steps = [
+        {
+            "step_name": "runtime_loop",
+            "sample_count": 2,
+            "value_sum": 30.0,
+            "value_max": 20.0,
+            "p95_value": 20.0,
+            "histogram_bounds": [10.0, 20.0, 50.0],
+            "histogram_counts": [1, 1, 0],
+        },
+        {
+            "step_name": "runtime_loop",
+            "sample_count": 3,
+            "value_sum": 90.0,
+            "value_max": 40.0,
+            "p95_value": 40.0,
+            "histogram_bounds": [10.0, 20.0, 50.0],
+            "histogram_counts": [0, 1, 2],
+        },
+    ]
+
+    dataset = _build(monkeypatch, steps=steps)
+    timing = dataset["performance"]["major_step_timings"][0]
+
+    assert timing["step_name"] == "runtime_loop"
+    assert timing["count"] == 5
+    assert timing["total_ms"] == 120.0
+    assert timing["avg_ms"] == 24.0
+    assert timing["p95_ms"] == 40.0
+    assert timing["p95_method"] == "merged_histogram_upper_bound"
 
 
 @pytest.mark.parametrize(
@@ -1381,11 +1417,62 @@ def test_missing_fee_facts_are_visible_in_report_trust(
     assert "fee_accounting" in dataset["readiness"]["degraded_sections"]
 
 
+def test_unconfigured_default_zero_fees_are_visible_in_report_trust(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trades = _trades()
+    for trade in trades:
+        metrics = dict(trade.get("metrics") or {})
+        metrics["fee_rate"] = 0.0
+        metrics["fee_source"] = "default_zero"
+        trade["metrics"] = metrics
+
+    dataset = _build(monkeypatch, trades=trades)
+
+    caveats = set(dataset["readiness"]["caveats"])
+    assert "unconfigured_zero_fee_model" in caveats
+    assert "fee_accounting" in dataset["readiness"]["degraded_sections"]
+
+
 def test_dataset_includes_botlens_rebuildable_snapshot_caveat(monkeypatch: pytest.MonkeyPatch) -> None:
     dataset = _build(monkeypatch)
 
     caveats = set(dataset["readiness"]["caveats"])
     assert "botlens_snapshots_rebuildable_from_material_event_ledger_and_compact_context" in caveats
+
+
+def test_operational_health_exposes_opt_in_runtime_profile_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset = _build(
+        monkeypatch,
+        observability_events=[
+            {
+                "event_name": "runtime_profile_completed",
+                "worker_id": "worker-1",
+                "observed_at": "2026-03-31T00:00:00Z",
+                "details": {
+                    "schema_version": "python_profile.v1",
+                    "status": "completed",
+                    "wall_seconds": 12.5,
+                    "cpu_seconds": 11.0,
+                    "peak_memory_bytes": 2048,
+                },
+            }
+        ],
+    )
+
+    assert dataset["operational_health"]["profile_artifacts"] == [
+        {
+            "schema_version": "python_profile.v1",
+            "status": "completed",
+            "wall_seconds": 12.5,
+            "cpu_seconds": 11.0,
+            "peak_memory_bytes": 2048,
+            "worker_id": "worker-1",
+            "observed_at": "2026-03-31T00:00:00Z",
+        }
+    ]
 
 
 def test_botlens_projection_failure_blocks_golden_candidate(monkeypatch: pytest.MonkeyPatch) -> None:

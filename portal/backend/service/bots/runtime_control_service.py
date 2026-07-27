@@ -79,6 +79,8 @@ def _apply_start_overrides(bot: Mapping[str, Any], overrides: Mapping[str, Any] 
             payload["risk"] = risk
         elif key == "run_type":
             payload["run_type"] = str(value).strip().lower()
+        elif key == "profile":
+            payload["profile"] = bool(value)
         elif key == "duration_seconds":
             payload["duration_seconds"] = float(value)
         elif key == "market_data_stream_policy":
@@ -89,6 +91,8 @@ def _apply_start_overrides(bot: Mapping[str, Any], overrides: Mapping[str, Any] 
             payload[key] = value
     if "execution_behavior" not in payload:
         payload["execution_behavior"] = execution_behavior_from_bot(payload)
+    if bool(payload.get("profile")) and str(payload.get("run_type") or "").strip().lower() != "backtest":
+        raise ValueError("runtime_profile_invalid: profiling is supported only for backtest runs")
     return payload
 
 

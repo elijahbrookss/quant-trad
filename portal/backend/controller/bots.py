@@ -131,6 +131,7 @@ class BotStartRequest(BaseModel):
     request_id: Optional[str] = None
     run_type: Optional[str] = Field(default=None, pattern="^(backtest|sim_trade|paper|live)$")
     dataset_id: Optional[str] = None
+    profile: Optional[bool] = None
     execution_behavior: Optional[str] = Field(default=None, pattern="^(simulated|observe-only)$")
     duration_seconds: Optional[float] = Field(default=None, gt=0)
     market_data_stream_policy: Optional[Dict[str, Any]] = None

@@ -698,6 +698,39 @@ def test_bots_start_supports_observe_only_paper_overrides(tmp_path, monkeypatch)
     }
 
 
+def test_bots_start_supports_opt_in_backtest_profiling(tmp_path, monkeypatch):
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        observed["body"] = json.loads(request.data.decode("utf-8"))
+        return _Response(b'{"status":"started","run_id":"run-1"}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    exit_code = main(
+        [
+            "--log-root",
+            str(tmp_path),
+            "bots",
+            "start",
+            "bot-1",
+            "--run-type",
+            "backtest",
+            "--dataset-id",
+            "mds-1",
+            "--profile",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed["body"] == {
+        "run_type": "backtest",
+        "dataset_id": "mds-1",
+        "profile": True,
+    }
+
+
 def test_reports_semantic_inspection_commands_use_backend_routes(monkeypatch):
     calls = []
 

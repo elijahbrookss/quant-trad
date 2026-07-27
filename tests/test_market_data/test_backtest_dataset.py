@@ -356,6 +356,13 @@ def test_plan_freezes_exact_execution_instrument_configuration() -> None:
             updated_at="2026-01-02T00:00:00Z",
         ),
     )
+    profiling_change = derive_backtest_dataset_plan(
+        bot={**_bot(), "profile": True},
+        strategy=_strategy(),
+        evaluation_start=EVALUATION_START,
+        evaluation_end=EVALUATION_END,
+        instrument_loader=lambda _instrument_id: instrument_with(),
+    )
     execution_change = derive_backtest_dataset_plan(
         bot=_bot(),
         strategy=_strategy(),
@@ -374,6 +381,9 @@ def test_plan_freezes_exact_execution_instrument_configuration() -> None:
         "instrument_config_hash"
     ]
     assert first["execution_config_hash"] == operational_timestamp_change[
+        "execution_config_hash"
+    ]
+    assert first["execution_config_hash"] == profiling_change[
         "execution_config_hash"
     ]
     assert first["instrument_config_hash"] != execution_change[

@@ -78,6 +78,7 @@ def _bot_run_config_snapshot(bot: Mapping[str, Any]) -> Dict[str, Any]:
         "bot_env",
         "execution_semantics",
         "duration_seconds",
+        "profile",
         "dataset_id",
         "dataset_binding",
     )
@@ -370,6 +371,8 @@ class BotStartupOrchestrator:
             start_request_overrides["run_type"] = ctx.bot_record.get("run_type")
         if ctx.bot_record.get("dataset_id") is not None:
             start_request_overrides["dataset_id"] = ctx.bot_record.get("dataset_id")
+        if bool(ctx.bot_record.get("profile")):
+            start_request_overrides["profile"] = True
         if execution_behavior:
             start_request_overrides["execution_behavior"] = execution_behavior
         if duration_seconds is not None:

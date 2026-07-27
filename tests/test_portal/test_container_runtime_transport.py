@@ -169,6 +169,62 @@ def test_handle_worker_terminal_event_records_explicit_terminal_statuses() -> No
     assert ctx.series_states["BTC"]["status"] == "completed"
 
 
+def test_handle_worker_terminal_event_emits_opt_in_profile_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        runtime_mod._OBSERVER,
+        "event",
+        lambda event_name, **fields: observed.append((event_name, fields)),
+    )
+    ctx = runtime_mod.ContainerStartupContext(
+        bot_id="bot-1",
+        run_id="run-1",
+        bot={},
+        runtime_bot_config={},
+        strategy_id="strategy-1",
+        symbols=["BTC"],
+        symbol_shards=[["BTC"]],
+        wallet_config={},
+        manager=MagicMock(),
+        shared_wallet_proxy={},
+        worker_symbols={"worker-1": ["BTC"]},
+    )
+
+    runtime_mod._handle_worker_terminal_event(
+        ctx,
+        {
+            "worker_id": "worker-1",
+            "symbols": ["BTC"],
+            "status": "completed",
+            "profile_artifact": {
+                "schema_version": "python_profile.v1",
+                "status": "completed",
+                "wall_seconds": 12.5,
+            },
+        },
+    )
+
+    assert observed == [
+        (
+            "runtime_profile_completed",
+            {
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "worker_id": "worker-1",
+                "capture_policy": "opt_in",
+                "profile_status": "completed",
+                "details": {
+                    "schema_version": "python_profile.v1",
+                    "status": "completed",
+                    "wall_seconds": 12.5,
+                },
+            },
+        )
+    ]
+
+
 def test_handle_worker_terminal_event_records_paper_market_stream_summary() -> None:
     ctx = runtime_mod.ContainerStartupContext(
         bot_id="bot-1",

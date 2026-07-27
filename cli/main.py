@@ -485,6 +485,8 @@ def _cmd_bots_start(args: argparse.Namespace) -> int:
         body["run_type"] = args.run_type
     if getattr(args, "dataset_id", None):
         body["dataset_id"] = args.dataset_id
+    if bool(getattr(args, "profile", False)):
+        body["profile"] = True
     if getattr(args, "execution_behavior", None):
         body["execution_behavior"] = args.execution_behavior
     if getattr(args, "duration_seconds", None):
@@ -2243,6 +2245,8 @@ def _start_experiment(args: argparse.Namespace, client: ApiClient) -> dict[str, 
         "run_type": "backtest",
         "dataset_id": args.dataset_id,
     }
+    if bool(getattr(args, "profile", False)):
+        start_body["profile"] = True
     if getattr(args, "request_id", None):
         start_body["request_id"] = args.request_id
     start_payload = client.request_json("POST", f"/api/bots/{args.bot_id}/runs/start", payload=start_body)
@@ -2626,6 +2630,7 @@ def build_parser() -> argparse.ArgumentParser:
     bots_start.add_argument("--run-type", choices=["backtest", "sim_trade", "paper", "live"])
     bots_start.add_argument("--execution-behavior", "--execution", choices=["simulated", "observe-only"], dest="execution_behavior")
     bots_start.add_argument("--dataset-id", help="Required immutable dataset identity for backtest runs.")
+    bots_start.add_argument("--profile", action="store_true", help="Enable opt-in cProfile and tracemalloc evidence for this backtest run.")
     bots_start.add_argument("--duration-seconds", type=float, help="Optional bounded duration for observe-only paper runs.")
     bots_start.add_argument(
         "--market-data-stream-policy-json",
@@ -3380,6 +3385,7 @@ def build_parser() -> argparse.ArgumentParser:
     start_bot = experiments_sub.add_parser("start-bot", help="Start a bot run and write a resumable experiment record.")
     start_bot.add_argument("bot_id")
     start_bot.add_argument("--dataset-id", required=True, help="Prepared immutable dataset identity.")
+    start_bot.add_argument("--profile", action="store_true", help="Enable opt-in cProfile and tracemalloc evidence for this backtest run.")
     start_bot.add_argument("--request-id")
     start_bot.add_argument("--baseline-run-id")
     start_bot.add_argument("--export", action="store_true", help="Record export as a default for collect.")
