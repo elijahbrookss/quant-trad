@@ -148,6 +148,8 @@ class _Connection:
             return _Result(("2.14.2",))
         if "timescaledb_information.hypertables" in statement_text:
             return _Result((True,))
+        if "FROM pg_attribute AS attribute" in statement_text:
+            return _Result(("", "nextval('market.fact_commit_seq'::regclass)"))
         if isinstance(statement, CreateSchema):
             self.inspector.schemas.add(str(statement.element))
             return _Result(())

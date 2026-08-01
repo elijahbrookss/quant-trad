@@ -63,6 +63,34 @@ services:
         aliases:
           - backend.quanttrad
 
+  market-data-collector:
+    profiles: [core]
+    build:
+      context: ..
+      dockerfile: portal/backend/Dockerfile
+    image: quanttrad-backend:dev
+    hostname: market-data-collector.quanttrad
+    labels:
+      loki.job: quanttrad
+      loki.service: market-data-collector
+    env_file:
+      - ../secrets.env
+    environment:
+      PYTHONPATH: /app/src:/app
+      QT_CONFIG_PROFILE: ${QT_CONFIG_PROFILE:-dev}
+    command:
+      - /bin/bash
+      - -lc
+      - export PG_DSN="postgresql+psycopg2://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@tsdb:5432/$${POSTGRES_DB}" && python -m portal.backend.workers.market_data_collector
+    depends_on:
+      - tsdb
+    volumes:
+      - ../secrets.env:/app/secrets.env:ro
+    networks:
+      quanttrad:
+        aliases:
+          - market-data-collector.quanttrad
+
   tsdb:
     profiles: [database]
     build:

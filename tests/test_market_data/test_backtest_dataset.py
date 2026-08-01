@@ -12,12 +12,15 @@ from market_data.contracts import (
     CANDLE_FACT_VERSION,
     CandleFact,
     CandleRecord,
+    OPEN_INTEREST_FACT_TYPE,
+    OPEN_INTEREST_FACT_VERSION,
     SourceIdentity,
     build_candle_material_hash,
     build_dataset_identity_hash,
     build_provenance_hash,
     build_quality_hash,
 )
+from indicators.manifest import IndicatorManifest, IndicatorMarketInput
 from market_data.store import FrozenDataset
 from portal.backend.service.market.backtest_dataset_service import (
     derive_backtest_dataset_plan,
@@ -583,3 +586,55 @@ def test_transitive_indicator_inputs_participate_in_dataset_planning() -> None:
         "candle-stats-1",
     }
     assert plan["materialization_range"]["start"] == "2023-12-29T22:00:00.000000Z"
+
+
+def test_plan_resolves_open_interest_as_latest_known_primary_fact(monkeypatch) -> None:
+    import portal.backend.service.market.backtest_dataset_service as service
+
+    strategy = _strategy()
+    strategy.indicator_ids = ["oi-1"]
+    manifest = IndicatorManifest(
+        type="oi_context",
+        version="1.0.0",
+        label="OI context",
+        description="Reference OI input contract.",
+        market_inputs=(
+            IndicatorMarketInput(
+                key="open_interest",
+                fact_type=OPEN_INTEREST_FACT_TYPE,
+                contract_version=OPEN_INTEREST_FACT_VERSION,
+                alignment="latest_known",
+                max_staleness_seconds=3600,
+                required_fields=("sample_time", "value", "known_at"),
+            ),
+        ),
+    )
+    monkeypatch.setattr(service, "get_indicator_manifest", lambda _type: manifest)
+    plan = derive_backtest_dataset_plan(
+        bot=_bot(),
+        strategy=strategy,
+        evaluation_start=EVALUATION_START,
+        evaluation_end=EVALUATION_END,
+        indicator_meta_loader=lambda _indicator_id: {
+            "id": "oi-1",
+            "type": "oi_context",
+            "params": {},
+            "enabled": True,
+        },
+        indicator_input_plan_loader=lambda *_args, **_kwargs: {
+            "source_timeframe": "1h",
+            "start": EVALUATION_START,
+        },
+        instrument_loader=_instrument,
+    )
+
+    oi = next(
+        row for row in plan["series"] if row["fact_type"] == OPEN_INTEREST_FACT_TYPE
+    )
+    assert oi["instrument_id"] == "instrument-1"
+    assert oi["timeframe_seconds"] is None
+    assert oi["alignment"] == "latest_known"
+    assert oi["max_staleness_seconds"] == 3600
+    assert oi["range_start"] == "2023-12-31T09:00:00.000000Z"
+    assert oi["range_end"] == "2024-01-01T02:00:00.000000Z"
+    assert oi["bindings"][0]["input"]["instrument_role"] == "primary"

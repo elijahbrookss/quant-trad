@@ -9,6 +9,8 @@ tags:
   - providers
   - market-data
   - candles
+  - open-interest
+  - collectors
   - known-at
   - provenance
   - gaps
@@ -22,7 +24,10 @@ code_paths:
   - portal/backend/service/providers
   - portal/backend/service/market
   - portal/backend/service/storage/repos/market_data.py
+  - portal/backend/service/storage/repos/market_collection.py
+  - portal/backend/workers/market_data_collector.py
   - scripts/db/manual_migration_market_data_v2_hard_cutover.sql
+  - scripts/db/manual_migration_market_fact_commit_clock_v1.sql
   - docs/architecture/data/diagrams/data-boundary-flow.mmd
   - docs/architecture/data/diagrams/candle-continuity-flow.mmd
 ---
@@ -32,8 +37,8 @@ code_paths:
 
 The data boundary turns external observations into immutable, causally readable
 market facts. It owns acquisition adapters, normalization, source and series
-identity, accepted fact revisions, known-at and provenance evidence, gap quality,
-and frozen dataset manifests.
+identity, accepted revisions, known-at and provenance evidence, gap quality,
+collector schedules, and frozen dataset manifests.
 
 Related diagrams:
 
@@ -42,151 +47,163 @@ Related diagrams:
 
 ## Boundary Contract
 
-The data boundary provides evidence. It does not make trading decisions, execute
-orders, manufacture missing rows, or silently call a provider for a consumer.
+The boundary provides evidence. It does not make trading decisions, execute
+orders, manufacture missing facts, or call a provider because a consumer read
+missed.
 
 | Owns | Does Not Own |
 | --- | --- |
 | provider registry, credentials, and acquisition adapters | indicator state or derived features |
-| typed market-fact and source identities | strategy rules |
-| explicit historical and paper intake | execution or fill semantics |
+| typed fact, source, series, and instrument-role contracts | strategy rules |
+| historical, paper, and scheduled poll intake | execution or fill semantics |
 | append-only revisions and causal reads | wallet or margin effects |
 | provenance, gaps, and quality evidence | report readiness policy |
 | frozen source-dataset manifests | BotLens projection state |
 
 Provider adapters are acquisition-only anti-corruption boundaries. They isolate
-external API details, symbols, pagination, and provider metadata. They do not
-create tables, cache rows, choose fallback providers, or format runtime frames.
+API details, provider product IDs, pagination, and response metadata. They do
+not create tables, choose fallback providers, or format runtime frames.
 
-## Canonical Flow
+## Canonical Flows
 
-[data-boundary-flow.mmd](diagrams/data-boundary-flow.mmd) shows two explicit
-intake paths and one read path:
+1. Historical candles are requested explicitly through an audited CLI or API
+   operation. Bounded provider segments are normalized and persisted before a
+   consumer can read them.
+2. Paper aggregation persists each closed candle before making it visible to
+   runtime.
+3. A durable collector worker claims enabled schedules from PostgreSQL, applies
+   database pacing and bounded retries, polls the exact configured product, and
+   appends only while its ownership fence remains current.
+4. Research, indicators, checks, backtests, paper runtime, reports, and APIs read
+   canonical storage only. Missing series or facts are explicit errors or
+   structured optional caveats.
+5. Backtest preparation resolves transitive requirements, validates coverage,
+   and freezes an immutable dataset. Startup admits that dataset against exact
+   strategy, indicator, execution-policy, instrument, warmup, and run identity.
 
-1. An operator, audited CLI command, or API request chooses the canonical
-   instrument, provider, venue, timeframe, and half-open window.
-2. The selected adapter acquires external rows. Acquisition is never triggered
-   by a read miss.
-3. The feed service validates ordering, duplicates, OHLCV, candle closure,
-   requested bounds, and known-at evidence.
-4. The canonical repository registers the source and typed series, then appends
-   accepted candle revisions and range-based gap evidence under schema `market`.
-5. Paper aggregation persists each closed candle before placing it in the
-   runtime-visible store.
-6. Research, backtest, indicator, reporting, and API consumers read only the
-   canonical store. Missing series fail with an explicit-ingestion error.
-7. Backtest preparation freezes the complete required ranges into one immutable
-   dataset manifest. Startup admits that dataset against the exact strategy,
-   indicator, execution-policy, instrument, warmup, and run configuration;
-   nested strategy and indicator reads inherit the admitted commit scope.
+## Implemented Source Facts
 
-## Source-Fact Contract
+Logical series are keyed by canonical instrument, fact type, contract version,
+and optional timeframe. Candles and OI share one database-wide market fact
+commit sequence, allowing one mixed-fact dataset watermark.
 
-The implemented fact type is `candle.ohlcv` contract `candle.ohlcv.v1`. Each
-logical series is keyed by canonical instrument, fact type, contract version,
-and timeframe. Every candle revision records:
+### Candles
 
-- half-open open and close timestamps;
-- exact OHLC, optional volume and trade count;
-- provider publication and platform receipt timestamps when available;
-- platform acceptance time;
-- `known_at` and an explicit known-at method;
-- immutable revision and market commit sequence;
-- source identity, ingestion operation, and provenance;
-- an exact causal row hash.
+`candle.ohlcv.v1` revisions record half-open open and close timestamps, exact
+OHLC, optional volume and trade count, publication and receipt timestamps when
+available, platform acceptance, known-at and method, source, provenance,
+revision, commit sequence, and causal row hash.
 
-Historical data uses provider publication time when the adapter supplies it.
-Otherwise, `interval_close_inferred` states the limitation directly. Paper data
-uses platform acceptance as known-at. A provisional candle or a known-at value
-before close is invalid.
+Historical rows use provider publication time when supplied; otherwise
+`interval_close_inferred` states the limitation. Paper candles use platform
+acceptance. Provisional candles and known-at before close are invalid. Windows
+are half-open: `start <= candle_open_time < end`.
 
-Corrections append revisions. A read pinned to market commit `N` selects the
-latest revision visible at `N`; a known-at cutoff may narrow that set further.
-Current reads select the latest accepted revision. All windows are half-open:
-`start <= candle_open_time < end`.
+### Coinbase Open Interest
+
+`derivatives.open_interest.v1` revisions record scheduled sample time, finite
+nonnegative contract count, unit, receipt and acceptance time, known-at and
+method, source, provenance, revision, commit sequence, and causal row hash.
+
+Coinbase supplies current OI but no event timestamp through this adapter.
+`sample_time` is therefore the collector schedule and `known_at` is platform
+acceptance after receipt. The data is venue-specific polling evidence, not exact
+exchange-event-time history.
+
+Definitions are disabled by default and require an explicit canonical Coinbase
+futures instrument plus exact provider product ID. Missed schedules and
+exhausted attempts create gap evidence. Lease generation, secret token hash,
+expiry, and a write-transaction fence prevent stale workers from publishing.
+
+## Consumer Requirements And Instrument Roles
+
+Indicators and checks declare fact type, contract version, key, required fields,
+alignment, staleness, gap policy, and one instrument role:
+
+- `primary`: the traded canonical instrument;
+- `underlying`: the canonical underlying ID mapped for that primary;
+- `benchmark`: a named alias mapped to one canonical ID;
+- `explicit`: one declared canonical instrument ID.
+
+Consumers do not declare provider, endpoint, table, schedule, or fallback.
+Underlying and benchmark relationships come from immutable run configuration;
+symbol parsing is not a valid relationship resolver.
 
 ## Dataset Identity, Provenance, And Quality
 
-A frozen dataset manifest identifies exact selected ranges and contains separate
-hashes for candle material, acquisition provenance, and quality evidence. Its
-stable dataset ID includes those selected hashes but excludes unrelated global
-commit movement. An update to another series therefore cannot rename an
-unchanged dataset.
+A frozen dataset manifest identifies exact selected ranges and keeps separate
+hashes for typed-fact material, acquisition provenance, and quality evidence.
+Its stable ID excludes unrelated global commit movement. Corrections append a
+revision; reads pinned to commit `N` cannot observe a later revision.
 
-Gap evidence is immutable, range based, and conservative. It records expected
+Gap evidence is immutable, range-based, and conservative. It records expected
 and observed counts, classification, detection watermark, and structured
-provider or ingestion evidence. Continuity, closures, warmup, confidence, and
-caveats describe trust; they do not mutate candle values or synthesize rows.
+provider or ingestion evidence. Closures, warmup, confidence, and caveats do not
+mutate values or synthesize rows.
 
-Runtime also fingerprints its exact consumed candle/ATR frames through
-`candle_series_snapshot.v1`. That derived-input proof complements the frozen
-source dataset: the source manifest proves accepted market facts, while the
-runtime snapshot proves what the engine actually consumed after feature
-construction.
+Backtest OI inputs are frozen far enough back to cover indicator warmup plus the
+declared latest-known staleness window. Every warmup and decision bar resolves
+only facts known at that bar. Required unavailable or stale facts stop the run;
+optional facts produce a structured caveat. The indicator engine receives a
+fresh per-indicator fact map each bar and clears it before the next bar.
 
-## Failure And Recovery
+Runtime separately fingerprints exact consumed candle/ATR frames through
+`candle_series_snapshot.v1`. This complements the source manifest rather than
+replacing source provenance and quality.
 
-- Missing canonical data fails; it does not fall back to an external call.
-- Missing credentials fail before explicit acquisition starts.
-- Unsupported provider, venue, symbol, fact type, or contract versions fail with
-  context.
-- Empty provider segments and provider exceptions create gap evidence and fail
-  the requested acquisition when no usable facts remain.
-- Duplicate, malformed, provisional, or out-of-window rows fail before
-  acceptance.
+## Failure, Recovery, And Scaling
+
+- Missing canonical data fails without provider fallback.
+- Missing credentials fail before explicit acquisition or polling.
+- Unsupported provider, venue, product, fact contract, or instrument role fails
+  with context.
+- Duplicate, malformed, provisional, conflicting, or out-of-window facts fail
+  before acceptance.
 - Append-only table mutations are rejected by database triggers.
-- Startup rejects active legacy market-data tables instead of supporting two
-  storage paths.
-- The one-off hard-cutover migration verifies legacy counts and hashes before
-  archiving old tables under `legacy_market_v1`; application code cannot read
-  that archive.
-
-## Scaling Shape
-
-Historical requests are split into bounded provider-sized segments. Acceptance
-uses a staged set operation and a per-series transaction lock, rather than one
-transaction per candle. Candle revisions are a TimescaleDB hypertable indexed by
-series/time/revision, series/commit, and series/known-at. Consumers use bounded
-windows and explicit watermarks. Concurrency is intentionally conservative
-until measured provider and database evidence justifies widening it.
+- Collector work is idempotent by scheduled sample, resumable after restart,
+  paced in PostgreSQL, bounded in retries, and fenced across processes.
+- Candle and OI revisions are TimescaleDB hypertables indexed for series/time,
+  revision, commit, and known-at reads.
+- Historical ingestion uses staged set operations and bounded provider segments.
+  Collector and historical concurrency remain conservative until measurements
+  justify widening them.
+- Legacy candle tables are archived under `legacy_market_v1`; application code
+  has no fallback reader. The fact-clock migration archives prior active dataset
+  manifests whose provenance identity used the old contract.
 
 ## Invariants
 
-- No synthetic candle exists unless a future typed fact contract explicitly
-  models it.
-- No consumer read performs provider acquisition.
+- No consumer read performs acquisition.
 - Provider-specific behavior stops at the adapter boundary.
 - Accepted facts and evidence are immutable; corrections append.
-- Known-at cannot precede candle close, publication, or receipt evidence.
+- Known-at cannot precede the evidence required by the fact contract.
 - Paper runtime cannot observe a closed candle before canonical persistence.
-- One backtest uses one recorded market-data watermark across nested reads.
-- Every canonical backtest names one frozen dataset ID; execution cannot create,
-  expand, or substitute that dataset.
-- Exact material identity and quality evidence remain distinct.
-- Missing or malformed evidence is unavailable, never optimistic empty proof.
-- Instrument metadata is validated before execution depends on tick size,
-  contract size, fees, shorting, or margin.
+- One backtest uses one frozen dataset and one recorded commit scope across
+  nested reads.
+- Exact material, provenance, and quality remain distinct and inspectable.
+- Required stale or unavailable inputs fail; optional gaps are explicit.
+- Instrument relationships are canonical IDs, never symbol guesses.
 - Provider credentials flow through credential references, not bot or run
   configuration.
+
+## Known Gaps
+
+- Coinbase OI is polling-only and has no supported historical backfill. History
+  begins when an enabled collector accumulates it.
+- Coinbase OI lacks a provider event timestamp through the current endpoint, so
+  poll schedule and platform acceptance bound what can be known.
+- Funding, basis, cross-venue aggregation, expanded market state, L2, order flow,
+  options, and live trading are not implemented.
+- Provider publication timestamps are unavailable from some candle endpoints;
+  interval-close inference remains explicit provenance.
+- Session/calendar evidence cannot classify every closure.
+- Throughput has not yet justified wider historical or collector concurrency.
 
 ## Related Docs
 
 - [System model](../system/SYSTEM_MODEL.md)
 - [Persistence boundary](../persistence/PERSISTENCE_BOUNDARY.md)
-- [Engine state model](../engine/ENGINE_STATE_MODEL.md)
-- [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)
 - [ADR 0044: Known-at prefix invariance](../decisions/0044-enforce-known-at-prefix-invariance.md)
-- [ADR 0046: Exact candle inputs and separate quality](../decisions/0046-fingerprint-exact-candle-inputs-and-keep-quality-separate.md)
 - [ADR 0050: Canonical append-only market data](../decisions/0050-use-one-canonical-append-only-market-data-store.md)
 - [ADR 0051: Frozen datasets for canonical backtests](../decisions/0051-require-frozen-datasets-for-canonical-backtests.md)
-
-## Known Gaps
-
-- Only `candle.ohlcv.v1` is implemented. Open interest, basis, funding, market
-  state, L2, order flow, options, and live trading are not supported by this
-  contract yet.
-- Provider publication timestamps are not available from every historical API;
-  interval-close inference remains an explicit provenance limitation.
-- Session/calendar evidence is not complete enough to classify every closure.
-- Historical provider segments are bounded and sequential; concurrency has not
-  yet been justified by measured throughput.
+- [ADR 0052: Typed fact collectors and instrument roles](../decisions/0052-use-typed-fact-collectors-and-explicit-instrument-roles.md)

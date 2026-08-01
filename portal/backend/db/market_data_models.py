@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     Column,
     DateTime,
@@ -185,7 +186,11 @@ class MarketCandleVersionRecord(Base):
     )
     candle_open_time = Column(DateTime(timezone=True), nullable=False)
     revision = Column(Integer, nullable=False)
-    market_commit_seq = Column(BigInteger, Identity(always=True), nullable=False)
+    market_commit_seq = Column(
+        BigInteger,
+        nullable=False,
+        server_default=text("nextval('market.fact_commit_seq'::regclass)"),
+    )
     ingestion_run_id = Column(
         String(64),
         ForeignKey(f"{MARKET_DATA_SCHEMA}.ingestion_runs.id", ondelete="RESTRICT"),
@@ -205,6 +210,213 @@ class MarketCandleVersionRecord(Base):
     known_at_method = Column(String(64), nullable=False)
     provenance = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     row_hash = Column(String(64), nullable=False)
+
+
+class MarketOpenInterestVersionRecord(Base):
+    """Append-only scheduled observations of venue-specific open interest."""
+
+    __tablename__ = "open_interest_versions"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "series_id",
+            "sample_time",
+            "revision",
+            name="pk_market_open_interest_versions",
+        ),
+        CheckConstraint(
+            "revision > 0", name="ck_market_open_interest_revision_positive"
+        ),
+        CheckConstraint(
+            "open_interest >= 0", name="ck_market_open_interest_nonnegative"
+        ),
+        CheckConstraint(
+            "known_at >= sample_time",
+            name="ck_market_open_interest_known_after_schedule",
+        ),
+        CheckConstraint(
+            "source_published_at IS NULL OR known_at >= source_published_at",
+            name="ck_market_open_interest_known_after_publication",
+        ),
+        CheckConstraint(
+            "received_at IS NULL OR (known_at >= received_at AND accepted_at >= received_at)",
+            name="ck_market_open_interest_receipt_order",
+        ),
+        Index(
+            "ix_market_open_interest_series_time_revision",
+            "series_id",
+            text("sample_time DESC"),
+            text("revision DESC"),
+        ),
+        Index(
+            "ix_market_open_interest_series_commit",
+            "series_id",
+            "market_commit_seq",
+        ),
+        Index(
+            "ix_market_open_interest_series_known", "series_id", "known_at"
+        ),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    series_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    sample_time = Column(DateTime(timezone=True), nullable=False)
+    revision = Column(Integer, nullable=False)
+    market_commit_seq = Column(
+        BigInteger,
+        nullable=False,
+        server_default=text("nextval('market.fact_commit_seq'::regclass)"),
+    )
+    ingestion_run_id = Column(
+        String(64),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.ingestion_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    open_interest = Column(Float, nullable=False)
+    unit = Column(String(32), nullable=False)
+    sample_time_method = Column(String(64), nullable=False)
+    source_published_at = Column(DateTime(timezone=True), nullable=True)
+    received_at = Column(DateTime(timezone=True), nullable=True)
+    accepted_at = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+    known_at_method = Column(String(64), nullable=False)
+    provenance = Column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    row_hash = Column(String(64), nullable=False)
+
+
+class MarketCollectionDefinitionRecord(Base):
+    """Mutable scheduler state for one provider/fact/series polling definition."""
+
+    __tablename__ = "collection_definitions"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id", "series_id", name="uq_market_collection_source_series"
+        ),
+        CheckConstraint(
+            "poll_interval_seconds > 0",
+            name="ck_market_collection_poll_interval_positive",
+        ),
+        CheckConstraint(
+            "max_attempts > 0", name="ck_market_collection_max_attempts_positive"
+        ),
+        CheckConstraint(
+            "lease_generation >= 0",
+            name="ck_market_collection_lease_generation_nonnegative",
+        ),
+        CheckConstraint(
+            "consecutive_failures >= 0",
+            name="ck_market_collection_failures_nonnegative",
+        ),
+        CheckConstraint(
+            "((lease_owner IS NOT NULL AND lease_token_hash IS NOT NULL AND lease_expires_at IS NOT NULL) "
+            "OR (lease_owner IS NULL AND lease_token_hash IS NULL AND lease_expires_at IS NULL))",
+            name="ck_market_collection_lease_state",
+        ),
+        Index(
+            "ix_market_collection_claimable",
+            "enabled",
+            "next_scheduled_at",
+            "available_at",
+        ),
+        Index(
+            "ix_market_collection_lease_expiry", "lease_expires_at"
+        ),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(64), primary_key=True)
+    source_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.sources.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    series_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    enabled = Column(Boolean, nullable=False, default=False, server_default="false")
+    poll_interval_seconds = Column(Integer, nullable=False)
+    max_attempts = Column(Integer, nullable=False, default=3, server_default="3")
+    next_scheduled_at = Column(DateTime(timezone=True), nullable=False)
+    available_at = Column(DateTime(timezone=True), nullable=False)
+    consecutive_failures = Column(Integer, nullable=False, default=0, server_default="0")
+    lease_owner = Column(String(128), nullable=True)
+    lease_token_hash = Column(String(64), nullable=True)
+    lease_generation = Column(BigInteger, nullable=False, default=0, server_default="0")
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    last_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    last_success_at = Column(DateTime(timezone=True), nullable=True)
+    last_error = Column(Text, nullable=True)
+    config = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class MarketCollectionAttemptRecord(Base):
+    """Auditable execution attempt for one scheduled collection occurrence."""
+
+    __tablename__ = "collection_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "definition_id",
+            "scheduled_for",
+            "attempt_number",
+            name="uq_market_collection_attempt",
+        ),
+        CheckConstraint(
+            "attempt_number > 0", name="ck_market_collection_attempt_positive"
+        ),
+        CheckConstraint(
+            "status IN ('running', 'succeeded', 'failed', 'missed')",
+            name="ck_market_collection_attempt_status",
+        ),
+        Index(
+            "ix_market_collection_attempt_definition_schedule",
+            "definition_id",
+            "scheduled_for",
+        ),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(64), primary_key=True)
+    definition_id = Column(
+        String(64),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.collection_definitions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    scheduled_for = Column(DateTime(timezone=True), nullable=False)
+    attempt_number = Column(Integer, nullable=False)
+    lease_generation = Column(BigInteger, nullable=False)
+    owner_id = Column(String(128), nullable=False)
+    status = Column(String(16), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    ingestion_run_id = Column(
+        String(64),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.ingestion_runs.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    error = Column(Text, nullable=True)
+    evidence = Column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+
+
+class MarketProviderRateBudgetRecord(Base):
+    """Database-coordinated minimum-spacing budget for provider poll requests."""
+
+    __tablename__ = "provider_rate_budgets"
+    __table_args__ = ({"schema": MARKET_DATA_SCHEMA},)
+
+    provider = Column(String(64), primary_key=True)
+    next_request_at = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 
 class MarketGapEvidenceRecord(Base):
@@ -309,10 +521,14 @@ class MarketDatasetSeriesRecord(Base):
 __all__ = [
     "MARKET_DATA_SCHEMA",
     "MarketCandleVersionRecord",
+    "MarketCollectionAttemptRecord",
+    "MarketCollectionDefinitionRecord",
     "MarketDataIngestionRunRecord",
     "MarketDataSeriesRecord",
     "MarketDataSourceRecord",
     "MarketDatasetRecord",
     "MarketDatasetSeriesRecord",
     "MarketGapEvidenceRecord",
+    "MarketOpenInterestVersionRecord",
+    "MarketProviderRateBudgetRecord",
 ]

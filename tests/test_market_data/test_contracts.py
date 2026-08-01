@@ -7,13 +7,18 @@ import pytest
 
 from market_data.contracts import (
     CANDLE_FACT_TYPE,
+    OPEN_INTEREST_FACT_TYPE,
     CandleFact,
     CandleRecord,
+    InstrumentRole,
     MarketDataRequirement,
     MarketDataWindow,
+    OpenInterestFact,
+    OpenInterestRecord,
     SourceIdentity,
     build_candle_material_hash,
     build_dataset_identity_hash,
+    build_open_interest_material_hash,
     build_quality_hash,
 )
 
@@ -121,6 +126,84 @@ def test_candle_requirements_and_windows_require_a_timeframe() -> None:
             fact_type=CANDLE_FACT_TYPE,
             start=datetime(2024, 1, 1, tzinfo=UTC),
             end=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+
+
+def test_open_interest_requirement_requires_causal_staleness_and_no_timeframe() -> None:
+    requirement = MarketDataRequirement(
+        key="open_interest",
+        fact_type=OPEN_INTEREST_FACT_TYPE,
+        instrument_role=InstrumentRole.PRIMARY,
+        max_staleness_seconds=300,
+    )
+
+    assert requirement.contract_version == "derivatives.open_interest.v1"
+    assert requirement.alignment.value == "latest_known"
+    assert requirement.timeframe_seconds is None
+    with pytest.raises(ValueError, match="requires max_staleness"):
+        MarketDataRequirement(fact_type=OPEN_INTEREST_FACT_TYPE)
+    with pytest.raises(ValueError, match="do not have a timeframe"):
+        MarketDataRequirement(
+            fact_type=OPEN_INTEREST_FACT_TYPE,
+            timeframe_seconds=60,
+            max_staleness_seconds=300,
+        )
+
+
+def test_open_interest_fact_exposes_schedule_without_inventing_provider_time() -> None:
+    sample_time = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+    received_at = sample_time + timedelta(seconds=5)
+    fact = OpenInterestFact(
+        sample_time=sample_time,
+        value=12_345,
+        received_at=received_at,
+        accepted_at=received_at,
+        known_at=received_at,
+        known_at_method="platform_acceptance",
+    )
+    record = OpenInterestRecord(
+        series_id=12,
+        revision=1,
+        market_commit_seq=2,
+        ingestion_run_id="poll-1",
+        source_identity_key="coinbase-source",
+        source=SourceIdentity("COINBASE", "COINBASE_DIRECT", "poll_api", "v1"),
+        provenance={"provider_event_time_available": False},
+        fact=fact,
+    )
+
+    assert fact.sample_time_method == "collector_schedule"
+    assert fact.source_published_at is None
+    assert fact.known_at == received_at
+    identity = {
+        "instrument_id": "instrument-1",
+        "fact_type": OPEN_INTEREST_FACT_TYPE,
+        "timeframe_seconds": None,
+        "contract_version": "derivatives.open_interest.v1",
+    }
+    assert build_open_interest_material_hash(
+        series_identity=identity,
+        records=[record],
+    )
+
+
+def test_open_interest_fact_rejects_negative_or_future_schedule() -> None:
+    sample_time = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+    with pytest.raises(ValueError, match="nonnegative"):
+        OpenInterestFact(
+            sample_time=sample_time,
+            value=-1,
+            accepted_at=sample_time,
+            known_at=sample_time,
+            known_at_method="platform_acceptance",
+        )
+    with pytest.raises(ValueError, match="must not precede sample_time"):
+        OpenInterestFact(
+            sample_time=sample_time,
+            value=1,
+            accepted_at=sample_time - timedelta(seconds=1),
+            known_at=sample_time - timedelta(seconds=1),
+            known_at_method="platform_acceptance",
         )
 
 

@@ -255,9 +255,12 @@ class Database:
             try:
                 self._assert_market_data_cutover_state(conn)
                 self._create_missing_schemas(conn)
+                self._ensure_market_data_commit_sequence(conn)
+                self._assert_market_commit_clock(conn, existing_only=True)
                 self._assert_retired_tables_absent(conn)
                 self._create_missing_tables(conn)
-                self._ensure_market_data_hypertable(conn)
+                self._ensure_market_data_hypertables(conn)
+                self._assert_market_commit_clock(conn, existing_only=False)
                 self._assert_columns(conn)
                 self._assert_required_constraints(conn)
                 self._create_missing_indexes(conn)
@@ -333,8 +336,50 @@ class Database:
             "The canonical service will not start with dual candle ownership."
         )
 
-    def _ensure_market_data_hypertable(self, conn) -> None:
-        """Require TimescaleDB and make canonical candle versions a hypertable."""
+    def _ensure_market_data_commit_sequence(self, conn) -> None:
+        """Create the one causal commit clock shared by every typed fact table."""
+
+        conn.execute(text("CREATE SEQUENCE IF NOT EXISTS market.fact_commit_seq"))
+
+    def _assert_market_commit_clock(self, conn, *, existing_only: bool) -> None:
+        """Reject per-table identity clocks before heterogeneous facts can start."""
+
+        for table_name in ("candle_versions", "open_interest_versions"):
+            table_ref = f"market.{table_name}"
+            existing = conn.execute(
+                text("SELECT to_regclass(:table_ref)"), {"table_ref": table_ref}
+            ).scalar_one()
+            if existing is None:
+                if existing_only:
+                    continue
+                raise RuntimeError(f"Canonical table {table_ref} is missing")
+            identity, expression = conn.execute(
+                text(
+                    """
+                    SELECT attribute.attidentity,
+                           pg_get_expr(default_value.adbin, default_value.adrelid) AS default_expression
+                    FROM pg_attribute AS attribute
+                    LEFT JOIN pg_attrdef AS default_value
+                      ON default_value.adrelid = attribute.attrelid
+                     AND default_value.adnum = attribute.attnum
+                    WHERE attribute.attrelid = CAST(:table_ref AS regclass)
+                      AND attribute.attname = 'market_commit_seq'
+                      AND NOT attribute.attisdropped
+                    """
+                ),
+                {"table_ref": table_ref},
+            ).one()
+            expression = str(expression or "")
+            identity = str(identity or "")
+            if identity or "market.fact_commit_seq" not in expression:
+                raise RuntimeError(
+                    f"Table '{table_ref}' does not use the shared market fact commit clock. "
+                    "Stop backend and collector processes, then run "
+                    "scripts/db/manual_migration_market_fact_commit_clock_v1.sql."
+                )
+
+    def _ensure_market_data_hypertables(self, conn) -> None:
+        """Require TimescaleDB and make typed time-series fact tables hypertables."""
 
         extension_version = conn.execute(
             text("SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'")
@@ -344,29 +389,34 @@ class Database:
                 "TimescaleDB is required for canonical market-data storage. "
                 "Install the extension before starting the backend."
             )
-        conn.execute(
-            text(
-                "SELECT create_hypertable("
-                "'market.candle_versions', "
-                "by_range('candle_open_time'), "
-                "if_not_exists => TRUE, "
-                "migrate_data => TRUE"
-                ")"
+        for table_name, time_column in (
+            ("candle_versions", "candle_open_time"),
+            ("open_interest_versions", "sample_time"),
+        ):
+            conn.execute(
+                text(
+                    "SELECT create_hypertable("
+                    f"'market.{table_name}', "
+                    f"by_range('{time_column}'), "
+                    "if_not_exists => TRUE, "
+                    "migrate_data => TRUE"
+                    ")"
+                )
             )
-        )
-        is_hypertable = conn.execute(
-            text(
-                "SELECT EXISTS ("
-                "SELECT 1 FROM timescaledb_information.hypertables "
-                "WHERE hypertable_schema = 'market' "
-                "AND hypertable_name = 'candle_versions'"
-                ")"
-            )
-        ).scalar_one()
-        if not bool(is_hypertable):
-            raise RuntimeError(
-                "Canonical table market.candle_versions was not created as a hypertable."
-            )
+            is_hypertable = conn.execute(
+                text(
+                    "SELECT EXISTS ("
+                    "SELECT 1 FROM timescaledb_information.hypertables "
+                    "WHERE hypertable_schema = 'market' "
+                    "AND hypertable_name = :table_name"
+                    ")"
+                ),
+                {"table_name": table_name},
+            ).scalar_one()
+            if not bool(is_hypertable):
+                raise RuntimeError(
+                    f"Canonical table market.{table_name} was not created as a hypertable."
+                )
 
     def _ensure_market_data_immutability(self, conn) -> None:
         """Protect append-only facts and frozen datasets from in-place mutation."""
@@ -390,6 +440,7 @@ class Database:
             "sources",
             "series",
             "candle_versions",
+            "open_interest_versions",
             "gap_evidence",
             "datasets",
             "dataset_series",

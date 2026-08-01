@@ -13,12 +13,18 @@ from typing import Any, Optional
 
 from market_data.contracts import (
     CANDLE_FACT_TYPE,
+    OPEN_INTEREST_FACT_TYPE,
+    OPEN_INTEREST_FACT_VERSION,
     CandleFact,
     CandleRecord,
     DatasetSeriesRequest,
+    MarketDataRecord,
+    OpenInterestFact,
+    OpenInterestRecord,
     SourceIdentity,
     build_candle_material_hash,
     build_dataset_identity_hash,
+    build_open_interest_material_hash,
     build_provenance_hash,
     build_quality_hash,
 )
@@ -86,6 +92,41 @@ def _row_to_record(row: Mapping[str, Any]) -> CandleRecord:
     )
 
 
+def _row_to_open_interest_record(row: Mapping[str, Any]) -> OpenInterestRecord:
+    fact = OpenInterestFact(
+        sample_time=row["sample_time"],
+        sample_time_method=row["sample_time_method"],
+        value=row["open_interest"],
+        unit=row["unit"],
+        source_published_at=row.get("source_published_at"),
+        received_at=row.get("received_at"),
+        accepted_at=row["accepted_at"],
+        known_at=row["known_at"],
+        known_at_method=row["known_at_method"],
+    )
+    stored_hash = str(row.get("row_hash") or "")
+    if fact.row_hash != stored_hash:
+        raise RuntimeError(
+            "market_data_corrupt: open-interest row hash mismatch "
+            f"series_id={row.get('series_id')} sample_time={_iso(fact.sample_time)}"
+        )
+    return OpenInterestRecord(
+        series_id=int(row["series_id"]),
+        revision=int(row["revision"]),
+        market_commit_seq=int(row["market_commit_seq"]),
+        ingestion_run_id=str(row["ingestion_run_id"]),
+        source_identity_key=str(row["source_identity_key"]),
+        source=SourceIdentity(
+            provider=str(row["source_provider"]),
+            venue=str(row["source_venue"]),
+            source_kind=str(row["source_kind"]),
+            adapter_version=str(row["source_adapter_version"]),
+        ),
+        provenance=dict(row.get("provenance") or {}),
+        fact=fact,
+    )
+
+
 class PostgresMarketDataRepository:
     """Single PostgreSQL owner for accepted candle facts and frozen datasets."""
 
@@ -93,14 +134,22 @@ class PostgresMarketDataRepository:
         """Return the latest accepted market-fact commit sequence."""
 
         with db.session() as session:
-            return int(
-                session.execute(
-                    text(
-                        "SELECT COALESCE(MAX(market_commit_seq), 0) "
-                        "FROM market.candle_versions"
+            return self._current_commit_seq_with_session(session)
+
+    @staticmethod
+    def _current_commit_seq_with_session(session) -> int:
+        return int(
+            session.execute(
+                text(
+                    """
+                    SELECT GREATEST(
+                        COALESCE((SELECT MAX(market_commit_seq) FROM market.candle_versions), 0),
+                        COALESCE((SELECT MAX(market_commit_seq) FROM market.open_interest_versions), 0)
                     )
-                ).scalar_one()
-            )
+                    """
+                )
+            ).scalar_one()
+        )
 
     def list_series(self, *, instrument_id: Optional[str] = None) -> list[dict[str, Any]]:
         """Return canonical logical series and accepted-version counts."""
@@ -121,16 +170,40 @@ class PostgresMarketDataRepository:
                     SELECT series.id, series.identity_key, series.instrument_id,
                            series.fact_type, series.timeframe_seconds,
                            series.contract_version,
-                           count(versions.market_commit_seq) AS version_count,
-                           count(DISTINCT versions.candle_open_time) AS candle_count,
-                           min(versions.candle_open_time) AS first_open_time,
-                           max(versions.candle_open_time) AS last_open_time,
-                           max(versions.market_commit_seq) AS max_commit_seq
+                           COALESCE(candles.version_count, 0)
+                             + COALESCE(open_interest.version_count, 0) AS version_count,
+                           COALESCE(candles.fact_count, 0)
+                             + COALESCE(open_interest.fact_count, 0) AS fact_count,
+                           COALESCE(candles.fact_count, 0) AS candle_count,
+                           COALESCE(open_interest.fact_count, 0) AS observation_count,
+                           COALESCE(candles.first_fact_time, open_interest.first_fact_time)
+                             AS first_fact_time,
+                           COALESCE(candles.last_fact_time, open_interest.last_fact_time)
+                             AS last_fact_time,
+                           GREATEST(
+                             COALESCE(candles.max_commit_seq, 0),
+                             COALESCE(open_interest.max_commit_seq, 0)
+                           ) AS max_commit_seq
                     FROM market.series AS series
-                    LEFT JOIN market.candle_versions AS versions
-                      ON versions.series_id = series.id
+                    LEFT JOIN LATERAL (
+                        SELECT count(*) AS version_count,
+                               count(DISTINCT candle_open_time) AS fact_count,
+                               min(candle_open_time) AS first_fact_time,
+                               max(candle_open_time) AS last_fact_time,
+                               max(market_commit_seq) AS max_commit_seq
+                        FROM market.candle_versions
+                        WHERE series_id = series.id
+                    ) AS candles ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT count(*) AS version_count,
+                               count(DISTINCT sample_time) AS fact_count,
+                               min(sample_time) AS first_fact_time,
+                               max(sample_time) AS last_fact_time,
+                               max(market_commit_seq) AS max_commit_seq
+                        FROM market.open_interest_versions
+                        WHERE series_id = series.id
+                    ) AS open_interest ON TRUE
                     {where_sql}
-                    GROUP BY series.id
                     ORDER BY series.instrument_id, series.fact_type,
                              series.timeframe_seconds NULLS FIRST, series.id
                     """
@@ -259,6 +332,15 @@ class PostgresMarketDataRepository:
             raise ValueError("market_data_series_invalid: complete series identity is required")
         if fact_type == CANDLE_FACT_TYPE and (timeframe is None or timeframe <= 0):
             raise ValueError("market_data_series_invalid: candle timeframe must be positive")
+        if fact_type == OPEN_INTEREST_FACT_TYPE:
+            if timeframe is not None:
+                raise ValueError(
+                    "market_data_series_invalid: open-interest series has no timeframe"
+                )
+            if contract_version != OPEN_INTEREST_FACT_VERSION:
+                raise ValueError(
+                    "market_data_series_invalid: unsupported open-interest contract version"
+                )
 
         identity_key = _stable_hash(
             {
@@ -411,7 +493,9 @@ class PostgresMarketDataRepository:
             source_id=source_id,
             request=request,
             source_revision=source_revision,
-            rows=rows,
+            requested_start=rows[0].open_time,
+            requested_end=rows[-1].close_time,
+            requested_count=len(rows),
         )
         try:
             outcome = self._ingest_candle_rows(
@@ -425,6 +509,74 @@ class PostgresMarketDataRepository:
             raise
         return outcome
 
+    def ingest_open_interest(
+        self,
+        *,
+        series_id: int,
+        source_id: int,
+        facts: Iterable[OpenInterestFact],
+        request: Optional[Mapping[str, Any]] = None,
+        provenance: Optional[Mapping[str, Any]] = None,
+        source_revision: Optional[str] = None,
+        ingestion_run_id: Optional[str] = None,
+        allow_corrections: bool = True,
+        collection_fence: Optional[Mapping[str, Any]] = None,
+    ) -> IngestionOutcome:
+        series_id = int(series_id)
+        source_id = int(source_id)
+        rows = sorted(list(facts), key=lambda item: item.sample_time)
+        if series_id <= 0 or source_id <= 0:
+            raise ValueError(
+                "market_data_ingest_invalid: series_id and source_id must be positive"
+            )
+        if not rows:
+            raise ValueError(
+                "market_data_ingest_invalid: at least one open-interest fact is required"
+            )
+        duplicate_times = [
+            current.sample_time
+            for previous, current in zip(rows, rows[1:])
+            if previous.sample_time == current.sample_time
+        ]
+        if duplicate_times:
+            raise ValueError(
+                "market_data_ingest_invalid: duplicate open-interest sample_time "
+                f"{_iso(duplicate_times[0])}"
+            )
+        run_id = str(ingestion_run_id or uuid.uuid4().hex).strip()
+        if not run_id or len(run_id) > 64:
+            raise ValueError("market_data_ingest_invalid: ingestion_run_id is invalid")
+        series = self._get_series(series_id)
+        if (
+            str(series["fact_type"]) != OPEN_INTEREST_FACT_TYPE
+            or str(series["contract_version"]) != OPEN_INTEREST_FACT_VERSION
+            or series.get("timeframe_seconds") is not None
+        ):
+            raise ValueError(
+                f"market_data_ingest_invalid: series_id={series_id} is not an open-interest v1 series"
+            )
+        self._start_ingestion_run(
+            run_id=run_id,
+            source_id=source_id,
+            request=request,
+            source_revision=source_revision,
+            requested_start=rows[0].sample_time,
+            requested_end=rows[-1].sample_time,
+            requested_count=len(rows),
+        )
+        try:
+            return self._ingest_open_interest_rows(
+                run_id=run_id,
+                series_id=series_id,
+                rows=rows,
+                provenance=dict(provenance or {}),
+                allow_corrections=bool(allow_corrections),
+                collection_fence=collection_fence,
+            )
+        except Exception as exc:
+            self._fail_ingestion_run(run_id, exc)
+            raise
+
     def _start_ingestion_run(
         self,
         *,
@@ -432,7 +584,9 @@ class PostgresMarketDataRepository:
         source_id: int,
         request: Optional[Mapping[str, Any]],
         source_revision: Optional[str],
-        rows: Sequence[CandleFact],
+        requested_start: datetime,
+        requested_end: datetime,
+        requested_count: int,
     ) -> None:
         with db.session() as session:
             session.execute(
@@ -452,11 +606,222 @@ class PostgresMarketDataRepository:
                     "source_id": source_id,
                     "request": _json_text(request),
                     "source_revision": str(source_revision).strip() if source_revision else None,
-                    "requested_start": rows[0].open_time,
-                    "requested_end": rows[-1].close_time,
-                    "requested_count": len(rows),
+                    "requested_start": requested_start,
+                    "requested_end": requested_end,
+                    "requested_count": int(requested_count),
                 },
             )
+
+    def _ingest_open_interest_rows(
+        self,
+        *,
+        run_id: str,
+        series_id: int,
+        rows: Sequence[OpenInterestFact],
+        provenance: Mapping[str, Any],
+        allow_corrections: bool,
+        collection_fence: Optional[Mapping[str, Any]],
+    ) -> IngestionOutcome:
+        with db.session() as session:
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(:series_id)"),
+                {"series_id": series_id},
+            )
+            if collection_fence is not None:
+                definition_id = str(collection_fence.get("definition_id") or "").strip()
+                owner_id = str(collection_fence.get("owner_id") or "").strip()
+                lease_token = str(collection_fence.get("lease_token") or "").strip()
+                try:
+                    fenced_source_id = int(collection_fence.get("source_id"))
+                    lease_generation = int(collection_fence.get("lease_generation"))
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError(
+                        "market_collection_fence_invalid: source and lease generation are required"
+                    ) from exc
+                if not definition_id or not owner_id or not lease_token:
+                    raise ValueError(
+                        "market_collection_fence_invalid: complete ownership is required"
+                    )
+                ownership = session.execute(
+                    text(
+                        """
+                        SELECT source_id, series_id, lease_owner, lease_token_hash,
+                               lease_generation, lease_expires_at > now() AS lease_current
+                        FROM market.collection_definitions
+                        WHERE id = :definition_id
+                        FOR UPDATE
+                        """
+                    ),
+                    {"definition_id": definition_id},
+                ).mappings().first()
+                expected_token_hash = hashlib.sha256(
+                    lease_token.encode("utf-8")
+                ).hexdigest()
+                if (
+                    ownership is None
+                    or int(ownership["source_id"]) != fenced_source_id
+                    or int(ownership["series_id"]) != series_id
+                    or str(ownership["lease_owner"] or "") != owner_id
+                    or str(ownership["lease_token_hash"] or "") != expected_token_hash
+                    or int(ownership["lease_generation"]) != lease_generation
+                    or not bool(ownership["lease_current"])
+                ):
+                    raise RuntimeError(
+                        "market_collection_ownership_lost: rejected stale fact mutation"
+                    )
+            session.execute(
+                text(
+                    """
+                    CREATE TEMP TABLE market_open_interest_ingest_stage (
+                        sample_time timestamptz PRIMARY KEY,
+                        sample_time_method varchar(64) NOT NULL,
+                        open_interest double precision NOT NULL,
+                        unit varchar(32) NOT NULL,
+                        source_published_at timestamptz,
+                        received_at timestamptz,
+                        accepted_at timestamptz NOT NULL,
+                        known_at timestamptz NOT NULL,
+                        known_at_method varchar(64) NOT NULL,
+                        row_hash varchar(64) NOT NULL
+                    ) ON COMMIT DROP
+                    """
+                )
+            )
+            session.execute(
+                text(
+                    """
+                    INSERT INTO market_open_interest_ingest_stage (
+                        sample_time, sample_time_method, open_interest, unit,
+                        source_published_at, received_at, accepted_at, known_at,
+                        known_at_method, row_hash
+                    ) VALUES (
+                        :sample_time, :sample_time_method, :value, :unit,
+                        :source_published_at, :received_at, :accepted_at, :known_at,
+                        :known_at_method, :row_hash
+                    )
+                    """
+                ),
+                [fact.to_dict() for fact in rows],
+            )
+            conflicting_count = int(
+                session.execute(
+                    text(
+                        """
+                        SELECT count(*)
+                        FROM market_open_interest_ingest_stage AS stage
+                        JOIN LATERAL (
+                            SELECT current.row_hash
+                            FROM market.open_interest_versions AS current
+                            WHERE current.series_id = :series_id
+                              AND current.sample_time = stage.sample_time
+                            ORDER BY current.revision DESC
+                            LIMIT 1
+                        ) AS latest ON TRUE
+                        WHERE latest.row_hash IS DISTINCT FROM stage.row_hash
+                        """
+                    ),
+                    {"series_id": series_id},
+                ).scalar_one()
+            )
+            if conflicting_count and not allow_corrections:
+                raise RuntimeError(
+                    "market_data_correction_rejected: immutable consumer path cannot "
+                    f"accept {conflicting_count} changed open-interest sample(s) "
+                    f"series_id={series_id}"
+                )
+            inserted = session.execute(
+                text(
+                    """
+                    INSERT INTO market.open_interest_versions (
+                        series_id, sample_time, revision, ingestion_run_id,
+                        sample_time_method, open_interest, unit,
+                        source_published_at, received_at, accepted_at, known_at,
+                        known_at_method, provenance, row_hash
+                    )
+                    SELECT
+                        :series_id,
+                        stage.sample_time,
+                        COALESCE(latest.revision, 0) + 1,
+                        :run_id,
+                        stage.sample_time_method,
+                        stage.open_interest,
+                        stage.unit,
+                        stage.source_published_at,
+                        stage.received_at,
+                        stage.accepted_at,
+                        stage.known_at,
+                        stage.known_at_method,
+                        CAST(:provenance AS jsonb),
+                        stage.row_hash
+                    FROM market_open_interest_ingest_stage AS stage
+                    LEFT JOIN LATERAL (
+                        SELECT current.revision, current.row_hash
+                        FROM market.open_interest_versions AS current
+                        WHERE current.series_id = :series_id
+                          AND current.sample_time = stage.sample_time
+                        ORDER BY current.revision DESC
+                        LIMIT 1
+                    ) AS latest ON TRUE
+                    WHERE latest.row_hash IS DISTINCT FROM stage.row_hash
+                    RETURNING revision, market_commit_seq
+                    """
+                ),
+                {
+                    "series_id": series_id,
+                    "run_id": run_id,
+                    "provenance": _json_text(provenance),
+                },
+            ).mappings().all()
+            new_count = sum(1 for row in inserted if int(row["revision"]) == 1)
+            corrected_count = sum(
+                1 for row in inserted if int(row["revision"]) > 1
+            )
+            noop_count = len(rows) - len(inserted)
+            max_commit_seq = int(
+                session.execute(
+                    text(
+                        """
+                        SELECT COALESCE(MAX(latest.market_commit_seq), 0)
+                        FROM market_open_interest_ingest_stage AS stage
+                        JOIN LATERAL (
+                            SELECT current.market_commit_seq
+                            FROM market.open_interest_versions AS current
+                            WHERE current.series_id = :series_id
+                              AND current.sample_time = stage.sample_time
+                            ORDER BY current.revision DESC
+                            LIMIT 1
+                        ) AS latest ON TRUE
+                        """
+                    ),
+                    {"series_id": series_id},
+                ).scalar_one()
+            )
+            session.execute(
+                text(
+                    """
+                    UPDATE market.ingestion_runs
+                    SET status = 'completed', finished_at = now(),
+                        inserted_count = :inserted_count,
+                        corrected_count = :corrected_count,
+                        noop_count = :noop_count
+                    WHERE id = :run_id AND status = 'running'
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "inserted_count": new_count,
+                    "corrected_count": corrected_count,
+                    "noop_count": noop_count,
+                },
+            )
+        return IngestionOutcome(
+            ingestion_run_id=run_id,
+            requested_count=len(rows),
+            inserted_count=new_count,
+            corrected_count=corrected_count,
+            noop_count=noop_count,
+            max_commit_seq=max_commit_seq,
+        )
 
     def _ingest_candle_rows(
         self,
@@ -730,6 +1095,79 @@ class PostgresMarketDataRepository:
                 known_at_lte=known_at_lte,
             )
 
+    @staticmethod
+    def _read_open_interest_with_session(
+        session,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int],
+        known_at_lte: Optional[datetime],
+    ) -> list[OpenInterestRecord]:
+        request = DatasetSeriesRequest(series_id=series_id, start=start, end=end)
+        predicates = [
+            "series_id = :series_id",
+            "sample_time >= :start",
+            "sample_time < :end",
+        ]
+        params: dict[str, Any] = {
+            "series_id": request.series_id,
+            "start": request.start,
+            "end": request.end,
+        }
+        if as_of_commit_seq is not None:
+            predicates.append("market_commit_seq <= :as_of_commit_seq")
+            params["as_of_commit_seq"] = int(as_of_commit_seq)
+        if known_at_lte is not None:
+            predicates.append("known_at <= :known_at_lte")
+            params["known_at_lte"] = known_at_lte
+        rows = session.execute(
+            text(
+                f"""
+                WITH visible AS (
+                    SELECT DISTINCT ON (sample_time) *
+                    FROM market.open_interest_versions
+                    WHERE {' AND '.join(predicates)}
+                    ORDER BY sample_time, revision DESC
+                )
+                SELECT visible.*,
+                       sources.identity_key AS source_identity_key,
+                       sources.provider AS source_provider,
+                       sources.venue AS source_venue,
+                       sources.source_kind,
+                       sources.adapter_version AS source_adapter_version
+                FROM visible
+                JOIN market.ingestion_runs AS runs
+                  ON runs.id = visible.ingestion_run_id
+                JOIN market.sources AS sources
+                  ON sources.id = runs.source_id
+                ORDER BY visible.sample_time
+                """
+            ),
+            params,
+        ).mappings().all()
+        return [_row_to_open_interest_record(row) for row in rows]
+
+    def read_open_interest(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+    ) -> list[OpenInterestRecord]:
+        with db.session() as session:
+            return self._read_open_interest_with_session(
+                session,
+                series_id=series_id,
+                start=start,
+                end=end,
+                as_of_commit_seq=as_of_commit_seq,
+                known_at_lte=known_at_lte,
+            )
+
     def record_gap_evidence(
         self,
         *,
@@ -760,14 +1198,7 @@ class PostgresMarketDataRepository:
         with db.session() as session:
             watermark = detected_as_of_commit_seq
             if watermark is None:
-                watermark = int(
-                    session.execute(
-                        text(
-                            "SELECT COALESCE(MAX(market_commit_seq), 0) "
-                            "FROM market.candle_versions"
-                        )
-                    ).scalar_one()
-                )
+                watermark = self._current_commit_seq_with_session(session)
             session.execute(
                 text(
                     """
@@ -855,14 +1286,7 @@ class PostgresMarketDataRepository:
         with db.session() as session:
             watermark = as_of_commit_seq
             if watermark is None:
-                watermark = int(
-                    session.execute(
-                        text(
-                            "SELECT COALESCE(MAX(market_commit_seq), 0) "
-                            "FROM market.candle_versions"
-                        )
-                    ).scalar_one()
-                )
+                watermark = self._current_commit_seq_with_session(session)
             return self._gap_evidence_with_session(
                 session,
                 series_id=request.series_id,
@@ -895,14 +1319,7 @@ class PostgresMarketDataRepository:
 
         with db.session() as session:
             session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
-            watermark = int(
-                session.execute(
-                    text(
-                        "SELECT COALESCE(MAX(market_commit_seq), 0) "
-                        "FROM market.candle_versions"
-                    )
-                ).scalar_one()
-            )
+            watermark = self._current_commit_seq_with_session(session)
             manifest_series: list[dict[str, Any]] = []
             for item in normalized:
                 identity = session.execute(
@@ -920,17 +1337,33 @@ class PostgresMarketDataRepository:
                     raise ValueError(
                         f"market_dataset_invalid: unknown series_id={item.series_id}"
                     )
-                records = self._read_candles_with_session(
-                    session,
-                    series_id=item.series_id,
-                    start=item.start,
-                    end=item.end,
-                    as_of_commit_seq=watermark,
-                    known_at_lte=None,
-                )
+                fact_type = str(identity["fact_type"])
+                if fact_type == CANDLE_FACT_TYPE:
+                    records: list[MarketDataRecord] = self._read_candles_with_session(
+                        session,
+                        series_id=item.series_id,
+                        start=item.start,
+                        end=item.end,
+                        as_of_commit_seq=watermark,
+                        known_at_lte=None,
+                    )
+                elif fact_type == OPEN_INTEREST_FACT_TYPE:
+                    records = self._read_open_interest_with_session(
+                        session,
+                        series_id=item.series_id,
+                        start=item.start,
+                        end=item.end,
+                        as_of_commit_seq=watermark,
+                        known_at_lte=None,
+                    )
+                else:
+                    raise RuntimeError(
+                        "market_dataset_unsupported_fact: "
+                        f"series_id={item.series_id} fact_type={fact_type}"
+                    )
                 if not records:
                     raise RuntimeError(
-                        "market_dataset_incomplete: no candle facts for "
+                        "market_dataset_incomplete: no facts for "
                         f"series_id={item.series_id} start={_iso(item.start)} "
                         f"end={_iso(item.end)}"
                     )
@@ -962,9 +1395,16 @@ class PostgresMarketDataRepository:
                         "range_end": _iso(item.end),
                         "max_commit_seq": watermark,
                         "row_count": len(records),
-                        "material_hash": build_candle_material_hash(
-                            series_identity=series_identity,
-                            records=records,
+                        "material_hash": (
+                            build_candle_material_hash(
+                                series_identity=series_identity,
+                                records=records,
+                            )
+                            if fact_type == CANDLE_FACT_TYPE
+                            else build_open_interest_material_hash(
+                                series_identity=series_identity,
+                                records=records,
+                            )
                         ),
                         "provenance_hash": build_provenance_hash(records),
                         "source_summary": {
@@ -1046,14 +1486,17 @@ class PostgresMarketDataRepository:
         known_at_lte: Optional[datetime] = None,
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
-    ) -> list[CandleRecord]:
+    ) -> list[MarketDataRecord]:
         with db.session() as session:
             entry = session.execute(
                 text(
                     """
-                    SELECT range_start, range_end, max_commit_seq
-                    FROM market.dataset_series
-                    WHERE dataset_id = :dataset_id AND series_id = :series_id
+                    SELECT dataset_series.range_start, dataset_series.range_end,
+                           dataset_series.max_commit_seq, series.fact_type
+                    FROM market.dataset_series AS dataset_series
+                    JOIN market.series AS series ON series.id = dataset_series.series_id
+                    WHERE dataset_series.dataset_id = :dataset_id
+                      AND dataset_series.series_id = :series_id
                     """
                 ),
                 {"dataset_id": str(dataset_id), "series_id": int(series_id)},
@@ -1073,13 +1516,28 @@ class PostgresMarketDataRepository:
                     "market_dataset_range_expansion_forbidden: requested range is outside "
                     f"dataset_id={dataset_id} series_id={series_id} frozen bounds"
                 )
-            return self._read_candles_with_session(
-                session,
-                series_id=int(series_id),
-                start=requested.start,
-                end=requested.end,
-                as_of_commit_seq=int(entry["max_commit_seq"]),
-                known_at_lte=known_at_lte,
+            fact_type = str(entry["fact_type"])
+            if fact_type == CANDLE_FACT_TYPE:
+                return self._read_candles_with_session(
+                    session,
+                    series_id=int(series_id),
+                    start=requested.start,
+                    end=requested.end,
+                    as_of_commit_seq=int(entry["max_commit_seq"]),
+                    known_at_lte=known_at_lte,
+                )
+            if fact_type == OPEN_INTEREST_FACT_TYPE:
+                return self._read_open_interest_with_session(
+                    session,
+                    series_id=int(series_id),
+                    start=requested.start,
+                    end=requested.end,
+                    as_of_commit_seq=int(entry["max_commit_seq"]),
+                    known_at_lte=known_at_lte,
+                )
+            raise RuntimeError(
+                "market_dataset_unsupported_fact: "
+                f"series_id={series_id} fact_type={fact_type}"
             )
 
 

@@ -126,7 +126,17 @@ class IndicatorExecutionEngine:
         bar_time: datetime,
         include_overlays: bool = True,
         include_details: bool = True,
+        market_data_inputs: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> EngineFrame:
+        resolved_market_inputs = dict(market_data_inputs or {})
+        unknown_consumers = sorted(
+            set(resolved_market_inputs) - set(self._indicators_by_id)
+        )
+        if unknown_consumers:
+            raise RuntimeError(
+                "indicator_market_data_input_invalid: unknown indicator IDs "
+                + ", ".join(unknown_consumers)
+            )
         by_ref: Dict[OutputRef, RuntimeOutput] = {}
         flat: Dict[str, RuntimeOutput] = {}
         flat_overlays: Dict[str, RuntimeOverlay] = {}
@@ -138,6 +148,9 @@ class IndicatorExecutionEngine:
             indicator = self._indicators_by_id[indicator_id]
             runtime_spec = self._runtime_specs_by_id[indicator_id]
             inputs = {ref: by_ref[ref] for ref in runtime_spec.dependencies}
+            indicator.bind_market_data_inputs(
+                resolved_market_inputs.get(indicator_id, {})
+            )
             apply_started = time.perf_counter()
             indicator.apply_bar(bar, inputs)
             execution_time_ms = max((time.perf_counter() - apply_started) * 1000.0, 0.0)

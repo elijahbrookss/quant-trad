@@ -466,7 +466,12 @@ def _load_strategy_symbols(
 ) -> List[str]:
     raw_binding = runtime_config.get("dataset_binding")
     deps = build_bot_runtime_deps(
-        dataset_binding=raw_binding if isinstance(raw_binding, Mapping) else None
+        dataset_binding=raw_binding if isinstance(raw_binding, Mapping) else None,
+        market_data_bindings=(
+            runtime_config.get("market_data_bindings")
+            if isinstance(runtime_config.get("market_data_bindings"), Mapping)
+            else None
+        ),
     )
     strategy = deps.fetch_strategy(strategy_id, dict(runtime_config))
     symbols: List[str] = []
@@ -1819,7 +1824,14 @@ def _series_worker(
     runtime = BotRuntime(
         bot_id=bot_id,
         config=child_config,
-        deps=build_bot_runtime_deps(dataset_binding=child_config.get("dataset_binding")),
+        deps=build_bot_runtime_deps(
+            dataset_binding=child_config.get("dataset_binding"),
+            market_data_bindings=(
+                child_config.get("market_data_bindings")
+                if isinstance(child_config.get("market_data_bindings"), Mapping)
+                else None
+            ),
+        ),
     )
 
     def _queue_worker_event(payload: Mapping[str, Any], *, timeout_s: float = 0.25) -> bool:

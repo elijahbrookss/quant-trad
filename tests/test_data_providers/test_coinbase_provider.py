@@ -264,3 +264,68 @@ def test_fetch_from_api_chunks_requests(monkeypatch):
     candle_calls = [call for call in fake_client.calls if call["url_path"] == "/candles"]
     assert len(candle_calls) > 1
     assert len(frame) == len(candle_calls)
+
+
+def test_fetch_open_interest_normalizes_coinbase_future_snapshot():
+    provider = _make_provider(
+        FakeClient(
+            product={
+                "product_id": "BIP-20DEC30-CDE",
+                "product_type": "FUTURE",
+                "future_product_details": {
+                    "open_interest": "12345",
+                    "contract_code": "BIPZ30",
+                    "contract_root_unit": "BTC",
+                    "venue": "CDE",
+                },
+            }
+        )
+    )
+
+    snapshot = provider.fetch_open_interest("BIP-20DEC30-CDE")
+
+    assert snapshot.provider_product_id == "BIP-20DEC30-CDE"
+    assert snapshot.value == 12345.0
+    assert snapshot.unit == "contracts"
+    assert snapshot.provider_event_at is None
+    assert snapshot.source_path == "future_product_details.open_interest"
+    assert snapshot.metadata["provider_event_time_available"] is False
+
+
+def test_fetch_open_interest_rejects_non_future_missing_and_conflicting_values():
+    spot = _make_provider(
+        FakeClient(
+            product={
+                "product_id": "BTC-USD",
+                "product_type": "SPOT",
+                "open_interest": "10",
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="unsupported"):
+        spot.fetch_open_interest("BTC-USD")
+
+    missing = _make_provider(
+        FakeClient(
+            product={
+                "product_id": "BIP-20DEC30-CDE",
+                "product_type": "FUTURE",
+                "future_product_details": {},
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="no open_interest"):
+        missing.fetch_open_interest("BIP-20DEC30-CDE")
+
+    conflict = _make_provider(
+        FakeClient(
+            product={
+                "product_id": "BIP-20DEC30-CDE",
+                "product_type": "FUTURE",
+                "open_interest": "11",
+                "future_product_details": {"open_interest": "12"},
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="values disagree"):
+        conflict.fetch_open_interest("BIP-20DEC30-CDE")

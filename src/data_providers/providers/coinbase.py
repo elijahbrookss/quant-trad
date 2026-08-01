@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
+import math
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -19,6 +22,7 @@ except ImportError:  # pragma: no cover - handled in __init__
 
 from core.logger import logger
 from data_providers.registry import _REGISTRY
+from data_providers.facts import ProviderOpenInterestSnapshot
 from data_providers.services.credential_store import load_credentials
 from .base import BaseDataProvider, InstrumentMetadata, InstrumentType
 
@@ -211,6 +215,85 @@ class CoinbaseProvider(BaseDataProvider):
                 "Ensure the symbol exists and API keys have sufficient access."
             )
         return CoinbaseProduct.from_dict(data)
+
+    def fetch_open_interest(self, symbol: str) -> ProviderOpenInterestSnapshot:
+        """Poll one Coinbase futures product for its current native-contract OI.
+
+        Advanced Trade does not expose an OI event timestamp. This adapter keeps
+        that absence explicit and reports only platform receipt time; the collector
+        later assigns the scheduled sample identity and accepted known-at time.
+        """
+
+        product = self._load_product(symbol)
+        payload = dict(self._last_product_payload or {})
+        product_type = str(product.product_type or "").strip().upper()
+        if product_type != "FUTURE":
+            raise ValueError(
+                "coinbase_open_interest_unsupported: "
+                f"product_id={symbol} product_type={product_type or '<missing>'}"
+            )
+        future_details = (
+            dict(product.future_product_details)
+            if isinstance(product.future_product_details, dict)
+            else {}
+        )
+        candidates = [
+            ("future_product_details.open_interest", future_details.get("open_interest")),
+            ("open_interest", payload.get("open_interest")),
+        ]
+        present = [(path, value) for path, value in candidates if value not in (None, "")]
+        if not present:
+            raise ValueError(
+                "coinbase_open_interest_missing: "
+                f"product_id={symbol} response contains no open_interest field"
+            )
+        numeric_values: list[tuple[str, float]] = []
+        for path, raw in present:
+            if isinstance(raw, bool):
+                raise ValueError(
+                    f"coinbase_open_interest_invalid: product_id={symbol} path={path} is not numeric"
+                )
+            try:
+                value = float(Decimal(str(raw)))
+            except (TypeError, ValueError, InvalidOperation) as exc:
+                raise ValueError(
+                    f"coinbase_open_interest_invalid: product_id={symbol} path={path} value={raw!r}"
+                ) from exc
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(
+                    f"coinbase_open_interest_invalid: product_id={symbol} path={path} must be finite and nonnegative"
+                )
+            numeric_values.append((path, value))
+        distinct_values = {value for _path, value in numeric_values}
+        if len(distinct_values) != 1:
+            raise ValueError(
+                "coinbase_open_interest_conflict: top-level and futures-detail values disagree "
+                f"product_id={symbol}"
+            )
+        source_path, value = numeric_values[0]
+        received_at = dt.datetime.now(dt.timezone.utc)
+        response_hash = hashlib.sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        return ProviderOpenInterestSnapshot(
+            provider_product_id=str(product.product_id or symbol),
+            value=value,
+            received_at=received_at,
+            provider_event_at=None,
+            response_hash=response_hash,
+            source_path=source_path,
+            metadata={
+                "provider_event_time_available": False,
+                "contract_code": future_details.get("contract_code"),
+                "contract_root_unit": future_details.get("contract_root_unit"),
+                "venue": future_details.get("venue"),
+            },
+        )
 
     def get_datasource(self) -> str:
         return "COINBASE"

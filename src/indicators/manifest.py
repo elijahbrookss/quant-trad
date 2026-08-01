@@ -6,6 +6,14 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Literal, Mapping, Sequence
 
+from market_data.contracts import (
+    CANDLE_FACT_TYPE,
+    CANDLE_FACT_VERSION,
+    InstrumentRole,
+    MarketDataAlignment,
+    MarketDataRequirement,
+)
+
 from engines.indicator_engine.contracts import (
     DetailDefinition,
     IndicatorRuntimeSpec,
@@ -100,9 +108,15 @@ class IndicatorDependency:
 class IndicatorMarketInput:
     """Typed market fact contract required by an indicator."""
 
-    role: str = "primary_bars"
-    fact_type: str = "candle.ohlcv"
-    contract_version: str = "candle.ohlcv.v1"
+    key: str = "primary_bars"
+    fact_type: str = CANDLE_FACT_TYPE
+    contract_version: str = CANDLE_FACT_VERSION
+    instrument_role: InstrumentRole | str = InstrumentRole.PRIMARY
+    instrument_ref: str | None = None
+    alignment: MarketDataAlignment | str | None = None
+    max_staleness_seconds: int | None = None
+    required: bool = True
+    allow_gaps: bool = False
     required_fields: tuple[str, ...] = (
         "open_time",
         "close_time",
@@ -114,10 +128,34 @@ class IndicatorMarketInput:
     )
     known_at_required: bool = True
 
+    def to_requirement(
+        self,
+        *,
+        timeframe_seconds: int | None,
+        lookback_bars: int | None = None,
+        lookback_seconds: int | None = None,
+    ) -> MarketDataRequirement:
+        return MarketDataRequirement(
+            key=self.key,
+            fact_type=self.fact_type,
+            contract_version=self.contract_version,
+            timeframe_seconds=timeframe_seconds,
+            instrument_role=self.instrument_role,
+            instrument_ref=self.instrument_ref,
+            alignment=self.alignment,
+            max_staleness_seconds=self.max_staleness_seconds,
+            required=self.required,
+            allow_gaps=self.allow_gaps,
+            required_fields=self.required_fields,
+            known_at_required=self.known_at_required,
+            lookback_bars=lookback_bars,
+            lookback_seconds=lookback_seconds,
+        )
+
 
 @dataclass(frozen=True)
 class IndicatorRuntimeInput:
-    market_input_role: str = "primary_bars"
+    market_input_key: str = "primary_bars"
     source_timeframe: str | None = None
     source_timeframe_param: str | None = None
     lookback_bars: int | None = None
@@ -169,30 +207,38 @@ def validate_indicator_manifest(manifest: IndicatorManifest) -> None:
             f"indicator_manifest_invalid: color_mode invalid type={manifest_type} color_mode={manifest.color_mode}"
         )
 
-    market_input_roles: set[str] = set()
+    market_input_keys: set[str] = set()
     for market_input in manifest.market_inputs:
-        role = str(market_input.role or "").strip()
+        key = str(market_input.key or "").strip()
         fact_type = str(market_input.fact_type or "").strip()
         contract_version = str(market_input.contract_version or "").strip()
-        if not role or not fact_type or not contract_version:
+        if not key or not fact_type or not contract_version:
             raise RuntimeError(
                 f"indicator_manifest_invalid: complete market input identity required type={manifest_type}"
             )
-        if role in market_input_roles:
+        if key in market_input_keys:
             raise RuntimeError(
-                f"indicator_manifest_invalid: duplicate market input role type={manifest_type} role={role}"
+                f"indicator_manifest_invalid: duplicate market input key type={manifest_type} key={key}"
             )
         if not market_input.required_fields:
             raise RuntimeError(
-                f"indicator_manifest_invalid: market input fields required type={manifest_type} role={role}"
+                f"indicator_manifest_invalid: market input fields required type={manifest_type} key={key}"
             )
-        market_input_roles.add(role)
-    for runtime_input in manifest.runtime_inputs:
-        role = str(runtime_input.market_input_role or "").strip()
-        if role not in market_input_roles:
+        try:
+            market_input.to_requirement(
+                timeframe_seconds=60 if fact_type == CANDLE_FACT_TYPE else None
+            )
+        except ValueError as exc:
             raise RuntimeError(
-                f"indicator_manifest_invalid: runtime input references unknown market role "
-                f"type={manifest_type} role={role}"
+                f"indicator_manifest_invalid: market input type={manifest_type} key={key}: {exc}"
+            ) from exc
+        market_input_keys.add(key)
+    for runtime_input in manifest.runtime_inputs:
+        key = str(runtime_input.market_input_key or "").strip()
+        if key not in market_input_keys:
+            raise RuntimeError(
+                f"indicator_manifest_invalid: runtime input references unknown market key "
+                f"type={manifest_type} key={key}"
             )
 
     seen_params: set[str] = set()
@@ -440,9 +486,23 @@ def serialize_indicator_manifest(manifest: IndicatorManifest) -> dict[str, Any]:
         "details": manifest_detail_catalog(manifest),
         "market_inputs": [
             {
-                "role": spec.role,
+                "key": spec.key,
                 "fact_type": spec.fact_type,
                 "contract_version": spec.contract_version,
+                "instrument_role": (
+                    spec.instrument_role.value
+                    if isinstance(spec.instrument_role, InstrumentRole)
+                    else str(spec.instrument_role)
+                ),
+                "instrument_ref": spec.instrument_ref,
+                "alignment": (
+                    spec.alignment.value
+                    if isinstance(spec.alignment, MarketDataAlignment)
+                    else spec.alignment
+                ),
+                "max_staleness_seconds": spec.max_staleness_seconds,
+                "required": bool(spec.required),
+                "allow_gaps": bool(spec.allow_gaps),
                 "required_fields": list(spec.required_fields),
                 "known_at_required": bool(spec.known_at_required),
             }
@@ -459,7 +519,7 @@ def serialize_indicator_manifest(manifest: IndicatorManifest) -> dict[str, Any]:
         ],
         "runtime_inputs": [
             {
-                "market_input_role": spec.market_input_role,
+                "market_input_key": spec.market_input_key,
                 "source_timeframe": spec.source_timeframe,
                 "source_timeframe_param": spec.source_timeframe_param,
                 "lookback_bars": spec.lookback_bars,

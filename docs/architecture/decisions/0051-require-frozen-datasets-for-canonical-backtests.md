@@ -13,8 +13,8 @@ tags:
   - reporting
 code_paths:
   - src/market_data/backtest.py
-  - src/market_data/runtime_scope.py
-  - portal/backend/service/market/dataset_service.py
+  - portal/backend/service/market/backtest_dataset_service.py
+  - portal/backend/service/market/candle_service.py
   - portal/backend/service/bots/startup_service.py
   - portal/backend/service/bots/container_runtime.py
   - portal/backend/service/reports/artifacts.py
@@ -85,8 +85,8 @@ truth. Operators must perform preparation before startup, and old runs without a
 frozen binding cannot be promoted as canonical golden evidence.
 
 Paper intake remains an unpinned append-and-consume workflow, and live order
-submission remains closed. This decision does not claim a generic continuous
-collector or support for non-candle fact types.
+submission remains closed. ADR 0052 adds a durable typed-fact collector and
+mixed candle/OI datasets while preserving this preparation/execution split.
 
 ## Rejected Alternatives
 
@@ -124,3 +124,4 @@ collector or support for non-candle fact types.
 - [ADR 0044: Enforce Known-At Prefix Invariance](0044-enforce-known-at-prefix-invariance.md)
 - [ADR 0046: Fingerprint Exact Candle Inputs And Keep Quality Separate](0046-fingerprint-exact-candle-inputs-and-keep-quality-separate.md)
 - [ADR 0050: Use One Canonical Append-Only Market-Data Store](0050-use-one-canonical-append-only-market-data-store.md)
+- [ADR 0052: Typed Fact Collectors And Explicit Instrument Roles](0052-use-typed-fact-collectors-and-explicit-instrument-roles.md)

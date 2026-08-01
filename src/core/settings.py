@@ -74,6 +74,12 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_WORKERS_RESEARCH_IDLE_SLEEP_SECONDS", ("workers", "research", "idle_sleep_seconds")),
     ("QT_WORKERS_RESEARCH_IDLE_SLEEP_MAX_SECONDS", ("workers", "research", "idle_sleep_max_seconds")),
     ("QT_WORKERS_RESEARCH_DB_WAIT_TIMEOUT_SECONDS", ("workers", "research", "db_wait_timeout_seconds")),
+    ("QT_WORKERS_COLLECTORS_PROCESSES", ("workers", "collectors", "processes")),
+    ("QT_WORKERS_COLLECTORS_INDEX", ("workers", "collectors", "index")),
+    ("QT_WORKERS_COLLECTORS_TOTAL", ("workers", "collectors", "total")),
+    ("QT_WORKERS_COLLECTORS_IDLE_SLEEP_SECONDS", ("workers", "collectors", "idle_sleep_seconds")),
+    ("QT_WORKERS_COLLECTORS_IDLE_SLEEP_MAX_SECONDS", ("workers", "collectors", "idle_sleep_max_seconds")),
+    ("QT_WORKERS_COLLECTORS_DB_WAIT_TIMEOUT_SECONDS", ("workers", "collectors", "db_wait_timeout_seconds")),
     ("QT_BOT_RUNTIME_MODE", ("bot_runtime", "mode")),
     ("QT_BOT_RUNTIME_TARGET", ("bot_runtime", "target")),
     ("QT_BOT_RUNTIME_IMAGE", ("bot_runtime", "image")),
@@ -450,6 +456,7 @@ class WorkerGroupSettings:
 class WorkersSettings:
     indicators: WorkerGroupSettings
     research: WorkerGroupSettings
+    collectors: WorkerGroupSettings
 
 
 @dataclass(frozen=True)
@@ -672,6 +679,7 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
     workers_payload = _coerce_mapping(payload.get("workers"))
     indicator_workers_payload = _coerce_mapping(workers_payload.get("indicators"))
     research_workers_payload = _coerce_mapping(workers_payload.get("research"))
+    collector_workers_payload = _coerce_mapping(workers_payload.get("collectors"))
     bot_runtime_payload = _coerce_mapping(payload.get("bot_runtime"))
     snapshot_payload = _coerce_mapping(bot_runtime_payload.get("snapshot"))
     push_payload = _coerce_mapping(bot_runtime_payload.get("push"))
@@ -810,6 +818,20 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                 ),
                 db_wait_timeout_seconds=_coerce_float(
                     research_workers_payload.get("db_wait_timeout_seconds"), 120.0, minimum=0.5
+                ),
+            ),
+            collectors=WorkerGroupSettings(
+                processes=_coerce_int(collector_workers_payload.get("processes"), 1, minimum=1),
+                index=_coerce_int(collector_workers_payload.get("index"), 0, minimum=0),
+                total=_coerce_int(collector_workers_payload.get("total"), 1, minimum=1),
+                idle_sleep_seconds=_coerce_float(
+                    collector_workers_payload.get("idle_sleep_seconds"), 0.5, minimum=0.05
+                ),
+                idle_sleep_max_seconds=_coerce_float(
+                    collector_workers_payload.get("idle_sleep_max_seconds"), 5.0, minimum=0.05
+                ),
+                db_wait_timeout_seconds=_coerce_float(
+                    collector_workers_payload.get("db_wait_timeout_seconds"), 120.0, minimum=0.5
                 ),
             ),
         ),

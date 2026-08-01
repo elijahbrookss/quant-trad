@@ -902,17 +902,42 @@ class RuntimeSetupPrepareMixin:
         state.indicator_output_types = state.indicator_engine.output_types
         state.indicator_outputs = {}
         state.indicator_overlays = {}
+        state.indicator_market_data_requirements = {}
+        for indicator_id, meta in indicator_metas.items():
+            manifest = meta.get("manifest") if isinstance(meta, Mapping) else None
+            raw_inputs = (
+                manifest.get("market_inputs")
+                if isinstance(manifest, Mapping)
+                else None
+            )
+            non_candle_inputs = tuple(
+                dict(item)
+                for item in (raw_inputs or [])
+                if isinstance(item, Mapping)
+                and str(item.get("fact_type") or "").strip().lower()
+                != "candle.ohlcv"
+            )
+            if non_candle_inputs:
+                state.indicator_market_data_requirements[str(indicator_id)] = (
+                    non_candle_inputs
+                )
 
         warmup_count = max(int(state.bar_index or 0), 0)
         if warmup_count > 0 and state.indicator_engine is not None:
             last_frame = None
             for index, warmup_candle in enumerate(series.candles[:warmup_count]):
-                last_frame = state.indicator_engine.step(
-                    bar=warmup_candle,
-                    bar_time=warmup_candle.time,
-                    include_overlays=False,
-                    include_details=False,
+                step_kwargs: Dict[str, Any] = {
+                    "bar": warmup_candle,
+                    "bar_time": warmup_candle.time,
+                    "include_overlays": False,
+                    "include_details": False,
+                }
+                market_data_inputs = self._market_data_inputs_for_decision(
+                    state, warmup_candle.time
                 )
+                if market_data_inputs:
+                    step_kwargs["market_data_inputs"] = market_data_inputs
+                last_frame = state.indicator_engine.step(**step_kwargs)
             if last_frame is not None:
                 state.indicator_outputs = dict(last_frame.outputs)
 
@@ -928,6 +953,35 @@ class RuntimeSetupPrepareMixin:
                     order=list(state.indicator_engine.order if state.indicator_engine else ()),
                 ),
             )
+        )
+
+    def _market_data_inputs_for_decision(
+        self,
+        state: SeriesExecutionState,
+        evaluation_time: datetime,
+    ) -> Dict[str, Dict[str, Any]]:
+        requirements = getattr(state, "indicator_market_data_requirements", {})
+        if not requirements:
+            return {}
+        resolver = self._deps.market_data_inputs_for_decision
+        if resolver is None:
+            raise RuntimeError(
+                "runtime_market_data_resolver_missing: non-candle indicator inputs declared"
+            )
+        instrument = (
+            state.series.instrument
+            if isinstance(state.series.instrument, Mapping)
+            else {}
+        )
+        instrument_id = str(instrument.get("id") or "").strip()
+        if not instrument_id:
+            raise RuntimeError(
+                "runtime_market_data_invalid: series has no canonical instrument ID"
+            )
+        return resolver(
+            requirements_by_consumer=requirements,
+            primary_instrument_id=instrument_id,
+            evaluation_time=evaluation_time,
         )
 
     def _build_indicator_guard_config(self) -> IndicatorGuardConfig:

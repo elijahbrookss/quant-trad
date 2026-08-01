@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
+from types import MappingProxyType
 from typing import Any, Literal, Mapping, Sequence, Tuple
 
 from .signal_output import assert_signal_output_event
@@ -172,6 +173,23 @@ class IndicatorGuardWarning:
 
 class Indicator(ABC):
     runtime_spec: IndicatorRuntimeSpec
+
+    def bind_market_data_inputs(self, inputs: Mapping[str, Any]) -> None:
+        """Bind immutable, causally resolved source facts for the current bar."""
+
+        self._market_data_inputs = MappingProxyType(dict(inputs or {}))
+
+    def market_data_input(self, key: str) -> Any:
+        """Return one declared source fact, failing if orchestration omitted it."""
+
+        normalized = str(key or "").strip()
+        inputs = getattr(self, "_market_data_inputs", MappingProxyType({}))
+        if normalized not in inputs:
+            raise KeyError(
+                "indicator_market_data_input_missing: "
+                f"indicator_id={self.runtime_spec.instance_id} key={normalized or '<missing>'}"
+            )
+        return inputs[normalized]
 
     @abstractmethod
     def apply_bar(

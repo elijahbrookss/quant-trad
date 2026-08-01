@@ -189,3 +189,89 @@ def test_backtest_start_sends_the_existing_dataset_identity(monkeypatch) -> None
         "path": "/api/bots/bot-1/runs/start",
         "body": {"run_type": "backtest", "dataset_id": "mds_123"},
     }
+
+
+def test_data_collectors_create_coinbase_oi_is_explicit_and_disabled_by_default(
+    monkeypatch,
+) -> None:
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        observed.update(
+            method=request.get_method(),
+            path=urllib.parse.urlparse(request.full_url).path,
+            body=json.loads(request.data.decode("utf-8")),
+        )
+        return _Response({"definition": {"id": "mcd_1", "enabled": False}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "data",
+            "collectors",
+            "create-coinbase-oi",
+            "--instrument-id",
+            "coinbase-btc-future",
+            "--provider-product-id",
+            "BIT-28NOV25-CDE",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed == {
+        "method": "POST",
+        "path": "/api/market-data/collectors",
+        "body": {
+            "instrument_id": "coinbase-btc-future",
+            "provider_product_id": "BIT-28NOV25-CDE",
+            "fact_type": "derivatives.open_interest",
+            "poll_interval_seconds": 60,
+            "max_attempts": 3,
+            "minimum_spacing_seconds": 1.0,
+            "enabled": False,
+        },
+    }
+
+
+def test_data_open_interest_latest_declares_decision_time_and_staleness(
+    monkeypatch,
+) -> None:
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        parsed = urllib.parse.urlparse(request.full_url)
+        observed.update(
+            method=request.get_method(),
+            path=parsed.path,
+            query=urllib.parse.parse_qs(parsed.query),
+        )
+        return _Response({"available": False, "reason": "stale"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "data",
+            "open-interest-latest",
+            "--instrument-id",
+            "coinbase-btc-future",
+            "--decision-time",
+            "2026-08-01T18:00:00Z",
+            "--max-staleness-seconds",
+            "120",
+            "--optional",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed == {
+        "method": "GET",
+        "path": "/api/market-data/open-interest/latest",
+        "query": {
+            "instrument_id": ["coinbase-btc-future"],
+            "decision_time": ["2026-08-01T18:00:00Z"],
+            "max_staleness_seconds": ["120"],
+            "required": ["false"],
+        },
+    }

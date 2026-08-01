@@ -8,8 +8,11 @@ import pytest
 from market_data.contracts import (
     CANDLE_FACT_TYPE,
     CANDLE_FACT_VERSION,
+    OPEN_INTEREST_FACT_TYPE,
+    OPEN_INTEREST_FACT_VERSION,
     CandleFact,
     DatasetSeriesRequest,
+    OpenInterestFact,
     SourceIdentity,
 )
 from portal.backend.db import InstrumentRecord, db
@@ -175,3 +178,95 @@ def test_frozen_dataset_cannot_observe_post_freeze_correction(
             series_id=series_id,
             start=_BASE - timedelta(hours=1),
         )
+
+
+def test_mixed_fact_freeze_uses_one_commit_clock_and_preserves_oi_revision(
+    canonical_series: dict[str, int | str],
+) -> None:
+    candle_series_id = int(canonical_series["series_id"])
+    source_id = int(canonical_series["source_id"])
+    _ingest(
+        canonical_series,
+        [_fact(0), _fact(1), _fact(2)],
+        source_revision="fixture-v1",
+    )
+    oi_series_id = market_data_repo.register_series(
+        instrument_id=str(canonical_series["instrument_id"]),
+        fact_type=OPEN_INTEREST_FACT_TYPE,
+        timeframe_seconds=None,
+        contract_version=OPEN_INTEREST_FACT_VERSION,
+    )
+
+    def oi(index: int, value: float) -> OpenInterestFact:
+        sample = _BASE + timedelta(hours=index)
+        known = sample + timedelta(minutes=2)
+        return OpenInterestFact(
+            sample_time=sample,
+            value=value,
+            received_at=known,
+            accepted_at=known,
+            known_at=known,
+            known_at_method="platform_acceptance",
+        )
+
+    original = [oi(0, 1000), oi(1, 1100), oi(2, 1200)]
+    first_ingest = market_data_repo.ingest_open_interest(
+        series_id=oi_series_id,
+        source_id=source_id,
+        facts=original,
+        provenance={"fixture": "mixed-fact-freeze"},
+        source_revision="oi-v1",
+    )
+    repeated = market_data_repo.ingest_open_interest(
+        series_id=oi_series_id,
+        source_id=source_id,
+        facts=original,
+        provenance={"fixture": "mixed-fact-freeze"},
+        source_revision="oi-v1",
+    )
+    assert first_ingest.inserted_count == 3
+    assert repeated.noop_count == 3
+    assert repeated.max_commit_seq == first_ingest.max_commit_seq
+
+    frozen = market_data_repo.freeze_dataset(
+        [_request(candle_series_id), _request(oi_series_id)],
+        purpose="backtest",
+    )
+    assert len(frozen.series) == 2
+    assert frozen.max_commit_seq >= max(
+        int(row["max_commit_seq"]) for row in frozen.series
+    )
+    oi_manifest = next(
+        row for row in frozen.series if row["fact_type"] == OPEN_INTEREST_FACT_TYPE
+    )
+    assert oi_manifest["timeframe_seconds"] is None
+    assert oi_manifest["row_count"] == 3
+
+    market_data_repo.ingest_open_interest(
+        series_id=oi_series_id,
+        source_id=source_id,
+        facts=[oi(0, 9999)],
+        provenance={"fixture": "post-freeze-correction"},
+        source_revision="oi-v2",
+    )
+    latest = market_data_repo.read_open_interest(
+        series_id=oi_series_id,
+        start=_BASE,
+        end=_BASE + timedelta(hours=3),
+    )
+    replay = market_data_repo.read_dataset_series(
+        dataset_id=frozen.dataset_id,
+        series_id=oi_series_id,
+    )
+    before_known = market_data_repo.read_open_interest(
+        series_id=oi_series_id,
+        start=_BASE,
+        end=_BASE + timedelta(hours=1),
+        known_at_lte=_BASE + timedelta(minutes=1),
+    )
+
+    assert latest[0].revision == 2
+    assert latest[0].fact.value == 9999
+    assert replay[0].revision == 1
+    assert replay[0].fact.value == 1000
+    assert before_known == []

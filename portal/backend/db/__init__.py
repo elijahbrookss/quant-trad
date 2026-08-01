@@ -29,12 +29,16 @@ from .models import (
 )
 from .market_data_models import (
     MarketCandleVersionRecord,
+    MarketCollectionAttemptRecord,
+    MarketCollectionDefinitionRecord,
     MarketDataIngestionRunRecord,
     MarketDataSeriesRecord,
     MarketDataSourceRecord,
     MarketDatasetRecord,
     MarketDatasetSeriesRecord,
     MarketGapEvidenceRecord,
+    MarketOpenInterestVersionRecord,
+    MarketProviderRateBudgetRecord,
 )
 from .session import Database, db
 
@@ -66,11 +70,15 @@ __all__ = [
     "StrategyVariantRecord",
     "SymbolPresetRecord",
     "MarketCandleVersionRecord",
+    "MarketCollectionAttemptRecord",
+    "MarketCollectionDefinitionRecord",
     "MarketDataIngestionRunRecord",
     "MarketDataSeriesRecord",
     "MarketDataSourceRecord",
     "MarketDatasetRecord",
     "MarketDatasetSeriesRecord",
     "MarketGapEvidenceRecord",
+    "MarketOpenInterestVersionRecord",
+    "MarketProviderRateBudgetRecord",
     "db",
 ]

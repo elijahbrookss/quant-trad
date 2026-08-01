@@ -105,9 +105,15 @@ def test_manifest_serialization_preserves_rich_option_metadata() -> None:
 
     assert payload["market_inputs"] == [
         {
-            "role": "primary_bars",
+            "key": "primary_bars",
             "fact_type": "candle.ohlcv",
             "contract_version": "candle.ohlcv.v1",
+            "instrument_role": "primary",
+            "instrument_ref": None,
+            "alignment": None,
+            "max_staleness_seconds": None,
+            "required": True,
+            "allow_gaps": False,
             "required_fields": [
                 "open_time",
                 "close_time",

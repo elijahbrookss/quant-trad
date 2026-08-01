@@ -1456,12 +1456,18 @@ class RuntimeExecutionLoopMixin:
         bar_time = _isoformat(candle.time)
         if state.indicator_engine is None:
             raise RuntimeError("indicator_runtime_missing: series indicator engine is not initialized")
-        frame = state.indicator_engine.step(
-            bar=candle,
-            bar_time=candle.time,
-            include_overlays=False,
-            include_details=False,
+        step_kwargs: Dict[str, Any] = {
+            "bar": candle,
+            "bar_time": candle.time,
+            "include_overlays": False,
+            "include_details": False,
+        }
+        market_data_inputs = self._market_data_inputs_for_decision(
+            state, candle.time
         )
+        if market_data_inputs:
+            step_kwargs["market_data_inputs"] = market_data_inputs
+        frame = state.indicator_engine.step(**step_kwargs)
         outputs = frame.outputs
         state.indicator_outputs = outputs
         self._record_indicator_frame_warnings(

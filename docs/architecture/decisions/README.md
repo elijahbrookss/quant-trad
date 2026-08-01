@@ -77,3 +77,4 @@ respect.
 | [0049](0049-keep-live-order-submission-closed.md) | Keep live order submission closed | Accepted, retroactive cleanup |
 | [0050](0050-use-one-canonical-append-only-market-data-store.md) | Use one canonical append-only market-data store | Accepted, retroactive cleanup |
 | [0051](0051-require-frozen-datasets-for-canonical-backtests.md) | Require frozen datasets for canonical backtests | Accepted |
+| [0052](0052-use-typed-fact-collectors-and-explicit-instrument-roles.md) | Use typed fact collectors and explicit instrument roles | Accepted |

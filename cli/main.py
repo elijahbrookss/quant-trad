@@ -1309,6 +1309,73 @@ def _cmd_data_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_data_collectors_create(args: argparse.Namespace) -> int:
+    payload = {
+        "instrument_id": args.instrument_id,
+        "provider_product_id": args.provider_product_id,
+        "fact_type": "derivatives.open_interest",
+        "poll_interval_seconds": args.poll_interval_seconds,
+        "max_attempts": args.max_attempts,
+        "minimum_spacing_seconds": args.minimum_spacing_seconds,
+        "enabled": bool(args.enabled),
+    }
+    _print_json(
+        _client(args).request_json(
+            "POST", "/api/market-data/collectors", payload=payload
+        )
+    )
+    return 0
+
+
+def _cmd_data_collectors_list(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/market-data/collectors",
+            params={"definition_id": args.definition_id},
+        )
+    )
+    return 0
+
+
+def _cmd_data_collectors_toggle(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/collectors/{quote(args.definition_id, safe='')}/enabled",
+            payload={"enabled": bool(args.enabled)},
+        )
+    )
+    return 0
+
+
+def _cmd_data_collectors_attempts(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/market-data/collectors/{quote(args.definition_id, safe='')}/attempts",
+            params={"limit": args.limit},
+        )
+    )
+    return 0
+
+
+def _cmd_data_open_interest_latest(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/market-data/open-interest/latest",
+            params={
+                "instrument_id": args.instrument_id,
+                "decision_time": args.decision_time,
+                "max_staleness_seconds": args.max_staleness_seconds,
+                "required": not bool(args.optional),
+            },
+        )
+    )
+    return 0
+
+
 def _cmd_research_items_list(args: argparse.Namespace) -> int:
     payload = _client(args).request_json(
         "GET",
@@ -3025,6 +3092,55 @@ def build_parser() -> argparse.ArgumentParser:
     )
     data_dataset.add_argument("dataset_id")
     data_dataset.set_defaults(func=_cmd_data_dataset)
+
+    data_collectors = data_sub.add_parser(
+        "collectors", help="Manage bounded market-fact collection definitions."
+    )
+    data_collectors_sub = data_collectors.add_subparsers(
+        dest="data_collectors_command", required=True
+    )
+    data_collectors_create = data_collectors_sub.add_parser(
+        "create-coinbase-oi",
+        help="Create or update a Coinbase venue-specific open-interest poll.",
+    )
+    data_collectors_create.add_argument("--instrument-id", required=True)
+    data_collectors_create.add_argument("--provider-product-id", required=True)
+    data_collectors_create.add_argument(
+        "--poll-interval-seconds", type=int, default=60
+    )
+    data_collectors_create.add_argument("--max-attempts", type=int, default=3)
+    data_collectors_create.add_argument(
+        "--minimum-spacing-seconds", type=float, default=1.0
+    )
+    data_collectors_create.add_argument("--enabled", action="store_true")
+    data_collectors_create.set_defaults(func=_cmd_data_collectors_create)
+    data_collectors_list = data_collectors_sub.add_parser(
+        "list", help="Inspect definitions, schedules, leases, and failures."
+    )
+    data_collectors_list.add_argument("--definition-id")
+    data_collectors_list.set_defaults(func=_cmd_data_collectors_list)
+    for name, enabled in (("enable", True), ("disable", False)):
+        command = data_collectors_sub.add_parser(
+            name, help=f"{name.title()} one collection definition."
+        )
+        command.add_argument("definition_id")
+        command.set_defaults(func=_cmd_data_collectors_toggle, enabled=enabled)
+    data_collectors_attempts = data_collectors_sub.add_parser(
+        "attempts", help="Inspect auditable collection attempts."
+    )
+    data_collectors_attempts.add_argument("definition_id")
+    data_collectors_attempts.add_argument("--limit", type=int, default=100)
+    data_collectors_attempts.set_defaults(func=_cmd_data_collectors_attempts)
+
+    data_oi_latest = data_sub.add_parser(
+        "open-interest-latest",
+        help="Read latest causally known stored OI without provider fallback.",
+    )
+    data_oi_latest.add_argument("--instrument-id", required=True)
+    data_oi_latest.add_argument("--decision-time", required=True)
+    data_oi_latest.add_argument("--max-staleness-seconds", type=int, required=True)
+    data_oi_latest.add_argument("--optional", action="store_true")
+    data_oi_latest.set_defaults(func=_cmd_data_open_interest_latest)
 
     research = subparsers.add_parser("research", help="Research memory and lightweight historical checks.")
     research_sub = research.add_subparsers(dest="research_command", required=True)
