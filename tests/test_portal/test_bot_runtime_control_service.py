@@ -22,6 +22,16 @@ def _stub_lifecycle_bridge(monkeypatch):
         "portal.backend.service.bots.runtime_control_service.emit_lifecycle_event",
         lambda payload: None,
     )
+    monkeypatch.setattr(
+        "portal.backend.service.bots.startup_service.validate_backtest_dataset",
+        lambda *, dataset_id, **_kwargs: {
+            "schema_version": "backtest_dataset_binding.v1",
+            "dataset_contract_version": "market_dataset.v1",
+            "dataset_id": dataset_id,
+            "dataset_hash": "dataset-hash-1",
+            "quality": {"status": "ready", "evidence_count": 0},
+        },
+    )
 
 
 def _strategy() -> Strategy:
@@ -49,6 +59,7 @@ class _FakeConfigService:
                 "wallet_config": {"balances": {"USDC": 100.0}},
                 "snapshot_interval_ms": 1000,
                 "run_type": "backtest",
+                "dataset_id": "mds-test-1",
             }
         ]
 
@@ -326,6 +337,49 @@ def test_start_observe_only_paper_run_uses_docker_runner_with_effective_snapshot
         ]
         == 120.0
     )
+
+
+def test_start_backtest_profile_is_explicit_and_persisted() -> None:
+    storage = _FakeStorage()
+    runner = _RecordingRunner()
+    service = BotRuntimeControlService(
+        _FakeConfigService(),
+        _FakeStreamManager(),
+        storage=storage,
+        watchdog=_FakeWatchdog(),
+        runner_factory=lambda: runner,
+    )
+
+    response = service.start_bot(
+        "bot-1",
+        request_id="req-profile-1",
+        start_overrides={"run_type": "backtest", "profile": True},
+    )
+
+    run = storage.runs[response["run_id"]]
+    assert runner.starts[0]["bot"]["profile"] is True
+    assert run["config_snapshot"]["bot"]["profile"] is True
+    assert run["config_snapshot"]["start_request"]["overrides"]["profile"] is True
+
+
+def test_start_profile_rejects_non_backtest_runs() -> None:
+    runner = _RecordingRunner()
+    service = BotRuntimeControlService(
+        _FakeConfigService(),
+        _FakeStreamManager(),
+        storage=_FakeStorage(),
+        watchdog=_FakeWatchdog(),
+        runner_factory=lambda: runner,
+    )
+
+    with pytest.raises(ValueError, match="profiling is supported only for backtest"):
+        service.start_bot(
+            "bot-1",
+            start_overrides={"run_type": "paper", "profile": True},
+        )
+
+    assert runner.starts == []
+
 
 def test_start_bot_passes_run_lease_to_runner():
     config = _FakeConfigService()

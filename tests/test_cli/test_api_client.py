@@ -698,6 +698,39 @@ def test_bots_start_supports_observe_only_paper_overrides(tmp_path, monkeypatch)
     }
 
 
+def test_bots_start_supports_opt_in_backtest_profiling(tmp_path, monkeypatch):
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        observed["body"] = json.loads(request.data.decode("utf-8"))
+        return _Response(b'{"status":"started","run_id":"run-1"}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    exit_code = main(
+        [
+            "--log-root",
+            str(tmp_path),
+            "bots",
+            "start",
+            "bot-1",
+            "--run-type",
+            "backtest",
+            "--dataset-id",
+            "mds-1",
+            "--profile",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed["body"] == {
+        "run_type": "backtest",
+        "dataset_id": "mds-1",
+        "profile": True,
+    }
+
+
 def test_reports_semantic_inspection_commands_use_backend_routes(monkeypatch):
     calls = []
 
@@ -1217,6 +1250,11 @@ def test_experiments_start_bot_writes_resumable_record(tmp_path, monkeypatch):
         _ = timeout
         assert request.get_method() == "POST"
         assert urllib.parse.urlparse(request.full_url).path == "/api/bots/bot-1/runs/start"
+        assert json.loads(request.data.decode("utf-8")) == {
+            "run_type": "backtest",
+            "dataset_id": "mds-1",
+            "request_id": "req-1",
+        }
         return _Response(
             json.dumps(
                 {
@@ -1239,6 +1277,8 @@ def test_experiments_start_bot_writes_resumable_record(tmp_path, monkeypatch):
             "experiments",
             "start-bot",
             "bot-1",
+            "--dataset-id",
+            "mds-1",
             "--request-id",
             "req-1",
             "--baseline-run-id",

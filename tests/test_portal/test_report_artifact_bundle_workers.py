@@ -153,6 +153,11 @@ def _worker_config(worker_id: str) -> dict:
         "backtest_warmup_bars": 100,
         "backtest_start": "2026-01-01T00:00:00Z",
         "backtest_end": "2026-01-02T00:00:00Z",
+        "dataset_binding": {
+            "dataset_id": "mds_test",
+            "dataset_hash": "a" * 64,
+            "dataset_contract_version": "market_data_dataset.v1",
+        },
     }
 
 
@@ -299,6 +304,11 @@ def test_finalize_run_artifact_bundle_from_workers_aggregates_worker_outputs(mon
     assert config_snapshot["backtest_warmup_bars"] == 100
     assert len(config_snapshot["backtest_warmup_evidence"]) == 2
     assert len(config_snapshot["indicator_source_diagnostics"]) == 2
+    assert config_snapshot["dataset_binding"] == {
+        "dataset_id": "mds_test",
+        "dataset_hash": "a" * 64,
+        "dataset_contract_version": "market_data_dataset.v1",
+    }
     assert config_snapshot["indicator_source_diagnostics"][0]["instrument_id"] == (
         "BTC-instrument"
     )

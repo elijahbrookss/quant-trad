@@ -45,6 +45,44 @@ class RuntimeProjectionMixin:
             entries = entries[-limit:]
         return [entry.serialize() for entry in entries]
 
+    def _decision_events_after_marker(
+        self,
+        *,
+        previous_marker: Optional[str],
+        result_limit: int,
+        window_limit: int = 200,
+    ) -> Tuple[List[Dict[str, Any]], Optional[str], int]:
+        """Serialize only new immutable decisions from the bounded push window."""
+
+        resolved_window_limit = max(int(window_limit or 0), 1)
+        resolved_result_limit = max(int(result_limit or 0), 1)
+        with self._lock:
+            reversed_window = []
+            for entry in reversed(self._decision_events):
+                reversed_window.append(entry)
+                if len(reversed_window) >= resolved_window_limit:
+                    break
+        entries = list(reversed(reversed_window))
+        if not entries:
+            return [], previous_marker, 0
+
+        latest_marker = (
+            str(getattr(entries[-1], "event_id", "") or "").strip()
+            or previous_marker
+        )
+        selected = entries
+        if previous_marker:
+            for index, entry in enumerate(entries):
+                marker = str(getattr(entry, "event_id", "") or "").strip()
+                if marker == previous_marker:
+                    selected = entries[index + 1 :]
+                    break
+
+        dropped = max(len(selected) - resolved_result_limit, 0)
+        if dropped > 0:
+            selected = selected[-resolved_result_limit:]
+        return [entry.serialize() for entry in selected], latest_marker, dropped
+
     def _update_state(self, candle: Candle, status: str = "running") -> Dict[str, Any]:
         update_started = time.perf_counter()
         stats_started = time.perf_counter()

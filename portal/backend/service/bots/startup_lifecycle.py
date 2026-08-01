@@ -314,6 +314,7 @@ class BotStartupContext:
     wallet_config: Dict[str, Any]
     runtime_readiness: Dict[str, Any]
     runtime_dependency_metadata: Dict[str, Any]
+    dataset_binding: Dict[str, Any] = field(default_factory=dict)
     request_id: str = ""
     config_hash: str = ""
     started_at: str = field(default_factory=utc_now_iso)

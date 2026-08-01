@@ -483,6 +483,10 @@ def _cmd_bots_start(args: argparse.Namespace) -> int:
     body = {"request_id": args.request_id} if args.request_id else {}
     if getattr(args, "run_type", None):
         body["run_type"] = args.run_type
+    if getattr(args, "dataset_id", None):
+        body["dataset_id"] = args.dataset_id
+    if bool(getattr(args, "profile", False)):
+        body["profile"] = True
     if getattr(args, "execution_behavior", None):
         body["execution_behavior"] = args.execution_behavior
     if getattr(args, "duration_seconds", None):
@@ -1241,6 +1245,25 @@ def _cmd_data_series(args: argparse.Namespace) -> int:
     )
     return 0
 
+
+
+def _cmd_data_prepare_backtest_dataset(args: argparse.Namespace) -> int:
+    """Prepare and freeze source facts without starting execution."""
+
+    payload = {
+        "evaluation_start": args.start,
+        "evaluation_end": args.end,
+        "acquire_missing": bool(args.acquire_missing),
+        "created_by": args.created_by,
+    }
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/bots/{quote(args.bot_id, safe='')}/backtest-dataset/prepare",
+            payload=payload,
+        )
+    )
+    return 0
 
 def _cmd_data_freeze_dataset(args: argparse.Namespace) -> int:
     payload = _read_json_object_arg(args.request_json, label="--request-json")
@@ -2218,7 +2241,14 @@ def _ensure_run_report_materialized(client: ApiClient, run_id: str, *, force_reb
 
 
 def _start_experiment(args: argparse.Namespace, client: ApiClient) -> dict[str, Any]:
-    start_body = {"request_id": args.request_id} if getattr(args, "request_id", None) else {}
+    start_body: dict[str, Any] = {
+        "run_type": "backtest",
+        "dataset_id": args.dataset_id,
+    }
+    if bool(getattr(args, "profile", False)):
+        start_body["profile"] = True
+    if getattr(args, "request_id", None):
+        start_body["request_id"] = args.request_id
     start_payload = client.request_json("POST", f"/api/bots/{args.bot_id}/runs/start", payload=start_body)
     if not isinstance(start_payload, dict):
         raise ApiError(f"POST start returned unexpected payload type: {type(start_payload).__name__}")
@@ -2599,6 +2629,8 @@ def build_parser() -> argparse.ArgumentParser:
     bots_start.add_argument("--request-id")
     bots_start.add_argument("--run-type", choices=["backtest", "sim_trade", "paper", "live"])
     bots_start.add_argument("--execution-behavior", "--execution", choices=["simulated", "observe-only"], dest="execution_behavior")
+    bots_start.add_argument("--dataset-id", help="Required immutable dataset identity for backtest runs.")
+    bots_start.add_argument("--profile", action="store_true", help="Enable opt-in cProfile and tracemalloc evidence for this backtest run.")
     bots_start.add_argument("--duration-seconds", type=float, help="Optional bounded duration for observe-only paper runs.")
     bots_start.add_argument(
         "--market-data-stream-policy-json",
@@ -2958,6 +2990,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     data_series.add_argument("--instrument-id")
     data_series.set_defaults(func=_cmd_data_series)
+    data_prepare = data_sub.add_parser(
+        "prepare-backtest-dataset",
+        help="Resolve requirements, optionally acquire missing facts, and freeze a backtest dataset.",
+    )
+    data_prepare.add_argument("--bot-id", required=True)
+    data_prepare.add_argument("--start", required=True)
+    data_prepare.add_argument("--end", required=True)
+    data_prepare.add_argument("--acquire-missing", action="store_true")
+    data_prepare.add_argument("--created-by")
+    data_prepare.set_defaults(func=_cmd_data_prepare_backtest_dataset)
+
     data_freeze = data_sub.add_parser(
         "freeze-dataset",
         help="Freeze exact candle facts, provenance, and quality evidence.",
@@ -3341,6 +3384,8 @@ def build_parser() -> argparse.ArgumentParser:
     resume.set_defaults(func=_cmd_experiments_resume)
     start_bot = experiments_sub.add_parser("start-bot", help="Start a bot run and write a resumable experiment record.")
     start_bot.add_argument("bot_id")
+    start_bot.add_argument("--dataset-id", required=True, help="Prepared immutable dataset identity.")
+    start_bot.add_argument("--profile", action="store_true", help="Enable opt-in cProfile and tracemalloc evidence for this backtest run.")
     start_bot.add_argument("--request-id")
     start_bot.add_argument("--baseline-run-id")
     start_bot.add_argument("--export", action="store_true", help="Record export as a default for collect.")

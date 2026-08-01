@@ -7,7 +7,6 @@ import portal.backend.service.bots.botlens_canonical_facts as canonical_mod
 
 def _fact_payload() -> dict[str, Any]:
     return {
-        "bridge_session_id": "bridge-1",
         "series_key": "instrument-btc|1m",
         "known_at": "2026-04-19T12:00:00Z",
         "event_time": "2026-04-19T12:00:00Z",
@@ -152,6 +151,7 @@ def _fact_payload() -> dict[str, Any]:
 
 
 def test_append_botlens_canonical_fact_batch_persists_only_budgeted_runtime_truth(monkeypatch) -> None:
+    """Producer persistence must not require a transport bridge session."""
     captured: dict[str, Any] = {}
 
     def _record(rows, *, context=None):

@@ -76,6 +76,10 @@ class CandleDatasetFreezeRequest(BaseModel):
 def _dataset_payload(dataset) -> Dict[str, Any]:
     return {
         "schema_version": "market_dataset.v1",
+        "contract_version": dataset.contract_version,
+        "name": dataset.name,
+        "purpose": dataset.purpose,
+        "metadata": dict(dataset.metadata),
         "dataset_id": dataset.dataset_id,
         "dataset_hash": dataset.dataset_hash,
         "max_commit_seq": dataset.max_commit_seq,

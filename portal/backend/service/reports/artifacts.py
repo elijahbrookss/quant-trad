@@ -558,6 +558,9 @@ def _build_config_snapshot(config: Mapping[str, Any], series: Sequence[Any]) -> 
                 config["backtest_warmup_bars"]
             )
         snapshot["backtest_warmup_evidence"] = warmup_evidence
+    dataset_binding = config.get("dataset_binding")
+    if isinstance(dataset_binding, Mapping) and dataset_binding:
+        snapshot["dataset_binding"] = dict(dataset_binding)
     return snapshot
 
 
@@ -1145,6 +1148,9 @@ def _build_config_snapshot_from_series_snapshot(
                 config["backtest_warmup_bars"]
             )
         snapshot["backtest_warmup_evidence"] = warmup_evidence
+    dataset_binding = config.get("dataset_binding")
+    if isinstance(dataset_binding, Mapping) and dataset_binding:
+        snapshot["dataset_binding"] = dict(dataset_binding)
     return snapshot
 
 

@@ -11,7 +11,7 @@ ccxt_module = importlib.import_module("data_providers.providers.ccxt")
 
 
 def test_ccxt_provider_continues_pagination_when_exchange_caps(monkeypatch):
-    """Providers should keep paging until the requested end timestamp is covered."""
+    """Providers page fully while preserving the canonical half-open window."""
 
     start = datetime(2024, 1, 1, tzinfo=timezone.utc)
     end = start + timedelta(minutes=5)
@@ -43,9 +43,10 @@ def test_ccxt_provider_continues_pagination_when_exchange_caps(monkeypatch):
 
     exchange = provider._exchange
     assert len(exchange.fetch_calls) >= 3  # Limited batches required several pages.
-    assert len(frame) == 6
+    assert len(frame) == 5
     assert frame["timestamp"].iloc[0] == pd.Timestamp(start)
-    assert frame["timestamp"].iloc[-1] == pd.Timestamp(end)
+    assert frame["timestamp"].iloc[-1] == pd.Timestamp(end - timedelta(minutes=1))
+    assert bool((frame["timestamp"] < pd.Timestamp(end)).all())
     assert frame["timestamp"].is_monotonic_increasing
 
 

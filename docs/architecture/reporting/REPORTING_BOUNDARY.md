@@ -74,9 +74,10 @@ artifact, and `run_report_comparison_summary.v1` for pairwise comparison. These
 projections are derived from the same dataset and materialized report truth;
 they are not alternate report semantics.
 
-The compact research summary preserves the canonical dataset identity hashes,
-semantic and operational fingerprints, repeatability state, data and execution
-quality states, blockers, degraded/unavailable sections, and caveats. Persisted
+The compact research summary preserves the frozen source `dataset_id` and
+`dataset_hash`, exact runtime-consumed data snapshot hash, semantic and
+operational fingerprints, repeatability state, data and execution quality
+states, blockers, degraded/unavailable sections, and caveats. Persisted
 experiment summaries carry that projection unchanged so CLI and MCP research
 workflows cannot mistake missing or degraded evidence for a complete run.
 
@@ -126,6 +127,13 @@ Computed portfolio metrics are part of reporting truth. Standard values such as
 Sharpe, Sortino, Calmar, annualized volatility, drawdown duration, and exposure
 are derived by the reporting layer from closed trades and the simulated run
 window, with raw trades retained for audit and independent recompute.
+
+Maximum drawdown uses every ordered closed-trade equity transition. Daily-close
+aggregation remains appropriate for daily return ratios and drawdown duration,
+but it cannot replace intraday trade-path peaks and troughs in the canonical
+maximum-drawdown metric. Missing fee-role, fee-rate, or slippage facts remain
+explicit report and trust caveats even when the deterministic simulator applies
+zero cost.
 
 Trade rows may include report-only lifecycle enrichment such as entry stop
 distance, entry R, persisted runtime MAE/MFE, bounded candle-derived excursion,

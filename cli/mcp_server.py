@@ -711,6 +711,8 @@ class QuantTradMcpServer:
         if run_type in {"paper", "live"} and not _optional_bool(arguments, "allow_non_backtest", False):
             raise McpError("paper/live runs require allow_non_backtest=true", code=-32602)
         payload: dict[str, Any] = {"run_type": run_type}
+        if run_type == "backtest":
+            payload["dataset_id"] = _required_str(arguments, "dataset_id")
         for key in ("request_id", "execution_behavior", "duration_seconds", "market_data_stream_policy"):
             if arguments.get(key) is not None:
                 payload[key] = arguments[key]
@@ -1241,10 +1243,11 @@ class QuantTradMcpServer:
                 "handler": self._tool_collect_experiment,
             },
             "start_bot_run": {
-                "description": "Start a bot run. Requires confirm=true; paper/live require allow_non_backtest=true.",
+                "description": "Start a bot run against explicit admission inputs. Backtests require dataset_id; paper/live require allow_non_backtest=true; all starts require confirm=true.",
                 "inputSchema": _object_schema(
                     {
                         "bot_id": _string_schema(),
+                        "dataset_id": _string_schema(),
                         "request_id": _string_schema(),
                         "run_type": {"type": "string", "enum": ["backtest", "sim_trade", "paper", "live"], "default": "backtest"},
                         "execution_behavior": {"type": "string", "enum": ["simulated", "observe-only"]},

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import deque
+import threading
 from types import SimpleNamespace
 
 from engines.bot_runtime.runtime.mixins.runtime_projection import RuntimeProjectionMixin
@@ -79,6 +81,16 @@ class _WindowEngine:
         return {"fees_paid": 0.0}
 
 
+class _SerializableDecision:
+    def __init__(self, event_id: str) -> None:
+        self.event_id = event_id
+        self.serialize_calls = 0
+
+    def serialize(self):
+        self.serialize_calls += 1
+        return {"event_id": self.event_id}
+
+
 def _series(series_id: str, trades):
     return SimpleNamespace(
         instrument={"id": f"instrument-{series_id}"},
@@ -110,3 +122,54 @@ def test_chart_state_uses_bounded_trade_window_for_top_level_and_series_payloads
     assert [trade["trade_id"] for trade in payload["series"][1]["trades"]] == ["open-b"]
     assert first.risk_engine.window_calls == [1]
     assert second.risk_engine.window_calls == [1]
+
+
+def test_decision_push_cursor_serializes_only_new_events_after_raw_marker_selection():
+    runtime = _ProjectionRuntime([])
+    runtime._lock = threading.Lock()
+    decisions = [_SerializableDecision(f"decision-{index}") for index in range(5)]
+    runtime._decision_events = deque(decisions)
+
+    entries, marker, dropped = runtime._decision_events_after_marker(
+        previous_marker="decision-2",
+        result_limit=2,
+    )
+
+    assert entries == [
+        {"event_id": "decision-3"},
+        {"event_id": "decision-4"},
+    ]
+    assert marker == "decision-4"
+    assert dropped == 0
+    assert [entry.serialize_calls for entry in decisions] == [0, 0, 0, 1, 1]
+
+    repeated, repeated_marker, repeated_dropped = runtime._decision_events_after_marker(
+        previous_marker=marker,
+        result_limit=2,
+    )
+
+    assert repeated == []
+    assert repeated_marker == marker
+    assert repeated_dropped == 0
+    assert [entry.serialize_calls for entry in decisions] == [0, 0, 0, 1, 1]
+
+
+def test_decision_push_cursor_preserves_missing_marker_and_truncation_semantics():
+    runtime = _ProjectionRuntime([])
+    runtime._lock = threading.Lock()
+    decisions = [_SerializableDecision(f"decision-{index}") for index in range(5)]
+    runtime._decision_events = deque(decisions)
+
+    entries, marker, dropped = runtime._decision_events_after_marker(
+        previous_marker="evicted-marker",
+        result_limit=2,
+        window_limit=3,
+    )
+
+    assert entries == [
+        {"event_id": "decision-3"},
+        {"event_id": "decision-4"},
+    ]
+    assert marker == "decision-4"
+    assert dropped == 1
+    assert [entry.serialize_calls for entry in decisions] == [0, 0, 0, 1, 1]

@@ -25,6 +25,7 @@ from engines.bot_runtime.runtime.mixins.runtime_events import (
     _fill_accounting_mode,
     _fill_currency_pair,
 )
+from engines.bot_runtime.runtime.mixins.runtime_projection import RuntimeProjectionMixin
 from engines.bot_runtime.runtime.mixins.runtime_push_stream import RuntimePushStreamMixin
 from engines.bot_runtime.runtime.components.canonical_facts import (
     CanonicalFactAppender,
@@ -223,6 +224,20 @@ class _PushRuntime(_FakeRuntime):
     def _broadcast(self, event, payload=None):
         self.broadcast_payloads.append({"event": event, **dict(payload or {})})
         return (1, 0)
+
+
+class _IncrementalPushRuntime(RuntimeProjectionMixin, _PushRuntime):
+    pass
+
+
+class _CountedDecision:
+    def __init__(self, event_id: str) -> None:
+        self.event_id = event_id
+        self.serialize_calls = 0
+
+    def serialize(self):
+        self.serialize_calls += 1
+        return {"event_id": self.event_id}
 
 
 def test_subscribe_drop_and_signal_replaces_backpressure_with_gap_event() -> None:
@@ -2059,6 +2074,37 @@ def test_push_update_bounds_live_log_and_decision_fact_batches() -> None:
 
     assert [entry["id"] for entry in logs] == ["log-3", "log-4"]
     assert [entry["event_id"] for entry in decisions] == ["decision-3", "decision-4", "decision-5"]
+
+
+def test_decision_facts_apply_marker_and_limit_before_serialization() -> None:
+    runtime = _IncrementalPushRuntime()
+    runtime._botlens_fact_stream_decision_fact_limit = 3
+    decisions = [_CountedDecision(f"decision-{index}") for index in range(4)]
+    runtime._decision_events = decisions
+
+    facts, dropped = runtime._decision_facts()
+
+    assert [fact["decision"]["event_id"] for fact in facts] == [
+        "decision-1",
+        "decision-2",
+        "decision-3",
+    ]
+    assert dropped == 1
+    assert [entry.serialize_calls for entry in decisions] == [0, 1, 1, 1]
+
+    repeated, repeated_dropped = runtime._decision_facts()
+
+    assert repeated == []
+    assert repeated_dropped == 0
+    assert [entry.serialize_calls for entry in decisions] == [0, 1, 1, 1]
+
+    appended = _CountedDecision("decision-4")
+    runtime._decision_events.append(appended)
+    incremental, incremental_dropped = runtime._decision_facts()
+
+    assert [fact["decision"]["event_id"] for fact in incremental] == ["decision-4"]
+    assert incremental_dropped == 0
+    assert appended.serialize_calls == 1
 
 
 def test_overlay_projection_due_uses_bar_distance_not_wall_clock() -> None:

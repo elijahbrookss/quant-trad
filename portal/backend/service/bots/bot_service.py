@@ -8,6 +8,9 @@ from datetime import UTC, datetime
 from typing import Any, Dict, List, Mapping
 
 from ..market import candle_service
+from ..market.backtest_dataset_service import (
+    prepare_backtest_dataset as prepare_backtest_dataset_material,
+)
 from .bot_state_projection import project_bot_state
 from .runner import DockerBotRunner
 from .runtime_composition import get_runtime_composition
@@ -529,6 +532,34 @@ def preflight_bot_data(bot_id: str, *, start: str, end: str) -> Dict[str, Any]:
         "checks": checks,
     }
 
+def prepare_backtest_dataset(
+    bot_id: str,
+    *,
+    evaluation_start: str,
+    evaluation_end: str,
+    acquire_missing: bool,
+    created_by: str | None = None,
+) -> Dict[str, Any]:
+    """Resolve strategy requirements and freeze data without starting a run."""
+
+    bot = dict(_composition().config_service.get_bot(bot_id))
+    windowed_bot = {
+        **bot,
+        "run_type": "backtest",
+        "backtest_start": evaluation_start,
+        "backtest_end": evaluation_end,
+    }
+    artifacts = _composition().config_service.prepare_startup_artifacts(windowed_bot)
+    return prepare_backtest_dataset_material(
+        bot=windowed_bot,
+        strategy=artifacts["strategy"],
+        evaluation_start=evaluation_start,
+        evaluation_end=evaluation_end,
+        acquire_missing=bool(acquire_missing),
+        created_by=created_by,
+    )
+
+
 
 def delete_bot_record(bot_id: str) -> None:
     _composition().config_service.delete_bot_record(bot_id)
@@ -589,6 +620,12 @@ def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
             continue
         summary_state = _telemetry_hub().get_run_snapshot(run_id=run_id)
         runtime_payload = summary_state.health.to_dict() if summary_state is not None else {}
+        persisted_status = str(run.get("status") or "")
+        runtime_status = (
+            persisted_status
+            if is_terminal_run_state(status=persisted_status)
+            else str(runtime_payload.get("status") or persisted_status)
+        )
         summary = dict(run.get("summary") or {})
         if not summary:
             symbol_index = summary_state.symbol_catalog.entries if summary_state is not None else {}
@@ -604,7 +641,7 @@ def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
             {
                 **dict(run),
                 "is_active": run_id == active_run_id,
-                "runtime_status": str(runtime_payload.get("status") or run.get("status") or ""),
+                "runtime_status": runtime_status,
                 "botlens_available": summary_state is not None,
                 "botlens_reason": None if summary_state is not None else "snapshot_unavailable",
                 "last_snapshot_at": runtime_payload.get("last_event_at"),

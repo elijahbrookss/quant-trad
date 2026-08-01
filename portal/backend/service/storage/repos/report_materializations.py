@@ -98,6 +98,16 @@ def _input_fingerprint_status_payload(
     trade_count: int,
     trade_updated_at: Any,
 ) -> Dict[str, Any]:
+    config_snapshot = (
+        dict(run.config_snapshot)
+        if isinstance(run.config_snapshot, Mapping)
+        else {}
+    )
+    dataset_binding = (
+        dict(config_snapshot.get("dataset_binding"))
+        if isinstance(config_snapshot.get("dataset_binding"), Mapping)
+        else {}
+    )
     payload = {
         "schema_version": REPORT_INPUT_FINGERPRINT_SCHEMA_VERSION,
         "run_id": str(run.run_id or ""),
@@ -109,6 +119,8 @@ def _input_fingerprint_status_payload(
         "run_updated_at": _dt_iso(run.updated_at),
         "config_hash": str(run.config_hash or ""),
         "material_config_hash": str(run.material_config_hash or ""),
+        "dataset_id": str(dataset_binding.get("dataset_id") or ""),
+        "dataset_hash": str(dataset_binding.get("dataset_hash") or ""),
         "strategy_hash": str(run.strategy_hash or ""),
         "data_snapshot_hash": str(run.data_snapshot_hash or ""),
         "runtime_contract_version": str(run.runtime_contract_version or ""),

@@ -11,6 +11,17 @@ from portal.backend.service.bots.startup_service import BotStartupOrchestrator
 @pytest.fixture(autouse=True)
 def _disable_lifecycle_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(startup_mod, "emit_lifecycle_event", lambda _payload: None)
+    monkeypatch.setattr(
+        startup_mod,
+        "validate_backtest_dataset",
+        lambda **_kwargs: {
+            "dataset_id": "mds_test",
+            "dataset_hash": "dataset-hash",
+            "dataset_contract_version": "market_dataset.v1",
+            "strategy_hash": "compiled-strategy-hash",
+            "quality": {"status": "ready", "evidence_count": 0},
+        },
+    )
 
 
 def _strategy() -> Strategy:
@@ -32,6 +43,9 @@ class _FakeConfig:
     def __init__(self) -> None:
         self._bot = {
             "id": "bot-1",
+            "dataset_id": "mds_test",
+            "backtest_start": "2026-01-01T00:00:00Z",
+            "backtest_end": "2026-01-02T00:00:00Z",
             "name": "Bot 1",
             "strategy_id": "strategy-1",
             "wallet_config": {"balances": {"USDC": 100.0}},
@@ -143,6 +157,11 @@ def test_startup_orchestrator_creates_run_before_container_launch():
     assert order.index("upsert_bot_run") < order.index("runner.start_bot")
     assert order.index("acquire_bot_run_lease") < order.index("runner.start_bot")
     assert order.index("upsert_bot_run") < order.index(f"phase:{BotLifecyclePhase.START_REQUESTED.value}")
+    configured_run = next(row for row in reversed(storage.runs) if row.get("strategy_hash"))
+    assert configured_run["strategy_hash"] == "compiled-strategy-hash"
+    assert configured_run["config_snapshot"]["run_strategy_snapshot"]["strategy_hash"] == (
+        "compiled-strategy-hash"
+    )
     assert [row["phase"] for row in storage.lifecycle[:5]] == [
         BotLifecyclePhase.START_REQUESTED.value,
         BotLifecyclePhase.VALIDATING_CONFIGURATION.value,

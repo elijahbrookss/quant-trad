@@ -249,6 +249,7 @@ def normalize_plan(raw: Mapping[str, Any]) -> dict[str, Any]:
         "poll_interval_seconds": 30.0,
         "run_timeout_seconds": 3600.0,
         "update_bot_window": True,
+        "acquire_missing_data": False,
         **dict(payload.get("run_policy") or {}),
     }
     if run_policy.get("mode") != "sequential":

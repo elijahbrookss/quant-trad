@@ -184,14 +184,61 @@ class ExperimentRunner:
                     target={"bot_id": bot_id, "window_id": window_id},
                 )
             request_id = f"{state.get('experiment_id')}__{safe_path_part(window_id)}__{safe_path_part(variant_id)}"
+            acquire_missing = bool(
+                dict(plan.get("run_policy") or {}).get("acquire_missing_data", False)
+            )
+            events.append(
+                event_type="intent",
+                operation="prepare_backtest_dataset",
+                status="started",
+                step_id=str(step.get("step_id")),
+                target={
+                    "bot_id": bot_id,
+                    "window_id": window_id,
+                    "evaluation_start": window.get("start"),
+                    "evaluation_end": window.get("end"),
+                    "acquire_missing": acquire_missing,
+                },
+            )
+            preparation = self.client.request_json(
+                "POST",
+                f"/api/bots/{bot_id}/backtest-dataset/prepare",
+                payload={
+                    "evaluation_start": window.get("start"),
+                    "evaluation_end": window.get("end"),
+                    "acquire_missing": acquire_missing,
+                    "created_by": str(state.get("experiment_id") or "experiment_runner"),
+                },
+            )
+            if not isinstance(preparation, dict):
+                raise ApiError("backtest dataset preparation returned unexpected payload")
+            dataset = preparation.get("dataset") if isinstance(preparation.get("dataset"), dict) else {}
+            dataset_id = str(dataset.get("dataset_id") or "").strip()
+            if str(preparation.get("status") or "").strip().lower() != "ready" or not dataset_id:
+                raise ValueError("backtest dataset preparation did not return a ready dataset_id")
+            events.append(
+                event_type="result",
+                operation="prepare_backtest_dataset",
+                status="succeeded",
+                step_id=str(step.get("step_id")),
+                target={"bot_id": bot_id, "dataset_id": dataset_id},
+            )
             events.append(
                 event_type="intent",
                 operation="start_bot_run",
                 status="started",
                 step_id=str(step.get("step_id")),
-                target={"bot_id": bot_id, "request_id": request_id},
+                target={"bot_id": bot_id, "request_id": request_id, "dataset_id": dataset_id},
             )
-            start_payload = self.client.request_json("POST", f"/api/bots/{bot_id}/runs/start", payload={"request_id": request_id})
+            start_payload = self.client.request_json(
+                "POST",
+                f"/api/bots/{bot_id}/runs/start",
+                payload={
+                    "request_id": request_id,
+                    "run_type": "backtest",
+                    "dataset_id": dataset_id,
+                },
+            )
             if not isinstance(start_payload, dict):
                 raise ApiError("bot run start returned unexpected payload")
             run_id = str(start_payload.get("run_id") or "").strip()
@@ -207,6 +254,7 @@ class ExperimentRunner:
                 "request_id": request_id,
                 "window": window,
                 "variant": variant,
+                "dataset_preparation": preparation,
                 "start": start_payload,
                 "status": start_payload.get("status"),
             }
@@ -217,7 +265,7 @@ class ExperimentRunner:
                 operation="start_bot_run",
                 status="succeeded",
                 step_id=str(step.get("step_id")),
-                target={"bot_id": bot_id, "run_id": run_id},
+                target={"bot_id": bot_id, "run_id": run_id, "dataset_id": dataset_id},
                 artifact_refs=[{"type": "run_record", "path": str(record_path)}],
             )
         timeout = float(dict(plan.get("run_policy") or {}).get("run_timeout_seconds") or 3600.0)

@@ -53,7 +53,7 @@ def split_fact_events(
     return canonical, derived
 
 
-def projection_batch_from_payload(
+def _fact_batch_from_payload(
     *,
     batch_kind: str,
     run_id: str,
@@ -61,6 +61,7 @@ def projection_batch_from_payload(
     symbol_key: str | None,
     payload: Mapping[str, Any],
     events: Sequence[BotLensDomainEvent],
+    bridge_session_id: str | None,
     seq: int | None = None,
 ) -> ProjectionBatch:
     known_at = payload.get("known_at") or payload.get("checkpoint_at") or payload.get("event_time") or payload.get("updated_at")
@@ -71,11 +72,63 @@ def projection_batch_from_payload(
         run_id=str(run_id),
         bot_id=str(bot_id),
         symbol_key=normalize_series_key(symbol_key) or None,
-        bridge_session_id=normalize_bridge_session_id(payload) if batch_kind in {BRIDGE_FACTS_KIND, BRIDGE_BOOTSTRAP_KIND} else None,
+        bridge_session_id=bridge_session_id,
         seq=resolved_seq,
         event_time=event_time,
         known_at=known_at,
         events=tuple(events),
+    )
+
+
+def canonical_fact_batch_from_payload(
+    *,
+    batch_kind: str,
+    run_id: str,
+    bot_id: str,
+    symbol_key: str | None,
+    payload: Mapping[str, Any],
+    events: Sequence[BotLensDomainEvent],
+    seq: int | None = None,
+) -> ProjectionBatch:
+    """Build a producer-owned persistence batch without transport identity."""
+
+    return _fact_batch_from_payload(
+        batch_kind=batch_kind,
+        run_id=run_id,
+        bot_id=bot_id,
+        symbol_key=symbol_key,
+        payload=payload,
+        events=events,
+        bridge_session_id=None,
+        seq=seq,
+    )
+
+
+def projection_batch_from_payload(
+    *,
+    batch_kind: str,
+    run_id: str,
+    bot_id: str,
+    symbol_key: str | None,
+    payload: Mapping[str, Any],
+    events: Sequence[BotLensDomainEvent],
+    seq: int | None = None,
+) -> ProjectionBatch:
+    """Build a transport projection batch and enforce bridge identity."""
+
+    return _fact_batch_from_payload(
+        batch_kind=batch_kind,
+        run_id=run_id,
+        bot_id=bot_id,
+        symbol_key=symbol_key,
+        payload=payload,
+        events=events,
+        bridge_session_id=(
+            normalize_bridge_session_id(payload)
+            if batch_kind in {BRIDGE_FACTS_KIND, BRIDGE_BOOTSTRAP_KIND}
+            else None
+        ),
+        seq=seq,
     )
 
 
@@ -107,6 +160,7 @@ def runtime_event_rows_from_batch(
 
 
 __all__ = [
+    "canonical_fact_batch_from_payload",
     "is_canonical_fact_event",
     "projection_batch_from_payload",
     "runtime_event_rows_from_batch",

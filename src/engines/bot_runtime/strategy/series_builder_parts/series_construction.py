@@ -28,6 +28,7 @@ from engines.bot_runtime.core.execution_profile import (
     normalize_execution_semantics,
     normalize_runtime_instrument_type,
 )
+from market_data.backtest import resolve_backtest_warmup_bars
 from atm import normalise_template
 from risk import normalise_risk_config
 from strategies.compiler import compile_strategy
@@ -317,15 +318,7 @@ class SeriesBuilderConstructionMixin:
                 timeframe,
                 indicator_requirements=indicator_warmup_requirements,
             )
-            required_warmup_bars = max(
-                [
-                    100,
-                    *[
-                        int(row["required_bars"])
-                        for row in indicator_warmup_requirements
-                    ],
-                ]
-            )
+            required_warmup_bars = warmup_bars
             (
                 candles,
                 replay_start_index,
@@ -621,7 +614,7 @@ class SeriesBuilderConstructionMixin:
         )
         replay_candles = [
             candle for candle in self._build_candles(replay_df, timeframe)
-            if candle.time >= start_ts.to_pydatetime() and candle.time <= end_ts.to_pydatetime()
+            if candle.time >= start_ts.to_pydatetime() and candle.time < end_ts.to_pydatetime()
         ]
         if getattr(replay_df, "attrs", {}).get("gap_classification"):
             gap_classification.extend(replay_df.attrs["gap_classification"])
@@ -710,32 +703,11 @@ class SeriesBuilderConstructionMixin:
         *,
         indicator_requirements: Sequence[Mapping[str, Any]] = (),
     ) -> int:
-        # Strategy/runtime warmup is intentionally separate from indicator-
-        # specific fetch windows (e.g. indicator days_back settings).
         _ = strategy, timeframe
-        default_bars = max(
-            [
-                100,
-                *[
-                    int(row.get("required_bars") or 0)
-                    for row in indicator_requirements
-                ],
-            ]
+        return resolve_backtest_warmup_bars(
+            indicator_requirements,
+            configured_bars=self.config.get("backtest_warmup_bars"),
         )
-        configured = self.config.get("backtest_warmup_bars")
-        if configured is None:
-            return default_bars
-        if isinstance(configured, bool):
-            raise ValueError("backtest_warmup_bars must be a positive integer")
-        try:
-            parsed = int(configured)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "backtest_warmup_bars must be a positive integer"
-            ) from exc
-        if parsed <= 0:
-            raise ValueError("backtest_warmup_bars must be a positive integer")
-        return parsed
 
     def evaluate_incremental_for_bar(
         self,

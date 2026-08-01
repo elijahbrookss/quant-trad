@@ -175,6 +175,34 @@ def test_list_bot_runs_for_bot_reports_snapshot_unavailable_without_replay(monke
     assert result["runs"][0]["seq"] is None
 
 
+def test_list_bot_runs_for_bot_keeps_persisted_terminal_status_when_snapshot_is_stale(monkeypatch):
+    storage = _FakeStorage()
+    storage.run["status"] = "completed"
+    storage.lifecycle.update({"phase": "completed", "status": "completed"})
+    snapshot = SimpleNamespace(
+        health=SimpleNamespace(
+            to_dict=lambda: {
+                "status": "starting",
+                "last_event_at": "2026-04-09T04:21:43Z",
+            }
+        ),
+        symbol_catalog=SimpleNamespace(entries={}),
+        seq=3,
+    )
+    composition = _FakeComposition(config_service=_FakeConfigService(), storage=storage)
+    monkeypatch.setattr(bot_service, "_composition", lambda: composition)
+    monkeypatch.setattr(
+        bot_service,
+        "_telemetry_hub",
+        lambda: _FakeTelemetryHub({"run-1": snapshot}),
+    )
+
+    result = bot_service.list_bot_runs_for_bot("bot-1")
+
+    assert result["runs"][0]["status"] == "completed"
+    assert result["runs"][0]["runtime_status"] == "completed"
+
+
 def test_runtime_capacity_marks_estimate_incomplete_when_snapshot_missing(monkeypatch):
     composition = _FakeComposition(config_service=_FakeConfigService(), storage=_FakeStorage())
     monkeypatch.setattr(bot_service, "_composition", lambda: composition)

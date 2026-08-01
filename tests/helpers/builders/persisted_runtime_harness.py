@@ -188,6 +188,7 @@ def run_persisted_reference(
     strategy = _strategy()
     deps = _runtime_deps(frame=frame, strategy=strategy, storage=storage)
     evaluation_bars = 7 if include_future_suffix else 4
+    evaluation_end = EVALUATION_START + timedelta(minutes=evaluation_bars)
     runtime = BotRuntime(
         BOT_ID,
         {
@@ -200,9 +201,10 @@ def run_persisted_reference(
             "series_runner": "inline",
             "strategy_ids": [STRATEGY_ID],
             "backtest_start": _iso(EVALUATION_START),
-            "backtest_end": _iso(
-                EVALUATION_START + timedelta(minutes=evaluation_bars - 1)
-            ),
+            # Canonical evaluation windows are half-open. Express N one-minute
+            # bars as [start, start + N minutes) so the final expected bar is
+            # decision-producing rather than accidentally excluded.
+            "backtest_end": _iso(evaluation_end),
             "backtest_warmup_bars": 100,
             "wallet_config": {"balances": {"USD": STARTING_CASH}},
             "shared_wallet_proxy": _shared_wallet_proxy(),

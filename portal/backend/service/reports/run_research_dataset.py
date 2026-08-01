@@ -125,6 +125,8 @@ class RunResearchMetadata:
     report_operational_fingerprint: Optional[str]
     dataset_schema_version: str
     generated_at: str
+    dataset_id: Optional[str] = None
+    dataset_hash: Optional[str] = None
     configuration: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -446,7 +448,13 @@ def _strategy_config_sections(config: Mapping[str, Any]) -> Dict[str, Any]:
         "execution_profile": config.get("execution_profile") or bot.get("execution_profile") or risk.get("execution_profile"),
         "slippage_bps": slippage_bps,
     }
+    dataset_binding = _mapping(config.get("dataset_binding"))
     data_config = {
+        "dataset_id": dataset_binding.get("dataset_id"),
+        "dataset_hash": dataset_binding.get("dataset_hash"),
+        "dataset_contract_version": dataset_binding.get(
+            "dataset_contract_version"
+        ),
         "backtest_warmup_bars": config.get("backtest_warmup_bars"),
         "backtest_warmup_evidence": config.get("backtest_warmup_evidence"),
         "symbols": config.get("symbols"),
@@ -584,13 +592,22 @@ def _metadata_instrument_ids(run: Mapping[str, Any]) -> List[str]:
         for instrument in strategy.get("instruments") or []:
             if not isinstance(instrument, Mapping):
                 continue
-            values.extend(
-                [
-                    instrument.get("instrument_id"),
-                    instrument.get("id"),
-                ]
-            )
+            # Instrument-link row IDs identify the strategy/instrument
+            # association, not the traded instrument. Use them only for old
+            # snapshots that genuinely lack the canonical instrument_id.
+            values.append(instrument.get("instrument_id") or instrument.get("id"))
     return _unique_text(values)
+
+
+def _metadata_dataset_identity(
+    run: Mapping[str, Any],
+) -> tuple[Optional[str], Optional[str]]:
+    config = _mapping(run.get("config_snapshot"))
+    binding = _mapping(config.get("dataset_binding"))
+    return (
+        _clean_text(binding.get("dataset_id")),
+        _clean_text(binding.get("dataset_hash")),
+    )
 
 
 def _metadata_instrument_semantics(run: Mapping[str, Any]) -> List[Dict[str, Any]]:
@@ -1562,6 +1579,8 @@ def _fee_accounting(
         caveats.append("fee_role_facts_unavailable")
     if not rates:
         caveats.append("fee_rate_facts_unavailable")
+    if sources.get("default_zero"):
+        caveats.append("unconfigured_zero_fee_model")
     return {
         "per_symbol_fees": sorted(per_symbol.values(), key=lambda item: item["symbol"]),
         "fee_rate": {
@@ -3339,6 +3358,31 @@ def _percentile(values: Sequence[float], percentile: float) -> Optional[float]:
     return clean[lower] + ((clean[upper] - clean[lower]) * (idx - lower))
 
 
+def _histogram_quantile_upper_bound(
+    bounds: Sequence[float],
+    counts: Sequence[int],
+    quantile: float,
+    *,
+    value_max: Optional[float],
+) -> Optional[float]:
+    if not bounds or len(bounds) != len(counts):
+        return None
+    total = sum(max(int(count), 0) for count in counts)
+    if total <= 0:
+        return None
+    threshold = max(
+        int(math.ceil(total * min(max(float(quantile), 0.0), 1.0))),
+        1,
+    )
+    cumulative = 0
+    for bound, count in zip(bounds, counts):
+        cumulative += max(int(count), 0)
+        if cumulative >= threshold:
+            result = float(bound)
+            return min(result, value_max) if value_max is not None else result
+    return value_max if value_max is not None else float(bounds[-1])
+
+
 def _portfolio_metrics(
     *,
     run: Mapping[str, Any],
@@ -3828,16 +3872,79 @@ def _performance(run: Mapping[str, Any], events: Sequence[Mapping[str, Any]]) ->
         sample_count = int(_safe_float(step.get("sample_count")) or 1)
         duration = _safe_float(step.get("p95_value", step.get("duration_ms"))) or 0.0
         total_ms = _safe_float(step.get("value_sum")) or duration * sample_count
-        stats = by_step.setdefault(name, {"step_name": name, "count": 0, "total_ms": 0.0, "durations": []})
+        stats = by_step.setdefault(
+            name,
+            {
+                "step_name": name,
+                "count": 0,
+                "total_ms": 0.0,
+                "rollup_quantiles": [],
+                "histogram_bounds": None,
+                "histogram_counts": None,
+                "histogram_complete": True,
+                "value_max": None,
+            },
+        )
         stats["count"] += sample_count
         step_count += sample_count
         stats["total_ms"] += total_ms
-        stats["durations"].append(duration)
+        stats["rollup_quantiles"].append(duration)
+        value_max = _safe_float(step.get("value_max", duration))
+        if value_max is not None:
+            stats["value_max"] = max(
+                float(stats["value_max"] or value_max),
+                value_max,
+            )
+        bounds = step.get("histogram_bounds")
+        counts = step.get("histogram_counts")
+        valid_histogram = (
+            isinstance(bounds, Sequence)
+            and not isinstance(bounds, (str, bytes))
+            and isinstance(counts, Sequence)
+            and not isinstance(counts, (str, bytes))
+            and len(bounds) > 0
+            and len(bounds) == len(counts)
+            and sum(max(int(count), 0) for count in counts) == sample_count
+        )
+        normalized_bounds = [float(bound) for bound in bounds] if valid_histogram else []
+        normalized_counts = [max(int(count), 0) for count in counts] if valid_histogram else []
+        if not valid_histogram:
+            stats["histogram_complete"] = False
+        elif stats["histogram_bounds"] is None:
+            stats["histogram_bounds"] = normalized_bounds
+            stats["histogram_counts"] = normalized_counts
+        elif stats["histogram_bounds"] != normalized_bounds:
+            stats["histogram_complete"] = False
+        else:
+            stats["histogram_counts"] = [
+                int(existing) + int(incoming)
+                for existing, incoming in zip(
+                    stats["histogram_counts"],
+                    normalized_counts,
+                )
+            ]
     major = []
     for stats in by_step.values():
-        values = list(stats.pop("durations"))
-        stats["avg_ms"] = statistics.mean(values) if values else None
-        stats["p95_ms"] = _percentile(values, 0.95)
+        values = list(stats.pop("rollup_quantiles"))
+        bounds = stats.pop("histogram_bounds")
+        counts = stats.pop("histogram_counts")
+        histogram_complete = bool(stats.pop("histogram_complete"))
+        value_max = stats.pop("value_max")
+        count = int(stats["count"] or 0)
+        stats["avg_ms"] = (
+            float(stats["total_ms"]) / count if count > 0 else None
+        )
+        if histogram_complete and bounds is not None and counts is not None:
+            stats["p95_ms"] = _histogram_quantile_upper_bound(
+                bounds,
+                counts,
+                0.95,
+                value_max=value_max,
+            )
+            stats["p95_method"] = "merged_histogram_upper_bound"
+        else:
+            stats["p95_ms"] = _percentile(values, 0.95)
+            stats["p95_method"] = "rollup_quantile_approximation"
         major.append(stats)
     major.sort(key=lambda item: item.get("total_ms") or 0.0, reverse=True)
     return {
@@ -3848,7 +3955,11 @@ def _performance(run: Mapping[str, Any], events: Sequence[Mapping[str, Any]]) ->
         "p95_ms": _percentile(clean_durations, 0.95),
         "p99_ms": _percentile(clean_durations, 0.99),
         "major_step_timings": major[:10],
-        "performance_caveats": [] if steps else ["runtime_step_timings_unavailable"],
+        "performance_caveats": (
+            ["run_level_percentiles_aggregate_rollup_quantiles"]
+            if steps
+            else ["runtime_step_timings_unavailable"]
+        ),
     }
 
 
@@ -4992,6 +5103,8 @@ def _report_semantic_fingerprint(
         "schema_version": DATASET_SCHEMA_VERSION,
         "fingerprint_type": "semantic",
         "identity": {
+            "dataset_id": metadata.dataset_id,
+            "dataset_hash": metadata.dataset_hash,
             "strategy_id": metadata.strategy_id,
             "strategy_hash": metadata.strategy_hash,
             "material_config_hash": metadata.material_config_hash,
@@ -5136,6 +5249,8 @@ def _report_operational_fingerprint(
         "schema_version": DATASET_SCHEMA_VERSION,
         "fingerprint_type": "operational",
         "identity": {
+            "dataset_id": metadata.dataset_id,
+            "dataset_hash": metadata.dataset_hash,
             "strategy_id": metadata.strategy_id,
             "strategy_hash": metadata.strategy_hash,
             "material_config_hash": metadata.material_config_hash,
@@ -5208,6 +5323,11 @@ def _golden_blocking_reasons(
     reasons: List[str] = []
     if not readiness.results_ready:
         reasons.append(readiness.reason or "results_not_ready")
+    if str(metadata.run_type or "").strip().lower() == "backtest":
+        if not metadata.dataset_id:
+            reasons.append("missing_dataset_id")
+        if not metadata.dataset_hash:
+            reasons.append("missing_dataset_hash")
     if not metadata.strategy_hash:
         reasons.append("missing_strategy_hash")
     if not metadata.material_config_hash:
@@ -5350,6 +5470,16 @@ def _operational_health(
         if coverage_status in {"truncated", "unavailable"}
         else []
     )
+    profile_artifacts = [
+        {
+            **dict(row.get("details") or {}),
+            "worker_id": row.get("worker_id"),
+            "observed_at": row.get("observed_at"),
+        }
+        for row in observability_events
+        if str(row.get("event_name") or "").strip().lower() == "runtime_profile_completed"
+        and isinstance(row.get("details"), Mapping)
+    ]
     return {
         "schema_version": "operational_health.v1",
         "run_id": metadata.run_id,
@@ -5360,6 +5490,7 @@ def _operational_health(
             "wall_clock_duration_seconds": performance.get("wall_clock_duration_seconds"),
         },
         "per_stage_latency": performance.get("major_step_timings") or [],
+        "profile_artifacts": profile_artifacts,
         "event_volume_summary": {
             "total": len(events),
             "by_event_type": dict(event_type_counts),
@@ -5458,6 +5589,7 @@ def _metadata(run: Mapping[str, Any]) -> RunResearchMetadata:
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     timeframes = _metadata_timeframes(run)
     datasource = str(run.get("provider") or run.get("datasource") or config.get("datasource") or "").strip() or None
+    dataset_id, dataset_hash = _metadata_dataset_identity(run)
     return RunResearchMetadata(
         run_id=str(run.get("run_id") or ""),
         bot_id=str(run.get("bot_id") or "").strip() or None,
@@ -5489,6 +5621,8 @@ def _metadata(run: Mapping[str, Any]) -> RunResearchMetadata:
         report_operational_fingerprint=None,
         dataset_schema_version=DATASET_SCHEMA_VERSION,
         generated_at=generated_at,
+        dataset_id=dataset_id,
+        dataset_hash=dataset_hash,
         configuration=_configuration_metadata(config),
     )
 
@@ -5538,6 +5672,7 @@ def _finalize_readiness(
     observability_coverage: Mapping[str, Any],
     readiness: RunResearchReadiness,
     execution: Mapping[str, Any],
+    fee_accounting: Mapping[str, Any],
     candle_gaps: Mapping[str, Any],
     wallet_accounting: Mapping[str, Any],
     portfolio_metrics: Mapping[str, Any],
@@ -5594,6 +5729,12 @@ def _finalize_readiness(
         )
     if execution_quality_status == "degraded":
         degraded_sections.append("execution_quality")
+    for caveat in fee_accounting.get("caveats") or []:
+        degraded_sections.append("fee_accounting")
+        caveats.append(str(caveat))
+    for caveat in _mapping(execution.get("slippage")).get("caveats") or []:
+        degraded_sections.append("execution_quality")
+        caveats.append(str(caveat))
     warmup_evidence = [
         dict(row)
         for row in _mapping(metadata.configuration.get("data")).get(
@@ -5864,6 +6005,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         observability_coverage=observability_coverage,
         readiness=readiness,
         execution=execution,
+        fee_accounting=fee_accounting,
         candle_gaps=candle_gaps,
         wallet_accounting=wallet_accounting,
         portfolio_metrics=portfolio_metrics,

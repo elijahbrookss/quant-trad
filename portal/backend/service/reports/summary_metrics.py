@@ -190,14 +190,19 @@ def compute_summary(
     closed = closed_trades(trades)
     start_balance = _extract_start_balance(run_config)
     total_net = sum(_safe_float(trade.get("net_pnl")) or 0.0 for trade in closed)
-    _equity_series, _trade_returns = _build_equity_series(closed, start_balance, start_time=start_time)
+    equity_series, _trade_returns = _build_equity_series(closed, start_balance, start_time=start_time)
     daily_equity, daily_returns, daily_pnls = _build_daily_equity(
         closed,
         start_balance,
         start_time=start_time,
         end_time=end_time,
     )
-    max_drawdown_pct, max_drawdown_abs = compute_max_drawdown([value for _, value in daily_equity])
+    # Max drawdown is an execution-path invariant: preserve every closed-trade
+    # equity transition instead of hiding intraday peaks and troughs behind the
+    # daily analytics aggregation used for Sharpe, Sortino, and volatility.
+    max_drawdown_pct, max_drawdown_abs = compute_max_drawdown(
+        [_safe_float(point.get("value")) or 0.0 for point in equity_series]
+    )
     sharpe = compute_sharpe(daily_returns, periods_per_year=ANNUALIZATION_PERIODS)
     sortino = compute_sortino(daily_returns, periods_per_year=ANNUALIZATION_PERIODS)
     volatility = statistics.pstdev(daily_returns) * math.sqrt(ANNUALIZATION_PERIODS) if len(daily_returns) >= 2 else None

@@ -40,7 +40,7 @@ run_policy:
 windows:
   - id: window_a
     start: "2026-01-01T00:00:00Z"
-    end: "2026-01-31T23:59:59Z"
+    end: "2026-02-01T00:00:00Z"
 variants:
   - id: baseline
     bot_id: bot-base
@@ -140,10 +140,42 @@ def test_experiments_run_plan_writes_state_events_artifacts_and_pass_gates(tmp_p
             )
         if method == "PUT" and path in {"/api/bots/bot-base", "/api/bots/bot-candidate"}:
             body = json.loads(request.data.decode("utf-8"))
-            assert body == {"backtest_start": "2026-01-01T00:00:00Z", "backtest_end": "2026-01-31T23:59:59Z"}
+            assert body == {
+                "backtest_start": "2026-01-01T00:00:00Z",
+                "backtest_end": "2026-02-01T00:00:00Z",
+            }
             return _Response(b'{"schema_version":"bot_response.v1"}')
+        if method == "POST" and path in {
+            "/api/bots/bot-base/backtest-dataset/prepare",
+            "/api/bots/bot-candidate/backtest-dataset/prepare",
+        }:
+            bot_id = path.split("/")[3]
+            body = json.loads(request.data.decode("utf-8"))
+            assert body == {
+                "evaluation_start": "2026-01-01T00:00:00Z",
+                "evaluation_end": "2026-02-01T00:00:00Z",
+                "acquire_missing": False,
+                "created_by": "exp-1",
+            }
+            return _Response(
+                json.dumps(
+                    {
+                        "schema_version": "backtest_dataset_preparation.v1",
+                        "status": "ready",
+                        "dataset": {"dataset_id": f"mds_{bot_id}"},
+                    }
+                ).encode("utf-8")
+            )
         if method == "POST" and path in {"/api/bots/bot-base/runs/start", "/api/bots/bot-candidate/runs/start"}:
             run_id = "run-base" if "bot-base" in path else "run-candidate"
+            bot_id = "bot-base" if "bot-base" in path else "bot-candidate"
+            variant_id = "baseline" if bot_id == "bot-base" else "candidate"
+            body = json.loads(request.data.decode("utf-8"))
+            assert body == {
+                "request_id": f"exp-1__window_a__{variant_id}",
+                "run_type": "backtest",
+                "dataset_id": f"mds_{bot_id}",
+            }
             return _Response(json.dumps({"schema_version": "bot_run_start.v1", "run_id": run_id, "status": "starting"}).encode("utf-8"))
         if method == "GET" and path in {"/api/bots/bot-base/runs/run-base/status", "/api/bots/bot-candidate/runs/run-candidate/status"}:
             run_id = path.split("/")[-2]

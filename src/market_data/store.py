@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional, Protocol
 
@@ -26,6 +26,11 @@ class FrozenDataset:
     dataset_hash: str
     max_commit_seq: int
     series: tuple[Mapping[str, Any], ...]
+    contract_version: str = "market_dataset.v1"
+    name: Optional[str] = None
+    purpose: str = "research"
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    reused_existing: bool = field(default=False, compare=False)
 
 
 class MarketDataStore(Protocol):
@@ -115,6 +120,8 @@ class MarketDataStore(Protocol):
         dataset_id: str,
         series_id: int,
         known_at_lte: Optional[datetime] = None,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
     ) -> list[CandleRecord]:
         ...
 

@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Mapping, Sequence
 from core.candle_snapshot import build_expected_candle_series_inventory
 from core.settings import get_settings
 from engines.bot_runtime.runtime.runtime import BotRuntime
+from engines.bot_runtime.runtime.profiling import PythonProfileSession
 from engines.bot_runtime.core.runtime_events import (
     RuntimeEventName,
     WalletInitializedContext,
@@ -53,7 +54,10 @@ from portal.backend.service.bots.execution_behavior import OBSERVE_ONLY_BEHAVIOR
 from portal.backend.service.bots.observe_only_runtime import run_observe_only_market_intake
 from portal.backend.service.bots.paper_market_stream import PaperMarketStreamRunner
 from portal.backend.service.market.feed_service import paper_candle_persistence_sink
-from portal.backend.service.storage.repos.market_data import market_data_repo
+from market_data.backtest import (
+    build_backtest_execution_config_hash,
+    normalize_backtest_dataset_binding,
+)
 from portal.backend.service.bots.run_lease import RunLeaseRenewer, default_run_lease_runner_id
 from engines.bot_runtime.live_market import LiveCandleStore
 from portal.backend.service.reports.artifacts import finalize_run_artifact_bundle_from_workers
@@ -147,24 +151,38 @@ def _bind_backtest_market_data_scope(
     *,
     run_id: str,
 ) -> Dict[str, Any] | None:
-    """Pin every backtest worker and nested strategy read to one market commit."""
+    """Defensively bind every backtest worker to the admitted frozen dataset."""
 
     run_type = str(runtime_bot_config.get("run_type") or "backtest").strip().lower()
     if run_type != "backtest":
         return None
-    configured = runtime_bot_config.get("market_data_as_of_commit_seq")
-    watermark = int(configured) if configured is not None else market_data_repo.current_commit_seq()
-    if watermark <= 0:
+    raw_binding = runtime_bot_config.get("dataset_binding")
+    binding = normalize_backtest_dataset_binding(raw_binding)
+    configured_id = str(runtime_bot_config.get("dataset_id") or "").strip()
+    if configured_id != binding["dataset_id"]:
         raise RuntimeError(
-            "backtest_market_data_unavailable: no accepted canonical candle facts exist"
+            "backtest_dataset_substitution_forbidden: configured dataset_id differs from admitted binding"
+        )
+    actual_execution_config_hash = build_backtest_execution_config_hash(
+        bot=runtime_bot_config,
+        strategy_identity=binding,
+        instrument_config_hash=str(binding["instrument_config_hash"]),
+    )
+    if actual_execution_config_hash != str(binding["execution_config_hash"]):
+        raise RuntimeError(
+            "backtest_execution_config_substitution_forbidden: runtime bot "
+            "configuration differs from the admitted dataset binding"
         )
     scope = {
-        "schema_version": "market_data_read_scope.v1",
-        "as_of_commit_seq": watermark,
-        "contract_version": "candle.ohlcv.v1",
+        "schema_version": "market_data_read_scope.v2",
+        "dataset_id": binding["dataset_id"],
+        "dataset_hash": binding["dataset_hash"],
+        "as_of_commit_seq": binding["max_commit_seq"],
+        "contract_version": binding["dataset_contract_version"],
     }
-    runtime_bot_config["market_data_as_of_commit_seq"] = watermark
+    runtime_bot_config["dataset_binding"] = binding
     runtime_bot_config["market_data_read_scope"] = dict(scope)
+    runtime_bot_config.pop("market_data_as_of_commit_seq", None)
 
     run = get_bot_run(run_id) or {}
     config_snapshot = (
@@ -441,8 +459,16 @@ def _next_run_event_seq(shared_wallet_proxy: Mapping[str, Any]) -> int:
             proxy_lock.release()
 
 
-def _load_strategy_symbols(strategy_id: str) -> List[str]:
-    strategy = StrategyLoader.fetch_strategy(strategy_id)
+def _load_strategy_symbols(
+    strategy_id: str,
+    *,
+    runtime_config: Mapping[str, Any],
+) -> List[str]:
+    raw_binding = runtime_config.get("dataset_binding")
+    deps = build_bot_runtime_deps(
+        dataset_binding=raw_binding if isinstance(raw_binding, Mapping) else None
+    )
+    strategy = deps.fetch_strategy(strategy_id, dict(runtime_config))
     symbols: List[str] = []
     seen: set[str] = set()
     for link in strategy.instrument_links:
@@ -1604,7 +1630,9 @@ def load_container_startup_context(
         metadata={"strategy_id": strategy_id},
         telemetry_sender=telemetry_sender,
     )
-    all_symbols = _load_strategy_symbols(strategy_id)
+    all_symbols = _load_strategy_symbols(
+        strategy_id, runtime_config=runtime_bot_config
+    )
     max_symbols = _MAX_SYMBOLS_PER_STRATEGY
     if len(all_symbols) > max_symbols:
         raise RuntimeError(
@@ -1791,11 +1819,7 @@ def _series_worker(
     runtime = BotRuntime(
         bot_id=bot_id,
         config=child_config,
-        deps=build_bot_runtime_deps(
-            market_data_as_of_commit_seq=child_config.get(
-                "market_data_as_of_commit_seq"
-            )
-        ),
+        deps=build_bot_runtime_deps(dataset_binding=child_config.get("dataset_binding")),
     )
 
     def _queue_worker_event(payload: Mapping[str, Any], *, timeout_s: float = 0.25) -> bool:
@@ -1852,6 +1876,43 @@ def _series_worker(
     first_live_progress_signaled = False
     paper_market_stream: PaperMarketStreamRunner | None = None
     paper_market_stream_snapshot: Dict[str, Any] | None = None
+    profile_enabled = (
+        bool(child_config.get("profile"))
+        and str(child_config.get("run_type") or "").strip().lower() == "backtest"
+    )
+    profile_work_units = 0
+    profile_context: dict[str, Any] = {}
+    if profile_enabled:
+        dataset_binding = (
+            child_config.get("dataset_binding")
+            if isinstance(child_config.get("dataset_binding"), Mapping)
+            else {}
+        )
+        dataset_series = [
+            row
+            for row in dataset_binding.get("series") or []
+            if isinstance(row, Mapping)
+        ]
+        profile_work_units = sum(
+            max(int(row.get("row_count") or 0), 0) for row in dataset_series
+        )
+        profile_context = {
+            "bot_id": bot_id,
+            "run_id": run_id,
+            "worker_id": worker_id,
+            "dataset_id": dataset_binding.get("dataset_id"),
+            "dataset_hash": dataset_binding.get("dataset_hash"),
+            "strategy_id": strategy_id,
+            "strategy_hash": dataset_binding.get("strategy_hash"),
+            "execution_mode": child_config.get("execution_mode"),
+            "source_revision": os.getenv("SOURCE_REVISION"),
+            "materialized_row_count": profile_work_units,
+        }
+    profile_session = PythonProfileSession(
+        enabled=profile_enabled,
+        work_units=profile_work_units,
+        context=profile_context,
+    )
 
     def _schedule_bridge_resync(reason: str) -> None:
         nonlocal bridge_session_id, bridge_seq, bridge_resync_reason
@@ -2092,6 +2153,7 @@ def _series_worker(
                     continue
             _schedule_bridge_resync("bridge_queue_backpressure")
 
+    profile_session.start()
     try:
         if not _queue_control_event(
             {
@@ -2165,40 +2227,54 @@ def _series_worker(
         runtime_error["exception_type"] = type(exc).__name__
         runtime_error["traceback"] = traceback.format_exc().strip()
     finally:
-        if paper_market_stream is not None:
-            try:
-                paper_market_stream.stop()
-                paper_market_stream_snapshot = json_safe(paper_market_stream.snapshot())
-                logger.info(
-                    "paper_market_stream_stopped | bot_id=%s | run_id=%s | worker_id=%s | symbols=%s | snapshot=%s",
-                    bot_id,
-                    run_id,
-                    worker_id,
-                    list(symbols),
-                    paper_market_stream_snapshot,
-                )
-            except Exception as exc:  # noqa: BLE001
+        try:
+            if paper_market_stream is not None:
                 try:
-                    paper_market_stream_snapshot = json_safe(
-                        {
-                            **paper_market_stream.snapshot(),
-                            "stop_error": str(exc),
-                        }
+                    paper_market_stream.stop()
+                    paper_market_stream_snapshot = json_safe(paper_market_stream.snapshot())
+                    logger.info(
+                        "paper_market_stream_stopped | bot_id=%s | run_id=%s | worker_id=%s | symbols=%s | snapshot=%s",
+                        bot_id,
+                        run_id,
+                        worker_id,
+                        list(symbols),
+                        paper_market_stream_snapshot,
                     )
-                except Exception:  # noqa: BLE001
-                    paper_market_stream_snapshot = {"stop_error": str(exc)}
+                except Exception as exc:  # noqa: BLE001
+                    try:
+                        paper_market_stream_snapshot = json_safe(
+                            {
+                                **paper_market_stream.snapshot(),
+                                "stop_error": str(exc),
+                            }
+                        )
+                    except Exception:  # noqa: BLE001
+                        paper_market_stream_snapshot = {"stop_error": str(exc)}
+                    logger.warning(
+                        "paper_market_stream_stop_failed | bot_id=%s | run_id=%s | worker_id=%s | error=%s",
+                        bot_id,
+                        run_id,
+                        worker_id,
+                        exc,
+                    )
+            stream_stop.set()
+            if emitter_thread is not None:
+                emitter_thread.join(timeout=1.0)
+            if subscription_token is not None:
+                runtime.unsubscribe(subscription_token)
+        finally:
+            try:
+                profile_session.stop(error=runtime_error.get("message"))
+            except Exception as exc:  # noqa: BLE001 - profiling cannot alter run truth.
+                profile_session.record_failure(exc)
                 logger.warning(
-                    "paper_market_stream_stop_failed | bot_id=%s | run_id=%s | worker_id=%s | error=%s",
+                    "runtime_profile_finalize_failed | bot_id=%s | run_id=%s | "
+                    "worker_id=%s | error=%s",
                     bot_id,
                     run_id,
                     worker_id,
                     exc,
                 )
-        stream_stop.set()
-        if emitter_thread is not None:
-            emitter_thread.join(timeout=1.0)
-        if subscription_token is not None:
-            runtime.unsubscribe(subscription_token)
     status = str((runtime.snapshot() or {}).get("status") or "").strip().lower() or ("error" if runtime_error else "stopped")
     if runtime_error:
         queued = _queue_control_event(
@@ -2228,6 +2304,8 @@ def _series_worker(
         }
         if paper_market_stream_snapshot is not None:
             terminal_event["paper_market_stream"] = paper_market_stream_snapshot
+        if profile_session.summary is not None:
+            terminal_event["profile_artifact"] = dict(profile_session.summary)
         _queue_control_event(
             terminal_event
         )
@@ -2246,6 +2324,8 @@ def _series_worker(
     }
     if paper_market_stream_snapshot is not None:
         terminal_event["paper_market_stream"] = paper_market_stream_snapshot
+    if profile_session.summary is not None:
+        terminal_event["profile_artifact"] = dict(profile_session.summary)
     _queue_control_event(terminal_event)
     if status in {"error", "failed", "crashed", "degraded"}:
         _queue_control_event(
@@ -2313,6 +2393,17 @@ def _handle_worker_terminal_event(ctx: ContainerStartupContext, event: Mapping[s
     if not worker_id or not status:
         return
     ctx.reported_worker_terminal_statuses[worker_id] = status
+    profile_artifact = event.get("profile_artifact") if isinstance(event.get("profile_artifact"), Mapping) else None
+    if profile_artifact is not None:
+        _OBSERVER.event(
+            "runtime_profile_completed",
+            bot_id=ctx.bot_id,
+            run_id=ctx.run_id,
+            worker_id=worker_id,
+            capture_policy="opt_in",
+            profile_status=profile_artifact.get("status"),
+            details=dict(profile_artifact),
+        )
     _handle_worker_paper_market_stream_summary(ctx, event)
     for symbol in event.get("symbols") or []:
         normalized_symbol = str(symbol).strip().upper()
