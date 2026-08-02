@@ -27,11 +27,20 @@ from market_data.book_archive import (
     BOOK_CHECKPOINT_FORMAT,
     EncodedBookCheckpoint,
 )
+from market_data.market_state import (
+    BasisFeatureFact,
+    BboFeatureFact,
+    DepthFeatureFact,
+    DerivativeStateFeatureFact,
+    ResponseFeatureFact,
+    TradeFlowFeatureFact,
+)
 from market_data.order_book import (
     BOOK_CHECKPOINT_SCHEMA_VERSION,
     BOOK_RECONSTRUCTION_VERSION,
     BookCheckpointFact,
     BookLifecycle,
+    BookSourcePosition,
     BookValidityIntervalVersion,
     L2MutationBatchFact,
     L2SnapshotFact,
@@ -156,7 +165,234 @@ class BookIngestionOutcome:
     inserted_validity_count: int
     max_commit_seq: int
 
+@dataclass(frozen=True)
+class FeatureIngestionOutcome:
+    inserted_count: int
+    noop_count: int
+    max_commit_seq: int
+    material_hashes: tuple[str, ...]
 
+
+
+def _persist_feature_revision(
+    session,
+    *,
+    table_name: str,
+    time_column: str,
+    prefix: str,
+    identity: Mapping[str, Any],
+    values: Mapping[str, Any],
+    json_columns: Sequence[str] = (),
+) -> tuple[bool, int]:
+    """Append one typed revision or prove exact material idempotency."""
+
+    identifiers = (table_name, time_column, *identity.keys(), *values.keys())
+    if any(not str(name).replace("_", "").isalnum() for name in identifiers):
+        raise ValueError("market_feature_storage_invalid: unsafe SQL identifier")
+    if "series_id" not in identity or "material_hash" not in values:
+        raise ValueError("market_feature_storage_invalid: identity/material hash required")
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(:series_id)"),
+        {"series_id": int(identity["series_id"])},
+    )
+    where_sql = " AND ".join(f"{name} = :identity_{name}" for name in identity)
+    identity_params = {f"identity_{name}": value for name, value in identity.items()}
+    existing = session.execute(
+        text(
+            f"SELECT revision, material_hash FROM market.{table_name} "
+            f"WHERE {where_sql} ORDER BY revision DESC LIMIT 1 FOR UPDATE"
+        ),
+        identity_params,
+    ).mappings().first()
+    material_hash = str(values["material_hash"])
+    if existing is not None and str(existing["material_hash"]) == material_hash:
+        return False, 0
+    revision = int(existing["revision"]) + 1 if existing is not None else 1
+    version_id = _version_id(
+        prefix,
+        {
+            "schema_version": "market.typed_feature_revision.v1",
+            "table_name": table_name,
+            "identity": dict(identity),
+            "revision": revision,
+            "material_hash": material_hash,
+        },
+    )
+    provenance_hash = _stable_hash(
+        {
+            "schema_version": "market.typed_feature_provenance.v1",
+            "table_name": table_name,
+            "identity": dict(identity),
+            "material_hash": material_hash,
+            "input_fingerprint": values.get("input_fingerprint"),
+        }
+    )
+    row = {
+        "id": version_id,
+        **dict(identity),
+        "revision": revision,
+        **dict(values),
+        "provenance_hash": provenance_hash,
+        "quality": _json({}),
+    }
+    columns = tuple(row)
+    json_names = set(json_columns) | {"quality"}
+    placeholders = ", ".join(
+        f"CAST(:{name} AS jsonb)" if name in json_names else f":{name}"
+        for name in columns
+    )
+    commit_seq = int(
+        session.execute(
+            text(
+                f"INSERT INTO market.{table_name} ({', '.join(columns)}) "
+                f"VALUES ({placeholders}) RETURNING market_commit_seq"
+            ),
+            row,
+        ).scalar_one()
+    )
+    return True, commit_seq
+
+
+def _require_book_state_source(
+    session,
+    *,
+    series_id: int,
+    position: Mapping[str, Any],
+    validity_interval_id: str,
+    state_hash: str,
+) -> None:
+    """Require a canonical archive-acknowledged snapshot or mutation state."""
+
+    found = session.execute(
+        text(
+            """
+            SELECT 1
+            FROM (
+                SELECT series_id, connection_epoch, receive_ordinal,
+                       event_ordinal, validity_interval_id, state_hash
+                FROM market.l2_snapshot_versions
+                UNION ALL
+                SELECT series_id, connection_epoch, receive_ordinal,
+                       event_ordinal, validity_interval_id,
+                       after_state_hash AS state_hash
+                FROM market.l2_mutation_batches
+            ) AS states
+            WHERE series_id = :series_id
+              AND connection_epoch = :connection_epoch
+              AND receive_ordinal = :receive_ordinal
+              AND event_ordinal = :event_ordinal
+              AND validity_interval_id = :validity_interval_id
+              AND state_hash = :state_hash
+            LIMIT 1
+            """
+        ),
+        {
+            "series_id": int(series_id),
+            "connection_epoch": int(position["connection_epoch"]),
+            "receive_ordinal": int(position["receive_ordinal"]),
+            "event_ordinal": int(position["event_ordinal"]),
+            "validity_interval_id": str(validity_interval_id),
+            "state_hash": str(state_hash),
+        },
+    ).scalar_one_or_none()
+    if found is None:
+        raise ValueError(
+            "market_feature_source_incomplete: canonical acknowledged book state is missing"
+        )
+
+
+def _require_material_source(
+    session,
+    *,
+    table_name: str,
+    series_id: int,
+    material_hash: str,
+) -> None:
+    if not str(table_name).replace("_", "").isalnum():
+        raise ValueError("market_feature_storage_invalid: unsafe source table")
+    found = session.execute(
+        text(
+            f"SELECT 1 FROM market.{table_name} "
+            "WHERE series_id = :series_id AND material_hash = :material_hash LIMIT 1"
+        ),
+        {"series_id": int(series_id), "material_hash": str(material_hash)},
+    ).scalar_one_or_none()
+    if found is None:
+        raise ValueError(
+            f"market_feature_source_incomplete: {table_name} source material is missing"
+        )
+
+def _read_feature_rows(
+    session,
+    *,
+    table_name: str,
+    time_column: str,
+    partition_columns: Sequence[str],
+    series_id: int,
+    start: datetime,
+    end: datetime,
+    known_at: datetime,
+    as_of_commit_seq: Optional[int],
+) -> list[Mapping[str, Any]]:
+    identifiers = (table_name, time_column, *partition_columns)
+    if any(not str(name).replace("_", "").isalnum() for name in identifiers):
+        raise ValueError("market_feature_storage_invalid: unsafe read identifier")
+    if end <= start:
+        raise ValueError("market_feature_read_invalid: end must follow start")
+    partition_sql = ", ".join(partition_columns)
+    params: dict[str, Any] = {
+        "series_id": int(series_id),
+        "start": _utc(start),
+        "end": _utc(end),
+        "known_at": _utc(known_at),
+        "as_of_commit_seq": (
+            int(as_of_commit_seq) if as_of_commit_seq is not None else None
+        ),
+    }
+    return list(
+        session.execute(
+            text(
+                f"""
+                WITH visible AS (
+                    SELECT rows.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY {partition_sql}
+                               ORDER BY revision DESC, market_commit_seq DESC
+                           ) AS selected_revision
+                    FROM market.{table_name} AS rows
+                    WHERE series_id = :series_id
+                      AND {time_column} >= :start
+                      AND {time_column} < :end
+                      AND known_at <= :known_at
+                      AND (
+                          :as_of_commit_seq IS NULL
+                          OR market_commit_seq <= :as_of_commit_seq
+                      )
+                )
+                SELECT * FROM visible
+                WHERE selected_revision = 1
+                ORDER BY {time_column}
+                """
+            ),
+            params,
+        ).mappings().all()
+    )
+
+
+def _book_position_from_material(value: Mapping[str, Any]) -> BookSourcePosition:
+    return BookSourcePosition(
+        definition_id=str(value["definition_id"]),
+        session_id=str(value["session_id"]),
+        connection_epoch=int(value["connection_epoch"]),
+        provider_product_id=str(value["provider_product_id"]),
+        provider_sequence_num=(
+            int(value["provider_sequence_num"])
+            if value.get("provider_sequence_num") is not None
+            else None
+        ),
+        receive_ordinal=int(value["receive_ordinal"]),
+        event_ordinal=int(value["event_ordinal"]),
+    )
 class PostgresMarketStructureRepository:
     """One transactional authority for Phase 1 stream facts and projections."""
 
@@ -1196,6 +1432,30 @@ class PostgresMarketStructureRepository:
                 },
             )
         return event_id
+
+    def list_session_quality_events(
+        self, *, definition_id: str, session_id: str
+    ) -> list[dict[str, Any]]:
+        """Return the immutable quality timeline used by deterministic replay."""
+
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT *
+                    FROM market.stream_quality_events
+                    WHERE definition_id = :definition_id
+                      AND session_id = :session_id
+                    ORDER BY connection_epoch, receive_ordinal,
+                             detected_at, classification, id
+                    """
+                ),
+                {
+                    "definition_id": str(definition_id),
+                    "session_id": str(session_id),
+                },
+            ).mappings().all()
+        return [dict(row) for row in rows]
 
     def ingest_trades(
         self,
@@ -2906,6 +3166,829 @@ class PostgresMarketStructureRepository:
         }
 
 
+
+    def cross_stream_input_commit_seq(
+        self,
+        *,
+        futures_bbo_series_id: int,
+        spot_bbo_series_id: int,
+        oi_series_id: Optional[int],
+        funding_series_id: Optional[int],
+        start: datetime,
+        end: datetime,
+        known_at: datetime,
+    ) -> int:
+        """Return a bounded watermark from inputs only, never derived outputs."""
+
+        start_at = _utc(start)
+        end_at = _utc(end)
+        decision_time = _utc(known_at)
+        if end_at <= start_at:
+            raise ValueError("market_feature_watermark_invalid: end must follow start")
+        futures_bbo = int(futures_bbo_series_id)
+        spot_bbo = int(spot_bbo_series_id)
+        if futures_bbo <= 0 or spot_bbo <= 0:
+            raise ValueError(
+                "market_feature_watermark_invalid: BBO series identities are required"
+            )
+        oi_series = int(oi_series_id) if oi_series_id is not None else -1
+        funding_series = (
+            int(funding_series_id) if funding_series_id is not None else -1
+        )
+        with db.session() as session:
+            value = session.execute(
+                text(
+                    """
+                    SELECT GREATEST(
+                        COALESCE((
+                            SELECT MAX(market_commit_seq)
+                            FROM market.bbo_feature_versions
+                            WHERE series_id IN (:futures_bbo, :spot_bbo)
+                              AND bucket_start >= :start
+                              AND bucket_start < :end
+                              AND known_at <= :known_at
+                        ), 0),
+                        COALESCE((
+                            SELECT MAX(market_commit_seq)
+                            FROM market.open_interest_versions
+                            WHERE series_id = :oi_series
+                              AND sample_time >= :start
+                              AND sample_time < :end
+                              AND known_at <= :known_at
+                        ), 0),
+                        COALESCE((
+                            SELECT MAX(market_commit_seq)
+                            FROM market.funding_rate_versions
+                            WHERE series_id = :funding_series
+                              AND sample_time >= :start
+                              AND sample_time < :end
+                              AND known_at <= :known_at
+                        ), 0),
+                        COALESCE((
+                            SELECT MAX(detected_as_of_commit_seq)
+                            FROM market.gap_evidence
+                            WHERE series_id IN (:oi_series, :funding_series)
+                              AND end_time > :start
+                              AND start_time < :end
+                        ), 0)
+                    )
+                    """
+                ),
+                {
+                    "futures_bbo": futures_bbo,
+                    "spot_bbo": spot_bbo,
+                    "oi_series": oi_series,
+                    "funding_series": funding_series,
+                    "start": start_at,
+                    "end": end_at,
+                    "known_at": decision_time,
+                },
+            ).scalar_one()
+        return int(value)
+
+    def ingest_market_state_features(
+        self,
+        *,
+        bbo_facts: Iterable[BboFeatureFact] = (),
+        depth_facts: Iterable[DepthFeatureFact] = (),
+        flow_facts: Iterable[TradeFlowFeatureFact] = (),
+        basis_facts: Iterable[BasisFeatureFact] = (),
+        derivative_facts: Iterable[DerivativeStateFeatureFact] = (),
+        response_facts: Iterable[ResponseFeatureFact] = (),
+    ) -> FeatureIngestionOutcome:
+        """Persist one deterministic append-only Phase 3 feature batch."""
+
+        bbo_rows = tuple(bbo_facts)
+        depth_rows = tuple(depth_facts)
+        flow_rows = tuple(flow_facts)
+        basis_rows = tuple(basis_facts)
+        derivative_rows = tuple(derivative_facts)
+        response_rows = tuple(response_facts)
+        inserted = 0
+        noop = 0
+        max_commit_seq = 0
+        material_hashes: list[str] = []
+
+        def record(outcome: tuple[bool, int], material_hash: str) -> None:
+            nonlocal inserted, noop, max_commit_seq
+            was_inserted, commit_seq = outcome
+            inserted += int(was_inserted)
+            noop += int(not was_inserted)
+            max_commit_seq = max(max_commit_seq, int(commit_seq))
+            material_hashes.append(str(material_hash))
+
+        with db.session() as session:
+            for fact in bbo_rows:
+                position = fact.source_position.material()
+                _require_book_state_source(
+                    session,
+                    series_id=fact.source_l2_series_id,
+                    position=position,
+                    validity_interval_id=fact.validity_interval_id,
+                    state_hash=fact.source_state_hash,
+                )
+                record(
+                    _persist_feature_revision(
+                        session,
+                        table_name="bbo_feature_versions",
+                        time_column="bucket_start",
+                        prefix="bbo",
+                        identity={
+                            "series_id": fact.series_id,
+                            "bucket_start": fact.bucket_start,
+                        },
+                        values={
+                            "source_l2_series_id": fact.source_l2_series_id,
+                            "bucket_end": fact.bucket_end,
+                            "source_effective_at": fact.source_effective_at,
+                            "known_at": fact.known_at,
+                            "source_position": _json(position),
+                            "validity_interval_id": fact.validity_interval_id,
+                            "product_definition_version_id": fact.product_definition_version_id,
+                            "provider_size_unit": fact.provider_size_unit.value,
+                            "source_state_hash": fact.source_state_hash,
+                            "bid_price": fact.bid_price,
+                            "bid_quantity": fact.bid_quantity,
+                            "bid_base_quantity": fact.bid_base_quantity,
+                            "ask_price": fact.ask_price,
+                            "ask_quantity": fact.ask_quantity,
+                            "ask_base_quantity": fact.ask_base_quantity,
+                            "mid_price": fact.mid_price,
+                            "spread": fact.spread,
+                            "spread_bps": fact.spread_bps,
+                            "input_fingerprint": fact.input_fingerprint,
+                            "material_hash": fact.material_hash,
+                        },
+                        json_columns=("source_position",),
+                    ),
+                    fact.material_hash,
+                )
+
+            for fact in depth_rows:
+                position = fact.source_position.material()
+                _require_book_state_source(
+                    session,
+                    series_id=fact.source_l2_series_id,
+                    position=position,
+                    validity_interval_id=fact.validity_interval_id,
+                    state_hash=fact.source_state_hash,
+                )
+                record(
+                    _persist_feature_revision(
+                        session,
+                        table_name="depth_feature_versions",
+                        time_column="bucket_start",
+                        prefix="depth",
+                        identity={
+                            "series_id": fact.series_id,
+                            "bucket_start": fact.bucket_start,
+                            "band_bps": fact.band_bps,
+                        },
+                        values={
+                            "source_l2_series_id": fact.source_l2_series_id,
+                            "bucket_end": fact.bucket_end,
+                            "source_effective_at": fact.source_effective_at,
+                            "known_at": fact.known_at,
+                            "source_position": _json(position),
+                            "validity_interval_id": fact.validity_interval_id,
+                            "source_state_hash": fact.source_state_hash,
+                            "bbo_input_fingerprint": fact.bbo_input_fingerprint,
+                            "provider_size_unit": fact.provider_size_unit.value,
+                            "mid_price": fact.mid_price,
+                            "bid_quantity": fact.bid_quantity,
+                            "ask_quantity": fact.ask_quantity,
+                            "bid_base_quantity": fact.bid_base_quantity,
+                            "ask_base_quantity": fact.ask_base_quantity,
+                            "bid_notional": fact.bid_notional,
+                            "ask_notional": fact.ask_notional,
+                            "imbalance": fact.imbalance,
+                            "input_fingerprint": fact.input_fingerprint,
+                            "material_hash": fact.material_hash,
+                        },
+                        json_columns=("source_position",),
+                    ),
+                    fact.material_hash,
+                )
+
+            for fact in flow_rows:
+                _require_material_source(
+                    session,
+                    table_name="trade_flow_aggregate_versions",
+                    series_id=fact.source_trade_flow_series_id,
+                    material_hash=fact.aggregate_material_hash,
+                )
+                record(
+                    _persist_feature_revision(
+                        session,
+                        table_name="trade_flow_feature_versions",
+                        time_column="bucket_start",
+                        prefix="flow",
+                        identity={
+                            "series_id": fact.series_id,
+                            "interval_seconds": fact.interval_seconds,
+                            "bucket_start": fact.bucket_start,
+                        },
+                        values={
+                            "source_trade_flow_series_id": fact.source_trade_flow_series_id,
+                            "bucket_end": fact.bucket_end,
+                            "known_at": fact.known_at,
+                            "aggregate_material_hash": fact.aggregate_material_hash,
+                            "aggregate_input_fingerprint": fact.aggregate_input_fingerprint,
+                            "trade_count": fact.trade_count,
+                            "quote_notional": fact.quote_notional,
+                            "aggressor_buy_base_volume": fact.aggressor_buy_base_volume,
+                            "aggressor_sell_base_volume": fact.aggressor_sell_base_volume,
+                            "aggressor_buy_notional": fact.aggressor_buy_notional,
+                            "aggressor_sell_notional": fact.aggressor_sell_notional,
+                            "cvd_base": fact.cvd_base,
+                            "cvd_notional": fact.cvd_notional,
+                            "cvd_volume_share": fact.cvd_volume_share,
+                            "input_fingerprint": fact.input_fingerprint,
+                            "material_hash": fact.material_hash,
+                        },
+                    ),
+                    fact.material_hash,
+                )
+
+            for fact in basis_rows:
+                _require_material_source(
+                    session,
+                    table_name="bbo_feature_versions",
+                    series_id=fact.futures_series_id,
+                    material_hash=fact.futures_bbo_material_hash,
+                )
+                _require_material_source(
+                    session,
+                    table_name="bbo_feature_versions",
+                    series_id=fact.spot_series_id,
+                    material_hash=fact.spot_bbo_material_hash,
+                )
+                record(
+                    _persist_feature_revision(
+                        session,
+                        table_name="futures_spot_relationship_versions",
+                        time_column="effective_at",
+                        prefix="basis",
+                        identity={
+                            "series_id": fact.series_id,
+                            "effective_at": fact.effective_at,
+                        },
+                        values={
+                            "mapping_id": fact.mapping_id,
+                            "futures_series_id": fact.futures_series_id,
+                            "spot_series_id": fact.spot_series_id,
+                            "known_at": fact.known_at,
+                            "futures_bbo_material_hash": fact.futures_bbo_material_hash,
+                            "spot_bbo_material_hash": fact.spot_bbo_material_hash,
+                            "futures_mid": fact.futures_mid,
+                            "spot_mid": fact.spot_mid,
+                            "futures_staleness_seconds": fact.futures_staleness_seconds,
+                            "spot_staleness_seconds": fact.spot_staleness_seconds,
+                            "basis": fact.basis,
+                            "basis_bps": fact.basis_bps,
+                            "input_fingerprint": fact.input_fingerprint,
+                            "material_hash": fact.material_hash,
+                        },
+                    ),
+                    fact.material_hash,
+                )
+
+            for fact in derivative_rows:
+                for table_name, series_id, commit_seq in (
+                    (
+                        "open_interest_versions",
+                        fact.oi_series_id,
+                        fact.oi_market_commit_seq,
+                    ),
+                    (
+                        "funding_rate_versions",
+                        fact.funding_series_id,
+                        fact.funding_market_commit_seq,
+                    ),
+                ):
+                    if series_id is None:
+                        continue
+                    found = session.execute(
+                        text(
+                            f"SELECT 1 FROM market.{table_name} "
+                            "WHERE series_id = :series_id "
+                            "AND market_commit_seq = :commit_seq LIMIT 1"
+                        ),
+                        {
+                            "series_id": int(series_id),
+                            "commit_seq": int(commit_seq),
+                        },
+                    ).scalar_one_or_none()
+                    if found is None:
+                        raise ValueError(
+                            f"market_feature_source_incomplete: {table_name} source is missing"
+                        )
+                record(
+                    _persist_feature_revision(
+                        session,
+                        table_name="derivative_state_versions",
+                        time_column="effective_at",
+                        prefix="derivative",
+                        identity={
+                            "series_id": fact.series_id,
+                            "effective_at": fact.effective_at,
+                        },
+                        values={
+                            "instrument_id": fact.instrument_id,
+                            "known_at": fact.known_at,
+                            "oi_series_id": fact.oi_series_id,
+                            "oi_sample_time": fact.oi_sample_time,
+                            "oi_market_commit_seq": fact.oi_market_commit_seq,
+                            "oi_value": fact.oi_value,
+                            "oi_previous_value": fact.oi_previous_value,
+                            "oi_log_change": fact.oi_log_change,
+                            "funding_series_id": fact.funding_series_id,
+                            "funding_sample_time": fact.funding_sample_time,
+                            "funding_market_commit_seq": fact.funding_market_commit_seq,
+                            "funding_rate": fact.funding_rate,
+                            "funding_time": fact.funding_time,
+                            "funding_interval_seconds": fact.funding_interval_seconds,
+                            "funding_semantics": fact.funding_semantics,
+                            "input_fingerprint": fact.input_fingerprint,
+                            "material_hash": fact.material_hash,
+                        },
+                    ),
+                    fact.material_hash,
+                )
+
+            for fact in response_rows:
+                _require_material_source(
+                    session,
+                    table_name="trade_flow_feature_versions",
+                    series_id=fact.source_flow_feature_series_id,
+                    material_hash=fact.source_flow_material_hash,
+                )
+                for position, state_hash in (
+                    (fact.pre_book_source_position, fact.pre_state_hash),
+                    (fact.trough_book_source_position, fact.trough_state_hash),
+                    (fact.post_book_source_position, fact.post_state_hash),
+                ):
+                    _require_book_state_source(
+                        session,
+                        series_id=fact.source_l2_series_id,
+                        position=position.material(),
+                        validity_interval_id=fact.validity_interval_id,
+                        state_hash=state_hash,
+                    )
+                positions = {
+                    "first_trade": dict(fact.first_trade_source_position),
+                    "last_trade": dict(fact.last_trade_source_position),
+                    "pre_book": fact.pre_book_source_position.material(),
+                    "trough_book": fact.trough_book_source_position.material(),
+                    "post_book": fact.post_book_source_position.material(),
+                }
+                record(
+                    _persist_feature_revision(
+                        session,
+                        table_name="market_response_feature_versions",
+                        time_column="bucket_start",
+                        prefix="response",
+                        identity={
+                            "series_id": fact.series_id,
+                            "bucket_start": fact.bucket_start,
+                            "direction": fact.direction.value,
+                        },
+                        values={
+                            "source_flow_feature_series_id": fact.source_flow_feature_series_id,
+                            "source_l2_series_id": fact.source_l2_series_id,
+                            "source_flow_material_hash": fact.source_flow_material_hash,
+                            "pre_state_hash": fact.pre_state_hash,
+                            "trough_state_hash": fact.trough_state_hash,
+                            "post_state_hash": fact.post_state_hash,
+                            "bucket_end": fact.bucket_end,
+                            "effective_at": fact.effective_at,
+                            "known_at": fact.known_at,
+                            "first_trade_id": fact.first_trade_id,
+                            "last_trade_id": fact.last_trade_id,
+                            "source_positions": _json(positions),
+                            "validity_interval_id": fact.validity_interval_id,
+                            "aggressive_notional": fact.aggressive_notional,
+                            "signed_aggressive_notional": fact.signed_aggressive_notional,
+                            "response_bps": fact.response_bps,
+                            "pre_depth_notional": fact.pre_depth_notional,
+                            "consumed_depth_notional": fact.consumed_depth_notional,
+                            "replenished_depth_notional": fact.replenished_depth_notional,
+                            "depth_replenishment": fact.depth_replenishment,
+                            "liquidity_adjusted_impact": fact.liquidity_adjusted_impact,
+                            "price_response_per_flow": fact.price_response_per_flow,
+                            "input_fingerprint": fact.input_fingerprint,
+                            "material_hash": fact.material_hash,
+                        },
+                        json_columns=("source_positions",),
+                    ),
+                    fact.material_hash,
+                )
+
+        return FeatureIngestionOutcome(
+            inserted_count=inserted,
+            noop_count=noop,
+            max_commit_seq=max_commit_seq,
+            material_hashes=tuple(material_hashes),
+        )
+
+    def read_bbo_features(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        known_at: datetime,
+        as_of_commit_seq: Optional[int] = None,
+    ) -> tuple[BboFeatureFact, ...]:
+        with db.session() as session:
+            rows = _read_feature_rows(
+                session,
+                table_name="bbo_feature_versions",
+                time_column="bucket_start",
+                partition_columns=("series_id", "bucket_start"),
+                series_id=series_id,
+                start=start,
+                end=end,
+                known_at=known_at,
+                as_of_commit_seq=as_of_commit_seq,
+            )
+        facts = tuple(
+            BboFeatureFact(
+                series_id=int(row["series_id"]),
+                source_l2_series_id=int(row["source_l2_series_id"]),
+                bucket_start=row["bucket_start"],
+                bucket_end=row["bucket_end"],
+                source_effective_at=row["source_effective_at"],
+                known_at=row["known_at"],
+                source_position=_book_position_from_material(row["source_position"]),
+                validity_interval_id=str(row["validity_interval_id"]),
+                product_definition_version_id=str(
+                    row["product_definition_version_id"]
+                ),
+                provider_size_unit=str(row["provider_size_unit"]),
+                source_state_hash=str(row["source_state_hash"]),
+                bid_price=Decimal(row["bid_price"]),
+                bid_quantity=Decimal(row["bid_quantity"]),
+                bid_base_quantity=Decimal(row["bid_base_quantity"]),
+                ask_price=Decimal(row["ask_price"]),
+                ask_quantity=Decimal(row["ask_quantity"]),
+                ask_base_quantity=Decimal(row["ask_base_quantity"]),
+                mid_price=Decimal(row["mid_price"]),
+                spread=Decimal(row["spread"]),
+                spread_bps=Decimal(row["spread_bps"]),
+                input_fingerprint=str(row["input_fingerprint"]),
+            )
+            for row in rows
+        )
+        for fact, row in zip(facts, rows):
+            if fact.material_hash != str(row["material_hash"]):
+                raise RuntimeError("market_bbo_feature_storage_corrupt: hash mismatch")
+        return facts
+
+    def read_depth_features(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        known_at: datetime,
+        as_of_commit_seq: Optional[int] = None,
+    ) -> tuple[DepthFeatureFact, ...]:
+        with db.session() as session:
+            rows = _read_feature_rows(
+                session,
+                table_name="depth_feature_versions",
+                time_column="bucket_start",
+                partition_columns=("series_id", "bucket_start", "band_bps"),
+                series_id=series_id,
+                start=start,
+                end=end,
+                known_at=known_at,
+                as_of_commit_seq=as_of_commit_seq,
+            )
+        facts = tuple(
+            DepthFeatureFact(
+                series_id=int(row["series_id"]),
+                source_l2_series_id=int(row["source_l2_series_id"]),
+                bucket_start=row["bucket_start"],
+                bucket_end=row["bucket_end"],
+                source_effective_at=row["source_effective_at"],
+                known_at=row["known_at"],
+                source_position=_book_position_from_material(row["source_position"]),
+                validity_interval_id=str(row["validity_interval_id"]),
+                source_state_hash=str(row["source_state_hash"]),
+                bbo_input_fingerprint=str(row["bbo_input_fingerprint"]),
+                provider_size_unit=str(row["provider_size_unit"]),
+                band_bps=int(row["band_bps"]),
+                mid_price=Decimal(row["mid_price"]),
+                bid_quantity=Decimal(row["bid_quantity"]),
+                ask_quantity=Decimal(row["ask_quantity"]),
+                bid_base_quantity=Decimal(row["bid_base_quantity"]),
+                ask_base_quantity=Decimal(row["ask_base_quantity"]),
+                bid_notional=(
+                    Decimal(row["bid_notional"])
+                    if row["bid_notional"] is not None
+                    else None
+                ),
+                ask_notional=(
+                    Decimal(row["ask_notional"])
+                    if row["ask_notional"] is not None
+                    else None
+                ),
+                imbalance=(
+                    Decimal(row["imbalance"])
+                    if row["imbalance"] is not None
+                    else None
+                ),
+                input_fingerprint=str(row["input_fingerprint"]),
+            )
+            for row in rows
+        )
+        for fact, row in zip(facts, rows):
+            if fact.material_hash != str(row["material_hash"]):
+                raise RuntimeError("market_depth_feature_storage_corrupt: hash mismatch")
+        return facts
+
+    def read_trade_flow_features(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        known_at: datetime,
+        as_of_commit_seq: Optional[int] = None,
+    ) -> tuple[TradeFlowFeatureFact, ...]:
+        with db.session() as session:
+            rows = _read_feature_rows(
+                session,
+                table_name="trade_flow_feature_versions",
+                time_column="bucket_start",
+                partition_columns=(
+                    "series_id",
+                    "interval_seconds",
+                    "bucket_start",
+                ),
+                series_id=series_id,
+                start=start,
+                end=end,
+                known_at=known_at,
+                as_of_commit_seq=as_of_commit_seq,
+            )
+        facts = tuple(
+            TradeFlowFeatureFact(
+                series_id=int(row["series_id"]),
+                source_trade_flow_series_id=int(
+                    row["source_trade_flow_series_id"]
+                ),
+                interval_seconds=int(row["interval_seconds"]),
+                bucket_start=row["bucket_start"],
+                bucket_end=row["bucket_end"],
+                known_at=row["known_at"],
+                aggregate_material_hash=str(row["aggregate_material_hash"]),
+                aggregate_input_fingerprint=str(
+                    row["aggregate_input_fingerprint"]
+                ),
+                trade_count=int(row["trade_count"]),
+                quote_notional=Decimal(row["quote_notional"]),
+                aggressor_buy_base_volume=Decimal(
+                    row["aggressor_buy_base_volume"]
+                ),
+                aggressor_sell_base_volume=Decimal(
+                    row["aggressor_sell_base_volume"]
+                ),
+                aggressor_buy_notional=Decimal(row["aggressor_buy_notional"]),
+                aggressor_sell_notional=Decimal(
+                    row["aggressor_sell_notional"]
+                ),
+                cvd_base=Decimal(row["cvd_base"]),
+                cvd_notional=Decimal(row["cvd_notional"]),
+                cvd_volume_share=(
+                    Decimal(row["cvd_volume_share"])
+                    if row["cvd_volume_share"] is not None
+                    else None
+                ),
+                input_fingerprint=str(row["input_fingerprint"]),
+            )
+            for row in rows
+        )
+        for fact, row in zip(facts, rows):
+            if fact.material_hash != str(row["material_hash"]):
+                raise RuntimeError(
+                    "market_trade_flow_feature_storage_corrupt: hash mismatch"
+                )
+        return facts
+
+    def read_basis_features(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        known_at: datetime,
+        as_of_commit_seq: Optional[int] = None,
+    ) -> tuple[BasisFeatureFact, ...]:
+        with db.session() as session:
+            rows = _read_feature_rows(
+                session,
+                table_name="futures_spot_relationship_versions",
+                time_column="effective_at",
+                partition_columns=("series_id", "effective_at"),
+                series_id=series_id,
+                start=start,
+                end=end,
+                known_at=known_at,
+                as_of_commit_seq=as_of_commit_seq,
+            )
+        facts = tuple(
+            BasisFeatureFact(
+                series_id=int(row["series_id"]),
+                mapping_id=str(row["mapping_id"]),
+                futures_series_id=int(row["futures_series_id"]),
+                spot_series_id=int(row["spot_series_id"]),
+                effective_at=row["effective_at"],
+                known_at=row["known_at"],
+                futures_bbo_material_hash=str(row["futures_bbo_material_hash"]),
+                spot_bbo_material_hash=str(row["spot_bbo_material_hash"]),
+                futures_mid=Decimal(row["futures_mid"]),
+                spot_mid=Decimal(row["spot_mid"]),
+                futures_staleness_seconds=Decimal(
+                    row["futures_staleness_seconds"]
+                ),
+                spot_staleness_seconds=Decimal(row["spot_staleness_seconds"]),
+                basis=Decimal(row["basis"]),
+                basis_bps=Decimal(row["basis_bps"]),
+                input_fingerprint=str(row["input_fingerprint"]),
+            )
+            for row in rows
+        )
+        for fact, row in zip(facts, rows):
+            if fact.material_hash != str(row["material_hash"]):
+                raise RuntimeError("market_basis_feature_storage_corrupt: hash mismatch")
+        return facts
+
+    def read_derivative_state_features(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        known_at: datetime,
+        as_of_commit_seq: Optional[int] = None,
+    ) -> tuple[DerivativeStateFeatureFact, ...]:
+        with db.session() as session:
+            rows = _read_feature_rows(
+                session,
+                table_name="derivative_state_versions",
+                time_column="effective_at",
+                partition_columns=("series_id", "effective_at"),
+                series_id=series_id,
+                start=start,
+                end=end,
+                known_at=known_at,
+                as_of_commit_seq=as_of_commit_seq,
+            )
+        facts = tuple(
+            DerivativeStateFeatureFact(
+                series_id=int(row["series_id"]),
+                instrument_id=str(row["instrument_id"]),
+                effective_at=row["effective_at"],
+                known_at=row["known_at"],
+                oi_series_id=(
+                    int(row["oi_series_id"])
+                    if row["oi_series_id"] is not None
+                    else None
+                ),
+                oi_sample_time=row["oi_sample_time"],
+                oi_market_commit_seq=(
+                    int(row["oi_market_commit_seq"])
+                    if row["oi_market_commit_seq"] is not None
+                    else None
+                ),
+                oi_value=(
+                    Decimal(row["oi_value"]) if row["oi_value"] is not None else None
+                ),
+                oi_previous_value=(
+                    Decimal(row["oi_previous_value"])
+                    if row["oi_previous_value"] is not None
+                    else None
+                ),
+                oi_log_change=(
+                    Decimal(row["oi_log_change"])
+                    if row["oi_log_change"] is not None
+                    else None
+                ),
+                funding_series_id=(
+                    int(row["funding_series_id"])
+                    if row["funding_series_id"] is not None
+                    else None
+                ),
+                funding_sample_time=row["funding_sample_time"],
+                funding_market_commit_seq=(
+                    int(row["funding_market_commit_seq"])
+                    if row["funding_market_commit_seq"] is not None
+                    else None
+                ),
+                funding_rate=(
+                    Decimal(row["funding_rate"])
+                    if row["funding_rate"] is not None
+                    else None
+                ),
+                funding_time=row["funding_time"],
+                funding_interval_seconds=(
+                    int(row["funding_interval_seconds"])
+                    if row["funding_interval_seconds"] is not None
+                    else None
+                ),
+                funding_semantics=row["funding_semantics"],
+                input_fingerprint=str(row["input_fingerprint"]),
+            )
+            for row in rows
+        )
+        for fact, row in zip(facts, rows):
+            if fact.material_hash != str(row["material_hash"]):
+                raise RuntimeError(
+                    "market_derivative_state_storage_corrupt: hash mismatch"
+                )
+        return facts
+
+    def read_response_features(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        known_at: datetime,
+        as_of_commit_seq: Optional[int] = None,
+    ) -> tuple[ResponseFeatureFact, ...]:
+        with db.session() as session:
+            rows = _read_feature_rows(
+                session,
+                table_name="market_response_feature_versions",
+                time_column="bucket_start",
+                partition_columns=("series_id", "bucket_start", "direction"),
+                series_id=series_id,
+                start=start,
+                end=end,
+                known_at=known_at,
+                as_of_commit_seq=as_of_commit_seq,
+            )
+        facts_list: list[ResponseFeatureFact] = []
+        for row in rows:
+            positions = dict(row["source_positions"])
+            fact = ResponseFeatureFact(
+                series_id=int(row["series_id"]),
+                source_flow_feature_series_id=int(
+                    row["source_flow_feature_series_id"]
+                ),
+                source_l2_series_id=int(row["source_l2_series_id"]),
+                source_flow_material_hash=str(row["source_flow_material_hash"]),
+                pre_state_hash=str(row["pre_state_hash"]),
+                trough_state_hash=str(row["trough_state_hash"]),
+                post_state_hash=str(row["post_state_hash"]),
+                bucket_start=row["bucket_start"],
+                bucket_end=row["bucket_end"],
+                effective_at=row["effective_at"],
+                known_at=row["known_at"],
+                direction=MarketSide(str(row["direction"])),
+                first_trade_id=str(row["first_trade_id"]),
+                last_trade_id=str(row["last_trade_id"]),
+                first_trade_source_position=dict(positions["first_trade"]),
+                last_trade_source_position=dict(positions["last_trade"]),
+                pre_book_source_position=_book_position_from_material(
+                    positions["pre_book"]
+                ),
+                trough_book_source_position=_book_position_from_material(
+                    positions["trough_book"]
+                ),
+                post_book_source_position=_book_position_from_material(
+                    positions["post_book"]
+                ),
+                validity_interval_id=str(row["validity_interval_id"]),
+                aggressive_notional=Decimal(row["aggressive_notional"]),
+                signed_aggressive_notional=Decimal(
+                    row["signed_aggressive_notional"]
+                ),
+                response_bps=Decimal(row["response_bps"]),
+                pre_depth_notional=Decimal(row["pre_depth_notional"]),
+                consumed_depth_notional=Decimal(row["consumed_depth_notional"]),
+                replenished_depth_notional=Decimal(
+                    row["replenished_depth_notional"]
+                ),
+                depth_replenishment=Decimal(row["depth_replenishment"]),
+                liquidity_adjusted_impact=Decimal(
+                    row["liquidity_adjusted_impact"]
+                ),
+                price_response_per_flow=Decimal(
+                    row["price_response_per_flow"]
+                ),
+                input_fingerprint=str(row["input_fingerprint"]),
+            )
+            if fact.material_hash != str(row["material_hash"]):
+                raise RuntimeError(
+                    "market_response_feature_storage_corrupt: hash mismatch"
+                )
+            facts_list.append(fact)
+        return tuple(facts_list)
 def _trade_record(row: Mapping[str, Any]) -> MarketTradeRecord:
     fact = MarketTradeFact(
         provider_product_id=row["provider_product_id"],
@@ -3007,6 +4090,7 @@ __all__ = [
     "AggregateIngestionOutcome",
     "ArchiveCommitResult",
     "BookIngestionOutcome",
+    "FeatureIngestionOutcome",
     "MarketStructureOwnershipError",
     "MarketTradeConflictError",
     "PostgresMarketStructureRepository",

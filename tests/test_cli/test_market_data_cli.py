@@ -404,6 +404,51 @@ def test_market_structure_configure_is_bounded_and_never_production_enrolls(
     }
 
 
+def test_market_structure_materialize_carries_explicit_causal_window(monkeypatch) -> None:
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        observed.update(
+            method=request.get_method(),
+            path=urllib.parse.urlparse(request.full_url).path,
+            body=json.loads(request.data.decode("utf-8")),
+        )
+        return _Response(
+            {
+                "schema_version": "market.cross_stream_materialization.v1",
+                "source_commit_seq": 42,
+            }
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "materialize",
+            "--pair",
+            "bip_btc",
+            "--start",
+            "2026-08-02T14:00:00Z",
+            "--end",
+            "2026-08-02T14:01:00Z",
+            "--known-at",
+            "2026-08-02T14:02:00Z",
+        ]
+    )
+    assert exit_code == 0
+    assert observed == {
+        "method": "POST",
+        "path": "/api/market-data/market-structure/pairs/bip_btc/materialize",
+        "body": {
+            "start": "2026-08-02T14:00:00Z",
+            "end": "2026-08-02T14:01:00Z",
+            "known_at": "2026-08-02T14:02:00Z",
+        },
+    }
+
+
 def test_market_structure_capture_is_explicitly_bounded(monkeypatch) -> None:
     observed = {}
 

@@ -22,6 +22,7 @@ code_paths:
   - portal/backend/service/storage/repos/market_data.py
   - portal/backend/workers
   - cli/main.py
+  - docker/docker-compose.yml
   - config/defaults.yaml
   - scripts/db
   - docs/architecture/data/MARKET_STRUCTURE_DATA_PLANE.md
@@ -159,6 +160,25 @@ compaction lineage, and append-only explicit retention pins now exist. Replay
 selects a compacted replacement only after its manifest, mappings, and lineage
 commit atomically; source objects are not deleted by compaction. See
 [Market Structure Phase 2 Level 2](../data/MARKET_STRUCTURE_PHASE_2_LEVEL2.md).
+
+Phase 3 implemented typed one-second BBO/spread/depth/imbalance, one-second and
+one-minute flow/CVD projections, futures/spot basis, OI/funding derivative
+state, and direction-specific response facts. All are append-only, use the
+shared commit clock, and name exact typed source material. Session replay now
+replays the persisted transport-quality timeline at its original source
+position, so a heartbeat/sequence invalidation and post-invalid feature
+suppression reproduce exactly. Cross-stream materialization fixes an input-only
+commit watermark; its own outputs cannot advance its source identity. See
+[Market Structure Phase 3 State Features](../data/MARKET_STRUCTURE_PHASE_3_STATE_FEATURES.md).
+
+The Phase 3 scrub also proved that the original filesystem archive path was
+inside the replaceable backend container. Pre-correction objects were lost on
+recreation and remain loudly unreplayable; their database manifests are not
+treated as sufficient evidence or dataset-eligible bytes. The local stack now
+mounts a dedicated named volume at `/app/logs/market-structure` in both backend
+and collector services. A new BIP archive replayed with an identical fingerprint
+after backend replacement. This is durable local object storage for the current
+deployment boundary, not a claim of cloud object-store durability.
 
 No definition is enabled or production-admitted. The post-Phase-4 24-hour
 measurement and explicit budget approval remain unchanged.

@@ -1613,6 +1613,262 @@ class MarketBookReconstructionStateRecord(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False)
 
 
+class MarketBboFeatureVersionRecord(Base):
+    """Append-only causal one-second BBO, spread, and midpoint fact."""
+
+    __tablename__ = "bbo_feature_versions"
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "bucket_start", name="pk_market_bbo_feature_versions"),
+        UniqueConstraint("series_id", "bucket_start", "revision", name="uq_market_bbo_feature_revision"),
+        CheckConstraint("revision > 0", name="ck_market_bbo_feature_revision"),
+        CheckConstraint("bucket_end > bucket_start", name="ck_market_bbo_feature_range"),
+        CheckConstraint("bid_price > 0 AND ask_price > bid_price", name="ck_market_bbo_feature_prices"),
+        Index("ix_market_bbo_feature_series_time", "series_id", "bucket_start"),
+        Index("ix_market_bbo_feature_series_known", "series_id", "known_at"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(128), nullable=False)
+    series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
+    source_l2_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
+    revision = Column(Integer, nullable=False)
+    market_commit_seq = Column(BigInteger, nullable=False, server_default=text("nextval('market.fact_commit_seq'::regclass)"))
+    bucket_start = Column(DateTime(timezone=True), nullable=False)
+    bucket_end = Column(DateTime(timezone=True), nullable=False)
+    source_effective_at = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+    source_position = Column(JSONB, nullable=False)
+    validity_interval_id = Column(String(128), nullable=False)
+    product_definition_version_id = Column(String(128), ForeignKey(f"{MARKET_DATA_SCHEMA}.product_definition_versions.id", ondelete="RESTRICT"), nullable=False)
+    provider_size_unit = Column(String(32), nullable=False)
+    source_state_hash = Column(String(64), nullable=False)
+    bid_price = Column(Numeric(38, 18), nullable=False)
+    bid_quantity = Column(Numeric(78, 38), nullable=False)
+    bid_base_quantity = Column(Numeric(78, 38), nullable=False)
+    ask_price = Column(Numeric(38, 18), nullable=False)
+    ask_quantity = Column(Numeric(78, 38), nullable=False)
+    ask_base_quantity = Column(Numeric(78, 38), nullable=False)
+    mid_price = Column(Numeric(38, 18), nullable=False)
+    spread = Column(Numeric(38, 18), nullable=False)
+    spread_bps = Column(Numeric(78, 38), nullable=False)
+    input_fingerprint = Column(String(64), nullable=False)
+    material_hash = Column(String(64), nullable=False)
+    provenance_hash = Column(String(64), nullable=False)
+    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+
+
+class MarketDepthFeatureVersionRecord(Base):
+    """Append-only one-second depth and bounded imbalance fact."""
+
+    __tablename__ = "depth_feature_versions"
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "bucket_start", name="pk_market_depth_feature_versions"),
+        UniqueConstraint("series_id", "bucket_start", "band_bps", "revision", name="uq_market_depth_feature_revision"),
+        CheckConstraint("revision > 0", name="ck_market_depth_feature_revision"),
+        CheckConstraint("band_bps IN (5, 10, 25)", name="ck_market_depth_feature_band"),
+        CheckConstraint("imbalance IS NULL OR (imbalance >= -1 AND imbalance <= 1)", name="ck_market_depth_feature_imbalance"),
+        Index("ix_market_depth_feature_series_time", "series_id", "bucket_start"),
+        Index("ix_market_depth_feature_series_known", "series_id", "known_at"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(128), nullable=False)
+    series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
+    source_l2_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
+    revision = Column(Integer, nullable=False)
+    market_commit_seq = Column(BigInteger, nullable=False, server_default=text("nextval('market.fact_commit_seq'::regclass)"))
+    bucket_start = Column(DateTime(timezone=True), nullable=False)
+    bucket_end = Column(DateTime(timezone=True), nullable=False)
+    source_effective_at = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+    source_position = Column(JSONB, nullable=False)
+    validity_interval_id = Column(String(128), nullable=False)
+    source_state_hash = Column(String(64), nullable=False)
+    bbo_input_fingerprint = Column(String(64), nullable=False)
+    provider_size_unit = Column(String(32), nullable=False)
+    band_bps = Column(Integer, nullable=False)
+    mid_price = Column(Numeric(38, 18), nullable=False)
+    bid_quantity = Column(Numeric(78, 38), nullable=False)
+    ask_quantity = Column(Numeric(78, 38), nullable=False)
+    bid_base_quantity = Column(Numeric(78, 38), nullable=False)
+    ask_base_quantity = Column(Numeric(78, 38), nullable=False)
+    bid_notional = Column(Numeric(78, 38), nullable=True)
+    ask_notional = Column(Numeric(78, 38), nullable=True)
+    imbalance = Column(Numeric(78, 38), nullable=True)
+    input_fingerprint = Column(String(64), nullable=False)
+    material_hash = Column(String(64), nullable=False)
+    provenance_hash = Column(String(64), nullable=False)
+    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+
+
+class MarketTradeFlowFeatureVersionRecord(Base):
+    """Append-only enriched complete trade-flow feature bucket."""
+
+    __tablename__ = "trade_flow_feature_versions"
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "bucket_start", name="pk_market_trade_flow_feature_versions"),
+        UniqueConstraint("series_id", "interval_seconds", "bucket_start", "revision", name="uq_market_trade_flow_feature_revision"),
+        CheckConstraint("revision > 0", name="ck_market_trade_flow_feature_revision"),
+        CheckConstraint("interval_seconds IN (1, 60)", name="ck_market_trade_flow_feature_interval"),
+        CheckConstraint("trade_count > 0", name="ck_market_trade_flow_feature_count"),
+        CheckConstraint("cvd_volume_share IS NULL OR (cvd_volume_share >= -1 AND cvd_volume_share <= 1)", name="ck_market_trade_flow_feature_share"),
+        Index("ix_market_trade_flow_feature_series_time", "series_id", "bucket_start"),
+        Index("ix_market_trade_flow_feature_series_known", "series_id", "known_at"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(128), nullable=False)
+    series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
+    source_trade_flow_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
+    revision = Column(Integer, nullable=False)
+    market_commit_seq = Column(BigInteger, nullable=False, server_default=text("nextval('market.fact_commit_seq'::regclass)"))
+    interval_seconds = Column(Integer, nullable=False)
+    bucket_start = Column(DateTime(timezone=True), nullable=False)
+    bucket_end = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+    aggregate_material_hash = Column(String(64), nullable=False)
+    aggregate_input_fingerprint = Column(String(64), nullable=False)
+    trade_count = Column(BigInteger, nullable=False)
+    quote_notional = Column(Numeric(78, 38), nullable=False)
+    aggressor_buy_base_volume = Column(Numeric(78, 38), nullable=False)
+    aggressor_sell_base_volume = Column(Numeric(78, 38), nullable=False)
+    aggressor_buy_notional = Column(Numeric(78, 38), nullable=False)
+    aggressor_sell_notional = Column(Numeric(78, 38), nullable=False)
+    cvd_base = Column(Numeric(78, 38), nullable=False)
+    cvd_notional = Column(Numeric(78, 38), nullable=False)
+    cvd_volume_share = Column(Numeric(78, 38), nullable=True)
+    input_fingerprint = Column(String(64), nullable=False)
+    material_hash = Column(String(64), nullable=False)
+    provenance_hash = Column(String(64), nullable=False)
+    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+
+
+class MarketFuturesSpotRelationshipVersionRecord(Base):
+    """Append-only causally aligned futures/spot basis fact."""
+
+    __tablename__ = "futures_spot_relationship_versions"
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "effective_at", name="pk_market_futures_spot_versions"),
+        UniqueConstraint("series_id", "effective_at", "revision", name="uq_market_futures_spot_revision"),
+        CheckConstraint("revision > 0", name="ck_market_futures_spot_revision"),
+        CheckConstraint("futures_mid > 0 AND spot_mid > 0", name="ck_market_futures_spot_mid"),
+        CheckConstraint("futures_staleness_seconds >= 0 AND spot_staleness_seconds >= 0", name="ck_market_futures_spot_staleness"),
+        Index("ix_market_futures_spot_series_time", "series_id", "effective_at"),
+        Index("ix_market_futures_spot_series_known", "series_id", "known_at"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(128), nullable=False)
+    series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
+    revision = Column(Integer, nullable=False)
+    market_commit_seq = Column(BigInteger, nullable=False, server_default=text("nextval('market.fact_commit_seq'::regclass)"))
+    mapping_id = Column(String(128), nullable=False)
+    futures_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
+    spot_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
+    effective_at = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+    futures_bbo_material_hash = Column(String(64), nullable=False)
+    spot_bbo_material_hash = Column(String(64), nullable=False)
+    futures_mid = Column(Numeric(38, 18), nullable=False)
+    spot_mid = Column(Numeric(38, 18), nullable=False)
+    futures_staleness_seconds = Column(Numeric(38, 18), nullable=False)
+    spot_staleness_seconds = Column(Numeric(38, 18), nullable=False)
+    basis = Column(Numeric(38, 18), nullable=False)
+    basis_bps = Column(Numeric(78, 38), nullable=False)
+    input_fingerprint = Column(String(64), nullable=False)
+    material_hash = Column(String(64), nullable=False)
+    provenance_hash = Column(String(64), nullable=False)
+    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+
+
+class MarketDerivativeStateVersionRecord(Base):
+    """Append-only one-minute OI/funding relationship fact."""
+
+    __tablename__ = "derivative_state_versions"
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "effective_at", name="pk_market_derivative_state_versions"),
+        UniqueConstraint("series_id", "effective_at", "revision", name="uq_market_derivative_state_revision"),
+        CheckConstraint("revision > 0", name="ck_market_derivative_state_revision"),
+        Index("ix_market_derivative_state_series_time", "series_id", "effective_at"),
+        Index("ix_market_derivative_state_series_known", "series_id", "known_at"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(128), nullable=False)
+    series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
+    revision = Column(Integer, nullable=False)
+    market_commit_seq = Column(BigInteger, nullable=False, server_default=text("nextval('market.fact_commit_seq'::regclass)"))
+    instrument_id = Column(String(64), ForeignKey("portal_instruments.id", ondelete="RESTRICT"), nullable=False)
+    effective_at = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+    oi_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=True)
+    oi_sample_time = Column(DateTime(timezone=True), nullable=True)
+    oi_market_commit_seq = Column(BigInteger, nullable=True)
+    oi_value = Column(Numeric(78, 38), nullable=True)
+    oi_previous_value = Column(Numeric(78, 38), nullable=True)
+    oi_log_change = Column(Numeric(78, 38), nullable=True)
+    funding_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=True)
+    funding_sample_time = Column(DateTime(timezone=True), nullable=True)
+    funding_market_commit_seq = Column(BigInteger, nullable=True)
+    funding_rate = Column(Numeric(78, 38), nullable=True)
+    funding_time = Column(DateTime(timezone=True), nullable=True)
+    funding_interval_seconds = Column(Integer, nullable=True)
+    funding_semantics = Column(String(32), nullable=True)
+    input_fingerprint = Column(String(64), nullable=False)
+    material_hash = Column(String(64), nullable=False)
+    provenance_hash = Column(String(64), nullable=False)
+    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+
+
+class MarketResponseFeatureVersionRecord(Base):
+    """Append-only directional depth replenishment and price-response fact."""
+
+    __tablename__ = "market_response_feature_versions"
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "bucket_start", name="pk_market_response_feature_versions"),
+        UniqueConstraint("series_id", "bucket_start", "direction", "revision", name="uq_market_response_feature_revision"),
+        CheckConstraint("revision > 0", name="ck_market_response_feature_revision"),
+        CheckConstraint("direction IN ('BUY', 'SELL')", name="ck_market_response_feature_direction"),
+        CheckConstraint("aggressive_notional > 0 AND pre_depth_notional > 0 AND consumed_depth_notional > 0", name="ck_market_response_feature_positive"),
+        Index("ix_market_response_feature_series_time", "series_id", "bucket_start"),
+        Index("ix_market_response_feature_series_known", "series_id", "known_at"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(128), nullable=False)
+    series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
+    source_flow_feature_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
+    source_l2_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
+    source_flow_material_hash = Column(String(64), nullable=False)
+    pre_state_hash = Column(String(64), nullable=False)
+    trough_state_hash = Column(String(64), nullable=False)
+    post_state_hash = Column(String(64), nullable=False)
+    revision = Column(Integer, nullable=False)
+    market_commit_seq = Column(BigInteger, nullable=False, server_default=text("nextval('market.fact_commit_seq'::regclass)"))
+    bucket_start = Column(DateTime(timezone=True), nullable=False)
+    bucket_end = Column(DateTime(timezone=True), nullable=False)
+    effective_at = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+    direction = Column(String(8), nullable=False)
+    first_trade_id = Column(String(128), nullable=False)
+    last_trade_id = Column(String(128), nullable=False)
+    source_positions = Column(JSONB, nullable=False)
+    validity_interval_id = Column(String(128), nullable=False)
+    aggressive_notional = Column(Numeric(78, 38), nullable=False)
+    signed_aggressive_notional = Column(Numeric(78, 38), nullable=False)
+    response_bps = Column(Numeric(78, 38), nullable=False)
+    pre_depth_notional = Column(Numeric(78, 38), nullable=False)
+    consumed_depth_notional = Column(Numeric(78, 38), nullable=False)
+    replenished_depth_notional = Column(Numeric(78, 38), nullable=False)
+    depth_replenishment = Column(Numeric(78, 38), nullable=False)
+    liquidity_adjusted_impact = Column(Numeric(78, 38), nullable=False)
+    price_response_per_flow = Column(Numeric(78, 38), nullable=False)
+    input_fingerprint = Column(String(64), nullable=False)
+    material_hash = Column(String(64), nullable=False)
+    provenance_hash = Column(String(64), nullable=False)
+    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+
+
 class MarketDatasetArchiveRefRecord(Base):
     """Immutable raw-object retention pin attached to a frozen dataset."""
 
@@ -1639,6 +1895,12 @@ class MarketDatasetArchiveRefRecord(Base):
 
 __all__ = [
     "MARKET_DATA_SCHEMA",
+    "MarketBboFeatureVersionRecord",
+    "MarketDepthFeatureVersionRecord",
+    "MarketDerivativeStateVersionRecord",
+    "MarketFuturesSpotRelationshipVersionRecord",
+    "MarketResponseFeatureVersionRecord",
+    "MarketTradeFlowFeatureVersionRecord",
     "MarketCandleVersionRecord",
     "MarketCollectionAttemptRecord",
     "MarketCollectionDefinitionRecord",

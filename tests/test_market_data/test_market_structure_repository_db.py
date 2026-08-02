@@ -20,6 +20,17 @@ from market_data.archive import (
 )
 from market_data.book_archive import publish_book_checkpoint
 from market_data.contracts import DatasetSeriesRequest, SourceIdentity
+from market_data.market_state import (
+    BBO_FACT_TYPE,
+    BBO_FACT_VERSION,
+    DEPTH_FACT_TYPE,
+    DEPTH_FACT_VERSION,
+    TRADE_FLOW_FEATURE_FACT_TYPE,
+    TRADE_FLOW_FEATURE_FACT_VERSION,
+    MarketStateValuationContract,
+    derive_book_features,
+    derive_trade_flow_feature,
+)
 from market_data.order_book import (
     BookLifecycle,
     L2ProductContract,
@@ -133,6 +144,12 @@ def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
         fact_type="market.trade_flow",
         timeframe_seconds=1,
         contract_version="market.trade_flow.v1",
+    )
+    flow_feature_series_id = market_data_repo.register_series(
+        instrument_id=instrument_id,
+        fact_type=TRADE_FLOW_FEATURE_FACT_TYPE,
+        timeframe_seconds=1,
+        contract_version=TRADE_FLOW_FEATURE_FACT_VERSION,
     )
     base_contract = PHASE1_COINBASE_TRADE_CONTRACTS["BTC-USD"]
     product_definition_id = f"coinbase.BTC-USD.db-test.{token}"
@@ -315,6 +332,30 @@ def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
     )
     assert stored_aggregate[0].fact.material_hash == aggregate.material_hash
 
+    flow_feature = derive_trade_flow_feature(
+        series_id=flow_feature_series_id,
+        source_trade_flow_series_id=aggregate_series_id,
+        aggregate=aggregate,
+        trades=[fact],
+        computed_at=max(datetime.now(UTC), aggregate.bucket_end),
+    )
+    assert flow_feature is not None
+    first_feature = market_structure_repository.ingest_market_state_features(
+        flow_facts=[flow_feature]
+    )
+    repeated_feature = market_structure_repository.ingest_market_state_features(
+        flow_facts=[flow_feature]
+    )
+    assert first_feature.inserted_count == 1
+    assert repeated_feature.noop_count == 1
+    stored_flow = market_structure_repository.read_trade_flow_features(
+        series_id=flow_feature_series_id,
+        start=bucket,
+        end=bucket + timedelta(seconds=1),
+        known_at=flow_feature.known_at + timedelta(microseconds=1),
+    )
+    assert stored_flow[0].material_hash == flow_feature.material_hash
+
     requests = [
         DatasetSeriesRequest(
             series_id=trade_series_id,
@@ -406,6 +447,18 @@ def test_phase2_book_archive_validity_checkpoint_and_replay_are_atomic(
         timeframe_seconds=None,
         contract_version="market.l2_book.v1",
     )
+    bbo_series_id = market_data_repo.register_series(
+        instrument_id=instrument_id,
+        fact_type=BBO_FACT_TYPE,
+        timeframe_seconds=1,
+        contract_version=BBO_FACT_VERSION,
+    )
+    depth_series_id = market_data_repo.register_series(
+        instrument_id=instrument_id,
+        fact_type=DEPTH_FACT_TYPE,
+        timeframe_seconds=1,
+        contract_version=DEPTH_FACT_VERSION,
+    )
     product_definition_id = f"coinbase.BTC-USD.l2-db-test.{token}"
     market_structure_repository.register_product_definition(
         definition_version_id=product_definition_id,
@@ -461,6 +514,7 @@ def test_phase2_book_archive_validity_checkpoint_and_replay_are_atomic(
     batches = []
     validity_versions = []
     checkpoints = []
+    states = []
     spools = []
     last_fact = None
     for ordinal, raw_frame in enumerate(_btc_l2_frames(), start=1):
@@ -508,6 +562,8 @@ def test_phase2_book_archive_validity_checkpoint_and_replay_are_atomic(
                 snapshots.append(result.snapshot)
             if result.batch is not None:
                 batches.append(result.batch)
+            if result.state is not None:
+                states.append(result.state)
             validity_versions.extend(result.validity_versions)
             checkpoints.extend(result.checkpoints)
             last_fact = fact
@@ -649,6 +705,68 @@ def test_phase2_book_archive_validity_checkpoint_and_replay_are_atomic(
     assert first.inserted_validity_count == 2
     assert repeated.noop_snapshot_count == repeated.noop_batch_count == 1
     assert repeated.inserted_validity_count == 0
+    valuation = MarketStateValuationContract(
+        product_definition_version_id=product_definition_id,
+        provider_size_unit="base",
+        base_currency="BTC",
+        quote_currency="USD",
+        contract_size=None,
+    )
+    computed_at = max(
+        datetime.now(UTC),
+        max(state.effective_at for state in states) + timedelta(seconds=1),
+    )
+    bbo_facts, depth_facts = derive_book_features(
+        states,
+        contract=valuation,
+        bbo_series_id=bbo_series_id,
+        depth_series_id=depth_series_id,
+        computed_at=computed_at,
+    )
+    assert bbo_facts
+    assert len(depth_facts) == len(bbo_facts) * 3
+    first_features = market_structure_repository.ingest_market_state_features(
+        bbo_facts=bbo_facts,
+        depth_facts=depth_facts,
+    )
+    repeated_features = market_structure_repository.ingest_market_state_features(
+        bbo_facts=bbo_facts,
+        depth_facts=depth_facts,
+    )
+    assert first_features.inserted_count == len(bbo_facts) + len(depth_facts)
+    assert repeated_features.noop_count == len(bbo_facts) + len(depth_facts)
+    feature_start = bbo_facts[0].bucket_start
+    feature_end = bbo_facts[-1].bucket_end
+    stored_bbo = market_structure_repository.read_bbo_features(
+        series_id=bbo_series_id,
+        start=feature_start,
+        end=feature_end,
+        known_at=datetime.now(UTC),
+    )
+    stored_depth = market_structure_repository.read_depth_features(
+        series_id=depth_series_id,
+        start=feature_start,
+        end=feature_end,
+        known_at=datetime.now(UTC),
+    )
+    assert [row.material_hash for row in stored_bbo] == [
+        row.material_hash for row in bbo_facts
+    ]
+    assert sorted(row.material_hash for row in stored_depth) == sorted(
+        row.material_hash for row in depth_facts
+    )
+    input_watermark = market_structure_repository.cross_stream_input_commit_seq(
+        futures_bbo_series_id=bbo_series_id,
+        spot_bbo_series_id=bbo_series_id,
+        oi_series_id=None,
+        funding_series_id=None,
+        start=feature_start,
+        end=feature_end,
+        known_at=datetime.now(UTC),
+    )
+    assert 0 < input_watermark <= first_features.max_commit_seq
+    assert market_data_repo.current_commit_seq() >= first_features.max_commit_seq
+
     replay = market_structure_repository.reconcile_book_replay(
         definition_id=definition_id,
         session_id=claim.session_id,

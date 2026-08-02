@@ -44,6 +44,16 @@ def test_market_structure_operator_routes_preserve_typed_boundaries(
         return {"schema_version": "market_structure_bounded_capture.v1"}
 
     monkeypatch.setattr(
+        controller.market_structure_service,
+        "materialize_pair_features",
+        lambda **kwargs: {
+            "schema_version": "market.cross_stream_materialization.v1",
+            "pair_id": kwargs["pair_id"],
+            "basis_count": 2,
+            "source_commit_seq": 42,
+        },
+    )
+    monkeypatch.setattr(
         controller.market_structure_service, "capture_bounded", fake_capture
     )
     monkeypatch.setattr(
@@ -106,6 +116,14 @@ def test_market_structure_operator_routes_preserve_typed_boundaries(
         },
     )
     client = _client()
+    materialize = client.post(
+        "/api/market-data/market-structure/pairs/bip_btc/materialize",
+        json={
+            "start": "2026-08-02T14:00:00Z",
+            "end": "2026-08-02T14:01:00Z",
+            "known_at": "2026-08-02T14:02:00Z",
+        },
+    )
     capture = client.post(
         "/api/market-data/market-structure/definitions/definition-a/capture",
         json={"duration_seconds": 12},
@@ -142,6 +160,8 @@ def test_market_structure_operator_routes_preserve_typed_boundaries(
         params={"limit": 25},
     )
     assert capture.status_code == status.status_code == 200
+    assert materialize.status_code == 200
+    assert materialize.json()["source_commit_seq"] == 42
     assert replay.status_code == book_replay.status_code == compact.status_code == 200
     assert pin.status_code == retention.status_code == recent.status_code == 200
     assert status.json()["archive_mapping_lag_records"] == 0

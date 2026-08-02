@@ -233,7 +233,13 @@ class PostgresMarketDataRepository:
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.open_interest_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.funding_rate_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.market_trade_versions), 0),
-                        COALESCE((SELECT MAX(market_commit_seq) FROM market.trade_flow_aggregate_versions), 0)
+                        COALESCE((SELECT MAX(market_commit_seq) FROM market.trade_flow_aggregate_versions), 0),
+                        COALESCE((SELECT MAX(market_commit_seq) FROM market.bbo_feature_versions), 0),
+                        COALESCE((SELECT MAX(market_commit_seq) FROM market.depth_feature_versions), 0),
+                        COALESCE((SELECT MAX(market_commit_seq) FROM market.trade_flow_feature_versions), 0),
+                        COALESCE((SELECT MAX(market_commit_seq) FROM market.futures_spot_relationship_versions), 0),
+                        COALESCE((SELECT MAX(market_commit_seq) FROM market.derivative_state_versions), 0),
+                        COALESCE((SELECT MAX(market_commit_seq) FROM market.market_response_feature_versions), 0)
                     )
                     """
                 )

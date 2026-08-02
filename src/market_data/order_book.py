@@ -518,6 +518,23 @@ class BookCheckpointFact:
         )
 
 
+
+@dataclass(frozen=True)
+class BookStateView:
+    """One immutable valid post-event book state exposed to derived consumers."""
+
+    series_id: int
+    validity_interval_id: str
+    source_position: BookSourcePosition
+    product_definition_version_id: str
+    provider_size_unit: ProviderSizeUnit
+    effective_at: datetime
+    known_at: datetime
+    state_hash: str
+    bids: tuple[tuple[Decimal, Decimal], ...]
+    asks: tuple[tuple[Decimal, Decimal], ...]
+
+
 @dataclass(frozen=True)
 class BookApplyResult:
     accepted: bool
@@ -526,6 +543,7 @@ class BookApplyResult:
     validity_versions: tuple[BookValidityIntervalVersion, ...] = ()
     checkpoints: tuple[BookCheckpointFact, ...] = ()
     quality: tuple[BookQualityEvidence, ...] = ()
+    state: Optional[BookStateView] = None
 
 
 def book_state_hash(
@@ -934,11 +952,13 @@ class Level2BookReconstructor:
         )
         checkpoint = self._checkpoint(event, mutation_count=0)
         versions = ((prior_close,) if prior_close else ()) + (validity,)
+        state = self._state_view(event)
         return BookApplyResult(
             accepted=True,
             snapshot=snapshot,
             validity_versions=versions,
             checkpoints=(checkpoint,),
+            state=state,
         )
 
     def _apply_update(self, event: L2EventFact) -> BookApplyResult:
@@ -1033,12 +1053,32 @@ class Level2BookReconstructor:
                     evidence={"count": unknown_deletes},
                 ),
             )
+        state = self._state_view(event)
         return BookApplyResult(
             accepted=True,
             batch=batch,
             validity_versions=(),
             checkpoints=checkpoints,
             quality=quality,
+            state=state,
+        )
+
+
+    def _state_view(self, event: L2EventFact) -> BookStateView:
+        if self.current_interval is None or self.current_state_hash is None:
+            raise RuntimeError("market_l2_state_view_invalid: no valid book state")
+        bids, asks = self._sorted_levels()
+        return BookStateView(
+            series_id=self.series_id,
+            validity_interval_id=self.current_interval.interval_id,
+            source_position=event.position,
+            product_definition_version_id=self.contract.product_definition_version_id,
+            provider_size_unit=self.contract.provider_size_unit,
+            effective_at=event.effective_at,
+            known_at=event.known_at,
+            state_hash=self.current_state_hash,
+            bids=bids,
+            asks=asks,
         )
 
     def _checkpoint(
@@ -1119,6 +1159,7 @@ __all__ = [
     "BookCheckpointFact",
     "BookLifecycle",
     "BookQualityEvidence",
+    "BookStateView",
     "BookSide",
     "BookSourcePosition",
     "BookValidityIntervalVersion",

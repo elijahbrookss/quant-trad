@@ -58,6 +58,7 @@ services:
     volumes:
       - ../secrets.env:/app/secrets.env:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - market-structure-data:/app/logs/market-structure
     networks:
       quanttrad:
         aliases:
@@ -86,6 +87,7 @@ services:
       - tsdb
     volumes:
       - ../secrets.env:/app/secrets.env:ro
+      - market-structure-data:/app/logs/market-structure
     networks:
       quanttrad:
         aliases:
@@ -280,6 +282,7 @@ volumes:
   loki-data:
   ibkr-gateway-config:
   ibkr-gateway-logs:
+  market-structure-data:
 
 networks:
   quanttrad:

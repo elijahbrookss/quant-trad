@@ -355,6 +355,12 @@ class Database:
             "trade_flow_aggregate_versions",
             "l2_snapshot_versions",
             "l2_mutation_batches",
+            "bbo_feature_versions",
+            "depth_feature_versions",
+            "trade_flow_feature_versions",
+            "futures_spot_relationship_versions",
+            "derivative_state_versions",
+            "market_response_feature_versions",
         ):
             table_ref = f"market.{table_name}"
             existing = conn.execute(
@@ -408,6 +414,12 @@ class Database:
             ("trade_flow_aggregate_versions", "bucket_start"),
             ("l2_snapshot_versions", "effective_at"),
             ("l2_mutation_batches", "effective_at"),
+            ("bbo_feature_versions", "bucket_start"),
+            ("depth_feature_versions", "bucket_start"),
+            ("trade_flow_feature_versions", "bucket_start"),
+            ("futures_spot_relationship_versions", "effective_at"),
+            ("derivative_state_versions", "effective_at"),
+            ("market_response_feature_versions", "bucket_start"),
         ):
             conn.execute(
                 text(
@@ -478,6 +490,12 @@ class Database:
             "l2_snapshot_levels",
             "l2_mutation_batches",
             "l2_mutations",
+            "bbo_feature_versions",
+            "depth_feature_versions",
+            "trade_flow_feature_versions",
+            "futures_spot_relationship_versions",
+            "derivative_state_versions",
+            "market_response_feature_versions",
             "book_validity_interval_versions",
             "book_checkpoint_manifests",
             "book_quality_event_links",

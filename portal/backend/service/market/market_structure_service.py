@@ -41,7 +41,33 @@ from market_data.book_archive import (
     publish_book_checkpoint,
     read_book_checkpoint_parquet,
 )
-from market_data.contracts import SourceIdentity
+from market_data.contracts import (
+    FUNDING_RATE_FACT_TYPE,
+    FUNDING_RATE_FACT_VERSION,
+    OPEN_INTEREST_FACT_TYPE,
+    OPEN_INTEREST_FACT_VERSION,
+    SourceIdentity,
+)
+from market_data.market_state import (
+    BASIS_FACT_TYPE,
+    BASIS_FACT_VERSION,
+    BBO_FACT_TYPE,
+    BBO_FACT_VERSION,
+    DEPTH_FACT_TYPE,
+    DEPTH_FACT_VERSION,
+    DERIVATIVE_STATE_FACT_TYPE,
+    DERIVATIVE_STATE_FACT_VERSION,
+    RESPONSE_FACT_TYPE,
+    RESPONSE_FACT_VERSION,
+    TRADE_FLOW_FEATURE_FACT_TYPE,
+    TRADE_FLOW_FEATURE_FACT_VERSION,
+    MarketStateValuationContract,
+    derive_basis_features,
+    derive_book_features,
+    derive_derivative_state_features,
+    derive_response_features,
+    derive_trade_flow_feature,
+)
 from market_data.order_book import (
     L2_BOOK_FACT_TYPE,
     L2_BOOK_FACT_VERSION,
@@ -177,6 +203,14 @@ def _instrument_decimal(record: Mapping[str, Any], key: str) -> Optional[Decimal
     return Decimal(str(raw))
 
 
+def _utc_time(value: datetime, *, field_name: str) -> datetime:
+    if not isinstance(value, datetime):
+        raise ValueError(f"market_feature_materialization_invalid: {field_name} must be datetime")
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 class MarketStructureService:
     """Coordinates Phase 1 without creating a second credential or data plane."""
 
@@ -283,6 +317,53 @@ class MarketStructureService:
                 timeframe_seconds=None,
                 contract_version=L2_BOOK_FACT_VERSION,
             )
+            bbo_series_id = market_data_repo.register_series(
+                instrument_id=instrument_id,
+                fact_type=BBO_FACT_TYPE,
+                timeframe_seconds=1,
+                contract_version=BBO_FACT_VERSION,
+            )
+            depth_series_id = market_data_repo.register_series(
+                instrument_id=instrument_id,
+                fact_type=DEPTH_FACT_TYPE,
+                timeframe_seconds=1,
+                contract_version=DEPTH_FACT_VERSION,
+            )
+            flow_feature_series_ids = {
+                interval: market_data_repo.register_series(
+                    instrument_id=instrument_id,
+                    fact_type=TRADE_FLOW_FEATURE_FACT_TYPE,
+                    timeframe_seconds=interval,
+                    contract_version=TRADE_FLOW_FEATURE_FACT_VERSION,
+                )
+                for interval in (1, 60)
+            }
+            response_series_id = market_data_repo.register_series(
+                instrument_id=instrument_id,
+                fact_type=RESPONSE_FACT_TYPE,
+                timeframe_seconds=1,
+                contract_version=RESPONSE_FACT_VERSION,
+            )
+            basis_series_id = (
+                market_data_repo.register_series(
+                    instrument_id=instrument_id,
+                    fact_type=BASIS_FACT_TYPE,
+                    timeframe_seconds=1,
+                    contract_version=BASIS_FACT_VERSION,
+                )
+                if product_type == "future"
+                else None
+            )
+            derivative_state_series_id = (
+                market_data_repo.register_series(
+                    instrument_id=instrument_id,
+                    fact_type=DERIVATIVE_STATE_FACT_TYPE,
+                    timeframe_seconds=60,
+                    contract_version=DERIVATIVE_STATE_FACT_VERSION,
+                )
+                if product_type == "future"
+                else None
+            )
             contract = PHASE1_COINBASE_TRADE_CONTRACTS[product_id]
             self.repository.register_product_definition(
                 definition_version_id=contract.product_definition_version_id,
@@ -327,6 +408,10 @@ class MarketStructureService:
                     "aggregate_series_ids": {
                         str(key): value for key, value in aggregate_series_ids.items()
                     },
+                    "flow_feature_series_ids": {
+                        str(key): value for key, value in flow_feature_series_ids.items()
+                    },
+                    "response_feature_series_id": response_series_id,
                     "product_definition_version_id": contract.product_definition_version_id,
                     "production_blocker": "post_phase4_24h_capacity_and_budget_gate",
                 },
@@ -359,6 +444,20 @@ class MarketStructureService:
                         if _instrument_decimal(instrument, "tick_size") is not None
                         else None
                     ),
+                    "bbo_series_id": bbo_series_id,
+                    "depth_series_id": depth_series_id,
+                    "response_feature_series_id": response_series_id,
+                    "trade_series_id": trade_series_id,
+                    "flow_feature_series_ids": {
+                        str(key): value for key, value in flow_feature_series_ids.items()
+                    },
+                    "base_currency": contract.base_currency,
+                    "quote_currency": contract.quote_currency,
+                    "contract_size": (
+                        str(contract.contract_size)
+                        if contract.contract_size is not None
+                        else None
+                    ),
                     "quantity_increment": (
                         "1"
                         if contract.provider_size_unit.value == "contracts"
@@ -381,6 +480,19 @@ class MarketStructureService:
                     "trade_series_id": trade_series_id,
                     "aggregate_series_ids": aggregate_series_ids,
                     "l2_series_id": l2_series_id,
+                    "bbo_series_id": bbo_series_id,
+                    "depth_series_id": depth_series_id,
+                    "flow_feature_series_ids": flow_feature_series_ids,
+                    "response_feature_series_id": response_series_id,
+                    "basis_series_id": basis_series_id,
+                    "derivative_state_series_id": derivative_state_series_id,
+                    "valuation_contract_hash": MarketStateValuationContract(
+                        product_definition_version_id=contract.product_definition_version_id,
+                        provider_size_unit=contract.provider_size_unit,
+                        base_currency=contract.base_currency,
+                        quote_currency=contract.quote_currency,
+                        contract_size=contract.contract_size,
+                    ).material_hash,
                 }
             )
         mapping_id = self.repository.register_instrument_mapping(
@@ -402,6 +514,169 @@ class MarketStructureService:
                 "post_phase4_24h_implemented_path_capture",
                 "explicit_storage_and_cost_budget",
             ],
+        }
+
+    def materialize_pair_features(
+        self,
+        *,
+        pair_id: str,
+        start: datetime,
+        end: datetime,
+        known_at: datetime,
+    ) -> dict[str, Any]:
+        """Materialize cross-stream Phase 3 facts at one causal commit watermark."""
+
+        start_at = _utc_time(start, field_name="start")
+        end_at = _utc_time(end, field_name="end")
+        decision_time = _utc_time(known_at, field_name="known_at")
+        if end_at <= start_at:
+            raise ValueError(
+                "market_feature_materialization_invalid: end must follow start"
+            )
+        configured = self.configure_pair(pair_id=pair_id)
+        pair = PHASE1_PAIRS[str(configured["pair_id"])]
+        series_by_product = {
+            str(row["product_id"]): dict(row) for row in configured["series"]
+        }
+        futures = series_by_product[pair.futures_product_id]
+        spot = series_by_product[pair.spot_product_id]
+
+        source_series = market_data_repo.list_series(
+            instrument_id=pair.futures_instrument_id
+        )
+        oi_series = [
+            row
+            for row in source_series
+            if row["fact_type"] == OPEN_INTEREST_FACT_TYPE
+            and row["contract_version"] == OPEN_INTEREST_FACT_VERSION
+        ]
+        funding_series = [
+            row
+            for row in source_series
+            if row["fact_type"] == FUNDING_RATE_FACT_TYPE
+            and row["contract_version"] == FUNDING_RATE_FACT_VERSION
+        ]
+        if len(oi_series) > 1 or len(funding_series) > 1:
+            raise RuntimeError(
+                "market_feature_materialization_ambiguous: multiple canonical OI/funding series"
+            )
+        lookback_start = start_at - timedelta(seconds=60)
+        source_commit_seq = self.repository.cross_stream_input_commit_seq(
+            futures_bbo_series_id=int(futures["bbo_series_id"]),
+            spot_bbo_series_id=int(spot["bbo_series_id"]),
+            oi_series_id=int(oi_series[0]["id"]) if oi_series else None,
+            funding_series_id=(
+                int(funding_series[0]["id"]) if funding_series else None
+            ),
+            start=lookback_start,
+            end=end_at,
+            known_at=decision_time,
+        )
+
+        futures_bbo = self.repository.read_bbo_features(
+            series_id=int(futures["bbo_series_id"]),
+            start=start_at,
+            end=end_at,
+            known_at=decision_time,
+            as_of_commit_seq=source_commit_seq,
+        )
+        spot_bbo = self.repository.read_bbo_features(
+            series_id=int(spot["bbo_series_id"]),
+            start=start_at - timedelta(seconds=2),
+            end=end_at,
+            known_at=decision_time,
+            as_of_commit_seq=source_commit_seq,
+        )
+        basis_facts = derive_basis_features(
+            futures_bbo,
+            spot_bbo,
+            mapping_id=str(configured["mapping_id"]),
+            computed_at=decision_time,
+            series_id=int(futures["basis_series_id"]),
+        )
+
+        oi_records = (
+            market_data_repo.read_open_interest(
+                series_id=int(oi_series[0]["id"]),
+                start=lookback_start,
+                end=end_at,
+                as_of_commit_seq=source_commit_seq,
+                known_at_lte=decision_time,
+            )
+            if oi_series
+            else []
+        )
+        funding_records = (
+            market_data_repo.read_funding_rates(
+                series_id=int(funding_series[0]["id"]),
+                start=lookback_start,
+                end=end_at,
+                as_of_commit_seq=source_commit_seq,
+                known_at_lte=decision_time,
+            )
+            if funding_series
+            else []
+        )
+        oi_gaps = (
+            market_data_repo.list_gap_evidence(
+                series_id=int(oi_series[0]["id"]),
+                start=lookback_start,
+                end=end_at,
+                as_of_commit_seq=source_commit_seq,
+            )
+            if oi_series
+            else []
+        )
+        derivative_facts = tuple(
+            fact
+            for fact in derive_derivative_state_features(
+                instrument_id=pair.futures_instrument_id,
+                oi_records=oi_records,
+                funding_records=funding_records,
+                oi_gaps=oi_gaps,
+                series_id=int(futures["derivative_state_series_id"]),
+                expected_oi_interval_seconds=60,
+                computed_at=decision_time,
+            )
+            if start_at <= fact.effective_at < end_at
+        )
+        outcome = self.repository.ingest_market_state_features(
+            basis_facts=basis_facts,
+            derivative_facts=derivative_facts,
+        )
+        fingerprint = _stable_hash(
+            {
+                "schema_version": "market.cross_stream_materialization.v1",
+                "pair_id": pair.pair_id,
+                "start": start_at.isoformat(),
+                "end": end_at.isoformat(),
+                "known_at": decision_time.isoformat(),
+                "source_commit_seq": source_commit_seq,
+                "basis_material_hashes": [
+                    row.material_hash for row in basis_facts
+                ],
+                "derivative_material_hashes": [
+                    row.material_hash for row in derivative_facts
+                ],
+            }
+        )
+        return {
+            "schema_version": "market.cross_stream_materialization.v1",
+            "pair_id": pair.pair_id,
+            "start": start_at.isoformat(),
+            "end": end_at.isoformat(),
+            "known_at": decision_time.isoformat(),
+            "source_commit_seq": source_commit_seq,
+            "basis_count": len(basis_facts),
+            "derivative_state_count": len(derivative_facts),
+            "oi_series_id": int(oi_series[0]["id"]) if oi_series else None,
+            "funding_series_id": (
+                int(funding_series[0]["id"]) if funding_series else None
+            ),
+            "inserted": outcome.inserted_count,
+            "noop": outcome.noop_count,
+            "max_commit_seq": outcome.max_commit_seq,
+            "materialization_fingerprint": fingerprint,
         }
 
     async def capture_bounded(
@@ -786,6 +1061,7 @@ class MarketStructureService:
                 )
 
             aggregate_counts: dict[str, dict[str, int]] = {}
+            feature_counts: dict[str, dict[str, int]] = {}
             all_trade_facts = []
             if coverage is not None:
                 # Initial snapshot trades are valuable canonical evidence, but
@@ -804,6 +1080,10 @@ class MarketStructureService:
             aggregate_series_ids = {
                 int(key): int(value)
                 for key, value in dict(claim.config.get("aggregate_series_ids") or {}).items()
+            }
+            flow_feature_series_ids = {
+                int(key): int(value)
+                for key, value in dict(claim.config.get("flow_feature_series_ids") or {}).items()
             }
             for interval in (1, 60):
                 bucket_starts = {
@@ -859,6 +1139,29 @@ class MarketStructureService:
                     "inserted": aggregate_outcome.inserted_count,
                     "noop": aggregate_outcome.noop_count,
                 }
+                if interval not in flow_feature_series_ids:
+                    raise RuntimeError(
+                        "market_flow_feature_config_missing: re-run pair configuration"
+                    )
+                flow_features = []
+                for aggregate in aggregate_facts:
+                    feature = derive_trade_flow_feature(
+                        series_id=flow_feature_series_ids[interval],
+                        source_trade_flow_series_id=aggregate_series_ids[interval],
+                        aggregate=aggregate,
+                        trades=all_trade_facts,
+                        computed_at=max(datetime.now(UTC), aggregate.bucket_end),
+                    )
+                    if feature is not None:
+                        flow_features.append(feature)
+                feature_outcome = self.repository.ingest_market_state_features(
+                    flow_facts=flow_features
+                )
+                feature_counts[str(interval)] = {
+                    "requested": len(flow_features),
+                    "inserted": feature_outcome.inserted_count,
+                    "noop": feature_outcome.noop_count,
+                }
             self.repository.append_session_event(
                 claim,
                 event_ordinal=session_event_ordinal,
@@ -870,6 +1173,7 @@ class MarketStructureService:
                     "trade_inserted": trade_outcome.inserted_count,
                     "trade_noop": trade_outcome.noop_count,
                     "aggregate_counts": aggregate_counts,
+                    "flow_feature_counts": feature_counts,
                     "manifest_ids": manifest_ids,
                 },
             )
@@ -900,6 +1204,7 @@ class MarketStructureService:
                     "max_commit_seq": trade_outcome.max_commit_seq,
                 },
                 "aggregates": aggregate_counts,
+                "flow_features": feature_counts,
                 "coverage": {
                     "opened": coverage is not None,
                     "status": coverage.status.value if coverage else "unproven",
@@ -1020,6 +1325,7 @@ class MarketStructureService:
         validity_versions = []
         checkpoints = []
         book_quality: list[BookQualityEvidence] = []
+        valid_states = []
         direct_quality: list[Mapping[str, Any]] = []
         interval_by_position: dict[tuple[int, int], str] = {}
         last_l2_event = None
@@ -1049,6 +1355,8 @@ class MarketStructureService:
             validity_versions.extend(result.validity_versions)
             checkpoints.extend(result.checkpoints)
             book_quality.extend(result.quality)
+            if result.state is not None:
+                valid_states.append(result.state)
 
         for raw in raw_records:
             raw_events = events_by_raw.get(raw.raw_record_id, [])
@@ -1173,6 +1481,78 @@ class MarketStructureService:
             final_event_ordinal=final_position.event_ordinal,
             final_sequence_num=final_position.provider_sequence_num,
         )
+        if "bbo_series_id" not in config or "depth_series_id" not in config:
+            raise RuntimeError(
+                "market_book_feature_config_missing: re-run pair configuration"
+            )
+        valuation = MarketStateValuationContract(
+            product_definition_version_id=str(
+                config.get("product_definition_version_id") or ""
+            ),
+            provider_size_unit=str(config.get("provider_size_unit") or ""),
+            base_currency=str(config.get("base_currency") or ""),
+            quote_currency=str(config.get("quote_currency") or ""),
+            contract_size=config.get("contract_size"),
+        )
+        bbo_facts, depth_facts = derive_book_features(
+            valid_states,
+            contract=valuation,
+            bbo_series_id=int(config["bbo_series_id"]),
+            depth_series_id=int(config["depth_series_id"]),
+            computed_at=datetime.now(UTC),
+        )
+        feature_ingest = self.repository.ingest_market_state_features(
+            bbo_facts=bbo_facts,
+            depth_facts=depth_facts,
+        )
+        response_facts = ()
+        response_inserted = 0
+        response_noop = 0
+        if valid_states:
+            required_response_config = (
+                "trade_series_id",
+                "flow_feature_series_ids",
+                "response_feature_series_id",
+            )
+            if not all(name in config for name in required_response_config):
+                raise RuntimeError(
+                    "market_response_feature_config_missing: re-run pair configuration"
+                )
+            response_start = min(row.effective_at for row in valid_states) - timedelta(
+                seconds=2
+            )
+            response_end = max(row.effective_at for row in valid_states) + timedelta(
+                seconds=2
+            )
+            response_known_at = datetime.now(UTC)
+            flow_series_id = int(
+                dict(config["flow_feature_series_ids"])["1"]
+            )
+            flow_rows = self.repository.read_trade_flow_features(
+                series_id=flow_series_id,
+                start=response_start,
+                end=response_end,
+                known_at=response_known_at,
+            )
+            trade_rows = self.repository.read_trades(
+                series_id=int(config["trade_series_id"]),
+                start=response_start,
+                end=response_end,
+                known_at_lte=response_known_at,
+            )
+            response_facts = derive_response_features(
+                valid_states,
+                tuple(row.fact for row in trade_rows),
+                flow_rows,
+                contract=valuation,
+                series_id=int(config["response_feature_series_id"]),
+                computed_at=response_known_at,
+            )
+            response_ingest = self.repository.ingest_market_state_features(
+                response_facts=response_facts
+            )
+            response_inserted = response_ingest.inserted_count
+            response_noop = response_ingest.noop_count
 
         quality_event_ids: list[str] = []
         closing_interval_by_quality_hash = {
@@ -1246,6 +1626,15 @@ class MarketStructureService:
                 "checkpoint_ids": checkpoint_ids,
                 "final_state_hash": final_state_hash,
                 "archive_manifest_ids": list(manifest_ids),
+                "feature_counts": {
+                    "bbo": len(bbo_facts),
+                    "depth": len(depth_facts),
+                    "response": len(response_facts),
+                    "response_inserted": response_inserted,
+                    "response_noop": response_noop,
+                    "inserted": feature_ingest.inserted_count,
+                    "noop": feature_ingest.noop_count,
+                },
             },
         )
         status = self.repository.archive_status(definition_id=claim.definition_id)
@@ -1279,6 +1668,15 @@ class MarketStructureService:
                 "noop_batches": ingest.noop_batch_count,
                 "inserted_validity_versions": ingest.inserted_validity_count,
                 "max_commit_seq": ingest.max_commit_seq,
+            },
+            "features": {
+                "bbo_count": len(bbo_facts),
+                "depth_count": len(depth_facts),
+                "response_count": len(response_facts),
+                "response_inserted": response_inserted,
+                "response_noop": response_noop,
+                "inserted": feature_ingest.inserted_count,
+                "noop": feature_ingest.noop_count,
             },
             "quality_event_ids": quality_event_ids,
             "archive_status": status,
@@ -1542,40 +1940,64 @@ class MarketStructureService:
             symbol_by_product_id={contract.provider_product_id: contract.provider_product_id}
         )
         operations: list[tuple[str, BookSourcePosition, Any]] = []
+        invalidating_classes = {
+            "sequence_gap",
+            "out_of_order",
+            "heartbeat_gap",
+            "disconnect",
+            "decode_error",
+        }
+        quality_rows = self.repository.list_session_quality_events(
+            definition_id=definition_id,
+            session_id=session_id,
+        )
+        quality_by_position: dict[tuple[int, int], list[Mapping[str, Any]]] = {}
+        for quality in quality_rows:
+            if str(quality["classification"]) not in invalidating_classes:
+                continue
+            key = (
+                int(quality["connection_epoch"]),
+                int(quality["receive_ordinal"]),
+            )
+            quality_by_position.setdefault(key, []).append(quality)
         for record in records:
             parsed = parser.parse_raw(
                 record.raw_frame,
                 received_at=record.received_at.isoformat(),
                 raw_ref={"raw_record_id": record.raw_record_id},
             )
-            for event in parsed:
-                if event.event_kind != "provider_sequence_gap":
-                    continue
-                status = str(event.payload.get("status") or "")
-                if status not in {"gap", "out_of_order"}:
-                    continue
+            for quality in quality_by_position.get(
+                (record.connection_epoch, record.receive_ordinal), ()
+            ):
+                evidence = dict(quality.get("evidence") or {})
+                event_ordinal = int(evidence.pop("event_ordinal", 0))
+                evidence.pop("book_quality_evidence_hash", None)
                 position = BookSourcePosition(
                     definition_id=definition_id,
                     session_id=session_id,
                     connection_epoch=record.connection_epoch,
                     provider_product_id=contract.provider_product_id,
-                    provider_sequence_num=event.provider_sequence_num,
+                    provider_sequence_num=(
+                        int(quality["sequence_after"])
+                        if quality.get("sequence_after") is not None
+                        else None
+                    ),
                     receive_ordinal=record.receive_ordinal,
-                    event_ordinal=0,
+                    event_ordinal=event_ordinal,
                 )
                 operations.append(
                     (
                         "invalidate",
                         position,
                         {
-                            "effective_at": record.received_at,
-                            "known_at": record.received_at,
-                            "raw_record_id": record.raw_record_id,
-                            "classification": (
-                                "sequence_gap" if status == "gap" else "out_of_order"
+                            "effective_at": quality["detected_at"],
+                            "known_at": quality["known_at"],
+                            "raw_record_id": str(
+                                quality.get("raw_record_id") or record.raw_record_id
                             ),
-                            "reason": f"provider connection sequence status={status}",
-                            "evidence": dict(event.payload),
+                            "classification": str(quality["classification"]),
+                            "reason": str(quality["reason"]),
+                            "evidence": evidence,
                         },
                     )
                 )
@@ -1593,11 +2015,12 @@ class MarketStructureService:
         def reduce_operations(
             reducer: Level2BookReconstructor,
             selected: Sequence[tuple[str, BookSourcePosition, Any]],
-        ) -> tuple[list[str], list[str], dict[str, Any], dict[str, Any]]:
+        ) -> tuple[list[str], list[str], dict[str, Any], dict[str, Any], list[Any]]:
             snapshot_ids: list[str] = []
             batch_ids: list[str] = []
             checkpoints: dict[str, Any] = {}
             opening_validity: dict[str, Any] = {}
+            states: list[Any] = []
             for kind, position, payload in selected:
                 if kind == "invalidate":
                     result = reducer.invalidate_transport(
@@ -1610,19 +2033,21 @@ class MarketStructureService:
                     snapshot_ids.append(result.snapshot.snapshot_id)
                 if result.batch is not None:
                     batch_ids.append(result.batch.batch_id)
+                if result.state is not None:
+                    states.append(result.state)
                 for checkpoint in result.checkpoints:
                     checkpoints[checkpoint.checkpoint_id] = checkpoint
                 for validity in result.validity_versions:
                     if validity.revision == 1:
                         opening_validity[validity.interval_id] = validity
-            return snapshot_ids, batch_ids, checkpoints, opening_validity
+            return snapshot_ids, batch_ids, checkpoints, opening_validity, states
 
         full = Level2BookReconstructor(
             series_id=int(definition["series_id"]),
             contract=contract,
             ordering_assurance=OrderingAssurance.PROVIDER_DELIVERY_GUARANTEED,
         )
-        snapshot_ids, batch_ids, replay_checkpoints, opening_validity = (
+        snapshot_ids, batch_ids, replay_checkpoints, opening_validity, replay_states = (
             reduce_operations(full, operations)
         )
         final_state_hash = full.current_state_hash
@@ -1700,6 +2125,62 @@ class MarketStructureService:
                     "market_book_replay_invalid: checkpoint-plus-delta differs from full replay"
                 )
 
+        replay_bbo = ()
+        replay_depth = ()
+        persisted_bbo = ()
+        persisted_depth = ()
+        feature_equal: Optional[bool] = None
+        if replay_states:
+            valuation = MarketStateValuationContract(
+                product_definition_version_id=str(
+                    config.get("product_definition_version_id") or ""
+                ),
+                provider_size_unit=str(config.get("provider_size_unit") or ""),
+                base_currency=str(config.get("base_currency") or ""),
+                quote_currency=str(config.get("quote_currency") or ""),
+                contract_size=config.get("contract_size"),
+            )
+            replay_bbo, replay_depth = derive_book_features(
+                replay_states,
+                contract=valuation,
+                bbo_series_id=int(config["bbo_series_id"]),
+                depth_series_id=int(config["depth_series_id"]),
+                computed_at=datetime.now(UTC),
+            )
+            if replay_bbo:
+                feature_start = replay_bbo[0].bucket_start
+                feature_end = replay_bbo[-1].bucket_end
+                read_known_at = datetime.now(UTC)
+                persisted_bbo = self.repository.read_bbo_features(
+                    series_id=int(config["bbo_series_id"]),
+                    start=feature_start,
+                    end=feature_end,
+                    known_at=read_known_at,
+                )
+                persisted_depth = self.repository.read_depth_features(
+                    series_id=int(config["depth_series_id"]),
+                    start=feature_start,
+                    end=feature_end,
+                    known_at=read_known_at,
+                )
+                replay_bbo_hashes = sorted(row.material_hash for row in replay_bbo)
+                persisted_bbo_hashes = sorted(
+                    row.material_hash for row in persisted_bbo
+                )
+                replay_depth_hashes = sorted(
+                    row.material_hash for row in replay_depth
+                )
+                persisted_depth_hashes = sorted(
+                    row.material_hash for row in persisted_depth
+                )
+                feature_equal = (
+                    replay_bbo_hashes == persisted_bbo_hashes
+                    and replay_depth_hashes == persisted_depth_hashes
+                )
+                if not feature_equal:
+                    raise RuntimeError(
+                        "market_book_replay_invalid: persisted features differ from raw replay"
+                    )
         fingerprint = _stable_hash(
             {
                 "schema_version": "market.book_session_replay.v1",
@@ -1708,6 +2189,13 @@ class MarketStructureService:
                 "batch_ids": batch_ids,
                 "final_state_hash": final_state_hash,
                 "checkpoint_checks": checkpoint_checks,
+                "bbo_feature_hashes": sorted(row.material_hash for row in replay_bbo),
+                "depth_feature_hashes": sorted(row.material_hash for row in replay_depth),
+                "transport_quality_hashes": sorted(
+                    str(row["evidence_hash"])
+                    for row in quality_rows
+                    if str(row["classification"]) in invalidating_classes
+                ),
             }
         )
         return {
@@ -1721,8 +2209,18 @@ class MarketStructureService:
             "final_state_hash": final_state_hash,
             "checkpoint_count": len(checkpoint_checks),
             "checkpoint_delta_equal": checkpoint_delta_equal,
+            "transport_invalidation_count": sum(
+                1
+                for row in quality_rows
+                if str(row["classification"]) in invalidating_classes
+            ),
             "replay_fingerprint": fingerprint,
             "reconciliation": reconciliation,
+            "features": {
+                "bbo_count": len(replay_bbo),
+                "depth_count": len(replay_depth),
+                "persisted_equal": feature_equal,
+            },
         }
 
     def reconcile_recent_trades(

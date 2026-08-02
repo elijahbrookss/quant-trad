@@ -82,6 +82,12 @@ class MarketStructurePairRequest(BaseModel):
     enable_production: bool = False
 
 
+class MarketStructureMaterializeRequest(BaseModel):
+    start: str
+    end: str
+    known_at: str
+
+
 class MarketStructureCaptureRequest(BaseModel):
     duration_seconds: float = 60.0
     storage_root: Optional[str] = None
@@ -237,6 +243,22 @@ def configure_market_structure_pair(
             max_spool_bytes=req.max_spool_bytes,
             max_segment_bytes=req.max_segment_bytes,
             enable_production=req.enable_production,
+        )
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/market-structure/pairs/{pair_id}/materialize")
+def materialize_market_structure_pair(
+    pair_id: str,
+    req: MarketStructureMaterializeRequest,
+) -> dict[str, Any]:
+    try:
+        return market_structure_service.materialize_pair_features(
+            pair_id=pair_id,
+            start=_time(req.start),
+            end=_time(req.end),
+            known_at=_time(req.known_at),
         )
     except (KeyError, ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

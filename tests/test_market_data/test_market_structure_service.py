@@ -13,6 +13,7 @@ from portal.backend.service.storage.repos.market_structure import (
     AggregateIngestionOutcome,
     ArchiveCommitResult,
     BookIngestionOutcome,
+    FeatureIngestionOutcome,
     StreamClaim,
     TradeIngestionOutcome,
 )
@@ -149,7 +150,10 @@ class _FakeRepository:
             contract_version="market.trade.v1",
             max_spool_bytes=10 * 1024 * 1024,
             max_segment_bytes=1024 * 1024,
-            config={"aggregate_series_ids": {"1": 11, "60": 12}},
+            config={
+                "aggregate_series_ids": {"1": 11, "60": 12},
+                "flow_feature_series_ids": {"1": 13, "60": 14},
+            },
             owner_id="test-owner",
             lease_token="token",
             lease_generation=1,
@@ -219,6 +223,22 @@ class _FakeRepository:
             max_commit_seq=100 + self.aggregate_count,
             records=(),
         )
+
+    def ingest_market_state_features(self, **kwargs) -> FeatureIngestionOutcome:
+        facts = tuple(
+            fact
+            for values in kwargs.values()
+            for fact in values
+        )
+        return FeatureIngestionOutcome(
+            inserted_count=len(facts),
+            noop_count=0,
+            max_commit_seq=200 + len(facts),
+            material_hashes=tuple(fact.material_hash for fact in facts),
+        )
+
+    def read_trade_flow_features(self, **_kwargs):
+        return ()
 
     def archive_status(self, *, definition_id) -> dict:
         return {
@@ -344,6 +364,14 @@ class _FakeL2Repository(_FakeRepository):
                 "provider_size_unit": "base",
                 "price_increment": "1",
                 "quantity_increment": "0.00000001",
+                "bbo_series_id": 21,
+                "depth_series_id": 22,
+                "response_feature_series_id": 23,
+                "trade_series_id": 10,
+                "flow_feature_series_ids": {"1": 13, "60": 14},
+                "base_currency": "BTC",
+                "quote_currency": "USD",
+                "contract_size": None,
             },
             owner_id="test-owner",
             lease_token="token",

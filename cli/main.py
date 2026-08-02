@@ -1435,6 +1435,21 @@ def _cmd_data_market_structure_configure(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_data_market_structure_materialize(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/pairs/{quote(args.pair, safe='')}/materialize",
+            payload={
+                "start": args.start,
+                "end": args.end,
+                "known_at": args.known_at,
+            },
+        )
+    )
+    return 0
+
+
 def _cmd_data_market_structure_definitions(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
@@ -3428,6 +3443,21 @@ def build_parser() -> argparse.ArgumentParser:
     data_market_structure_configure.add_argument("--segment-mib", type=float, default=128.0)
     data_market_structure_configure.set_defaults(
         func=_cmd_data_market_structure_configure
+    )
+    data_market_structure_materialize = data_market_structure_sub.add_parser(
+        "materialize",
+        help="Materialize causal basis and OI/funding relationship facts at one commit watermark.",
+    )
+    data_market_structure_materialize.add_argument(
+        "--pair",
+        choices=["bip_btc", "etp_eth", "slp_sol"],
+        default="bip_btc",
+    )
+    data_market_structure_materialize.add_argument("--start", required=True)
+    data_market_structure_materialize.add_argument("--end", required=True)
+    data_market_structure_materialize.add_argument("--known-at", required=True)
+    data_market_structure_materialize.set_defaults(
+        func=_cmd_data_market_structure_materialize
     )
     data_market_structure_definitions = data_market_structure_sub.add_parser(
         "definitions",

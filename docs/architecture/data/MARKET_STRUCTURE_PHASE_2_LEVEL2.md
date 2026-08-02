@@ -190,6 +190,22 @@ Exact accepted evidence:
 This bounded proof is sufficient to begin Phase 3. It is not a sustained
 capacity result and does not replace the post-Phase-4 24-hour gate.
 
+## Post-Phase-2 Archive Durability Correction
+
+The Phase 3 scrub recreated the backend container and proved that the original
+default filesystem archive lived on its replaceable writable layer. The Phase
+2 object bytes listed above were lost even though PostgreSQL manifests remained.
+Those manifests now fail replay with `market_archive_object_missing`; they are
+historical proof that the checks passed at capture time, but they are not
+archive-complete or dataset-eligible evidence today.
+
+The local stack now mounts the shared named volume `market-structure-data` at
+`/app/logs/market-structure` for backend and collector processes. New raw and
+checkpoint objects survive service recreation. Phase 3 accepted this correction
+only after replaying the same BIP session before and after backend replacement
+with an identical fingerprint. Missing old objects were not regenerated or
+silently replaced.
+
 ## Verification And Remaining Work
 
 Phase 2 tests prove deterministic randomized replay, exact duplicate and

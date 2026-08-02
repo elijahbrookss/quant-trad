@@ -25,6 +25,7 @@ code_paths:
   - portal/backend/service/storage/repos/market_collection.py
   - portal/backend/workers
   - cli/main.py
+  - docker/docker-compose.yml
   - cli/mcp_server.py
   - config/defaults.yaml
   - scripts/db
@@ -35,8 +36,9 @@ code_paths:
 ## Status And Campaign Boundary
 
 This is the active phased design. Phase 0 provider proof, Phase 1 bounded
-futures/spot trades, and Phase 2 Level 2 archive/reconstruction are implemented;
-Phases 3–4 remain approved implementation work. No phase or document authorizes production collector enrollment, cloud
+futures/spot trades, Phase 2 Level 2 archive/reconstruction, and Phase 3 typed
+market-state features are implemented; Phase 4 remains approved implementation
+work. No phase or document authorizes production collector enrollment, cloud
 resources, strategy changes, live trading, or frontend work. The implemented
 24-hour capacity proof and explicit budget approval remain deferred until after
 Phase 4 and mandatory before production enrollment.
@@ -119,12 +121,12 @@ The design extends, and does not replace, the contracts in:
   cross-product ordering contract.
 - the paper runner is candle-specific, owned by a bot run, and publishes only
   after candle persistence. It is not an independently recoverable data plane.
-- OI and funding have typed append-only storage. Phase 1 datasets support trades
-  and trade-flow aggregates; canonical runtime requirement delivery still does
-  not support funding or market-structure facts until Phase 4.
-- shared commit-clock, hypertable, and immutability setup enumerates Phase 1
-  trade/flow and Phase 2 snapshot/mutation/book/archive-lineage tables. It will
-  require extension for Phase 3–4 tables.
+- OI and funding have typed append-only storage. Phase 3 causally aligns both
+  into derivative-state facts, but canonical dataset/runtime delivery of those
+  and all market-structure facts remains Phase 4 work.
+- shared commit-clock, hypertable, and immutability setup now enumerates Phase
+  1–3 source and feature tables. Phase 4 must add its normalization and frozen
+  dataset reference tables without creating another clock.
 - the live catalog contains BIP, ETP, and SLP Coinbase futures. Phase 1 pair
   configuration registered canonical direct Coinbase BTC-USD. ETH-USD and
   SOL-USD remain explicit on-demand registrations and are not enrolled.
@@ -372,11 +374,14 @@ revision are known.
 
 | Table | Purpose and grain | Key/idempotency | Important columns and time | Mutability/revision | Partition/index, writes, retention |
 |---|---|---|---|---|---|
-| `market.bbo_versions` | best bid/ask after one complete valid batch or sampled cadence | natural `(series_id, effective_time, source_position_hash, contract_version, revision)` | bid/ask price/qty, mid, source state hash, validity interval, receipt/known-at, provenance/quality | append-only revisions | hypertable; series/time/known-at; hot 400d, frozen longer |
-| `market.depth_observation_versions` | depth/spread/imbalance observation at configured cadence | natural `(series_id, effective_time, band_spec_version, source_state_hash, revision)` | spread absolute/bps, band bps, bid/ask qty and notional, imbalance, mid, validity interval, known-at | append-only revisions | hypertable; series/time/band; hot 400d |
+| `market.bbo_feature_versions` | one-second best bid/ask from the last complete valid state in the bucket | natural `(series_id, bucket_start, revision)`; material hash idempotency | bid/ask price/qty, mid, spread absolute/bps, source state/position, validity interval, provider units, effective/known-at, input fingerprint | append-only revisions | hypertable; series/time/known-at; hot 400d, frozen longer |
+| `market.depth_feature_versions` | one-second depth/imbalance observation for one fixed band | natural `(series_id, band_bps, bucket_start, revision)`; material hash idempotency | 5/10/25 bps band, bid/ask quantity/base/notional, bounded imbalance, source BBO/state/position, validity, known-at | append-only revisions | hypertable; series/time/band; hot 400d |
 | `market.trade_flow_aggregate_versions` | causal 1s or 1m trade bucket | natural `(series_id, interval_seconds, bucket_start, aggregation_version, revision)` | counts, maker/aggressor buy/sell quantities, contracts/base/notional, CVD delta/cumulative anchor, OHLC/last, first/last trade source position, coverage interval/revision, coverage opening/closing positions, complete/late/archive flags, known-at | append-only bucket revisions; late trades or archive completion append later-known revision | hypertable; series/interval/time/known-at; hot 400d |
+| `market.trade_flow_feature_versions` | validated flow/CVD projection from one complete aggregate | natural `(series_id, interval_seconds, bucket_start, revision)` | aggregate material/input hashes, buy/sell base and notional, CVD delta/share, known-at and input fingerprint | append-only; incomplete and zero-denominator aggregates emit no numeric feature | hypertable; series/interval/time; hot 400d |
 | `market.derivative_fact_reconciliations` | comparison evidence between live OI/funding and a historical/public reference | natural `(left_series_id, right_source_id, fact_type, effective_time, reconciliation_version)` | left/right fact refs, unit transform, absolute/relative delta, tolerance, status, compared/known-at, evidence hash | append-only; never overwrites either source | fact/time/status index; indefinite quality evidence |
 | `market.futures_spot_relationship_versions` | paired causal futures/spot observation | natural `(mapping_version_id, effective_time, relationship_contract_version, revision)` | future/spot source fact refs, mids, basis absolute/bps, staleness each side, alignment policy, known-at, quality | append-only revisions | hypertable; mapping/time/known-at; hot 400d |
+| `market.derivative_state_versions` | one causal OI/funding relationship observation | natural `(series_id, effective_at, revision)` | exact OI/funding source series, sample times and commit sequences, OI level/previous/log change, provider-reported funding and interval, known-at/input fingerprint | append-only; a gap blocks OI change instead of imputing it | hypertable; series/time/known-at; hot 400d |
+| `market.market_response_feature_versions` | one direction-specific flow/price/depth response horizon | natural `(series_id, direction, horizon_seconds, effective_at, revision)` | trade-flow and pre/trough/post book source refs, response bps, consumed/replenished selected-side depth, impact, validity, known-at | append-only; invalid/cross-interval evidence suppresses output | hypertable; series/time/direction; hot 400d |
 | `market.normalization_specs` | immutable executable feature definition | PK UUID; unique `(feature_name, semantic_version, spec_hash)` | typed inputs, formula AST/identifier, units, window/partition, minimums, missing/validity/staleness policy, warmup, materialization mode, created/approved | immutable; new semantics require new version/hash | feature/version index; indefinite |
 | `market.normalized_feature_versions` | one materialized operational normalized value | natural `(output_series_id, spec_id, effective_time, input_fingerprint, revision)` | exact numeric/enum value, input range/count/watermark, warmup/valid flags, effective/known-at, provenance/quality/input hashes | append-only; later inputs create later-known revision and never replace earlier causal visibility | hypertable; series/spec/time/known-at; operational hot 400d |
 | `market.dataset_archive_refs` | immutable set of source archive objects pinned by a dataset | PK `(dataset_id, raw_archive_manifest_id)` | inclusion role, object checksum/content fingerprint | append-only with dataset; manifest must be acknowledged | dataset index; dataset lifetime |
@@ -1154,6 +1159,9 @@ history.
 
 ### Phase 3: One-Second/One-Minute Market-State Features
 
+Status: implemented for bounded BIP/BTC on 2026-08-02. See
+[Market Structure Phase 3 State Features](MARKET_STRUCTURE_PHASE_3_STATE_FEATURES.md).
+
 Dependencies: valid Phase 2 books and Phase 1 trades.
 
 Work:
@@ -1161,15 +1169,17 @@ Work:
 - materialize the small v1 BBO/spread/depth/imbalance/trade-flow/CVD/basis
   catalog;
 - add OI/funding causal alignment and reconciliation evidence;
-- expose typed coverage/quality through dataset planning and runtime resolver
-  only for declared consumers.
+- expose typed coverage/quality in the operational read boundary; dataset
+  planning and runtime resolver registration remain Phase 4 work.
 
 Acceptance:
 
 - raw-to-feature and persisted/recomputed agreement pass;
 - gap and book-validity policies suppress all contaminated rows;
 - output rate/storage remain bounded and spec/version fingerprints are stable;
-- provider-free frozen dataset can deliver the new facts.
+- repeated materialization is a no-op at the same bounded input watermark and
+  replayed features equal persisted features. Provider-free frozen delivery is
+  the Phase 4 admission gate, not an implied Phase 3 capability.
 
 Value without later phases: queryable causal market-state history and deterministic
 operational features.
