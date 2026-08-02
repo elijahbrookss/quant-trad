@@ -600,6 +600,95 @@ def get_bot(bot_id: str) -> Dict[str, object]:
     return _project_bot(_composition().config_service.get_bot(bot_id))
 
 
+def get_bot_run_inspection(run_id: str) -> Dict[str, Any]:
+    """Return one exact run with its definition, lifecycle, lease, and read models."""
+
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        raise ValueError("run_id is required")
+    run = _as_mapping(_composition().storage.get_bot_run(normalized_run_id))
+    if not run:
+        raise KeyError(normalized_run_id)
+    bot_id = _clean_text(run.get("bot_id"))
+    if not bot_id:
+        raise ValueError(f"bot_id missing for run_id={normalized_run_id}")
+    try:
+        bot = _as_mapping(_composition().config_service.get_bot(bot_id))
+        definition_available = True
+    except KeyError:
+        # Historical run identity remains inspectable even if its mutable
+        # definition is no longer present. The persisted run row is explicit
+        # fallback evidence, not a reconstruction of the missing definition.
+        bot = {}
+        definition_available = False
+    lifecycle = _as_mapping(
+        _composition().storage.get_bot_run_lifecycle(normalized_run_id)
+    )
+    lease = _as_mapping(
+        _composition().storage.get_bot_run_lease(normalized_run_id)
+    )
+    report_status = _report_status(normalized_run_id)
+    run_snapshot = _telemetry_hub().get_run_snapshot(run_id=normalized_run_id)
+    runtime_health = (
+        _as_mapping(run_snapshot.health.to_dict())
+        if run_snapshot is not None
+        else {}
+    )
+    persisted_status = _clean_text(run.get("status")) or "unknown"
+    runtime_status = (
+        persisted_status
+        if is_terminal_run_state(
+            status=persisted_status,
+            phase=lifecycle.get("phase"),
+        )
+        else (
+            _clean_text(runtime_health.get("status"))
+            or _clean_text(lifecycle.get("status"))
+            or persisted_status
+        )
+    )
+    return {
+        "schema_version": "bot_run_inspection.v1",
+        "run": {
+            **dict(run),
+            "runtime_status": runtime_status,
+            "is_active": (
+                str(lifecycle.get("run_id") or "").strip() == normalized_run_id
+                and is_active_run_state(
+                    status=lifecycle.get("status"),
+                    phase=lifecycle.get("phase"),
+                )
+            ),
+            "lifecycle": dict(lifecycle),
+            "lease": dict(lease),
+            "projection": {
+                "available": run_snapshot is not None,
+                "reason": (
+                    None if run_snapshot is not None else "snapshot_unavailable"
+                ),
+                "known_at": runtime_health.get("last_event_at"),
+                "seq": (
+                    int(run_snapshot.seq or 0)
+                    if run_snapshot is not None
+                    else None
+                ),
+            },
+            "report_materialization": dict(report_status),
+        },
+        "definition": {
+            "available": definition_available,
+            "id": bot.get("id") or bot_id,
+            "name": bot.get("name") or run.get("bot_name"),
+            "strategy_id": bot.get("strategy_id") or run.get("strategy_id"),
+            "strategy_variant_id": bot.get("strategy_variant_id"),
+            "strategy_variant_name": bot.get("strategy_variant_name") or run.get("strategy_name"),
+            "run_type": bot.get("run_type") or run.get("run_type"),
+            "execution_mode": bot.get("execution_mode") or run.get("execution_mode"),
+        },
+        "observed_at": datetime.now(UTC).isoformat(),
+    }
+
+
 def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
     current = get_bot(bot_id)
     active_run_id = str(current.get("active_run_id") or "").strip() or None

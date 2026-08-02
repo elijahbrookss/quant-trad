@@ -18,7 +18,11 @@ from starlette.websockets import WebSocketState
 
 from ..service.bots import bot_service
 from ..service.bots.bot_run_diagnostics_projection import project_bot_run_diagnostics
-from ..service.bots.botlens_bootstrap_service import get_active_botlens_run_bootstrap, resolve_active_botlens_stream
+from ..service.bots.botlens_bootstrap_service import (
+    get_active_botlens_run_bootstrap,
+    get_botlens_run_bootstrap,
+    resolve_active_botlens_stream,
+)
 from ..service.bots.botlens_chart_service import get_symbol_chart_history
 from ..service.bots.botlens_forensics_service import get_run_signal_forensics, list_run_forensic_events
 from ..service.bots.botlens_symbol_service import get_selected_symbol_snapshot, get_symbol_detail, list_run_symbols
@@ -516,6 +520,30 @@ async def bot_run_forensic_events(
 
 
 
+
+
+@router.get("/runs/{run_id}")
+def bot_run_inspection(run_id: str) -> Dict[str, Any]:
+    """Return one exact run for read-only Operations and direct links."""
+
+    try:
+        return bot_service.get_bot_run_inspection(str(run_id))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/botlens/bootstrap")
+async def bot_lens_exact_run_bootstrap(run_id: str) -> Dict[str, Any]:
+    """Return BotLens projection state for one exact active or historical run."""
+
+    try:
+        return await get_botlens_run_bootstrap(run_id=str(run_id))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.get("/runs/{run_id}/series")

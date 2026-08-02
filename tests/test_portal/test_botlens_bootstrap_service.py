@@ -223,6 +223,84 @@ def test_get_active_botlens_run_bootstrap_is_run_scoped_and_embeds_selected_symb
     assert all(metric["tags"]["pipeline_stage"] == "botlens_run_bootstrap" for metric in projection_reads)
 
 
+def test_get_botlens_run_bootstrap_loads_exact_historical_run_without_live_transport(monkeypatch) -> None:
+    telemetry_hub = _FakeTelemetryHub()
+    telemetry_hub.run_state.readiness = SimpleNamespace(
+        catalog_discovered=True,
+        run_live=False,
+    )
+    monkeypatch.setattr(svc, "_telemetry_hub", lambda: telemetry_hub)
+    monkeypatch.setattr(
+        svc.bot_service,
+        "get_bot",
+        lambda bot_id: {
+            "id": bot_id,
+            "status": "running",
+            "active_run_id": "newer-run",
+            "lifecycle": {"phase": "live", "status": "running"},
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "get_bot_run",
+        lambda run_id: {
+            "run_id": run_id,
+            "bot_id": "bot-1",
+            "status": "completed",
+            "ended_at": "2026-04-09T11:00:00Z",
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "get_bot_run_lifecycle",
+        lambda run_id: {"run_id": run_id, "phase": "completed", "status": "completed"},
+    )
+
+    result = asyncio.run(svc.get_botlens_run_bootstrap(run_id="historical-run"))
+
+    assert result["scope"]["run_id"] == "historical-run"
+    assert result["run"]["meta"]["status"] == "completed"
+    assert result["readiness"]["run_live"] is False
+    assert result["live_transport"]["eligible"] is False
+
+
+def test_get_botlens_historical_run_bootstrap_survives_missing_definition(monkeypatch) -> None:
+    telemetry_hub = _FakeTelemetryHub()
+    telemetry_hub.run_state.readiness = SimpleNamespace(
+        catalog_discovered=True,
+        run_live=False,
+    )
+    monkeypatch.setattr(svc, "_telemetry_hub", lambda: telemetry_hub)
+    monkeypatch.setattr(
+        svc.bot_service,
+        "get_bot",
+        lambda _bot_id: (_ for _ in ()).throw(KeyError("definition missing")),
+    )
+    monkeypatch.setattr(
+        svc,
+        "get_bot_run",
+        lambda run_id: {
+            "run_id": run_id,
+            "bot_id": "deleted-bot",
+            "bot_name": "Persisted bot name",
+            "strategy_name": "Persisted strategy",
+            "run_type": "backtest",
+            "status": "completed",
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "get_bot_run_lifecycle",
+        lambda run_id: {"run_id": run_id, "phase": "completed", "status": "completed"},
+    )
+
+    result = asyncio.run(svc.get_botlens_run_bootstrap(run_id="historical-run"))
+
+    assert result["scope"] == {"bot_id": "deleted-bot", "run_id": "historical-run"}
+    assert result["run"]["meta"]["strategy_name"] == "Persisted strategy"
+    assert result["live_transport"]["eligible"] is False
+
+
 def test_get_active_botlens_run_bootstrap_does_not_persist_observer_continuity_by_default(monkeypatch) -> None:
     monkeypatch.setattr(svc, "_telemetry_hub", lambda: _FakeTelemetryHub())
     monkeypatch.setattr(svc, "should_persist_observer_continuity", lambda **kwargs: False)
@@ -369,3 +447,51 @@ def test_resolve_active_botlens_stream_returns_run_scope_only(monkeypatch) -> No
             "scope": {"bot_id": "bot-1", "run_id": "run-1"},
         },
     }
+
+def test_terminal_run_without_symbol_catalog_is_explicitly_unavailable(monkeypatch) -> None:
+    telemetry_hub = _FakeTelemetryHub()
+    telemetry_hub.run_state.symbol_catalog = SimpleNamespace(entries={})
+    telemetry_hub.run_state.readiness = SimpleNamespace(
+        catalog_discovered=False,
+        run_live=False,
+    )
+    telemetry_hub.run_state.lifecycle = SimpleNamespace(
+        to_dict=lambda: {"phase": "canceled", "status": "canceled", "live": False},
+    )
+    monkeypatch.setattr(svc, "_telemetry_hub", lambda: telemetry_hub)
+    monkeypatch.setattr(
+        svc.bot_service,
+        "get_bot",
+        lambda bot_id: {
+            "id": bot_id,
+            "status": "idle",
+            "active_run_id": None,
+            "lifecycle": {"phase": "idle", "status": "idle"},
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "get_bot_run",
+        lambda run_id: {
+            "run_id": run_id,
+            "bot_id": "bot-1",
+            "status": "canceled",
+            "ended_at": "2026-04-09T11:00:00Z",
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "get_bot_run_lifecycle",
+        lambda run_id: {"run_id": run_id, "phase": "canceled", "status": "canceled"},
+    )
+
+    result = asyncio.run(svc.get_botlens_run_bootstrap(run_id="historical-run"))
+
+    assert result["scope"]["run_id"] == "historical-run"
+    assert result["state"] == "snapshot_unavailable"
+    assert result["contract_state"] == "snapshot_unavailable"
+    assert result["bootstrap"]["ready"] is False
+    assert result["live_transport"]["eligible"] is False
+    assert result["message"] == (
+        "Persisted BotLens symbol evidence is unavailable for this terminal run."
+    )

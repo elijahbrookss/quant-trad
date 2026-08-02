@@ -545,10 +545,13 @@ class PostgresMarketStructureRepository:
             rows = session.execute(
                 text(
                     f"""
-                    SELECT definitions.*, leases.owner_id, leases.lease_generation,
+                    SELECT definitions.*, series.instrument_id,
+                           series.fact_type AS series_fact_type,
+                           leases.owner_id, leases.lease_generation,
                            leases.heartbeat_at, leases.expires_at,
                            CASE WHEN leases.expires_at > now() THEN true ELSE false END AS lease_current
                     FROM market.stream_definitions AS definitions
+                    JOIN market.series AS series ON series.id = definitions.series_id
                     LEFT JOIN market.stream_lease_state AS leases
                       ON leases.definition_id = definitions.id
                     {predicate}

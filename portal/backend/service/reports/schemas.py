@@ -555,6 +555,24 @@ class ReportListResponse(BaseModel):
     offset: int
 
 
+class ReportActivityDayResponse(BaseModel):
+    date: str
+    total: int
+    by_status: Dict[str, int] = Field(default_factory=dict)
+
+
+class ReportActivityResponse(BaseModel):
+    schema_version: str = "report_activity.v1"
+    activity_type: str = "backtests_completed"
+    run_type: str
+    qualifying_statuses: List[str] = Field(default_factory=lambda: ["completed"])
+    timestamp_field: str = "ended_at"
+    timezone: str = "UTC"
+    description: str
+    since: str
+    days: List[ReportActivityDayResponse] = Field(default_factory=list)
+
+
 class ReportCompareRequest(BaseModel):
     run_ids: List[str] = Field(min_length=2)
 

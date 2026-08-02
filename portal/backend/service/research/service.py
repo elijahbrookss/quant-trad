@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
+from collections import defaultdict
+from datetime import UTC, date, datetime, timedelta
 from time import perf_counter
 from typing import Any, Mapping
 import uuid
@@ -44,6 +46,25 @@ logger = logging.getLogger(__name__)
 RESEARCH_ITEM_KINDS = {"observation", "research_check", "hypothesis", "study"}
 RESEARCH_ITEM_STATUSES = {"draft", "active", "tested", "promoted", "rejected", "archived", "blocked"}
 INDICATOR_CHECK_FAMILIES = {INDICATOR_FORWARD_OUTCOME, SIGNAL_AUDIT, CANDIDATE_LIFECYCLE}
+
+RESEARCH_ACTIVITY_TYPES: dict[str, tuple[str, tuple[str, ...], str]] = {
+    "checks_completed": (
+        "research_check",
+        ("tested", "blocked"),
+        "Research checks persisted after evaluation; created_at is the completion day.",
+    ),
+    "hypotheses_created": (
+        "hypothesis",
+        (),
+        "Hypotheses use the UTC day of their persisted created_at timestamp.",
+    ),
+    "observations_recorded": (
+        "observation",
+        (),
+        "Observations use the UTC day of their persisted created_at timestamp.",
+    ),
+}
+_RESEARCH_ACTIVITY_MAX_DAYS = 366
 
 
 class ResearchEvaluationCache:
@@ -140,6 +161,71 @@ def list_research_items(
         timeframe=timeframe,
         limit=limit,
     )
+
+
+def get_research_activity(
+    *,
+    activity_type: str = "checks_completed",
+    days: int = 182,
+) -> dict[str, Any]:
+    """Return one complete, zero-filled UTC research-activity series."""
+
+    normalized_type = str(activity_type or "checks_completed").strip().lower()
+    definition = RESEARCH_ACTIVITY_TYPES.get(normalized_type)
+    if definition is None:
+        raise ValueError(
+            "unsupported research activity type: "
+            f"{normalized_type or '<empty>'}; expected one of "
+            f"{', '.join(sorted(RESEARCH_ACTIVITY_TYPES))}"
+        )
+    kind, statuses, description = definition
+    bounded_days = max(1, min(int(days or 182), _RESEARCH_ACTIVITY_MAX_DAYS))
+    today = datetime.now(UTC).date()
+    since_date = today - timedelta(days=bounded_days - 1)
+    since = datetime.combine(
+        since_date,
+        datetime.min.time(),
+        tzinfo=UTC,
+    ).replace(tzinfo=None)
+    rows = repository.count_items_by_day(
+        kind=kind,
+        statuses=statuses,
+        since=since,
+    )
+
+    by_day: dict[date, dict[str, int]] = defaultdict(dict)
+    for row in rows:
+        raw_day = row.get("day")
+        day_value = raw_day.date() if isinstance(raw_day, datetime) else raw_day
+        if isinstance(day_value, date):
+            by_day[day_value][str(row.get("status") or "unknown")] = int(
+                row.get("total") or 0
+            )
+
+    payload_days: list[dict[str, Any]] = []
+    cursor = since_date
+    while cursor <= today:
+        by_status = dict(sorted(by_day.get(cursor, {}).items()))
+        payload_days.append(
+            {
+                "date": cursor.isoformat(),
+                "total": sum(by_status.values()),
+                "by_status": by_status,
+            }
+        )
+        cursor += timedelta(days=1)
+
+    return {
+        "schema_version": "research_activity.v1",
+        "activity_type": normalized_type,
+        "kind": kind,
+        "qualifying_statuses": list(statuses),
+        "timestamp_field": "created_at",
+        "timezone": "UTC",
+        "description": description,
+        "since": since_date.isoformat(),
+        "days": payload_days,
+    }
 
 
 def create_research_link(payload: Mapping[str, Any]) -> dict[str, Any]:

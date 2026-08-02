@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any, Dict, List, Optional
 
-from ._shared import BotRunRecord, SQLAlchemyError, _json_safe, _parse_optional_timestamp, _utcnow, db, logger, select
+from ._shared import BotRunRecord, SQLAlchemyError, _json_safe, _parse_optional_timestamp, _utcnow, db, func, logger, select
 
 _NON_MATERIAL_CONFIG_KEYS = {
     "backtest_warmup_evidence",
@@ -221,6 +221,47 @@ def list_bot_runs(
             status,
             bot_id,
             timeframe,
+            exc,
+        )
+        raise
+
+
+def count_bot_runs_by_day(
+    *,
+    run_type: Optional[str] = None,
+    status: Optional[str] = None,
+    since: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    """Return per-day, per-status run counts bucketed by ``ended_at`` at UTC day boundaries.
+
+    ``ended_at`` is stored as a naive UTC timestamp (see ``BotRunRecord``), so
+    ``date_trunc('day', ended_at)`` already yields UTC day boundaries without
+    an explicit timezone conversion.
+    """
+
+    if not db.available:
+        return []
+    day_bucket = func.date_trunc("day", BotRunRecord.ended_at)
+    query = select(day_bucket.label("day"), BotRunRecord.status, func.count().label("total")).where(
+        BotRunRecord.ended_at.is_not(None)
+    )
+    if run_type:
+        query = query.where(BotRunRecord.run_type == run_type)
+    if status:
+        query = query.where(BotRunRecord.status == status)
+    if since is not None:
+        query = query.where(BotRunRecord.ended_at >= since)
+    query = query.group_by(day_bucket, BotRunRecord.status).order_by(day_bucket)
+    try:
+        with db.session() as session:
+            rows = session.execute(query).all()
+            return [{"day": row.day, "status": row.status, "total": int(row.total)} for row in rows]
+    except SQLAlchemyError as exc:
+        logger.error(
+            "bot_run_activity_count_failed | run_type=%s | status=%s | since=%s | error=%s",
+            run_type,
+            status,
+            since,
             exc,
         )
         raise

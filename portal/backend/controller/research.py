@@ -96,6 +96,22 @@ async def list_research_items(
         raise HTTPException(400, str(exc)) from exc
 
 
+@router.get("/activity")
+async def get_research_activity(
+    type: str = Query("checks_completed", alias="type"),
+    days: int = Query(182, ge=1, le=366),
+) -> Dict[str, Any]:
+    """Return a complete zero-filled UTC activity projection."""
+
+    try:
+        return research_service.get_research_activity(
+            activity_type=type,
+            days=days,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.post("/links", status_code=201)
 async def create_research_link(body: ResearchLinkRequest) -> Dict[str, Any]:
     try:

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections import Counter, OrderedDict
+from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Mapping, Sequence
 from concurrent.futures import Future
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+import math
 import statistics
 import threading
 import time
@@ -160,6 +161,26 @@ def _dataset(run_id: str) -> Dict[str, Any]:
     return dataset
 
 
+_REPORT_SORT_FIELDS = {
+    "net_pnl_desc": "net_pnl",
+    "sharpe_desc": "sharpe",
+    "total_return_desc": "total_return",
+}
+
+
+def _report_summary_field(entry: Mapping[str, Any], field: str) -> Any:
+    return _mapping(entry.get("summary")).get(field)
+
+
+def _report_numeric_sort_value(entry: Mapping[str, Any], field: str) -> Optional[float]:
+    raw = _report_summary_field(entry, field)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
 def list_report_summaries(
     *,
     run_type: str = "backtest",
@@ -172,8 +193,15 @@ def list_report_summaries(
     timeframe: Optional[str] = None,
     started_after: Optional[str] = None,
     started_before: Optional[str] = None,
+    sort: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Return lightweight report catalog rows from durable run metadata."""
+    """Return lightweight report catalog rows from durable run metadata.
+
+    ``sort`` accepts one of ``net_pnl_desc`` / ``sharpe_desc`` / ``total_return_desc``
+    (ranked descending by the named summary metric, missing values sorted last,
+    ties broken by most-recent-``ended_at`` then ``run_id`` for full determinism).
+    Omitted, it falls back to the existing most-recently-completed ordering.
+    """
 
     context = build_log_context(
         run_type=run_type,
@@ -186,6 +214,7 @@ def list_report_summaries(
         search=search,
         start=started_after,
         end=started_before,
+        sort=sort,
     )
     logger.debug(with_log_context("report_catalog_list_start", context))
     runs = report_data.list_runs(
@@ -216,7 +245,19 @@ def list_report_summaries(
                 continue
         filtered.append(run)
 
-    filtered.sort(key=lambda entry: entry.get("ended_at") or "", reverse=True)
+    sort_field = _REPORT_SORT_FIELDS.get(str(sort or "").strip().lower())
+    if sort_field:
+        # Stable multi-pass sort, least-significant key first: tertiary (run_id desc),
+        # secondary (ended_at desc), then primary (summary field desc, None last).
+        filtered.sort(key=lambda entry: str(entry.get("run_id") or ""), reverse=True)
+        filtered.sort(key=lambda entry: str(entry.get("ended_at") or ""), reverse=True)
+        def metric_key(entry: Mapping[str, Any]) -> tuple[bool, float]:
+            value = _report_numeric_sort_value(entry, sort_field)
+            return (value is None, -(value or 0.0))
+
+        filtered.sort(key=metric_key)
+    else:
+        filtered.sort(key=lambda entry: entry.get("ended_at") or "", reverse=True)
     total = len(filtered)
     sliced = filtered[offset : offset + limit] if limit else filtered[offset:]
 
@@ -269,6 +310,63 @@ def list_report_summaries(
         )
     logger.debug(with_log_context("report_catalog_list_done", context | {"items": len(items), "total": total}))
     return {"schema_version": "report_list.v1", "items": items, "total": total, "limit": limit, "offset": offset}
+
+
+_ACTIVITY_MAX_DAYS = 366
+
+
+def get_backtest_activity(*, run_type: str = "backtest", days: int = 182) -> Dict[str, Any]:
+    """Return a day-bucketed, zero-filled backtest completion count for an activity heatmap.
+
+    Bucketed by ``ended_at`` (completion date, not start date) at UTC day
+    boundaries. ``total`` per day is the count of *completed* runs that day;
+    ``by_status`` gives the full status breakdown for context. Every day in the
+    requested window is present, even with zero completions.
+    """
+
+    bounded_days = max(1, min(int(days or 182), _ACTIVITY_MAX_DAYS))
+    today = datetime.now(timezone.utc).date()
+    since_date = today - timedelta(days=bounded_days - 1)
+    since_dt = datetime(since_date.year, since_date.month, since_date.day)
+
+    context = build_log_context(run_type=run_type, days=bounded_days, since=since_date.isoformat())
+    logger.debug(with_log_context("report_activity_request", context))
+
+    rows = report_data.count_runs_by_day(run_type=run_type, status=None, since=since_dt)
+
+    by_day: Dict[date, Dict[str, int]] = defaultdict(dict)
+    for row in rows:
+        day_value = row.get("day")
+        day_date = day_value.date() if isinstance(day_value, datetime) else day_value
+        if not isinstance(day_date, date):
+            continue
+        by_day[day_date][str(row.get("status") or "")] = int(row.get("total") or 0)
+
+    days_payload: List[Dict[str, Any]] = []
+    cursor = since_date
+    while cursor <= today:
+        by_status = by_day.get(cursor, {})
+        days_payload.append(
+            {
+                "date": cursor.isoformat(),
+                "total": int(by_status.get("completed", 0)),
+                "by_status": by_status,
+            }
+        )
+        cursor += timedelta(days=1)
+
+    logger.debug(with_log_context("report_activity_done", context | {"days_returned": len(days_payload)}))
+    return {
+        "schema_version": "report_activity.v1",
+        "activity_type": "backtests_completed",
+        "run_type": run_type,
+        "qualifying_statuses": ["completed"],
+        "timestamp_field": "ended_at",
+        "timezone": "UTC",
+        "description": "Completed backtests by persisted ended_at UTC day.",
+        "since": since_date.isoformat(),
+        "days": days_payload,
+    }
 
 
 def get_run_research_dataset(run_id: str) -> Dict[str, Any]:

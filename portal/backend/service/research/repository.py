@@ -9,6 +9,7 @@ import uuid
 
 from portal.backend.db.models import ResearchItemRecord, ResearchLinkRecord
 from portal.backend.db.session import db
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 
@@ -121,6 +122,41 @@ def list_items(
             .all()
         )
         return [record.to_dict() for record in records]
+
+
+def count_items_by_day(
+    *,
+    kind: str,
+    statuses: tuple[str, ...] = (),
+    since: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Count persisted research items by UTC creation day and status.
+
+    Research checks are persisted only after evaluation finishes, so their
+    ``created_at`` is the completion timestamp. Observation and hypothesis
+    activity uses the same field as the time the evidence record was created.
+    """
+
+    day_bucket = func.date_trunc("day", ResearchItemRecord.created_at)
+    with db.session() as session:
+        query = session.query(
+            day_bucket.label("day"),
+            ResearchItemRecord.status,
+            func.count().label("total"),
+        ).filter(ResearchItemRecord.kind == str(kind).strip())
+        if statuses:
+            query = query.filter(ResearchItemRecord.status.in_(statuses))
+        if since is not None:
+            query = query.filter(ResearchItemRecord.created_at >= since)
+        rows = (
+            query.group_by(day_bucket, ResearchItemRecord.status)
+            .order_by(day_bucket, ResearchItemRecord.status)
+            .all()
+        )
+    return [
+        {"day": row.day, "status": row.status, "total": int(row.total)}
+        for row in rows
+    ]
 
 
 def create_link(
