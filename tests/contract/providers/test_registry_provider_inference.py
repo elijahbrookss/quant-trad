@@ -4,7 +4,7 @@ import pytest
 
 pytest.importorskip("pandas")
 
-from data_providers.registry import _Registry
+from data_providers.registry import FeatureAuth, _Registry, feature_contract
 
 
 class _InlineProvider:
@@ -46,3 +46,15 @@ def test_provider_decorator_infers_implementation_from_registration_function():
     assert cfg is not None
     assert cfg.implementation_class == "_FuncProvider"
     assert cfg.implementation_module == __name__
+
+
+def test_coinbase_declares_public_open_interest_without_advertising_unbuilt_features():
+    open_interest = feature_contract(
+        "COINBASE", "COINBASE_DIRECT", "open_interest_current"
+    )
+
+    assert open_interest.auth == FeatureAuth.PUBLIC
+    with pytest.raises(ValueError, match="provider_feature_unsupported"):
+        feature_contract("COINBASE", "COINBASE_DIRECT", "funding_current")
+    with pytest.raises(ValueError, match="provider_feature_unsupported"):
+        feature_contract("COINBASE", "COINBASE_DIRECT", "orders")

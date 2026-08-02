@@ -7,8 +7,32 @@ for developers to add new providers/venues without editing static lists.
 """
 
 from dataclasses import dataclass, field
+from enum import Enum
 import inspect
 from typing import Callable, Dict, List, Optional
+
+
+PROVIDER_FEATURE_CONTRACT_VERSION = "provider_feature_contract.v1"
+
+
+class FeatureAuth(str, Enum):
+    PUBLIC = "public"
+    CREDENTIALS = "credentials"
+    EXTERNAL = "external_auth"
+
+
+@dataclass(frozen=True)
+class ProviderFeatureContract:
+    """Declared platform support and provider auth mode for one operation."""
+
+    auth: FeatureAuth
+    reason: str
+
+    def as_dict(self) -> Dict[str, str]:
+        return {
+            "auth": self.auth.value,
+            "reason": self.reason,
+        }
 
 
 @dataclass(frozen=True)
@@ -32,6 +56,7 @@ class VenueConfig:
     asset_class: Optional[str] = None
     symbols_format: Optional[str] = None
     metadata: Dict[str, object] = field(default_factory=dict)
+    features: Dict[str, ProviderFeatureContract] = field(default_factory=dict)
     required_secrets: List[str] = field(default_factory=list)
     optional_secrets: List[str] = field(default_factory=list)
 
@@ -179,6 +204,50 @@ def venue_for_exchange_slug(exchange: Optional[str]) -> Optional[str]:
     return None
 
 
+def feature_contract(
+    provider_id: Optional[str],
+    venue_id: Optional[str],
+    feature: str,
+) -> ProviderFeatureContract:
+    """Return one explicit venue feature contract or fail on undeclared behavior."""
+
+    provider = normalize_provider_id(provider_id)
+    venue = get_venue_config(venue_id)
+    feature_id = str(feature or "").strip().lower()
+    if not provider or not venue or venue.provider_id != provider:
+        raise ValueError(
+            "provider_feature_contract_invalid: valid provider/venue pairing is required"
+        )
+    if not feature_id:
+        raise ValueError("provider_feature_contract_invalid: feature is required")
+    contract = venue.features.get(feature_id)
+    if contract is None:
+        raise ValueError(
+            "provider_feature_unsupported: Quant-Trad does not implement "
+            f"provider={provider} venue={venue.id} feature={feature_id}"
+        )
+    return contract
+
+
+def feature_contract_payload(venue: VenueConfig) -> Dict[str, object]:
+    """Serialize the stable feature contract for APIs and operator tooling."""
+
+    return {
+        "schema_version": PROVIDER_FEATURE_CONTRACT_VERSION,
+        "features": {
+            feature_id: contract.as_dict()
+            for feature_id, contract in sorted(venue.features.items())
+        },
+    }
+
+
+def _feature(
+    auth: FeatureAuth,
+    reason: str,
+) -> ProviderFeatureContract:
+    return ProviderFeatureContract(auth=auth, reason=reason)
+
+
 # --- Pre-register built-in providers/venues to keep existing behaviour ---
 _REGISTRY.register_provider(
     ProviderConfig(
@@ -226,11 +295,94 @@ _REGISTRY.register_provider(
         id="COINBASE",
         label="Coinbase Direct API",
         supported_venues=["COINBASE_DIRECT"],
-        capabilities={"supportsHistorical": True, "supportsLive": True, "supportsOrders": True, "assetClasses": ["crypto"]},
+        capabilities={
+            "supportsHistorical": True,
+            "supportsLive": True,
+            "supportsOrders": False,
+            "publicMarketData": True,
+            "assetClasses": ["crypto"],
+        },
         implementation_module="data_providers.providers.coinbase",
         implementation_class="CoinbaseProvider",
     )
 )
+
+_ALPACA_FEATURES = {
+    "instrument_metadata": _feature(
+        FeatureAuth.CREDENTIALS,
+        "alpaca_api_credentials_required",
+    ),
+    "historical_candles": _feature(
+        FeatureAuth.CREDENTIALS,
+        "alpaca_api_credentials_required",
+    ),
+    "live_market_data": _feature(
+        FeatureAuth.CREDENTIALS,
+        "alpaca_api_credentials_required",
+    ),
+}
+
+_YAHOO_FEATURES = {
+    "instrument_metadata": _feature(
+        FeatureAuth.PUBLIC, "public_market_data"
+    ),
+    "historical_candles": _feature(
+        FeatureAuth.PUBLIC, "public_market_data"
+    ),
+}
+
+_IBKR_FEATURES = {
+    "instrument_metadata": _feature(
+        FeatureAuth.EXTERNAL,
+        "ibkr_gateway_session_required",
+    ),
+    "historical_candles": _feature(
+        FeatureAuth.EXTERNAL,
+        "ibkr_gateway_session_required",
+    ),
+    "live_market_data": _feature(
+        FeatureAuth.EXTERNAL,
+        "ibkr_gateway_session_required",
+    ),
+}
+
+_CCXT_FEATURES = {
+    "instrument_metadata": _feature(
+        FeatureAuth.PUBLIC,
+        "public_exchange_market_data",
+    ),
+    "historical_candles": _feature(
+        FeatureAuth.PUBLIC,
+        "public_exchange_market_data",
+    ),
+    "live_market_data": _feature(
+        FeatureAuth.PUBLIC,
+        "public_exchange_market_data",
+    ),
+}
+
+_COINBASE_FEATURES = {
+    "instrument_metadata": _feature(
+        FeatureAuth.PUBLIC,
+        "advanced_trade_public_product",
+    ),
+    "historical_candles": _feature(
+        FeatureAuth.PUBLIC,
+        "advanced_trade_public_candles",
+    ),
+    "live_market_data": _feature(
+        FeatureAuth.PUBLIC,
+        "advanced_trade_public_websocket",
+    ),
+    "open_interest_current": _feature(
+        FeatureAuth.PUBLIC,
+        "advanced_trade_public_product",
+    ),
+    "account_fees": _feature(
+        FeatureAuth.CREDENTIALS,
+        "advanced_trade_account_fee_tier_requires_credentials",
+    ),
+}
 
 _REGISTRY.register_venue(
     VenueConfig(
@@ -240,18 +392,79 @@ _REGISTRY.register_venue(
         adapter_id=None,
         asset_class="equities",
         required_secrets=["ALPACA_API_KEY", "ALPACA_SECRET_KEY"],
+        features=_ALPACA_FEATURES,
     )
 )
-_REGISTRY.register_venue(VenueConfig(id="YAHOO", label="Yahoo Finance", provider_id="YAHOO", adapter_id=None, asset_class="equities"))
-_REGISTRY.register_venue(VenueConfig(id="INTERACTIVE_BROKERS", label="Interactive Brokers", provider_id="INTERACTIVE_BROKERS", adapter_id=None))
-_REGISTRY.register_venue(VenueConfig(id="KRAKEN_PRO", label="Kraken Pro", provider_id="CCXT", adapter_id="kraken", asset_class="crypto"))
-_REGISTRY.register_venue(VenueConfig(id="BINANCE_US", label="Binance US", provider_id="CCXT", adapter_id="binanceus", asset_class="crypto"))
-_REGISTRY.register_venue(VenueConfig(id="COINBASE", label="Coinbase Advanced (CCXT)", provider_id="CCXT", adapter_id="coinbase", asset_class="crypto", required_secrets=[]))
-_REGISTRY.register_venue(VenueConfig(id="COINBASE_DIRECT", label="Coinbase Direct API", provider_id="COINBASE", adapter_id=None, asset_class="crypto", required_secrets=["COINBASE_API_KEY", "COINBASE_API_SECRET"]))
+_REGISTRY.register_venue(
+    VenueConfig(
+        id="YAHOO",
+        label="Yahoo Finance",
+        provider_id="YAHOO",
+        adapter_id=None,
+        asset_class="equities",
+        features=_YAHOO_FEATURES,
+    )
+)
+_REGISTRY.register_venue(
+    VenueConfig(
+        id="INTERACTIVE_BROKERS",
+        label="Interactive Brokers",
+        provider_id="INTERACTIVE_BROKERS",
+        adapter_id=None,
+        features=_IBKR_FEATURES,
+    )
+)
+_REGISTRY.register_venue(
+    VenueConfig(
+        id="KRAKEN_PRO",
+        label="Kraken Pro",
+        provider_id="CCXT",
+        adapter_id="kraken",
+        asset_class="crypto",
+        features=_CCXT_FEATURES,
+    )
+)
+_REGISTRY.register_venue(
+    VenueConfig(
+        id="BINANCE_US",
+        label="Binance US",
+        provider_id="CCXT",
+        adapter_id="binanceus",
+        asset_class="crypto",
+        features=_CCXT_FEATURES,
+    )
+)
+_REGISTRY.register_venue(
+    VenueConfig(
+        id="COINBASE",
+        label="Coinbase Advanced (CCXT)",
+        provider_id="CCXT",
+        adapter_id="coinbase",
+        asset_class="crypto",
+        required_secrets=[],
+        features=_CCXT_FEATURES,
+    )
+)
+_REGISTRY.register_venue(
+    VenueConfig(
+        id="COINBASE_DIRECT",
+        label="Coinbase Advanced Trade Direct",
+        provider_id="COINBASE",
+        adapter_id=None,
+        asset_class="crypto",
+        required_secrets=["COINBASE_API_KEY", "COINBASE_API_SECRET"],
+        features=_COINBASE_FEATURES,
+    )
+)
 
 
 __all__ = [
     "ProviderConfig",
+    "ProviderFeatureContract",
+    "FeatureAuth",
+    "PROVIDER_FEATURE_CONTRACT_VERSION",
+    "feature_contract",
+    "feature_contract_payload",
     "VenueConfig",
     "list_providers",
     "list_venues",
