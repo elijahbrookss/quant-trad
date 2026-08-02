@@ -11,6 +11,8 @@ from .contracts import (
     CandleFact,
     CandleRecord,
     DatasetSeriesRequest,
+    FundingRateFact,
+    FundingRateRecord,
     MarketDataRecord,
     OpenInterestFact,
     OpenInterestRecord,
@@ -129,6 +131,32 @@ class MarketDataStore(Protocol):
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
     ) -> list[OpenInterestRecord]:
+        ...
+
+    def ingest_funding_rates(
+        self,
+        *,
+        series_id: int,
+        source_id: int,
+        facts: Iterable[FundingRateFact],
+        request: Optional[Mapping[str, Any]] = None,
+        provenance: Optional[Mapping[str, Any]] = None,
+        source_revision: Optional[str] = None,
+        ingestion_run_id: Optional[str] = None,
+        allow_corrections: bool = True,
+        collection_fence: Optional[Mapping[str, Any]] = None,
+    ) -> IngestionOutcome:
+        ...
+
+    def read_funding_rates(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+    ) -> list[FundingRateRecord]:
         ...
 
     def record_gap_evidence(self, **kwargs: Any) -> str:

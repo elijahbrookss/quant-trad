@@ -7,9 +7,12 @@ import pytest
 
 from market_data.contracts import (
     CANDLE_FACT_TYPE,
+    FUNDING_RATE_FACT_TYPE,
     OPEN_INTEREST_FACT_TYPE,
     CandleFact,
     CandleRecord,
+    FundingRateFact,
+    FundingRateRecord,
     InstrumentRole,
     MarketDataRequirement,
     MarketDataWindow,
@@ -18,6 +21,7 @@ from market_data.contracts import (
     SourceIdentity,
     build_candle_material_hash,
     build_dataset_identity_hash,
+    build_funding_rate_material_hash,
     build_open_interest_material_hash,
     build_quality_hash,
 )
@@ -207,6 +211,73 @@ def test_open_interest_fact_rejects_negative_or_future_schedule() -> None:
         )
 
 
+def test_funding_rate_preserves_signed_rate_and_provider_time_without_causalizing_it() -> None:
+    sample_time = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+    known_at = sample_time + timedelta(seconds=4)
+    funding_time = sample_time + timedelta(hours=1)
+    fact = FundingRateFact(
+        sample_time=sample_time,
+        rate=-0.000025,
+        funding_time=funding_time,
+        interval_seconds=3600,
+        received_at=known_at,
+        accepted_at=known_at,
+        known_at=known_at,
+        known_at_method="platform_acceptance",
+    )
+    record = FundingRateRecord(
+        series_id=13,
+        revision=1,
+        market_commit_seq=3,
+        ingestion_run_id="funding-poll-1",
+        source_identity_key="coinbase-funding-source",
+        source=SourceIdentity("COINBASE", "COINBASE_DIRECT", "poll_api", "v1"),
+        provenance={
+            "provider_funding_time_semantics": "provider_reported_unspecified"
+        },
+        fact=fact,
+    )
+
+    assert fact.rate == -0.000025
+    assert fact.funding_time == funding_time
+    assert fact.known_at == known_at
+    assert fact.source_published_at is None
+    assert build_funding_rate_material_hash(
+        series_identity={
+            "instrument_id": "instrument-1",
+            "fact_type": FUNDING_RATE_FACT_TYPE,
+            "timeframe_seconds": None,
+            "contract_version": "derivatives.funding_rate.v1",
+        },
+        records=[record],
+    )
+
+
+def test_funding_rate_requirement_and_fact_reject_invalid_shape() -> None:
+    requirement = MarketDataRequirement(
+        key="funding_rate",
+        fact_type=FUNDING_RATE_FACT_TYPE,
+        max_staleness_seconds=300,
+    )
+    assert requirement.contract_version == "derivatives.funding_rate.v1"
+    assert requirement.alignment.value == "latest_known"
+    with pytest.raises(ValueError, match="do not have a timeframe"):
+        MarketDataRequirement(
+            fact_type=FUNDING_RATE_FACT_TYPE,
+            timeframe_seconds=60,
+            max_staleness_seconds=300,
+        )
+    for interval_seconds in (0, 1.5):
+        with pytest.raises(ValueError, match="positive integer"):
+            FundingRateFact(
+                sample_time=datetime(2024, 1, 1, tzinfo=UTC),
+                rate=0.0,
+                funding_time=datetime(2024, 1, 1, 1, tzinfo=UTC),
+                interval_seconds=interval_seconds,
+                accepted_at=datetime(2024, 1, 1, tzinfo=UTC),
+                known_at=datetime(2024, 1, 1, tzinfo=UTC),
+                known_at_method="platform_acceptance",
+            )
 def test_material_hash_ignores_storage_revision_but_not_fact_values() -> None:
     identity = {
         "instrument_id": "instrument-1",

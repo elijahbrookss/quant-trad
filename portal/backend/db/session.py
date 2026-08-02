@@ -344,7 +344,11 @@ class Database:
     def _assert_market_commit_clock(self, conn, *, existing_only: bool) -> None:
         """Reject per-table identity clocks before heterogeneous facts can start."""
 
-        for table_name in ("candle_versions", "open_interest_versions"):
+        for table_name in (
+            "candle_versions",
+            "open_interest_versions",
+            "funding_rate_versions",
+        ):
             table_ref = f"market.{table_name}"
             existing = conn.execute(
                 text("SELECT to_regclass(:table_ref)"), {"table_ref": table_ref}
@@ -392,6 +396,7 @@ class Database:
         for table_name, time_column in (
             ("candle_versions", "candle_open_time"),
             ("open_interest_versions", "sample_time"),
+            ("funding_rate_versions", "sample_time"),
         ):
             conn.execute(
                 text(
@@ -441,6 +446,7 @@ class Database:
             "series",
             "candle_versions",
             "open_interest_versions",
+            "funding_rate_versions",
             "gap_evidence",
             "datasets",
             "dataset_series",

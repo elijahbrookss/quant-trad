@@ -289,6 +289,91 @@ class MarketOpenInterestVersionRecord(Base):
     row_hash = Column(String(64), nullable=False)
 
 
+class MarketFundingRateVersionRecord(Base):
+    """Append-only scheduled observations of perpetual funding rates."""
+
+    __tablename__ = "funding_rate_versions"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "series_id",
+            "sample_time",
+            "revision",
+            name="pk_market_funding_rate_versions",
+        ),
+        CheckConstraint(
+            "revision > 0", name="ck_market_funding_rate_revision_positive"
+        ),
+        CheckConstraint(
+            "funding_interval_seconds > 0",
+            name="ck_market_funding_rate_interval_positive",
+        ),
+        CheckConstraint(
+            "known_at >= sample_time",
+            name="ck_market_funding_rate_known_after_schedule",
+        ),
+        CheckConstraint(
+            "source_published_at IS NULL OR known_at >= source_published_at",
+            name="ck_market_funding_rate_known_after_publication",
+        ),
+        CheckConstraint(
+            "received_at IS NULL OR (known_at >= received_at AND accepted_at >= received_at)",
+            name="ck_market_funding_rate_receipt_order",
+        ),
+        Index(
+            "ix_market_funding_rate_series_time_revision",
+            "series_id",
+            text("sample_time DESC"),
+            text("revision DESC"),
+        ),
+        Index(
+            "ix_market_funding_rate_series_commit",
+            "series_id",
+            "market_commit_seq",
+        ),
+        Index(
+            "ix_market_funding_rate_series_known", "series_id", "known_at"
+        ),
+        Index(
+            "ix_market_funding_rate_series_funding_time",
+            "series_id",
+            "funding_time",
+        ),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    series_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    sample_time = Column(DateTime(timezone=True), nullable=False)
+    revision = Column(Integer, nullable=False)
+    market_commit_seq = Column(
+        BigInteger,
+        nullable=False,
+        server_default=text("nextval('market.fact_commit_seq'::regclass)"),
+    )
+    ingestion_run_id = Column(
+        String(64),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.ingestion_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    funding_rate = Column(Float, nullable=False)
+    funding_time = Column(DateTime(timezone=True), nullable=False)
+    funding_interval_seconds = Column(Integer, nullable=False)
+    unit = Column(String(32), nullable=False)
+    sample_time_method = Column(String(64), nullable=False)
+    source_published_at = Column(DateTime(timezone=True), nullable=True)
+    received_at = Column(DateTime(timezone=True), nullable=True)
+    accepted_at = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+    known_at_method = Column(String(64), nullable=False)
+    provenance = Column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    row_hash = Column(String(64), nullable=False)
+
+
 class MarketCollectionDefinitionRecord(Base):
     """Mutable scheduler state for one provider/fact/series polling definition."""
 

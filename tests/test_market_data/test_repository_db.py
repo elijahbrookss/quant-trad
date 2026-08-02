@@ -8,10 +8,13 @@ import pytest
 from market_data.contracts import (
     CANDLE_FACT_TYPE,
     CANDLE_FACT_VERSION,
+    FUNDING_RATE_FACT_TYPE,
+    FUNDING_RATE_FACT_VERSION,
     OPEN_INTEREST_FACT_TYPE,
     OPEN_INTEREST_FACT_VERSION,
     CandleFact,
     DatasetSeriesRequest,
+    FundingRateFact,
     OpenInterestFact,
     SourceIdentity,
 )
@@ -270,3 +273,74 @@ def test_mixed_fact_freeze_uses_one_commit_clock_and_preserves_oi_revision(
     assert replay[0].revision == 1
     assert replay[0].fact.value == 1000
     assert before_known == []
+
+
+def test_funding_rate_round_trip_and_freeze_preserve_causal_observations(
+    canonical_series: dict[str, int | str],
+) -> None:
+    source_id = int(canonical_series["source_id"])
+    funding_series_id = market_data_repo.register_series(
+        instrument_id=str(canonical_series["instrument_id"]),
+        fact_type=FUNDING_RATE_FACT_TYPE,
+        timeframe_seconds=None,
+        contract_version=FUNDING_RATE_FACT_VERSION,
+    )
+
+    def funding(index: int, rate: float) -> FundingRateFact:
+        sample = _BASE + timedelta(hours=index)
+        known = sample + timedelta(minutes=2)
+        return FundingRateFact(
+            sample_time=sample,
+            rate=rate,
+            funding_time=sample + timedelta(hours=1),
+            interval_seconds=3600,
+            received_at=known,
+            accepted_at=known,
+            known_at=known,
+            known_at_method="platform_acceptance",
+        )
+
+    facts = [funding(0, -0.00002), funding(1, 0.00003)]
+    outcome = market_data_repo.ingest_funding_rates(
+        series_id=funding_series_id,
+        source_id=source_id,
+        facts=facts,
+        provenance={
+            "fixture": "funding-rate-round-trip",
+            "provider_funding_time_semantics": "provider_reported_unspecified",
+        },
+        source_revision="funding-v1",
+    )
+    visible = market_data_repo.read_funding_rates(
+        series_id=funding_series_id,
+        start=_BASE,
+        end=_BASE + timedelta(hours=2),
+    )
+    before_known = market_data_repo.read_funding_rates(
+        series_id=funding_series_id,
+        start=_BASE,
+        end=_BASE + timedelta(hours=1),
+        known_at_lte=_BASE + timedelta(minutes=1),
+    )
+    frozen = market_data_repo.freeze_dataset(
+        [
+            DatasetSeriesRequest(
+                series_id=funding_series_id,
+                start=_BASE,
+                end=_BASE + timedelta(hours=2),
+            )
+        ],
+        purpose="research",
+    )
+    replay = market_data_repo.read_dataset_series(
+        dataset_id=frozen.dataset_id,
+        series_id=funding_series_id,
+    )
+
+    assert outcome.inserted_count == 2
+    assert [record.fact.rate for record in visible] == [-0.00002, 0.00003]
+    assert visible[0].fact.funding_time == _BASE + timedelta(hours=1)
+    assert before_known == []
+    assert [record.fact.row_hash for record in replay] == [
+        fact.row_hash for fact in facts
+    ]

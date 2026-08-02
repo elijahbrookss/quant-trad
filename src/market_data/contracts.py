@@ -24,6 +24,9 @@ CANDLE_MATERIAL_HASH_VERSION = "candle_material_hash.v1"
 OPEN_INTEREST_FACT_TYPE = "derivatives.open_interest"
 OPEN_INTEREST_FACT_VERSION = "derivatives.open_interest.v1"
 OPEN_INTEREST_MATERIAL_HASH_VERSION = "open_interest_material_hash.v1"
+FUNDING_RATE_FACT_TYPE = "derivatives.funding_rate"
+FUNDING_RATE_FACT_VERSION = "derivatives.funding_rate.v1"
+FUNDING_RATE_MATERIAL_HASH_VERSION = "funding_rate_material_hash.v1"
 DATASET_IDENTITY_HASH_VERSION = "market_dataset.v1"
 QUALITY_HASH_VERSION = "market_data_quality_hash.v1"
 
@@ -173,6 +176,7 @@ class MarketDataRequirement:
         default_version = {
             CANDLE_FACT_TYPE: CANDLE_FACT_VERSION,
             OPEN_INTEREST_FACT_TYPE: OPEN_INTEREST_FACT_VERSION,
+            FUNDING_RATE_FACT_TYPE: FUNDING_RATE_FACT_VERSION,
         }.get(fact_type)
         contract_version = str(self.contract_version or default_version or "").strip()
         key = str(self.key or "").strip()
@@ -195,6 +199,10 @@ class MarketDataRequirement:
         if fact_type == OPEN_INTEREST_FACT_TYPE and self.timeframe_seconds is not None:
             raise ValueError(
                 "market_data_requirement_invalid: open-interest observations do not have a timeframe"
+            )
+        if fact_type == FUNDING_RATE_FACT_TYPE and self.timeframe_seconds is not None:
+            raise ValueError(
+                "market_data_requirement_invalid: funding-rate observations do not have a timeframe"
             )
         try:
             raw_instrument_role = (
@@ -707,6 +715,189 @@ class OpenInterestRecord:
         object.__setattr__(self, "provenance", dict(self.provenance or {}))
 
 
+@dataclass(frozen=True)
+class FundingRateFact:
+    """One scheduled observation of a provider-reported perpetual funding rate.
+
+    sample_time is the collector schedule and therefore the observation
+    identity. Coinbase documents funding_time as part of the product payload
+    without defining it as a publication timestamp, so it is preserved verbatim
+    and never substituted for causal known_at.
+    """
+
+    sample_time: datetime
+    rate: float
+    funding_time: datetime
+    interval_seconds: int
+    known_at: datetime
+    known_at_method: str
+    accepted_at: datetime
+    unit: str = "fraction"
+    sample_time_method: str = "collector_schedule"
+    source_published_at: Optional[datetime] = None
+    received_at: Optional[datetime] = None
+
+    def __post_init__(self) -> None:
+        sample_time = _utc_datetime(self.sample_time, field="sample_time")
+        funding_time = _utc_datetime(self.funding_time, field="funding_time")
+        known_at = _utc_datetime(self.known_at, field="known_at")
+        accepted_at = _utc_datetime(self.accepted_at, field="accepted_at")
+        source_published_at = _optional_utc_datetime(
+            self.source_published_at, field="source_published_at"
+        )
+        received_at = _optional_utc_datetime(self.received_at, field="received_at")
+        known_at_method = str(self.known_at_method or "").strip().lower()
+        sample_time_method = str(self.sample_time_method or "").strip().lower()
+        unit = str(self.unit or "").strip().lower()
+        rate = _finite_number(self.rate, field="funding_rate")
+        assert rate is not None
+        if isinstance(self.interval_seconds, bool):
+            raise ValueError(
+                "funding_rate_fact_invalid: interval_seconds must be a positive integer"
+            )
+        if (
+            isinstance(self.interval_seconds, float)
+            and not self.interval_seconds.is_integer()
+        ):
+            raise ValueError(
+                "funding_rate_fact_invalid: interval_seconds must be a positive integer"
+            )
+        try:
+            interval_seconds = int(self.interval_seconds)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "funding_rate_fact_invalid: interval_seconds must be a positive integer"
+            ) from exc
+        if interval_seconds <= 0:
+            raise ValueError(
+                "funding_rate_fact_invalid: interval_seconds must be a positive integer"
+            )
+        if not known_at_method:
+            raise ValueError("funding_rate_fact_invalid: known_at_method is required")
+        if sample_time_method != "collector_schedule":
+            raise ValueError(
+                "funding_rate_fact_invalid: sample_time_method must be collector_schedule"
+            )
+        if unit != "fraction":
+            raise ValueError(
+                "funding_rate_fact_invalid: unit must be fraction for derivatives.funding_rate.v1"
+            )
+        if known_at < sample_time:
+            raise ValueError(
+                "funding_rate_fact_invalid: known_at must not precede sample_time"
+            )
+        if source_published_at is not None and known_at < source_published_at:
+            raise ValueError(
+                "funding_rate_fact_invalid: known_at must not precede source publication"
+            )
+        if received_at is not None:
+            if accepted_at < received_at:
+                raise ValueError(
+                    "funding_rate_fact_invalid: accepted_at must not precede received_at"
+                )
+            if known_at < received_at:
+                raise ValueError(
+                    "funding_rate_fact_invalid: known_at must not precede received_at"
+                )
+        if known_at_method in _RECEIPT_KNOWN_AT_METHODS and known_at < accepted_at:
+            raise ValueError(
+                "funding_rate_fact_invalid: receipt-based known_at must not precede accepted_at"
+            )
+        object.__setattr__(self, "sample_time", sample_time)
+        object.__setattr__(self, "rate", rate)
+        object.__setattr__(self, "funding_time", funding_time)
+        object.__setattr__(self, "interval_seconds", interval_seconds)
+        object.__setattr__(self, "known_at", known_at)
+        object.__setattr__(self, "accepted_at", accepted_at)
+        object.__setattr__(self, "known_at_method", known_at_method)
+        object.__setattr__(self, "sample_time_method", sample_time_method)
+        object.__setattr__(self, "unit", unit)
+        object.__setattr__(self, "source_published_at", source_published_at)
+        object.__setattr__(self, "received_at", received_at)
+
+    @property
+    def row_hash(self) -> str:
+        return _stable_hash(
+            {
+                "schema_version": FUNDING_RATE_FACT_VERSION,
+                "sample_time": _canonical_time(self.sample_time),
+                "sample_time_method": self.sample_time_method,
+                "rate": _canonical_number(self.rate),
+                "funding_time": _canonical_time(self.funding_time),
+                "interval_seconds": self.interval_seconds,
+                "unit": self.unit,
+                "source_published_at": (
+                    _canonical_time(self.source_published_at)
+                    if self.source_published_at is not None
+                    else None
+                ),
+                "received_at": (
+                    _canonical_time(self.received_at)
+                    if self.received_at is not None
+                    else None
+                ),
+                "known_at": _canonical_time(self.known_at),
+                "known_at_method": self.known_at_method,
+            }
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sample_time": self.sample_time,
+            "sample_time_method": self.sample_time_method,
+            "rate": self.rate,
+            "funding_time": self.funding_time,
+            "interval_seconds": self.interval_seconds,
+            "unit": self.unit,
+            "source_published_at": self.source_published_at,
+            "received_at": self.received_at,
+            "accepted_at": self.accepted_at,
+            "known_at": self.known_at,
+            "known_at_method": self.known_at_method,
+            "row_hash": self.row_hash,
+        }
+
+
+@dataclass(frozen=True)
+class FundingRateRecord:
+    """A funding-rate fact plus immutable storage revision identity."""
+
+    series_id: int
+    revision: int
+    market_commit_seq: int
+    ingestion_run_id: str
+    source_identity_key: str
+    source: SourceIdentity
+    provenance: Mapping[str, Any]
+    fact: FundingRateFact
+
+    def __post_init__(self) -> None:
+        if int(self.series_id) <= 0:
+            raise ValueError("funding_rate_record_invalid: series_id must be positive")
+        if int(self.revision) <= 0:
+            raise ValueError("funding_rate_record_invalid: revision must be positive")
+        if int(self.market_commit_seq) <= 0:
+            raise ValueError(
+                "funding_rate_record_invalid: market_commit_seq must be positive"
+            )
+        ingestion_run_id = str(self.ingestion_run_id or "").strip()
+        source_identity_key = str(self.source_identity_key or "").strip()
+        if not ingestion_run_id:
+            raise ValueError(
+                "funding_rate_record_invalid: ingestion_run_id is required"
+            )
+        if not source_identity_key:
+            raise ValueError(
+                "funding_rate_record_invalid: source_identity_key is required"
+            )
+        object.__setattr__(self, "series_id", int(self.series_id))
+        object.__setattr__(self, "revision", int(self.revision))
+        object.__setattr__(self, "market_commit_seq", int(self.market_commit_seq))
+        object.__setattr__(self, "ingestion_run_id", ingestion_run_id)
+        object.__setattr__(self, "source_identity_key", source_identity_key)
+        object.__setattr__(self, "provenance", dict(self.provenance or {}))
+
+
 def build_candle_material_hash(
     *, series_identity: Mapping[str, Any], records: Iterable[CandleRecord]
 ) -> str:
@@ -765,13 +956,46 @@ def build_open_interest_material_hash(
     )
 
 
-MarketDataRecord = CandleRecord | OpenInterestRecord
+def build_funding_rate_material_hash(
+    *,
+    series_identity: Mapping[str, Any],
+    records: Iterable[FundingRateRecord],
+) -> str:
+    """Hash exact scheduled funding observations without revision coupling."""
+
+    rows = sorted(records, key=lambda item: item.fact.sample_time)
+    seen: set[datetime] = set()
+    material: list[dict[str, Any]] = []
+    for record in rows:
+        if record.fact.sample_time in seen:
+            raise ValueError(
+                "funding_rate_material_hash_invalid: duplicate sample_time"
+            )
+        seen.add(record.fact.sample_time)
+        material.append(
+            {
+                "sample_time": _canonical_time(record.fact.sample_time),
+                "row_hash": record.fact.row_hash,
+            }
+        )
+    return _stable_hash(
+        {
+            "schema_version": FUNDING_RATE_MATERIAL_HASH_VERSION,
+            "series": dict(series_identity),
+            "rows": material,
+        }
+    )
+
+
+MarketDataRecord = CandleRecord | OpenInterestRecord | FundingRateRecord
 
 
 def _record_time(record: MarketDataRecord) -> datetime:
     if isinstance(record, CandleRecord):
         return record.fact.open_time
     if isinstance(record, OpenInterestRecord):
+        return record.fact.sample_time
+    if isinstance(record, FundingRateRecord):
         return record.fact.sample_time
     raise TypeError(
         f"market_data_record_invalid: unsupported record type {type(record).__name__}"
@@ -863,11 +1087,15 @@ __all__ = [
     "CANDLE_FACT_TYPE",
     "CANDLE_FACT_VERSION",
     "DATASET_IDENTITY_HASH_VERSION",
+    "FUNDING_RATE_FACT_TYPE",
+    "FUNDING_RATE_FACT_VERSION",
     "OPEN_INTEREST_FACT_TYPE",
     "OPEN_INTEREST_FACT_VERSION",
     "CandleFact",
     "CandleRecord",
     "DatasetSeriesRequest",
+    "FundingRateFact",
+    "FundingRateRecord",
     "InstrumentRole",
     "MarketDataAlignment",
     "MarketDataRecord",
@@ -878,6 +1106,7 @@ __all__ = [
     "SourceIdentity",
     "build_candle_material_hash",
     "build_dataset_identity_hash",
+    "build_funding_rate_material_hash",
     "build_open_interest_material_hash",
     "build_provenance_hash",
     "build_quality_hash",
