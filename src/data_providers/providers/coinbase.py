@@ -22,7 +22,10 @@ except ImportError:  # pragma: no cover - handled in __init__
 
 from core.logger import logger
 from data_providers.registry import _REGISTRY
-from data_providers.facts import ProviderOpenInterestSnapshot
+from data_providers.facts import (
+    ProviderFundingRateSnapshot,
+    ProviderOpenInterestSnapshot,
+)
 from data_providers.services.credential_store import load_credentials
 from .base import BaseDataProvider, InstrumentMetadata, InstrumentType
 
@@ -307,6 +310,151 @@ class CoinbaseProvider(BaseDataProvider):
             source_path=source_path,
             metadata={
                 "provider_event_time_available": False,
+                "contract_code": future_details.get("contract_code"),
+                "contract_root_unit": future_details.get("contract_root_unit"),
+                "venue": future_details.get("venue"),
+            },
+        )
+
+    def fetch_funding_rate(self, symbol: str) -> ProviderFundingRateSnapshot:
+        """Poll one Coinbase perpetual future for its current funding tuple."""
+
+        product = self._load_product(symbol)
+        payload = dict(self._last_product_payload or {})
+        product_type = str(product.product_type or "").strip().upper()
+        if product_type != "FUTURE":
+            raise ValueError(
+                "coinbase_funding_rate_unsupported: "
+                f"product_id={symbol} product_type={product_type or '<missing>'}"
+            )
+        future_details = (
+            dict(product.future_product_details)
+            if isinstance(product.future_product_details, dict)
+            else {}
+        )
+        perpetual_details = (
+            dict(future_details.get("perpetual_details") or {})
+            if isinstance(future_details.get("perpetual_details"), dict)
+            else {}
+        )
+
+        rate_candidates = [
+            ("future_product_details.funding_rate", future_details.get("funding_rate")),
+            (
+                "future_product_details.perpetual_details.funding_rate",
+                perpetual_details.get("funding_rate"),
+            ),
+        ]
+        present_rates = [
+            (path, value)
+            for path, value in rate_candidates
+            if value not in (None, "")
+        ]
+        if not present_rates:
+            raise ValueError(
+                "coinbase_funding_rate_missing: "
+                f"product_id={symbol} response contains no funding_rate field"
+            )
+        normalized_rates: list[tuple[str, float]] = []
+        for path, raw in present_rates:
+            if isinstance(raw, bool):
+                raise ValueError(
+                    f"coinbase_funding_rate_invalid: product_id={symbol} path={path} is not numeric"
+                )
+            try:
+                rate = float(Decimal(str(raw)))
+            except (TypeError, ValueError, InvalidOperation) as exc:
+                raise ValueError(
+                    f"coinbase_funding_rate_invalid: product_id={symbol} path={path} value={raw!r}"
+                ) from exc
+            if not math.isfinite(rate):
+                raise ValueError(
+                    f"coinbase_funding_rate_invalid: product_id={symbol} path={path} must be finite"
+                )
+            normalized_rates.append((path, rate))
+        if len({value for _path, value in normalized_rates}) != 1:
+            raise ValueError(
+                "coinbase_funding_rate_conflict: futures-detail values disagree "
+                f"product_id={symbol}"
+            )
+        source_path, rate = normalized_rates[0]
+
+        time_candidates = [
+            ("future_product_details.funding_time", future_details.get("funding_time")),
+            (
+                "future_product_details.perpetual_details.funding_time",
+                perpetual_details.get("funding_time"),
+            ),
+        ]
+        present_times = [
+            (path, value)
+            for path, value in time_candidates
+            if value not in (None, "")
+        ]
+        if not present_times:
+            raise ValueError(
+                "coinbase_funding_time_missing: "
+                f"product_id={symbol} response contains no funding_time field"
+            )
+        normalized_times: list[tuple[str, dt.datetime]] = []
+        for path, raw in present_times:
+            text_value = str(raw).strip()
+            if text_value.endswith("Z"):
+                text_value = f"{text_value[:-1]}+00:00"
+            try:
+                parsed = dt.datetime.fromisoformat(text_value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"coinbase_funding_time_invalid: product_id={symbol} path={path} value={raw!r}"
+                ) from exc
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt.timezone.utc)
+            normalized_times.append((path, parsed.astimezone(dt.timezone.utc)))
+        if len({value for _path, value in normalized_times}) != 1:
+            raise ValueError(
+                "coinbase_funding_time_conflict: futures-detail values disagree "
+                f"product_id={symbol}"
+            )
+        funding_time_path, funding_time = normalized_times[0]
+
+        raw_interval = future_details.get("funding_interval")
+        interval_text = str(raw_interval or "").strip().lower()
+        numeric_interval = interval_text[:-1] if interval_text.endswith("s") else interval_text
+        try:
+            interval_decimal = Decimal(numeric_interval)
+            interval_seconds = int(interval_decimal)
+        except (TypeError, ValueError, InvalidOperation) as exc:
+            raise ValueError(
+                "coinbase_funding_interval_invalid: "
+                f"product_id={symbol} value={raw_interval!r}"
+            ) from exc
+        if interval_decimal != interval_seconds or interval_seconds <= 0:
+            raise ValueError(
+                "coinbase_funding_interval_invalid: "
+                f"product_id={symbol} value={raw_interval!r}"
+            )
+
+        received_at = dt.datetime.now(dt.timezone.utc)
+        response_hash = hashlib.sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        return ProviderFundingRateSnapshot(
+            provider_product_id=str(product.product_id or symbol),
+            rate=rate,
+            funding_time=funding_time,
+            interval_seconds=interval_seconds,
+            received_at=received_at,
+            response_hash=response_hash,
+            source_path=source_path,
+            metadata={
+                "funding_time_path": funding_time_path,
+                "funding_interval_path": "future_product_details.funding_interval",
+                "funding_time_semantics": "provider_reported_unspecified",
                 "contract_code": future_details.get("contract_code"),
                 "contract_root_unit": future_details.get("contract_root_unit"),
                 "venue": future_details.get("venue"),

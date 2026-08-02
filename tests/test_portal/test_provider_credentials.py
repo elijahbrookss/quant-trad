@@ -42,9 +42,10 @@ def test_coinbase_feature_contract_exposes_only_implemented_capabilities(monkeyp
     assert features["instrument_metadata"]["auth"] == "public"
     assert features["open_interest_current"]["state"] == "available"
     assert features["open_interest_current"]["auth"] == "public"
+    assert features["funding_current"]["state"] == "available"
+    assert features["funding_current"]["auth"] == "public"
     assert features["account_fees"]["state"] == "missing_secrets"
     assert features["account_fees"]["auth"] == "credentials"
-    assert "funding_current" not in features
     assert "orders" not in features
 
 

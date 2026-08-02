@@ -378,6 +378,10 @@ _COINBASE_FEATURES = {
         FeatureAuth.PUBLIC,
         "advanced_trade_public_product",
     ),
+    "funding_current": _feature(
+        FeatureAuth.PUBLIC,
+        "advanced_trade_public_product",
+    ),
     "account_fees": _feature(
         FeatureAuth.CREDENTIALS,
         "advanced_trade_account_fee_tier_requires_credentials",

@@ -381,3 +381,88 @@ def test_fetch_open_interest_rejects_non_future_missing_and_conflicting_values()
     )
     with pytest.raises(ValueError, match="values disagree"):
         conflict.fetch_open_interest("BIP-20DEC30-CDE")
+
+
+def test_fetch_funding_rate_normalizes_public_coinbase_future_snapshot():
+    provider = _make_provider(
+        FakeClient(
+            product={
+                "product_id": "BIP-20DEC30-CDE",
+                "product_type": "FUTURE",
+                "future_product_details": {
+                    "funding_rate": "-0.000002",
+                    "funding_time": "2026-08-02T02:00:00Z",
+                    "funding_interval": "3600s",
+                    "contract_code": "BIP",
+                    "contract_root_unit": "BTC",
+                    "venue": "CDE",
+                    "perpetual_details": {
+                        "funding_rate": "",
+                        "funding_time": None,
+                    },
+                },
+            }
+        )
+    )
+
+    snapshot = provider.fetch_funding_rate("BIP-20DEC30-CDE")
+
+    assert snapshot.provider_product_id == "BIP-20DEC30-CDE"
+    assert snapshot.rate == -0.000002
+    assert snapshot.funding_time == dt.datetime(
+        2026, 8, 2, 2, 0, tzinfo=dt.timezone.utc
+    )
+    assert snapshot.interval_seconds == 3600
+    assert snapshot.unit == "fraction"
+    assert snapshot.source_path == "future_product_details.funding_rate"
+    assert snapshot.metadata["funding_time_semantics"] == "provider_reported_unspecified"
+
+
+def test_fetch_funding_rate_rejects_missing_invalid_and_conflicting_fields():
+    missing = _make_provider(
+        FakeClient(
+            product={
+                "product_id": "BIP-20DEC30-CDE",
+                "product_type": "FUTURE",
+                "future_product_details": {},
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="no funding_rate"):
+        missing.fetch_funding_rate("BIP-20DEC30-CDE")
+
+    invalid_interval = _make_provider(
+        FakeClient(
+            product={
+                "product_id": "BIP-20DEC30-CDE",
+                "product_type": "FUTURE",
+                "future_product_details": {
+                    "funding_rate": "0.0001",
+                    "funding_time": "2026-08-02T02:00:00Z",
+                    "funding_interval": "hourly",
+                },
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="funding_interval_invalid"):
+        invalid_interval.fetch_funding_rate("BIP-20DEC30-CDE")
+
+    conflict = _make_provider(
+        FakeClient(
+            product={
+                "product_id": "BIP-20DEC30-CDE",
+                "product_type": "FUTURE",
+                "future_product_details": {
+                    "funding_rate": "0.0001",
+                    "funding_time": "2026-08-02T02:00:00Z",
+                    "funding_interval": "3600s",
+                    "perpetual_details": {
+                        "funding_rate": "0.0002",
+                        "funding_time": "2026-08-02T02:00:00Z",
+                    },
+                },
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="funding_rate_conflict"):
+        conflict.fetch_funding_rate("BIP-20DEC30-CDE")

@@ -54,7 +54,9 @@ def test_coinbase_declares_public_open_interest_without_advertising_unbuilt_feat
     )
 
     assert open_interest.auth == FeatureAuth.PUBLIC
-    with pytest.raises(ValueError, match="provider_feature_unsupported"):
-        feature_contract("COINBASE", "COINBASE_DIRECT", "funding_current")
+    funding = feature_contract(
+        "COINBASE", "COINBASE_DIRECT", "funding_current"
+    )
+    assert funding.auth == FeatureAuth.PUBLIC
     with pytest.raises(ValueError, match="provider_feature_unsupported"):
         feature_contract("COINBASE", "COINBASE_DIRECT", "orders")
