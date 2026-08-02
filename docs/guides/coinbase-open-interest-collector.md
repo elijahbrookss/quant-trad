@@ -3,7 +3,8 @@
 The first continuous typed-fact collector polls Coinbase Advanced Trade for the
 current open interest of one explicitly mapped futures product. It stores
 append-only `derivatives.open_interest.v1` observations. It does not provide
-historical backfill, funding, basis, aggregated OI, or live trading.
+historical backfill, basis, aggregated OI, or live trading. Funding collection
+is a separate typed handler.
 The collector uses Coinbase Advanced Trade's public product endpoint.
 
 ## Preconditions
@@ -78,3 +79,6 @@ unavailability. Required missing or stale input fails loudly.
   authoritative across processes.
 - Backtests can use only OI already accumulated in canonical storage and frozen
   during dataset preparation. Backtest execution never calls Coinbase.
+
+See [Coinbase funding-rate collector](coinbase-funding-rate-collector.md) for
+the separate perpetual funding fact.

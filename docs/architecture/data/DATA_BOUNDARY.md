@@ -10,6 +10,7 @@ tags:
   - market-data
   - candles
   - open-interest
+  - funding-rate
   - collectors
   - known-at
   - provenance
@@ -21,11 +22,14 @@ code_paths:
   - src/core/candle_continuity.py
   - src/core/candle_snapshot.py
   - portal/backend/db/market_data_models.py
+  - portal/backend/db/session.py
+  - portal/backend/controller/market_data.py
   - portal/backend/service/providers
   - portal/backend/service/market
   - portal/backend/service/storage/repos/market_data.py
   - portal/backend/service/storage/repos/market_collection.py
   - portal/backend/workers/market_data_collector.py
+  - cli/main.py
   - scripts/db/manual_migration_market_data_v2_hard_cutover.sql
   - scripts/db/manual_migration_market_fact_commit_clock_v1.sql
   - docs/architecture/data/diagrams/data-boundary-flow.mmd
@@ -75,9 +79,9 @@ that an upstream API can never change.
 Credential field names live once on the provider/venue registry. Secret values
 live only in encrypted provider credential references. Collectors, bots, and run
 configuration do not copy secrets or credential references. Coinbase Advanced
-Trade product metadata, public candles, public live data, and current OI are
-declared public. Authenticated account-fee lookup is a separate operation and
-uses the same shared provider credential record.
+Trade product metadata, public candles, public live data, current OI, and
+current perpetual funding are declared public. Authenticated account-fee lookup
+is a separate operation and uses the same shared provider credential record.
 
 ## Canonical Flows
 
@@ -99,22 +103,23 @@ uses the same shared provider credential record.
 ## Implemented Source Facts
 
 Logical series are keyed by canonical instrument, fact type, contract version,
-and optional timeframe. Candles and OI share one database-wide market fact
-commit sequence, allowing one mixed-fact dataset watermark.
+and optional timeframe. Candles, OI, and funding share one database-wide market
+fact commit sequence, allowing one mixed-fact dataset watermark.
 
 Physical fact storage is typed by fact contract, not by provider, venue, or
-instrument. `candle_versions` stores all `candle.ohlcv.v1` series and
-`open_interest_versions` stores all `derivatives.open_interest.v1` series. The
-generic source, series, ingestion, gap, dataset, collection-definition,
+instrument. `candle_versions` stores all `candle.ohlcv.v1` series,
+`open_interest_versions` stores all `derivatives.open_interest.v1` series,
+and `funding_rate_versions` stores all `derivatives.funding_rate.v1` series.
+The generic source, series, ingestion, gap, dataset, collection-definition,
 collection-attempt, pacing, lease, and commit-clock tables are shared.
 
 A new fact family gets a typed revision table only when its value and temporal
 constraints differ materially. It does not get one table per exchange or symbol.
 This keeps database constraints and causal reads explicit without collapsing
-unrelated facts into a universal JSON payload. The scheduler itself is already
-provider-neutral. When a second point-in-time fact such as funding is
-implemented, repeated repository and collector dispatch is the signal to
-introduce a fact-handler registry.
+unrelated facts into a universal JSON payload. The scheduler itself is
+provider-neutral. OI and funding use explicit typed collector handlers behind
+the same schedule, retry, pacing, ownership, evidence, and gap lifecycle.
+Lease-fence validation remains one shared repository guard.
 
 ### Candles
 
@@ -143,6 +148,26 @@ Definitions are disabled by default and require an explicit canonical Coinbase
 futures instrument plus exact provider product ID. Missed schedules and
 exhausted attempts create gap evidence. Lease generation, secret token hash,
 expiry, and a write-transaction fence prevent stale workers from publishing.
+
+### Coinbase Perpetual Funding
+
+`derivatives.funding_rate.v1` revisions record scheduled sample time, signed
+finite funding rate as a fractional value, provider-reported funding time,
+positive interval seconds, receipt and acceptance time, known-at and method,
+source, provenance, revision, commit sequence, and causal row hash.
+
+Coinbase exposes the tuple on the same public Advanced Trade product response,
+so collection does not require credentials. Its documentation exposes
+`funding_time` but does not define it as an event or publication timestamp.
+The adapter therefore preserves it as provider-reported metadata and never uses
+it to establish causal visibility. `sample_time` is the collector schedule and
+`known_at` is platform acceptance after receipt.
+
+Definitions require an explicit canonical Coinbase instrument with
+`has_funding=true` plus the exact provider product ID. Storage, frozen dataset
+reads, operator latest-known reads, retries, gap evidence, pacing, and fencing
+are implemented. Indicator/strategy requirement delivery for funding is not
+wired yet; consumers cannot imply that support merely because collection exists.
 
 ## Consumer Requirements And Instrument Roles
 
@@ -192,8 +217,8 @@ replacing source provenance and quality.
 - Append-only table mutations are rejected by database triggers.
 - Collector work is idempotent by scheduled sample, resumable after restart,
   paced in PostgreSQL, bounded in retries, and fenced across processes.
-- Candle and OI revisions are TimescaleDB hypertables indexed for series/time,
-  revision, commit, and known-at reads.
+- Candle, OI, and funding revisions are TimescaleDB hypertables indexed for
+  series/time, revision, commit, and known-at reads.
 - Historical ingestion uses staged set operations and bounded provider segments.
   Collector and historical concurrency remain conservative until measurements
   justify widening them.
@@ -225,8 +250,13 @@ replacing source provenance and quality.
   begins when an enabled collector accumulates it.
 - Coinbase OI lacks a provider event timestamp through the current endpoint, so
   poll schedule and platform acceptance bound what can be known.
-- Funding, basis, cross-venue aggregation, expanded market state, L2, order flow,
-  options, and live trading are not implemented.
+- Coinbase funding is polling-only and has no implemented historical backfill.
+  History begins when an enabled collector accumulates it.
+- Coinbase funding time is provider-reported but not treated as publication
+  time; platform receipt and acceptance govern known-at.
+- Funding delivery into strategy/indicator runtime requirements is not
+  implemented yet. Basis, cross-venue aggregation, expanded market state, L2,
+  order flow, options, and live trading also remain unsupported.
 - Provider publication timestamps are unavailable from some candle endpoints;
   interval-close inference remains explicit provenance.
 - Session/calendar evidence cannot classify every closure.

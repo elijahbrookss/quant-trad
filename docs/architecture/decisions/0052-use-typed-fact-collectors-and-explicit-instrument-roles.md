@@ -9,16 +9,21 @@ tags:
   - market-data
   - collectors
   - open-interest
+  - funding-rate
   - known-at
   - datasets
   - fencing
 code_paths:
   - src/market_data/contracts.py
   - src/market_data/requirements.py
+  - src/market_data/store.py
+  - src/data_providers/facts.py
   - src/data_providers/providers/coinbase.py
   - src/data_providers/registry.py
   - portal/backend/service/providers/provider_service.py
   - portal/backend/db/market_data_models.py
+  - portal/backend/db/session.py
+  - portal/backend/controller/market_data.py
   - portal/backend/service/market/collector_service.py
   - portal/backend/service/market/runtime_market_data.py
   - portal/backend/service/storage/repos/market_collection.py
@@ -42,12 +47,13 @@ and do not belong in a widening candle row. Consumers also need to say whether a
 fact applies to the traded instrument, its underlying, a named benchmark, or one
 explicit instrument without choosing a provider endpoint or guessing symbols.
 
-Coinbase Advanced Trade exposes current futures open interest through its product
-response but does not provide historical backfill or a provider event timestamp
-for that field. Quant-Trad polls the public Advanced Trade product endpoint, so
-current OI does not require account credentials. A durable poller still needs
-explicit sampling, known-at, retry, gap, pacing, and ownership semantics.
-Backtests use accumulated facts from a frozen dataset and never poll Coinbase.
+Coinbase Advanced Trade exposes current futures open interest and perpetual
+funding through its product response. Quant-Trad polls the public Advanced Trade
+product endpoint, so neither operation requires account credentials. The
+adapter has no supported historical backfill for either fact. OI has no provider
+event timestamp, while Coinbase exposes funding time without defining it as a
+publication timestamp. A durable poller still needs explicit sampling, known-at,
+retry, gap, pacing, and ownership semantics.
 
 ## Decision
 
@@ -80,14 +86,20 @@ counts; malformed, absent, or conflicting fields fail loudly. Definitions are
 disabled by default and require an explicit canonical Coinbase instrument and
 provider product ID.
 
-Open-interest revisions have their own append-only hypertable and share the
-database-wide market fact commit clock with candles. Dataset manifests can
-contain both contracts. Backtest planning resolves transitive indicator inputs,
-freezes enough OI history for warmup and staleness, verifies causal availability
-at every engine step, and then executes with provider-free latest-known reads.
-Paper/runtime reads use only canonical stored facts and the same max-staleness
-policy. The indicator engine receives a fresh immutable per-indicator fact map on
-each bar and clears it between bars.
+The second handler is Coinbase venue-specific
+`derivatives.funding_rate.v1`. It records a signed fractional rate,
+provider-reported funding time, and positive funding interval. Funding time is
+preserved but never substituted for source publication or known-at because its
+provider semantics are unspecified. Schedule identifies the observation and
+platform acceptance after receipt establishes causal visibility. A funding
+definition additionally requires a canonical instrument with
+`has_funding=true`.
+
+Open-interest and funding revisions each have a typed append-only hypertable and
+share the database-wide market fact commit clock with candles. Dataset
+manifests and repository reads support all three contracts. Backtest planning
+and runtime delivery currently consume OI but not funding; collection does not
+implicitly advertise an unbuilt engine consumer path.
 
 ## Invariants
 
@@ -99,9 +111,11 @@ each bar and clears it between bars.
 - Instrument relationships use canonical IDs supplied by run configuration; no
   symbol parsing infers underlying or benchmark identity.
 - A read miss never calls Coinbase or another provider.
-- OI `known_at` never precedes schedule, receipt, or platform acceptance.
-- One scheduled OI sample is idempotent; changed same-schedule values are not
-  silently accepted as consumer-path corrections.
+- OI and funding `known_at` never precede schedule, receipt, or platform
+  acceptance.
+- Provider funding time remains distinct from publication and known-at.
+- One scheduled OI or funding sample is idempotent; changed same-schedule values
+  are not silently accepted as consumer-path corrections.
 - Only the current fenced owner can append a collected fact or complete an
   attempt.
 - Required unavailable or stale facts stop execution; optional facts return a
@@ -110,17 +124,16 @@ each bar and clears it between bars.
   facts not known at the decision time.
 - Collector failures and missed schedules remain quality evidence, not synthetic
   zeroes or forward-filled truth.
-- Funding, basis, aggregated OI, historical OI backfill, L2, order flow, options,
-  and live order submission remain unsupported.
+- Historical OI/funding backfill, funding engine delivery, basis, aggregated OI,
+  L2, order flow, options, and live order submission remain unsupported.
 
 ## Consequences
 
 Collectors can accumulate venue facts continuously and independently of bot or
-backtest speed. More providers and fact handlers can reuse scheduling and
-storage ownership without forcing one universal payload. The first OI history
-starts only when the collector starts, so old backtests requiring OI remain
-unavailable until explicit history exists. Polling gives an observation known at
-platform receipt, not the exchange's exact internal change time.
+backtest speed. More providers and fact handlers reuse scheduling and storage
+ownership without forcing one universal payload. OI and funding history start
+only when their collectors start. Polling gives an observation known at platform
+receipt, not the exchange's exact internal change time.
 
 The shared commit clock permits one mixed-fact dataset watermark. Existing
 dataset manifests created under the prior provenance hash are archived by the
@@ -135,8 +148,7 @@ manual migration rather than read through compatibility logic.
 - Store only the latest OI value or overwrite prior samples.
 - Use in-process locks without database ownership fencing.
 - Claim Coinbase historical OI acquisition where no supported endpoint exists.
-- Implement a provider-agnostic payload before a second fact contract requires
-  it.
+- Collapse distinct OI and funding values into a provider-agnostic JSON payload.
 
 ## Enforcing Tests Or Evidence
 
@@ -144,19 +156,19 @@ manual migration rather than read through compatibility logic.
   `tests/test_market_data/test_requirements.py` enforce typed facts, roles,
   deterministic plans, known-at selection, staleness, and fail-loud inputs.
 - `tests/test_data_providers/test_coinbase_provider.py` enforces Coinbase OI
-  response validation without live credentialed calls.
+  and funding response validation without credentialed calls.
 - `tests/test_market_data/test_collector_service.py` and
   `tests/test_market_data/test_collection_repository_db.py` enforce scheduled
   identity, retries, pacing, leases, missed schedules, and fencing.
-- `tests/test_market_data/test_repository_db.py` enforces append-only OI,
-  corrections, the shared commit clock, and mixed frozen datasets.
+- `tests/test_market_data/test_repository_db.py` enforces append-only OI and
+  funding, causal reads, the shared commit clock, and frozen datasets.
 - `tests/test_market_data/test_backtest_dataset.py` and
   `tests/test_market_data/test_runtime_delivery.py` enforce frozen warmup
   coverage, provider-free latest-known delivery, no look-ahead, stale-input
   rejection, and per-bar input clearing.
-- A clean PostgreSQL/TimescaleDB bootstrap and repeated fresh-process bootstrap
-  were validated on an isolated database; the fact-clock migration and mixed
-  repository tests also passed there.
+- Live BIP, ETP, and SLP funding collectors were validated through public
+  provider normalization, fenced attempts, PostgreSQL rows, causal `qt` reads,
+  repeated schedules, and worker restart recovery.
 
 ## References
 

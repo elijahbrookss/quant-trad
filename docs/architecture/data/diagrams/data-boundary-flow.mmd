@@ -4,7 +4,7 @@ flowchart TD
     adapter["Acquisition-only adapter<br/>external anti-corruption"]
     credentials["Credential references"]
     api["External provider API"]
-    normalize["Feed intake<br/>validate closure + known-at"]
+    normalize["Typed fact intake<br/>normalize + validate known-at"]
     stream["Paper closed-candle stream"]
     scheduler["Durable collector schedule<br/>lease + retry + pacing"]
     store["Canonical market store<br/>append-only revisions + gaps"]
