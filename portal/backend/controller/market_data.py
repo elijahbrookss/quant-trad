@@ -15,6 +15,7 @@ from market_data.contracts import (
     FundingRateRecord,
     OpenInterestRecord,
 )
+from ..service.market.normalization_service import market_normalization_service
 from market_data.requirements import UnavailableMarketData
 
 from ..service.market.collector_service import market_data_collector
@@ -73,6 +74,18 @@ class CollectorCreateRequest(BaseModel):
 class CollectorToggleRequest(BaseModel):
     enabled: bool
 
+
+class MarketNormalizationSpecInstallRequest(BaseModel):
+    approved_by: str
+
+
+class MarketNormalizationMaterializeRequest(BaseModel):
+    spec_id: str
+    source_series_id: int
+    start: str
+    end: str
+    known_at: str
+    as_of_commit_seq: Optional[int] = None
 
 class MarketStructurePairRequest(BaseModel):
     pair_id: str = "bip_btc"
@@ -264,6 +277,69 @@ def materialize_market_structure_pair(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+
+@router.post("/market-structure/normalization/specs/install")
+def install_market_normalization_specs(
+    req: MarketNormalizationSpecInstallRequest,
+) -> dict[str, Any]:
+    try:
+        specs = market_normalization_service.install_builtin_specs(
+            approved_by=req.approved_by
+        )
+        return {
+            "schema_version": "market.normalization_spec_catalog.v1",
+            "specs": specs,
+        }
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/market-structure/normalization/specs")
+def list_market_normalization_specs() -> dict[str, Any]:
+    try:
+        return {
+            "schema_version": "market.normalization_spec_catalog.v1",
+            "specs": market_normalization_service.list_specs(),
+        }
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _normalization_request_kwargs(
+    req: MarketNormalizationMaterializeRequest,
+) -> dict[str, Any]:
+    return {
+        "spec_id": req.spec_id,
+        "source_series_id": req.source_series_id,
+        "start": _time(req.start),
+        "end": _time(req.end),
+        "known_at": _time(req.known_at),
+        "as_of_commit_seq": req.as_of_commit_seq,
+    }
+
+
+@router.post("/market-structure/normalization/materialize")
+def materialize_market_normalization(
+    req: MarketNormalizationMaterializeRequest,
+) -> dict[str, Any]:
+    try:
+        return market_normalization_service.materialize(
+            **_normalization_request_kwargs(req)
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/market-structure/normalization/compare")
+def compare_market_normalization(
+    req: MarketNormalizationMaterializeRequest,
+) -> dict[str, Any]:
+    try:
+        return market_normalization_service.compare_persisted(
+            **_normalization_request_kwargs(req)
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 @router.get("/market-structure/definitions")
 def list_market_structure_definitions(
     definition_id: Optional[str] = None,

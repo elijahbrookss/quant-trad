@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Mapping, Optional, Sequence
 
 from market_data.backtest import normalize_backtest_dataset_binding
 from market_data.contracts import (
     CANDLE_FACT_TYPE,
+    FUNDING_RATE_FACT_TYPE,
     OPEN_INTEREST_FACT_TYPE,
     InstrumentRole,
+    MarketDataAlignment,
     MarketDataRequirement,
+    TypedFeatureRecord,
+    record_effective_time,
 )
 from market_data.requirements import UnavailableMarketData, latest_known_record
 from market_data.store import MarketDataStore
@@ -138,12 +142,41 @@ class RuntimeMarketDataResolver:
                     series_id=series_id,
                 )
             )
-        assert requirement.max_staleness_seconds is not None
-        selected = latest_known_record(
-            self._frozen_records[series_id],
-            evaluation_time=evaluation_time,
-            max_staleness_seconds=requirement.max_staleness_seconds,
-        )
+        records = self._frozen_records[series_id]
+        if requirement.alignment is MarketDataAlignment.EXACT_INTERVAL:
+            timeframe = int(requirement.timeframe_seconds or 0)
+            interval_start = evaluation_time - timedelta(seconds=timeframe)
+            visible = [
+                record
+                for record in records
+                if record_effective_time(record) == interval_start
+                and record.fact.known_at <= evaluation_time
+            ]
+            if visible:
+                selected: Any = max(
+                    visible,
+                    key=lambda record: (
+                        record.fact.known_at,
+                        int(record.market_commit_seq),
+                    ),
+                )
+            else:
+                selected = UnavailableMarketData(
+                    key=requirement.key,
+                    reason="exact_interval_unavailable",
+                    evaluation_time=evaluation_time,
+                    details={
+                        "interval_start": interval_start.isoformat(),
+                        "timeframe_seconds": timeframe,
+                    },
+                )
+        else:
+            assert requirement.max_staleness_seconds is not None
+            selected = latest_known_record(
+                records,
+                evaluation_time=evaluation_time,
+                max_staleness_seconds=requirement.max_staleness_seconds,
+            )
         if isinstance(selected, UnavailableMarketData):
             return self._unavailable(
                 requirement,
@@ -152,6 +185,28 @@ class RuntimeMarketDataResolver:
                 details={**dict(selected.details), "series_id": series_id},
                 consumer_id=consumer_id,
             )
+        if isinstance(selected, TypedFeatureRecord):
+            status = getattr(selected.fact, "status", None)
+            status_value = str(getattr(status, "value", status)) if status else None
+            quality_valid = selected.quality.get("valid", True)
+            if quality_valid is False or (
+                status_value is not None and status_value != "valid"
+            ):
+                return self._unavailable(
+                    requirement,
+                    evaluation_time=evaluation_time,
+                    reason=str(
+                        getattr(selected.fact, "reason", None)
+                        or selected.quality.get("reason")
+                        or status_value
+                        or "invalid_source_fact"
+                    ),
+                    details={
+                        "series_id": series_id,
+                        "material_hash": selected.fact.material_hash,
+                    },
+                    consumer_id=consumer_id,
+                )
         return selected
 
     def _instrument_id(
@@ -190,11 +245,6 @@ class RuntimeMarketDataResolver:
                 requirement = self._requirement(raw)
                 if requirement.fact_type == CANDLE_FACT_TYPE:
                     continue
-                if requirement.fact_type != OPEN_INTEREST_FACT_TYPE:
-                    raise RuntimeError(
-                        "runtime_market_data_unsupported_fact: "
-                        f"consumer_id={consumer_id} fact_type={requirement.fact_type}"
-                    )
                 if self.dataset_binding is not None:
                     values[requirement.key] = self._frozen_series(
                         consumer_id=consumer_id,
@@ -203,6 +253,15 @@ class RuntimeMarketDataResolver:
                         evaluation_time=decision_time,
                     )
                     continue
+                if requirement.fact_type not in {
+                    OPEN_INTEREST_FACT_TYPE,
+                    FUNDING_RATE_FACT_TYPE,
+                }:
+                    raise RuntimeError(
+                        "runtime_market_data_unsupported_fact: mutable runtime reads "
+                        f"are unavailable consumer_id={consumer_id} "
+                        f"fact_type={requirement.fact_type}"
+                    )
                 instrument_id = self._instrument_id(
                     requirement, primary_instrument_id=primary_id
                 )
@@ -218,7 +277,12 @@ class RuntimeMarketDataResolver:
                         consumer_id=consumer_id,
                     )
                     continue
-                values[requirement.key] = self._latest_service.latest_open_interest(
+                latest_reader = (
+                    self._latest_service.latest_open_interest
+                    if requirement.fact_type == OPEN_INTEREST_FACT_TYPE
+                    else self._latest_service.latest_funding_rate
+                )
+                values[requirement.key] = latest_reader(
                     instrument_id=instrument_id,
                     decision_time=decision_time,
                     max_staleness_seconds=int(

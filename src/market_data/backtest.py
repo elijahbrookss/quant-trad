@@ -16,6 +16,7 @@ from .contracts import (
     OPEN_INTEREST_FACT_TYPE,
     OPEN_INTEREST_FACT_VERSION,
 )
+from .fact_registry import get_fact_contract
 
 
 BACKTEST_DATASET_BINDING_VERSION = "backtest_dataset_binding.v1"
@@ -393,15 +394,18 @@ def normalize_backtest_dataset_binding(payload: Mapping[str, Any]) -> dict[str, 
         instrument_id = str(raw.get("instrument_id") or "").strip()
         fact_type = str(raw.get("fact_type") or "").strip().lower()
         contract_version = str(raw.get("contract_version") or "").strip()
-        supported_contracts = {
-            CANDLE_FACT_TYPE: CANDLE_FACT_VERSION,
-            OPEN_INTEREST_FACT_TYPE: OPEN_INTEREST_FACT_VERSION,
-        }
-        if supported_contracts.get(fact_type) != contract_version:
+        try:
+            contract = get_fact_contract(fact_type)
+            contract.validate(contract_version=contract_version, timeframe_seconds=raw.get("timeframe_seconds"))
+            if not contract.dataset_eligible:
+                raise ValueError(
+                    f"fact type is not dataset eligible: {fact_type}"
+                )
+        except (TypeError, ValueError) as exc:
             raise ValueError(
                 "backtest_dataset_binding_invalid: unsupported fact contract "
                 f"{fact_type or '<missing>'}/{contract_version or '<missing>'}"
-            )
+            ) from exc
         try:
             series_id = int(raw.get("series_id"))
             row_count = int(raw.get("row_count"))
@@ -420,16 +424,7 @@ def normalize_backtest_dataset_binding(payload: Mapping[str, Any]) -> dict[str, 
                 raise ValueError(
                     "backtest_dataset_binding_invalid: timeframe is malformed"
                 ) from exc
-        if fact_type == CANDLE_FACT_TYPE and (
-            timeframe_seconds is None or timeframe_seconds <= 0
-        ):
-            raise ValueError(
-                "backtest_dataset_binding_invalid: candle timeframe must be positive"
-            )
-        if fact_type == OPEN_INTEREST_FACT_TYPE and timeframe_seconds is not None:
-            raise ValueError(
-                "backtest_dataset_binding_invalid: open interest has no timeframe"
-            )
+        contract.validate(contract_version=contract_version, timeframe_seconds=timeframe_seconds)
         if (
             not instrument_id
             or series_id <= 0

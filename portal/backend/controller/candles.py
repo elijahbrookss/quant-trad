@@ -59,10 +59,11 @@ class CandleIngestionRequest(BaseModel):
 
 
 class CandleDatasetSeriesRequest(BaseModel):
-    instrument_id: str
+    series_id: Optional[int] = None
+    instrument_id: Optional[str] = None
     start: str
     end: str
-    timeframe: str
+    timeframe: Optional[str] = None
 
 
 class CandleDatasetFreezeRequest(BaseModel):
@@ -133,15 +134,30 @@ def freeze_candle_dataset(req: CandleDatasetFreezeRequest) -> Dict[str, Any]:
         requests: list[DatasetSeriesRequest] = []
         resolved: list[dict[str, Any]] = []
         for item in req.series:
-            timeframe_seconds = int(
-                interval_to_timedelta(item.timeframe).total_seconds()
-            )
-            series_id = market_data_repo.resolve_series_id(
-                instrument_id=item.instrument_id,
-                fact_type=CANDLE_FACT_TYPE,
-                timeframe_seconds=timeframe_seconds,
-                contract_version=CANDLE_FACT_VERSION,
-            )
+            if item.series_id is not None:
+                if int(item.series_id) <= 0:
+                    raise ValueError("market_dataset_invalid: series_id must be positive")
+                if item.instrument_id is not None or item.timeframe is not None:
+                    raise ValueError(
+                        "market_dataset_invalid: series_id cannot be combined with "
+                        "instrument_id or timeframe"
+                    )
+                series_id = int(item.series_id)
+            else:
+                if not item.instrument_id or not item.timeframe:
+                    raise ValueError(
+                        "market_dataset_invalid: each series requires either series_id "
+                        "or instrument_id plus timeframe"
+                    )
+                timeframe_seconds = int(
+                    interval_to_timedelta(item.timeframe).total_seconds()
+                )
+                series_id = market_data_repo.resolve_series_id(
+                    instrument_id=item.instrument_id,
+                    fact_type=CANDLE_FACT_TYPE,
+                    timeframe_seconds=timeframe_seconds,
+                    contract_version=CANDLE_FACT_VERSION,
+                )
             request = DatasetSeriesRequest(
                 series_id=series_id,
                 start=_normalize_time(item.start),

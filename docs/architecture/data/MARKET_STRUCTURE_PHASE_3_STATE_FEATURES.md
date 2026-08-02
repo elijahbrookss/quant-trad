@@ -37,9 +37,10 @@ code_paths:
 Phase 3 is implemented and accepted for bounded BIP/BTC operational market-state
 features. It does not authorize production enrollment or canonical backtest
 delivery. All stream definitions remain disabled and
-`production_admitted=false`. Immutable normalization specifications, frozen
-feature datasets, runtime delivery, and the post-Phase-4 24-hour capacity and
-budget gate remain Phase 4 or later work.
+`production_admitted=false`. Phase 4 subsequently implemented immutable
+normalization specifications, frozen feature datasets, and provider-free typed
+delivery. The post-Phase-4 24-hour capacity and budget gate remains mandatory
+before production enrollment.
 
 The implementation uses only typed Phase 1–2 facts plus existing OI/funding
 facts. It does not call Coinbase while materializing or replaying features and
@@ -146,9 +147,10 @@ reported 36 no-ops, and returned fingerprint
 `057a9923af74b6d1ff378d964a4e4b06f44e6b65c507d0e9f9941a1f1e4cb184`.
 
 That window includes pre-volume BBO evidence. It proves typed transformation,
-source verification, causal selection, and idempotency, but it is deliberately
-not Phase 4 dataset acceptance evidence because the old raw objects are gone.
-Phase 4 must freeze a wholly post-correction input range.
+source verification, causal selection, and idempotency, but is deliberately not
+Phase 4 dataset acceptance evidence because the old raw objects are gone. Phase
+4 later froze a wholly post-correction BIP flow range with verified archive
+bytes; see the Phase 4 document below.
 
 ## Verification
 
@@ -162,15 +164,11 @@ Phase 4 must freeze a wholly post-correction input range.
 - Live replay covers both valid closure and terminal transport invalidation.
 - Backend replacement proves new raw/checkpoint objects remain readable.
 
-## Remaining Phase 4 Gates
+## Phase 4 Continuation
 
-- immutable normalization spec and normalized-value tables;
-- causal percentile, z-score, time-of-day baseline, ratio, bps, and volatility
-  transforms with explicit warmup and minimum observations;
-- typed dataset registry/planning for trades, aggregates, BBO, depth, flow,
-  basis, derivative state, response, OI, funding, and candles;
-- frozen normalized values plus spec/source/quality/archive fingerprints;
-- provider-free research/backtest delivery and retention/compaction invariance;
-- a wholly post-volume dataset proof;
-- only after Phase 4, the required 24-hour implemented-path capacity and budget
-  admission run.
+[Market Structure Phase 4: Normalization And Frozen Datasets](MARKET_STRUCTURE_PHASE_4_NORMALIZATION_DATASETS.md)
+records the implemented normalization catalog, registry-driven typed freezing,
+transitive archive/spec lineage, provider-free delivery, and wholly
+post-correction live proof. The remaining gate is operational rather than an
+implementation dependency: a 24-hour implemented-path capacity run and explicit
+budget approval are required before production admission.

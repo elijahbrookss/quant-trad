@@ -171,6 +171,13 @@ suppression reproduce exactly. Cross-stream materialization fixes an input-only
 commit watermark; its own outputs cannot advance its source identity. See
 [Market Structure Phase 3 State Features](../data/MARKET_STRUCTURE_PHASE_3_STATE_FEATURES.md).
 
+Phase 4 implemented immutable normalization specifications, append-only causal
+normalized revisions, one typed fact registry for planning/freezing/runtime,
+transitive source/archive/spec dataset references, physical archive checksum
+verification, and provider-free frozen delivery. The one-hour BIP proof froze
+the exact source and aggressive-flow normalization twice to the same dataset
+identity. See [Market Structure Phase 4 Normalization And Frozen Datasets](../data/MARKET_STRUCTURE_PHASE_4_NORMALIZATION_DATASETS.md).
+
 The Phase 3 scrub also proved that the original filesystem archive path was
 inside the replaceable backend container. Pre-correction objects were lost on
 recreation and remain loudly unreplayable; their database manifests are not
@@ -180,8 +187,9 @@ and collector services. A new BIP archive replayed with an identical fingerprint
 after backend replacement. This is durable local object storage for the current
 deployment boundary, not a claim of cloud object-store durability.
 
-No definition is enabled or production-admitted. The post-Phase-4 24-hour
-measurement and explicit budget approval remain unchanged.
+No definition is enabled or production-admitted. Phase 4 is complete; the
+24-hour implemented-path measurement and explicit budget approval now remain
+as post-campaign production-readiness gates.
 
 ## Consequences
 

@@ -173,3 +173,65 @@ def test_market_structure_operator_routes_preserve_typed_boundaries(
     assert retention.json()["pinned"] is True
     assert recent.json()["historical_completeness_claim"] == "none"
     assert recent.json()["rest_limit"] == 25
+
+
+def test_market_normalization_routes_preserve_causal_request(monkeypatch) -> None:
+    observed = {}
+
+    monkeypatch.setattr(
+        controller.market_normalization_service,
+        "install_builtin_specs",
+        lambda **kwargs: [{"approved_by": kwargs["approved_by"], "spec_id": "nsp-a"}],
+    )
+    monkeypatch.setattr(
+        controller.market_normalization_service,
+        "list_specs",
+        lambda: [{"spec_id": "nsp-a"}],
+    )
+
+    def fake_materialize(**kwargs):
+        observed["materialize"] = kwargs
+        return {"schema_version": "market.normalization_materialization.v1"}
+
+    def fake_compare(**kwargs):
+        observed["compare"] = kwargs
+        return {"persisted_equal": True, "provider_call_performed": False}
+
+    monkeypatch.setattr(
+        controller.market_normalization_service, "materialize", fake_materialize
+    )
+    monkeypatch.setattr(
+        controller.market_normalization_service, "compare_persisted", fake_compare
+    )
+    client = _client()
+    install = client.post(
+        "/api/market-data/market-structure/normalization/specs/install",
+        json={"approved_by": "operator-a"},
+    )
+    specs = client.get(
+        "/api/market-data/market-structure/normalization/specs"
+    )
+    payload = {
+        "spec_id": "nsp-a",
+        "source_series_id": 41,
+        "start": "2026-08-02T12:00:00Z",
+        "end": "2026-08-02T12:02:00Z",
+        "known_at": "2026-08-02T12:03:00Z",
+        "as_of_commit_seq": 77,
+    }
+    materialize = client.post(
+        "/api/market-data/market-structure/normalization/materialize",
+        json=payload,
+    )
+    compare = client.post(
+        "/api/market-data/market-structure/normalization/compare",
+        json=payload,
+    )
+
+    assert install.status_code == specs.status_code == 200
+    assert materialize.status_code == compare.status_code == 200
+    assert install.json()["specs"][0]["approved_by"] == "operator-a"
+    assert compare.json()["persisted_equal"] is True
+    assert observed["materialize"]["source_series_id"] == 41
+    assert observed["materialize"]["as_of_commit_seq"] == 77
+    assert observed["compare"]["known_at"].isoformat() == "2026-08-02T12:03:00+00:00"

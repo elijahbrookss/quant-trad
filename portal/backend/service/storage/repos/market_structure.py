@@ -27,6 +27,7 @@ from market_data.book_archive import (
     BOOK_CHECKPOINT_FORMAT,
     EncodedBookCheckpoint,
 )
+from market_data.contracts import TypedFeatureRecord
 from market_data.market_state import (
     BasisFeatureFact,
     BboFeatureFact,
@@ -3989,6 +3990,104 @@ class PostgresMarketStructureRepository:
                 )
             facts_list.append(fact)
         return tuple(facts_list)
+
+    def read_feature_records(
+        self,
+        *,
+        fact_type: str,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        known_at: Optional[datetime] = None,
+        as_of_commit_seq: Optional[int] = None,
+    ) -> tuple[TypedFeatureRecord, ...]:
+        """Read one registered Phase 3 fact as storage-backed typed revisions."""
+
+        definitions = {
+            "market.bbo": (
+                "bbo_feature_versions",
+                "bucket_start",
+                ("series_id", "bucket_start"),
+                self.read_bbo_features,
+            ),
+            "market.depth_observation": (
+                "depth_feature_versions",
+                "bucket_start",
+                ("series_id", "bucket_start", "band_bps"),
+                self.read_depth_features,
+            ),
+            "market.trade_flow_feature": (
+                "trade_flow_feature_versions",
+                "bucket_start",
+                ("series_id", "interval_seconds", "bucket_start"),
+                self.read_trade_flow_features,
+            ),
+            "market.futures_spot_relationship": (
+                "futures_spot_relationship_versions",
+                "effective_at",
+                ("series_id", "effective_at"),
+                self.read_basis_features,
+            ),
+            "market.derivative_state": (
+                "derivative_state_versions",
+                "effective_at",
+                ("series_id", "effective_at"),
+                self.read_derivative_state_features,
+            ),
+            "market.market_response": (
+                "market_response_feature_versions",
+                "bucket_start",
+                ("series_id", "bucket_start", "direction"),
+                self.read_response_features,
+            ),
+        }
+        normalized_type = str(fact_type or "").strip().lower()
+        definition = definitions.get(normalized_type)
+        if definition is None:
+            raise ValueError(
+                f"market_feature_read_unsupported: fact_type={normalized_type or '<missing>'}"
+            )
+        table_name, time_column, partition_columns, reader = definition
+        decision_time = known_at or datetime.max.replace(tzinfo=UTC)
+        facts = reader(
+            series_id=int(series_id),
+            start=start,
+            end=end,
+            known_at=decision_time,
+            as_of_commit_seq=as_of_commit_seq,
+        )
+        with db.session() as session:
+            rows = _read_feature_rows(
+                session,
+                table_name=table_name,
+                time_column=time_column,
+                partition_columns=partition_columns,
+                series_id=int(series_id),
+                start=start,
+                end=end,
+                known_at=decision_time,
+                as_of_commit_seq=as_of_commit_seq,
+            )
+        by_material = {str(row["material_hash"]): row for row in rows}
+        if len(by_material) != len(rows):
+            raise RuntimeError("market_feature_storage_corrupt: duplicate material hash")
+        records: list[TypedFeatureRecord] = []
+        for fact in facts:
+            row = by_material.get(fact.material_hash)
+            if row is None:
+                raise RuntimeError("market_feature_storage_corrupt: fact envelope missing")
+            records.append(
+                TypedFeatureRecord(
+                    version_id=str(row["id"]),
+                    series_id=int(row["series_id"]),
+                    revision=int(row["revision"]),
+                    market_commit_seq=int(row["market_commit_seq"]),
+                    provenance_hash=str(row["provenance_hash"]),
+                    quality=dict(row["quality"] or {}),
+                    fact=fact,
+                )
+            )
+        return tuple(records)
 def _trade_record(row: Mapping[str, Any]) -> MarketTradeRecord:
     fact = MarketTradeFact(
         provider_product_id=row["provider_product_id"],

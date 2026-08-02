@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 import uuid
 
 import pytest
@@ -19,6 +20,9 @@ from market_data.contracts import (
     SourceIdentity,
 )
 from portal.backend.db import InstrumentRecord, db
+from portal.backend.service.market.normalization_service import (
+    market_normalization_service,
+)
 from portal.backend.service.storage.repos.market_data import market_data_repo
 
 
@@ -344,3 +348,106 @@ def test_funding_rate_round_trip_and_freeze_preserve_causal_observations(
     assert [record.fact.row_hash for record in replay] == [
         fact.row_hash for fact in facts
     ]
+
+    installed = market_normalization_service.install_builtin_specs(
+        approved_by="phase4-db-test"
+    )
+    bps_spec_id = next(
+        row["spec_id"] for row in installed if row["feature_name"] == "funding_rate_bps"
+    )
+    percentile_spec_id = next(
+        row["spec_id"]
+        for row in installed
+        if row["feature_name"] == "funding_rate_percentile_30d"
+    )
+    normalized = market_normalization_service.compare_persisted(
+        spec_id=bps_spec_id,
+        source_series_id=funding_series_id,
+        start=_BASE,
+        end=_BASE + timedelta(hours=2),
+        known_at=_BASE + timedelta(hours=2),
+    )
+    assert normalized["persisted_equal"] is True
+    assert normalized["provider_call_performed"] is False
+    assert normalized["statuses"] == {"valid": 2}
+    normalized_series_id = int(normalized["output_series_id"])
+
+    warmup = market_normalization_service.materialize(
+        spec_id=percentile_spec_id,
+        source_series_id=funding_series_id,
+        start=_BASE,
+        end=_BASE + timedelta(hours=2),
+        known_at=_BASE + timedelta(hours=2),
+    )
+    assert warmup["statuses"] == {"insufficient_history": 2}
+
+    requests = [
+        DatasetSeriesRequest(
+            series_id=funding_series_id,
+            start=_BASE,
+            end=_BASE + timedelta(hours=2),
+        ),
+        DatasetSeriesRequest(
+            series_id=normalized_series_id,
+            start=_BASE,
+            end=_BASE + timedelta(hours=2),
+        ),
+    ]
+    normalized_dataset = market_data_repo.freeze_dataset(
+        requests,
+        purpose="research",
+    )
+    repeated = market_data_repo.freeze_dataset(requests, purpose="research")
+    normalized_replay = market_data_repo.read_dataset_series(
+        dataset_id=normalized_dataset.dataset_id,
+        series_id=normalized_series_id,
+    )
+    correction = market_data_repo.ingest_funding_rates(
+        series_id=funding_series_id,
+        source_id=source_id,
+        facts=[funding(0, -0.00004)],
+        provenance={"fixture": "post-freeze-funding-correction"},
+        source_revision="funding-v2",
+    )
+    recomputed = market_normalization_service.compare_persisted(
+        spec_id=bps_spec_id,
+        source_series_id=funding_series_id,
+        start=_BASE,
+        end=_BASE + timedelta(hours=2),
+        known_at=_BASE + timedelta(hours=2),
+    )
+    latest_normalized = market_data_repo.read_series_records(
+        series_id=normalized_series_id,
+        start=_BASE,
+        end=_BASE + timedelta(hours=2),
+    )
+    frozen_after_correction = market_data_repo.read_dataset_series(
+        dataset_id=normalized_dataset.dataset_id,
+        series_id=normalized_series_id,
+    )
+    assert correction.corrected_count == 1
+    assert recomputed["persisted_equal"] is True
+    assert recomputed["inserted_count"] == 1
+    assert [record.fact.value for record in latest_normalized] == [
+        Decimal("-0.4000000000000000000000"),
+        Decimal("0.3000000000000000000000"),
+    ]
+    assert [record.fact.value for record in frozen_after_correction] == [
+        Decimal("-0.2000000000000000000000"),
+        Decimal("0.3000000000000000000000"),
+    ]
+
+    assert repeated.dataset_id == normalized_dataset.dataset_id
+    assert repeated.dataset_hash == normalized_dataset.dataset_hash
+    assert [record.fact.value for record in normalized_replay] == [
+        Decimal("-0.2000000000000000000000"),
+        Decimal("0.3000000000000000000000"),
+    ]
+    assert normalized_dataset.metadata["normalization_refs"][0][
+        "source_series_ids"
+    ] == [funding_series_id]
+    normalized_series = next(
+        row for row in market_data_repo.list_series()
+        if int(row["id"]) == normalized_series_id
+    )
+    assert normalized_series["feature_count"] == 2

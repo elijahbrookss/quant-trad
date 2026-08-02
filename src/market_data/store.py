@@ -159,6 +159,18 @@ class MarketDataStore(Protocol):
     ) -> list[FundingRateRecord]:
         ...
 
+    def read_series_records(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+    ) -> list[MarketDataRecord]:
+        ...
+
+
     def record_gap_evidence(self, **kwargs: Any) -> str:
         ...
 

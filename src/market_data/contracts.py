@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
+from .fact_registry import get_fact_contract
+
 
 CANDLE_FACT_TYPE = "candle.ohlcv"
 CANDLE_FACT_VERSION = "candle.ohlcv.v1"
@@ -173,11 +175,8 @@ class MarketDataRequirement:
 
     def __post_init__(self) -> None:
         fact_type = str(self.fact_type or "").strip().lower()
-        default_version = {
-            CANDLE_FACT_TYPE: CANDLE_FACT_VERSION,
-            OPEN_INTEREST_FACT_TYPE: OPEN_INTEREST_FACT_VERSION,
-            FUNDING_RATE_FACT_TYPE: FUNDING_RATE_FACT_VERSION,
-        }.get(fact_type)
+        contract = get_fact_contract(fact_type)
+        default_version = contract.contract_version
         contract_version = str(self.contract_version or default_version or "").strip()
         key = str(self.key or "").strip()
         if not fact_type:
@@ -192,18 +191,7 @@ class MarketDataRequirement:
             raise ValueError(
                 "market_data_requirement_invalid: timeframe_seconds must be positive"
             )
-        if fact_type == CANDLE_FACT_TYPE and self.timeframe_seconds is None:
-            raise ValueError(
-                "market_data_requirement_invalid: candle facts require timeframe_seconds"
-            )
-        if fact_type == OPEN_INTEREST_FACT_TYPE and self.timeframe_seconds is not None:
-            raise ValueError(
-                "market_data_requirement_invalid: open-interest observations do not have a timeframe"
-            )
-        if fact_type == FUNDING_RATE_FACT_TYPE and self.timeframe_seconds is not None:
-            raise ValueError(
-                "market_data_requirement_invalid: funding-rate observations do not have a timeframe"
-            )
+        contract.validate(contract_version=contract_version, timeframe_seconds=self.timeframe_seconds)
         try:
             raw_instrument_role = (
                 self.instrument_role.value
@@ -229,7 +217,7 @@ class MarketDataRequirement:
 
         default_alignment = (
             MarketDataAlignment.EXACT_INTERVAL
-            if fact_type == CANDLE_FACT_TYPE
+            if contract.default_alignment == MarketDataAlignment.EXACT_INTERVAL.value
             else MarketDataAlignment.LATEST_KNOWN
         )
         try:
@@ -245,9 +233,9 @@ class MarketDataRequirement:
             raise ValueError(
                 "market_data_requirement_invalid: unsupported alignment"
             ) from exc
-        if fact_type == CANDLE_FACT_TYPE and alignment is not MarketDataAlignment.EXACT_INTERVAL:
+        if contract.timeframe_mode == "required" and alignment is not MarketDataAlignment.EXACT_INTERVAL:
             raise ValueError(
-                "market_data_requirement_invalid: candle facts require exact_interval alignment"
+                "market_data_requirement_invalid: bucketed facts require exact_interval alignment"
             )
         max_staleness = self.max_staleness_seconds
         if max_staleness is not None and int(max_staleness) <= 0:
@@ -339,10 +327,13 @@ class MarketDataWindow:
             raise ValueError(
                 "market_data_window_invalid: timeframe_seconds must be positive"
             )
-        if fact_type == CANDLE_FACT_TYPE and self.timeframe_seconds is None:
+        contract = get_fact_contract(fact_type)
+        if contract.timeframe_mode == "required" and self.timeframe_seconds is None:
             raise ValueError(
-                "market_data_window_invalid: candle facts require timeframe_seconds"
+                "market_data_window_invalid: bucketed facts require timeframe_seconds"
             )
+        if contract.timeframe_mode == "forbidden" and self.timeframe_seconds is not None:
+            raise ValueError("market_data_window_invalid: unbucketed fact forbids timeframe")
         if self.as_of_commit_seq is not None and int(self.as_of_commit_seq) < 0:
             raise ValueError(
                 "market_data_window_invalid: as_of_commit_seq must be nonnegative"
@@ -990,12 +981,49 @@ def build_funding_rate_material_hash(
 from .structure import MarketTradeRecord, TradeFlowAggregateRecord
 
 
+DERIVED_FEATURE_SERIES_MATERIAL_HASH_VERSION = "market.derived_feature_series.v1"
+
+
+@dataclass(frozen=True)
+class TypedFeatureRecord:
+    """Storage envelope for one typed derived or normalized fact revision."""
+
+    version_id: str
+    series_id: int
+    revision: int
+    market_commit_seq: int
+    provenance_hash: str
+    quality: Mapping[str, Any]
+    fact: Any
+
+    def __post_init__(self) -> None:
+        version_id = str(self.version_id or "").strip()
+        provenance_hash = str(self.provenance_hash or "").strip().lower()
+        if not version_id or int(self.series_id) <= 0:
+            raise ValueError("market_feature_record_invalid: identity")
+        if int(self.revision) <= 0 or int(self.market_commit_seq) <= 0:
+            raise ValueError("market_feature_record_invalid: revision")
+        if len(provenance_hash) != 64:
+            raise ValueError("market_feature_record_invalid: provenance hash")
+        if int(getattr(self.fact, "series_id", 0)) != int(self.series_id):
+            raise ValueError("market_feature_record_invalid: fact series disagreement")
+        material_hash = str(getattr(self.fact, "material_hash", "") or "").lower()
+        if len(material_hash) != 64:
+            raise ValueError("market_feature_record_invalid: fact material hash")
+        object.__setattr__(self, "version_id", version_id)
+        object.__setattr__(self, "series_id", int(self.series_id))
+        object.__setattr__(self, "revision", int(self.revision))
+        object.__setattr__(self, "market_commit_seq", int(self.market_commit_seq))
+        object.__setattr__(self, "provenance_hash", provenance_hash)
+        object.__setattr__(self, "quality", dict(self.quality))
+
 MarketDataRecord = (
     CandleRecord
     | OpenInterestRecord
     | FundingRateRecord
     | MarketTradeRecord
     | TradeFlowAggregateRecord
+    | TypedFeatureRecord
 )
 
 
@@ -1010,8 +1038,56 @@ def _record_time(record: MarketDataRecord) -> datetime:
         return record.fact.provider_event_time
     if isinstance(record, TradeFlowAggregateRecord):
         return record.fact.bucket_start
+    if isinstance(record, TypedFeatureRecord):
+        for field in ("bucket_start", "effective_at", "sample_time", "provider_event_time"):
+            value = getattr(record.fact, field, None)
+            if isinstance(value, datetime):
+                return value
+        raise TypeError(
+            f"market_data_record_invalid: feature has no effective time {type(record.fact).__name__}"
+        )
     raise TypeError(
         f"market_data_record_invalid: unsupported record type {type(record).__name__}"
+    )
+
+
+def record_effective_time(record: MarketDataRecord) -> datetime:
+    """Return the canonical event/effective time for any typed record."""
+
+    return _record_time(record)
+
+
+def build_typed_feature_material_hash(
+    *,
+    series_identity: Mapping[str, Any],
+    records: Iterable[TypedFeatureRecord],
+) -> str:
+    """Hash exact typed feature values independently of storage revisions."""
+
+    rows = sorted(
+        records,
+        key=lambda record: (_record_time(record), record.fact.material_hash),
+    )
+    if not rows:
+        raise ValueError("market_feature_material_hash_invalid: records are required")
+    seen: set[str] = set()
+    material: list[dict[str, Any]] = []
+    for record in rows:
+        if record.version_id in seen:
+            raise ValueError("market_feature_material_hash_invalid: duplicate version")
+        seen.add(record.version_id)
+        material.append(
+            {
+                "fact_time": _canonical_time(_record_time(record)),
+                "material_hash": record.fact.material_hash,
+            }
+        )
+    return _stable_hash(
+        {
+            "schema_version": DERIVED_FEATURE_SERIES_MATERIAL_HASH_VERSION,
+            "series": dict(series_identity),
+            "rows": material,
+        }
     )
 
 
@@ -1021,10 +1097,22 @@ def build_provenance_hash(records: Iterable[MarketDataRecord]) -> str:
     rows = sorted(records, key=_record_time)
     normalized: list[dict[str, Any]] = []
     market_structure_records = any(
-        isinstance(record, (MarketTradeRecord, TradeFlowAggregateRecord))
+        isinstance(record, (MarketTradeRecord, TradeFlowAggregateRecord, TypedFeatureRecord))
         for record in rows
     )
     for record in rows:
+        if isinstance(record, TypedFeatureRecord):
+            normalized.append(
+                {
+                    "fact_time": _canonical_time(_record_time(record)),
+                    "material_hash": record.fact.material_hash,
+                    "version_id": record.version_id,
+                    "provenance_hash": record.provenance_hash,
+                    "quality": dict(record.quality),
+                }
+            )
+            continue
+
         if isinstance(record, MarketTradeRecord):
             normalized.append(
                 {

@@ -16,10 +16,13 @@ from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
 from market_data.contracts import (
     OPEN_INTEREST_FACT_TYPE,
     OPEN_INTEREST_FACT_VERSION,
+    TypedFeatureRecord,
     OpenInterestFact,
     OpenInterestRecord,
     SourceIdentity,
 )
+from market_data.normalization import NormalizedFeatureFact, NormalizedStatus
+from market_data.requirements import UnavailableMarketData
 from portal.backend.service.market.runtime_market_data import RuntimeMarketDataResolver
 
 
@@ -233,3 +236,167 @@ def test_frozen_runtime_reads_dataset_once_and_never_uses_mutable_latest(
     assert second["oi-indicator"]["open_interest"].fact.value == 10
     assert store.dataset_reads == 1
     assert store.current_reads == 0
+
+
+_NORMALIZED_SPEC_ID = f"nsp_{'a' * 31}"
+_NORMALIZED_FACT_TYPE = "market.normalized.aggressive_buy_share"
+_NORMALIZED_CONTRACT = f"market.normalized_feature.v1/{_NORMALIZED_SPEC_ID}"
+
+
+def _normalized_record(
+    *, effective_at: datetime, known_at: datetime, value: str | None, commit_seq: int
+) -> TypedFeatureRecord:
+    status = NormalizedStatus.VALID if value is not None else NormalizedStatus.INVALID_INPUT
+    fingerprint = f"{commit_seq:064x}"
+    fact = NormalizedFeatureFact(
+        series_id=19,
+        spec_id=_NORMALIZED_SPEC_ID,
+        spec_hash="b" * 64,
+        effective_at=effective_at,
+        known_at=known_at,
+        value=value,
+        status=status,
+        reason=None if value is not None else "source_window_gap",
+        input_start=effective_at,
+        input_end=effective_at,
+        input_count=1,
+        input_watermark=commit_seq,
+        source_series_ids=(11,),
+        source_material_hashes=("c" * 64,),
+        input_fingerprint=fingerprint,
+    )
+    return TypedFeatureRecord(
+        version_id=f"nfv-{commit_seq}",
+        series_id=19,
+        revision=1,
+        market_commit_seq=commit_seq,
+        provenance_hash="d" * 64,
+        quality={
+            "classification": status.value,
+            "valid": status is NormalizedStatus.VALID,
+            "reason": fact.reason,
+        },
+        fact=fact,
+    )
+
+
+def _normalized_declarations(*, required: bool = True):
+    return {
+        "normalized-indicator": (
+            {
+                "key": "aggressive_buy_share",
+                "fact_type": _NORMALIZED_FACT_TYPE,
+                "contract_version": _NORMALIZED_CONTRACT,
+                "timeframe_seconds": 60,
+                "instrument_role": "primary",
+                "alignment": "exact_interval",
+                "required": required,
+            },
+        )
+    }
+
+
+def _normalized_binding():
+    declaration = _normalized_declarations()["normalized-indicator"][0]
+    return {
+        "dataset_id": "mds_normalized",
+        "series": [
+            {
+                "series_id": 19,
+                "fact_type": _NORMALIZED_FACT_TYPE,
+                "contract_version": _NORMALIZED_CONTRACT,
+                "bindings": [
+                    {
+                        "consumer_id": "normalized-indicator",
+                        "primary_instrument_id": "coinbase-btc-future",
+                        "input": declaration,
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def test_frozen_normalized_exact_interval_is_provider_free_and_never_looks_ahead(
+    monkeypatch,
+) -> None:
+    import portal.backend.service.market.runtime_market_data as runtime_market_data
+
+    decision = datetime(2025, 1, 1, 12, 1, tzinfo=UTC)
+    selected = _normalized_record(
+        effective_at=decision - timedelta(minutes=1),
+        known_at=decision - timedelta(seconds=1),
+        value="0.6",
+        commit_seq=21,
+    )
+    future = _normalized_record(
+        effective_at=decision,
+        known_at=decision,
+        value="0.9",
+        commit_seq=22,
+    )
+    store = _Store([selected, future])
+    monkeypatch.setattr(
+        runtime_market_data,
+        "normalize_backtest_dataset_binding",
+        lambda payload: dict(payload),
+    )
+
+    result = RuntimeMarketDataResolver(
+        store=store,
+        dataset_binding=_normalized_binding(),
+    ).resolve(
+        requirements_by_consumer=_normalized_declarations(),
+        primary_instrument_id="coinbase-btc-future",
+        evaluation_time=decision,
+    )
+
+    assert result["normalized-indicator"]["aggressive_buy_share"] is selected
+    assert store.dataset_reads == 1
+    assert store.current_reads == 0
+
+
+def test_frozen_invalid_normalized_fact_remains_visible(monkeypatch) -> None:
+    import portal.backend.service.market.runtime_market_data as runtime_market_data
+
+    decision = datetime(2025, 1, 1, 12, 1, tzinfo=UTC)
+    invalid = _normalized_record(
+        effective_at=decision - timedelta(minutes=1),
+        known_at=decision - timedelta(seconds=1),
+        value=None,
+        commit_seq=21,
+    )
+    monkeypatch.setattr(
+        runtime_market_data,
+        "normalize_backtest_dataset_binding",
+        lambda payload: dict(payload),
+    )
+    resolver = RuntimeMarketDataResolver(
+        store=_Store([invalid]),
+        dataset_binding=_normalized_binding(),
+    )
+
+    with pytest.raises(RuntimeError, match="source_window_gap"):
+        resolver.resolve(
+            requirements_by_consumer=_normalized_declarations(required=True),
+            primary_instrument_id="coinbase-btc-future",
+            evaluation_time=decision,
+        )
+    optional = resolver.resolve(
+        requirements_by_consumer=_normalized_declarations(required=False),
+        primary_instrument_id="coinbase-btc-future",
+        evaluation_time=decision,
+    )
+    assert isinstance(
+        optional["normalized-indicator"]["aggressive_buy_share"],
+        UnavailableMarketData,
+    )
+
+
+def test_mutable_runtime_does_not_implicitly_read_normalized_facts() -> None:
+    with pytest.raises(RuntimeError, match="mutable runtime reads are unavailable"):
+        RuntimeMarketDataResolver(store=_Store([])).resolve(
+            requirements_by_consumer=_normalized_declarations(),
+            primary_instrument_id="coinbase-btc-future",
+            evaluation_time=datetime(2025, 1, 1, 12, 1, tzinfo=UTC),
+        )

@@ -31,6 +31,10 @@ from market_data.market_state import (
     derive_book_features,
     derive_trade_flow_feature,
 )
+from market_data.normalization import (
+    NormalizationFormula,
+    NormalizationSpec,
+)
 from market_data.order_book import (
     BookLifecycle,
     L2ProductContract,
@@ -50,7 +54,11 @@ from market_data.structure import (
     translate_coinbase_market_trade,
 )
 from portal.backend.db import InstrumentRecord, db
+from portal.backend.service.market.normalization_service import market_normalization_service
 from portal.backend.service.storage.repos.market_data import market_data_repo
+from portal.backend.service.storage.repos.normalization import (
+    normalization_repository,
+)
 from portal.backend.service.storage.repos.market_structure import (
     MarketStructureOwnershipError,
     market_structure_repository,
@@ -108,7 +116,9 @@ def _btc_l2_frames() -> list[str]:
 
 def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(tmp_path))
     token = uuid.uuid4().hex
     instrument_id = f"ms-db-{token[:24]}"
     with db.session() as session:
@@ -234,9 +244,10 @@ def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
     )
     spool.append(raw_record)
     spool.seal()
+    object_store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
     encoded, acknowledgement, archived_records = publish_spool_archive(
         spool,
-        object_store=FilesystemRawArchiveObjectStore(tmp_path / "objects"),
+        object_store=object_store,
         temporary_directory=tmp_path / "tmp",
     )
     archive = market_structure_repository.commit_archive(
@@ -356,6 +367,46 @@ def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
     )
     assert stored_flow[0].material_hash == flow_feature.material_hash
 
+    aggressive_spec = NormalizationSpec(
+        feature_name=f"aggressive_buy_share_db_{token[:8]}",
+        semantic_version="1.0.0",
+        input_fact_type=TRADE_FLOW_FEATURE_FACT_TYPE,
+        output_fact_type=f"market.normalized.aggressive_buy_share_db_{token[:8]}",
+        formula=NormalizationFormula.RATIO,
+        units="unit_interval",
+        window_seconds=None,
+        minimum_observations=0,
+        warmup_observations=0,
+        parameters={
+            "value_field": "aggressor_buy_notional",
+            "denominator_field": "quote_notional",
+            "input_step_seconds": 1,
+        },
+    )
+    aggressive_spec = normalization_repository.register_spec(
+        aggressive_spec,
+        created_by="pytest",
+        approved_by="pytest",
+    )
+    normalization = market_normalization_service.compare_persisted(
+        spec_id=aggressive_spec.spec_id,
+        source_series_id=flow_feature_series_id,
+        start=bucket,
+        end=bucket + timedelta(seconds=1),
+        known_at=max(flow_feature.known_at, bucket + timedelta(seconds=1)),
+    )
+    assert normalization["persisted_equal"] is True
+    assert normalization["provider_call_performed"] is False
+    assert normalization["statuses"] == {"valid": 1}
+    normalized_series_id = int(normalization["output_series_id"])
+    normalized_before = normalization_repository.read_records(
+        series_id=normalized_series_id,
+        start=bucket,
+        end=bucket + timedelta(seconds=1),
+    )
+    assert len(normalized_before) == 1
+    assert normalized_before[0].fact.source_series_ids == (flow_feature_series_id,)
+
     requests = [
         DatasetSeriesRequest(
             series_id=trade_series_id,
@@ -364,6 +415,16 @@ def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
         ),
         DatasetSeriesRequest(
             series_id=aggregate_series_id,
+            start=bucket,
+            end=bucket + timedelta(seconds=1),
+        ),
+        DatasetSeriesRequest(
+            series_id=flow_feature_series_id,
+            start=bucket,
+            end=bucket + timedelta(seconds=1),
+        ),
+        DatasetSeriesRequest(
+            series_id=normalized_series_id,
             start=bucket,
             end=bucket + timedelta(seconds=1),
         ),
@@ -393,6 +454,93 @@ def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
     )
     assert frozen_trades[0].fact.row_hash == fact.row_hash
     assert frozen_aggregates[0].fact.material_hash == aggregate.material_hash
+    frozen_normalized = market_data_repo.read_dataset_series(
+        dataset_id=frozen.dataset_id,
+        series_id=normalized_series_id,
+    )
+    assert [row.fact.material_hash for row in frozen_normalized] == [
+        row.fact.material_hash for row in normalized_before
+    ]
+    normalization_refs = frozen.metadata["normalization_refs"]
+    assert len(normalization_refs) == 1
+    normalization_ref = normalization_refs[0]
+    assert normalization_ref["source_series_ids"] == [flow_feature_series_id]
+    source_manifest = next(
+        row for row in frozen.series if int(row["series_id"]) == flow_feature_series_id
+    )
+    assert normalization_ref["source_dataset_fingerprints"] == {
+
+        str(flow_feature_series_id): source_manifest["material_hash"]
+    }
+    assert normalization_ref["input_fingerprint"]
+
+    second_message = ProviderRawMessage.build(
+        provider="COINBASE",
+        venue="COINBASE_DIRECT",
+        stream_session_id=claim.session_id,
+        connection_epoch=0,
+        receive_ordinal=2,
+        received_at=(received_at + timedelta(microseconds=1)).isoformat(),
+        raw_frame=raw_frame,
+    )
+    second_spool = DurableRawSpoolSegment(
+        root=tmp_path / "spool",
+        definition_id=definition_id,
+        session_id=claim.session_id,
+        connection_epoch=0,
+        segment_ordinal=1,
+    )
+    second_record = RawStreamRecord.from_provider_message(
+        second_message,
+        definition_id=definition_id,
+        spool_segment_id=second_spool.spool_segment_id,
+        provider_product_id="BTC-USD",
+        requested_channel="market_trades",
+        observed_channel="market_trades",
+    )
+    second_spool.append(second_record)
+    second_spool.seal()
+    second_encoded, second_ack, second_records = publish_spool_archive(
+        second_spool,
+        object_store=object_store,
+        temporary_directory=tmp_path / "tmp",
+    )
+    second_archive = market_structure_repository.commit_archive(
+        claim,
+        encoded=second_encoded,
+        acknowledgement=second_ack,
+        records=second_records,
+    )
+
+    compacted_encoded, compacted_ack, compacted_records = publish_compacted_raw_archives(
+        [
+            object_store.local_path(acknowledgement.object_key),
+            object_store.local_path(second_ack.object_key),
+        ],
+        object_store=object_store,
+        temporary_directory=tmp_path / "tmp",
+    )
+    compacted = market_structure_repository.commit_archive(
+        claim,
+        encoded=compacted_encoded,
+        acknowledgement=compacted_ack,
+        records=compacted_records,
+        compaction_source_manifest_ids=[
+            archive.manifest_id,
+            second_archive.manifest_id,
+        ],
+    )
+    assert compacted.manifest_id != archive.manifest_id
+    after_compaction = market_data_repo.get_dataset(frozen.dataset_id)
+    replayed_after_compaction = market_data_repo.read_dataset_series(
+        dataset_id=frozen.dataset_id,
+        series_id=normalized_series_id,
+    )
+    assert after_compaction.dataset_hash == frozen.dataset_hash
+    assert [row.fact.material_hash for row in replayed_after_compaction] == [
+        row.fact.material_hash for row in frozen_normalized
+    ]
+
     with db.session() as session:
         archive_ref_count = session.execute(
             text(

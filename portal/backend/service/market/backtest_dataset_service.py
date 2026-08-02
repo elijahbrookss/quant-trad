@@ -30,13 +30,26 @@ from market_data.contracts import (
     DATASET_IDENTITY_HASH_VERSION,
     OPEN_INTEREST_FACT_TYPE,
     OPEN_INTEREST_FACT_VERSION,
+    FUNDING_RATE_FACT_TYPE,
+    FUNDING_RATE_FACT_VERSION,
     DatasetSeriesRequest,
     MarketDataRequirement,
+    TypedFeatureRecord,
     build_candle_material_hash,
     build_dataset_identity_hash,
     build_open_interest_material_hash,
     build_provenance_hash,
+    build_funding_rate_material_hash,
+    build_typed_feature_material_hash,
+    record_effective_time,
     build_quality_hash,
+)
+from market_data.fact_registry import get_fact_contract
+from market_data.structure import (
+    MARKET_TRADE_FACT_TYPE,
+    TRADE_FLOW_FACT_TYPE,
+    build_market_trade_material_hash,
+    build_trade_flow_material_hash,
 )
 from market_data.requirements import (
     InstrumentResolutionContext,
@@ -435,8 +448,7 @@ def _indicator_requirements(
             market_input.to_requirement(
                 timeframe_seconds=(
                     _timeframe_seconds(source_timeframe)
-                    if str(market_input.fact_type).strip().lower()
-                    == CANDLE_FACT_TYPE
+                    if get_fact_contract(market_input.fact_type).timeframe_mode != "forbidden"
                     else None
                 ),
                 lookback_bars=(
@@ -666,7 +678,7 @@ def derive_backtest_dataset_plan(
             indicator_ids = sorted(
                 {binding.consumer_id for binding in resolved.bindings}
             )
-            if resolved.fact_type == CANDLE_FACT_TYPE:
+            if resolved.alignment.value == "exact_interval":
                 starts = [
                     _utc(
                         input_by_id[indicator_id]["required_start"],
@@ -678,7 +690,7 @@ def derive_backtest_dataset_plan(
                 timeframe = str(
                     input_by_id[indicator_ids[0]]["source_timeframe"]
                 )
-            elif resolved.fact_type == OPEN_INTEREST_FACT_TYPE:
+            elif resolved.alignment.value == "latest_known":
                 causal_history = max(
                     int(resolved.max_staleness_seconds or 0),
                     int(resolved.lookback_seconds or 0),
@@ -690,11 +702,15 @@ def derive_backtest_dataset_plan(
                 required_start = base_warmup_start - timedelta(
                     seconds=causal_history
                 )
-                timeframe = None
+                timeframe = (
+                    str(input_by_id[indicator_ids[0]]["source_timeframe"])
+                    if resolved.timeframe_seconds is not None
+                    else None
+                )
             else:
                 raise ValueError(
-                    "backtest_dataset_unsupported_fact_contract: "
-                    f"fact_type={resolved.fact_type}"
+                    "backtest_dataset_unsupported_alignment: "
+                    f"fact_type={resolved.fact_type} alignment={resolved.alignment.value}"
                 )
             merge_series(
                 instrument_id=resolved.instrument_id,
@@ -844,19 +860,21 @@ def _validate_dataset_series(
         if entry.get("timeframe_seconds") is not None
         else None
     )
-    supported = {
-        CANDLE_FACT_TYPE: CANDLE_FACT_VERSION,
-        OPEN_INTEREST_FACT_TYPE: OPEN_INTEREST_FACT_VERSION,
-    }
-    if fact_type not in supported:
-        raise ValueError(
-            f"backtest_dataset_unsupported_fact_contract: series_id={series_id}"
+    try:
+        contract = get_fact_contract(fact_type)
+        contract.validate(
+            contract_version=contract_version,
+            timeframe_seconds=timeframe_seconds,
         )
-    if contract_version != supported[fact_type]:
+        if not contract.dataset_eligible:
+            raise ValueError(
+                f"fact type is not dataset eligible: {fact_type}"
+            )
+    except (TypeError, ValueError) as exc:
         raise ValueError(
             "backtest_dataset_contract_mismatch: "
             f"series_id={series_id} contract={entry.get('contract_version')}"
-        )
+        ) from exc
     records = store.read_dataset_series(
         dataset_id=str(entry["dataset_id"]),
         series_id=series_id,
@@ -938,18 +956,18 @@ def _validate_dataset_series(
             "start": iso_utc(records[0].fact.open_time),
             "end_exclusive": iso_utc(records[-1].fact.close_time),
         }
-    else:
+    elif fact_type in {OPEN_INTEREST_FACT_TYPE, FUNDING_RATE_FACT_TYPE}:
         previous_sample: datetime | None = None
         for record in records:
             fact = record.fact
             if previous_sample is not None and fact.sample_time <= previous_sample:
                 raise RuntimeError(
-                    "backtest_dataset_malformed: duplicate or unordered open interest "
+                    "backtest_dataset_malformed: duplicate or unordered scheduled fact "
                     f"series_id={series_id}"
                 )
             if fact.known_at < fact.sample_time:
                 raise RuntimeError(
-                    "backtest_dataset_malformed: OI known_at precedes scheduled sample"
+                    "backtest_dataset_malformed: known_at precedes scheduled sample"
                 )
             if int(record.market_commit_seq) > int(entry["max_commit_seq"]):
                 raise RuntimeError(
@@ -962,6 +980,91 @@ def _validate_dataset_series(
             "first_known_at": iso_utc(records[0].fact.known_at),
             "last_known_at": iso_utc(records[-1].fact.known_at),
         }
+    else:
+        previous_time: datetime | None = None
+        version_ids: set[str] = set()
+        for record in records:
+            effective_at = record_effective_time(record)
+            if previous_time is not None and effective_at < previous_time:
+                raise RuntimeError(
+                    "backtest_dataset_malformed: typed facts are unordered "
+                    f"series_id={series_id}"
+                )
+            if record.fact.known_at < effective_at:
+                raise RuntimeError(
+                    "backtest_dataset_malformed: known_at precedes effective time"
+                )
+            if int(record.market_commit_seq) > int(entry["max_commit_seq"]):
+                raise RuntimeError(
+                    "backtest_dataset_revision_disagreement: loaded revision exceeds frozen watermark"
+                )
+            version_id = str(getattr(record, "version_id", ""))
+            if version_id and version_id in version_ids:
+                raise RuntimeError("backtest_dataset_malformed: duplicate typed version")
+            if version_id:
+                version_ids.add(version_id)
+            previous_time = effective_at
+        loaded_range = {
+            "first_effective_at": iso_utc(record_effective_time(records[0])),
+            "last_effective_at": iso_utc(record_effective_time(records[-1])),
+            "first_known_at": iso_utc(records[0].fact.known_at),
+            "last_known_at": iso_utc(records[-1].fact.known_at),
+        }
+
+    if fact_type == MARKET_TRADE_FACT_TYPE:
+        quality = [
+            *quality,
+            *[
+                {
+                    "classification": (
+                        "covered_trade"
+                        if record.fact.coverage_interval_id
+                        else "uncovered_snapshot_delivery"
+                    ),
+                    "provider_product_id": record.fact.provider_product_id,
+                    "provider_trade_id": record.fact.provider_trade_id,
+                    "raw_record_id": record.fact.raw_record_id,
+                    "coverage_interval_id": record.fact.coverage_interval_id,
+                }
+                for record in records
+            ],
+        ]
+    elif fact_type == TRADE_FLOW_FACT_TYPE:
+        quality = [
+            *quality,
+            *[
+                {
+                    "classification": (
+                        "complete"
+                        if record.fact.aggregate_complete
+                        else "incomplete_trade_coverage"
+                    ),
+                    "bucket_start": iso_utc(record.fact.bucket_start),
+                    "archive_complete": record.fact.archive_complete,
+                    "canonicalization_complete": record.fact.canonicalization_complete,
+                    "coverage_interval_id": record.fact.coverage_interval_id,
+                    "coverage_revision": record.fact.coverage_revision,
+                }
+                for record in records
+            ],
+        ]
+    elif all(isinstance(record, TypedFeatureRecord) for record in records):
+        quality = [
+            *quality,
+            *[
+                {
+                    "classification": str(
+                        record.quality.get("classification") or "valid"
+                    ),
+                    "fact_time": iso_utc(record_effective_time(record)),
+                    "known_at": iso_utc(record.fact.known_at),
+                    "material_hash": record.fact.material_hash,
+                    "valid": record.quality.get("valid", True),
+                    "reason": record.quality.get("reason"),
+                }
+                for record in records
+            ],
+        ]
 
     series_identity = {
         "identity_key": str(entry["identity_key"]),
@@ -970,17 +1073,36 @@ def _validate_dataset_series(
         "timeframe_seconds": timeframe_seconds,
         "contract_version": str(entry["contract_version"]),
     }
-    material_hash = (
-        build_candle_material_hash(
+    if fact_type == CANDLE_FACT_TYPE:
+        material_hash = build_candle_material_hash(
             series_identity=series_identity,
             records=records,
         )
-        if fact_type == CANDLE_FACT_TYPE
-        else build_open_interest_material_hash(
+    elif fact_type == OPEN_INTEREST_FACT_TYPE:
+        material_hash = build_open_interest_material_hash(
             series_identity=series_identity,
             records=records,
         )
-    )
+    elif fact_type == FUNDING_RATE_FACT_TYPE:
+        material_hash = build_funding_rate_material_hash(
+            series_identity=series_identity,
+            records=records,
+        )
+    elif fact_type == MARKET_TRADE_FACT_TYPE:
+        material_hash = build_market_trade_material_hash(
+            series_identity=series_identity,
+            records=records,
+        )
+    elif fact_type == TRADE_FLOW_FACT_TYPE:
+        material_hash = build_trade_flow_material_hash(
+            series_identity=series_identity,
+            records=records,
+        )
+    else:
+        material_hash = build_typed_feature_material_hash(
+            series_identity=series_identity,
+            records=records,
+        )
     provenance_hash = build_provenance_hash(records)
     quality_hash = build_quality_hash(quality)
     disagreements = {
@@ -1105,6 +1227,13 @@ def validate_backtest_dataset(
         }
         for key in sorted(missing)
     ]
+    raw_normalization_refs = dataset.metadata.get("normalization_refs") or []
+    normalization_refs_by_output: dict[int, list[Mapping[str, Any]]] = {}
+    for reference in raw_normalization_refs:
+        normalization_refs_by_output.setdefault(
+            int(reference["output_series_id"]), []
+        ).append(reference)
+    archive_refs = list(dataset.metadata.get("archive_refs") or [])
     for key, requirement in expected.items():
         if key not in actual:
             continue
@@ -1129,6 +1258,105 @@ def validate_backtest_dataset(
                 f"instrument={key[0]} fact_type={key[1]} timeframe_seconds={key[3]}"
             )
         verified, quality, records = _validate_dataset_series(store=store, entry=entry)
+        if key[1].startswith("market.normalized."):
+            references = normalization_refs_by_output.get(int(entry["series_id"]), [])
+            if len(references) != 1:
+                raise RuntimeError(
+                    "backtest_dataset_normalization_ref_disagreement: "
+                    f"series_id={entry['series_id']} count={len(references)}"
+                )
+            reference = dict(references[0])
+            spec_id = str(reference.get("spec_id") or "")
+            expected_contract = f"market.normalized_feature.v1/{spec_id}"
+            disagreements = {
+                "contract_version": (
+                    str(entry["contract_version"]),
+                    expected_contract,
+                ),
+                "range_start": (
+                    _utc(reference["range_start"], field="normalization.range_start"),
+                    _utc(entry["range_start"], field="series.range_start"),
+                ),
+                "range_end": (
+                    _utc(reference["range_end"], field="normalization.range_end"),
+                    _utc(entry["range_end"], field="series.range_end"),
+                ),
+                "material_hash": (
+                    str(reference["material_hash"]),
+                    str(entry["material_hash"]),
+                ),
+                "provenance_hash": (
+                    str(reference["provenance_hash"]),
+                    str(entry["provenance_hash"]),
+                ),
+                "quality_hash": (
+                    str(reference["quality_hash"]),
+                    str(entry["quality_hash"]),
+                ),
+                "row_count": (int(reference["row_count"]), len(records)),
+            }
+            mismatches = [
+                name
+                for name, (actual_value, expected_value) in disagreements.items()
+                if actual_value != expected_value
+            ]
+            if mismatches:
+                raise RuntimeError(
+                    "backtest_dataset_normalization_ref_disagreement: "
+                    f"series_id={entry['series_id']} fields={','.join(mismatches)}"
+                )
+            source_fingerprints = dict(
+                reference.get("source_dataset_fingerprints") or {}
+            )
+            source_series_ids = [
+                int(value) for value in (reference.get("source_series_ids") or [])
+            ]
+            if not source_series_ids or set(source_fingerprints) != {
+                str(value) for value in source_series_ids
+            }:
+                raise RuntimeError(
+                    "backtest_dataset_normalization_ref_disagreement: "
+                    f"series_id={entry['series_id']} fields=source_series_ids"
+                )
+            source_entries = {
+                int(row["series_id"]): row for row in dataset.series
+            }
+            source_count = 0
+            for source_series_id in source_series_ids:
+                source_entry = source_entries.get(source_series_id)
+                if source_entry is None:
+                    raise RuntimeError(
+                        "backtest_dataset_normalization_source_missing: "
+                        f"output_series_id={entry['series_id']} "
+                        f"source_series_id={source_series_id}"
+                    )
+                source_count += int(source_entry["row_count"])
+                if (
+                    str(source_entry["material_hash"])
+                    != str(source_fingerprints[str(source_series_id)])
+                    or _utc(source_entry["range_start"], field="source.range_start")
+                    > _utc(reference["input_range_start"], field="normalization.input_start")
+                    or _utc(source_entry["range_end"], field="source.range_end")
+                    <= _utc(reference["input_range_end"], field="normalization.input_end")
+                ):
+                    raise RuntimeError(
+                        "backtest_dataset_normalization_source_disagreement: "
+                        f"output_series_id={entry['series_id']} "
+                        f"source_series_id={source_series_id}"
+                    )
+            if source_count != int(reference["input_count"]):
+                raise RuntimeError(
+                    "backtest_dataset_normalization_ref_disagreement: "
+                    f"series_id={entry['series_id']} fields=input_count"
+                )
+            verified["normalization_ref"] = reference
+        if get_fact_contract(key[1]).archive_policy == "raw_required":
+            if not archive_refs:
+                raise RuntimeError(
+                    "backtest_dataset_archive_ref_disagreement: "
+                    f"series_id={entry['series_id']} has no frozen raw archive references"
+                )
+            verified["archive_ref_count"] = len(archive_refs)
         verified["roles"] = list(requirement.get("roles") or [])
         verified["indicator_ids"] = list(requirement.get("indicator_ids") or [])
         verified["bindings"] = list(requirement.get("bindings") or [])
@@ -1138,11 +1366,71 @@ def validate_backtest_dataset(
         verified["max_staleness_seconds"] = requirement.get(
             "max_staleness_seconds"
         )
-        if key[1] == OPEN_INTEREST_FACT_TYPE:
+        if (
+            str(requirement.get("alignment") or "") == "exact_interval"
+            and key[1] != CANDLE_FACT_TYPE
+        ):
+            timeframe = int(requirement.get("timeframe_seconds") or 0)
+            if timeframe <= 0:
+                raise ValueError(
+                    "backtest_dataset_invalid: exact-interval fact requires timeframe"
+                )
+            step = timedelta(seconds=timeframe)
+            by_effective = {
+                record_effective_time(record): record for record in records
+            }
+            decision = _utc(entry["range_start"], field="range_start")
+            decision_end = _utc(entry["range_end"], field="range_end")
+            unavailable: list[dict[str, Any]] = []
+            while decision < decision_end:
+                record = by_effective.get(decision)
+                reason = None
+                if record is None:
+                    reason = "missing_interval"
+                elif record.fact.known_at > decision + step:
+                    reason = "not_known_by_interval_close"
+                elif not _record_has_usable_quality(record):
+                    reason = "invalid_source_fact"
+                if reason:
+                    unavailable.append(
+                        {"decision_time": iso_utc(decision + step), "reason": reason}
+                    )
+                decision += step
+            verified["causal_coverage"] = {
+                "decision_count": int(
+                    (decision_end - _utc(entry["range_start"], field="range_start"))
+                    .total_seconds()
+                    // timeframe
+                ),
+                "unavailable_count": len(unavailable),
+                "timeframe_seconds": timeframe,
+                "first_unavailable": unavailable[0] if unavailable else None,
+            }
+            if (
+                unavailable
+                and bool(requirement.get("required", True))
+                and not bool(requirement.get("allow_gaps", False))
+            ):
+                raise RuntimeError(
+                    "backtest_dataset_required_fact_unavailable: "
+                    f"series_id={entry['series_id']} count={len(unavailable)} "
+                    f"first={unavailable[0]}"
+                )
+            if unavailable:
+                quality.append(
+                    {
+                        "classification": "exact_interval_unavailable",
+                        "series_id": int(entry["series_id"]),
+                        "expected_count": len(unavailable),
+                        "observed_count": 0,
+                        "evidence": verified["causal_coverage"],
+                    }
+                )
+        elif str(requirement.get("alignment") or "") == "latest_known":
             max_staleness = int(requirement.get("max_staleness_seconds") or 0)
             if max_staleness <= 0:
                 raise ValueError(
-                    "backtest_dataset_invalid: OI max staleness must be positive"
+                    "backtest_dataset_invalid: latest-known max staleness must be positive"
                 )
             decision = _utc(
                 plan["warmup_range"]["start"], field="warmup_range.start"
@@ -1176,6 +1464,8 @@ def validate_backtest_dataset(
                     > timedelta(seconds=max_staleness)
                 ):
                     reason = "stale"
+                elif not _record_has_usable_quality(latest):
+                    reason = "invalid_source_fact"
                 if reason:
                     unavailable.append(
                         {
@@ -1273,6 +1563,143 @@ def validate_backtest_dataset(
         "validation_status": "ready",
     }
     return normalize_backtest_dataset_binding(binding)
+
+
+
+def _record_has_usable_quality(record: Any) -> bool:
+    if not isinstance(record, TypedFeatureRecord):
+        return True
+    if record.quality.get("valid") is False:
+        return False
+    status = getattr(record.fact, "status", None)
+    if status is None:
+        return True
+    return str(getattr(status, "value", status)) == "valid"
+
+
+def _coalesce_missing_points(
+    points: Sequence[datetime], *, step_seconds: int
+) -> list[dict[str, str]]:
+    ranges: list[dict[str, str]] = []
+    step = timedelta(seconds=int(step_seconds))
+    for point in points:
+        if ranges and _utc(ranges[-1]["end"], field="missing.end") == point:
+            ranges[-1]["end"] = iso_utc(point + step)
+        else:
+            ranges.append(
+                {"start": iso_utc(point), "end": iso_utc(point + step)}
+            )
+    return ranges
+
+
+def _generic_fact_coverage(
+    requirement: Mapping[str, Any],
+    *,
+    decision_start: datetime,
+    decision_end: datetime,
+    decision_step: int,
+    store: MarketDataStore,
+) -> dict[str, Any]:
+    fact_type = str(requirement["fact_type"])
+    timeframe_seconds = (
+        int(requirement["timeframe_seconds"])
+        if requirement.get("timeframe_seconds") is not None
+        else None
+    )
+    try:
+        series_id = store.resolve_series_id(
+            instrument_id=str(requirement["instrument_id"]),
+            fact_type=fact_type,
+            timeframe_seconds=timeframe_seconds,
+            contract_version=str(requirement["contract_version"]),
+        )
+        records = store.read_series_records(
+            series_id=series_id,
+            start=_utc(requirement["range_start"], field="range_start"),
+            end=_utc(requirement["range_end"], field="range_end"),
+        )
+    except ValueError:
+        series_id = None
+        records = []
+
+    alignment = str(requirement.get("alignment") or "")
+    missing_points: list[datetime] = []
+    if alignment == "exact_interval":
+        if timeframe_seconds is None or timeframe_seconds <= 0:
+            raise ValueError(
+                "backtest_dataset_invalid: exact-interval fact requires timeframe"
+            )
+        step = timedelta(seconds=timeframe_seconds)
+        by_effective = {
+            record_effective_time(record): record
+            for record in records
+        }
+        point = _utc(requirement["range_start"], field="range_start")
+        range_end = _utc(requirement["range_end"], field="range_end")
+        while point < range_end:
+            record = by_effective.get(point)
+            if (
+                record is None
+                or record.fact.known_at > point + step
+                or not _record_has_usable_quality(record)
+            ):
+                missing_points.append(point)
+            point += step
+        coverage_step = timeframe_seconds
+        decision_count = int(
+            (range_end - _utc(requirement["range_start"], field="range_start"))
+            .total_seconds()
+            // timeframe_seconds
+        )
+    elif alignment == "latest_known":
+        max_staleness = int(requirement.get("max_staleness_seconds") or 0)
+        if max_staleness <= 0:
+            raise ValueError(
+                "backtest_dataset_invalid: latest-known fact requires max staleness"
+            )
+        ordered = sorted(
+            records,
+            key=lambda record: (
+                record.fact.known_at,
+                int(record.market_commit_seq),
+            ),
+        )
+        cursor = 0
+        latest = None
+        point = decision_start
+        while point < decision_end:
+            while cursor < len(ordered) and ordered[cursor].fact.known_at <= point:
+                latest = ordered[cursor]
+                cursor += 1
+            if (
+                latest is None
+                or point - latest.fact.known_at > timedelta(seconds=max_staleness)
+                or not _record_has_usable_quality(latest)
+            ):
+                missing_points.append(point)
+            point += timedelta(seconds=decision_step)
+        coverage_step = decision_step
+        decision_count = int(
+            (decision_end - decision_start).total_seconds() // decision_step
+        )
+    else:
+        raise ValueError(
+            "backtest_dataset_unsupported_alignment: "
+            f"fact_type={fact_type} alignment={alignment or '<missing>'}"
+        )
+
+    return {
+        "schema_version": "market_fact_coverage.v1",
+        "series_id": series_id,
+        "row_count": len(records),
+        "decision_count": decision_count,
+        "missing_decision_count": len(missing_points),
+        "missing_ranges": _coalesce_missing_points(
+            missing_points, step_seconds=coverage_step
+        ),
+        "max_staleness_seconds": requirement.get("max_staleness_seconds"),
+        "provider_call_performed": False,
+    }
 
 
 def _coverage_for_plan(
@@ -1381,9 +1808,12 @@ def _coverage_for_plan(
                 "provider_call_performed": False,
             }
         else:
-            raise ValueError(
-                "backtest_dataset_unsupported_fact_contract: "
-                f"fact_type={requirement['fact_type']}"
+            payload = _generic_fact_coverage(
+                requirement,
+                decision_start=decision_start,
+                decision_end=decision_end,
+                decision_step=decision_step,
+                store=store,
             )
         rows.append({**dict(requirement), "coverage": payload})
     return rows
@@ -1459,7 +1889,7 @@ def prepare_backtest_dataset(
     missing = [
         (row, gap)
         for row in coverage_before
-        if bool(row.get("required", True))
+        if bool(row.get("required", True)) and not bool(row.get("allow_gaps", False))
         for gap in list((row["coverage"] or {}).get("missing_ranges") or [])
     ]
     if missing and not acquire_missing:
@@ -1517,7 +1947,7 @@ def prepare_backtest_dataset(
     remaining = [
         (row["instrument_id"], row["fact_type"], row.get("timeframe"), gap)
         for row in coverage_after
-        if bool(row.get("required", True))
+        if bool(row.get("required", True)) and not bool(row.get("allow_gaps", False))
         for gap in list((row["coverage"] or {}).get("missing_ranges") or [])
     ]
     if remaining:

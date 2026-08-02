@@ -110,9 +110,9 @@ is a separate operation and uses the same shared provider credential record.
 ## Implemented Source Facts
 
 Logical series are keyed by canonical instrument, fact type, contract version,
-and optional timeframe. Candles, OI, funding, trades, and trade-flow aggregates
-share one database-wide market fact commit sequence, allowing one mixed-fact
-dataset watermark.
+and optional timeframe. Candles, OI, funding, trades, market-state features,
+and normalized features share one database-wide market fact commit sequence,
+allowing one mixed-fact dataset watermark.
 
 Physical fact storage is typed by fact contract, not by provider, venue, or
 instrument. `candle_versions` stores all `candle.ohlcv.v1` series,
@@ -122,6 +122,19 @@ instrument. `candle_versions` stores all `candle.ohlcv.v1` series,
 `trade_flow_aggregate_versions` stores all `market.trade_flow.v1` series.
 The generic source, series, ingestion, gap, dataset, collection-definition,
 collection-attempt, pacing, lease, and commit-clock tables are shared.
+
+Phase 3 market-state tables preserve typed BBO, depth, flow, futures/spot,
+derivative-state, and response facts. Phase 4 adds immutable normalization specs
+and append-only normalized revisions without replacing their source facts. A
+registry declares each fact type's contract version, timeframe behavior,
+record-time field, archive policy, and dataset eligibility; reconstructed L2
+book state is intentionally replay input rather than a dataset fact surface.
+
+Frozen dataset requests may select a legacy candle identity or an exact typed
+series identity. Normalized outputs require the exact transitive source series
+and range in the same dataset. Dataset freeze and read verify spec/input
+fingerprints and any required raw archive object bytes and checksums, preserving
+provider-free execution after ordinary hot-store compaction or correction.
 
 A new fact family gets a typed revision table only when its value and temporal
 constraints differ materially. It does not get one table per exchange or symbol.
@@ -286,10 +299,9 @@ replacing source provenance and quality.
   History begins when an enabled collector accumulates it.
 - Coinbase funding time is provider-reported but not treated as publication
   time; platform receipt and acceptance govern known-at.
-- Funding delivery into strategy/indicator runtime requirements is not
-  implemented yet. Phase 1 event trades and trade-flow dataset reads are
-  implemented, but Level 2, book-derived state, normalized runtime delivery,
-  options, and live trading remain unsupported.
+- Mutable OI/funding runtime delivery and frozen typed-fact delivery are
+  implemented. Normalized facts require a frozen dataset. Raw Level 2 book
+  state, options, and live-trading integration remain unsupported.
 - Provider publication timestamps are unavailable from some candle endpoints;
   interval-close inference remains explicit provenance.
 - Session/calendar evidence cannot classify every closure.

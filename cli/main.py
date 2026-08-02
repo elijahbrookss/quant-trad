@@ -1450,6 +1450,64 @@ def _cmd_data_market_structure_materialize(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def _cmd_data_market_structure_normalization_specs_install(
+    args: argparse.Namespace,
+) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            "/api/market-data/market-structure/normalization/specs/install",
+            payload={"approved_by": args.approved_by},
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_normalization_specs(
+    args: argparse.Namespace,
+) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET", "/api/market-data/market-structure/normalization/specs"
+        )
+    )
+    return 0
+
+
+def _normalization_cli_payload(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "spec_id": args.spec_id,
+        "source_series_id": args.source_series_id,
+        "start": args.start,
+        "end": args.end,
+        "known_at": args.known_at,
+        "as_of_commit_seq": args.as_of_commit_seq,
+    }
+
+
+def _cmd_data_market_structure_normalize(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            "/api/market-data/market-structure/normalization/materialize",
+            payload=_normalization_cli_payload(args),
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_normalization_compare(
+    args: argparse.Namespace,
+) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            "/api/market-data/market-structure/normalization/compare",
+            payload=_normalization_cli_payload(args),
+        )
+    )
+    return 0
 def _cmd_data_market_structure_definitions(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
@@ -3268,7 +3326,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     data_freeze = data_sub.add_parser(
         "freeze-dataset",
-        help="Freeze exact candle facts, provenance, and quality evidence.",
+        help="Freeze exact typed market facts, provenance, and quality evidence.",
     )
     data_freeze.add_argument(
         "--request-json",
@@ -3459,6 +3517,43 @@ def build_parser() -> argparse.ArgumentParser:
     data_market_structure_materialize.set_defaults(
         func=_cmd_data_market_structure_materialize
     )
+    data_normalization_specs_install = data_market_structure_sub.add_parser(
+        "normalization-specs-install",
+        help="Install the immutable approved Phase 4 normalization specs.",
+    )
+    data_normalization_specs_install.add_argument("--approved-by", required=True)
+    data_normalization_specs_install.set_defaults(
+        func=_cmd_data_market_structure_normalization_specs_install
+    )
+    data_normalization_specs = data_market_structure_sub.add_parser(
+        "normalization-specs",
+        help="List installed immutable normalization specs.",
+    )
+    data_normalization_specs.set_defaults(
+        func=_cmd_data_market_structure_normalization_specs
+    )
+    for command, help_text, handler in (
+        (
+            "normalize",
+            "Materialize one causal normalized series from canonical stored facts.",
+            _cmd_data_market_structure_normalize,
+        ),
+        (
+            "normalization-compare",
+            "Recompute and compare normalized facts with persisted revisions.",
+            _cmd_data_market_structure_normalization_compare,
+        ),
+    ):
+        normalization_parser = data_market_structure_sub.add_parser(
+            command, help=help_text
+        )
+        normalization_parser.add_argument("spec_id")
+        normalization_parser.add_argument("source_series_id", type=int)
+        normalization_parser.add_argument("--start", required=True)
+        normalization_parser.add_argument("--end", required=True)
+        normalization_parser.add_argument("--known-at", required=True)
+        normalization_parser.add_argument("--as-of-commit-seq", type=int)
+        normalization_parser.set_defaults(func=handler)
     data_market_structure_definitions = data_market_structure_sub.add_parser(
         "definitions",
         help="Inspect bounded definitions, production blockers, and leases.",

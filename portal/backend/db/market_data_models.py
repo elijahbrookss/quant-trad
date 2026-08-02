@@ -1869,6 +1869,175 @@ class MarketResponseFeatureVersionRecord(Base):
     quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
 
 
+class MarketNormalizationSpecRecord(Base):
+    """Immutable executable causal normalization specification."""
+
+    __tablename__ = "normalization_specs"
+    __table_args__ = (
+        UniqueConstraint(
+            "feature_name",
+            "semantic_version",
+            "spec_hash",
+            name="uq_market_normalization_spec_identity",
+        ),
+        CheckConstraint("feature_name <> ''", name="ck_market_normalization_feature"),
+        CheckConstraint("minimum_observations >= 0", name="ck_market_normalization_minimum"),
+        CheckConstraint(
+            "warmup_observations >= minimum_observations",
+            name="ck_market_normalization_warmup",
+        ),
+        CheckConstraint(
+            "window_seconds IS NULL OR window_seconds > 0",
+            name="ck_market_normalization_window",
+        ),
+        Index("ix_market_normalization_feature_version", "feature_name", "semantic_version"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(64), primary_key=True)
+    spec_hash = Column(String(64), nullable=False)
+    feature_name = Column(String(128), nullable=False)
+    semantic_version = Column(String(64), nullable=False)
+    input_fact_type = Column(String(128), nullable=False)
+    output_fact_type = Column(String(128), nullable=False)
+    formula = Column(String(64), nullable=False)
+    units = Column(String(64), nullable=False)
+    window_seconds = Column(BigInteger, nullable=True)
+    minimum_observations = Column(Integer, nullable=False)
+    warmup_observations = Column(Integer, nullable=False)
+    partition = Column(String(64), nullable=False)
+    missing_behavior = Column(String(64), nullable=False)
+    materialization_mode = Column(String(64), nullable=False)
+    parameters = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    created_by = Column(String(128), nullable=True)
+    approved_by = Column(String(128), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class MarketNormalizedFeatureVersionRecord(Base):
+    """Append-only normalized value or explicit causal unavailability revision."""
+
+    __tablename__ = "normalized_feature_versions"
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "effective_at", name="pk_market_normalized_feature_versions"),
+        UniqueConstraint(
+            "series_id",
+            "spec_id",
+            "effective_at",
+            "revision",
+            name="uq_market_normalized_feature_revision",
+        ),
+        CheckConstraint("revision > 0", name="ck_market_normalized_feature_revision"),
+        CheckConstraint("input_count > 0", name="ck_market_normalized_input_count"),
+        CheckConstraint("input_watermark > 0", name="ck_market_normalized_watermark"),
+        CheckConstraint("input_end >= input_start", name="ck_market_normalized_input_range"),
+        CheckConstraint("effective_at >= input_end", name="ck_market_normalized_effective"),
+        CheckConstraint("known_at >= effective_at", name="ck_market_normalized_known"),
+        CheckConstraint(
+            "status IN ('valid', 'insufficient_history', 'invalid_input', 'zero_denominator', 'zero_variance')",
+            name="ck_market_normalized_status",
+        ),
+        CheckConstraint(
+            "(status = 'valid' AND value IS NOT NULL) OR (status <> 'valid' AND value IS NULL)",
+            name="ck_market_normalized_value_status",
+        ),
+        Index("ix_market_normalized_series_time", "series_id", "effective_at"),
+        Index("ix_market_normalized_series_known", "series_id", "known_at"),
+        Index("ix_market_normalized_spec_time", "spec_id", "effective_at"),
+        Index("ix_market_normalized_series_commit", "series_id", "market_commit_seq"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(128), nullable=False)
+    series_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    spec_id = Column(
+        String(64),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.normalization_specs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    revision = Column(Integer, nullable=False)
+    market_commit_seq = Column(
+        BigInteger,
+        nullable=False,
+        server_default=text("nextval('market.fact_commit_seq'::regclass)"),
+    )
+    effective_at = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+    value = Column(Numeric(78, 38), nullable=True)
+    status = Column(String(32), nullable=False)
+    reason = Column(Text, nullable=True)
+    input_start = Column(DateTime(timezone=True), nullable=False)
+    input_end = Column(DateTime(timezone=True), nullable=False)
+    input_count = Column(Integer, nullable=False)
+    input_watermark = Column(BigInteger, nullable=False)
+    source_series_ids = Column(JSONB, nullable=False)
+    source_material_hashes = Column(JSONB, nullable=False)
+    input_fingerprint = Column(String(64), nullable=False)
+    material_hash = Column(String(64), nullable=False)
+    provenance_hash = Column(String(64), nullable=False)
+    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+
+
+class MarketDatasetNormalizationRefRecord(Base):
+    """Immutable binding from a frozen dataset to one normalization spec."""
+
+    __tablename__ = "dataset_normalization_refs"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "dataset_id",
+            "spec_id",
+            "output_series_id",
+            name="pk_market_dataset_normalization_ref",
+        ),
+        CheckConstraint("input_count > 0", name="ck_market_dataset_normalization_count"),
+        CheckConstraint("input_watermark > 0", name="ck_market_dataset_normalization_watermark"),
+        CheckConstraint("range_end > range_start", name="ck_market_dataset_normalization_range"),
+        CheckConstraint(
+            "input_range_end >= input_range_start",
+            name="ck_market_dataset_normalization_input_range",
+        ),
+        Index("ix_market_dataset_normalization_spec", "spec_id", "output_series_id"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    dataset_id = Column(
+        String(64),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.datasets.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    spec_id = Column(
+        String(64),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.normalization_specs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    output_series_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    range_start = Column(DateTime(timezone=True), nullable=False)
+    range_end = Column(DateTime(timezone=True), nullable=False)
+    input_range_start = Column(DateTime(timezone=True), nullable=False)
+    input_range_end = Column(DateTime(timezone=True), nullable=False)
+    input_count = Column(BigInteger, nullable=False)
+    input_watermark = Column(BigInteger, nullable=False)
+    source_series_ids = Column(JSONB, nullable=False)
+    input_fingerprint = Column(String(64), nullable=False)
+    source_dataset_fingerprints = Column(JSONB, nullable=False)
+    material_hash = Column(String(64), nullable=False)
+    provenance_hash = Column(String(64), nullable=False)
+    quality_hash = Column(String(64), nullable=False)
+    storage_kind = Column(String(32), nullable=False, default="database_snapshot", server_default="database_snapshot")
+    frozen_object_uri = Column(Text, nullable=True)
+    frozen_object_sha256 = Column(String(64), nullable=True)
+    row_count = Column(BigInteger, nullable=False)
+
+
 class MarketDatasetArchiveRefRecord(Base):
     """Immutable raw-object retention pin attached to a frozen dataset."""
 
@@ -1909,6 +2078,9 @@ __all__ = [
     "MarketDataSourceRecord",
     "MarketDatasetRecord",
     "MarketDatasetSeriesRecord",
+    "MarketDatasetNormalizationRefRecord",
+    "MarketNormalizationSpecRecord",
+    "MarketNormalizedFeatureVersionRecord",
     "MarketGapEvidenceRecord",
     "MarketOpenInterestVersionRecord",
     "MarketProviderRateBudgetRecord",

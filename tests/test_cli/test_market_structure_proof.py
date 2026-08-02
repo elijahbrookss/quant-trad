@@ -598,3 +598,53 @@ def test_cli_exposes_bounded_market_structure_proof_command() -> None:
     assert args.channel == ["level2"]
     assert args.duration == 10
     assert args.auth_mode == "authenticated"
+
+
+def test_cli_exposes_phase4_normalization_commands() -> None:
+    install = build_parser().parse_args(
+        [
+            "data",
+            "market-structure",
+            "normalization-specs-install",
+            "--approved-by",
+            "operator-a",
+        ]
+    )
+    normalize = build_parser().parse_args(
+        [
+            "data",
+            "market-structure",
+            "normalize",
+            "nsp-a",
+            "41",
+            "--start",
+            "2026-08-02T12:00:00Z",
+            "--end",
+            "2026-08-02T12:02:00Z",
+            "--known-at",
+            "2026-08-02T12:03:00Z",
+            "--as-of-commit-seq",
+            "77",
+        ]
+    )
+    compare = build_parser().parse_args(
+        [
+            "data",
+            "market-structure",
+            "normalization-compare",
+            "nsp-a",
+            "41",
+            "--start",
+            "2026-08-02T12:00:00Z",
+            "--end",
+            "2026-08-02T12:02:00Z",
+            "--known-at",
+            "2026-08-02T12:03:00Z",
+        ]
+    )
+
+    assert install.approved_by == "operator-a"
+    assert normalize.spec_id == compare.spec_id == "nsp-a"
+    assert normalize.source_series_id == compare.source_series_id == 41
+    assert normalize.as_of_commit_seq == 77
+    assert compare.as_of_commit_seq is None

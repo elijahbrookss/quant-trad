@@ -6,6 +6,8 @@ import hashlib
 import json
 import uuid
 from collections import Counter
+import os
+from pathlib import Path
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -23,6 +25,7 @@ from market_data.contracts import (
     FundingRateFact,
     FundingRateRecord,
     MarketDataRecord,
+    TypedFeatureRecord,
     OpenInterestFact,
     OpenInterestRecord,
     SourceIdentity,
@@ -32,7 +35,10 @@ from market_data.contracts import (
     build_open_interest_material_hash,
     build_provenance_hash,
     build_quality_hash,
+    build_typed_feature_material_hash,
+    record_effective_time,
 )
+from market_data.fact_registry import get_fact_contract
 from market_data.store import FrozenDataset, IngestionOutcome
 from market_data.structure import (
     MARKET_TRADE_FACT_TYPE,
@@ -208,11 +214,291 @@ def _build_material_hash(
             series_identity=series_identity,
             records=records,
         )
+    if records and all(
+        isinstance(record, TypedFeatureRecord) for record in records
+    ):
+        return build_typed_feature_material_hash(
+            series_identity=series_identity,
+            records=records,
+        )
     raise RuntimeError(
         f"market_dataset_unsupported_fact: fact_type={fact_type}"
     )
 
 
+
+def _collect_typed_archive_refs(
+    session,
+    *,
+    records: Sequence[TypedFeatureRecord],
+) -> dict[str, dict[str, str]]:
+    """Resolve typed derived lineage back to acknowledged raw objects."""
+
+    references: dict[str, dict[str, str]] = {}
+    queue = [(record.series_id, record.fact.material_hash) for record in records]
+    visited: set[tuple[int, str]] = set()
+
+    def add_manifest_rows(rows: Sequence[Mapping[str, Any]]) -> None:
+        for row in rows:
+            references[str(row["manifest_id"])] = {
+                "object_sha256": str(row["object_sha256"]),
+                "content_fingerprint": str(row["content_fingerprint"]),
+                "object_key": str(row["object_key"]),
+                "object_uri": str(row["object_uri"]),
+            }
+
+    def add_book_position(position: Mapping[str, Any]) -> None:
+        definition_id = str(position.get("definition_id") or "")
+        session_id = str(position.get("session_id") or "")
+        receive_ordinal = int(position.get("receive_ordinal") or 0)
+        if not definition_id or not session_id or receive_ordinal <= 0:
+            raise RuntimeError(
+                "market_dataset_archive_incomplete: derived book position is malformed"
+            )
+        rows = session.execute(
+            text(
+                """
+                SELECT id AS manifest_id, object_sha256,
+                       content_fingerprint, object_key, object_uri
+                FROM market.raw_archive_manifests
+                WHERE definition_id = :definition_id
+                  AND session_id = :session_id
+                  AND first_receive_ordinal <= :receive_ordinal
+                  AND last_receive_ordinal >= :receive_ordinal
+                ORDER BY first_receive_ordinal, id
+                """
+            ),
+            {
+                "definition_id": definition_id,
+                "session_id": session_id,
+                "receive_ordinal": receive_ordinal,
+            },
+        ).mappings().all()
+        if not rows:
+            raise RuntimeError(
+                "market_dataset_archive_incomplete: book source position has no acknowledged archive"
+            )
+        add_manifest_rows(rows)
+
+    def add_coverage(coverage_interval_id: str) -> None:
+        rows = session.execute(
+            text(
+                """
+                SELECT DISTINCT manifests.id AS manifest_id,
+                       manifests.object_sha256,
+                       manifests.content_fingerprint,
+                       manifests.object_key, manifests.object_uri
+                FROM market.stream_coverage_interval_versions AS coverage
+                JOIN market.raw_archive_manifests AS manifests
+                  ON manifests.definition_id = coverage.definition_id
+                 AND manifests.session_id = coverage.session_id
+                WHERE coverage.interval_id = :coverage_interval_id
+                ORDER BY manifests.id
+                """
+            ),
+            {"coverage_interval_id": str(coverage_interval_id)},
+        ).mappings().all()
+        if not rows:
+            raise RuntimeError(
+                "market_dataset_archive_incomplete: coverage interval has no acknowledged archive"
+            )
+        add_manifest_rows(rows)
+
+    while queue:
+        series_id, material_hash = queue.pop()
+        key = (int(series_id), str(material_hash))
+        if key in visited:
+            continue
+        visited.add(key)
+        fact_type = session.execute(
+            text("SELECT fact_type FROM market.series WHERE id = :series_id"),
+            {"series_id": int(series_id)},
+        ).scalar_one_or_none()
+        if fact_type is None:
+            raise RuntimeError(
+                "market_dataset_provenance_incomplete: source series is missing"
+            )
+        fact_type = str(fact_type)
+        if fact_type in {
+            CANDLE_FACT_TYPE,
+            OPEN_INTEREST_FACT_TYPE,
+            FUNDING_RATE_FACT_TYPE,
+            "market.derivative_state",
+        }:
+            continue
+        if fact_type == MARKET_TRADE_FACT_TYPE:
+            row = session.execute(
+                text(
+                    """
+                    SELECT raw_record_id
+                    FROM market.market_trade_versions
+                    WHERE series_id = :series_id AND material_hash = :material_hash
+                    LIMIT 1
+                    """
+                ),
+                {"series_id": series_id, "material_hash": material_hash},
+            ).mappings().first()
+            if row is None:
+                raise RuntimeError("market_dataset_provenance_incomplete: trade source missing")
+            manifests = session.execute(
+                text(
+                    """
+                    SELECT manifests.id AS manifest_id, manifests.object_sha256,
+                           manifests.content_fingerprint, manifests.object_key,
+                           manifests.object_uri
+                    FROM market.raw_archive_record_mappings AS mappings
+                    JOIN market.raw_archive_manifests AS manifests
+                      ON manifests.id = mappings.manifest_id
+                    WHERE mappings.raw_record_id = :raw_record_id
+                    """
+                ),
+                {"raw_record_id": str(row["raw_record_id"])},
+            ).mappings().all()
+            if not manifests:
+                raise RuntimeError("market_dataset_archive_incomplete: trade raw mapping missing")
+            add_manifest_rows(manifests)
+            continue
+        if fact_type == TRADE_FLOW_FACT_TYPE:
+            row = session.execute(
+                text(
+                    """
+                    SELECT coverage_interval_id, archive_complete,
+                           canonicalization_complete
+                    FROM market.trade_flow_aggregate_versions
+                    WHERE series_id = :series_id AND material_hash = :material_hash
+                    LIMIT 1
+                    """
+                ),
+                {"series_id": series_id, "material_hash": material_hash},
+            ).mappings().first()
+            if (
+                row is None
+                or not bool(row["archive_complete"])
+                or not bool(row["canonicalization_complete"])
+                or not row.get("coverage_interval_id")
+            ):
+                raise RuntimeError(
+                    "market_dataset_archive_incomplete: trade-flow source is incomplete"
+                )
+            add_coverage(str(row["coverage_interval_id"]))
+            continue
+        if fact_type in {"market.bbo", "market.depth_observation"}:
+            table_name = (
+                "bbo_feature_versions"
+                if fact_type == "market.bbo"
+                else "depth_feature_versions"
+            )
+            row = session.execute(
+                text(
+                    f"SELECT source_position FROM market.{table_name} "
+                    "WHERE series_id = :series_id AND material_hash = :material_hash LIMIT 1"
+                ),
+                {"series_id": series_id, "material_hash": material_hash},
+            ).mappings().first()
+            if row is None:
+                raise RuntimeError("market_dataset_provenance_incomplete: book feature missing")
+            add_book_position(dict(row["source_position"]))
+            continue
+        if fact_type == "market.trade_flow_feature":
+            row = session.execute(
+                text(
+                    """
+                    SELECT source_trade_flow_series_id, aggregate_material_hash
+                    FROM market.trade_flow_feature_versions
+                    WHERE series_id = :series_id AND material_hash = :material_hash
+                    LIMIT 1
+                    """
+                ),
+                {"series_id": series_id, "material_hash": material_hash},
+            ).mappings().first()
+            if row is None:
+                raise RuntimeError("market_dataset_provenance_incomplete: flow feature missing")
+            queue.append(
+                (int(row["source_trade_flow_series_id"]), str(row["aggregate_material_hash"]))
+            )
+            continue
+        if fact_type == "market.futures_spot_relationship":
+            row = session.execute(
+                text(
+                    """
+                    SELECT futures_series_id, spot_series_id,
+                           futures_bbo_material_hash, spot_bbo_material_hash
+                    FROM market.futures_spot_relationship_versions
+                    WHERE series_id = :series_id AND material_hash = :material_hash
+                    LIMIT 1
+                    """
+                ),
+                {"series_id": series_id, "material_hash": material_hash},
+            ).mappings().first()
+            if row is None:
+                raise RuntimeError("market_dataset_provenance_incomplete: basis feature missing")
+            queue.extend(
+                (
+                    (int(row["futures_series_id"]), str(row["futures_bbo_material_hash"])),
+                    (int(row["spot_series_id"]), str(row["spot_bbo_material_hash"])),
+                )
+            )
+            continue
+        if fact_type == "market.market_response":
+            row = session.execute(
+                text(
+                    """
+                    SELECT source_flow_feature_series_id,
+                           source_flow_material_hash, source_positions
+                    FROM market.market_response_feature_versions
+                    WHERE series_id = :series_id AND material_hash = :material_hash
+                    LIMIT 1
+                    """
+                ),
+                {"series_id": series_id, "material_hash": material_hash},
+            ).mappings().first()
+            if row is None:
+                raise RuntimeError("market_dataset_provenance_incomplete: response feature missing")
+            queue.append(
+                (int(row["source_flow_feature_series_id"]), str(row["source_flow_material_hash"]))
+            )
+            positions = dict(row["source_positions"])
+            for name in ("pre_book", "trough_book", "post_book"):
+                add_book_position(dict(positions[name]))
+            continue
+        if fact_type.startswith("market.normalized."):
+            # The required frozen source series owns transitive archive lineage;
+            # normalized rows retain only bounded witness hashes.
+            continue
+        raise RuntimeError(
+            f"market_dataset_provenance_incomplete: unsupported lineage fact_type={fact_type}"
+        )
+    return references
+
+
+def _verify_local_archive_objects(references: Mapping[str, Mapping[str, str]]) -> None:
+    """Require physical bytes and checksums for the local object-store adapter."""
+
+    if not references:
+        return
+    storage_root = Path(
+        os.environ.get("MARKET_STRUCTURE_STORAGE_ROOT", "logs/market-structure")
+    ).resolve()
+    object_root = (storage_root / "objects").resolve()
+    for manifest_id, reference in sorted(references.items()):
+        uri = str(reference.get("object_uri") or "")
+        if not uri.startswith("market-archive://"):
+            raise RuntimeError(
+                "market_dataset_archive_verification_unsupported: object adapter cannot be verified"
+            )
+        object_path = (object_root / str(reference["object_key"])).resolve()
+        if object_root not in object_path.parents or not object_path.is_file():
+            raise RuntimeError(
+                f"market_dataset_archive_object_missing: manifest_id={manifest_id}"
+            )
+        digest = hashlib.sha256()
+        with object_path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != str(reference["object_sha256"]):
+            raise RuntimeError(
+                f"market_dataset_archive_object_corrupt: manifest_id={manifest_id}"
+            )
 class PostgresMarketDataRepository:
     """Single PostgreSQL owner for accepted candle facts and frozen datasets."""
 
@@ -239,7 +525,8 @@ class PostgresMarketDataRepository:
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.trade_flow_feature_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.futures_spot_relationship_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.derivative_state_versions), 0),
-                        COALESCE((SELECT MAX(market_commit_seq) FROM market.market_response_feature_versions), 0)
+                        COALESCE((SELECT MAX(market_commit_seq) FROM market.market_response_feature_versions), 0),
+                        COALESCE((SELECT MAX(market_commit_seq) FROM market.normalized_feature_versions), 0)
                     )
                     """
                 )
@@ -269,32 +556,38 @@ class PostgresMarketDataRepository:
                              + COALESCE(open_interest.version_count, 0)
                              + COALESCE(funding.version_count, 0)
                              + COALESCE(trades.version_count, 0)
-                             + COALESCE(trade_flow.version_count, 0) AS version_count,
+                             + COALESCE(trade_flow.version_count, 0)
+                             + COALESCE(typed_features.version_count, 0) AS version_count,
                            COALESCE(candles.fact_count, 0)
                              + COALESCE(open_interest.fact_count, 0)
                              + COALESCE(funding.fact_count, 0)
                              + COALESCE(trades.fact_count, 0)
-                             + COALESCE(trade_flow.fact_count, 0) AS fact_count,
+                             + COALESCE(trade_flow.fact_count, 0)
+                             + COALESCE(typed_features.fact_count, 0) AS fact_count,
                            COALESCE(candles.fact_count, 0) AS candle_count,
                            COALESCE(open_interest.fact_count, 0)
                              + COALESCE(funding.fact_count, 0) AS observation_count,
                            COALESCE(funding.fact_count, 0) AS funding_rate_count,
                            COALESCE(trades.fact_count, 0) AS trade_count,
                            COALESCE(trade_flow.fact_count, 0) AS trade_flow_count,
+                           COALESCE(typed_features.fact_count, 0) AS feature_count,
                            COALESCE(candles.first_fact_time, open_interest.first_fact_time,
                                     funding.first_fact_time, trades.first_fact_time,
-                                    trade_flow.first_fact_time)
+                                    trade_flow.first_fact_time,
+                                    typed_features.first_fact_time)
                              AS first_fact_time,
                            COALESCE(candles.last_fact_time, open_interest.last_fact_time,
                                     funding.last_fact_time, trades.last_fact_time,
-                                    trade_flow.last_fact_time)
+                                    trade_flow.last_fact_time,
+                                    typed_features.last_fact_time)
                              AS last_fact_time,
                            GREATEST(
                              COALESCE(candles.max_commit_seq, 0),
                              COALESCE(open_interest.max_commit_seq, 0),
                              COALESCE(funding.max_commit_seq, 0),
                              COALESCE(trades.max_commit_seq, 0),
-                             COALESCE(trade_flow.max_commit_seq, 0)
+                             COALESCE(trade_flow.max_commit_seq, 0),
+                             COALESCE(typed_features.max_commit_seq, 0)
                            ) AS max_commit_seq
                     FROM market.series AS series
                     LEFT JOIN LATERAL (
@@ -344,6 +637,49 @@ class PostgresMarketDataRepository:
                         FROM market.trade_flow_aggregate_versions
                         WHERE series_id = series.id
                     ) AS trade_flow ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT count(*) AS version_count,
+                               count(DISTINCT fact_key) AS fact_count,
+                               min(fact_time) AS first_fact_time,
+                               max(fact_time) AS last_fact_time,
+                               max(market_commit_seq) AS max_commit_seq
+                        FROM (
+                            SELECT jsonb_build_array(bucket_start) AS fact_key,
+                                   bucket_start AS fact_time, market_commit_seq
+                            FROM market.bbo_feature_versions
+                            WHERE series_id = series.id
+                            UNION ALL
+                            SELECT jsonb_build_array(bucket_start, band_bps),
+                                   bucket_start, market_commit_seq
+                            FROM market.depth_feature_versions
+                            WHERE series_id = series.id
+                            UNION ALL
+                            SELECT jsonb_build_array(bucket_start, interval_seconds),
+                                   bucket_start, market_commit_seq
+                            FROM market.trade_flow_feature_versions
+                            WHERE series_id = series.id
+                            UNION ALL
+                            SELECT jsonb_build_array(effective_at),
+                                   effective_at, market_commit_seq
+                            FROM market.futures_spot_relationship_versions
+                            WHERE series_id = series.id
+                            UNION ALL
+                            SELECT jsonb_build_array(effective_at),
+                                   effective_at, market_commit_seq
+                            FROM market.derivative_state_versions
+                            WHERE series_id = series.id
+                            UNION ALL
+                            SELECT jsonb_build_array(bucket_start, direction),
+                                   bucket_start, market_commit_seq
+                            FROM market.market_response_feature_versions
+                            WHERE series_id = series.id
+                            UNION ALL
+                            SELECT jsonb_build_array(effective_at, spec_id),
+                                   effective_at, market_commit_seq
+                            FROM market.normalized_feature_versions
+                            WHERE series_id = series.id
+                        ) AS typed_feature_rows
+                    ) AS typed_features ON TRUE
                     {where_sql}
                     ORDER BY series.instrument_id, series.fact_type,
                              series.timeframe_seconds NULLS FIRST, series.id
@@ -390,6 +726,43 @@ class PostgresMarketDataRepository:
                 ),
                 {"dataset_id": normalized},
             ).mappings().all()
+            archive_rows = session.execute(
+                text(
+                    """
+                    SELECT refs.raw_archive_manifest_id, refs.inclusion_role,
+                           refs.object_sha256, refs.content_fingerprint,
+                           manifests.object_key, manifests.object_uri
+                    FROM market.dataset_archive_refs AS refs
+                    JOIN market.raw_archive_manifests AS manifests
+                      ON manifests.id = refs.raw_archive_manifest_id
+                    WHERE refs.dataset_id = :dataset_id
+                    ORDER BY raw_archive_manifest_id
+                    """
+                ),
+                {"dataset_id": normalized},
+            ).mappings().all()
+            normalization_rows = session.execute(
+                text(
+                    """
+                    SELECT spec_id, output_series_id, range_start, range_end,
+                           input_range_start, input_range_end, input_count,
+                           input_watermark, source_series_ids, input_fingerprint,
+                           source_dataset_fingerprints, material_hash,
+                           provenance_hash, quality_hash, storage_kind,
+                           frozen_object_uri, frozen_object_sha256, row_count
+                    FROM market.dataset_normalization_refs
+                    WHERE dataset_id = :dataset_id
+                    ORDER BY output_series_id, spec_id
+                    """
+                ),
+                {"dataset_id": normalized},
+            ).mappings().all()
+        _verify_local_archive_objects(
+            {
+                str(row["raw_archive_manifest_id"]): dict(row)
+                for row in archive_rows
+            }
+        )
         return FrozenDataset(
             dataset_id=str(dataset["id"]),
             dataset_hash=str(dataset["dataset_hash"]),
@@ -398,7 +771,11 @@ class PostgresMarketDataRepository:
             contract_version="market_dataset.v1",
             name=str(dataset["name"]) if dataset.get("name") else None,
             purpose=str(dataset["purpose"]),
-            metadata=dict(dataset.get("metadata") or {}),
+            metadata={
+                **dict(dataset.get("metadata") or {}),
+                "archive_refs": [dict(row) for row in archive_rows],
+                "normalization_refs": [dict(row) for row in normalization_rows],
+            },
         )
 
     def register_source(
@@ -471,26 +848,8 @@ class PostgresMarketDataRepository:
         timeframe = int(timeframe_seconds) if timeframe_seconds is not None else None
         if not instrument_id or not fact_type or not contract_version:
             raise ValueError("market_data_series_invalid: complete series identity is required")
-        if fact_type == CANDLE_FACT_TYPE and (timeframe is None or timeframe <= 0):
-            raise ValueError("market_data_series_invalid: candle timeframe must be positive")
-        if fact_type == OPEN_INTEREST_FACT_TYPE:
-            if timeframe is not None:
-                raise ValueError(
-                    "market_data_series_invalid: open-interest series has no timeframe"
-                )
-            if contract_version != OPEN_INTEREST_FACT_VERSION:
-                raise ValueError(
-                    "market_data_series_invalid: unsupported open-interest contract version"
-                )
-        if fact_type == FUNDING_RATE_FACT_TYPE:
-            if timeframe is not None:
-                raise ValueError(
-                    "market_data_series_invalid: funding-rate series has no timeframe"
-                )
-            if contract_version != FUNDING_RATE_FACT_VERSION:
-                raise ValueError(
-                    "market_data_series_invalid: unsupported funding-rate contract version"
-                )
+        contract = get_fact_contract(fact_type)
+        contract.validate(contract_version=contract_version, timeframe_seconds=timeframe)
 
         identity_key = _stable_hash(
             {
@@ -1728,17 +2087,20 @@ class PostgresMarketDataRepository:
         start: datetime,
         end: datetime,
         as_of_commit_seq: int,
+        known_at_lte: Optional[datetime] = None,
     ) -> list[dict[str, Any]]:
         rows = session.execute(
             text(
                 """
                 SELECT start_time, end_time, classification, expected_count,
-                       observed_count, detected_as_of_commit_seq, evidence_hash, evidence
+                       observed_count, detected_as_of_commit_seq, evidence_hash, evidence,
+                       created_at
                 FROM market.gap_evidence
                 WHERE series_id = :series_id
                   AND end_time > :start
                   AND start_time < :end
                   AND detected_as_of_commit_seq <= :watermark
+                  AND (:known_at_lte IS NULL OR created_at <= :known_at_lte)
                 ORDER BY start_time, end_time, evidence_hash
                 """
             ),
@@ -1747,6 +2109,7 @@ class PostgresMarketDataRepository:
                 "start": start,
                 "end": end,
                 "watermark": as_of_commit_seq,
+                "known_at_lte": known_at_lte,
             },
         ).mappings().all()
         return [
@@ -1759,6 +2122,7 @@ class PostgresMarketDataRepository:
                 "detected_as_of_commit_seq": int(row["detected_as_of_commit_seq"]),
                 "evidence_hash": str(row["evidence_hash"]),
                 "evidence": dict(row["evidence"] or {}),
+                "detected_at": _iso(row["created_at"]),
             }
             for row in rows
         ]
@@ -1770,6 +2134,7 @@ class PostgresMarketDataRepository:
         start: datetime,
         end: datetime,
         as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
     ) -> list[dict[str, Any]]:
         request = DatasetSeriesRequest(series_id=series_id, start=start, end=end)
         with db.session() as session:
@@ -1782,8 +2147,127 @@ class PostgresMarketDataRepository:
                 start=request.start,
                 end=request.end,
                 as_of_commit_seq=int(watermark),
+                known_at_lte=known_at_lte,
             )
 
+
+    def read_series_records(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+    ) -> list[MarketDataRecord]:
+        """Read any registered typed fact without consulting a provider."""
+
+        with db.session() as session:
+            identity = session.execute(
+                text(
+                    """
+                    SELECT fact_type, timeframe_seconds, contract_version
+                    FROM market.series WHERE id = :series_id
+                    """
+                ),
+                {"series_id": int(series_id)},
+            ).mappings().first()
+        if identity is None:
+            raise ValueError(f"market_data_series_unknown: series_id={series_id}")
+        fact_type = str(identity["fact_type"])
+        if fact_type == CANDLE_FACT_TYPE:
+            return list(
+                self.read_candles(
+                    series_id=int(series_id),
+                    start=start,
+                    end=end,
+                    as_of_commit_seq=as_of_commit_seq,
+                    known_at_lte=known_at_lte,
+                )
+            )
+        if fact_type == OPEN_INTEREST_FACT_TYPE:
+            return list(
+                self.read_open_interest(
+                    series_id=int(series_id),
+                    start=start,
+                    end=end,
+                    as_of_commit_seq=as_of_commit_seq,
+                    known_at_lte=known_at_lte,
+                )
+            )
+        if fact_type == FUNDING_RATE_FACT_TYPE:
+            return list(
+                self.read_funding_rates(
+                    series_id=int(series_id),
+                    start=start,
+                    end=end,
+                    as_of_commit_seq=as_of_commit_seq,
+                    known_at_lte=known_at_lte,
+                )
+            )
+        if fact_type in {MARKET_TRADE_FACT_TYPE, TRADE_FLOW_FACT_TYPE}:
+            from .market_structure import market_structure_repository
+
+            if fact_type == MARKET_TRADE_FACT_TYPE:
+                return list(
+                    market_structure_repository.read_trades(
+                        series_id=int(series_id),
+                        start=start,
+                        end=end,
+                        as_of_commit_seq=as_of_commit_seq,
+                        known_at_lte=known_at_lte,
+                    )
+                )
+            timeframe = identity.get("timeframe_seconds")
+            if timeframe not in {1, 60}:
+                raise RuntimeError(
+                    "market_dataset_contract_mismatch: trade-flow interval must be 1s or 60s"
+                )
+            return list(
+                market_structure_repository.read_aggregates(
+                    series_id=int(series_id),
+                    interval_seconds=int(timeframe),
+                    start=start,
+                    end=end,
+                    as_of_commit_seq=as_of_commit_seq,
+                    known_at_lte=known_at_lte,
+                )
+            )
+        if fact_type in {
+            "market.bbo",
+            "market.depth_observation",
+            "market.trade_flow_feature",
+            "market.futures_spot_relationship",
+            "market.derivative_state",
+            "market.market_response",
+        }:
+            from .market_structure import market_structure_repository
+
+            return list(
+                market_structure_repository.read_feature_records(
+                    fact_type=fact_type,
+                    series_id=int(series_id),
+                    start=start,
+                    end=end,
+                    known_at=known_at_lte,
+                    as_of_commit_seq=as_of_commit_seq,
+                )
+            )
+        if fact_type.startswith("market.normalized."):
+            from .normalization import normalization_repository
+
+            return list(
+                normalization_repository.read_records(
+                    series_id=int(series_id),
+                    start=start,
+                    end=end,
+                    known_at_lte=known_at_lte,
+                    as_of_commit_seq=as_of_commit_seq,
+                )
+            )
+        raise RuntimeError(
+            f"market_dataset_unsupported_fact: series_id={series_id} fact_type={fact_type}"
+        )
     def freeze_dataset(
         self,
         requests: Sequence[DatasetSeriesRequest],
@@ -1811,6 +2295,7 @@ class PostgresMarketDataRepository:
             watermark = self._current_commit_seq_with_session(session)
             manifest_series: list[dict[str, Any]] = []
             archive_refs: dict[str, dict[str, str]] = {}
+            normalization_refs: list[dict[str, Any]] = []
             for item in normalized:
                 identity = session.execute(
                     text(
@@ -1828,64 +2313,18 @@ class PostgresMarketDataRepository:
                         f"market_dataset_invalid: unknown series_id={item.series_id}"
                     )
                 fact_type = str(identity["fact_type"])
-                if fact_type == CANDLE_FACT_TYPE:
-                    records: list[MarketDataRecord] = self._read_candles_with_session(
-                        session,
-                        series_id=item.series_id,
-                        start=item.start,
-                        end=item.end,
-                        as_of_commit_seq=watermark,
-                        known_at_lte=None,
-                    )
-                elif fact_type == OPEN_INTEREST_FACT_TYPE:
-                    records = self._read_open_interest_with_session(
-                        session,
-                        series_id=item.series_id,
-                        start=item.start,
-                        end=item.end,
-                        as_of_commit_seq=watermark,
-                        known_at_lte=None,
-                    )
-                elif fact_type == FUNDING_RATE_FACT_TYPE:
-                    records = self._read_funding_rates_with_session(
-                        session,
-                        series_id=item.series_id,
-                        start=item.start,
-                        end=item.end,
-                        as_of_commit_seq=watermark,
-                        known_at_lte=None,
-                    )
-                elif fact_type == MARKET_TRADE_FACT_TYPE:
-                    from .market_structure import market_structure_repository
-
-                    records = market_structure_repository.read_trades(
-                        series_id=item.series_id,
-                        start=item.start,
-                        end=item.end,
-                        as_of_commit_seq=watermark,
-                        known_at_lte=None,
-                    )
-                elif fact_type == TRADE_FLOW_FACT_TYPE:
-                    from .market_structure import market_structure_repository
-
-                    timeframe = identity.get("timeframe_seconds")
-                    if timeframe not in {1, 60}:
-                        raise RuntimeError(
-                            "market_dataset_contract_mismatch: trade-flow series requires 1s or 60s timeframe"
-                        )
-                    records = market_structure_repository.read_aggregates(
-                        series_id=item.series_id,
-                        interval_seconds=int(timeframe),
-                        start=item.start,
-                        end=item.end,
-                        as_of_commit_seq=watermark,
-                        known_at_lte=None,
-                    )
-                else:
+                contract = get_fact_contract(fact_type)
+                if not contract.dataset_eligible:
                     raise RuntimeError(
-                        "market_dataset_unsupported_fact: "
-                        f"series_id={item.series_id} fact_type={fact_type}"
+                        f"market_dataset_unsupported_fact: series_id={item.series_id} fact_type={fact_type}"
                     )
+                records: list[MarketDataRecord] = self.read_series_records(
+                    series_id=item.series_id,
+                    start=item.start,
+                    end=item.end,
+                    as_of_commit_seq=watermark,
+                    known_at_lte=None,
+                )
                 if not records:
                     raise RuntimeError(
                         "market_dataset_incomplete: no facts for "
@@ -1909,8 +2348,8 @@ class PostgresMarketDataRepository:
                             """
                             SELECT mappings.raw_record_id,
                                    manifests.id AS manifest_id,
-                                   manifests.object_sha256,
-                                   manifests.content_fingerprint
+                                   manifests.object_sha256, manifests.content_fingerprint,
+                                   manifests.object_key, manifests.object_uri
                             FROM market.raw_archive_record_mappings AS mappings
                             JOIN market.raw_archive_manifests AS manifests
                               ON manifests.id = mappings.manifest_id
@@ -1928,6 +2367,8 @@ class PostgresMarketDataRepository:
                         archive_refs[str(row["manifest_id"])] = {
                             "object_sha256": str(row["object_sha256"]),
                             "content_fingerprint": str(row["content_fingerprint"]),
+                            "object_key": str(row["object_key"]),
+                            "object_uri": str(row["object_uri"]),
                         }
                     quality = [
                         *quality,
@@ -1970,8 +2411,8 @@ class PostgresMarketDataRepository:
                         text(
                             """
                             SELECT DISTINCT manifests.id AS manifest_id,
-                                   manifests.object_sha256,
-                                   manifests.content_fingerprint
+                                   manifests.object_sha256, manifests.content_fingerprint,
+                                   manifests.object_key, manifests.object_uri
                             FROM market.stream_coverage_interval_versions AS coverage
                             JOIN market.raw_archive_manifests AS manifests
                               ON manifests.definition_id = coverage.definition_id
@@ -1989,7 +2430,13 @@ class PostgresMarketDataRepository:
                         archive_refs[str(row["manifest_id"])] = {
                             "object_sha256": str(row["object_sha256"]),
                             "content_fingerprint": str(row["content_fingerprint"]),
+                            "object_key": str(row["object_key"]),
+                            "object_uri": str(row["object_uri"]),
                         }
+                if records and all(
+                    isinstance(record, TypedFeatureRecord) for record in records
+                ):
+                    archive_refs.update(_collect_typed_archive_refs(session, records=records))
                 if fact_type == MARKET_TRADE_FACT_TYPE:
                     source_ids = sorted({record.source_id for record in records})
                     source_rows = session.execute(
@@ -2032,6 +2479,19 @@ class PostgresMarketDataRepository:
                             "adapter_version": "market.trade_flow.v1",
                         }
                     }
+                elif records and all(
+                    isinstance(record, TypedFeatureRecord) for record in records
+                ):
+                    source_key = f"derived:{fact_type}:{identity['contract_version']}"
+                    source_counts = Counter({source_key: len(records)})
+                    source_details = {
+                        source_key: {
+                            "provider": "QUANT_TRAD",
+                            "venue": "",
+                            "source_kind": "causal_derivation",
+                            "adapter_version": str(identity["contract_version"]),
+                        }
+                    }
                 else:
                     source_counts = Counter(
                         record.source_identity_key for record in records
@@ -2062,6 +2522,25 @@ class PostgresMarketDataRepository:
                         for record in records
                     ]
                     quality = [*quality, *structure_quality]
+                if records and all(
+                    isinstance(record, TypedFeatureRecord) for record in records
+                ):
+                    quality = [
+                        *quality,
+                        *[
+                            {
+                                "classification": str(
+                                    record.quality.get("classification") or "valid"
+                                ),
+                                "fact_time": _iso(record_effective_time(record)),
+                                "known_at": _iso(record.fact.known_at),
+                                "material_hash": record.fact.material_hash,
+                                "valid": record.quality.get("valid", True),
+                                "reason": record.quality.get("reason"),
+                            }
+                            for record in records
+                        ],
+                    ]
                 classifications = Counter(
                     str(entry["classification"]) for entry in quality
                 )
@@ -2089,6 +2568,104 @@ class PostgresMarketDataRepository:
                         },
                     }
                 )
+                if fact_type.startswith("market.normalized."):
+                    typed_records = [
+                        record
+                        for record in records
+                        if isinstance(record, TypedFeatureRecord)
+                    ]
+                    spec_ids = {record.fact.spec_id for record in typed_records}
+                    if len(typed_records) != len(records) or len(spec_ids) != 1:
+                        raise RuntimeError(
+                            "market_dataset_normalization_invalid: one typed spec per output series required"
+                        )
+                    source_series_ids = sorted(
+                        {
+                            int(source_series_id)
+                            for record in typed_records
+                            for source_series_id in record.fact.source_series_ids
+                        }
+                    )
+                    if len(source_series_ids) != 1:
+                        raise RuntimeError(
+                            "market_dataset_normalization_invalid: v1 requires one frozen source series"
+                        )
+                    entry = manifest_series[-1]
+                    normalization_refs.append(
+                        {
+                            "spec_id": next(iter(spec_ids)),
+                            "output_series_id": item.series_id,
+                            "range_start": _iso(item.start),
+                            "range_end": _iso(item.end),
+                            "input_range_start": _iso(
+                                min(record.fact.input_start for record in typed_records)
+                            ),
+                            "input_range_end": _iso(
+                                max(record.fact.input_end for record in typed_records)
+                            ),
+                            "input_count": 0,
+                            "input_watermark": max(
+                                record.fact.input_watermark
+                                for record in typed_records
+                            ),
+                            "source_series_ids": source_series_ids,
+                            "input_fingerprint": _stable_hash(
+                                {
+                                    "schema_version": "market.dataset_normalization_input.v1",
+                                    "facts": [
+                                        {
+                                            "effective_at": _iso(record.fact.effective_at),
+                                            "input_fingerprint": record.fact.input_fingerprint,
+                                        }
+                                        for record in typed_records
+                                    ],
+                                }
+                            ),
+                            "source_dataset_fingerprints": {},
+                            "material_hash": entry["material_hash"],
+                            "provenance_hash": entry["provenance_hash"],
+                            "quality_hash": entry["quality_hash"],
+                            "storage_kind": "database_snapshot",
+                            "frozen_object_uri": None,
+                            "frozen_object_sha256": None,
+                            "row_count": len(typed_records),
+                        }
+                    )
+            for reference in normalization_refs:
+                source_fingerprints: dict[str, str] = {}
+                source_row_count = 0
+                for source_series_id in reference["source_series_ids"]:
+                    candidates = [
+                        entry
+                        for entry in manifest_series
+                        if int(entry["series_id"]) == int(source_series_id)
+                        and str(entry["range_start"])
+                        <= str(reference["input_range_start"])
+                        and str(entry["range_end"])
+                        > str(reference["input_range_end"])
+                    ]
+                    if not candidates:
+                        raise RuntimeError(
+                            "market_dataset_normalization_source_missing: "
+                            f"output_series_id={reference['output_series_id']} "
+                            f"source_series_id={source_series_id} "
+                            f"required_start={reference['input_range_start']} "
+                            f"required_end={reference['input_range_end']}"
+                        )
+                    source_entry = min(
+                        candidates,
+                        key=lambda entry: (
+                            str(entry["range_end"]),
+                            str(entry["range_start"]),
+                        ),
+                    )
+                    source_fingerprints[str(source_series_id)] = str(
+                        source_entry["material_hash"]
+                    )
+                    source_row_count += int(source_entry["row_count"])
+                reference["source_dataset_fingerprints"] = source_fingerprints
+                reference["input_count"] = source_row_count
+            _verify_local_archive_objects(archive_refs)
             dataset_hash = build_dataset_identity_hash(manifest_series)
             dataset_id = f"mds_{dataset_hash[:32]}"
             inserted_dataset_id = session.execute(
@@ -2160,6 +2737,41 @@ class PostgresMarketDataRepository:
                         **archive_ref,
                     },
                 )
+            for reference in normalization_refs:
+                session.execute(
+                    text(
+                        """
+                        INSERT INTO market.dataset_normalization_refs (
+                            dataset_id, spec_id, output_series_id,
+                            range_start, range_end, input_range_start,
+                            input_range_end, input_count, input_watermark,
+                            source_series_ids, input_fingerprint,
+                            source_dataset_fingerprints, material_hash, provenance_hash,
+                            quality_hash, storage_kind, frozen_object_uri,
+                            frozen_object_sha256, row_count
+                        ) VALUES (
+                            :dataset_id, :spec_id, :output_series_id,
+                            :range_start, :range_end, :input_range_start,
+                            :input_range_end, :input_count, :input_watermark,
+                            CAST(:source_series_ids AS jsonb), :input_fingerprint,
+                            CAST(:source_dataset_fingerprints AS jsonb),
+                            :material_hash, :provenance_hash,
+                            :quality_hash, :storage_kind, :frozen_object_uri,
+                            :frozen_object_sha256, :row_count
+                        )
+                        ON CONFLICT DO NOTHING
+                        """
+                    ),
+                    {
+                        "dataset_id": dataset_id,
+                        **reference,
+                        "source_series_ids": json.dumps(reference["source_series_ids"]),
+                        "source_dataset_fingerprints": json.dumps(
+                            reference["source_dataset_fingerprints"],
+                            sort_keys=True,
+                        ),
+                    },
+                )
         # Content-identical material may resolve to an already persisted dataset
         # whose immutable read watermark predates unrelated later commits. Always
         # return that canonical stored manifest instead of a transient manifest
@@ -2208,63 +2820,12 @@ class PostgresMarketDataRepository:
                     "market_dataset_range_expansion_forbidden: requested range is outside "
                     f"dataset_id={dataset_id} series_id={series_id} frozen bounds"
                 )
-            fact_type = str(entry["fact_type"])
-            if fact_type == CANDLE_FACT_TYPE:
-                return self._read_candles_with_session(
-                    session,
-                    series_id=int(series_id),
-                    start=requested.start,
-                    end=requested.end,
-                    as_of_commit_seq=int(entry["max_commit_seq"]),
-                    known_at_lte=known_at_lte,
-                )
-            if fact_type == OPEN_INTEREST_FACT_TYPE:
-                return self._read_open_interest_with_session(
-                    session,
-                    series_id=int(series_id),
-                    start=requested.start,
-                    end=requested.end,
-                    as_of_commit_seq=int(entry["max_commit_seq"]),
-                    known_at_lte=known_at_lte,
-                )
-            if fact_type == FUNDING_RATE_FACT_TYPE:
-                return self._read_funding_rates_with_session(
-                    session,
-                    series_id=int(series_id),
-                    start=requested.start,
-                    end=requested.end,
-                    as_of_commit_seq=int(entry["max_commit_seq"]),
-                    known_at_lte=known_at_lte,
-                )
-            if fact_type == MARKET_TRADE_FACT_TYPE:
-                from .market_structure import market_structure_repository
-
-                return market_structure_repository.read_trades(
-                    series_id=int(series_id),
-                    start=requested.start,
-                    end=requested.end,
-                    as_of_commit_seq=int(entry["max_commit_seq"]),
-                    known_at_lte=known_at_lte,
-                )
-            if fact_type == TRADE_FLOW_FACT_TYPE:
-                from .market_structure import market_structure_repository
-
-                timeframe = entry.get("timeframe_seconds")
-                if timeframe not in {1, 60}:
-                    raise RuntimeError(
-                        "market_dataset_contract_mismatch: trade-flow series requires 1s or 60s timeframe"
-                    )
-                return market_structure_repository.read_aggregates(
-                    series_id=int(series_id),
-                    interval_seconds=int(timeframe),
-                    start=requested.start,
-                    end=requested.end,
-                    as_of_commit_seq=int(entry["max_commit_seq"]),
-                    known_at_lte=known_at_lte,
-                )
-            raise RuntimeError(
-                "market_dataset_unsupported_fact: "
-                f"series_id={series_id} fact_type={fact_type}"
+            return self.read_series_records(
+                series_id=int(series_id),
+                start=requested.start,
+                end=requested.end,
+                as_of_commit_seq=int(entry["max_commit_seq"]),
+                known_at_lte=known_at_lte,
             )
 
 

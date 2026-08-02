@@ -361,6 +361,7 @@ class Database:
             "futures_spot_relationship_versions",
             "derivative_state_versions",
             "market_response_feature_versions",
+            "normalized_feature_versions",
         ):
             table_ref = f"market.{table_name}"
             existing = conn.execute(
@@ -419,6 +420,7 @@ class Database:
             ("trade_flow_feature_versions", "bucket_start"),
             ("futures_spot_relationship_versions", "effective_at"),
             ("derivative_state_versions", "effective_at"),
+            ("normalized_feature_versions", "effective_at"),
             ("market_response_feature_versions", "bucket_start"),
         ):
             conn.execute(
@@ -494,6 +496,9 @@ class Database:
             "depth_feature_versions",
             "trade_flow_feature_versions",
             "futures_spot_relationship_versions",
+            "normalization_specs",
+            "normalized_feature_versions",
+            "dataset_normalization_refs",
             "derivative_state_versions",
             "market_response_feature_versions",
             "book_validity_interval_versions",

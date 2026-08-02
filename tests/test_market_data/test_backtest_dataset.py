@@ -10,6 +10,8 @@ from market_data.backtest import bound_series_for_request
 from market_data.contracts import (
     CANDLE_FACT_TYPE,
     CANDLE_FACT_VERSION,
+    FUNDING_RATE_FACT_TYPE,
+    FUNDING_RATE_FACT_VERSION,
     CandleFact,
     CandleRecord,
     OPEN_INTEREST_FACT_TYPE,
@@ -636,5 +638,55 @@ def test_plan_resolves_open_interest_as_latest_known_primary_fact(monkeypatch) -
     assert oi["alignment"] == "latest_known"
     assert oi["max_staleness_seconds"] == 3600
     assert oi["range_start"] == "2023-12-31T09:00:00.000000Z"
-    assert oi["range_end"] == "2024-01-01T02:00:00.000000Z"
-    assert oi["bindings"][0]["input"]["instrument_role"] == "primary"
+
+
+def test_plan_resolves_funding_as_latest_known_primary_fact(monkeypatch) -> None:
+    import portal.backend.service.market.backtest_dataset_service as service
+
+    strategy = _strategy()
+    strategy.indicator_ids = ["funding-1"]
+    manifest = IndicatorManifest(
+        type="funding_context",
+        version="1.0.0",
+        label="Funding context",
+        description="Reference funding input contract.",
+        market_inputs=(
+            IndicatorMarketInput(
+                key="funding_rate",
+                fact_type=FUNDING_RATE_FACT_TYPE,
+                contract_version=FUNDING_RATE_FACT_VERSION,
+                alignment="latest_known",
+                max_staleness_seconds=1_800,
+                required_fields=("sample_time", "rate", "known_at"),
+            ),
+        ),
+    )
+    monkeypatch.setattr(service, "get_indicator_manifest", lambda _type: manifest)
+    plan = derive_backtest_dataset_plan(
+        bot=_bot(),
+        strategy=strategy,
+        evaluation_start=EVALUATION_START,
+        evaluation_end=EVALUATION_END,
+        indicator_meta_loader=lambda _indicator_id: {
+            "id": "funding-1",
+            "type": "funding_context",
+            "params": {},
+            "enabled": True,
+        },
+        indicator_input_plan_loader=lambda *_args, **_kwargs: {
+            "source_timeframe": "1h",
+            "start": EVALUATION_START,
+        },
+        instrument_loader=_instrument,
+    )
+
+    funding = next(
+        row for row in plan["series"] if row["fact_type"] == FUNDING_RATE_FACT_TYPE
+    )
+    assert funding["instrument_id"] == "instrument-1"
+    assert funding["timeframe_seconds"] is None
+    assert funding["alignment"] == "latest_known"
+    assert funding["max_staleness_seconds"] == 1_800
+    assert funding["range_start"] == "2023-12-31T09:30:00.000000Z"
+    assert funding["range_end"] == "2024-01-01T02:00:00.000000Z"
+    assert funding["bindings"][0]["input"]["instrument_role"] == "primary"

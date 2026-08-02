@@ -35,13 +35,13 @@ code_paths:
 
 ## Status And Campaign Boundary
 
-This is the active phased design. Phase 0 provider proof, Phase 1 bounded
-futures/spot trades, Phase 2 Level 2 archive/reconstruction, and Phase 3 typed
-market-state features are implemented; Phase 4 remains approved implementation
-work. No phase or document authorizes production collector enrollment, cloud
-resources, strategy changes, live trading, or frontend work. The implemented
-24-hour capacity proof and explicit budget approval remain deferred until after
-Phase 4 and mandatory before production enrollment.
+This phased design is implemented through Phase 4: provider proof, bounded
+futures/spot trades, Level 2 archive/reconstruction, typed market-state
+features, causal normalization, and frozen typed datasets. No phase or document
+authorizes production collector enrollment, cloud resources, strategy changes,
+live trading, or frontend work. The 24-hour capacity proof and explicit budget
+approval remain post-Phase-4 gates and are mandatory before production
+enrollment.
 
 The allowed live provider boundary is Coinbase Advanced Trade REST and
 WebSocket using the existing provider credential boundary. Public channels may
@@ -62,6 +62,7 @@ The design extends, and does not replace, the contracts in:
 - [ADR 0020: Budgeted Market-Stream Reconnect](../decisions/0020-use-budgeted-market-data-stream-reconnect-policy.md)
 - [ADR 0024: Provider Credential References](../decisions/0024-use-provider-credential-references.md)
 - [ADR 0053: Tiered Market-Structure Archive And Replay Boundary](../decisions/0053-use-tiered-market-structure-archive-and-replay-boundary.md)
+- [Market Structure Phase 4: Normalization And Frozen Datasets](MARKET_STRUCTURE_PHASE_4_NORMALIZATION_DATASETS.md)
 
 ## Decision Summary
 
@@ -122,11 +123,11 @@ The design extends, and does not replace, the contracts in:
 - the paper runner is candle-specific, owned by a bot run, and publishes only
   after candle persistence. It is not an independently recoverable data plane.
 - OI and funding have typed append-only storage. Phase 3 causally aligns both
-  into derivative-state facts, but canonical dataset/runtime delivery of those
-  and all market-structure facts remains Phase 4 work.
-- shared commit-clock, hypertable, and immutability setup now enumerates Phase
-  1–3 source and feature tables. Phase 4 must add its normalization and frozen
-  dataset reference tables without creating another clock.
+  into derivative-state facts; Phase 4 registers and freezes them through the
+  same typed dataset boundary.
+- shared commit-clock, hypertable, and immutability setup enumerates Phase 1–4
+  source, feature, normalization, and frozen-reference tables without creating
+  another clock.
 - the live catalog contains BIP, ETP, and SLP Coinbase futures. Phase 1 pair
   configuration registered canonical direct Coinbase BTC-USD. ETH-USD and
   SOL-USD remain explicit on-demand registrations and are not enrolled.
@@ -1169,8 +1170,9 @@ Work:
 - materialize the small v1 BBO/spread/depth/imbalance/trade-flow/CVD/basis
   catalog;
 - add OI/funding causal alignment and reconciliation evidence;
-- expose typed coverage/quality in the operational read boundary; dataset
-  planning and runtime resolver registration remain Phase 4 work.
+- expose typed coverage/quality in the operational read boundary. Phase 4
+  subsequently registered these facts for exact freezing and frozen runtime
+  resolution.
 
 Acceptance:
 
@@ -1178,13 +1180,16 @@ Acceptance:
 - gap and book-validity policies suppress all contaminated rows;
 - output rate/storage remain bounded and spec/version fingerprints are stable;
 - repeated materialization is a no-op at the same bounded input watermark and
-  replayed features equal persisted features. Provider-free frozen delivery is
-  the Phase 4 admission gate, not an implied Phase 3 capability.
+  replayed features equal persisted features. Provider-free frozen delivery was
+  subsequently accepted in Phase 4.
 
 Value without later phases: queryable causal market-state history and deterministic
 operational features.
 
 ### Phase 4: Normalization And Frozen-Dataset Integration
+
+Status: implemented and accepted for bounded BIP evidence on 2026-08-02. See
+[Market Structure Phase 4 Normalization And Frozen Datasets](MARKET_STRUCTURE_PHASE_4_NORMALIZATION_DATASETS.md).
 
 Dependencies: Phase 3 typed facts and existing frozen dataset boundary.
 
