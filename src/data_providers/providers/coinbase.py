@@ -32,7 +32,13 @@ from .base import BaseDataProvider, InstrumentMetadata, InstrumentType
     id="COINBASE",
     label="Coinbase Direct API",
     supported_venues=["COINBASE_DIRECT"],
-    capabilities={"supportsHistorical": True, "supportsLive": True, "supportsOrders": True, "assetClasses": ["crypto"]},
+    capabilities={
+        "supportsHistorical": True,
+        "supportsLive": True,
+        "supportsOrders": False,
+        "publicMarketData": True,
+        "assetClasses": ["crypto"],
+    },
     implementation_module="data_providers.providers.coinbase",
     implementation_class="CoinbaseProvider",
 )
@@ -145,6 +151,7 @@ class CoinbaseProvider(BaseDataProvider):
         self._api_key: Optional[str] = None
         self._api_secret: Optional[str] = None
         self._client: Optional[RESTClient] = None
+        self._public_client: Optional[RESTClient] = None
         self._last_product_payload: Dict[str, Any] = {}
 
     # Credentials / helpers -------------------------------------------------
@@ -185,6 +192,13 @@ class CoinbaseProvider(BaseDataProvider):
         )
         return self._client
 
+    def _ensure_public_client(self) -> RESTClient:
+        """Return an unauthenticated client for Coinbase public market data."""
+
+        if self._public_client is None:
+            self._public_client = RESTClient(timeout=self._timeout)
+        return self._public_client
+
     @staticmethod
     def _response_to_dict(response: Any) -> Dict[str, Any]:
         if response is None:
@@ -200,11 +214,15 @@ class CoinbaseProvider(BaseDataProvider):
     def _load_product(self, symbol: str) -> CoinbaseProduct:
         if not symbol:
             raise ValueError("Symbol is required for Coinbase lookup.")
-        client = self._ensure_client()
+        client = self._ensure_public_client()
         try:
-            response = client.get_product(product_id=symbol)
+            response = client.get_public_product(product_id=symbol)
         except Exception as exc:
-            logger.warning("coinbase_product_lookup_failed | symbol=%s | error=%s", symbol, exc)
+            logger.warning(
+                "coinbase_public_product_lookup_failed | symbol=%s | error=%s",
+                symbol,
+                exc,
+            )
             raise ValueError(f"Coinbase product lookup failed: {exc}") from exc
 
         data = self._response_to_dict(response)
@@ -212,7 +230,7 @@ class CoinbaseProvider(BaseDataProvider):
         if not data:
             raise ValueError(
                 f"Coinbase did not return product metadata for '{symbol}'. "
-                "Ensure the symbol exists and API keys have sufficient access."
+                "Ensure the Coinbase Advanced Trade product ID exists."
             )
         return CoinbaseProduct.from_dict(data)
 
@@ -340,6 +358,56 @@ class CoinbaseProvider(BaseDataProvider):
             f"Unsupported Coinbase product type '{product.product_type}' for symbol '{symbol}'"
         )
 
+    def get_account_fee_rates(
+        self, *, product_type: Optional[str] = None
+    ) -> Dict[str, float]:
+        """Return authenticated account fee rates from the shared credential layer."""
+
+        normalized_type = str(product_type or "").strip().upper() or None
+        try:
+            response = self._ensure_client().get_transaction_summary(
+                product_type=normalized_type
+            )
+        except Exception as exc:
+            logger.error(
+                "coinbase_account_fee_rates_failed | product_type=%s error=%s",
+                normalized_type,
+                exc,
+            )
+            raise CoinbaseAPIError(
+                "coinbase_account_fee_rates_failed: authenticated Coinbase "
+                f"transaction summary failed for product_type={normalized_type or '<all>'}: {exc}"
+            ) from exc
+
+        payload = self._response_to_dict(response)
+        fee_tier = (
+            payload.get("fee_tier")
+            if isinstance(payload.get("fee_tier"), dict)
+            else {}
+        )
+        rates: Dict[str, float] = {}
+        for field in ("maker_fee_rate", "taker_fee_rate"):
+            raw = fee_tier.get(field)
+            if raw is None:
+                raise CoinbaseAPIError(
+                    "coinbase_account_fee_rates_missing: "
+                    f"product_type={normalized_type or '<all>'} field={field}"
+                )
+            try:
+                value = float(Decimal(str(raw)))
+            except (TypeError, ValueError, InvalidOperation) as exc:
+                raise CoinbaseAPIError(
+                    "coinbase_account_fee_rates_invalid: "
+                    f"product_type={normalized_type or '<all>'} field={field} value={raw!r}"
+                ) from exc
+            if not math.isfinite(value) or value < 0:
+                raise CoinbaseAPIError(
+                    "coinbase_account_fee_rates_invalid: "
+                    f"product_type={normalized_type or '<all>'} field={field} must be finite and nonnegative"
+                )
+            rates[field] = value
+        return rates
+
     def get_instrument_metadata(self, venue: str, symbol: str) -> InstrumentMetadata:
         product = self._load_product(symbol)
         if not product:
@@ -441,51 +509,8 @@ class CoinbaseProvider(BaseDataProvider):
                 "short_margin_rate": overnight_margin.get("short_margin_rate"),
             }
 
-        fee_tier_payload: Dict[str, Any] = {}
         maker_fee_rate = None
         taker_fee_rate = None
-        try:
-            summary_response = self._ensure_client().get_transaction_summary(
-                product_type=product_type or None
-            )
-            summary_payload = self._response_to_dict(summary_response)
-            fee_tier_payload = (
-                summary_payload.get("fee_tier")
-                if isinstance(summary_payload.get("fee_tier"), dict)
-                else {}
-            )
-        except Exception as exc:
-            logger.error(
-                "coinbase_transaction_summary_failed | symbol=%s | product_type=%s | error=%s",
-                symbol,
-                product_type,
-                exc,
-            )
-            raise ValueError(
-                f"Coinbase transaction summary failed for '{symbol}': {exc}"
-            ) from exc
-
-        maker_fee_rate_value = fee_tier_payload.get("maker_fee_rate")
-        if maker_fee_rate_value is None:
-            missing_fields.append("maker_fee_rate")
-        else:
-            try:
-                maker_fee_rate = Decimal(maker_fee_rate_value)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"Coinbase fee tier invalid maker_fee_rate '{maker_fee_rate_value}'"
-                ) from exc
-
-        taker_fee_rate_value = fee_tier_payload.get("taker_fee_rate")
-        if taker_fee_rate_value is None:
-            missing_fields.append("taker_fee_rate")
-        else:
-            try:
-                taker_fee_rate = Decimal(taker_fee_rate_value)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"Coinbase fee tier invalid taker_fee_rate '{taker_fee_rate_value}'"
-                ) from exc
 
         tick_value = tick_size * contract_size if contract_size is not None else None
 
@@ -526,6 +551,7 @@ class CoinbaseProvider(BaseDataProvider):
         metadata_payload: Dict[str, Any] = {
             "product": dict(self._last_product_payload or {}),
             "fees": {
+                "status": "not_requested",
                 "maker_fee_rate": float(maker_fee_rate) if maker_fee_rate is not None else None,
                 "taker_fee_rate": float(taker_fee_rate) if taker_fee_rate is not None else None,
             },
@@ -614,7 +640,7 @@ class CoinbaseProvider(BaseDataProvider):
         window_start = start_ts
         while window_start < end_ts:
             window_end = min(end_ts, window_start + chunk_seconds)
-            response = self._ensure_client().get_candles(
+            response = self._ensure_public_client().get_public_candles(
                 product_id=symbol,
                 start=str(window_start),
                 end=str(window_end),

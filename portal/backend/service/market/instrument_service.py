@@ -749,6 +749,27 @@ def instrument_runtime_status(record: Optional[Mapping[str, Any]]) -> Dict[str, 
 
     payload = _with_proxy_derivative_reference(record)
     execution_semantics = _execution_semantics_for_record(payload)
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
+    provider_metadata = (
+        metadata.get("provider_metadata")
+        if isinstance(metadata.get("provider_metadata"), Mapping)
+        else {}
+    )
+    fee_metadata = (
+        provider_metadata.get("fees")
+        if isinstance(provider_metadata.get("fees"), Mapping)
+        else {}
+    )
+    if fee_metadata.get("status") == "not_requested":
+        return {
+            "research_ready": True,
+            "runtime_ready": False,
+            "runtime_message": "Authenticated execution fee metadata has not been collected.",
+            "runtime_policy": _runtime_policy_from_execution_semantics(execution_semantics),
+            "runtime_policy_version": "instrument_runtime_policy.v1",
+            "execution_semantics": execution_semantics,
+        }
+
     try:
         profile_payload = instrument_runtime_profile(payload, execution_semantics=execution_semantics)
         profile = profile_payload["profile"]

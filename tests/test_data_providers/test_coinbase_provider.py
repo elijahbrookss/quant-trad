@@ -22,6 +22,12 @@ class FakeClient:
             raise Exception("product_not_found")
         return dict(self.product)
 
+    def get_public_product(self, product_id, **kwargs):
+        self.calls.append({"url_path": "/market/products", "product_id": product_id})
+        if self.product is None:
+            raise Exception("product_not_found")
+        return dict(self.product)
+
     def get_candles(self, product_id, start, end, granularity, limit=None, **kwargs):
         self.calls.append(
             {
@@ -37,6 +43,8 @@ class FakeClient:
             return {"candles": []}
         return {"candles": self.candle_provider({"start": start, "end": end, "granularity": granularity})}
 
+    def get_public_candles(self, product_id, start, end, granularity, limit=None, **kwargs):
+        return self.get_candles(product_id, start, end, granularity, limit=limit, **kwargs)
     def get_transaction_summary(self, **kwargs):
         self.calls.append({"url_path": "/transaction_summary", "params": kwargs})
         if self.transaction_summary is None:
@@ -47,6 +55,7 @@ class FakeClient:
 def _make_provider(fake_client):
     provider = coinbase_module.CoinbaseProvider()
     provider._client = fake_client
+    provider._public_client = fake_client
     return provider
 
 
@@ -184,8 +193,9 @@ def test_get_instrument_metadata_spot_and_future():
     assert spot_meta.quote_currency == "USD"
     assert spot_meta.can_short is False
     assert spot_meta.min_order_size == 0.001
-    assert spot_meta.maker_fee_rate == 0.0001
-    assert spot_meta.taker_fee_rate == 0.0002
+    assert spot_meta.maker_fee_rate is None
+    assert spot_meta.taker_fee_rate is None
+    assert spot_meta.metadata["fees"]["status"] == "not_requested"
 
     future_meta = future.get_instrument_metadata("", "BTC-PERP")
     assert future_meta.tick_size == 0.5
@@ -195,14 +205,56 @@ def test_get_instrument_metadata_spot_and_future():
     assert future_meta.can_short is True
     assert future_meta.expiry_ts is not None
     assert future_meta.min_order_size == 0.01
-    assert future_meta.maker_fee_rate == 0.0001
-    assert future_meta.taker_fee_rate == 0.0002
+    assert future_meta.maker_fee_rate is None
+    assert future_meta.taker_fee_rate is None
+    assert future_meta.metadata["fees"]["status"] == "not_requested"
     assert future_meta.margin_rates is not None
     assert future_meta.margin_rates.get("intraday", {}).get("long_margin_rate") == "0.1000185"
     future_meta_payload = future_meta.metadata or {}
     future_details = future_meta_payload.get("future_product_details") or {}
     margin_rates = future_details.get("margin_rates") or {}
     assert margin_rates.get("intraday", {}).get("long_margin_rate") == "0.1000185"
+
+    fee_rates = future.get_account_fee_rates(product_type="FUTURE")
+    assert fee_rates == {
+        "maker_fee_rate": 0.0001,
+        "taker_fee_rate": 0.0002,
+    }
+
+
+
+def test_get_instrument_metadata_allows_public_research_without_private_fees(monkeypatch):
+    product = {
+        "product_id": "BIP-20DEC30-CDE",
+        "product_type": "FUTURE",
+        "price_increment": "5",
+        "base_currency_id": "",
+        "quote_currency_id": "USD",
+        "base_min_size": "1",
+        "future_product_details": {
+            "contract_size": "0.01",
+            "contract_root_unit": "BTC",
+            "contract_expiry": "2030-12-20T16:00:00Z",
+            "funding_rate": "-0.000002",
+        },
+    }
+    provider = coinbase_module.CoinbaseProvider()
+    provider._public_client = FakeClient(product=product)
+    monkeypatch.setattr(
+        provider,
+        "_ensure_client",
+        lambda: (_ for _ in ()).throw(RuntimeError("Coinbase credentials missing")),
+    )
+
+    metadata = provider.get_instrument_metadata("COINBASE_DIRECT", product["product_id"])
+
+    assert metadata.base_currency == "BTC"
+    assert metadata.quote_currency == "USD"
+    assert metadata.contract_size == 0.01
+    assert metadata.maker_fee_rate is None
+    assert metadata.taker_fee_rate is None
+    assert metadata.metadata["fees"]["status"] == "not_requested"
+
 
 
 def test_fetch_from_api_normalizes_candles_sorted():
