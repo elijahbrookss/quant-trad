@@ -34,9 +34,9 @@ code_paths:
 
 ## Status And Campaign Boundary
 
-This is the active phased design. Phase 0 provider proof and Phase 1 bounded
-futures/spot trades are implemented; Phases 2–4 remain approved implementation
-work. No phase or document authorizes production collector enrollment, cloud
+This is the active phased design. Phase 0 provider proof, Phase 1 bounded
+futures/spot trades, and Phase 2 Level 2 archive/reconstruction are implemented;
+Phases 3–4 remain approved implementation work. No phase or document authorizes production collector enrollment, cloud
 resources, strategy changes, live trading, or frontend work. The implemented
 24-hour capacity proof and explicit budget approval remain deferred until after
 Phase 4 and mandatory before production enrollment.
@@ -108,8 +108,9 @@ The design extends, and does not replace, the contracts in:
 
 ### Concrete Current Limitations
 
-- Phase 1 now supports `market_trades` plus heartbeats on one product per
-  connection. `level2` parsing and persistent reconstruction remain Phase 2.
+- Phase 1 supports `market_trades` plus heartbeats and Phase 2 supports `level2`
+  plus heartbeats on one product per connection. Both remain bounded and
+  production-unenrolled.
 - Market-structure archive identity is deterministic through `raw_record_id`
   and `spool_segment_id`; the generic `CanonicalMarketEvent.event_id` remains
   unsuitable as raw evidence identity and is not used for that purpose.
@@ -121,8 +122,9 @@ The design extends, and does not replace, the contracts in:
 - OI and funding have typed append-only storage. Phase 1 datasets support trades
   and trade-flow aggregates; canonical runtime requirement delivery still does
   not support funding or market-structure facts until Phase 4.
-- shared commit-clock, hypertable, and immutability setup now enumerate Phase 1
-  trade/flow tables. It will require extension for Phase 2–4 tables.
+- shared commit-clock, hypertable, and immutability setup enumerates Phase 1
+  trade/flow and Phase 2 snapshot/mutation/book/archive-lineage tables. It will
+  require extension for Phase 3–4 tables.
 - the live catalog contains BIP, ETP, and SLP Coinbase futures. Phase 1 pair
   configuration registered canonical direct Coinbase BTC-USD. ETH-USD and
   SOL-USD remain explicit on-demand registrations and are not enrolled.
@@ -143,7 +145,7 @@ Status means:
 | Advanced Trade WS `market_trades`, spot | public; authenticated CDP recommended | BTC-USD, ETH-USD, SOL-USD | initial `snapshot`, then 250 ms `update` batches containing one or more trades | trade `time`; envelope `timestamp`; Phase 0 observed one connection-wide `sequence_num` across subscribed channels, reset on reconnect; local receipt/acceptance becomes known-at | dedupe by provider trade ID; a connection-sequence gap affects every subscription on that connection; typed coverage intervals detect gaps and reconnect; explicit zero requires the complete rule below; recent REST trades validate only | no complete event-level backfill documented | irreplaceable event evidence | confirmed for BIP/BTC proof scope |
 | Advanced Trade WS `market_trades`, CDE futures | same surface/auth contract | BIP, ETP, SLP product IDs | captured schema is the same; Phase 0 proved product access and contract units | same fields; maker-side semantics documented and captured | same typed coverage policy; BIP Phase 1 live capture passed | no complete event-level backfill documented | irreplaceable event evidence | confirmed semantics; only BIP Phase 1 live-verified |
 | Advanced Trade WS `level2`, spot | public; authenticated CDP recommended | matching spot allowlist | `snapshot` then `update`; each event contains ordered absolute level quantities | update `event_time`; envelope `timestamp`; Phase 0 observed the same connection-wide `sequence_num`; receipt/known-at locally assigned | channel is documented as guaranteed; validate the connection sequence; reconnect resets it and requires a new snapshot | none documented | irreplaceable book evidence | confirmed for BIP/BTC proof scope |
-| Advanced Trade WS `level2`, CDE futures | same surface/auth contract | BIP, ETP, SLP | Phase 0 captured the absolute-quantity contract and product units | same fields and local times | same validity contract; no assumed native retransmit | none documented | irreplaceable book evidence | confirmed for Phase 2 implementation; not yet persisted |
+| Advanced Trade WS `level2`, CDE futures | same surface/auth contract | BIP, ETP, SLP | Phase 0 captured the absolute-quantity contract and product units | same fields and local times | same validity contract; no assumed native retransmit | none documented | irreplaceable book evidence | implemented and live-verified for bounded BIP; ETP/SLP unenrolled |
 | Advanced Trade WS `heartbeats` | public | every stream session | one-second heartbeat and counter | server current time, envelope time, receipt | counter discontinuity is transport evidence, not a product-book sequence substitute | none | session/gap evidence, low volume | confirmed |
 | Advanced Trade WS `ticker` | public | futures and spot allowlist | snapshot/update, may batch cascading matches | envelope/event receipt; no replacement for trade event time | validation only; not canonical trade recovery | no event history | BBO/trade cross-check only | confirmed |
 | Advanced Trade WS `status` | public | subscribed products | periodic product/currency snapshots | provider/envelope and receipt | revision by material hash | no reliable history promised | product-state cross-check | confirmed, optional |
@@ -310,6 +312,8 @@ No hot query scans raw frame bytes.
 | `market.raw_archive_manifests` | one sealed immutable object | PK UUID; unique object URI and object SHA-256; content fingerprint over ordered record hashes | definition/session/epoch, object URI, format/schema/compression, byte/record counts, first/last ordinal, time bounds, uploaded/acknowledged at, checksum, content fingerprint | insert only after upload verification; append-only | date/provider/channel/product indexes; manifests indefinite; object follows tier retention |
 | `market.raw_archive_ranges` | per manifest/product/channel ordering summary | PK `(manifest_id, product_id, channel)` | first/last sequence when present, min/max provider event/message/receipt time, count, gap count | append-only child of manifest | product/time indexes; same as manifest |
 | `market.raw_archive_record_mappings` | one immutable placement of one preassigned raw record in one acknowledged object | PK `(raw_record_id, manifest_id)`; unique `(manifest_id, object_row_index)`; idempotency includes raw hash | spool segment, session/epoch/receive ordinal, manifest, object row group/index, raw SHA-256, mapped/known-at; compaction may append another placement | append-only; facts are never updated; mapping exists only after object verification | raw-record and manifest indexes; append-heavy; retain with manifest/pins |
+| `market.raw_archive_compaction_sources` | one ordered immutable source-manifest edge for a compacted replacement | PK `(replacement_manifest_id, source_manifest_id)`; unique replacement/source ordinal | replacement fingerprint, source ordinal, compacted/known-at | append-only; source objects remain authoritative until all replacement manifest, mappings, and lineage commit | source/replacement indexes; low write; retain indefinitely |
+| `market.archive_retention_pin_versions` | one explicit operator pin or release revision for a raw manifest or book checkpoint | PK version ID; natural `(pin_id, revision)` | target kind/ID, owner kind/ID, status, reason, effective/known-at | append-only revisions; latest revision determines active explicit pin | target/known-at index; indefinite control evidence |
 | `market.stream_coverage_interval_versions` | one revision of product/channel delivery coverage, including trade-stream validity | PK UUID; natural `(definition_id, session_id, connection_epoch, product_id, channel, interval_id, revision)` | opening/closing session-event and raw-record evidence, first/last sequence and ordinal, provider/message/receipt time bounds, ordering assurance, coverage status, archive status, canonicalization watermark, gap/quality refs, known-at | append-only; opening, archive completion, closure, or invalidation appends a revision | product/channel/time/status indexes; indefinite quality evidence |
 | `market.stream_quality_events` | exact session/product/channel anomaly, invalidation, or recovery evidence | PK UUID; natural identity `(session_id, product_id, channel, receive_ordinal, classification, evidence_hash)` | sequence before/after, heartbeat counter, invalid reason, detected/known-at, raw record/manifest refs, related coverage/book interval, series, generic gap ID | append-only; correction is a new event | monthly by detected_at; classification/product index; indefinite or 7 years |
 
@@ -354,13 +358,14 @@ revision are known.
 
 | Table/dataset | Purpose and grain | Key/idempotency | Important columns and time | Mutability/revision | Partition/index, writes, retention |
 |---|---|---|---|---|---|
-| `market.l2_snapshot_versions` | one accepted provider snapshot event per product | PK UUID; natural `(session_id, connection_epoch, product_id, sequence_num, receive_ordinal, revision)`; raw hash idempotency | series, sequence, event/message/receipt/known-at, level count, state hash after snapshot, raw record ID, provenance/quality | append-only | hypertable by receipt time; product/session indexes; hot 7d |
-| `market.l2_snapshot_levels` | one typed side/price level in a snapshot | PK `(snapshot_version_id, side, price)` | absolute quantity, provider unit, update event time, ordinal | append-only child | snapshot/side/price index; high write; hot 7d |
-| `market.l2_mutation_batches` | one provider update event applied atomically | PK UUID; natural `(session_id, connection_epoch, product_id, sequence_num, receive_ordinal, event_ordinal)`; raw/event hash idempotency | series, sequence, provider message/event bounds, receipt/known-at, mutation count, before/after state hash, validity interval, raw record ID | append-only; exact duplicate no-op; divergent duplicate invalidates | hypertable by receipt time; product/sequence/ordinal indexes; hot 7d |
-| `market.l2_mutations` | one ordered absolute level mutation in a batch | PK `(batch_id, mutation_ordinal)` | side, exact price, new absolute quantity, provider event time, provider unit | append-only child; order is semantic | batch/side/price index; high write; hot 7d |
+| `market.l2_snapshot_versions` | one accepted provider snapshot event per product | composite PK `(id, effective_at)` for Timescale; natural source position plus effective time; raw/event hash idempotency | series, sequence, event/message/receipt/known-at, level count, state hash after snapshot, raw record ID, provenance/quality | append-only | hypertable by effective time; series/time and commit indexes; hot 7d |
+| `market.l2_snapshot_levels` | one typed side/price level in a snapshot | PK `(snapshot_version_id, snapshot_effective_at, side, price)`; parent ownership is atomic repository enforcement because installed Timescale rejects FKs to hypertables | absolute quantity, provider unit, update event time, ordinal | append-only child | snapshot/side/price index; one typed recordset insert per snapshot; hot 7d |
+| `market.l2_mutation_batches` | one provider update event applied atomically | composite PK `(id, effective_at)`; natural source position plus effective time; raw/event hash idempotency | series, sequence, provider message/event bounds, receipt/known-at, mutation count, before/after state hash, validity interval, raw record ID | append-only; exact duplicate no-op; divergent duplicate invalidates | hypertable by effective time; series/time/commit and source-position indexes; hot 7d |
+| `market.l2_mutations` | one ordered absolute level mutation in a batch | PK `(batch_id, batch_effective_at, mutation_ordinal)`; transactional parent ownership | side, exact price, new absolute quantity, provider event time, provider unit | append-only child; order is semantic | batch/side/price index; one typed recordset insert per batch; hot 7d |
 | `market.book_checkpoint_manifests` | one deterministic reconstructable book checkpoint | PK UUID; natural `(series_id, reconstruction_version, checkpoint_time, source_position_hash)` | source session/epoch/sequence/ordinal, validity interval, object URI/checksum, sorted-level state hash, counts, created/known-at, source manifest range | append-only | series/time index; metadata indefinite; objects 90d or dataset-pinned |
 | `book_checkpoint_levels.v1` object dataset | typed sorted levels for one checkpoint | natural `(checkpoint_id, side, price)` | exact quantity and unit; schema/reconstruction version | immutable Parquet/ZSTD object | ordered by side then numeric price; replay read; tiered retention |
 | `market.book_validity_interval_versions` | one version of a valid or invalid reconstruction interval | PK UUID; natural `(series_id, interval_id, revision)` | start/end source positions and event/receipt/known-at times, status, reason, opening snapshot, closing quality event, reconstruction version | append-only; open revision has null end, closure appends final revision | series/time/status indexes; indefinite quality evidence |
+| `market.book_quality_event_links` | typed relationship from a stream quality event to the affected book interval | PK `(quality_event_id, validity_interval_id, link_role)` | link role and known-at | append-only | interval and quality-event lookups; indefinite quality evidence |
 | `market.book_reconstruction_state` | disposable current operational projection | PK series | current checkpoint/sequence/ordinal/state hash/validity/fence/updated | mutable; never dataset truth; rebuilt from archive/checkpoint | hot only |
 
 ### Derived, Reconciliation, Normalization, And Dataset Tables
@@ -1123,6 +1128,10 @@ research and deterministic trade-flow backtests.
 ### Phase 2: Raw Level 2 Archive And Validity/Reconstruction
 
 Dependencies: Phase 1 archive/session foundation and Phase 0 L2 proof.
+
+Implementation status: completed for bounded BIP/BTC on 2026-08-02. See
+[Market Structure Phase 2 Level 2](MARKET_STRUCTURE_PHASE_2_LEVEL2.md). The
+post-Phase-4 24-hour production-admission gate remains unchanged.
 
 Work:
 

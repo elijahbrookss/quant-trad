@@ -477,6 +477,59 @@ def test_market_structure_status_and_replay_use_typed_routes(monkeypatch) -> Non
             "manifest-a",
         ]
     ) == 0
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "replay-book",
+            "definition-a",
+            "session-a",
+            "--storage-root",
+            "/data/market-structure",
+        ]
+    ) == 0
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "compact",
+            "definition-a",
+            "session-a",
+            "--manifest-id",
+            "manifest-a",
+            "--manifest-id",
+            "manifest-b",
+        ]
+    ) == 0
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "retention-pin",
+            "raw_manifest",
+            "manifest-a",
+            "--owner-kind",
+            "operator",
+            "--owner-id",
+            "test",
+            "--reason",
+            "test complete",
+            "--release",
+        ]
+    ) == 0
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "retention-status",
+            "raw_manifest",
+            "manifest-a",
+        ]
+    ) == 0
     assert observed == [
         {
             "method": "GET",
@@ -487,6 +540,35 @@ def test_market_structure_status_and_replay_use_typed_routes(monkeypatch) -> Non
             "method": "POST",
             "path": "/api/market-data/market-structure/manifests/manifest-a/replay",
             "body": {"storage_root": None},
+        },
+        {
+            "method": "POST",
+            "path": "/api/market-data/market-structure/definitions/definition-a/sessions/session-a/replay-book",
+            "body": {"storage_root": "/data/market-structure"},
+        },
+        {
+            "method": "POST",
+            "path": "/api/market-data/market-structure/definitions/definition-a/sessions/session-a/compact",
+            "body": {
+                "source_manifest_ids": ["manifest-a", "manifest-b"],
+                "storage_root": None,
+                "owner_id": None,
+            },
+        },
+        {
+            "method": "POST",
+            "path": "/api/market-data/market-structure/archive-retention/raw_manifest/manifest-a/pin",
+            "body": {
+                "owner_kind": "operator",
+                "owner_id": "test",
+                "active": False,
+                "reason": "test complete",
+            },
+        },
+        {
+            "method": "GET",
+            "path": "/api/market-data/market-structure/archive-retention/raw_manifest/manifest-a",
+            "body": None,
         },
     ]
 

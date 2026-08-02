@@ -92,6 +92,19 @@ class MarketStructureReplayRequest(BaseModel):
     storage_root: Optional[str] = None
 
 
+class MarketStructureCompactionRequest(BaseModel):
+    source_manifest_ids: list[str]
+    storage_root: Optional[str] = None
+    owner_id: Optional[str] = None
+
+
+class MarketStructureRetentionPinRequest(BaseModel):
+    owner_kind: str
+    owner_id: str
+    active: bool = True
+    reason: str
+
+
 @router.post("/collectors")
 def create_collector(req: CollectorCreateRequest) -> dict[str, Any]:
     creators = {
@@ -295,6 +308,89 @@ def replay_market_structure_manifest(
         if req.storage_root:
             kwargs["storage_root"] = Path(req.storage_root)
         return market_structure_service.replay_manifest(**kwargs)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/market-structure/definitions/{definition_id}/sessions/{session_id}/replay-book"
+)
+def replay_market_structure_book_session(
+    definition_id: str,
+    session_id: str,
+    req: MarketStructureReplayRequest,
+) -> dict[str, Any]:
+    try:
+        kwargs: dict[str, Any] = {
+            "definition_id": definition_id,
+            "session_id": session_id,
+        }
+        if req.storage_root:
+            kwargs["storage_root"] = Path(req.storage_root)
+        return market_structure_service.replay_book_session(**kwargs)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/market-structure/definitions/{definition_id}/sessions/{session_id}/compact"
+)
+def compact_market_structure_session(
+    definition_id: str,
+    session_id: str,
+    req: MarketStructureCompactionRequest,
+) -> dict[str, Any]:
+    try:
+        kwargs: dict[str, Any] = {
+            "definition_id": definition_id,
+            "source_session_id": session_id,
+            "source_manifest_ids": req.source_manifest_ids,
+            "owner_id": req.owner_id,
+        }
+        if req.storage_root:
+            kwargs["storage_root"] = Path(req.storage_root)
+        return market_structure_service.compact_session_archives(**kwargs)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/market-structure/archive-retention/{target_kind}/{target_id}/pin")
+def append_market_structure_retention_pin(
+    target_kind: str,
+    target_id: str,
+    req: MarketStructureRetentionPinRequest,
+) -> dict[str, Any]:
+    try:
+        version_id = market_structure_repository.append_archive_retention_pin_version(
+            target_kind=target_kind,
+            target_id=target_id,
+            owner_kind=req.owner_kind,
+            owner_id=req.owner_id,
+            active=req.active,
+            reason=req.reason,
+        )
+        return {
+            "schema_version": "market.archive_retention_pin_operation.v1",
+            "version_id": version_id,
+            "status": market_structure_repository.archive_retention_status(
+                target_kind=target_kind,
+                target_id=target_id,
+            ),
+        }
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/market-structure/archive-retention/{target_kind}/{target_id}")
+def get_market_structure_retention_status(
+    target_kind: str,
+    target_id: str,
+) -> dict[str, Any]:
+    try:
+        return market_structure_repository.archive_retention_status(
+            target_kind=target_kind,
+            target_id=target_id,
+        )
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

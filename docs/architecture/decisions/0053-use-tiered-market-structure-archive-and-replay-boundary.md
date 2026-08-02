@@ -150,7 +150,15 @@ and froze complete one-second flow ranges with both source objects pinned. See
 This implementation chose the stricter permitted publication sequence:
 canonical facts wait for verified object acknowledgement and committed raw
 record mappings. They still reference only stable `raw_record_id` values; no
-fact is mutated to attach a manifest. Phase 2 must reuse this boundary for L2.
+fact is mutated to attach a manifest.
+
+Phase 2 implemented this same boundary for bounded BIP/BTC Level 2 on
+2026-08-02. Typed snapshots, absolute mutations, validity revisions,
+deterministic checkpoints, full/checkpoint replay, quality linkage, immutable
+compaction lineage, and append-only explicit retention pins now exist. Replay
+selects a compacted replacement only after its manifest, mappings, and lineage
+commit atomically; source objects are not deleted by compaction. See
+[Market Structure Phase 2 Level 2](../data/MARKET_STRUCTURE_PHASE_2_LEVEL2.md).
 
 No definition is enabled or production-admitted. The post-Phase-4 24-hour
 measurement and explicit budget approval remain unchanged.

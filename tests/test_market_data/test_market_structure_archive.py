@@ -11,6 +11,7 @@ from market_data.archive import (
     FilesystemRawArchiveObjectStore,
     SpoolBackpressureError,
     encode_spool_segment_to_parquet,
+    publish_compacted_raw_archives,
     publish_spool_archive,
     read_raw_archive_parquet,
     require_spool_capacity,
@@ -43,12 +44,13 @@ def _record(segment: DurableRawSpoolSegment, ordinal: int) -> RawStreamRecord:
     )
 
 
-def _segment(root: Path) -> DurableRawSpoolSegment:
+def _segment(root: Path, *, segment_ordinal: int = 0) -> DurableRawSpoolSegment:
     return DurableRawSpoolSegment(
         root=root,
         definition_id="coinbase-btc-trades",
         session_id="session-a",
         connection_epoch=0,
+        segment_ordinal=segment_ordinal,
     )
 
 
@@ -158,6 +160,64 @@ def test_failed_object_upload_leaves_sealed_spool_recoverable(tmp_path: Path) ->
     assert segment.sealed_path.exists()
     assert list(segment.records()) == [_record(segment, 1)]
     assert not segment.ack_path.exists()
+
+
+def test_compaction_is_idempotent_and_preserves_raw_identity_and_sources(
+    tmp_path: Path,
+) -> None:
+    store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    source_paths = []
+    expected = []
+    for segment_ordinal, ordinals in enumerate(((1, 2), (3, 4))):
+        segment = _segment(
+            tmp_path / "spool",
+            segment_ordinal=segment_ordinal,
+        )
+        rows = [_record(segment, ordinal) for ordinal in ordinals]
+        for row in rows:
+            segment.append(row)
+        segment.seal()
+        _encoded, acknowledgement, archived = publish_spool_archive(
+            segment,
+            object_store=store,
+            temporary_directory=tmp_path / "tmp",
+        )
+        source_paths.append(store.local_path(acknowledgement.object_key))
+        expected.extend(archived)
+
+    first, first_ack, first_rows = publish_compacted_raw_archives(
+        reversed(source_paths),
+        object_store=store,
+        temporary_directory=tmp_path / "tmp",
+    )
+    second, second_ack, second_rows = publish_compacted_raw_archives(
+        source_paths,
+        object_store=store,
+        temporary_directory=tmp_path / "tmp",
+    )
+    assert first_rows == second_rows == tuple(expected)
+    assert first.sha256 == second.sha256
+    assert first.content_fingerprint == second.content_fingerprint
+    assert first_ack.object_key == second_ack.object_key
+    assert second_ack.reused_existing is True
+    assert read_raw_archive_parquet(store.local_path(first_ack.object_key)) == expected
+    assert {row.spool_segment_id for row in first_rows} == {
+        expected[0].spool_segment_id,
+        expected[-1].spool_segment_id,
+    }
+    assert all(path.exists() for path in source_paths)
+
+    class FailingCompactionStore(FilesystemRawArchiveObjectStore):
+        def put_verified(self, **_kwargs):
+            raise RuntimeError("injected compaction upload failure")
+
+    with pytest.raises(RuntimeError, match="compaction upload failure"):
+        publish_compacted_raw_archives(
+            source_paths,
+            object_store=FailingCompactionStore(tmp_path / "failed-objects"),
+            temporary_directory=tmp_path / "tmp",
+        )
+    assert all(path.exists() for path in source_paths)
 
 
 def test_spool_backpressure_fails_before_exceeding_bound(tmp_path: Path) -> None:

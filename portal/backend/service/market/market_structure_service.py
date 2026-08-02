@@ -31,12 +31,28 @@ from market_data.archive import (
     DurableRawSpoolSegment,
     FilesystemRawArchiveObjectStore,
     SpoolBackpressureError,
+    publish_compacted_raw_archives,
     publish_spool_archive,
     read_raw_archive_parquet,
     require_spool_capacity,
     spool_backlog_bytes,
 )
+from market_data.book_archive import (
+    publish_book_checkpoint,
+    read_book_checkpoint_parquet,
+)
 from market_data.contracts import SourceIdentity
+from market_data.order_book import (
+    L2_BOOK_FACT_TYPE,
+    L2_BOOK_FACT_VERSION,
+    BookLifecycle,
+    BookQualityEvidence,
+    BookSourcePosition,
+    L2ProductContract,
+    Level2BookReconstructor,
+    checkpoint_canonical_rows,
+    translate_coinbase_l2_event,
+)
 from market_data.structure import (
     ArchiveStatus,
     CoverageStatus,
@@ -208,19 +224,34 @@ class MarketStructureService:
             raise RuntimeError(
                 f"market_structure_spot_registration_failed: product_id={pair.spot_product_id} error={error}"
             )
-        source = SourceIdentity(
+        trade_source = SourceIdentity(
             provider="COINBASE",
             venue="COINBASE_DIRECT",
             source_kind="stream",
             adapter_version="coinbase_advanced_trade.market_trades.v1",
         )
         source_id = market_data_repo.register_source(
-            source,
+            trade_source,
             lineage={
                 "schema_version": "market_structure_source_lineage.v1",
                 "provider_surface": "Coinbase Advanced Trade WebSocket",
                 "channels": ["market_trades", "heartbeats"],
                 "phase0_proof_sha256": PHASE1_AUTHENTICATED_PROOF_SHA256,
+            },
+        )
+        l2_source_id = market_data_repo.register_source(
+            SourceIdentity(
+                provider="COINBASE",
+                venue="COINBASE_DIRECT",
+                source_kind="stream",
+                adapter_version="coinbase_advanced_trade.level2.v1",
+            ),
+            lineage={
+                "schema_version": "market_structure_source_lineage.v1",
+                "provider_surface": "Coinbase Advanced Trade WebSocket",
+                "channels": ["level2", "heartbeats"],
+                "phase0_proof_sha256": PHASE1_AUTHENTICATED_PROOF_SHA256,
+                "ordering_scope": "one product per connection epoch",
             },
         )
         instruments = (
@@ -246,6 +277,12 @@ class MarketStructureService:
                 )
                 for interval in (1, 60)
             }
+            l2_series_id = market_data_repo.register_series(
+                instrument_id=instrument_id,
+                fact_type=L2_BOOK_FACT_TYPE,
+                timeframe_seconds=None,
+                contract_version=L2_BOOK_FACT_VERSION,
+            )
             contract = PHASE1_COINBASE_TRADE_CONTRACTS[product_id]
             self.repository.register_product_definition(
                 definition_version_id=contract.product_definition_version_id,
@@ -295,12 +332,55 @@ class MarketStructureService:
                 },
             )
             definitions.append(definition)
+            l2_definition_id = (
+                f"ms_coinbase_l2_{product_id.lower().replace('-', '_')}"
+            )
+            l2_definition = self.repository.upsert_stream_definition(
+                definition_id=l2_definition_id,
+                source_id=l2_source_id,
+                series_id=l2_series_id,
+                provider="COINBASE",
+                venue="COINBASE_DIRECT",
+                provider_product_id=product_id,
+                channels=("level2", "heartbeats"),
+                auth_mode=auth_mode,
+                contract_version=L2_BOOK_FACT_VERSION,
+                max_spool_bytes=max_spool_bytes,
+                max_segment_bytes=max_segment_bytes,
+                enabled=False,
+                production_admitted=False,
+                config={
+                    "schema_version": "market_structure_l2_stream_config.v1",
+                    "pair_id": normalized_pair,
+                    "product_definition_version_id": contract.product_definition_version_id,
+                    "provider_size_unit": contract.provider_size_unit.value,
+                    "price_increment": (
+                        str(_instrument_decimal(instrument, "tick_size"))
+                        if _instrument_decimal(instrument, "tick_size") is not None
+                        else None
+                    ),
+                    "quantity_increment": (
+                        "1"
+                        if contract.provider_size_unit.value == "contracts"
+                        else (
+                            str(_instrument_decimal(instrument, "qty_step"))
+                            if _instrument_decimal(instrument, "qty_step") is not None
+                            else None
+                        )
+                    ),
+                    "checkpoint_max_seconds": 300,
+                    "checkpoint_max_mutations": 100000,
+                    "production_blocker": "post_phase4_24h_capacity_and_budget_gate",
+                },
+            )
+            definitions.append(l2_definition)
             series_catalog.append(
                 {
                     "instrument_id": instrument_id,
                     "product_id": product_id,
                     "trade_series_id": trade_series_id,
                     "aggregate_series_ids": aggregate_series_ids,
+                    "l2_series_id": l2_series_id,
                 }
             )
         mapping_id = self.repository.register_instrument_mapping(
@@ -361,7 +441,8 @@ class MarketStructureService:
         current_segment: DurableRawSpoolSegment | None = None
         captured: list[CapturedEvent] = []
         raw_records: list[RawStreamRecord] = []
-        analysis_state = _CaptureAnalyzer(claim)
+        primary_channel = "level2" if "level2" in claim.channels else "market_trades"
+        analysis_state = _CaptureAnalyzer(claim, primary_channel=primary_channel)
         heartbeat_deadline = time.monotonic() + min(30.0, lease_seconds / 3.0)
         try:
             provider = get_provider("COINBASE", venue="COINBASE_DIRECT")
@@ -463,7 +544,7 @@ class MarketStructureService:
                     definition_id=claim.definition_id,
                     spool_segment_id=current_segment.spool_segment_id,
                     provider_product_id=claim.provider_product_id,
-                    requested_channel="market_trades",
+                    requested_channel=primary_channel,
                     observed_channel=observed_channel,
                 )
                 current_segment.append(record)
@@ -528,6 +609,22 @@ class MarketStructureService:
                 self.repository.heartbeat(claim, lease_seconds=lease_seconds)
 
             analysis = analysis_state.finalize()
+            if primary_channel == "level2":
+                return self._finalize_level2_capture(
+                    claim=claim,
+                    captured=captured,
+                    raw_records=raw_records,
+                    analysis=analysis,
+                    manifest_ids=manifest_ids,
+                    object_store=object_store,
+                    temporary_root=temporary_root,
+                    storage_root=storage,
+                    started_at=started_at,
+                    started_monotonic=started_monotonic,
+                    bounded_stop_event_id=bounded_stop_event_id,
+                    session_event_ordinal=session_event_ordinal,
+                    segment_count=len(segments),
+                )
             coverage_interval_id = _stable_hash(
                 {
                     "schema_version": "market.trade_coverage_interval_id.v1",
@@ -608,7 +705,7 @@ class MarketStructureService:
                     session_id=claim.session_id,
                     connection_epoch=0,
                     provider_product_id=claim.provider_product_id,
-                    channel="market_trades",
+                    channel=primary_channel,
                     status=status,
                     ordering_assurance=OrderingAssurance.PROVIDER_SEQUENCE_CONTIGUOUS,
                     archive_status=ArchiveStatus.COMPLETE,
@@ -673,7 +770,7 @@ class MarketStructureService:
                     claim,
                     connection_epoch=0,
                     receive_ordinal=conflict.receive_ordinal if conflict else raw_records[-1].receive_ordinal,
-                    channel="market_trades",
+                    channel=primary_channel,
                     classification="provider_trade_conflict",
                     reason=str(exc),
                     detected_at=datetime.now(UTC),
@@ -836,7 +933,7 @@ class MarketStructureService:
                     claim,
                     connection_epoch=0,
                     receive_ordinal=raw_records[-1].receive_ordinal if raw_records else 0,
-                    channel="market_trades",
+                    channel=primary_channel,
                     classification="backpressure_stop",
                     reason=str(exc),
                     detected_at=datetime.now(UTC),
@@ -874,6 +971,335 @@ class MarketStructureService:
                     current_segment.close()
             with contextlib.suppress(Exception):
                 self.repository.release(claim)
+
+    def _finalize_level2_capture(
+        self,
+        *,
+        claim: StreamClaim,
+        captured: Sequence[CapturedEvent],
+        raw_records: Sequence[RawStreamRecord],
+        analysis: CaptureAnalysis,
+        manifest_ids: Sequence[str],
+        object_store: FilesystemRawArchiveObjectStore,
+        temporary_root: Path,
+        storage_root: Path,
+        started_at: datetime,
+        started_monotonic: float,
+        bounded_stop_event_id: str,
+        session_event_ordinal: int,
+        segment_count: int,
+    ) -> dict[str, Any]:
+        """Reduce acknowledged raw L2 evidence and persist one bounded session."""
+
+        config = dict(claim.config or {})
+        contract = L2ProductContract(
+            provider_product_id=claim.provider_product_id,
+            product_definition_version_id=str(
+                config.get("product_definition_version_id") or ""
+            ),
+            provider_size_unit=str(config.get("provider_size_unit") or ""),
+            price_increment=config.get("price_increment"),
+            quantity_increment=config.get("quantity_increment"),
+        )
+        reducer = Level2BookReconstructor(
+            series_id=claim.series_id,
+            contract=contract,
+            ordering_assurance=OrderingAssurance.PROVIDER_DELIVERY_GUARANTEED,
+        )
+        events_by_raw: dict[str, list[CanonicalMarketEvent]] = {}
+        for item in captured:
+            events_by_raw.setdefault(item.raw_record.raw_record_id, []).append(item.event)
+        analyzer_quality_by_ordinal: dict[int, list[Mapping[str, Any]]] = {}
+        for item in analysis.quality_events:
+            analyzer_quality_by_ordinal.setdefault(
+                int(item["receive_ordinal"]), []
+            ).append(item)
+
+        snapshots = []
+        batches = []
+        validity_versions = []
+        checkpoints = []
+        book_quality: list[BookQualityEvidence] = []
+        direct_quality: list[Mapping[str, Any]] = []
+        interval_by_position: dict[tuple[int, int], str] = {}
+        last_l2_event = None
+        last_source_position: Optional[BookSourcePosition] = None
+        final_interval_id: Optional[str] = None
+
+        def collect(result) -> None:
+            nonlocal final_interval_id
+            if result.snapshot is not None:
+                snapshots.append(result.snapshot)
+                final_interval_id = result.snapshot.validity_interval_id
+                interval_by_position[
+                    (
+                        result.snapshot.event.position.receive_ordinal,
+                        result.snapshot.event.position.event_ordinal,
+                    )
+                ] = result.snapshot.validity_interval_id
+            if result.batch is not None:
+                batches.append(result.batch)
+                final_interval_id = result.batch.validity_interval_id
+                interval_by_position[
+                    (
+                        result.batch.event.position.receive_ordinal,
+                        result.batch.event.position.event_ordinal,
+                    )
+                ] = result.batch.validity_interval_id
+            validity_versions.extend(result.validity_versions)
+            checkpoints.extend(result.checkpoints)
+            book_quality.extend(result.quality)
+
+        for raw in raw_records:
+            raw_events = events_by_raw.get(raw.raw_record_id, [])
+            sequence_num = next(
+                (
+                    event.provider_sequence_num
+                    for event in raw_events
+                    if event.provider_sequence_num is not None
+                ),
+                None,
+            )
+            for quality in analyzer_quality_by_ordinal.get(raw.receive_ordinal, []):
+                if not bool(quality.get("invalidating")):
+                    direct_quality.append(quality)
+                    continue
+                position = BookSourcePosition(
+                    definition_id=claim.definition_id,
+                    session_id=claim.session_id,
+                    connection_epoch=raw.connection_epoch,
+                    provider_product_id=claim.provider_product_id,
+                    provider_sequence_num=(
+                        int(quality["sequence_after"])
+                        if quality.get("sequence_after") is not None
+                        else sequence_num
+                    ),
+                    receive_ordinal=raw.receive_ordinal,
+                    event_ordinal=0,
+                )
+                result = reducer.invalidate_transport(
+                    position=position,
+                    effective_at=quality["detected_at"],
+                    known_at=quality["detected_at"],
+                    raw_record_id=raw.raw_record_id,
+                    classification=str(quality["classification"]),
+                    reason=str(quality["reason"]),
+                    evidence=dict(quality.get("evidence") or {}),
+                )
+                collect(result)
+                last_source_position = position
+
+            for event in raw_events:
+                if event.event_kind not in {"market_l2_snapshot", "market_l2_update"}:
+                    continue
+                fact = translate_coinbase_l2_event(
+                    event,
+                    raw_record=raw,
+                    contract=contract,
+                    accepted_at=datetime.now(UTC),
+                )
+                prior_lifecycle = reducer.lifecycle
+                result = reducer.process(fact)
+                collect(result)
+                last_l2_event = fact
+                last_source_position = fact.position
+                if (
+                    result.snapshot is not None
+                    and prior_lifecycle is BookLifecycle.INVALID
+                ):
+                    book_quality.append(
+                        BookQualityEvidence(
+                            classification="resync_snapshot_accepted",
+                            reason="fresh complete snapshot restored book validity",
+                            position=fact.position,
+                            known_at=fact.known_at,
+                            raw_record_id=fact.raw_record_id,
+                            invalidating=False,
+                            evidence={
+                                "state_hash": result.snapshot.state_hash,
+                                "validity_interval_id": result.snapshot.validity_interval_id,
+                            },
+                        )
+                    )
+
+        if not snapshots or last_l2_event is None or last_source_position is None:
+            raise RuntimeError(
+                "market_l2_capture_unproven: no valid complete snapshot was accepted"
+            )
+        terminal_lifecycle = reducer.lifecycle
+        final_state_hash = reducer.current_state_hash
+        final_interval_id = (
+            reducer.current_interval.interval_id
+            if reducer.current_interval is not None
+            else final_interval_id
+        )
+        final_position = last_source_position
+        if terminal_lifecycle is BookLifecycle.VALID:
+            validity_versions.extend(
+                reducer.close_bounded(at_event=last_l2_event)
+            )
+
+        checkpoint_ids: list[str] = []
+        for checkpoint in checkpoints:
+            encoded, acknowledgement = publish_book_checkpoint(
+                checkpoint,
+                object_store=object_store,
+                temporary_directory=temporary_root,
+            )
+            self.repository.commit_book_checkpoint(
+                claim,
+                checkpoint=checkpoint,
+                encoded=encoded,
+                acknowledgement=acknowledgement,
+                source_manifest_ids=manifest_ids,
+            )
+            checkpoint_ids.append(checkpoint.checkpoint_id)
+
+        ingest = self.repository.ingest_book_facts(
+            claim,
+            snapshots=snapshots,
+            batches=batches,
+            validity_versions=validity_versions,
+            lifecycle=(
+                BookLifecycle.AWAITING_SNAPSHOT
+                if terminal_lifecycle is BookLifecycle.VALID
+                else terminal_lifecycle
+            ),
+            final_validity_interval_id=final_interval_id,
+            checkpoint_id=checkpoint_ids[-1] if checkpoint_ids else None,
+            final_state_hash=final_state_hash,
+            final_connection_epoch=final_position.connection_epoch,
+            final_receive_ordinal=final_position.receive_ordinal,
+            final_event_ordinal=final_position.event_ordinal,
+            final_sequence_num=final_position.provider_sequence_num,
+        )
+
+        quality_event_ids: list[str] = []
+        closing_interval_by_quality_hash = {
+            row.closing_quality_hash: row.interval_id
+            for row in validity_versions
+            if row.closing_quality_hash
+        }
+        for quality in book_quality:
+            quality_id = self.repository.record_quality_event(
+                claim,
+                connection_epoch=quality.position.connection_epoch,
+                receive_ordinal=quality.position.receive_ordinal,
+                channel="level2",
+                classification=quality.classification,
+                reason=quality.reason,
+                detected_at=quality.known_at,
+                raw_record_id=quality.raw_record_id,
+                sequence_after=quality.position.provider_sequence_num,
+                evidence={
+                    **dict(quality.evidence),
+                    "book_quality_evidence_hash": quality.evidence_hash,
+                    "event_ordinal": quality.position.event_ordinal,
+                },
+            )
+            quality_event_ids.append(quality_id)
+            interval_id = closing_interval_by_quality_hash.get(
+                quality.evidence_hash
+            ) or interval_by_position.get(
+                (
+                    quality.position.receive_ordinal,
+                    quality.position.event_ordinal,
+                )
+            )
+            if interval_id:
+                self.repository.link_book_quality_event(
+                    claim,
+                    quality_event_id=quality_id,
+                    validity_interval_id=interval_id,
+                    link_role=(
+                        "invalidated" if quality.invalidating else "observed_within"
+                    ),
+                    known_at=quality.known_at,
+                )
+        for quality in direct_quality:
+            quality_event_ids.append(
+                self.repository.record_quality_event(
+                    claim,
+                    connection_epoch=int(quality["connection_epoch"]),
+                    receive_ordinal=int(quality["receive_ordinal"]),
+                    channel="level2",
+                    classification=str(quality["classification"]),
+                    reason=str(quality["reason"]),
+                    detected_at=quality["detected_at"],
+                    raw_record_id=quality.get("raw_record_id"),
+                    sequence_before=quality.get("sequence_before"),
+                    sequence_after=quality.get("sequence_after"),
+                    evidence=quality.get("evidence"),
+                )
+            )
+
+        self.repository.append_session_event(
+            claim,
+            event_ordinal=session_event_ordinal,
+            connection_epoch=0,
+            event_type="book_canonicalization_completed",
+            occurred_at=datetime.now(UTC),
+            evidence={
+                "bounded_stop_session_event_id": bounded_stop_event_id,
+                "snapshot_count": len(snapshots),
+                "batch_count": len(batches),
+                "checkpoint_ids": checkpoint_ids,
+                "final_state_hash": final_state_hash,
+                "archive_manifest_ids": list(manifest_ids),
+            },
+        )
+        status = self.repository.archive_status(definition_id=claim.definition_id)
+        result = {
+            "schema_version": "market_structure_l2_bounded_capture.v1",
+            "status": "completed",
+            "definition_id": claim.definition_id,
+            "session_id": claim.session_id,
+            "product_id": claim.provider_product_id,
+            "started_at": started_at.isoformat(),
+            "finished_at": datetime.now(UTC).isoformat(),
+            "elapsed_seconds": time.monotonic() - started_monotonic,
+            "raw_record_count": analysis.raw_record_count,
+            "raw_bytes": analysis.raw_bytes,
+            "spool_segment_count": segment_count,
+            "spool_backlog_bytes": spool_backlog_bytes(
+                storage_root / "spool", definition_id=claim.definition_id
+            ),
+            "manifest_ids": list(manifest_ids),
+            "snapshot_count": len(snapshots),
+            "mutation_batch_count": len(batches),
+            "mutation_count": sum(len(row.event.mutations) for row in batches),
+            "checkpoint_ids": checkpoint_ids,
+            "final_state_hash": final_state_hash,
+            "validity_interval_id": final_interval_id,
+            "validity_closed_cleanly": terminal_lifecycle is BookLifecycle.VALID,
+            "ingestion": {
+                "inserted_snapshots": ingest.inserted_snapshot_count,
+                "noop_snapshots": ingest.noop_snapshot_count,
+                "inserted_batches": ingest.inserted_batch_count,
+                "noop_batches": ingest.noop_batch_count,
+                "inserted_validity_versions": ingest.inserted_validity_count,
+                "max_commit_seq": ingest.max_commit_seq,
+            },
+            "quality_event_ids": quality_event_ids,
+            "archive_status": status,
+            "production_admitted": False,
+            "production_blockers": [
+                "post_phase4_24h_implemented_path_capture",
+                "explicit_storage_and_cost_budget",
+            ],
+        }
+        logger.info(
+            "market_structure_l2_capture_completed | definition_id=%s session_id=%s product_id=%s snapshots=%s batches=%s mutations=%s checkpoints=%s final_state_hash=%s",
+            claim.definition_id,
+            claim.session_id,
+            claim.provider_product_id,
+            len(snapshots),
+            len(batches),
+            result["mutation_count"],
+            len(checkpoint_ids),
+            final_state_hash,
+        )
+        return result
 
     def replay_manifest(
         self, *, manifest_id: str, storage_root: Path = DEFAULT_STORAGE_ROOT
@@ -923,6 +1349,378 @@ class MarketStructureService:
             "trade_count": len(trade_ids),
             "first_receive_ordinal": records[0].receive_ordinal if records else None,
             "last_receive_ordinal": records[-1].receive_ordinal if records else None,
+            "replay_fingerprint": fingerprint,
+            "reconciliation": reconciliation,
+        }
+
+    def compact_session_archives(
+        self,
+        *,
+        definition_id: str,
+        source_session_id: str,
+        source_manifest_ids: Sequence[str],
+        storage_root: Path = DEFAULT_STORAGE_ROOT,
+        owner_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Compact an explicit active source set without provider access."""
+
+        requested_ids = tuple(dict.fromkeys(str(value) for value in source_manifest_ids))
+        if len(requested_ids) < 2:
+            raise ValueError(
+                "market_archive_compaction_invalid: at least two source manifests required"
+            )
+        active = self.repository.list_session_manifests(
+            definition_id=definition_id,
+            session_id=source_session_id,
+        )
+        active_by_id = {str(row["id"]): row for row in active}
+        if any(manifest_id not in active_by_id for manifest_id in requested_ids):
+            raise ValueError(
+                "market_archive_compaction_invalid: source is missing or already replaced"
+            )
+        selected = sorted(
+            (active_by_id[manifest_id] for manifest_id in requested_ids),
+            key=lambda row: (int(row["connection_epoch"]), int(row["first_receive_ordinal"])),
+        )
+        if len({int(row["connection_epoch"]) for row in selected}) != 1:
+            raise ValueError(
+                "market_archive_compaction_invalid: source objects cross connection epochs"
+            )
+        store = FilesystemRawArchiveObjectStore(
+            Path(storage_root).expanduser().resolve() / "objects"
+        )
+        source_paths: list[Path] = []
+        for manifest in selected:
+            path = store.local_path(str(manifest["object_key"]))
+            if not path.exists():
+                raise RuntimeError(
+                    f"market_archive_object_missing: manifest_id={manifest['id']}"
+                )
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if digest != str(manifest["object_sha256"]):
+                raise RuntimeError(
+                    "market_archive_compaction_invalid: source checksum mismatch"
+                )
+            source_paths.append(path)
+
+        owner = str(owner_id or f"qt-compaction:{socket.gethostname()}:{os.getpid()}")
+        claim = self.repository.claim_stream(
+            definition_id=definition_id,
+            owner_id=owner,
+            lease_seconds=600,
+            bounded=True,
+        )
+        event_ordinal = 0
+        try:
+            self.repository.append_session_event(
+                claim,
+                event_ordinal=event_ordinal,
+                connection_epoch=int(selected[0]["connection_epoch"]),
+                event_type="archive_compaction_started",
+                occurred_at=datetime.now(UTC),
+                evidence={
+                    "source_session_id": source_session_id,
+                    "source_manifest_ids": [str(row["id"]) for row in selected],
+                },
+            )
+            event_ordinal += 1
+            encoded, acknowledgement, records = publish_compacted_raw_archives(
+                source_paths,
+                object_store=store,
+                temporary_directory=(
+                    Path(storage_root).expanduser().resolve() / "tmp"
+                ),
+            )
+            commit = self.repository.commit_archive(
+                claim,
+                encoded=encoded,
+                acknowledgement=acknowledgement,
+                records=records,
+                compaction_source_manifest_ids=[str(row["id"]) for row in selected],
+            )
+            self.repository.append_session_event(
+                claim,
+                event_ordinal=event_ordinal,
+                connection_epoch=int(selected[0]["connection_epoch"]),
+                event_type="archive_compaction_completed",
+                occurred_at=datetime.now(UTC),
+                evidence={
+                    "source_session_id": source_session_id,
+                    "source_manifest_ids": [str(row["id"]) for row in selected],
+                    "replacement_manifest_id": commit.manifest_id,
+                    "content_fingerprint": encoded.content_fingerprint,
+                },
+            )
+            return {
+                "schema_version": "market.raw_archive_compaction.v1",
+                "definition_id": definition_id,
+                "source_session_id": source_session_id,
+                "compaction_session_id": claim.session_id,
+                "source_manifest_ids": [str(row["id"]) for row in selected],
+                "replacement_manifest_id": commit.manifest_id,
+                "record_count": len(records),
+                "first_receive_ordinal": records[0].receive_ordinal,
+                "last_receive_ordinal": records[-1].receive_ordinal,
+                "object_sha256": acknowledgement.sha256,
+                "content_fingerprint": encoded.content_fingerprint,
+                "reused_existing": acknowledgement.reused_existing,
+                "source_objects_deleted": False,
+            }
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                self.repository.append_session_event(
+                    claim,
+                    event_ordinal=event_ordinal,
+                    connection_epoch=int(selected[0]["connection_epoch"]),
+                    event_type="archive_compaction_failed",
+                    occurred_at=datetime.now(UTC),
+                    reason=str(exc),
+                    evidence={
+                        "source_session_id": source_session_id,
+                        "source_manifest_ids": [str(row["id"]) for row in selected],
+                    },
+                )
+            raise
+        finally:
+            with contextlib.suppress(Exception):
+                self.repository.release(claim)
+
+    def replay_book_session(
+        self,
+        *,
+        definition_id: str,
+        session_id: str,
+        storage_root: Path = DEFAULT_STORAGE_ROOT,
+    ) -> dict[str, Any]:
+        """Replay acknowledged raw objects without provider access."""
+
+        definitions = self.repository.list_stream_definitions(
+            definition_id=definition_id
+        )
+        if len(definitions) != 1 or "level2" not in tuple(definitions[0]["channels"]):
+            raise ValueError("market_book_replay_invalid: Level 2 definition required")
+        definition = definitions[0]
+        config = dict(definition.get("config") or {})
+        contract = L2ProductContract(
+            provider_product_id=str(definition["provider_product_id"]),
+            product_definition_version_id=str(
+                config.get("product_definition_version_id") or ""
+            ),
+            provider_size_unit=str(config.get("provider_size_unit") or ""),
+            price_increment=config.get("price_increment"),
+            quantity_increment=config.get("quantity_increment"),
+        )
+        manifests = self.repository.list_session_manifests(
+            definition_id=definition_id, session_id=session_id
+        )
+        if not manifests:
+            raise ValueError("market_book_replay_invalid: session has no archive manifests")
+        store = FilesystemRawArchiveObjectStore(
+            Path(storage_root).expanduser().resolve() / "objects"
+        )
+        records_by_id: dict[str, RawStreamRecord] = {}
+        for manifest in manifests:
+            path = store.local_path(str(manifest["object_key"]))
+            if not path.exists():
+                raise RuntimeError(
+                    f"market_archive_object_missing: manifest_id={manifest['id']}"
+                )
+            if hashlib.sha256(path.read_bytes()).hexdigest() != str(
+                manifest["object_sha256"]
+            ):
+                raise RuntimeError("market_book_replay_invalid: raw object checksum mismatch")
+            for record in read_raw_archive_parquet(path):
+                prior = records_by_id.get(record.raw_record_id)
+                if prior is not None and prior.raw_frame_sha256 != record.raw_frame_sha256:
+                    raise RuntimeError("market_book_replay_invalid: raw identity conflict")
+                records_by_id[record.raw_record_id] = record
+        records = sorted(
+            records_by_id.values(),
+            key=lambda row: (row.connection_epoch, row.receive_ordinal),
+        )
+        parser = CoinbaseMessageParser(
+            symbol_by_product_id={contract.provider_product_id: contract.provider_product_id}
+        )
+        operations: list[tuple[str, BookSourcePosition, Any]] = []
+        for record in records:
+            parsed = parser.parse_raw(
+                record.raw_frame,
+                received_at=record.received_at.isoformat(),
+                raw_ref={"raw_record_id": record.raw_record_id},
+            )
+            for event in parsed:
+                if event.event_kind != "provider_sequence_gap":
+                    continue
+                status = str(event.payload.get("status") or "")
+                if status not in {"gap", "out_of_order"}:
+                    continue
+                position = BookSourcePosition(
+                    definition_id=definition_id,
+                    session_id=session_id,
+                    connection_epoch=record.connection_epoch,
+                    provider_product_id=contract.provider_product_id,
+                    provider_sequence_num=event.provider_sequence_num,
+                    receive_ordinal=record.receive_ordinal,
+                    event_ordinal=0,
+                )
+                operations.append(
+                    (
+                        "invalidate",
+                        position,
+                        {
+                            "effective_at": record.received_at,
+                            "known_at": record.received_at,
+                            "raw_record_id": record.raw_record_id,
+                            "classification": (
+                                "sequence_gap" if status == "gap" else "out_of_order"
+                            ),
+                            "reason": f"provider connection sequence status={status}",
+                            "evidence": dict(event.payload),
+                        },
+                    )
+                )
+            for event in parsed:
+                if event.event_kind not in {"market_l2_snapshot", "market_l2_update"}:
+                    continue
+                fact = translate_coinbase_l2_event(
+                    event,
+                    raw_record=record,
+                    contract=contract,
+                    accepted_at=record.received_at,
+                )
+                operations.append(("event", fact.position, fact))
+
+        def reduce_operations(
+            reducer: Level2BookReconstructor,
+            selected: Sequence[tuple[str, BookSourcePosition, Any]],
+        ) -> tuple[list[str], list[str], dict[str, Any], dict[str, Any]]:
+            snapshot_ids: list[str] = []
+            batch_ids: list[str] = []
+            checkpoints: dict[str, Any] = {}
+            opening_validity: dict[str, Any] = {}
+            for kind, position, payload in selected:
+                if kind == "invalidate":
+                    result = reducer.invalidate_transport(
+                        position=position,
+                        **payload,
+                    )
+                else:
+                    result = reducer.process(payload)
+                if result.snapshot is not None:
+                    snapshot_ids.append(result.snapshot.snapshot_id)
+                if result.batch is not None:
+                    batch_ids.append(result.batch.batch_id)
+                for checkpoint in result.checkpoints:
+                    checkpoints[checkpoint.checkpoint_id] = checkpoint
+                for validity in result.validity_versions:
+                    if validity.revision == 1:
+                        opening_validity[validity.interval_id] = validity
+            return snapshot_ids, batch_ids, checkpoints, opening_validity
+
+        full = Level2BookReconstructor(
+            series_id=int(definition["series_id"]),
+            contract=contract,
+            ordering_assurance=OrderingAssurance.PROVIDER_DELIVERY_GUARANTEED,
+        )
+        snapshot_ids, batch_ids, replay_checkpoints, opening_validity = (
+            reduce_operations(full, operations)
+        )
+        final_state_hash = full.current_state_hash
+        reconciliation = self.repository.reconcile_book_replay(
+            definition_id=definition_id,
+            session_id=session_id,
+            snapshot_ids=snapshot_ids,
+            batch_ids=batch_ids,
+            final_state_hash=final_state_hash,
+        )
+
+        persisted_checkpoints = self.repository.list_book_checkpoints(
+            definition_id=definition_id, session_id=session_id
+        )
+        checkpoint_checks: list[dict[str, Any]] = []
+        latest_checkpoint = None
+        for row in persisted_checkpoints:
+            checkpoint = replay_checkpoints.get(str(row["id"]))
+            if checkpoint is None:
+                raise RuntimeError(
+                    "market_book_replay_invalid: persisted checkpoint was not reproduced"
+                )
+            path = store.local_path(str(row["object_key"]))
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if digest != str(row["object_sha256"]):
+                raise RuntimeError(
+                    "market_book_replay_invalid: checkpoint object checksum mismatch"
+                )
+            rows = read_book_checkpoint_parquet(path)
+            if rows != checkpoint_canonical_rows(checkpoint):
+                raise RuntimeError(
+                    "market_book_replay_invalid: checkpoint typed levels differ"
+                )
+            checkpoint_checks.append(
+                {
+                    "checkpoint_id": checkpoint.checkpoint_id,
+                    "object_sha256": digest,
+                    "state_hash": checkpoint.state_hash,
+                    "level_count": len(rows),
+                }
+            )
+            latest_checkpoint = checkpoint
+
+        checkpoint_delta_equal: Optional[bool] = None
+        if latest_checkpoint is not None:
+            validity = opening_validity.get(latest_checkpoint.validity_interval_id)
+            if validity is None:
+                raise RuntimeError(
+                    "market_book_replay_invalid: checkpoint validity opening is missing"
+                )
+            resumed = Level2BookReconstructor.from_checkpoint(
+                latest_checkpoint,
+                contract=contract,
+                validity=validity,
+            )
+            checkpoint_position = (
+                latest_checkpoint.source_position.connection_epoch,
+                latest_checkpoint.source_position.receive_ordinal,
+                latest_checkpoint.source_position.event_ordinal,
+            )
+            deltas = [
+                operation
+                for operation in operations
+                if (
+                    operation[1].connection_epoch,
+                    operation[1].receive_ordinal,
+                    operation[1].event_ordinal,
+                )
+                > checkpoint_position
+            ]
+            reduce_operations(resumed, deltas)
+            checkpoint_delta_equal = resumed.current_state_hash == final_state_hash
+            if not checkpoint_delta_equal:
+                raise RuntimeError(
+                    "market_book_replay_invalid: checkpoint-plus-delta differs from full replay"
+                )
+
+        fingerprint = _stable_hash(
+            {
+                "schema_version": "market.book_session_replay.v1",
+                "raw_record_ids": [row.raw_record_id for row in records],
+                "snapshot_ids": snapshot_ids,
+                "batch_ids": batch_ids,
+                "final_state_hash": final_state_hash,
+                "checkpoint_checks": checkpoint_checks,
+            }
+        )
+        return {
+            "schema_version": "market.book_session_replay.v1",
+            "definition_id": definition_id,
+            "session_id": session_id,
+            "raw_manifest_ids": [str(row["id"]) for row in manifests],
+            "raw_record_count": len(records),
+            "snapshot_count": len(snapshot_ids),
+            "mutation_batch_count": len(batch_ids),
+            "final_state_hash": final_state_hash,
+            "checkpoint_count": len(checkpoint_checks),
+            "checkpoint_delta_equal": checkpoint_delta_equal,
             "replay_fingerprint": fingerprint,
             "reconciliation": reconciliation,
         }
@@ -983,8 +1781,9 @@ class MarketStructureService:
 
 
 class _CaptureAnalyzer:
-    def __init__(self, claim: StreamClaim) -> None:
+    def __init__(self, claim: StreamClaim, *, primary_channel: str = "market_trades") -> None:
         self.claim = claim
+        self.primary_channel = str(primary_channel)
         self.raw_count = 0
         self.raw_bytes = 0
         self.trade_events = 0
@@ -1040,7 +1839,7 @@ class _CaptureAnalyzer:
         for event in events:
             if event.event_kind == "provider_subscription_ack":
                 subscriptions = json.dumps(dict(event.payload or {})).lower()
-                if "market_trades" in subscriptions:
+                if self.primary_channel in subscriptions:
                     self.subscription_ack = True
             elif event.event_kind == "provider_heartbeat":
                 now = record.received_at
@@ -1078,6 +1877,8 @@ class _CaptureAnalyzer:
                     self.snapshot_trades += 1
                 elif delivery == "update":
                     self.update_trades += 1
+            elif event.event_kind == "market_l2_snapshot":
+                self.snapshot = True
         if self._baseline_ready(record.receive_ordinal) and self.baseline_ready_ordinal is None:
             self.baseline_ready_ordinal = record.receive_ordinal
         # Trade coverage is a connection-delivery assertion, not an assertion
@@ -1138,6 +1939,7 @@ class _CaptureAnalyzer:
     ) -> None:
         material = {
             "classification": classification,
+            "connection_epoch": record.connection_epoch,
             "receive_ordinal": record.receive_ordinal,
             "raw_record_id": record.raw_record_id,
             "sequence_before": sequence_before,
@@ -1150,6 +1952,7 @@ class _CaptureAnalyzer:
         self.quality.append(
             {
                 "dedupe_hash": _stable_hash(material),
+                "connection_epoch": record.connection_epoch,
                 "receive_ordinal": record.receive_ordinal,
                 "channel": record.observed_channel,
                 "classification": classification,

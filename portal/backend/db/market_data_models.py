@@ -898,6 +898,83 @@ class MarketRawArchiveRecordMappingRecord(Base):
     known_at = Column(DateTime(timezone=True), nullable=False)
 
 
+class MarketRawArchiveCompactionSourceRecord(Base):
+    """Append-only lineage from immutable source objects to one replacement."""
+
+    __tablename__ = "raw_archive_compaction_sources"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "replacement_manifest_id",
+            "source_manifest_id",
+            name="pk_market_raw_archive_compaction_source",
+        ),
+        UniqueConstraint(
+            "replacement_manifest_id",
+            "source_ordinal",
+            name="uq_market_raw_archive_compaction_ordinal",
+        ),
+        CheckConstraint("source_ordinal >= 0", name="ck_market_raw_archive_compaction_ordinal"),
+        Index("ix_market_raw_archive_compaction_source", "source_manifest_id"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    replacement_manifest_id = Column(
+        String(128),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.raw_archive_manifests.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_manifest_id = Column(
+        String(128),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.raw_archive_manifests.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_ordinal = Column(Integer, nullable=False)
+    replacement_content_fingerprint = Column(String(64), nullable=False)
+    compacted_at = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class MarketArchiveRetentionPinVersionRecord(Base):
+    """Append-only explicit pin/release revisions for raw or checkpoint objects."""
+
+    __tablename__ = "archive_retention_pin_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "pin_id",
+            "revision",
+            name="uq_market_archive_retention_pin_revision",
+        ),
+        CheckConstraint("revision > 0", name="ck_market_archive_retention_pin_revision"),
+        CheckConstraint(
+            "target_kind IN ('raw_manifest', 'book_checkpoint')",
+            name="ck_market_archive_retention_pin_target",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'released')",
+            name="ck_market_archive_retention_pin_status",
+        ),
+        Index(
+            "ix_market_archive_retention_pin_target",
+            "target_kind",
+            "target_id",
+            "known_at",
+        ),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(128), primary_key=True)
+    pin_id = Column(String(128), nullable=False)
+    revision = Column(Integer, nullable=False)
+    target_kind = Column(String(32), nullable=False)
+    target_id = Column(String(128), nullable=False)
+    owner_kind = Column(String(32), nullable=False)
+    owner_id = Column(String(128), nullable=False)
+    status = Column(String(16), nullable=False)
+    reason = Column(Text, nullable=False)
+    effective_at = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+
+
 class MarketStreamCoverageIntervalVersionRecord(Base):
     """Typed product/channel delivery coverage, separate from book validity."""
 
@@ -1189,6 +1266,353 @@ class MarketTradeFlowAggregateVersionRecord(Base):
     quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
 
 
+class MarketL2SnapshotVersionRecord(Base):
+    """One accepted complete aggregated-book snapshot event."""
+
+    __tablename__ = "l2_snapshot_versions"
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "effective_at", name="pk_market_l2_snapshot_versions"),
+        UniqueConstraint(
+            "definition_id",
+            "session_id",
+            "connection_epoch",
+            "receive_ordinal",
+            "event_ordinal",
+            "effective_at",
+            name="uq_market_l2_snapshot_source_position",
+        ),
+        CheckConstraint("connection_epoch >= 0", name="ck_market_l2_snapshot_epoch"),
+        CheckConstraint("receive_ordinal > 0", name="ck_market_l2_snapshot_receive"),
+        CheckConstraint("event_ordinal >= 0", name="ck_market_l2_snapshot_event"),
+        CheckConstraint("level_count > 0", name="ck_market_l2_snapshot_levels"),
+        CheckConstraint(
+            "known_at >= accepted_at AND accepted_at >= received_at",
+            name="ck_market_l2_snapshot_causal_times",
+        ),
+        Index("ix_market_l2_snapshot_series_time", "series_id", "effective_at"),
+        Index("ix_market_l2_snapshot_series_commit", "series_id", "market_commit_seq"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(128), nullable=False)
+    series_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    definition_id = Column(
+        String(64),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.stream_definitions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    session_id = Column(String(64), nullable=False)
+    connection_epoch = Column(Integer, nullable=False)
+    provider_product_id = Column(String(128), nullable=False)
+    product_definition_version_id = Column(
+        String(128),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.product_definition_versions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    provider_sequence_num = Column(BigInteger, nullable=True)
+    receive_ordinal = Column(BigInteger, nullable=False)
+    event_ordinal = Column(Integer, nullable=False)
+    effective_at = Column(DateTime(timezone=True), nullable=False)
+    provider_message_time = Column(DateTime(timezone=True), nullable=True)
+    received_at = Column(DateTime(timezone=True), nullable=False)
+    accepted_at = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+    level_count = Column(BigInteger, nullable=False)
+    state_hash = Column(String(64), nullable=False)
+    event_material_hash = Column(String(64), nullable=False)
+    raw_record_id = Column(String(80), nullable=False)
+    validity_interval_id = Column(String(128), nullable=False)
+    market_commit_seq = Column(
+        BigInteger,
+        nullable=False,
+        server_default=text("nextval('market.fact_commit_seq'::regclass)"),
+    )
+    provenance_hash = Column(String(64), nullable=False)
+    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+
+
+class MarketL2SnapshotLevelRecord(Base):
+    """One typed absolute side/price quantity in an accepted snapshot."""
+
+    __tablename__ = "l2_snapshot_levels"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "snapshot_version_id",
+            "snapshot_effective_at",
+            "side",
+            "price",
+            name="pk_market_l2_snapshot_level",
+        ),
+        CheckConstraint("side IN ('bid', 'ask')", name="ck_market_l2_snapshot_level_side"),
+        CheckConstraint("price > 0", name="ck_market_l2_snapshot_level_price"),
+        CheckConstraint("quantity > 0", name="ck_market_l2_snapshot_level_quantity"),
+        Index("ix_market_l2_snapshot_level_order", "snapshot_version_id", "side", "price"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    snapshot_version_id = Column(String(128), nullable=False)
+    snapshot_effective_at = Column(DateTime(timezone=True), nullable=False)
+    side = Column(String(8), nullable=False)
+    price = Column(Numeric(38, 18), nullable=False)
+    quantity = Column(Numeric(38, 18), nullable=False)
+    provider_size_unit = Column(String(32), nullable=False)
+    provider_event_time = Column(DateTime(timezone=True), nullable=False)
+    level_ordinal = Column(BigInteger, nullable=False)
+
+
+class MarketL2MutationBatchRecord(Base):
+    """One accepted atomic provider Level 2 update event."""
+
+    __tablename__ = "l2_mutation_batches"
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "effective_at", name="pk_market_l2_mutation_batches"),
+        UniqueConstraint(
+            "definition_id",
+            "session_id",
+            "connection_epoch",
+            "receive_ordinal",
+            "event_ordinal",
+            "effective_at",
+            name="uq_market_l2_mutation_source_position",
+        ),
+        CheckConstraint("mutation_count > 0", name="ck_market_l2_mutation_count"),
+        CheckConstraint("unknown_zero_delete_count >= 0", name="ck_market_l2_unknown_delete"),
+        CheckConstraint(
+            "known_at >= accepted_at AND accepted_at >= received_at",
+            name="ck_market_l2_mutation_causal_times",
+        ),
+        Index("ix_market_l2_mutation_series_time", "series_id", "effective_at"),
+        Index("ix_market_l2_mutation_series_commit", "series_id", "market_commit_seq"),
+        Index(
+            "ix_market_l2_mutation_session_position",
+            "session_id",
+            "connection_epoch",
+            "receive_ordinal",
+            "event_ordinal",
+        ),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(128), nullable=False)
+    series_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    definition_id = Column(
+        String(64),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.stream_definitions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    session_id = Column(String(64), nullable=False)
+    connection_epoch = Column(Integer, nullable=False)
+    provider_product_id = Column(String(128), nullable=False)
+    product_definition_version_id = Column(String(128), nullable=False)
+    provider_sequence_num = Column(BigInteger, nullable=True)
+    receive_ordinal = Column(BigInteger, nullable=False)
+    event_ordinal = Column(Integer, nullable=False)
+    effective_at = Column(DateTime(timezone=True), nullable=False)
+    provider_message_time = Column(DateTime(timezone=True), nullable=True)
+    received_at = Column(DateTime(timezone=True), nullable=False)
+    accepted_at = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+    mutation_count = Column(BigInteger, nullable=False)
+    before_state_hash = Column(String(64), nullable=False)
+    after_state_hash = Column(String(64), nullable=False)
+    event_material_hash = Column(String(64), nullable=False)
+    raw_record_id = Column(String(80), nullable=False)
+    validity_interval_id = Column(String(128), nullable=False)
+    unknown_zero_delete_count = Column(BigInteger, nullable=False)
+    market_commit_seq = Column(
+        BigInteger,
+        nullable=False,
+        server_default=text("nextval('market.fact_commit_seq'::regclass)"),
+    )
+    provenance_hash = Column(String(64), nullable=False)
+    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+
+
+class MarketL2MutationRecord(Base):
+    """One ordered absolute side/price mutation in a provider event."""
+
+    __tablename__ = "l2_mutations"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "batch_id",
+            "batch_effective_at",
+            "mutation_ordinal",
+            name="pk_market_l2_mutation",
+        ),
+        CheckConstraint("mutation_ordinal >= 0", name="ck_market_l2_mutation_ordinal"),
+        CheckConstraint("side IN ('bid', 'ask')", name="ck_market_l2_mutation_side"),
+        CheckConstraint("price > 0", name="ck_market_l2_mutation_price"),
+        CheckConstraint("new_quantity >= 0", name="ck_market_l2_mutation_quantity"),
+        Index("ix_market_l2_mutation_level", "batch_id", "side", "price"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    batch_id = Column(String(128), nullable=False)
+    batch_effective_at = Column(DateTime(timezone=True), nullable=False)
+    mutation_ordinal = Column(Integer, nullable=False)
+    side = Column(String(8), nullable=False)
+    price = Column(Numeric(38, 18), nullable=False)
+    new_quantity = Column(Numeric(38, 18), nullable=False)
+    provider_size_unit = Column(String(32), nullable=False)
+    provider_event_time = Column(DateTime(timezone=True), nullable=False)
+
+
+class MarketBookValidityIntervalVersionRecord(Base):
+    """Opening or closing revision of one reconstructable book interval."""
+
+    __tablename__ = "book_validity_interval_versions"
+    __table_args__ = (
+        UniqueConstraint("interval_id", "revision", name="uq_market_book_validity_revision"),
+        CheckConstraint("revision > 0", name="ck_market_book_validity_revision"),
+        CheckConstraint(
+            "status IN ('open_valid', 'closed_valid', 'closed_invalidated')",
+            name="ck_market_book_validity_status",
+        ),
+        CheckConstraint(
+            "last_receive_ordinal >= opening_receive_ordinal",
+            name="ck_market_book_validity_position",
+        ),
+        Index("ix_market_book_validity_series_time", "series_id", "opening_effective_at"),
+        Index("ix_market_book_validity_status", "series_id", "status", "known_at"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(128), primary_key=True)
+    interval_id = Column(String(128), nullable=False)
+    revision = Column(Integer, nullable=False)
+    series_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    status = Column(String(32), nullable=False)
+    ordering_assurance = Column(String(64), nullable=False)
+    reconstruction_version = Column(String(64), nullable=False)
+    opening_snapshot_id = Column(String(128), nullable=False)
+    opening_session_id = Column(String(64), nullable=False)
+    opening_connection_epoch = Column(Integer, nullable=False)
+    opening_sequence_num = Column(BigInteger, nullable=True)
+    opening_receive_ordinal = Column(BigInteger, nullable=False)
+    opening_event_ordinal = Column(Integer, nullable=False)
+    opening_effective_at = Column(DateTime(timezone=True), nullable=False)
+    opening_known_at = Column(DateTime(timezone=True), nullable=False)
+    last_session_id = Column(String(64), nullable=False)
+    last_connection_epoch = Column(Integer, nullable=False)
+    last_sequence_num = Column(BigInteger, nullable=True)
+    last_receive_ordinal = Column(BigInteger, nullable=False)
+    last_event_ordinal = Column(Integer, nullable=False)
+    last_valid_effective_at = Column(DateTime(timezone=True), nullable=False)
+    last_state_hash = Column(String(64), nullable=False)
+    closing_session_id = Column(String(64), nullable=True)
+    closing_connection_epoch = Column(Integer, nullable=True)
+    closing_sequence_num = Column(BigInteger, nullable=True)
+    closing_receive_ordinal = Column(BigInteger, nullable=True)
+    closing_event_ordinal = Column(Integer, nullable=True)
+    closing_effective_at = Column(DateTime(timezone=True), nullable=True)
+    closing_quality_hash = Column(String(64), nullable=True)
+    reason = Column(Text, nullable=True)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class MarketBookCheckpointManifestRecord(Base):
+    """Verified immutable object metadata for one deterministic book checkpoint."""
+
+    __tablename__ = "book_checkpoint_manifests"
+    __table_args__ = (
+        UniqueConstraint("object_uri", name="uq_market_book_checkpoint_object"),
+        CheckConstraint("level_count > 0", name="ck_market_book_checkpoint_levels"),
+        CheckConstraint("byte_count > 0", name="ck_market_book_checkpoint_bytes"),
+        Index("ix_market_book_checkpoint_series_time", "series_id", "effective_at"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(128), primary_key=True)
+    series_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    validity_interval_id = Column(String(128), nullable=False)
+    reconstruction_version = Column(String(64), nullable=False)
+    product_definition_version_id = Column(String(128), nullable=False)
+    provider_size_unit = Column(String(32), nullable=False)
+    session_id = Column(String(64), nullable=False)
+    connection_epoch = Column(Integer, nullable=False)
+    provider_sequence_num = Column(BigInteger, nullable=True)
+    receive_ordinal = Column(BigInteger, nullable=False)
+    event_ordinal = Column(Integer, nullable=False)
+    effective_at = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+    state_hash = Column(String(64), nullable=False)
+    object_uri = Column(Text, nullable=False)
+    object_key = Column(Text, nullable=False)
+    object_sha256 = Column(String(64), nullable=False)
+    content_fingerprint = Column(String(64), nullable=False)
+    format = Column(String(32), nullable=False)
+    compression = Column(String(32), nullable=False)
+    schema_version = Column(String(64), nullable=False)
+    byte_count = Column(BigInteger, nullable=False)
+    level_count = Column(BigInteger, nullable=False)
+    bid_level_count = Column(BigInteger, nullable=False)
+    ask_level_count = Column(BigInteger, nullable=False)
+    mutation_count_since_prior = Column(BigInteger, nullable=False)
+    source_manifest_ids = Column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+    acknowledged_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class MarketBookQualityEventLinkRecord(Base):
+    """Typed link from transport quality evidence to a book validity interval."""
+
+    __tablename__ = "book_quality_event_links"
+    __table_args__ = (
+        PrimaryKeyConstraint("quality_event_id", "validity_interval_id", name="pk_market_book_quality_link"),
+        Index("ix_market_book_quality_interval", "validity_interval_id"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    quality_event_id = Column(
+        String(128),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.stream_quality_events.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    validity_interval_id = Column(String(128), nullable=False)
+    link_role = Column(String(32), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class MarketBookReconstructionStateRecord(Base):
+    """Disposable current projection rebuilt from checkpoints and raw archive."""
+
+    __tablename__ = "book_reconstruction_state"
+    __table_args__ = ({"schema": MARKET_DATA_SCHEMA},)
+
+    series_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    definition_id = Column(String(64), nullable=False)
+    session_id = Column(String(64), nullable=False)
+    connection_epoch = Column(Integer, nullable=False)
+    lifecycle = Column(String(32), nullable=False)
+    validity_interval_id = Column(String(128), nullable=True)
+    checkpoint_id = Column(String(128), nullable=True)
+    provider_sequence_num = Column(BigInteger, nullable=True)
+    receive_ordinal = Column(BigInteger, nullable=False)
+    event_ordinal = Column(Integer, nullable=False)
+    state_hash = Column(String(64), nullable=True)
+    lease_generation = Column(BigInteger, nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
 class MarketDatasetArchiveRefRecord(Base):
     """Immutable raw-object retention pin attached to a frozen dataset."""
 
@@ -1227,9 +1651,19 @@ __all__ = [
     "MarketOpenInterestVersionRecord",
     "MarketProviderRateBudgetRecord",
     "MarketDatasetArchiveRefRecord",
+    "MarketArchiveRetentionPinVersionRecord",
     "MarketInstrumentRoleMappingVersionRecord",
+    "MarketBookCheckpointManifestRecord",
+    "MarketBookQualityEventLinkRecord",
+    "MarketBookReconstructionStateRecord",
+    "MarketBookValidityIntervalVersionRecord",
+    "MarketL2MutationBatchRecord",
+    "MarketL2MutationRecord",
+    "MarketL2SnapshotLevelRecord",
+    "MarketL2SnapshotVersionRecord",
     "MarketProductDefinitionVersionRecord",
     "MarketRawArchiveManifestRecord",
+    "MarketRawArchiveCompactionSourceRecord",
     "MarketRawArchiveRangeRecord",
     "MarketRawArchiveRecordMappingRecord",
     "MarketStreamCoverageIntervalVersionRecord",

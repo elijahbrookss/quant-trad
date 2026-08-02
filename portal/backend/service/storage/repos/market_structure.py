@@ -22,6 +22,20 @@ from market_data.archive import (
     RAW_ARCHIVE_FORMAT,
     RAW_ARCHIVE_SCHEMA_VERSION,
 )
+from market_data.book_archive import (
+    BOOK_CHECKPOINT_COMPRESSION,
+    BOOK_CHECKPOINT_FORMAT,
+    EncodedBookCheckpoint,
+)
+from market_data.order_book import (
+    BOOK_CHECKPOINT_SCHEMA_VERSION,
+    BOOK_RECONSTRUCTION_VERSION,
+    BookCheckpointFact,
+    BookLifecycle,
+    BookValidityIntervalVersion,
+    L2MutationBatchFact,
+    L2SnapshotFact,
+)
 from market_data.structure import (
     MarketSide,
     MarketTradeFact,
@@ -133,6 +147,16 @@ class AggregateIngestionOutcome:
     records: tuple[TradeFlowAggregateRecord, ...]
 
 
+@dataclass(frozen=True)
+class BookIngestionOutcome:
+    inserted_snapshot_count: int
+    noop_snapshot_count: int
+    inserted_batch_count: int
+    noop_batch_count: int
+    inserted_validity_count: int
+    max_commit_seq: int
+
+
 class PostgresMarketStructureRepository:
     """One transactional authority for Phase 1 stream facts and projections."""
 
@@ -157,9 +181,12 @@ class PostgresMarketStructureRepository:
         normalized_channels = tuple(
             dict.fromkeys(str(channel).strip().lower() for channel in channels if str(channel).strip())
         )
-        if normalized_channels != ("market_trades", "heartbeats"):
+        if normalized_channels not in {
+            ("market_trades", "heartbeats"),
+            ("level2", "heartbeats"),
+        }:
             raise ValueError(
-                "market_stream_definition_invalid: Phase 1 requires ordered channels market_trades,heartbeats"
+                "market_stream_definition_invalid: supported ordered channels are market_trades,heartbeats or level2,heartbeats"
             )
         normalized_auth = str(auth_mode or "").strip().lower()
         if normalized_auth not in {"public", "authenticated"}:
@@ -679,13 +706,32 @@ class PostgresMarketStructureRepository:
         acknowledgement: ArchiveObjectAcknowledgement,
         records: Sequence[RawStreamRecord],
         uploaded_at: Optional[datetime] = None,
+        compaction_source_manifest_ids: Sequence[str] = (),
     ) -> ArchiveCommitResult:
         if not records or encoded.record_count != len(records):
             raise ValueError("market_archive_commit_invalid: record count mismatch")
         if encoded.sha256 != acknowledgement.sha256 or encoded.byte_count != acknowledgement.byte_count:
             raise ValueError("market_archive_commit_invalid: object acknowledgement mismatch")
-        if any(record.spool_segment_id != encoded.spool_segment_id for record in records):
+        source_manifest_ids = tuple(
+            dict.fromkeys(str(value) for value in compaction_source_manifest_ids)
+        )
+        if source_manifest_ids and len(source_manifest_ids) < 2:
+            raise ValueError(
+                "market_archive_compaction_commit_invalid: at least two source manifests required"
+            )
+        if not source_manifest_ids and any(
+            record.spool_segment_id != encoded.spool_segment_id for record in records
+        ):
             raise ValueError("market_archive_commit_invalid: segment mismatch")
+        if any(
+            record.definition_id != claim.definition_id
+            or record.session_id != records[0].session_id
+            or record.connection_epoch != records[0].connection_epoch
+            for record in records
+        ):
+            raise ValueError("market_archive_commit_invalid: record scope mismatch")
+        if not source_manifest_ids and records[0].session_id != claim.session_id:
+            raise ValueError("market_archive_commit_invalid: claim session mismatch")
         manifest_material = {
             "schema_version": RAW_ARCHIVE_SCHEMA_VERSION,
             "object_uri": acknowledgement.object_uri,
@@ -699,6 +745,86 @@ class PostgresMarketStructureRepository:
             grouped[record.observed_channel].append(record)
         with db.session() as session:
             self._require_fence(session, claim)
+            ordered_sources: list[Mapping[str, Any]] = []
+            if source_manifest_ids:
+                ordered_sources = list(
+                    session.execute(
+                        text(
+                            """
+                            SELECT manifests.id, manifests.definition_id,
+                                   manifests.session_id, manifests.connection_epoch,
+                                   manifests.first_receive_ordinal,
+                                   manifests.last_receive_ordinal,
+                                   replacements.replacement_manifest_id
+                            FROM market.raw_archive_manifests AS manifests
+                            LEFT JOIN market.raw_archive_compaction_sources AS replacements
+                              ON replacements.source_manifest_id = manifests.id
+                            WHERE manifests.id = ANY(:manifest_ids)
+                            ORDER BY manifests.first_receive_ordinal, manifests.id
+                            """
+                        ),
+                        {"manifest_ids": list(source_manifest_ids)},
+                    ).mappings()
+                )
+                if len(ordered_sources) != len(source_manifest_ids):
+                    raise ValueError(
+                        "market_archive_compaction_commit_invalid: source manifest missing"
+                    )
+                for index, source in enumerate(ordered_sources):
+                    if (
+                        str(source["definition_id"]) != claim.definition_id
+                        or str(source["session_id"]) != records[0].session_id
+                        or int(source["connection_epoch"])
+                        != records[0].connection_epoch
+                    ):
+                        raise ValueError(
+                            "market_archive_compaction_commit_invalid: source scope mismatch"
+                        )
+                    prior_replacement = source["replacement_manifest_id"]
+                    if prior_replacement is not None and str(prior_replacement) != manifest_id:
+                        raise ValueError(
+                            "market_archive_compaction_commit_invalid: source already replaced"
+                        )
+                    if index and (
+                        int(ordered_sources[index - 1]["last_receive_ordinal"]) + 1
+                        != int(source["first_receive_ordinal"])
+                    ):
+                        raise ValueError(
+                            "market_archive_compaction_commit_invalid: source ranges are not contiguous"
+                        )
+                source_mappings = session.execute(
+                    text(
+                        """
+                        SELECT mappings.raw_record_id,
+                               mappings.raw_frame_sha256,
+                               mappings.receive_ordinal
+                        FROM market.raw_archive_record_mappings AS mappings
+                        WHERE mappings.manifest_id = ANY(:manifest_ids)
+                        ORDER BY mappings.receive_ordinal
+                        """
+                    ),
+                    {"manifest_ids": [str(row["id"]) for row in ordered_sources]},
+                ).mappings().all()
+                expected_source = [
+                    (
+                        str(row["raw_record_id"]),
+                        str(row["raw_frame_sha256"]),
+                        int(row["receive_ordinal"]),
+                    )
+                    for row in source_mappings
+                ]
+                replacement = [
+                    (
+                        row.raw_record_id,
+                        row.raw_frame_sha256,
+                        row.receive_ordinal,
+                    )
+                    for row in records
+                ]
+                if expected_source != replacement:
+                    raise ValueError(
+                        "market_archive_compaction_commit_invalid: replacement evidence differs"
+                    )
             inserted_manifest = bool(
                 session.execute(
                     text(
@@ -724,7 +850,7 @@ class PostgresMarketStructureRepository:
                     {
                         "id": manifest_id,
                         "definition_id": claim.definition_id,
-                        "session_id": claim.session_id,
+                        "session_id": records[0].session_id,
                         "epoch": records[0].connection_epoch,
                         "segment_id": encoded.spool_segment_id,
                         "object_uri": acknowledgement.object_uri,
@@ -854,6 +980,31 @@ class PostgresMarketStructureRepository:
             observed = {str(row["raw_record_id"]): str(row["raw_frame_sha256"]) for row in mapping_rows}
             if observed != expected:
                 raise RuntimeError("market_archive_mapping_conflict")
+            for source_ordinal, source in enumerate(ordered_sources):
+                session.execute(
+                    text(
+                        """
+                        INSERT INTO market.raw_archive_compaction_sources (
+                            replacement_manifest_id, source_manifest_id,
+                            source_ordinal, replacement_content_fingerprint,
+                            compacted_at, known_at
+                        ) VALUES (
+                            :replacement_id, :source_id, :source_ordinal,
+                            :fingerprint, :compacted_at, :known_at
+                        ) ON CONFLICT (
+                            replacement_manifest_id, source_manifest_id
+                        ) DO NOTHING
+                        """
+                    ),
+                    {
+                        "replacement_id": manifest_id,
+                        "source_id": str(source["id"]),
+                        "source_ordinal": source_ordinal,
+                        "fingerprint": encoded.content_fingerprint,
+                        "compacted_at": acknowledgement.acknowledged_at,
+                        "known_at": acknowledgement.acknowledged_at,
+                    },
+                )
         return ArchiveCommitResult(
             manifest_id=manifest_id,
             inserted_manifest=inserted_manifest,
@@ -978,6 +1129,8 @@ class PostgresMarketStructureRepository:
             "sequence_gap", "out_of_order", "duplicate", "divergent_duplicate",
             "heartbeat_gap", "disconnect", "decode_error", "archive_loss",
             "provider_trade_conflict", "canonicalization_lag", "backpressure_stop",
+            "book_invalid", "unknown_zero_delete", "update_before_snapshot",
+            "resync_snapshot_accepted",
         }
         normalized = str(classification).strip().lower()
         if normalized not in allowed:
@@ -1492,6 +1645,648 @@ class PostgresMarketStructureRepository:
             ).mappings().all()
         return [_aggregate_record(row) for row in rows]
 
+    def ingest_book_facts(
+        self,
+        claim: StreamClaim,
+        *,
+        snapshots: Iterable[L2SnapshotFact],
+        batches: Iterable[L2MutationBatchFact],
+        validity_versions: Iterable[BookValidityIntervalVersion],
+        lifecycle: BookLifecycle,
+        final_validity_interval_id: Optional[str],
+        checkpoint_id: Optional[str],
+        final_state_hash: Optional[str],
+        final_connection_epoch: int,
+        final_receive_ordinal: int,
+        final_event_ordinal: int,
+        final_sequence_num: Optional[int],
+    ) -> BookIngestionOutcome:
+        """Persist accepted typed book evidence only after raw archive mapping."""
+
+        snapshot_rows = sorted(
+            snapshots,
+            key=lambda row: (
+                row.event.position.receive_ordinal,
+                row.event.position.event_ordinal,
+            ),
+        )
+        batch_rows = sorted(
+            batches,
+            key=lambda row: (
+                row.event.position.receive_ordinal,
+                row.event.position.event_ordinal,
+            ),
+        )
+        validity_rows = sorted(
+            validity_versions, key=lambda row: (row.interval_id, row.revision)
+        )
+        inserted_snapshots = 0
+        noop_snapshots = 0
+        inserted_batches = 0
+        noop_batches = 0
+        inserted_validity = 0
+        max_commit_seq = 0
+        with db.session() as session:
+            self._require_fence(session, claim)
+            for fact in snapshot_rows:
+                if fact.series_id != claim.series_id:
+                    raise ValueError("market_l2_ingest_invalid: snapshot series mismatch")
+                mapped = session.execute(
+                    text(
+                        "SELECT 1 FROM market.raw_archive_record_mappings "
+                        "WHERE raw_record_id = :raw_record_id LIMIT 1"
+                    ),
+                    {"raw_record_id": fact.event.raw_record_id},
+                ).scalar_one_or_none()
+                if mapped is None:
+                    raise ValueError(
+                        "market_l2_archive_incomplete: snapshot raw record is not acknowledged"
+                    )
+                existing = session.execute(
+                    text(
+                        "SELECT event_material_hash, state_hash "
+                        "FROM market.l2_snapshot_versions "
+                        "WHERE id = :id AND effective_at = :effective_at"
+                    ),
+                    {"id": fact.snapshot_id, "effective_at": fact.event.effective_at},
+                ).mappings().first()
+                if existing is not None:
+                    if (
+                        str(existing["event_material_hash"]) != fact.event.material_hash
+                        or str(existing["state_hash"]) != fact.state_hash
+                    ):
+                        raise RuntimeError("market_l2_snapshot_conflict")
+                    noop_snapshots += 1
+                    continue
+                provenance_hash = _stable_hash(
+                    {
+                        "schema_version": "market.l2_snapshot_provenance.v1",
+                        "raw_record_id": fact.event.raw_record_id,
+                        "event_material_hash": fact.event.material_hash,
+                        "validity_interval_id": fact.validity_interval_id,
+                    }
+                )
+                commit_seq = int(
+                    session.execute(
+                        text(
+                            """
+                            INSERT INTO market.l2_snapshot_versions (
+                                id, series_id, definition_id, session_id,
+                                connection_epoch, provider_product_id,
+                                product_definition_version_id,
+                                provider_sequence_num, receive_ordinal,
+                                event_ordinal, effective_at, provider_message_time,
+                                received_at, accepted_at, known_at, level_count,
+                                state_hash, event_material_hash, raw_record_id,
+                                validity_interval_id, provenance_hash, quality
+                            ) VALUES (
+                                :id, :series_id, :definition_id, :session_id,
+                                :epoch, :product_id, :product_definition_id,
+                                :sequence_num, :receive_ordinal, :event_ordinal,
+                                :effective_at, :message_time, :received_at,
+                                :accepted_at, :known_at, :level_count,
+                                :state_hash, :event_hash, :raw_record_id,
+                                :validity_interval_id, :provenance_hash,
+                                '{}'::jsonb
+                            ) RETURNING market_commit_seq
+                            """
+                        ),
+                        {
+                            "id": fact.snapshot_id,
+                            "series_id": fact.series_id,
+                            "definition_id": fact.event.position.definition_id,
+                            "session_id": fact.event.position.session_id,
+                            "epoch": fact.event.position.connection_epoch,
+                            "product_id": fact.event.position.provider_product_id,
+                            "product_definition_id": fact.event.product_definition_version_id,
+                            "sequence_num": fact.event.position.provider_sequence_num,
+                            "receive_ordinal": fact.event.position.receive_ordinal,
+                            "event_ordinal": fact.event.position.event_ordinal,
+                            "effective_at": fact.event.effective_at,
+                            "message_time": fact.event.provider_message_time,
+                            "received_at": fact.event.received_at,
+                            "accepted_at": fact.event.accepted_at,
+                            "known_at": fact.event.known_at,
+                            "level_count": len(fact.bids) + len(fact.asks),
+                            "state_hash": fact.state_hash,
+                            "event_hash": fact.event.material_hash,
+                            "raw_record_id": fact.event.raw_record_id,
+                            "validity_interval_id": fact.validity_interval_id,
+                            "provenance_hash": provenance_hash,
+                        },
+                    ).scalar_one()
+                )
+                mutation_by_level = {
+                    (row.side.value, row.price): row for row in fact.event.mutations
+                }
+                level_ordinal = 0
+                level_parameters: list[dict[str, Any]] = []
+                for side, levels in (("bid", fact.bids), ("ask", fact.asks)):
+                    for price, quantity in levels:
+                        mutation = mutation_by_level[(side, price)]
+                        level_parameters.append(
+                            {
+                                "side": side,
+                                "price": str(price),
+                                "quantity": str(quantity),
+                                "size_unit": mutation.provider_size_unit.value,
+                                "event_time": mutation.provider_event_time.isoformat(),
+                                "level_ordinal": level_ordinal,
+                            },
+                        )
+                        level_ordinal += 1
+                session.execute(
+                    text(
+                        """
+                        INSERT INTO market.l2_snapshot_levels (
+                            snapshot_version_id, snapshot_effective_at,
+                            side, price, quantity, provider_size_unit,
+                            provider_event_time, level_ordinal
+                        )
+                        SELECT :snapshot_id, :effective_at, levels.side,
+                               levels.price, levels.quantity, levels.size_unit,
+                               levels.event_time, levels.level_ordinal
+                        FROM jsonb_to_recordset(CAST(:levels AS jsonb)) AS levels(
+                            side text,
+                            price numeric,
+                            quantity numeric,
+                            size_unit text,
+                            event_time timestamptz,
+                            level_ordinal bigint
+                        )
+                        """
+                    ),
+                    {
+                        "snapshot_id": fact.snapshot_id,
+                        "effective_at": fact.event.effective_at,
+                        "levels": _json(level_parameters),
+                    },
+                )
+                inserted_snapshots += 1
+                max_commit_seq = max(max_commit_seq, commit_seq)
+
+            for fact in batch_rows:
+                if fact.series_id != claim.series_id:
+                    raise ValueError("market_l2_ingest_invalid: batch series mismatch")
+                mapped = session.execute(
+                    text(
+                        "SELECT 1 FROM market.raw_archive_record_mappings "
+                        "WHERE raw_record_id = :raw_record_id LIMIT 1"
+                    ),
+                    {"raw_record_id": fact.event.raw_record_id},
+                ).scalar_one_or_none()
+                if mapped is None:
+                    raise ValueError(
+                        "market_l2_archive_incomplete: batch raw record is not acknowledged"
+                    )
+                existing = session.execute(
+                    text(
+                        "SELECT event_material_hash, before_state_hash, after_state_hash "
+                        "FROM market.l2_mutation_batches "
+                        "WHERE id = :id AND effective_at = :effective_at"
+                    ),
+                    {"id": fact.batch_id, "effective_at": fact.event.effective_at},
+                ).mappings().first()
+                if existing is not None:
+                    if (
+                        str(existing["event_material_hash"]) != fact.event.material_hash
+                        or str(existing["before_state_hash"]) != fact.before_state_hash
+                        or str(existing["after_state_hash"]) != fact.after_state_hash
+                    ):
+                        raise RuntimeError("market_l2_batch_conflict")
+                    noop_batches += 1
+                    continue
+                provenance_hash = _stable_hash(
+                    {
+                        "schema_version": "market.l2_mutation_provenance.v1",
+                        "raw_record_id": fact.event.raw_record_id,
+                        "event_material_hash": fact.event.material_hash,
+                        "validity_interval_id": fact.validity_interval_id,
+                    }
+                )
+                commit_seq = int(
+                    session.execute(
+                        text(
+                            """
+                            INSERT INTO market.l2_mutation_batches (
+                                id, series_id, definition_id, session_id,
+                                connection_epoch, provider_product_id,
+                                product_definition_version_id,
+                                provider_sequence_num, receive_ordinal,
+                                event_ordinal, effective_at, provider_message_time,
+                                received_at, accepted_at, known_at,
+                                mutation_count, before_state_hash,
+                                after_state_hash, event_material_hash,
+                                raw_record_id, validity_interval_id,
+                                unknown_zero_delete_count, provenance_hash,
+                                quality
+                            ) VALUES (
+                                :id, :series_id, :definition_id, :session_id,
+                                :epoch, :product_id, :product_definition_id,
+                                :sequence_num, :receive_ordinal, :event_ordinal,
+                                :effective_at, :message_time, :received_at,
+                                :accepted_at, :known_at, :mutation_count,
+                                :before_hash, :after_hash, :event_hash,
+                                :raw_record_id, :validity_interval_id,
+                                :unknown_delete_count, :provenance_hash,
+                                '{}'::jsonb
+                            ) RETURNING market_commit_seq
+                            """
+                        ),
+                        {
+                            "id": fact.batch_id,
+                            "series_id": fact.series_id,
+                            "definition_id": fact.event.position.definition_id,
+                            "session_id": fact.event.position.session_id,
+                            "epoch": fact.event.position.connection_epoch,
+                            "product_id": fact.event.position.provider_product_id,
+                            "product_definition_id": fact.event.product_definition_version_id,
+                            "sequence_num": fact.event.position.provider_sequence_num,
+                            "receive_ordinal": fact.event.position.receive_ordinal,
+                            "event_ordinal": fact.event.position.event_ordinal,
+                            "effective_at": fact.event.effective_at,
+                            "message_time": fact.event.provider_message_time,
+                            "received_at": fact.event.received_at,
+                            "accepted_at": fact.event.accepted_at,
+                            "known_at": fact.event.known_at,
+                            "mutation_count": len(fact.event.mutations),
+                            "before_hash": fact.before_state_hash,
+                            "after_hash": fact.after_state_hash,
+                            "event_hash": fact.event.material_hash,
+                            "raw_record_id": fact.event.raw_record_id,
+                            "validity_interval_id": fact.validity_interval_id,
+                            "unknown_delete_count": fact.unknown_zero_delete_count,
+                            "provenance_hash": provenance_hash,
+                        },
+                    ).scalar_one()
+                )
+                mutation_parameters = [
+                    {
+                        "ordinal": mutation.mutation_ordinal,
+                        "side": mutation.side.value,
+                        "price": str(mutation.price),
+                        "quantity": str(mutation.new_quantity),
+                        "size_unit": mutation.provider_size_unit.value,
+                        "event_time": mutation.provider_event_time.isoformat(),
+                    }
+                    for mutation in fact.event.mutations
+                ]
+                session.execute(
+                    text(
+                        """
+                        INSERT INTO market.l2_mutations (
+                            batch_id, batch_effective_at, mutation_ordinal,
+                            side, price, new_quantity, provider_size_unit,
+                            provider_event_time
+                        )
+                        SELECT :batch_id, :effective_at, mutations.ordinal,
+                               mutations.side, mutations.price,
+                               mutations.quantity, mutations.size_unit,
+                               mutations.event_time
+                        FROM jsonb_to_recordset(CAST(:mutations AS jsonb)) AS mutations(
+                            ordinal integer,
+                            side text,
+                            price numeric,
+                            quantity numeric,
+                            size_unit text,
+                            event_time timestamptz
+                        )
+                        """
+                    ),
+                    {
+                        "batch_id": fact.batch_id,
+                        "effective_at": fact.event.effective_at,
+                        "mutations": _json(mutation_parameters),
+                    },
+                )
+                inserted_batches += 1
+                max_commit_seq = max(max_commit_seq, commit_seq)
+
+            for validity in validity_rows:
+                inserted_validity += int(
+                    bool(
+                        session.execute(
+                            text(
+                                """
+                                INSERT INTO market.book_validity_interval_versions (
+                                    id, interval_id, revision, series_id, status,
+                                    ordering_assurance, reconstruction_version,
+                                    opening_snapshot_id, opening_session_id,
+                                    opening_connection_epoch, opening_sequence_num,
+                                    opening_receive_ordinal, opening_event_ordinal,
+                                    opening_effective_at, opening_known_at,
+                                    last_session_id, last_connection_epoch,
+                                    last_sequence_num, last_receive_ordinal,
+                                    last_event_ordinal, last_valid_effective_at,
+                                    last_state_hash, closing_session_id,
+                                    closing_connection_epoch, closing_sequence_num,
+                                    closing_receive_ordinal, closing_event_ordinal,
+                                    closing_effective_at, closing_quality_hash,
+                                    reason, known_at
+                                ) VALUES (
+                                    :id, :interval_id, :revision, :series_id,
+                                    :status, :ordering_assurance,
+                                    :reconstruction_version, :opening_snapshot_id,
+                                    :opening_session_id, :opening_epoch,
+                                    :opening_sequence, :opening_receive,
+                                    :opening_event, :opening_effective,
+                                    :opening_known, :last_session_id, :last_epoch,
+                                    :last_sequence, :last_receive, :last_event,
+                                    :last_effective, :last_state_hash,
+                                    :closing_session_id, :closing_epoch,
+                                    :closing_sequence, :closing_receive,
+                                    :closing_event, :closing_effective,
+                                    :closing_quality_hash, :reason, :known_at
+                                ) ON CONFLICT (id) DO NOTHING RETURNING id
+                                """
+                            ),
+                            {
+                                "id": validity.version_id,
+                                "interval_id": validity.interval_id,
+                                "revision": validity.revision,
+                                "series_id": validity.series_id,
+                                "status": validity.status.value,
+                                "ordering_assurance": validity.ordering_assurance.value,
+                                "reconstruction_version": BOOK_RECONSTRUCTION_VERSION,
+                                "opening_snapshot_id": validity.opening_snapshot_id,
+                                "opening_session_id": validity.opening_position.session_id,
+                                "opening_epoch": validity.opening_position.connection_epoch,
+                                "opening_sequence": validity.opening_position.provider_sequence_num,
+                                "opening_receive": validity.opening_position.receive_ordinal,
+                                "opening_event": validity.opening_position.event_ordinal,
+                                "opening_effective": validity.opening_effective_at,
+                                "opening_known": validity.opening_known_at,
+                                "last_session_id": validity.last_valid_position.session_id,
+                                "last_epoch": validity.last_valid_position.connection_epoch,
+                                "last_sequence": validity.last_valid_position.provider_sequence_num,
+                                "last_receive": validity.last_valid_position.receive_ordinal,
+                                "last_event": validity.last_valid_position.event_ordinal,
+                                "last_effective": validity.last_valid_effective_at,
+                                "last_state_hash": validity.last_state_hash,
+                                "closing_session_id": (
+                                    validity.closing_position.session_id
+                                    if validity.closing_position else None
+                                ),
+                                "closing_epoch": (
+                                    validity.closing_position.connection_epoch
+                                    if validity.closing_position else None
+                                ),
+                                "closing_sequence": (
+                                    validity.closing_position.provider_sequence_num
+                                    if validity.closing_position else None
+                                ),
+                                "closing_receive": (
+                                    validity.closing_position.receive_ordinal
+                                    if validity.closing_position else None
+                                ),
+                                "closing_event": (
+                                    validity.closing_position.event_ordinal
+                                    if validity.closing_position else None
+                                ),
+                                "closing_effective": validity.closing_effective_at,
+                                "closing_quality_hash": validity.closing_quality_hash,
+                                "reason": validity.reason,
+                                "known_at": validity.known_at,
+                            },
+                        ).scalar_one_or_none()
+                    )
+                )
+
+            session.execute(
+                text(
+                    """
+                    INSERT INTO market.book_reconstruction_state (
+                        series_id, definition_id, session_id, connection_epoch,
+                        lifecycle, validity_interval_id, checkpoint_id,
+                        provider_sequence_num, receive_ordinal, event_ordinal,
+                        state_hash, lease_generation, updated_at
+                    ) VALUES (
+                        :series_id, :definition_id, :session_id, :connection_epoch,
+                        :lifecycle, :validity_interval_id, :checkpoint_id,
+                        :sequence_num, :receive_ordinal, :event_ordinal,
+                        :state_hash, :lease_generation, now()
+                    ) ON CONFLICT (series_id) DO UPDATE SET
+                        definition_id = EXCLUDED.definition_id,
+                        session_id = EXCLUDED.session_id,
+                        connection_epoch = EXCLUDED.connection_epoch,
+                        lifecycle = EXCLUDED.lifecycle,
+                        validity_interval_id = EXCLUDED.validity_interval_id,
+                        checkpoint_id = EXCLUDED.checkpoint_id,
+                        provider_sequence_num = EXCLUDED.provider_sequence_num,
+                        receive_ordinal = EXCLUDED.receive_ordinal,
+                        event_ordinal = EXCLUDED.event_ordinal,
+                        state_hash = EXCLUDED.state_hash,
+                        lease_generation = EXCLUDED.lease_generation,
+                        updated_at = EXCLUDED.updated_at
+                    """
+                ),
+                {
+                    "series_id": claim.series_id,
+                    "definition_id": claim.definition_id,
+                    "session_id": claim.session_id,
+                    "connection_epoch": int(final_connection_epoch),
+                    "lifecycle": lifecycle.value,
+                    "validity_interval_id": final_validity_interval_id,
+                    "checkpoint_id": checkpoint_id,
+                    "sequence_num": final_sequence_num,
+                    "receive_ordinal": int(final_receive_ordinal),
+                    "event_ordinal": int(final_event_ordinal),
+                    "state_hash": final_state_hash,
+                    "lease_generation": claim.lease_generation,
+                },
+            )
+        return BookIngestionOutcome(
+            inserted_snapshot_count=inserted_snapshots,
+            noop_snapshot_count=noop_snapshots,
+            inserted_batch_count=inserted_batches,
+            noop_batch_count=noop_batches,
+            inserted_validity_count=inserted_validity,
+            max_commit_seq=max_commit_seq,
+        )
+
+    def commit_book_checkpoint(
+        self,
+        claim: StreamClaim,
+        *,
+        checkpoint: BookCheckpointFact,
+        encoded: EncodedBookCheckpoint,
+        acknowledgement: ArchiveObjectAcknowledgement,
+        source_manifest_ids: Sequence[str],
+    ) -> bool:
+        if (
+            checkpoint.checkpoint_id != encoded.checkpoint_id
+            or encoded.sha256 != acknowledgement.sha256
+            or encoded.byte_count != acknowledgement.byte_count
+            or encoded.content_fingerprint != checkpoint.content_fingerprint
+        ):
+            raise ValueError("market_book_checkpoint_commit_invalid: acknowledgement mismatch")
+        manifests = tuple(dict.fromkeys(str(value) for value in source_manifest_ids))
+        if not manifests:
+            raise ValueError("market_book_checkpoint_commit_invalid: source manifests required")
+        with db.session() as session:
+            self._require_fence(session, claim)
+            source_count = int(
+                session.execute(
+                    text(
+                        "SELECT count(*) FROM market.raw_archive_manifests "
+                        "WHERE definition_id = :definition_id AND id = ANY(:manifest_ids)"
+                    ),
+                    {
+                        "definition_id": claim.definition_id,
+                        "manifest_ids": list(manifests),
+                    },
+                ).scalar_one()
+            )
+            if source_count != len(manifests):
+                raise ValueError(
+                    "market_book_checkpoint_archive_incomplete: source manifest is not acknowledged"
+                )
+            inserted = session.execute(
+                text(
+                    """
+                    INSERT INTO market.book_checkpoint_manifests (
+                        id, series_id, validity_interval_id,
+                        reconstruction_version, product_definition_version_id,
+                        provider_size_unit, session_id, connection_epoch,
+                        provider_sequence_num, receive_ordinal, event_ordinal,
+                        effective_at, known_at, state_hash, object_uri,
+                        object_key, object_sha256, content_fingerprint, format,
+                        compression, schema_version, byte_count, level_count,
+                        bid_level_count, ask_level_count,
+                        mutation_count_since_prior, source_manifest_ids,
+                        acknowledged_at
+                    ) VALUES (
+                        :id, :series_id, :validity_interval_id,
+                        :reconstruction_version, :product_definition_id,
+                        :size_unit, :session_id, :epoch, :sequence_num,
+                        :receive_ordinal, :event_ordinal, :effective_at,
+                        :known_at, :state_hash, :object_uri, :object_key,
+                        :object_sha256, :content_fingerprint, :format,
+                        :compression, :schema_version, :byte_count,
+                        :level_count, :bid_count, :ask_count, :mutation_count,
+                        CAST(:manifest_ids AS jsonb), :acknowledged_at
+                    ) ON CONFLICT (id) DO NOTHING RETURNING id
+                    """
+                ),
+                {
+                    "id": checkpoint.checkpoint_id,
+                    "series_id": checkpoint.series_id,
+                    "validity_interval_id": checkpoint.validity_interval_id,
+                    "reconstruction_version": BOOK_RECONSTRUCTION_VERSION,
+                    "product_definition_id": checkpoint.product_definition_version_id,
+                    "size_unit": checkpoint.provider_size_unit.value,
+                    "session_id": checkpoint.source_position.session_id,
+                    "epoch": checkpoint.source_position.connection_epoch,
+                    "sequence_num": checkpoint.source_position.provider_sequence_num,
+                    "receive_ordinal": checkpoint.source_position.receive_ordinal,
+                    "event_ordinal": checkpoint.source_position.event_ordinal,
+                    "effective_at": checkpoint.effective_at,
+                    "known_at": checkpoint.known_at,
+                    "state_hash": checkpoint.state_hash,
+                    "object_uri": acknowledgement.object_uri,
+                    "object_key": acknowledgement.object_key,
+                    "object_sha256": acknowledgement.sha256,
+                    "content_fingerprint": encoded.content_fingerprint,
+                    "format": BOOK_CHECKPOINT_FORMAT,
+                    "compression": BOOK_CHECKPOINT_COMPRESSION,
+                    "schema_version": BOOK_CHECKPOINT_SCHEMA_VERSION,
+                    "byte_count": encoded.byte_count,
+                    "level_count": encoded.level_count,
+                    "bid_count": len(checkpoint.bids),
+                    "ask_count": len(checkpoint.asks),
+                    "mutation_count": checkpoint.mutation_count_since_prior,
+                    "manifest_ids": _json(list(manifests)),
+                    "acknowledged_at": acknowledgement.acknowledged_at,
+                },
+            ).scalar_one_or_none()
+        return inserted is not None
+
+    def link_book_quality_event(
+        self,
+        claim: StreamClaim,
+        *,
+        quality_event_id: str,
+        validity_interval_id: str,
+        link_role: str,
+        known_at: datetime,
+    ) -> None:
+        with db.session() as session:
+            self._require_fence(session, claim)
+            session.execute(
+                text(
+                    """
+                    INSERT INTO market.book_quality_event_links (
+                        quality_event_id, validity_interval_id, link_role,
+                        known_at
+                    ) VALUES (
+                        :quality_event_id, :interval_id, :link_role, :known_at
+                    ) ON CONFLICT DO NOTHING
+                    """
+                ),
+                {
+                    "quality_event_id": quality_event_id,
+                    "interval_id": validity_interval_id,
+                    "link_role": str(link_role),
+                    "known_at": _utc(known_at),
+                },
+            )
+
+    def reconcile_book_replay(
+        self,
+        *,
+        definition_id: str,
+        session_id: str,
+        snapshot_ids: Sequence[str],
+        batch_ids: Sequence[str],
+        final_state_hash: Optional[str],
+    ) -> dict[str, Any]:
+        with db.session() as session:
+            stored_snapshots = tuple(
+                str(value)
+                for value in session.execute(
+                    text(
+                        "SELECT id FROM market.l2_snapshot_versions "
+                        "WHERE definition_id = :definition_id AND session_id = :session_id "
+                        "ORDER BY receive_ordinal, event_ordinal"
+                    ),
+                    {"definition_id": definition_id, "session_id": session_id},
+                ).scalars()
+            )
+            stored_batches = tuple(
+                str(value)
+                for value in session.execute(
+                    text(
+                        "SELECT id FROM market.l2_mutation_batches "
+                        "WHERE definition_id = :definition_id AND session_id = :session_id "
+                        "ORDER BY receive_ordinal, event_ordinal"
+                    ),
+                    {"definition_id": definition_id, "session_id": session_id},
+                ).scalars()
+            )
+            stored_final_hash = session.execute(
+                text(
+                    "SELECT state_hash FROM market.book_reconstruction_state "
+                    "WHERE definition_id = :definition_id AND session_id = :session_id"
+                ),
+                {"definition_id": definition_id, "session_id": session_id},
+            ).scalar_one_or_none()
+        requested_snapshots = tuple(snapshot_ids)
+        requested_batches = tuple(batch_ids)
+        equal = (
+            requested_snapshots == stored_snapshots
+            and requested_batches == stored_batches
+            and final_state_hash == stored_final_hash
+        )
+        if not equal:
+            raise RuntimeError("market_book_replay_reconciliation_failed")
+        return {
+            "schema_version": "market.book_replay_reconciliation.v1",
+            "snapshot_count": len(stored_snapshots),
+            "batch_count": len(stored_batches),
+            "final_state_hash": stored_final_hash,
+            "equal": True,
+        }
+
     def list_sessions(
         self, *, definition_id: Optional[str] = None, limit: int = 100
     ) -> list[dict[str, Any]]:
@@ -1628,6 +2423,51 @@ class PostgresMarketStructureRepository:
                 ),
                 {"series_ids": aggregate_series_ids or [-1]},
             ).mappings().all()
+            book_state = session.execute(
+                text(
+                    """
+                    SELECT state.*,
+                           COALESCE(snapshots.snapshot_count, 0) AS snapshot_count,
+                           COALESCE(batches.batch_count, 0) AS batch_count,
+                           COALESCE(batches.mutation_count, 0) AS mutation_count,
+                           COALESCE(checkpoints.checkpoint_count, 0) AS checkpoint_count
+                    FROM (SELECT CAST(:series_id AS bigint) AS requested_series_id) AS scope
+                    LEFT JOIN market.book_reconstruction_state AS state
+                      ON state.series_id = scope.requested_series_id
+                    LEFT JOIN LATERAL (
+                        SELECT count(*) AS snapshot_count
+                        FROM market.l2_snapshot_versions
+                        WHERE series_id = scope.requested_series_id
+                    ) AS snapshots ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT count(*) AS batch_count,
+                               COALESCE(sum(mutation_count), 0) AS mutation_count
+                        FROM market.l2_mutation_batches
+                        WHERE series_id = scope.requested_series_id
+                    ) AS batches ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT count(*) AS checkpoint_count
+                        FROM market.book_checkpoint_manifests
+                        WHERE series_id = scope.requested_series_id
+                    ) AS checkpoints ON TRUE
+                    """
+                ),
+                {"series_id": int(definition["series_id"])},
+            ).mappings().one()
+            book_validity = session.execute(
+                text(
+                    """
+                    SELECT DISTINCT ON (interval_id)
+                           interval_id, revision, status, ordering_assurance,
+                           opening_effective_at, last_valid_effective_at,
+                           closing_effective_at, last_state_hash, known_at
+                    FROM market.book_validity_interval_versions
+                    WHERE series_id = :series_id
+                    ORDER BY interval_id, revision DESC
+                    """
+                ),
+                {"series_id": int(definition["series_id"])},
+            ).mappings().all()
             datasets = session.execute(
                 text(
                     """
@@ -1657,6 +2497,8 @@ class PostgresMarketStructureRepository:
             "last_acknowledged_at": manifest["last_acknowledged_at"],
             "canonical_trade_count": trade_count,
             "trade_flow_aggregates": [dict(row) for row in aggregates],
+            "book_reconstruction": dict(book_state),
+            "book_validity_intervals": [dict(row) for row in book_validity],
             "quality_counts": {str(row["classification"]): int(row["count"]) for row in quality},
             "coverage_intervals": [dict(row) for row in coverage],
             "dataset_coverage": [dict(row) for row in datasets],
@@ -1681,6 +2523,261 @@ class PostgresMarketStructureRepository:
         if row is None:
             raise ValueError(f"market_archive_manifest_unknown: manifest_id={manifest_id}")
         return dict(row)
+
+    def list_session_manifests(
+        self, *, definition_id: str, session_id: str
+    ) -> list[dict[str, Any]]:
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT * FROM market.raw_archive_manifests
+                    WHERE definition_id = :definition_id
+                      AND session_id = :session_id
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM market.raw_archive_compaction_sources AS compacted
+                          WHERE compacted.source_manifest_id = raw_archive_manifests.id
+                      )
+                    ORDER BY connection_epoch, first_receive_ordinal, id
+                    """
+                ),
+                {"definition_id": definition_id, "session_id": session_id},
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def append_archive_retention_pin_version(
+        self,
+        *,
+        target_kind: str,
+        target_id: str,
+        owner_kind: str,
+        owner_id: str,
+        active: bool,
+        reason: str,
+        effective_at: Optional[datetime] = None,
+    ) -> str:
+        """Append one explicit pin/release revision; never mutate retention history."""
+
+        normalized_target = str(target_kind or "").strip().lower()
+        normalized_target_id = str(target_id or "").strip()
+        normalized_owner_kind = str(owner_kind or "").strip().lower()
+        normalized_owner_id = str(owner_id or "").strip()
+        normalized_reason = str(reason or "").strip()
+        if normalized_target not in {"raw_manifest", "book_checkpoint"}:
+            raise ValueError("market_archive_retention_pin_invalid: unsupported target")
+        if not all(
+            (normalized_target_id, normalized_owner_kind, normalized_owner_id, normalized_reason)
+        ):
+            raise ValueError("market_archive_retention_pin_invalid: identity and reason required")
+        pin_id = _version_id(
+            "arp",
+            {
+                "schema_version": "market.archive_retention_pin_identity.v1",
+                "target_kind": normalized_target,
+                "target_id": normalized_target_id,
+                "owner_kind": normalized_owner_kind,
+                "owner_id": normalized_owner_id,
+            },
+        )
+        status = "active" if active else "released"
+        effective = _utc(effective_at or datetime.now(UTC))
+        with db.session() as session:
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:pin_id, 0))"),
+                {"pin_id": pin_id},
+            )
+            target_table = (
+                "market.raw_archive_manifests"
+                if normalized_target == "raw_manifest"
+                else "market.book_checkpoint_manifests"
+            )
+            target_exists = session.execute(
+                text(f"SELECT 1 FROM {target_table} WHERE id = :target_id"),
+                {"target_id": normalized_target_id},
+            ).scalar_one_or_none()
+            if target_exists is None:
+                raise ValueError("market_archive_retention_pin_invalid: target missing")
+            prior = session.execute(
+                text(
+                    """
+                    SELECT id, revision, status, reason
+                    FROM market.archive_retention_pin_versions
+                    WHERE pin_id = :pin_id
+                    ORDER BY revision DESC LIMIT 1
+                    """
+                ),
+                {"pin_id": pin_id},
+            ).mappings().first()
+            if (
+                prior is not None
+                and str(prior["status"]) == status
+                and str(prior["reason"]) == normalized_reason
+            ):
+                return str(prior["id"])
+            revision = int(prior["revision"] if prior else 0) + 1
+            version_id = _version_id(
+                "arpv",
+                {
+                    "pin_id": pin_id,
+                    "revision": revision,
+                    "status": status,
+                    "reason": normalized_reason,
+                    "effective_at": effective.isoformat(),
+                },
+            )
+            session.execute(
+                text(
+                    """
+                    INSERT INTO market.archive_retention_pin_versions (
+                        id, pin_id, revision, target_kind, target_id,
+                        owner_kind, owner_id, status, reason, effective_at,
+                        known_at
+                    ) VALUES (
+                        :id, :pin_id, :revision, :target_kind, :target_id,
+                        :owner_kind, :owner_id, :status, :reason,
+                        :effective_at, :known_at
+                    )
+                    """
+                ),
+                {
+                    "id": version_id,
+                    "pin_id": pin_id,
+                    "revision": revision,
+                    "target_kind": normalized_target,
+                    "target_id": normalized_target_id,
+                    "owner_kind": normalized_owner_kind,
+                    "owner_id": normalized_owner_id,
+                    "status": status,
+                    "reason": normalized_reason,
+                    "effective_at": effective,
+                    "known_at": datetime.now(UTC),
+                },
+            )
+        return version_id
+
+    def archive_retention_status(
+        self, *, target_kind: str, target_id: str
+    ) -> dict[str, Any]:
+        normalized_target = str(target_kind or "").strip().lower()
+        normalized_target_id = str(target_id or "").strip()
+        if normalized_target not in {"raw_manifest", "book_checkpoint"}:
+            raise ValueError("market_archive_retention_status_invalid: unsupported target")
+        target_table = (
+            "market.raw_archive_manifests"
+            if normalized_target == "raw_manifest"
+            else "market.book_checkpoint_manifests"
+        )
+        with db.session() as session:
+            target = session.execute(
+                text(
+                    f"SELECT id, object_uri, object_sha256, content_fingerprint "
+                    f"FROM {target_table} WHERE id = :target_id"
+                ),
+                {"target_id": normalized_target_id},
+            ).mappings().first()
+            if target is None:
+                raise ValueError("market_archive_retention_status_invalid: target missing")
+            active_pins = session.execute(
+                text(
+                    """
+                    SELECT latest.pin_id, latest.owner_kind, latest.owner_id,
+                           latest.reason, latest.effective_at, latest.known_at
+                    FROM (
+                        SELECT versions.*,
+                               row_number() OVER (
+                                   PARTITION BY pin_id ORDER BY revision DESC
+                               ) AS selected_revision
+                        FROM market.archive_retention_pin_versions AS versions
+                        WHERE target_kind = :target_kind
+                          AND target_id = :target_id
+                    ) AS latest
+                    WHERE latest.selected_revision = 1
+                      AND latest.status = 'active'
+                    ORDER BY latest.pin_id
+                    """
+                ),
+                {
+                    "target_kind": normalized_target,
+                    "target_id": normalized_target_id,
+                },
+            ).mappings().all()
+            dataset_pin_count = 0
+            replacement_ids: list[str] = []
+            source_ids: list[str] = []
+            if normalized_target == "raw_manifest":
+                dataset_pin_count = int(
+                    session.execute(
+                        text(
+                            "SELECT count(*) FROM market.dataset_archive_refs "
+                            "WHERE raw_archive_manifest_id = :target_id"
+                        ),
+                        {"target_id": normalized_target_id},
+                    ).scalar_one()
+                )
+                replacement_ids = [
+                    str(value)
+                    for value in session.execute(
+                        text(
+                            "SELECT replacement_manifest_id "
+                            "FROM market.raw_archive_compaction_sources "
+                            "WHERE source_manifest_id = :target_id "
+                            "ORDER BY replacement_manifest_id"
+                        ),
+                        {"target_id": normalized_target_id},
+                    ).scalars()
+                ]
+                source_ids = [
+                    str(value)
+                    for value in session.execute(
+                        text(
+                            "SELECT source_manifest_id "
+                            "FROM market.raw_archive_compaction_sources "
+                            "WHERE replacement_manifest_id = :target_id "
+                            "ORDER BY source_ordinal"
+                        ),
+                        {"target_id": normalized_target_id},
+                    ).scalars()
+                ]
+        explicit_pin_count = len(active_pins)
+        pinned = bool(dataset_pin_count or explicit_pin_count)
+        return {
+            "schema_version": "market.archive_retention_status.v1",
+            "target_kind": normalized_target,
+            "target_id": normalized_target_id,
+            "object_uri": str(target["object_uri"]),
+            "object_sha256": str(target["object_sha256"]),
+            "content_fingerprint": str(target["content_fingerprint"]),
+            "dataset_pin_count": dataset_pin_count,
+            "explicit_active_pins": [dict(row) for row in active_pins],
+            "replacement_manifest_ids": replacement_ids,
+            "source_manifest_ids": source_ids,
+            "pinned": pinned,
+            "ordinary_retention_eligible": not pinned,
+            "object_retention_state": "pinned" if pinned else "active_unpinned",
+        }
+
+    def list_book_checkpoints(
+        self, *, definition_id: str, session_id: str
+    ) -> list[dict[str, Any]]:
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT checkpoints.*, definitions.provider_product_id
+                    FROM market.book_checkpoint_manifests AS checkpoints
+                    JOIN market.stream_definitions AS definitions
+                      ON definitions.series_id = checkpoints.series_id
+                     AND definitions.id = :definition_id
+                    WHERE checkpoints.session_id = :session_id
+                    ORDER BY checkpoints.connection_epoch,
+                             checkpoints.receive_ordinal,
+                             checkpoints.event_ordinal
+                    """
+                ),
+                {"definition_id": definition_id, "session_id": session_id},
+            ).mappings().all()
+        return [dict(row) for row in rows]
 
     def reconcile_manifest_trade_ids(
         self,
@@ -1909,6 +3006,7 @@ market_structure_repository = PostgresMarketStructureRepository()
 __all__ = [
     "AggregateIngestionOutcome",
     "ArchiveCommitResult",
+    "BookIngestionOutcome",
     "MarketStructureOwnershipError",
     "MarketTradeConflictError",
     "PostgresMarketStructureRepository",

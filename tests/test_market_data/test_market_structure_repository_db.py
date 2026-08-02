@@ -4,6 +4,7 @@ import gzip
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -14,9 +15,17 @@ from data_providers.streams.contracts import ProviderRawMessage
 from market_data.archive import (
     DurableRawSpoolSegment,
     FilesystemRawArchiveObjectStore,
+    publish_compacted_raw_archives,
     publish_spool_archive,
 )
+from market_data.book_archive import publish_book_checkpoint
 from market_data.contracts import DatasetSeriesRequest, SourceIdentity
+from market_data.order_book import (
+    BookLifecycle,
+    L2ProductContract,
+    Level2BookReconstructor,
+    translate_coinbase_l2_event,
+)
 from market_data.structure import (
     ArchiveStatus,
     CoverageStatus,
@@ -62,6 +71,28 @@ def _btc_update_frame() -> str:
         ):
             return row["raw_frame"]
     raise AssertionError("BTC update fixture missing")
+
+
+def _btc_l2_frames() -> list[str]:
+    with gzip.open(FIXTURE_PATH, "rt", encoding="utf-8") as handle:
+        frames = json.load(handle)["frames"]
+    selected: list[str] = []
+    observed_types: set[str] = set()
+    for row in frames:
+        payload = json.loads(row["raw_frame"])
+        if payload.get("channel") != "l2_data":
+            continue
+        for event in payload.get("events") or []:
+            if event.get("product_id") != "BTC-USD":
+                continue
+            event_type = str(event.get("type") or "")
+            if event_type in {"snapshot", "update"} and event_type not in observed_types:
+                selected.append(row["raw_frame"])
+                observed_types.add(event_type)
+                break
+        if observed_types == {"snapshot", "update"}:
+            return selected
+    raise AssertionError("BTC Level 2 snapshot/update fixtures missing")
 
 
 def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
@@ -329,7 +360,356 @@ def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
             {"dataset_id": frozen.dataset_id},
         ).scalar_one()
     assert archive_ref_count == 1
+    retention = market_structure_repository.archive_retention_status(
+        target_kind="raw_manifest",
+        target_id=archive.manifest_id,
+    )
+    assert retention["dataset_pin_count"] == 1
+    assert retention["pinned"] is True
+    assert retention["ordinary_retention_eligible"] is False
 
     market_structure_repository.release(claim)
     with pytest.raises(MarketStructureOwnershipError, match="ownership_lost"):
         market_structure_repository.heartbeat(claim, lease_seconds=120)
+
+
+def test_phase2_book_archive_validity_checkpoint_and_replay_are_atomic(
+    tmp_path: Path,
+) -> None:
+    token = uuid.uuid4().hex
+    instrument_id = f"ms-l2-db-{token[:21]}"
+    with db.session() as session:
+        session.add(
+            InstrumentRecord(
+                id=instrument_id,
+                datasource="COINBASE",
+                exchange="COINBASE_DIRECT",
+                symbol=f"BTC-L2-{token[:8].upper()}",
+                instrument_type="spot",
+                can_short=False,
+                short_requires_borrow=False,
+                has_funding=False,
+                extra_metadata={},
+            )
+        )
+    source_id = market_data_repo.register_source(
+        SourceIdentity(
+            provider="COINBASE",
+            venue="COINBASE_DIRECT",
+            source_kind="stream",
+            adapter_version=f"market-structure-l2-db-test.{token}",
+        )
+    )
+    series_id = market_data_repo.register_series(
+        instrument_id=instrument_id,
+        fact_type="market.l2_book",
+        timeframe_seconds=None,
+        contract_version="market.l2_book.v1",
+    )
+    product_definition_id = f"coinbase.BTC-USD.l2-db-test.{token}"
+    market_structure_repository.register_product_definition(
+        definition_version_id=product_definition_id,
+        source_id=source_id,
+        instrument_id=instrument_id,
+        provider_product_id="BTC-USD",
+        product_type="spot",
+        venue="COINBASE_DIRECT",
+        status="test",
+        base_currency="BTC",
+        quote_currency="USD",
+        provider_size_unit="base",
+        contract_size=None,
+        price_increment=Decimal("0.01"),
+        base_increment=Decimal("0.00000001"),
+        effective_at=datetime(2026, 8, 2, tzinfo=UTC),
+        received_at=datetime.now(UTC),
+        provenance={"fixture": "market_structure_repository_db_l2"},
+    )
+    definition_id = f"msl2db_{token}"
+    market_structure_repository.upsert_stream_definition(
+        definition_id=definition_id,
+        source_id=source_id,
+        series_id=series_id,
+        provider="COINBASE",
+        venue="COINBASE_DIRECT",
+        provider_product_id="BTC-USD",
+        channels=("level2", "heartbeats"),
+        auth_mode="public",
+        contract_version="market.l2_book.v1",
+        max_spool_bytes=1024**3,
+        max_segment_bytes=128 * 1024**2,
+        config={"product_definition_version_id": product_definition_id},
+    )
+    claim = market_structure_repository.claim_stream(
+        definition_id=definition_id,
+        owner_id="market-structure-l2-db-test",
+        lease_seconds=600,
+        bounded=True,
+    )
+
+    parser = CoinbaseMessageParser()
+    contract = L2ProductContract(
+        provider_product_id="BTC-USD",
+        product_definition_version_id=product_definition_id,
+        provider_size_unit="base",
+        price_increment=Decimal("0.01"),
+        quantity_increment=Decimal("0.00000001"),
+    )
+    reducer = Level2BookReconstructor(series_id=series_id, contract=contract)
+    raw_records = []
+    snapshots = []
+    batches = []
+    validity_versions = []
+    checkpoints = []
+    spools = []
+    last_fact = None
+    for ordinal, raw_frame in enumerate(_btc_l2_frames(), start=1):
+        spool = DurableRawSpoolSegment(
+            root=tmp_path / "spool",
+            definition_id=definition_id,
+            session_id=claim.session_id,
+            connection_epoch=0,
+            segment_ordinal=ordinal - 1,
+        )
+        received_at = datetime.now(UTC) + timedelta(milliseconds=ordinal)
+        message = ProviderRawMessage.build(
+            provider="COINBASE",
+            venue="COINBASE_DIRECT",
+            stream_session_id=claim.session_id,
+            connection_epoch=0,
+            receive_ordinal=ordinal,
+            received_at=received_at.isoformat(),
+            raw_frame=raw_frame,
+        )
+        raw = RawStreamRecord.from_provider_message(
+            message,
+            definition_id=definition_id,
+            spool_segment_id=spool.spool_segment_id,
+            provider_product_id="BTC-USD",
+            requested_channel="level2",
+            observed_channel="level2",
+        )
+        spool.append(raw)
+        spool.seal()
+        spools.append(spool)
+        raw_records.append(raw)
+        events = parser.parse_raw(raw_frame, received_at=received_at.isoformat())
+        for event in events:
+            if event.event_kind not in {"market_l2_snapshot", "market_l2_update"}:
+                continue
+            fact = translate_coinbase_l2_event(
+                event,
+                raw_record=raw,
+                contract=contract,
+                accepted_at=received_at + timedelta(milliseconds=1),
+            )
+            result = reducer.process(fact)
+            if result.snapshot is not None:
+                snapshots.append(result.snapshot)
+            if result.batch is not None:
+                batches.append(result.batch)
+            validity_versions.extend(result.validity_versions)
+            checkpoints.extend(result.checkpoints)
+            last_fact = fact
+    assert len(snapshots) == len(batches) == len(checkpoints) == 1
+    assert last_fact is not None
+    final_state_hash = reducer.current_state_hash
+    final_interval_id = reducer.current_interval.interval_id
+    validity_versions.extend(reducer.close_bounded(at_event=last_fact))
+    object_store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    published_sources = [
+        publish_spool_archive(
+            spool,
+            object_store=object_store,
+            temporary_directory=tmp_path / "tmp",
+        )
+        for spool in spools
+    ]
+
+    with pytest.raises(ValueError, match="market_l2_archive_incomplete"):
+        market_structure_repository.ingest_book_facts(
+            claim,
+            snapshots=snapshots,
+            batches=batches,
+            validity_versions=validity_versions,
+            lifecycle=BookLifecycle.AWAITING_SNAPSHOT,
+            final_validity_interval_id=final_interval_id,
+            checkpoint_id=checkpoints[0].checkpoint_id,
+            final_state_hash=final_state_hash,
+            final_connection_epoch=last_fact.position.connection_epoch,
+            final_receive_ordinal=last_fact.position.receive_ordinal,
+            final_event_ordinal=last_fact.position.event_ordinal,
+            final_sequence_num=last_fact.position.provider_sequence_num,
+        )
+
+    source_archives = [
+        market_structure_repository.commit_archive(
+            claim,
+            encoded=encoded,
+            acknowledgement=acknowledgement,
+            records=archived_records,
+        )
+        for encoded, acknowledgement, archived_records in published_sources
+    ]
+    compacted_encoded, compacted_ack, compacted_records = (
+        publish_compacted_raw_archives(
+            [
+                object_store.local_path(acknowledgement.object_key)
+                for _encoded, acknowledgement, _records in published_sources
+            ],
+            object_store=object_store,
+            temporary_directory=tmp_path / "tmp",
+        )
+    )
+    compacted_archive = market_structure_repository.commit_archive(
+        claim,
+        encoded=compacted_encoded,
+        acknowledgement=compacted_ack,
+        records=compacted_records,
+        compaction_source_manifest_ids=[
+            archive.manifest_id for archive in source_archives
+        ],
+    )
+    active_manifests = market_structure_repository.list_session_manifests(
+        definition_id=definition_id,
+        session_id=claim.session_id,
+    )
+    assert [row["id"] for row in active_manifests] == [
+        compacted_archive.manifest_id
+    ]
+    source_retention = market_structure_repository.archive_retention_status(
+        target_kind="raw_manifest",
+        target_id=source_archives[0].manifest_id,
+    )
+    assert source_retention["replacement_manifest_ids"] == [
+        compacted_archive.manifest_id
+    ]
+    assert source_retention["ordinary_retention_eligible"] is True
+    active_pin = market_structure_repository.append_archive_retention_pin_version(
+        target_kind="raw_manifest",
+        target_id=source_archives[0].manifest_id,
+        owner_kind="test",
+        owner_id=token,
+        active=True,
+        reason="phase2 compaction safety proof",
+    )
+    assert market_structure_repository.archive_retention_status(
+        target_kind="raw_manifest",
+        target_id=source_archives[0].manifest_id,
+    )["pinned"] is True
+    released_pin = market_structure_repository.append_archive_retention_pin_version(
+        target_kind="raw_manifest",
+        target_id=source_archives[0].manifest_id,
+        owner_kind="test",
+        owner_id=token,
+        active=False,
+        reason="phase2 compaction safety proof",
+    )
+    assert released_pin != active_pin
+    assert market_structure_repository.archive_retention_status(
+        target_kind="raw_manifest",
+        target_id=source_archives[0].manifest_id,
+    )["ordinary_retention_eligible"] is True
+    checkpoint_encoded, checkpoint_ack = publish_book_checkpoint(
+        checkpoints[0],
+        object_store=object_store,
+        temporary_directory=tmp_path / "tmp",
+    )
+    assert market_structure_repository.commit_book_checkpoint(
+        claim,
+        checkpoint=checkpoints[0],
+        encoded=checkpoint_encoded,
+        acknowledgement=checkpoint_ack,
+        source_manifest_ids=[compacted_archive.manifest_id],
+    ) is True
+    assert market_structure_repository.commit_book_checkpoint(
+        claim,
+        checkpoint=checkpoints[0],
+        encoded=checkpoint_encoded,
+        acknowledgement=checkpoint_ack,
+        source_manifest_ids=[compacted_archive.manifest_id],
+    ) is False
+
+    ingest_kwargs = {
+        "snapshots": snapshots,
+        "batches": batches,
+        "validity_versions": validity_versions,
+        "lifecycle": BookLifecycle.AWAITING_SNAPSHOT,
+        "final_validity_interval_id": final_interval_id,
+        "checkpoint_id": checkpoints[0].checkpoint_id,
+        "final_state_hash": final_state_hash,
+        "final_connection_epoch": last_fact.position.connection_epoch,
+        "final_receive_ordinal": last_fact.position.receive_ordinal,
+        "final_event_ordinal": last_fact.position.event_ordinal,
+        "final_sequence_num": last_fact.position.provider_sequence_num,
+    }
+    first = market_structure_repository.ingest_book_facts(claim, **ingest_kwargs)
+    repeated = market_structure_repository.ingest_book_facts(claim, **ingest_kwargs)
+    assert first.inserted_snapshot_count == first.inserted_batch_count == 1
+    assert first.inserted_validity_count == 2
+    assert repeated.noop_snapshot_count == repeated.noop_batch_count == 1
+    assert repeated.inserted_validity_count == 0
+    replay = market_structure_repository.reconcile_book_replay(
+        definition_id=definition_id,
+        session_id=claim.session_id,
+        snapshot_ids=[snapshots[0].snapshot_id],
+        batch_ids=[batches[0].batch_id],
+        final_state_hash=final_state_hash,
+    )
+    assert replay["equal"] is True
+    assert market_structure_repository.list_book_checkpoints(
+        definition_id=definition_id,
+        session_id=claim.session_id,
+    )[0]["state_hash"] == checkpoints[0].state_hash
+    with db.session() as session:
+        snapshot_level_count = session.execute(
+            text(
+                "SELECT count(*) FROM market.l2_snapshot_levels "
+                "WHERE snapshot_version_id = :snapshot_id"
+            ),
+            {"snapshot_id": snapshots[0].snapshot_id},
+        ).scalar_one()
+        mutation_count = session.execute(
+            text(
+                "SELECT count(*) FROM market.l2_mutations WHERE batch_id = :batch_id"
+            ),
+            {"batch_id": batches[0].batch_id},
+        ).scalar_one()
+        reconstruction_epoch = session.execute(
+            text(
+                "SELECT connection_epoch FROM market.book_reconstruction_state "
+                "WHERE series_id = :series_id"
+            ),
+            {"series_id": claim.series_id},
+        ).scalar_one()
+    assert snapshot_level_count == len(snapshots[0].bids) + len(snapshots[0].asks)
+    assert mutation_count == len(batches[0].event.mutations)
+    assert reconstruction_epoch == last_fact.position.connection_epoch
+    quality_event_id = market_structure_repository.record_quality_event(
+        claim,
+        connection_epoch=0,
+        receive_ordinal=last_fact.position.receive_ordinal,
+        channel="level2",
+        classification="unknown_zero_delete",
+        reason="fixture proves typed non-invalidating quality evidence",
+        detected_at=last_fact.known_at,
+        raw_record_id=last_fact.raw_record_id,
+        sequence_after=last_fact.position.provider_sequence_num,
+        evidence={"unknown_level_count": 1},
+    )
+    market_structure_repository.link_book_quality_event(
+        claim,
+        quality_event_id=quality_event_id,
+        validity_interval_id=final_interval_id,
+        link_role="observed_within",
+        known_at=last_fact.known_at,
+    )
+    status = market_structure_repository.archive_status(definition_id=definition_id)
+    assert status["book_reconstruction"]["snapshot_count"] == 1
+    assert status["book_reconstruction"]["batch_count"] == 1
+    assert status["book_reconstruction"]["checkpoint_count"] == 1
+    assert status["quality_counts"]["unknown_zero_delete"] == 1
+
+    market_structure_repository.release(claim)
+    with pytest.raises(MarketStructureOwnershipError, match="ownership_lost"):
+        market_structure_repository.ingest_book_facts(claim, **ingest_kwargs)

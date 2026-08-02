@@ -56,6 +56,25 @@ def test_market_structure_operator_routes_preserve_typed_boundaries(
     )
     monkeypatch.setattr(
         controller.market_structure_service,
+        "replay_book_session",
+        lambda **kwargs: {
+            "schema_version": "market_structure_book_replay.v1",
+            "definition_id": kwargs["definition_id"],
+            "session_id": kwargs["session_id"],
+            "checkpoint_delta_equal": True,
+        },
+    )
+    monkeypatch.setattr(
+        controller.market_structure_service,
+        "compact_session_archives",
+        lambda **kwargs: {
+            "schema_version": "market.raw_archive_compaction.v1",
+            "source_session_id": kwargs["source_session_id"],
+            "replacement_manifest_id": "manifest-compact",
+        },
+    )
+    monkeypatch.setattr(
+        controller.market_structure_service,
         "reconcile_recent_trades",
         lambda **kwargs: {
             "schema_version": "market.recent_trade_reconciliation.v1",
@@ -72,6 +91,20 @@ def test_market_structure_operator_routes_preserve_typed_boundaries(
             "production_admitted": False,
         },
     )
+    monkeypatch.setattr(
+        controller.market_structure_repository,
+        "append_archive_retention_pin_version",
+        lambda **_kwargs: "pin-version-a",
+    )
+    monkeypatch.setattr(
+        controller.market_structure_repository,
+        "archive_retention_status",
+        lambda **kwargs: {
+            "schema_version": "market.archive_retention_status.v1",
+            "target_id": kwargs["target_id"],
+            "pinned": True,
+        },
+    )
     client = _client()
     capture = client.post(
         "/api/market-data/market-structure/definitions/definition-a/capture",
@@ -84,13 +117,39 @@ def test_market_structure_operator_routes_preserve_typed_boundaries(
         "/api/market-data/market-structure/manifests/manifest-a/replay",
         json={},
     )
+    book_replay = client.post(
+        "/api/market-data/market-structure/definitions/definition-a/sessions/session-a/replay-book",
+        json={},
+    )
+    compact = client.post(
+        "/api/market-data/market-structure/definitions/definition-a/sessions/session-a/compact",
+        json={"source_manifest_ids": ["manifest-a", "manifest-b"]},
+    )
+    pin = client.post(
+        "/api/market-data/market-structure/archive-retention/raw_manifest/manifest-a/pin",
+        json={
+            "owner_kind": "operator",
+            "owner_id": "test",
+            "active": True,
+            "reason": "test hold",
+        },
+    )
+    retention = client.get(
+        "/api/market-data/market-structure/archive-retention/raw_manifest/manifest-a"
+    )
     recent = client.post(
         "/api/market-data/market-structure/definitions/definition-a/reconcile-recent",
         params={"limit": 25},
     )
     assert capture.status_code == status.status_code == 200
-    assert replay.status_code == recent.status_code == 200
+    assert replay.status_code == book_replay.status_code == compact.status_code == 200
+    assert pin.status_code == retention.status_code == recent.status_code == 200
     assert status.json()["archive_mapping_lag_records"] == 0
     assert replay.json()["manifest_id"] == "manifest-a"
+    assert book_replay.json()["checkpoint_delta_equal"] is True
+    assert book_replay.json()["session_id"] == "session-a"
+    assert compact.json()["replacement_manifest_id"] == "manifest-compact"
+    assert pin.json()["version_id"] == "pin-version-a"
+    assert retention.json()["pinned"] is True
     assert recent.json()["historical_completeness_claim"] == "none"
     assert recent.json()["rest_limit"] == 25

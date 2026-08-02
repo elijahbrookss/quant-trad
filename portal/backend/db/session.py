@@ -250,25 +250,28 @@ class Database:
         if not self._engine:
             return
         with self._engine.begin() as conn:
-            # Serialize schema DDL across backend + workers.
-            conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _SCHEMA_LOCK_KEY})
-            try:
-                self._assert_market_data_cutover_state(conn)
-                self._create_missing_schemas(conn)
-                self._ensure_market_data_commit_sequence(conn)
-                self._assert_market_commit_clock(conn, existing_only=True)
-                self._assert_retired_tables_absent(conn)
-                self._create_missing_tables(conn)
-                self._ensure_market_data_hypertables(conn)
-                self._assert_market_commit_clock(conn, existing_only=False)
-                self._assert_columns(conn)
-                self._assert_required_constraints(conn)
-                self._create_missing_indexes(conn)
-                self._assert_required_indexes(conn)
-                self._ensure_market_data_immutability(conn)
-                logger.info("portal_db_schema_contract_ready")
-            finally:
-                conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _SCHEMA_LOCK_KEY})
+            # Transaction-scoped locking serializes schema DDL across backend +
+            # workers and releases automatically on commit or rollback.  An
+            # explicit unlock inside an aborted PostgreSQL transaction masks the
+            # statement that actually violated the schema contract.
+            conn.execute(
+                text("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _SCHEMA_LOCK_KEY},
+            )
+            self._assert_market_data_cutover_state(conn)
+            self._create_missing_schemas(conn)
+            self._ensure_market_data_commit_sequence(conn)
+            self._assert_market_commit_clock(conn, existing_only=True)
+            self._assert_retired_tables_absent(conn)
+            self._create_missing_tables(conn)
+            self._ensure_market_data_hypertables(conn)
+            self._assert_market_commit_clock(conn, existing_only=False)
+            self._assert_columns(conn)
+            self._assert_required_constraints(conn)
+            self._create_missing_indexes(conn)
+            self._assert_required_indexes(conn)
+            self._ensure_market_data_immutability(conn)
+            logger.info("portal_db_schema_contract_ready")
 
     def _create_missing_schemas(self, conn) -> None:
         """Create non-public schemas declared by metadata when absent."""
@@ -350,6 +353,8 @@ class Database:
             "funding_rate_versions",
             "market_trade_versions",
             "trade_flow_aggregate_versions",
+            "l2_snapshot_versions",
+            "l2_mutation_batches",
         ):
             table_ref = f"market.{table_name}"
             existing = conn.execute(
@@ -401,6 +406,8 @@ class Database:
             ("funding_rate_versions", "sample_time"),
             ("market_trade_versions", "provider_event_time"),
             ("trade_flow_aggregate_versions", "bucket_start"),
+            ("l2_snapshot_versions", "effective_at"),
+            ("l2_mutation_batches", "effective_at"),
         ):
             conn.execute(
                 text(
@@ -460,11 +467,20 @@ class Database:
             "raw_archive_manifests",
             "raw_archive_ranges",
             "raw_archive_record_mappings",
+            "raw_archive_compaction_sources",
+            "archive_retention_pin_versions",
             "stream_coverage_interval_versions",
             "stream_quality_events",
             "market_trade_identities",
             "market_trade_versions",
             "trade_flow_aggregate_versions",
+            "l2_snapshot_versions",
+            "l2_snapshot_levels",
+            "l2_mutation_batches",
+            "l2_mutations",
+            "book_validity_interval_versions",
+            "book_checkpoint_manifests",
+            "book_quality_event_links",
             "dataset_archive_refs",
         ):
             trigger_name = f"trg_reject_mutation_{table_name}"

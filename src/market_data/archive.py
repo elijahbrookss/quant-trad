@@ -530,16 +530,49 @@ def encode_spool_segment_to_parquet(
 ) -> EncodedRawArchive:
     """Encode a sealed segment deterministically as typed Parquet/ZSTD."""
 
+    if not segment.sealed_path.exists():
+        raise ValueError("market_archive_invalid: spool segment must be sealed")
+    return encode_raw_records_to_parquet(
+        tuple(segment.records()),
+        archive_segment_id=segment.spool_segment_id,
+        temporary_directory=temporary_directory,
+    )
+
+
+def encode_raw_records_to_parquet(
+    records: Iterable[RawStreamRecord],
+    *,
+    archive_segment_id: str,
+    temporary_directory: Path | None = None,
+) -> EncodedRawArchive:
+    """Encode one ordered logical raw range without changing record identity."""
+
     try:
         import pyarrow as pa
         import pyarrow.parquet as pq
     except ImportError as exc:  # pragma: no cover - project dependency guard
         raise RuntimeError("market_archive_requires_pyarrow") from exc
-    if not segment.sealed_path.exists():
-        raise ValueError("market_archive_invalid: spool segment must be sealed")
-    records = list(segment.records())
-    if not records:
+    rows = tuple(records)
+    segment_id = str(archive_segment_id or "").strip()
+    if not rows or not segment_id:
         raise ValueError("market_archive_invalid: no records")
+    scope = {
+        (
+            row.definition_id,
+            row.session_id,
+            row.connection_epoch,
+            row.provider,
+            row.venue,
+            row.provider_product_id,
+            row.requested_channel,
+        )
+        for row in rows
+    }
+    if len(scope) != 1:
+        raise ValueError("market_archive_invalid: records cross archive scope")
+    ordinals = [row.receive_ordinal for row in rows]
+    if ordinals != sorted(set(ordinals)):
+        raise ValueError("market_archive_invalid: records are not strictly ordered")
     schema = pa.schema(
         [
             pa.field("raw_record_id", pa.string(), nullable=False),
@@ -559,7 +592,7 @@ def encode_spool_segment_to_parquet(
         ],
         metadata={
             b"schema_version": RAW_ARCHIVE_SCHEMA_VERSION.encode("ascii"),
-            b"spool_segment_id": segment.spool_segment_id.encode("ascii"),
+            b"spool_segment_id": segment_id.encode("ascii"),
         },
     )
     table = pa.Table.from_pylist(
@@ -580,14 +613,14 @@ def encode_spool_segment_to_parquet(
                 "raw_frame": record.raw_frame,
                 "raw_frame_sha256": record.raw_frame_sha256,
             }
-            for record in records
+            for record in rows
         ],
         schema=schema,
     )
     temporary_root = Path(temporary_directory) if temporary_directory else Path(tempfile.gettempdir())
     temporary_root.mkdir(parents=True, exist_ok=True)
     descriptor, raw_path = tempfile.mkstemp(
-        prefix=f"{segment.spool_segment_id}.", suffix=".parquet", dir=temporary_root
+        prefix=f"{segment_id}.", suffix=".parquet", dir=temporary_root
     )
     os.close(descriptor)
     path = Path(raw_path)
@@ -604,7 +637,7 @@ def encode_spool_segment_to_parquet(
             os.fsync(handle.fileno())
         replayed = read_raw_archive_parquet(path)
         if [item.raw_record_id for item in replayed] != [
-            item.raw_record_id for item in records
+            item.raw_record_id for item in rows
         ]:
             raise RuntimeError("market_archive_encode_invalid: replay identity mismatch")
     except Exception:
@@ -615,23 +648,78 @@ def encode_spool_segment_to_parquet(
         _canonical_json_bytes(
             {
                 "schema_version": "market.raw_archive_content.v1",
+                "raw_record_ids": [record.raw_record_id for record in rows],
+                "raw_frame_sha256": [record.raw_frame_sha256 for record in rows],
+            }
+        )
+    ).hexdigest()
+    return EncodedRawArchive(
+        spool_segment_id=segment_id,
+        path=path,
+        sha256=_sha256_file(path),
+        content_fingerprint=content_fingerprint,
+        byte_count=path.stat().st_size,
+        record_count=len(rows),
+        first_receive_ordinal=rows[0].receive_ordinal,
+        last_receive_ordinal=rows[-1].receive_ordinal,
+        first_received_at=rows[0].received_at,
+        last_received_at=rows[-1].received_at,
+    )
+
+
+def publish_compacted_raw_archives(
+    source_paths: Iterable[Path],
+    *,
+    object_store: RawArchiveObjectStore,
+    temporary_directory: Path | None = None,
+) -> tuple[EncodedRawArchive, ArchiveObjectAcknowledgement, tuple[RawStreamRecord, ...]]:
+    """Compact two or more verified immutable objects into one immutable range."""
+
+    sources = tuple(Path(path) for path in source_paths)
+    if len(sources) < 2:
+        raise ValueError("market_archive_compaction_invalid: at least two sources required")
+    decoded = [tuple(read_raw_archive_parquet(path)) for path in sources]
+    if any(not rows for rows in decoded):
+        raise ValueError("market_archive_compaction_invalid: empty source object")
+    decoded.sort(key=lambda rows: rows[0].receive_ordinal)
+    for previous, current in zip(decoded, decoded[1:]):
+        if previous[-1].receive_ordinal + 1 != current[0].receive_ordinal:
+            raise ValueError(
+                "market_archive_compaction_invalid: source ranges are not contiguous"
+            )
+    records = tuple(record for source in decoded for record in source)
+    compact_identity = hashlib.sha256(
+        _canonical_json_bytes(
+            {
+                "schema_version": "market.raw_archive_compaction_identity.v1",
                 "raw_record_ids": [record.raw_record_id for record in records],
                 "raw_frame_sha256": [record.raw_frame_sha256 for record in records],
             }
         )
     ).hexdigest()
-    return EncodedRawArchive(
-        spool_segment_id=segment.spool_segment_id,
-        path=path,
-        sha256=_sha256_file(path),
-        content_fingerprint=content_fingerprint,
-        byte_count=path.stat().st_size,
-        record_count=len(records),
-        first_receive_ordinal=records[0].receive_ordinal,
-        last_receive_ordinal=records[-1].receive_ordinal,
-        first_received_at=records[0].received_at,
-        last_received_at=records[-1].received_at,
+    archive_segment_id = f"compact_{compact_identity}"
+    encoded = encode_raw_records_to_parquet(
+        records,
+        archive_segment_id=archive_segment_id,
+        temporary_directory=temporary_directory,
     )
+    key = archive_object_key(
+        record=records[0],
+        spool_segment_id=archive_segment_id,
+    )
+    try:
+        acknowledgement = object_store.put_verified(
+            object_key=key,
+            source_path=encoded.path,
+            expected_sha256=encoded.sha256,
+        )
+    finally:
+        if encoded.path.exists():
+            encoded.path.unlink()
+    replayed = tuple(read_raw_archive_parquet(object_store.local_path(key)))
+    if replayed != records:
+        raise RuntimeError("market_archive_compaction_invalid: replacement replay differs")
+    return encoded, acknowledgement, records
 
 
 def read_raw_archive_parquet(path: Path) -> list[RawStreamRecord]:
@@ -732,7 +820,9 @@ __all__ = [
     "SpoolRecoveryEvidence",
     "archive_object_key",
     "discover_spool_segments",
+    "encode_raw_records_to_parquet",
     "encode_spool_segment_to_parquet",
+    "publish_compacted_raw_archives",
     "publish_spool_archive",
     "read_raw_archive_parquet",
     "require_spool_capacity",

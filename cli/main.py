@@ -1496,6 +1496,58 @@ def _cmd_data_market_structure_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_data_market_structure_replay_book(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/sessions/{quote(args.session_id, safe='')}/replay-book",
+            payload={"storage_root": args.storage_root},
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_compact(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/sessions/{quote(args.session_id, safe='')}/compact",
+            payload={
+                "source_manifest_ids": args.manifest_id,
+                "storage_root": args.storage_root,
+                "owner_id": args.owner_id,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_retention_pin(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/archive-retention/{quote(args.target_kind, safe='')}/{quote(args.target_id, safe='')}/pin",
+            payload={
+                "owner_kind": args.owner_kind,
+                "owner_id": args.owner_id,
+                "active": not args.release,
+                "reason": args.reason,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_retention_status(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/market-data/market-structure/archive-retention/{quote(args.target_kind, safe='')}/{quote(args.target_id, safe='')}",
+        )
+    )
+    return 0
+
+
 def _cmd_data_market_structure_reconcile_recent(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
@@ -3400,7 +3452,7 @@ def build_parser() -> argparse.ArgumentParser:
     data_market_structure_status.set_defaults(func=_cmd_data_market_structure_status)
     data_market_structure_capture = data_market_structure_sub.add_parser(
         "capture",
-        help="Run one explicitly bounded non-production market-trade capture.",
+        help="Run one explicitly bounded non-production trade or Level 2 capture.",
     )
     data_market_structure_capture.add_argument("definition_id")
     data_market_structure_capture.add_argument("--duration", type=float, default=60.0)
@@ -3414,6 +3466,56 @@ def build_parser() -> argparse.ArgumentParser:
     data_market_structure_replay.add_argument("manifest_id")
     data_market_structure_replay.add_argument("--storage-root")
     data_market_structure_replay.set_defaults(func=_cmd_data_market_structure_replay)
+    data_market_structure_replay_book = data_market_structure_sub.add_parser(
+        "replay-book",
+        help="Verify raw-to-book and checkpoint-plus-delta replay for one Level 2 session.",
+    )
+    data_market_structure_replay_book.add_argument("definition_id")
+    data_market_structure_replay_book.add_argument("session_id")
+    data_market_structure_replay_book.add_argument("--storage-root")
+    data_market_structure_replay_book.set_defaults(
+        func=_cmd_data_market_structure_replay_book
+    )
+    data_market_structure_compact = data_market_structure_sub.add_parser(
+        "compact",
+        help="Compact an explicit contiguous active raw-manifest set without deleting sources.",
+    )
+    data_market_structure_compact.add_argument("definition_id")
+    data_market_structure_compact.add_argument("session_id")
+    data_market_structure_compact.add_argument(
+        "--manifest-id", action="append", required=True
+    )
+    data_market_structure_compact.add_argument("--storage-root")
+    data_market_structure_compact.add_argument("--owner-id")
+    data_market_structure_compact.set_defaults(
+        func=_cmd_data_market_structure_compact
+    )
+    data_market_structure_retention_pin = data_market_structure_sub.add_parser(
+        "retention-pin",
+        help="Append an explicit archive/checkpoint retention pin or release revision.",
+    )
+    data_market_structure_retention_pin.add_argument(
+        "target_kind", choices=("raw_manifest", "book_checkpoint")
+    )
+    data_market_structure_retention_pin.add_argument("target_id")
+    data_market_structure_retention_pin.add_argument("--owner-kind", required=True)
+    data_market_structure_retention_pin.add_argument("--owner-id", required=True)
+    data_market_structure_retention_pin.add_argument("--reason", required=True)
+    data_market_structure_retention_pin.add_argument("--release", action="store_true")
+    data_market_structure_retention_pin.set_defaults(
+        func=_cmd_data_market_structure_retention_pin
+    )
+    data_market_structure_retention_status = data_market_structure_sub.add_parser(
+        "retention-status",
+        help="Inspect dataset/explicit pins and ordinary-retention eligibility.",
+    )
+    data_market_structure_retention_status.add_argument(
+        "target_kind", choices=("raw_manifest", "book_checkpoint")
+    )
+    data_market_structure_retention_status.add_argument("target_id")
+    data_market_structure_retention_status.set_defaults(
+        func=_cmd_data_market_structure_retention_status
+    )
     data_market_structure_reconcile = data_market_structure_sub.add_parser(
         "reconcile-recent",
         help="Compare a bounded recent Coinbase REST window with canonical trade IDs.",
