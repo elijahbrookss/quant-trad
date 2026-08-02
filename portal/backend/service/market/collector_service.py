@@ -9,12 +9,18 @@ from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable, Mapping, Optional
 
-from data_providers.facts import ProviderOpenInterestSnapshot
+from data_providers.facts import (
+    ProviderFundingRateSnapshot,
+    ProviderOpenInterestSnapshot,
+)
 from data_providers.providers.factory import get_provider
 from data_providers.registry import FeatureAuth, feature_contract
 from market_data.contracts import (
+    FUNDING_RATE_FACT_TYPE,
+    FUNDING_RATE_FACT_VERSION,
     OPEN_INTEREST_FACT_TYPE,
     OPEN_INTEREST_FACT_VERSION,
+    FundingRateFact,
     MarketDataRequirement,
     OpenInterestFact,
     SourceIdentity,
@@ -33,6 +39,7 @@ from . import instrument_service
 
 
 COINBASE_OI_ADAPTER_VERSION = "coinbase_advanced_trade.open_interest.public_poll.v1"
+COINBASE_FUNDING_ADAPTER_VERSION = "coinbase_advanced_trade.funding_rate.public_poll.v1"
 COLLECTOR_DEFINITION_VERSION = "market_collection_definition.v1"
 COLLECTOR_RESULT_VERSION = "market_collection_result.v1"
 
@@ -89,7 +96,73 @@ class MarketDataCollectorService:
         minimum_spacing_seconds: float = 1.0,
         enabled: bool = False,
     ) -> dict[str, Any]:
-        """Register one explicit venue product without symbol-role inference."""
+        return self._create_coinbase_definition(
+            instrument_id=instrument_id,
+            provider_product_id=provider_product_id,
+            fact_type=OPEN_INTEREST_FACT_TYPE,
+            contract_version=OPEN_INTEREST_FACT_VERSION,
+            feature_id="open_interest_current",
+            adapter_version=COINBASE_OI_ADAPTER_VERSION,
+            unit="contracts",
+            poll_interval_seconds=poll_interval_seconds,
+            max_attempts=max_attempts,
+            minimum_spacing_seconds=minimum_spacing_seconds,
+            enabled=enabled,
+            extra_config={},
+            lineage={
+                "provider_event_time_available": False,
+            },
+        )
+
+    def create_coinbase_funding_rate_definition(
+        self,
+        *,
+        instrument_id: str,
+        provider_product_id: str,
+        poll_interval_seconds: int = 60,
+        max_attempts: int = 3,
+        minimum_spacing_seconds: float = 1.0,
+        enabled: bool = False,
+    ) -> dict[str, Any]:
+        return self._create_coinbase_definition(
+            instrument_id=instrument_id,
+            provider_product_id=provider_product_id,
+            fact_type=FUNDING_RATE_FACT_TYPE,
+            contract_version=FUNDING_RATE_FACT_VERSION,
+            feature_id="funding_current",
+            adapter_version=COINBASE_FUNDING_ADAPTER_VERSION,
+            unit="fraction",
+            poll_interval_seconds=poll_interval_seconds,
+            max_attempts=max_attempts,
+            minimum_spacing_seconds=minimum_spacing_seconds,
+            enabled=enabled,
+            extra_config={
+                "funding_time_semantics": "provider_reported_unspecified",
+            },
+            lineage={
+                "provider_funding_time_available": True,
+                "provider_funding_time_semantics": "unspecified",
+            },
+        )
+
+    def _create_coinbase_definition(
+        self,
+        *,
+        instrument_id: str,
+        provider_product_id: str,
+        fact_type: str,
+        contract_version: str,
+        feature_id: str,
+        adapter_version: str,
+        unit: str,
+        poll_interval_seconds: int,
+        max_attempts: int,
+        minimum_spacing_seconds: float,
+        enabled: bool,
+        extra_config: Mapping[str, Any],
+        lineage: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Register one explicit Coinbase product and implemented fact handler."""
 
         instrument_id = str(instrument_id or "").strip()
         product_id = str(provider_product_id or "").strip().upper()
@@ -112,28 +185,33 @@ class MarketDataCollectorService:
                 "market_collection_definition_invalid: provider spacing is outside poll interval"
             )
         instrument = instrument_service.get_instrument_record(instrument_id)
-        capability = feature_contract(
-            "COINBASE", "COINBASE_DIRECT", "open_interest_current"
-        )
+        capability = feature_contract("COINBASE", "COINBASE_DIRECT", feature_id)
         if capability.auth != FeatureAuth.PUBLIC:
             raise RuntimeError(
-                "provider_feature_contract_invalid: Coinbase open-interest "
-                "collector requires declared public access"
+                "provider_feature_contract_invalid: Coinbase collector "
+                f"requires declared public access feature={feature_id}"
             )
 
         provider_id = str(instrument.get("datasource") or "").strip().upper()
         venue_id = str(instrument.get("exchange") or "").strip().upper()
         if provider_id != "COINBASE" or venue_id != "COINBASE_DIRECT":
             raise ValueError(
-                "market_collection_definition_invalid: Coinbase OI requires a "
+                "market_collection_definition_invalid: Coinbase market facts require a "
                 "COINBASE/COINBASE_DIRECT canonical instrument"
+            )
+        if fact_type == FUNDING_RATE_FACT_TYPE and not bool(
+            instrument.get("has_funding")
+        ):
+            raise ValueError(
+                "market_collection_definition_invalid: funding-rate collection "
+                f"requires has_funding instrument_id={instrument_id}"
             )
 
         source = SourceIdentity(
             provider="COINBASE",
             venue="COINBASE_DIRECT",
             source_kind="poll_api",
-            adapter_version=COINBASE_OI_ADAPTER_VERSION,
+            adapter_version=adapter_version,
         )
         source_id = self.store.register_source(
             source,
@@ -141,21 +219,21 @@ class MarketDataCollectorService:
                 "schema_version": "market_source_lineage.v1",
                 "acquisition": "scheduled_poll",
                 "provider_contract": "coinbase_advanced_trade_get_public_product",
-                "provider_event_time_available": False,
+                **dict(lineage),
             },
         )
         series_id = self.store.register_series(
             instrument_id=instrument_id,
-            fact_type=OPEN_INTEREST_FACT_TYPE,
+            fact_type=fact_type,
             timeframe_seconds=None,
-            contract_version=OPEN_INTEREST_FACT_VERSION,
+            contract_version=contract_version,
         )
         identity = {
             "schema_version": COLLECTOR_DEFINITION_VERSION,
             "source_identity_key": source.identity_key,
             "instrument_id": instrument_id,
-            "fact_type": OPEN_INTEREST_FACT_TYPE,
-            "contract_version": OPEN_INTEREST_FACT_VERSION,
+            "fact_type": fact_type,
+            "contract_version": contract_version,
             "provider_product_id": product_id,
         }
         definition_id = f"mcd_{_stable_hash(identity)[:32]}"
@@ -166,9 +244,10 @@ class MarketDataCollectorService:
             **identity,
             "minimum_spacing_seconds": spacing,
             "retry_base_seconds": 2.0,
-            "unit": "contracts",
+            "unit": unit,
             "sample_time_method": "collector_schedule",
             "known_at_method": "platform_acceptance",
+            **dict(extra_config),
         }
         row = self.collection_repo.upsert_definition(
             definition_id=definition_id,
@@ -234,17 +313,37 @@ class MarketDataCollectorService:
             },
         )
 
-    def collect(self, claim: CollectionClaim, *, lease_seconds: float = 90.0) -> dict[str, Any]:
+    def collect(
+        self, claim: CollectionClaim, *, lease_seconds: float = 90.0
+    ) -> dict[str, Any]:
         """Execute a claimed poll; all accepted writes carry the claim fence."""
 
-        if (
-            claim.provider.upper() != "COINBASE"
-            or claim.venue.upper() != "COINBASE_DIRECT"
-            or claim.fact_type != OPEN_INTEREST_FACT_TYPE
-            or claim.contract_version != OPEN_INTEREST_FACT_VERSION
-        ):
+        handlers = {
+            (
+                "COINBASE",
+                "COINBASE_DIRECT",
+                OPEN_INTEREST_FACT_TYPE,
+                OPEN_INTEREST_FACT_VERSION,
+            ): self._collect_open_interest,
+            (
+                "COINBASE",
+                "COINBASE_DIRECT",
+                FUNDING_RATE_FACT_TYPE,
+                FUNDING_RATE_FACT_VERSION,
+            ): self._collect_funding_rate,
+        }
+        handler_key = (
+            claim.provider.upper(),
+            claim.venue.upper(),
+            claim.fact_type,
+            claim.contract_version,
+        )
+        handler = handlers.get(handler_key)
+        if handler is None:
             raise RuntimeError(
-                "market_collection_handler_missing: no handler for claimed definition"
+                "market_collection_handler_missing: "
+                f"provider={handler_key[0]} venue={handler_key[1]} "
+                f"fact_type={handler_key[2]} contract_version={handler_key[3]}"
             )
         self._record_missed_schedule(claim)
         try:
@@ -259,61 +358,7 @@ class MarketDataCollectorService:
                 self.sleeper(delay)
             self.collection_repo.heartbeat(claim, lease_seconds=lease_seconds)
             provider = self.provider_factory(claim.provider, venue=claim.venue)
-            fetch = getattr(provider, "fetch_open_interest", None)
-            if not callable(fetch):
-                raise RuntimeError(
-                    "market_collection_provider_capability_missing: fetch_open_interest"
-                )
-            snapshot = fetch(str(claim.config["provider_product_id"]))
-            if not isinstance(snapshot, ProviderOpenInterestSnapshot):
-                raise RuntimeError(
-                    "market_collection_provider_contract_invalid: expected normalized OI snapshot"
-                )
-            accepted_at = max(
-                self.clock().astimezone(UTC),
-                snapshot.received_at,
-                claim.scheduled_for,
-            )
-            source_published_at = snapshot.provider_event_at
-            if source_published_at is not None:
-                accepted_at = max(accepted_at, source_published_at)
-            fact = OpenInterestFact(
-                sample_time=claim.scheduled_for,
-                sample_time_method="collector_schedule",
-                value=snapshot.value,
-                unit=snapshot.unit,
-                source_published_at=source_published_at,
-                received_at=snapshot.received_at,
-                accepted_at=accepted_at,
-                known_at=accepted_at,
-                known_at_method="platform_acceptance",
-            )
-            self.collection_repo.heartbeat(claim, lease_seconds=lease_seconds)
-            outcome = self.store.ingest_open_interest(
-                series_id=claim.series_id,
-                source_id=claim.source_id,
-                facts=[fact],
-                request={
-                    "schema_version": "market_ingestion_request.v1",
-                    "operation": "scheduled_fact_poll",
-                    "definition_id": claim.definition_id,
-                    "attempt_id": claim.attempt_id,
-                    "scheduled_for": claim.scheduled_for.isoformat(),
-                    "provider_product_id": snapshot.provider_product_id,
-                },
-                provenance={
-                    "schema_version": "market_fact_provenance.v1",
-                    "response_hash": snapshot.response_hash,
-                    "source_path": snapshot.source_path,
-                    "provider_product_id": snapshot.provider_product_id,
-                    "provider_event_time_available": snapshot.provider_event_at is not None,
-                    "provider_metadata": dict(snapshot.metadata),
-                },
-                source_revision=snapshot.response_hash,
-                ingestion_run_id=claim.attempt_id,
-                allow_corrections=False,
-                collection_fence=claim.fence(),
-            )
+            fact, outcome, snapshot = handler(claim, provider, lease_seconds)
             evidence = {
                 "schema_version": COLLECTOR_RESULT_VERSION,
                 "response_hash": snapshot.response_hash,
@@ -364,6 +409,127 @@ class MarketDataCollectorService:
                 )
             raise
 
+    def _collect_open_interest(
+        self, claim: CollectionClaim, provider: Any, lease_seconds: float
+    ) -> tuple[OpenInterestFact, Any, ProviderOpenInterestSnapshot]:
+        fetch = getattr(provider, "fetch_open_interest", None)
+        if not callable(fetch):
+            raise RuntimeError(
+                "market_collection_provider_capability_missing: fetch_open_interest"
+            )
+        snapshot = fetch(str(claim.config["provider_product_id"]))
+        if not isinstance(snapshot, ProviderOpenInterestSnapshot):
+            raise RuntimeError(
+                "market_collection_provider_contract_invalid: "
+                "expected normalized OI snapshot"
+            )
+        accepted_at = max(
+            self.clock().astimezone(UTC),
+            snapshot.received_at,
+            claim.scheduled_for,
+        )
+        source_published_at = snapshot.provider_event_at
+        if source_published_at is not None:
+            accepted_at = max(accepted_at, source_published_at)
+        fact = OpenInterestFact(
+            sample_time=claim.scheduled_for,
+            sample_time_method="collector_schedule",
+            value=snapshot.value,
+            unit=snapshot.unit,
+            source_published_at=source_published_at,
+            received_at=snapshot.received_at,
+            accepted_at=accepted_at,
+            known_at=accepted_at,
+            known_at_method="platform_acceptance",
+        )
+        self.collection_repo.heartbeat(claim, lease_seconds=lease_seconds)
+        outcome = self.store.ingest_open_interest(
+            series_id=claim.series_id,
+            source_id=claim.source_id,
+            facts=[fact],
+            request=self._ingestion_request(claim, snapshot.provider_product_id),
+            provenance={
+                "schema_version": "market_fact_provenance.v1",
+                "response_hash": snapshot.response_hash,
+                "source_path": snapshot.source_path,
+                "provider_product_id": snapshot.provider_product_id,
+                "provider_event_time_available": snapshot.provider_event_at is not None,
+                "provider_metadata": dict(snapshot.metadata),
+            },
+            source_revision=snapshot.response_hash,
+            ingestion_run_id=claim.attempt_id,
+            allow_corrections=False,
+            collection_fence=claim.fence(),
+        )
+        return fact, outcome, snapshot
+
+    def _collect_funding_rate(
+        self, claim: CollectionClaim, provider: Any, lease_seconds: float
+    ) -> tuple[FundingRateFact, Any, ProviderFundingRateSnapshot]:
+        fetch = getattr(provider, "fetch_funding_rate", None)
+        if not callable(fetch):
+            raise RuntimeError(
+                "market_collection_provider_capability_missing: fetch_funding_rate"
+            )
+        snapshot = fetch(str(claim.config["provider_product_id"]))
+        if not isinstance(snapshot, ProviderFundingRateSnapshot):
+            raise RuntimeError(
+                "market_collection_provider_contract_invalid: "
+                "expected normalized funding-rate snapshot"
+            )
+        accepted_at = max(
+            self.clock().astimezone(UTC),
+            snapshot.received_at,
+            claim.scheduled_for,
+        )
+        fact = FundingRateFact(
+            sample_time=claim.scheduled_for,
+            sample_time_method="collector_schedule",
+            rate=snapshot.rate,
+            funding_time=snapshot.funding_time,
+            interval_seconds=snapshot.interval_seconds,
+            unit=snapshot.unit,
+            source_published_at=None,
+            received_at=snapshot.received_at,
+            accepted_at=accepted_at,
+            known_at=accepted_at,
+            known_at_method="platform_acceptance",
+        )
+        self.collection_repo.heartbeat(claim, lease_seconds=lease_seconds)
+        outcome = self.store.ingest_funding_rates(
+            series_id=claim.series_id,
+            source_id=claim.source_id,
+            facts=[fact],
+            request=self._ingestion_request(claim, snapshot.provider_product_id),
+            provenance={
+                "schema_version": "market_fact_provenance.v1",
+                "response_hash": snapshot.response_hash,
+                "source_path": snapshot.source_path,
+                "provider_product_id": snapshot.provider_product_id,
+                "provider_funding_time": snapshot.funding_time.isoformat(),
+                "provider_funding_time_semantics": "provider_reported_unspecified",
+                "provider_metadata": dict(snapshot.metadata),
+            },
+            source_revision=snapshot.response_hash,
+            ingestion_run_id=claim.attempt_id,
+            allow_corrections=False,
+            collection_fence=claim.fence(),
+        )
+        return fact, outcome, snapshot
+
+    @staticmethod
+    def _ingestion_request(
+        claim: CollectionClaim, provider_product_id: str
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": "market_ingestion_request.v1",
+            "operation": "scheduled_fact_poll",
+            "definition_id": claim.definition_id,
+            "attempt_id": claim.attempt_id,
+            "scheduled_for": claim.scheduled_for.isoformat(),
+            "provider_product_id": provider_product_id,
+        }
+
     def latest_open_interest(
         self,
         *,
@@ -374,10 +540,54 @@ class MarketDataCollectorService:
     ) -> Any:
         """Read causally visible OI without provider fallback for paper/runtime use."""
 
-        requirement = MarketDataRequirement(
+        return self._latest_fact(
             key="open_interest",
+            instrument_id=instrument_id,
             fact_type=OPEN_INTEREST_FACT_TYPE,
             contract_version=OPEN_INTEREST_FACT_VERSION,
+            read_records=self.store.read_open_interest,
+            decision_time=decision_time,
+            max_staleness_seconds=max_staleness_seconds,
+            required=required,
+        )
+
+    def latest_funding_rate(
+        self,
+        *,
+        instrument_id: str,
+        decision_time: datetime,
+        max_staleness_seconds: int,
+        required: bool = True,
+    ) -> Any:
+        """Read causally visible funding without provider fallback."""
+
+        return self._latest_fact(
+            key="funding_rate",
+            instrument_id=instrument_id,
+            fact_type=FUNDING_RATE_FACT_TYPE,
+            contract_version=FUNDING_RATE_FACT_VERSION,
+            read_records=self.store.read_funding_rates,
+            decision_time=decision_time,
+            max_staleness_seconds=max_staleness_seconds,
+            required=required,
+        )
+
+    def _latest_fact(
+        self,
+        *,
+        key: str,
+        instrument_id: str,
+        fact_type: str,
+        contract_version: str,
+        read_records: Callable[..., list[Any]],
+        decision_time: datetime,
+        max_staleness_seconds: int,
+        required: bool,
+    ) -> Any:
+        requirement = MarketDataRequirement(
+            key=key,
+            fact_type=fact_type,
+            contract_version=contract_version,
             instrument_role="explicit",
             instrument_ref=instrument_id,
             alignment="latest_known",
@@ -387,9 +597,9 @@ class MarketDataCollectorService:
         try:
             series_id = self.store.resolve_series_id(
                 instrument_id=instrument_id,
-                fact_type=OPEN_INTEREST_FACT_TYPE,
+                fact_type=fact_type,
                 timeframe_seconds=None,
-                contract_version=OPEN_INTEREST_FACT_VERSION,
+                contract_version=contract_version,
             )
         except ValueError as exc:
             unavailable = UnavailableMarketData(
@@ -409,7 +619,7 @@ class MarketDataCollectorService:
                 ) from exc
             return unavailable
         decision = decision_time.astimezone(UTC)
-        records = self.store.read_open_interest(
+        records = read_records(
             series_id=series_id,
             start=decision - timedelta(seconds=max_staleness_seconds),
             end=decision + timedelta(microseconds=1),
@@ -444,6 +654,7 @@ market_data_collector = MarketDataCollectorService()
 
 
 __all__ = [
+    "COINBASE_FUNDING_ADAPTER_VERSION",
     "COINBASE_OI_ADAPTER_VERSION",
     "MarketDataCollectorService",
     "market_data_collector",

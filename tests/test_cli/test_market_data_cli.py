@@ -275,3 +275,86 @@ def test_data_open_interest_latest_declares_decision_time_and_staleness(
             "required": ["false"],
         },
     }
+
+
+def test_data_collectors_create_coinbase_funding_is_explicit(
+    monkeypatch,
+) -> None:
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        observed.update(
+            method=request.get_method(),
+            path=urllib.parse.urlparse(request.full_url).path,
+            body=json.loads(request.data.decode("utf-8")),
+        )
+        return _Response({"definition": {"id": "mcd_funding", "enabled": True}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "data",
+            "collectors",
+            "create-coinbase-funding",
+            "--instrument-id",
+            "coinbase-eth-future",
+            "--provider-product-id",
+            "ETP-20DEC30-CDE",
+            "--enabled",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed["body"] == {
+        "instrument_id": "coinbase-eth-future",
+        "provider_product_id": "ETP-20DEC30-CDE",
+        "fact_type": "derivatives.funding_rate",
+        "poll_interval_seconds": 60,
+        "max_attempts": 3,
+        "minimum_spacing_seconds": 1.0,
+        "enabled": True,
+    }
+
+
+def test_data_funding_rate_latest_declares_decision_time_and_staleness(
+    monkeypatch,
+) -> None:
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        parsed = urllib.parse.urlparse(request.full_url)
+        observed.update(
+            method=request.get_method(),
+            path=parsed.path,
+            query=urllib.parse.parse_qs(parsed.query),
+        )
+        return _Response({"available": False, "reason": "stale"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "data",
+            "funding-rate-latest",
+            "--instrument-id",
+            "coinbase-eth-future",
+            "--decision-time",
+            "2026-08-01T18:00:00Z",
+            "--max-staleness-seconds",
+            "120",
+            "--optional",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed == {
+        "method": "GET",
+        "path": "/api/market-data/funding-rate/latest",
+        "query": {
+            "instrument_id": ["coinbase-eth-future"],
+            "decision_time": ["2026-08-01T18:00:00Z"],
+            "max_staleness_seconds": ["120"],
+            "required": ["false"],
+        },
+    }

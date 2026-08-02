@@ -8,7 +8,12 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from market_data.contracts import OpenInterestRecord
+from market_data.contracts import (
+    FUNDING_RATE_FACT_TYPE,
+    OPEN_INTEREST_FACT_TYPE,
+    FundingRateRecord,
+    OpenInterestRecord,
+)
 from market_data.requirements import UnavailableMarketData
 
 from ..service.market.collector_service import market_data_collector
@@ -27,7 +32,9 @@ def _time(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _record_payload(record: OpenInterestRecord) -> dict[str, Any]:
+def _record_payload(
+    record: OpenInterestRecord | FundingRateRecord,
+) -> dict[str, Any]:
     fact = record.fact.to_dict()
     for key, value in tuple(fact.items()):
         if isinstance(value, datetime):
@@ -53,7 +60,7 @@ def _record_payload(record: OpenInterestRecord) -> dict[str, Any]:
 class CollectorCreateRequest(BaseModel):
     instrument_id: str
     provider_product_id: str
-    fact_type: str = "derivatives.open_interest"
+    fact_type: str = OPEN_INTEREST_FACT_TYPE
     poll_interval_seconds: int = 60
     max_attempts: int = 3
     minimum_spacing_seconds: float = 1.0
@@ -66,16 +73,25 @@ class CollectorToggleRequest(BaseModel):
 
 @router.post("/collectors")
 def create_collector(req: CollectorCreateRequest) -> dict[str, Any]:
-    if req.fact_type != "derivatives.open_interest":
+    creators = {
+        OPEN_INTEREST_FACT_TYPE: (
+            market_data_collector.create_coinbase_open_interest_definition
+        ),
+        FUNDING_RATE_FACT_TYPE: (
+            market_data_collector.create_coinbase_funding_rate_definition
+        ),
+    }
+    creator = creators.get(req.fact_type)
+    if creator is None:
         raise HTTPException(
             status_code=400,
             detail=(
-                "market_collection_handler_missing: only "
-                "derivatives.open_interest is implemented"
+                "market_collection_handler_missing: supported fact types are "
+                f"{', '.join(sorted(creators))}"
             ),
         )
     try:
-        definition = market_data_collector.create_coinbase_open_interest_definition(
+        definition = creator(
             instrument_id=req.instrument_id,
             provider_product_id=req.provider_product_id,
             poll_interval_seconds=req.poll_interval_seconds,
@@ -143,6 +159,27 @@ def latest_open_interest(
 ) -> dict[str, Any]:
     try:
         result = market_data_collector.latest_open_interest(
+            instrument_id=instrument_id,
+            decision_time=_time(decision_time),
+            max_staleness_seconds=max_staleness_seconds,
+            required=required,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if isinstance(result, UnavailableMarketData):
+        return result.to_dict()
+    return _record_payload(result)
+
+
+@router.get("/funding-rate/latest")
+def latest_funding_rate(
+    instrument_id: str,
+    decision_time: str,
+    max_staleness_seconds: int,
+    required: bool = True,
+) -> dict[str, Any]:
+    try:
+        result = market_data_collector.latest_funding_rate(
             instrument_id=instrument_id,
             decision_time=_time(decision_time),
             max_staleness_seconds=max_staleness_seconds,

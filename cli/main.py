@@ -1313,7 +1313,7 @@ def _cmd_data_collectors_create(args: argparse.Namespace) -> int:
     payload = {
         "instrument_id": args.instrument_id,
         "provider_product_id": args.provider_product_id,
-        "fact_type": "derivatives.open_interest",
+        "fact_type": args.fact_type,
         "poll_interval_seconds": args.poll_interval_seconds,
         "max_attempts": args.max_attempts,
         "minimum_spacing_seconds": args.minimum_spacing_seconds,
@@ -1365,6 +1365,22 @@ def _cmd_data_open_interest_latest(args: argparse.Namespace) -> int:
         _client(args).request_json(
             "GET",
             "/api/market-data/open-interest/latest",
+            params={
+                "instrument_id": args.instrument_id,
+                "decision_time": args.decision_time,
+                "max_staleness_seconds": args.max_staleness_seconds,
+                "required": not bool(args.optional),
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_funding_rate_latest(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/market-data/funding-rate/latest",
             params={
                 "instrument_id": args.instrument_id,
                 "decision_time": args.decision_time,
@@ -3113,7 +3129,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--minimum-spacing-seconds", type=float, default=1.0
     )
     data_collectors_create.add_argument("--enabled", action="store_true")
-    data_collectors_create.set_defaults(func=_cmd_data_collectors_create)
+    data_collectors_create.set_defaults(
+        func=_cmd_data_collectors_create,
+        fact_type="derivatives.open_interest",
+    )
+    data_collectors_funding = data_collectors_sub.add_parser(
+        "create-coinbase-funding",
+        help="Create or update a Coinbase venue-specific funding-rate poll.",
+    )
+    data_collectors_funding.add_argument("--instrument-id", required=True)
+    data_collectors_funding.add_argument("--provider-product-id", required=True)
+    data_collectors_funding.add_argument(
+        "--poll-interval-seconds", type=int, default=60
+    )
+    data_collectors_funding.add_argument("--max-attempts", type=int, default=3)
+    data_collectors_funding.add_argument(
+        "--minimum-spacing-seconds", type=float, default=1.0
+    )
+    data_collectors_funding.add_argument("--enabled", action="store_true")
+    data_collectors_funding.set_defaults(
+        func=_cmd_data_collectors_create,
+        fact_type="derivatives.funding_rate",
+    )
     data_collectors_list = data_collectors_sub.add_parser(
         "list", help="Inspect definitions, schedules, leases, and failures."
     )
@@ -3141,6 +3178,17 @@ def build_parser() -> argparse.ArgumentParser:
     data_oi_latest.add_argument("--max-staleness-seconds", type=int, required=True)
     data_oi_latest.add_argument("--optional", action="store_true")
     data_oi_latest.set_defaults(func=_cmd_data_open_interest_latest)
+    data_funding_latest = data_sub.add_parser(
+        "funding-rate-latest",
+        help="Read latest causally known stored funding without provider fallback.",
+    )
+    data_funding_latest.add_argument("--instrument-id", required=True)
+    data_funding_latest.add_argument("--decision-time", required=True)
+    data_funding_latest.add_argument(
+        "--max-staleness-seconds", type=int, required=True
+    )
+    data_funding_latest.add_argument("--optional", action="store_true")
+    data_funding_latest.set_defaults(func=_cmd_data_funding_rate_latest)
 
     research = subparsers.add_parser("research", help="Research memory and lightweight historical checks.")
     research_sub = research.add_subparsers(dest="research_command", required=True)

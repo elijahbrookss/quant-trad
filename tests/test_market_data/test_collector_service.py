@@ -5,7 +5,14 @@ from typing import Any
 
 import pytest
 
-from data_providers.facts import ProviderOpenInterestSnapshot
+from data_providers.facts import (
+    ProviderFundingRateSnapshot,
+    ProviderOpenInterestSnapshot,
+)
+from market_data.contracts import (
+    FUNDING_RATE_FACT_TYPE,
+    FUNDING_RATE_FACT_VERSION,
+)
 from market_data.store import IngestionOutcome
 from portal.backend.service.market.collector_service import MarketDataCollectorService
 from portal.backend.service.storage.repos.market_collection import CollectionClaim
@@ -81,6 +88,17 @@ class _Store:
             corrected_count=0,
             noop_count=0,
             max_commit_seq=41,
+        )
+
+    def ingest_funding_rates(self, **kwargs: Any) -> IngestionOutcome:
+        self.ingestions.append(dict(kwargs))
+        return IngestionOutcome(
+            ingestion_run_id=str(kwargs["ingestion_run_id"]),
+            requested_count=1,
+            inserted_count=1,
+            corrected_count=0,
+            noop_count=0,
+            max_commit_seq=42,
         )
 
     def record_gap_evidence(self, **kwargs: Any) -> str:
@@ -172,3 +190,58 @@ def test_exhausted_collection_failure_records_explicit_quality_gap() -> None:
             },
         }
     ]
+
+
+def test_collection_accepts_signed_funding_without_inventing_event_time() -> None:
+    received_at = SCHEDULED + timedelta(seconds=2)
+    funding_time = SCHEDULED + timedelta(minutes=58)
+    snapshot = ProviderFundingRateSnapshot(
+        provider_product_id="ETP-20DEC30-CDE",
+        rate=-0.000017,
+        funding_time=funding_time,
+        interval_seconds=3600,
+        received_at=received_at,
+        response_hash="b" * 64,
+        source_path="future_product_details.funding_rate",
+        metadata={"contract_code": "ETP"},
+    )
+
+    class Provider:
+        def fetch_funding_rate(
+            self, product_id: str
+        ) -> ProviderFundingRateSnapshot:
+            assert product_id == "ETP-20DEC30-CDE"
+            return snapshot
+
+    repo = _CollectionRepo()
+    store = _Store()
+    claim = _claim(
+        fact_type=FUNDING_RATE_FACT_TYPE,
+        contract_version=FUNDING_RATE_FACT_VERSION,
+        config={
+            "provider_product_id": "ETP-20DEC30-CDE",
+            "minimum_spacing_seconds": 1.0,
+            "retry_base_seconds": 2.0,
+        },
+    )
+    service = MarketDataCollectorService(
+        collection_repo=repo,
+        store=store,
+        provider_factory=lambda provider, **kwargs: Provider(),
+        clock=lambda: SCHEDULED + timedelta(seconds=3),
+        sleeper=lambda _seconds: None,
+    )
+
+    result = service.collect(claim)
+
+    fact = store.ingestions[0]["facts"][0]
+    provenance = store.ingestions[0]["provenance"]
+    assert result["status"] == "succeeded"
+    assert fact.rate == -0.000017
+    assert fact.funding_time == funding_time
+    assert fact.source_published_at is None
+    assert fact.known_at == SCHEDULED + timedelta(seconds=3)
+    assert provenance["provider_funding_time_semantics"] == (
+        "provider_reported_unspecified"
+    )
+    assert store.ingestions[0]["collection_fence"] == claim.fence()
