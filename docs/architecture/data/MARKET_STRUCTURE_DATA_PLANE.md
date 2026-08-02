@@ -61,8 +61,10 @@ The design extends, and does not replace, the contracts in:
 
 ## Decision Summary
 
-1. Preserve every accepted WebSocket frame as immutable raw evidence before
-   publishing canonical trades, L2 mutations, or derived facts.
+1. Assign every accepted WebSocket frame a stable `raw_record_id` and
+   `spool_segment_id`, then fsync it before publishing canonical facts. Object
+   upload may follow, but immutable archive acknowledgement is mandatory before
+   the record is archive-complete or eligible for a frozen dataset.
 2. Use local block storage only as a bounded durable spool/WAL. Use object
    storage for compressed immutable archives. Keep typed hot query surfaces in
    the existing PostgreSQL/Timescale `market` schema under `PG_DSN`.
@@ -134,8 +136,8 @@ Status means:
 
 | Source/channel | Auth | Role/products | Snapshot/incremental and batching | Time and ordering | Duplicate/gap/recovery | Historical value | Retention value | Status |
 |---|---|---|---|---|---|---|---|---|
-| Advanced Trade WS `market_trades`, spot | public; authenticated CDP recommended | BTC-USD, ETH-USD, SOL-USD | initial `snapshot`, then 250 ms `update` batches containing one or more trades | trade `time`; envelope `timestamp`; per-product `sequence_num`; local receipt/acceptance becomes known-at | dedupe by provider trade ID; detect product sequence gaps; reconnect and snapshot; recent REST trades are validation only | no complete event-level backfill documented | irreplaceable event evidence | confirmed |
-| Advanced Trade WS `market_trades`, CDE futures | same surface/auth contract | BIP, ETP, SLP product IDs | documented schema is the same; product acceptance and futures size units require capture | same fields; maker-side semantics documented | same policy, subject to capture | no complete event-level backfill documented | irreplaceable event evidence | conditional |
+| Advanced Trade WS `market_trades`, spot | public; authenticated CDP recommended | BTC-USD, ETH-USD, SOL-USD | initial `snapshot`, then 250 ms `update` batches containing one or more trades | trade `time`; envelope `timestamp`; per-product `sequence_num`; local receipt/acceptance becomes known-at | dedupe by provider trade ID; typed coverage intervals detect gaps and reconnect; explicit zero requires the complete rule below; recent REST trades validate only | no complete event-level backfill documented | irreplaceable event evidence | confirmed |
+| Advanced Trade WS `market_trades`, CDE futures | same surface/auth contract | BIP, ETP, SLP product IDs | documented schema is the same; product acceptance and futures size units require capture | same fields; maker-side semantics documented | same typed coverage policy, subject to Phase 0 sequence/delivery-assurance capture | no complete event-level backfill documented | irreplaceable event evidence | conditional |
 | Advanced Trade WS `level2`, spot | public; authenticated CDP recommended | matching spot allowlist | `snapshot` then `update`; each event contains ordered absolute level quantities | update `event_time`; envelope `timestamp`; per-product `sequence_num`; receipt/known-at locally assigned | channel is documented as guaranteed, but still validate product sequence; reconnect requires new snapshot | none documented | irreplaceable book evidence | confirmed |
 | Advanced Trade WS `level2`, CDE futures | same surface/auth contract | BIP, ETP, SLP | same documented absolute-quantity contract; product acceptance/units require capture | same fields and local times | same validity contract; no assumed native retransmit | none documented | irreplaceable book evidence | conditional |
 | Advanced Trade WS `heartbeats` | public | every stream session | one-second heartbeat and counter | server current time, envelope time, receipt | counter discontinuity is transport evidence, not a product-book sequence substitute | none | session/gap evidence, low volume | confirmed |
@@ -188,20 +190,24 @@ the configured limits with a 3x observed-peak safety factor.
 ```text
 provider frame
   -> fenced stream session
+  -> assign raw_record_id + spool_segment_id
   -> fsynced local spool record
-  -> immutable raw object + manifest
-  -> deterministic parser/validator
-  -> typed canonical trade/L2/product facts + quality evidence
-  -> valid book reconstruction + checkpoints
-  -> typed hot BBO/depth/flow/relationship facts
+       -> deterministic parser/validator
+       -> typed canonical facts referencing raw_record_id (archive pending)
+       -> valid book/trade coverage + derived facts
+  -> sealed spool segment -> immutable object -> acknowledged manifest
+       -> append manifest-to-record mappings (archive complete)
   -> versioned causal normalization
-  -> immutable dataset manifest/materialization
+  -> immutable dataset manifest/materialization (acknowledged records only)
   -> research, backtest, or runtime resolver
 ```
 
 Authority is intentionally split:
 
-- raw object bytes are authoritative for what the WebSocket client received;
+- the fsynced spool record is durable pending receipt evidence; it is not the
+  long-term archive authority;
+- acknowledged raw object bytes plus manifest-to-record mappings are
+  authoritative archive evidence for what the WebSocket client received;
 - PostgreSQL typed revisions are authoritative for canonical query facts;
 - book reconstruction code plus version is authoritative for reproducible book
   state, never an in-memory map by itself;
@@ -226,6 +232,11 @@ Every persisted record declares these times where applicable:
 - `receive_ordinal`: monotonically increasing integer inside one connection
   epoch, assigned before spool append; it is an acquisition order, not venue
   event order;
+- `spool_segment_id`: UUID written to the segment header before its first
+  record and preserved through recovery, upload, and compaction lineage;
+- `raw_record_id`: deterministic UUIDv5 over stream definition, session,
+  connection epoch, receive ordinal, and exact raw-frame SHA-256; assigned
+  before parsing and unchanged by upload or compaction;
 - `fact_commit_seq`: the existing database-wide ordering of admitted canonical
   revisions.
 
@@ -245,9 +256,10 @@ explicit nulls, and sorted field/level order as specified by a contract version.
 - Materially different fact families have typed physical tables.
 - Append-only tables receive immutability triggers. Mutable rows are restricted
   to operator configuration, leases, and disposable projections.
-- `source_id`, `series_id`, `ingestion_run_id`, `raw_archive_manifest_id`,
+- `source_id`, `series_id`, `ingestion_run_id`, `raw_record_id`,
   `contract_version`, `provenance_hash`, and relevant quality references are
-  present on canonical facts.
+  present on canonical facts. Canonical facts do not require or later acquire a
+  manifest ID.
 - A provider message hash is SHA-256 of the exact raw frame bytes. A canonical
   material hash is independent of receipt/provenance/quality.
 - Timescale hypertables partition high-volume facts by effective time; ordinary
@@ -262,6 +274,8 @@ Ownership and foreign-key direction is fixed:
 market.sources
   -> market.stream_definitions
       -> stream_session_events -> raw_archive_manifests -> raw_archive_ranges
+      -> raw_archive_record_mappings
+      -> stream_coverage_interval_versions
       -> stream_quality_events
   -> market.series
       -> source/derived fact revisions
@@ -289,7 +303,9 @@ No hot query scans raw frame bytes.
 | `market.stream_session_events` | one immutable lifecycle event per connection epoch | PK UUID; unique `(session_id, event_ordinal)`; idempotency includes event type/material hash | session, definition, owner generation, connection epoch, connected/disconnected/resync/error event, occurred/received/known-at, reason, counts | append-only | monthly by occurred_at; session/event index; retain indefinitely because low volume |
 | `market.raw_archive_manifests` | one sealed immutable object | PK UUID; unique object URI and object SHA-256; content fingerprint over ordered record hashes | definition/session/epoch, object URI, format/schema/compression, byte/record counts, first/last ordinal, time bounds, uploaded/acknowledged at, checksum, content fingerprint | insert only after upload verification; append-only | date/provider/channel/product indexes; manifests indefinite; object follows tier retention |
 | `market.raw_archive_ranges` | per manifest/product/channel ordering summary | PK `(manifest_id, product_id, channel)` | first/last sequence when present, min/max provider event/message/receipt time, count, gap count | append-only child of manifest | product/time indexes; same as manifest |
-| `market.stream_quality_events` | exact session/product/channel anomaly, invalidation, or recovery evidence | PK UUID; natural identity `(session_id, product_id, channel, receive_ordinal, classification, evidence_hash)` | sequence before/after, heartbeat counter, invalid reason, detected/known-at, raw manifest/ref, related series, generic gap ID | append-only; correction is a new event | monthly by detected_at; classification/product index; indefinite or 7 years |
+| `market.raw_archive_record_mappings` | one immutable placement of one preassigned raw record in one acknowledged object | PK `(raw_record_id, manifest_id)`; unique `(manifest_id, object_row_index)`; idempotency includes raw hash | spool segment, session/epoch/receive ordinal, manifest, object row group/index, raw SHA-256, mapped/known-at; compaction may append another placement | append-only; facts are never updated; mapping exists only after object verification | raw-record and manifest indexes; append-heavy; retain with manifest/pins |
+| `market.stream_coverage_interval_versions` | one revision of product/channel delivery coverage, including trade-stream validity | PK UUID; natural `(definition_id, session_id, connection_epoch, product_id, channel, interval_id, revision)` | opening/closing session-event and raw-record evidence, first/last sequence and ordinal, provider/message/receipt time bounds, ordering assurance, coverage status, archive status, canonicalization watermark, gap/quality refs, known-at | append-only; opening, archive completion, closure, or invalidation appends a revision | product/channel/time/status indexes; indefinite quality evidence |
+| `market.stream_quality_events` | exact session/product/channel anomaly, invalidation, or recovery evidence | PK UUID; natural identity `(session_id, product_id, channel, receive_ordinal, classification, evidence_hash)` | sequence before/after, heartbeat counter, invalid reason, detected/known-at, raw record/manifest refs, related coverage/book interval, series, generic gap ID | append-only; correction is a new event | monthly by detected_at; classification/product index; indefinite or 7 years |
 
 `stream_quality_events` supplements rather than replaces existing
 `market.gap_evidence`. Transport-specific evidence is recorded first; a gap that
@@ -302,11 +318,17 @@ Its classification is a closed versioned enum, initially `sequence_gap`,
 `resync_started`, and `resync_snapshot_accepted`. Sequence, ordinal, state-hash,
 and reason fields are typed columns; this is not an opaque JSON error bucket.
 
+A raw record becomes `archive_complete` only when at least one acknowledged,
+non-expired or dataset-pinned manifest mapping matches its exact SHA-256. A
+mapping appended after upload does not revise the canonical fact. A lost
+unmapped spool record creates `archive_loss` evidence and can never become
+dataset-eligible.
+
 ### Product And Relationship Tables
 
 | Table | Purpose and grain | Key/idempotency | Important columns and time | Mutability/revision | Partition/index, writes, retention |
 |---|---|---|---|---|---|
-| `market.product_definition_versions` | one material provider-product definition revision | PK UUID; natural `(source_id, provider_product_id, effective_time, revision)`; idempotency material hash | canonical instrument, product/type/venue, status/session state, base/quote/root unit, increments, contract size/expiry, funding interval, raw ref, provider/received/known-at, provenance | append-only revision; unchanged polls dedupe | product/effective/known-at indexes; low write; indefinite |
+| `market.product_definition_versions` | one material provider-product definition revision | PK UUID; natural `(source_id, provider_product_id, effective_time, revision)`; idempotency material hash | canonical instrument, product/type/venue, status/session state, base/quote/root unit, increments, contract size/expiry, funding interval, raw record ID when streamed, provider/received/known-at, provenance | append-only revision; unchanged polls dedupe | product/effective/known-at indexes; low write; indefinite |
 | `market.instrument_role_mapping_versions` | explicit futures-to-spot/benchmark role mapping | PK UUID; natural `(primary_instrument_id, role, effective_from, revision)` | related instrument, mapping reason/source, effective interval, received/known-at, material/provenance hash | append-only revision; overlapping latest mappings forbidden | primary/role/effective index; indefinite |
 
 Mappings are operator- or provider-metadata-approved source facts. Product-root
@@ -316,7 +338,7 @@ similarity may propose a mapping but cannot publish it automatically.
 
 | Table | Purpose and grain | Key/idempotency | Important columns and time | Mutability/revision | Partition/index, writes, retention |
 |---|---|---|---|---|---|
-| `market.market_trade_versions` | one provider trade revision | PK UUID; natural `(source_id, provider_product_id, provider_trade_id, revision)`; first material hash is idempotency | series/instrument, price, `provider_size`, `provider_size_unit`, maker side, nullable aggressor side + transform version, nullable contract/base quantity and quote notional, provider event/message time, receipt/acceptance/known-at, sequence, receive ordinal, raw ref, provenance/quality | append-only; duplicate identical material no-op; conflicting same ID appends correction/revision evidence or fails per provider proof | hypertable by provider event time; product/time, known-at, trade ID indexes; append-heavy; hot 180d, raw/frozen longer |
+| `market.market_trade_versions` | one provider trade revision | PK UUID; natural `(source_id, provider_product_id, provider_trade_id, revision)`; first material hash is idempotency | series/instrument, price, `provider_size`, `provider_size_unit`, maker side, nullable aggressor side + transform version, nullable contract/base quantity and quote notional, provider event/message time, receipt/acceptance/known-at, sequence, receive ordinal, raw record ID, coverage interval ID, provenance/quality | append-only; duplicate identical material no-op; conflicting same ID appends correction/revision evidence or fails per provider proof | hypertable by provider event time; product/time, known-at, trade ID indexes; append-heavy; hot 180d, raw/frozen longer |
 
 No field is populated by guesswork. Contract quantity, base quantity, and quote
 notional remain null until the exact size unit and applicable product-definition
@@ -326,9 +348,9 @@ revision are known.
 
 | Table/dataset | Purpose and grain | Key/idempotency | Important columns and time | Mutability/revision | Partition/index, writes, retention |
 |---|---|---|---|---|---|
-| `market.l2_snapshot_versions` | one accepted provider snapshot event per product | PK UUID; natural `(session_id, connection_epoch, product_id, sequence_num, receive_ordinal, revision)`; raw hash idempotency | series, sequence, event/message/receipt/known-at, level count, state hash after snapshot, raw ref, provenance/quality | append-only | hypertable by receipt time; product/session indexes; hot 7d |
+| `market.l2_snapshot_versions` | one accepted provider snapshot event per product | PK UUID; natural `(session_id, connection_epoch, product_id, sequence_num, receive_ordinal, revision)`; raw hash idempotency | series, sequence, event/message/receipt/known-at, level count, state hash after snapshot, raw record ID, provenance/quality | append-only | hypertable by receipt time; product/session indexes; hot 7d |
 | `market.l2_snapshot_levels` | one typed side/price level in a snapshot | PK `(snapshot_version_id, side, price)` | absolute quantity, provider unit, update event time, ordinal | append-only child | snapshot/side/price index; high write; hot 7d |
-| `market.l2_mutation_batches` | one provider update event applied atomically | PK UUID; natural `(session_id, connection_epoch, product_id, sequence_num, receive_ordinal, event_ordinal)`; raw/event hash idempotency | series, sequence, provider message/event bounds, receipt/known-at, mutation count, before/after state hash, validity interval, raw ref | append-only; exact duplicate no-op; divergent duplicate invalidates | hypertable by receipt time; product/sequence/ordinal indexes; hot 7d |
+| `market.l2_mutation_batches` | one provider update event applied atomically | PK UUID; natural `(session_id, connection_epoch, product_id, sequence_num, receive_ordinal, event_ordinal)`; raw/event hash idempotency | series, sequence, provider message/event bounds, receipt/known-at, mutation count, before/after state hash, validity interval, raw record ID | append-only; exact duplicate no-op; divergent duplicate invalidates | hypertable by receipt time; product/sequence/ordinal indexes; hot 7d |
 | `market.l2_mutations` | one ordered absolute level mutation in a batch | PK `(batch_id, mutation_ordinal)` | side, exact price, new absolute quantity, provider event time, provider unit | append-only child; order is semantic | batch/side/price index; high write; hot 7d |
 | `market.book_checkpoint_manifests` | one deterministic reconstructable book checkpoint | PK UUID; natural `(series_id, reconstruction_version, checkpoint_time, source_position_hash)` | source session/epoch/sequence/ordinal, validity interval, object URI/checksum, sorted-level state hash, counts, created/known-at, source manifest range | append-only | series/time index; metadata indefinite; objects 90d or dataset-pinned |
 | `book_checkpoint_levels.v1` object dataset | typed sorted levels for one checkpoint | natural `(checkpoint_id, side, price)` | exact quantity and unit; schema/reconstruction version | immutable Parquet/ZSTD object | ordered by side then numeric price; replay read; tiered retention |
@@ -341,7 +363,7 @@ revision are known.
 |---|---|---|---|---|---|
 | `market.bbo_versions` | best bid/ask after one complete valid batch or sampled cadence | natural `(series_id, effective_time, source_position_hash, contract_version, revision)` | bid/ask price/qty, mid, source state hash, validity interval, receipt/known-at, provenance/quality | append-only revisions | hypertable; series/time/known-at; hot 400d, frozen longer |
 | `market.depth_observation_versions` | depth/spread/imbalance observation at configured cadence | natural `(series_id, effective_time, band_spec_version, source_state_hash, revision)` | spread absolute/bps, band bps, bid/ask qty and notional, imbalance, mid, validity interval, known-at | append-only revisions | hypertable; series/time/band; hot 400d |
-| `market.trade_flow_aggregate_versions` | causal 1s or 1m trade bucket | natural `(series_id, interval_seconds, bucket_start, aggregation_version, revision)` | counts, maker/aggressor buy/sell quantities, contracts/base/notional, CVD delta/cumulative anchor, OHLC/last, first/last source position, complete/late flags, known-at | append-only bucket revisions; late trades append later-known revision | hypertable; series/interval/time/known-at; hot 400d |
+| `market.trade_flow_aggregate_versions` | causal 1s or 1m trade bucket | natural `(series_id, interval_seconds, bucket_start, aggregation_version, revision)` | counts, maker/aggressor buy/sell quantities, contracts/base/notional, CVD delta/cumulative anchor, OHLC/last, first/last trade source position, coverage interval/revision, coverage opening/closing positions, complete/late/archive flags, known-at | append-only bucket revisions; late trades or archive completion append later-known revision | hypertable; series/interval/time/known-at; hot 400d |
 | `market.derivative_fact_reconciliations` | comparison evidence between live OI/funding and a historical/public reference | natural `(left_series_id, right_source_id, fact_type, effective_time, reconciliation_version)` | left/right fact refs, unit transform, absolute/relative delta, tolerance, status, compared/known-at, evidence hash | append-only; never overwrites either source | fact/time/status index; indefinite quality evidence |
 | `market.futures_spot_relationship_versions` | paired causal futures/spot observation | natural `(mapping_version_id, effective_time, relationship_contract_version, revision)` | future/spot source fact refs, mids, basis absolute/bps, staleness each side, alignment policy, known-at, quality | append-only revisions | hypertable; mapping/time/known-at; hot 400d |
 | `market.normalization_specs` | immutable executable feature definition | PK UUID; unique `(feature_name, semantic_version, spec_hash)` | typed inputs, formula AST/identifier, units, window/partition, minimums, missing/validity/staleness policy, warmup, materialization mode, created/approved | immutable; new semantics require new version/hash | feature/version index; indefinite |
@@ -505,6 +527,79 @@ and every aggressive-flow/CVD feature is unavailable, not guessed.
   appends a later-known aggregate revision; it never changes what was visible
   at an earlier decision time.
 
+### Trade Stream Coverage Contract
+
+Book validity and trade delivery coverage are separate contracts. A valid book
+does not prove that all trades were received, and a healthy trade subscription
+does not prove that an L2 book is valid.
+
+`market.stream_coverage_interval_versions` scopes one interval to exactly one
+stream definition, session, connection epoch, provider product, and channel.
+For `market_trades`, an interval opens only after all contract-version opening
+evidence exists:
+
+1. the product/channel subscription is acknowledged;
+2. the channel's Phase 0-proven initial baseline is accepted (snapshot or other
+   documented first-message behavior);
+3. a usable sequence/delivery-assurance baseline is recorded; and
+4. the connection heartbeat policy is healthy.
+
+Opening evidence stores the subscription session-event ID, baseline
+`raw_record_id`, sequence when present, receive ordinal, provider message time,
+receipt time, and known-at. An interval closes or becomes invalid at the first
+disconnect, heartbeat stale condition, sequence gap, divergent duplicate,
+decode error, fenced-owner loss, spool loss, or deliberate backpressure stop.
+The closing revision names the exact session/quality event and last trustworthy
+raw record/sequence/ordinal. A reconnect starts a new interval; intervals never
+span connection epochs.
+
+`ordering_assurance` is a closed versioned enum:
+
+- `provider_sequence_contiguous`: Phase 0 proved a product/channel sequence and
+  every expected successor was observed;
+- `provider_delivery_guaranteed`: Coinbase explicitly guarantees the channel
+  behavior needed for coverage and Phase 0 verified it for this product class;
+- `receipt_contiguous`: only local receipt order is known;
+- `connection_health_only`: subscription/heartbeat health exists without proof
+  of message completeness.
+
+The latter two values never justify an explicit zero-trade bucket in v1.
+Heartbeat continuity alone proves connection health, not the absence of trades.
+If an inactive channel emits no provider evidence that brackets a bucket and no
+verified delivery guarantee covers that silence, the bucket is missing or
+incomplete—not zero.
+
+For bucket `[b0,b1)`, `aggregate_complete=true` if and only if all conditions
+below hold in the aggregate revision's known-at prefix:
+
+1. one latest coverage-interval revision has the exact product/channel scope,
+   opens at or before `b0`, and has a trustworthy closing coverage watermark at
+   or after `b1`;
+2. its status is valid (open-valid or closed-valid) and its ordering assurance
+   is allowed by `market.trade_flow.v1`: `provider_sequence_contiguous`, or
+   `provider_delivery_guaranteed` only after that assurance is Phase 0-approved;
+3. no sequence, connection, heartbeat, decode, ownership, spool, archive-loss,
+   or canonicalization gap intersects the bucket or its bracketing evidence;
+4. every raw record from the opening through closing coverage positions has an
+   acknowledged manifest-to-record mapping with matching SHA-256;
+5. the canonicalization watermark is at or beyond the closing coverage
+   position, and every admitted/rejected record in the range is reconciled; and
+6. the bucket end has passed. A later provider trade creates a later-known
+   aggregate revision and cannot change an earlier decision-time selection.
+
+The closing coverage watermark is the position of a later product/channel
+record whose assurance contract covers the preceding silence. A heartbeat may
+serve as that record only when the Phase 0-approved
+`provider_delivery_guaranteed` specification explicitly proves that the same
+heartbeat scope and continuity guarantee trade-channel delivery. Otherwise a
+heartbeat is health evidence only and cannot close a silent bucket.
+
+An observed-trade aggregate may be persisted with `complete=false` for
+diagnostics/research policies that explicitly allow partial data. A zero-trade
+row is emitted only when the same rule returns complete and observed count is
+exactly zero. Archive upload acknowledgement or interval closure appends a new
+aggregate revision; it never mutates the earlier row.
+
 ### Causal Buckets
 
 One-second and one-minute buckets are half-open UTC intervals `[start, end)`.
@@ -517,7 +612,9 @@ Each revision contains:
 - `cvd_delta = aggressor_buy_volume - aggressor_sell_volume` in one declared
   unit;
 - a cumulative CVD anchor/reset identity rather than an unbounded implicit sum;
-- first/last source positions, completeness, late-trade count, and known-at.
+- first/last trade source positions, coverage interval/revision, bracketing
+  coverage positions, archive/canonicalization watermarks, completeness,
+  late-trade count, and known-at.
 
 Operational emission occurs after bucket end with no hidden future grace. A
 later trade appends a correction revision known only at its later acceptance.
@@ -570,7 +667,7 @@ These are stored continuously after Phases 2-3:
 | `spread_bps` | `10000*(ask-bid)/mid`; bps | 1s per series; one valid state | valid uncrossed book; known after source batch | `market.spread_bps.v1`, continuous |
 | `depth_band` | sum quantity and notional on each side within 5, 10, and 25 bps of mid | 1s, series × band; at least one side level; empty valid band is zero | valid book and known units; no carry | `market.depth_band.v1`, continuous |
 | `book_imbalance` | `(bid_depth-ask_depth)/(bid_depth+ask_depth)`, bounded [-1,1] | 1s, series × 10 bps; positive denominator | suppress on invalid/empty denominator | `market.book_imbalance.v1`, continuous |
-| `trade_flow` | count, quantity, notional, aggressor buy/sell and `CVD_delta=buy-sell` | 1s and 1m per series; zero-trade bucket may be explicit only inside a proven-valid trade stream interval | aggressor fields require side transform; gaps mark bucket incomplete; no warmup | `market.trade_flow.v1`, continuous |
+| `trade_flow` | count, quantity, notional, aggressor buy/sell and `CVD_delta=buy-sell` | 1s and 1m per series; complete/zero status uses the exact trade coverage contract | aggressor fields require side transform; gaps/archive-pending state mark the revision incomplete; no warmup | `market.trade_flow.v1`, continuous |
 | `cvd_volume_share` | `CVD_delta/(buy+sell)` in [-1,1] | 1m per series; denominator > 0 | suppress if aggressor semantics/gap unavailable | `market.cvd_volume_share.v1`, continuous |
 | `basis_bps` | `10000*(future_mid-spot_mid)/spot_mid` | 1s per mapping; both mids no older than 2s | both books valid; suppress stale side; known-at max inputs | `market.futures_spot_basis.v1`, continuous |
 | `oi_log_change` | `ln(OI_t/OI_prev)`; log fraction | 1m series; two positive accepted OI observations, no gap between scheduled samples | null/suppress for zero, stale, missing, or gap; one-sample warmup | `market.oi_log_change.v1`, continuous after alignment support |
@@ -591,13 +688,39 @@ consumers justify operational materialization.
 | `liquidity_adjusted_impact` | signed response bps divided by pre-trade depth notional in chosen band, scaled per USD million | response horizon 1s; series × 10 bps band; valid pre-trade book | effective/known at response horizon; suppress gaps | `liquidity_adjusted_impact_1s.v1`, frozen/on demand |
 | `price_response_per_flow` | interval return bps divided by signed aggressive notional in USD millions | 1s/1m per series; nonzero flow and valid boundary mids | requires aggressor proof and valid books; effective at interval end | `price_response_per_flow.v1`, frozen/on demand |
 | `aggressive_flow_share` | aggressor buy or sell notional divided by total notional | 1s/1m; denominator > 0 | requires aggressor proof and complete trade bucket | `aggressive_flow_share.v1`, frozen/on demand |
-| `depth_replenishment` | post-flow same-side depth minus pre-flow depth, divided by pre-flow depth | 1s horizon, 10 bps band; positive pre-depth | both states valid; known at horizon | `depth_replenishment_1s.v1`, frozen/on demand |
+| `depth_replenishment` | direction-specific restoration of consumed depth: aggressive buys measure ask depth; aggressive sells measure bid depth; formula below | 1s horizon, 10 bps band; positive measured depletion | pre/trough/post states must be in one valid book interval and exact trade/book positions are stored; known at post position | `depth_replenishment_1s.v1`, frozen/on demand |
 | `absorption_primitive` | `abs(flow_share) * (1-clamp(abs(response_bps)/R,0,1)) * clamp(replenishment,0,1)` | 1s; fixed `R` in spec; all three inputs valid | descriptive bounded [0,1], no label/alpha claim; known at horizon | `absorption_primitive.v1`, frozen only |
 | `exhaustion_primitive` | `max(0,1-|flow_t|/median(|flow| prior 60s)) * max(0,|return_t|/V)` clipped [0,1] | 1s; prior 60 complete seconds; fixed `V`; min 30 | valid trade and price evidence; 30s warmup | `exhaustion_primitive.v1`, frozen only |
 
 Percentiles, medians, and rolling volatility must use a deterministic numeric
 algorithm named by the normalization spec. Changing interpolation, window
 closure, reset, staleness, or unit semantics requires a new semantic version.
+
+`depth_replenishment_1s.v1` emits two independent directional values; mixed
+aggression is never netted into one ambiguous side:
+
+- aggressive buys select ask-band depth;
+- aggressive sells select bid-band depth.
+
+For each direction, store `first_trade_source_position`,
+`last_trade_source_position`, `pre_book_source_position`,
+`trough_book_source_position`, and `post_book_source_position`. `D_pre` is the
+last valid selected-side 10 bps depth state known before the first qualifying
+trade. `D_trough` is the minimum selected-side depth at valid states after that
+trade through the one-second response horizon. `D_post` is the first valid
+state at or after the horizon. All three must belong to one book-validity
+interval and satisfy the spec's maximum staleness.
+
+```text
+consumed_depth = max(D_pre - D_trough, 0)
+replenished_depth = max(D_post - D_trough, 0)
+depth_replenishment = replenished_depth / consumed_depth
+```
+
+The value is nonnegative and may exceed one when more depth appears than was
+observably consumed. It is suppressed when `consumed_depth=0`, any position is
+missing/invalid, or trade coverage is incomplete. The absorption primitive
+uses `clamp(depth_replenishment,0,1)` and preserves the unclipped source feature.
 
 ## Bounded Storage And Retention Architecture
 
@@ -619,6 +742,9 @@ Raw files use Parquet with ZSTD and schema `coinbase_ws_raw_frame.v1`:
 stream_definition_id UUID
 session_id UUID
 connection_epoch INT64
+spool_segment_id UUID
+segment_record_ordinal INT64
+raw_record_id UUID
 receive_ordinal INT64
 received_at TIMESTAMPTZ
 channel_hint STRING nullable
@@ -627,9 +753,10 @@ raw_frame BINARY
 raw_frame_sha256 FIXED_BINARY(32)
 ```
 
-`raw_frame` is the exact complete WebSocket text frame bytes. Record order is
-`receive_ordinal`; replay never relies on Parquet physical row order without
-sorting/checking that ordinal. The object path is:
+`raw_frame` is the exact complete WebSocket text frame bytes. `raw_record_id`
+must recompute from the recorded identity fields and `raw_frame_sha256`.
+Record order is `receive_ordinal`; replay never relies on Parquet physical row
+order without sorting/checking that ordinal. The object path is:
 
 ```text
 market-structure/v1/provider=coinbase/venue=coinbase_direct/
@@ -656,15 +783,18 @@ manifests.
 
 ### Local Spool, Acknowledgement, And Recovery
 
-1. Append a length-delimited record with ordinal, receipt timestamp, and raw
-   bytes to a `.partial` spool segment; fsync according to the measured policy,
-   never later than one second or 4 MiB.
+1. Create `spool_segment_id` in the segment header. For each frame, compute its
+   raw SHA-256 and deterministic `raw_record_id`, then append a length-delimited
+   record containing both IDs, segment/receive ordinals, receipt timestamp, and
+   raw bytes to `.partial`; fsync according to the measured policy, never later
+   than one second or 4 MiB.
 2. Only after append acknowledgement may the parser publish the frame to the
    canonicalization queue.
 3. Rotate, fsync, checksum, and atomically rename to `.sealed`.
 4. Upload with an idempotent object key containing bounds/checksum.
-5. Verify object size and checksum, then transactionally insert archive
-   manifest/ranges.
+5. Verify object size and checksum, then transactionally insert the archive
+   manifest/ranges and append one `raw_archive_record_mappings` row per object
+   record. Only this commit makes those records archive-complete.
 6. Delete the sealed local object only after PostgreSQL manifest commit and a
    successful object HEAD/checksum check.
 7. On crash, scan partial/sealed segments. Truncate a partial segment only to
@@ -750,7 +880,7 @@ effects. It does not claim distributed exactly-once delivery.
 | Component | Input/output contract | Delivery/idempotency/retry | Ownership/recovery/failure evidence | Scaling unit and authority |
 |---|---|---|---|---|
 | Stream supervisor | enabled stream definition -> fenced session lifecycle | claim definition, increment generation, bounded reconnect; session event ordinal is idempotent | existing PostgreSQL lease pattern; expired owner cannot publish; startup recovers spool before reconnect | one definition; authority is definition + lease state |
-| Advanced Trade acquisition | exact WS frame -> receive ordinal + spool record | archive-first at-least-once; subscription within provider deadline; retry under ADR 0020 | one connection epoch per owner; disconnect, stale heartbeat, decode failure and counters are session events | one pair/channel connection; authority for receipt order |
+| Advanced Trade acquisition | exact WS frame -> stable raw record/spool segment identity + receive ordinal + spool record | durable-spool-first at-least-once; subscription within provider deadline; retry under ADR 0020 | one connection epoch per owner; disconnect, stale heartbeat, decode failure and counters are session events | one pair/channel connection; authority for receipt order |
 | Local durable spool | frame record -> partial/sealed segment | length/checksum framing, fsync, deterministic ordinal; retry upload indefinitely within backlog budget | current fenced session may append; crash scan/truncate only invalid tail; capacity disconnect visible | per host/definition; temporary authority until upload ack |
 | Raw archive uploader | sealed segment -> immutable object + manifest | content-addressed object key; repeat PUT/HEAD safe; manifest insert after checksum verification | upload ownership follows segment/session; partial upload never acknowledged; attempt failures logged | per sealed segment; object bytes authoritative raw evidence |
 | Deterministic parser/canonicalizer | acknowledged/spooled frame -> typed trade/L2/product facts | at-least-once consumption, raw/source keys dedupe; schema-versioned parser; malformed input fails that event visibly | fence checked again in append transaction; replay may republish identical facts; parser error quality event | product/channel partition; typed store authoritative query truth |
@@ -770,10 +900,11 @@ effects. It does not claim distributed exactly-once delivery.
 - Acquisition and raw archiving form one failure domain: a frame is not eligible
   for canonical publication until locally durable. Object upload may lag.
 - A canonical fact parsed from the fsynced pending spool carries a deterministic
-  raw record identity even before its object manifest exists. Dataset freeze
-  requires the matching acknowledged manifest. If the only pending spool copy
-  is lost, `archive_loss` quality/gap evidence makes that source range
-  ineligible; no derived or frozen surface may report it complete.
+  raw record identity even before its object manifest exists. Archive-complete
+  and dataset-eligible status require an acknowledged manifest-to-record
+  mapping whose checksum covers that record. If the only pending spool copy is
+  lost, `archive_loss` quality/gap evidence makes that source range ineligible;
+  no derived or frozen surface may report it complete.
 - Canonical parsing and derivation are replayable consumers. They may run in the
   acquisition process initially, but their contracts and checkpoints cannot
   depend on in-process-only state.
@@ -814,8 +945,10 @@ effects. It does not claim distributed exactly-once delivery.
 1. Resolve all typed requirements, instrument-role mappings, normalization
    specs, range, and as-of fact commit watermark.
 2. Fail if a required direct Coinbase spot instrument/mapping is absent, a
-   required source range is unavailable, book validity does not satisfy policy,
-   aggressor semantics are unproven, or a feature is still in warmup.
+   required source range is unavailable, trade coverage is incomplete, book
+   validity does not satisfy policy, aggressor semantics are unproven, any raw
+   record lacks an acknowledged manifest-to-record mapping, or a feature is
+   still in warmup.
 3. Select source/derived revisions using effective time, `known_at`, revision,
    and commit watermark. No provider calls are allowed in freeze.
 4. Compute separate material, provenance, and quality fingerprints using the
@@ -843,8 +976,10 @@ No test substitutes imagined Coinbase fields for a proof-spike fixture.
 | Checkpoint-plus-delta equality | reconstruct sampled endpoints both from initial snapshot and latest prior checkpoint | identical sorted levels, state hash, BBO/depth, validity, and source position |
 | Truncation/no-lookahead invariance | compute on prefix `0..t`, then on `0..T`; compare values selectable at `t` | all earlier known-at selections identical; response features appear only at their response horizon |
 | Stable archive fingerprint | upload, retry, and compact the same ordered records | object checksums may differ after compaction, ordered content fingerprint and canonical results do not |
+| Stable raw identity and mapping | assign identities before parse, publish from fsynced spool, then upload/compact | canonical facts retain the same `raw_record_id`; only append-only manifest mappings change; facts are never updated to attach an object manifest |
 | Stable dataset fingerprint | freeze same admitted inputs twice on separate workers | identical dataset identity, material/provenance/quality/spec fingerprints and object content hashes |
 | Late-data causality | insert a trade/revision known after original bucket/decision | later-known aggregate/feature revision appears; earlier decision-time selection unchanged |
+| Trade coverage discrimination | exercise a truly silent proven stream, dropped message, unhealthy connection, pending upload, and lagging canonicalizer | only the proven, ordered, archive-complete and canonicalized silent interval emits `complete=true` with zero trades; all other cases remain incomplete with typed evidence |
 | Gap/invalidation propagation | remove one sequence/frame, inject heartbeat gap, disconnect, corrupt quantity | explicit session quality + generic gap evidence; validity closes; downstream book features suppressed |
 | No invalid-book emission | feed updates after invalidation and before fresh snapshot | no BBO/depth/imbalance/basis using that book; diagnostics remain queryable |
 | Raw-to-derived reconciliation | recompute counts/volumes/notional and source-position ranges from raw trades | exact equality or typed, explainable rejected-record counts |
@@ -926,7 +1061,8 @@ Work:
 
 - register direct Coinbase BTC-USD, ETH-USD, SOL-USD instruments and explicit
   mapping revisions;
-- add stream session/spool/raw archive manifests and typed trade revisions;
+- add stream session/spool identity, raw archive manifests and record mappings,
+  typed trade coverage intervals, and typed trade revisions;
 - run BIP/BTC first, then gated ETP/ETH and SLP/SOL admission;
 - add 1s/1m trade aggregates, maker/aggressor contract, recent REST
   reconciliation, quality/health operations, replay, retention, and dataset
@@ -935,10 +1071,13 @@ Work:
 
 Acceptance:
 
-- archive-first crash/retry/fence tests pass;
+- durable-spool-first crash/retry/fence tests pass, and no canonical fact is
+  mutated when its manifest-to-record mapping is appended;
 - 24-hour raw-to-canonical trade ID/count/volume reconciliation passes within
   only explicitly rejected malformed records;
-- duplicate/restart/late-trade/provider-free dataset tests pass;
+- duplicate/restart/late-trade/provider-free dataset tests pass, including
+  deterministic distinction among zero trades, stream gaps, unhealthy
+  connections, pending archive upload, and canonicalization lag;
 - each admitted pair stays inside measured backlog/hot/object budgets;
 - `qt` exposes definitions, sessions, archive lag, gaps, replay verification,
   and dataset coverage without direct SQL.
@@ -1120,9 +1259,10 @@ credential model, raw format, storage role, identity, time model, product scope,
 or validity philosophy. Phase 0 exists to fill the explicitly named empirical
 fields, not to redesign the plane.
 
-After Phase 0 acceptance, Phase 1 has fixed boundaries for archive-first
-delivery, session fencing, trade identity, maker/aggressor translation, unit
-conversion, typed storage, late revisions, aggregation, replay, retention,
-dataset freezing, CLI ownership, and the three-pair gated allowlist. Any proof
-that contradicts those boundaries must amend this proposed design/ADR before
-implementation rather than hiding the contradiction in provider code.
+After Phase 0 acceptance, Phase 1 has fixed boundaries for durable-spool-first
+delivery, pre-parse raw identity, append-only manifest mapping, session fencing,
+trade coverage, trade identity, maker/aggressor translation, unit conversion,
+typed storage, late revisions, aggregation, replay, retention, dataset freezing,
+CLI ownership, and the three-pair gated allowlist. Any proof that contradicts
+those boundaries must amend this proposed design/ADR before implementation
+rather than hiding the contradiction in provider code.
