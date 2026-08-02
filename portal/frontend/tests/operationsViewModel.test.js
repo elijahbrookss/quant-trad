@@ -1,0 +1,52 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+import {
+  buildRunRows,
+  filterAndSortRunRows,
+  filterResearchRows,
+} from '../src/features/operations/buildOperationsViewModel.js'
+
+const NOW = Date.parse('2026-08-02T12:00:00Z')
+
+test('run inventory keeps definition identity and run instance identity separate', () => {
+  const rows = buildRunRows([{
+    run_id: 'run-1',
+    bot_id: 'definition-1',
+    bot_name: 'Breakout paper',
+    run_type: 'paper',
+    execution_mode: 'full',
+    status: 'completed',
+    strategy_name: 'Breakout',
+    symbols: ['ETH-USD'],
+    started_at: '2026-08-02T10:00:00Z',
+    ended_at: '2026-08-02T11:00:00Z',
+    definition: { id: 'definition-1', name: 'Definition name' },
+  }], { nowEpochMs: NOW })
+
+  assert.equal(rows[0].id, 'run-1')
+  assert.equal(rows[0].definitionId, 'definition-1')
+  assert.equal(rows[0].definitionName, 'Definition name')
+  assert.equal(rows[0].durationMs, 3_600_000)
+})
+
+test('run filters are deterministic with run id as the secondary key', () => {
+  const rows = buildRunRows([
+    { run_id: 'run-b', status: 'completed', run_type: 'backtest', started_at: '2026-08-02T10:00:00Z', symbols: ['ETH-USD'] },
+    { run_id: 'run-a', status: 'completed', run_type: 'backtest', started_at: '2026-08-02T10:00:00Z', symbols: ['BTC-USD'] },
+    { run_id: 'run-live', status: 'running', run_type: 'live', started_at: '2026-08-02T11:00:00Z' },
+  ], { nowEpochMs: NOW })
+
+  const selected = filterAndSortRunRows(rows, { status: 'completed', runType: 'backtest', sort: 'recent' })
+  assert.deepEqual(selected.map((row) => row.id), ['run-a', 'run-b'])
+  assert.deepEqual(filterAndSortRunRows(rows, { query: 'eth' }).map((row) => row.id), ['run-b'])
+})
+
+test('research evidence filtering is status-aware and newest-first', () => {
+  const rows = filterResearchRows([
+    { id: 'old', kind: 'research_check', status: 'tested', title: 'Old', created_at: '2026-08-01T10:00:00Z' },
+    { id: 'new', kind: 'research_check', status: 'tested', title: 'New', created_at: '2026-08-02T10:00:00Z' },
+    { id: 'draft', kind: 'hypothesis', status: 'draft', title: 'Draft', created_at: '2026-08-03T10:00:00Z' },
+  ], { status: 'tested' })
+  assert.deepEqual(rows.map((row) => row.id), ['new', 'old'])
+})

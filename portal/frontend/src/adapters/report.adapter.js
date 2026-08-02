@@ -75,6 +75,12 @@ export async function listReports(params = {}) {
   return handleResponse(res)
 }
 
+export async function fetchReportActivity(params = {}) {
+  const query = buildQuery(params)
+  const res = await fetch(`${BASE}/api/reports/activity${query}`, { mode: 'cors' })
+  return handleResponse(res)
+}
+
 export async function getReport(runId, options = {}) {
   return getReportJson(`/api/reports/${runId}`, options)
 }

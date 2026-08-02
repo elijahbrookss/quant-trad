@@ -27,6 +27,32 @@ services:
         aliases:
           - frontend.quanttrad
 
+  frontend-v2:
+    profiles: [core]
+    build:
+      context: ..
+      dockerfile: portal/frontend/Dockerfile
+      target: dev
+    hostname: frontend-v2.quanttrad
+    labels:
+      loki.job: quanttrad
+      loki.service: frontend-v2
+    environment:
+      - VITE_API_BASE_URL=/api
+      - VITE_API_PROXY_TARGET=http://backend.quanttrad:8000
+      - VITE_BOTLENS_DEBUG=true
+    ports:
+      - "5174:5173"
+    volumes:
+      - ../portal/frontend/src:/app/src:ro
+      - ../portal/frontend/v2.html:/app/index.html:ro
+    depends_on:
+      - backend
+    networks:
+      quanttrad:
+        aliases:
+          - frontend-v2.quanttrad
+
   backend:
     profiles: [core]
     build:

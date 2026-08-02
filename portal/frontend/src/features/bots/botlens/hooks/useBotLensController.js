@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 
 import {
   fetchBotLensChartHistory,
+  fetchBotLensExactRunBootstrap,
   fetchBotLensRunBootstrap,
   fetchBotLensSelectedSymbolSnapshot,
 } from '../../../../adapters/bot.adapter.js'
@@ -164,13 +165,18 @@ export function shouldCommitSelectedSymbolBootstrap({
   )
 }
 
-export function useBotLensController({ open, bot, onClose }) {
-  const logger = useMemo(() => createLogger('BotLensRuntime', { botId: bot?.id || null }), [bot?.id])
+export function useBotLensController({ open, bot, onClose, runId = null }) {
+  const logger = useMemo(
+    () => createLogger('BotLensRuntime', { botId: bot?.id || null, runId: runId || null }),
+    [bot?.id, runId],
+  )
   const [state, dispatch] = useReducer(
     reduceBotLensState,
     createInitialBotLensState({ botId: bot?.id || null }),
   )
   const [reloadTick, setReloadTick] = useState(0)
+  const stateRef = useRef(state)
+  stateRef.current = state
   const bootstrapTokenRef = useRef(0)
   const bootstrapLoadRef = useRef(new Set())
   const snapshotRefreshLoadRef = useRef(new Set())
@@ -179,8 +185,27 @@ export function useBotLensController({ open, bot, onClose }) {
 
   const activeRunId = selectActiveRunId(state)
   const selectedSymbolKey = selectSelectedSymbolKey(state)
-  const selectedSymbolSlices = useMemo(() => selectSelectedSymbolBaseSlices(state), [state])
-  const selectedSymbolMetadata = useMemo(() => selectSelectedSymbolMetadata(state), [state])
+
+  // Every selector below is keyed on the specific nested slice it actually
+  // reads, not the whole reducer `state` object. This is safe because the
+  // delta-application functions in botlensProjection.js (withSymbolState,
+  // applyRunHealthDelta, applyOpenTradesDelta, applyRunSymbolCatalogDelta,
+  // etc.) only replace the sub-slice they touch — sibling slices, and other
+  // symbols' entries within symbolStates, keep stable references across an
+  // unrelated dispatch. Narrow deps mean an unrelated websocket tick (e.g. a
+  // different symbol's candle, a health ping) skips recomputing values this
+  // component doesn't use, instead of recomputing everything on every message.
+  const selectedSymbolProjection = state.runState?.symbolStates?.[selectedSymbolKey] || null
+  const symbolIndex = state.runState?.symbolIndex
+  const health = state.runState?.health
+  const openTradesIndex = state.runState?.openTradesIndex
+  const chartHistoryForSymbol = state.retrieval?.chartHistoryBySymbol?.[selectedSymbolKey] || null
+  const chartHistoryBySymbol = state.retrieval?.chartHistoryBySymbol
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
+  const selectedSymbolSlices = useMemo(() => selectSelectedSymbolBaseSlices(state), [selectedSymbolProjection, selectedSymbolKey])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
+  const selectedSymbolMetadata = useMemo(() => selectSelectedSymbolMetadata(state), [selectedSymbolProjection, selectedSymbolKey])
   const selectedSymbolState = selectSelectedSymbolState(state)
   const selectedSummary = selectSelectedSymbolSummary(state)
   const selectedLabel = selectedSymbolSlices?.metadata?.display_label
@@ -189,18 +214,30 @@ export function useBotLensController({ open, bot, onClose }) {
     || '—'
   const selectedSymbolBootstrapStatus = selectSelectedSymbolBootstrapStatus(state)
   const selectedSymbolReady = Boolean(selectedSymbolState?.readiness?.snapshot_ready)
-  const symbolOptions = useMemo(() => selectSymbolOptions(state), [state])
-  const warningItems = useMemo(() => selectWarningItems(state), [state])
-  const openTrades = useMemo(() => selectOpenTrades(state), [state])
-  const chartCandles = useMemo(() => selectSelectedSymbolChartCandles(state), [state])
-  const chartHistory = useMemo(() => selectSelectedSymbolChartHistory(state), [state])
-  const chartHistoryStatus = useMemo(() => selectSelectedSymbolChartHistoryStatus(state), [state])
-  const selectedSymbolOverlays = useMemo(() => selectSelectedSymbolOverlays(state), [state])
-  const selectedSymbolRecentTrades = useMemo(() => selectSelectedSymbolRecentTrades(state), [state])
-  const selectedSymbolLogs = useMemo(() => selectSelectedSymbolLogs(state), [state])
-  const selectedSymbolSignals = useMemo(() => selectSelectedSymbolSignals(state), [state])
-  const selectedSymbolDecisions = useMemo(() => selectSelectedSymbolDecisions(state), [state])
-  const chartHistoryCacheCount = useMemo(() => selectChartHistoryCacheCount(state), [state])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
+  const symbolOptions = useMemo(() => selectSymbolOptions(state), [symbolIndex])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
+  const warningItems = useMemo(() => selectWarningItems(state), [health])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
+  const openTrades = useMemo(() => selectOpenTrades(state), [openTradesIndex])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
+  const chartCandles = useMemo(() => selectSelectedSymbolChartCandles(state), [selectedSymbolProjection, chartHistoryForSymbol, selectedSymbolKey])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
+  const chartHistory = useMemo(() => selectSelectedSymbolChartHistory(state), [chartHistoryForSymbol, selectedSymbolKey])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
+  const chartHistoryStatus = useMemo(() => selectSelectedSymbolChartHistoryStatus(state), [chartHistoryForSymbol, selectedSymbolKey])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
+  const selectedSymbolOverlays = useMemo(() => selectSelectedSymbolOverlays(state), [selectedSymbolProjection, selectedSymbolKey])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
+  const selectedSymbolRecentTrades = useMemo(() => selectSelectedSymbolRecentTrades(state), [selectedSymbolProjection, selectedSymbolKey])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
+  const selectedSymbolLogs = useMemo(() => selectSelectedSymbolLogs(state), [selectedSymbolProjection, selectedSymbolKey])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
+  const selectedSymbolSignals = useMemo(() => selectSelectedSymbolSignals(state), [selectedSymbolProjection, selectedSymbolKey])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
+  const selectedSymbolDecisions = useMemo(() => selectSelectedSymbolDecisions(state), [selectedSymbolProjection, selectedSymbolKey])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
+  const chartHistoryCacheCount = useMemo(() => selectChartHistoryCacheCount(state), [chartHistoryBySymbol])
   const transportEligible = Boolean(state.runState?.transportEligible)
 
   useEffect(() => {
@@ -340,8 +377,9 @@ export function useBotLensController({ open, bot, onClose }) {
   )
 
   useEffect(() => {
+    const bootstrapLoads = bootstrapLoadRef.current
     if (!open || !bot?.id) {
-      bootstrapLoadRef.current.clear()
+      bootstrapLoads.clear()
       snapshotRefreshLoadRef.current.clear()
       dispatch({ type: 'session/reset', botId: bot?.id || null })
       return
@@ -360,8 +398,16 @@ export function useBotLensController({ open, bot, onClose }) {
       let initialSelectedSymbolKey = ''
       try {
         while (!cancelled && token === bootstrapTokenRef.current) {
-          const runBootstrap = await fetchBotLensRunBootstrap(bot.id)
+          const runBootstrap = runId
+            ? await fetchBotLensExactRunBootstrap(runId)
+            : await fetchBotLensRunBootstrap(bot.id)
           if (cancelled || token !== bootstrapTokenRef.current) return
+          const returnedRunId = String(
+            runBootstrap?.scope?.run_id || runBootstrap?.run?.meta?.run_id || '',
+          ).trim()
+          if (runId && returnedRunId !== String(runId).trim()) {
+            throw new Error('BotLens bootstrap returned a mismatched run scope')
+          }
           if (isBotLensRunBootstrapReady(runBootstrap)) {
             const initialRunId = String(runBootstrap?.run?.meta?.run_id || '').trim()
             initialSelectedSymbolKey = normalizeSeriesKey(runBootstrap?.navigation?.selected_symbol_key || '')
@@ -397,18 +443,18 @@ export function useBotLensController({ open, bot, onClose }) {
           error: err?.message || 'BotLens bootstrap failed',
           statusMessage: 'BotLens bootstrap failed.',
         })
-        logger.warn('botlens_bootstrap_load_failed', { bot_id: bot.id }, err)
+        logger.warn('botlens_bootstrap_load_failed', { bot_id: bot.id, run_id: runId || null }, err)
       } finally {
-        bootstrapLoadRef.current.delete(initialSelectedSymbolKey)
+        bootstrapLoads.delete(initialSelectedSymbolKey)
       }
     }
 
     load()
     return () => {
       cancelled = true
-      bootstrapLoadRef.current.clear()
+      bootstrapLoads.clear()
     }
-  }, [bot?.id, loadSelectedSymbolSnapshot, logger, open, reloadTick])
+  }, [bot?.id, loadSelectedSymbolSnapshot, logger, open, reloadTick, runId])
 
   useEffect(() => {
     if (!open || !activeRunId || !selectedSymbolKey) return
@@ -492,15 +538,20 @@ export function useBotLensController({ open, bot, onClose }) {
         type: 'ui/statusMessage',
         statusMessage: `Loading symbol snapshot for ${normalizedSymbolKey}...`,
       })
+      // Reads via stateRef (not the closed-over `state`) so this callback's
+      // identity stays stable across unrelated ticks — it's diagnostic-only,
+      // or downstream React.memo boundaries (ChartPanel, TradesTab) would be
+      // defeated by a fresh function reference every time symbolStates changes.
+      const latestSymbolStates = stateRef.current.runState?.symbolStates
       logger.info('botlens_symbol_switch_requested', {
         bot_id: bot?.id || null,
         run_id: activeRunId,
         symbol_key: normalizedSymbolKey,
-        had_cached_symbol_state: Boolean(state.runState?.symbolStates?.[normalizedSymbolKey]?.readiness?.snapshot_ready),
-        state_cache_size: Object.keys(state.runState?.symbolStates || {}).length,
+        had_cached_symbol_state: Boolean(latestSymbolStates?.[normalizedSymbolKey]?.readiness?.snapshot_ready),
+        state_cache_size: Object.keys(latestSymbolStates || {}).length,
       })
     },
-    [activeRunId, bot?.id, logger, state.runState?.symbolStates],
+    [activeRunId, bot?.id, logger],
   )
 
   const loadOlderHistory = useCallback(async () => {

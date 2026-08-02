@@ -43,7 +43,7 @@ function formatMoment(value) {
 }
 
 function formatRelativeTime(value) {
-  if (!value) return 'just now'
+  if (!value) return '—'
   const timestamp = new Date(value).getTime()
   if (!Number.isFinite(timestamp)) return 'recently'
   const deltaMs = Math.max(0, Date.now() - timestamp)
@@ -607,13 +607,21 @@ export function buildBotLensRuntimeViewModel({
     ],
   }
 
+  const hasRunState = Boolean(
+    runState?.runMeta
+    || runState?.health
+    || runState?.lifecycle
+    || runState?.symbolIndex,
+  )
   let mode = 'ready'
   if (!bot) {
     mode = 'empty'
   } else if (runtimeStatus === 'bootstrapping') {
     mode = 'loading'
-  } else if (!runState) {
-    mode = runtimeStatus === 'error' || error ? 'error' : 'idle'
+  } else if (!hasRunState) {
+    if (runtimeStatus === 'error' || error) mode = 'error'
+    else if (String(statusMessage || '').toLowerCase().includes('unavailable')) mode = 'unavailable'
+    else mode = 'idle'
   }
 
   const symbolPriceContext = new Map()

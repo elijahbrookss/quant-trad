@@ -445,3 +445,25 @@ test('runtime chart timer mode prefers paper/live run type over playback mode', 
   assert.equal(model.topBar.runMode.label, 'Paper')
   assert.doesNotMatch(model.topBar.subtitle, /Paper/)
 })
+
+test('runtime view model stops at unavailable evidence instead of rendering empty live panels', () => {
+  const state = createInitialBotLensState({ botId: 'bot-1' })
+  const model = buildBotLensRuntimeViewModel(buildControllerLike(state, {
+    activeRunId: 'terminal-run',
+    runState: {
+      health: undefined,
+      openTradesIndex: undefined,
+      runMeta: undefined,
+      readiness: undefined,
+      lifecycle: undefined,
+      transportEligible: undefined,
+      symbolIndex: undefined,
+    },
+    runtimeStatus: 'idle',
+    statusMessage: 'Persisted BotLens symbol evidence is unavailable for this terminal run.',
+  }))
+
+  assert.equal(model.mode, 'unavailable')
+  assert.equal(model.topBar.stats.find((row) => row.key === 'last-event')?.value, '—')
+  assert.equal(model.notices[0]?.message, 'Persisted BotLens symbol evidence is unavailable for this terminal run.')
+})

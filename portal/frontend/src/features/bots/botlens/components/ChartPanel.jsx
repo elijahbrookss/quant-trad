@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import { LocateFixed, Maximize2, Minimize2, RefreshCcw } from 'lucide-react'
 
 import { BotLensChart } from '../../../../components/bots/BotLensChart.jsx'
@@ -250,7 +250,7 @@ function ChartViewport({
   )
 }
 
-export function ChartPanel({
+export const ChartPanel = memo(function ChartPanel({
   model,
   symbolSelector,
   overlayOptions,
@@ -329,4 +329,4 @@ export function ChartPanel({
       />
     </section>
   )
-}
+})

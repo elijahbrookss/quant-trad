@@ -36,6 +36,14 @@ export async function listBots() {
   return request('/api/bots/')
 }
 
+export async function fetchBot(botId) {
+  return request(`/api/bots/${encodeURIComponent(botId)}`)
+}
+
+export async function fetchRun(runId) {
+  return request(`/api/bots/runs/${encodeURIComponent(runId)}`)
+}
+
 export async function fetchBotRuntimeCapacity() {
   return request('/api/bots/runtime-capacity')
 }
@@ -105,6 +113,10 @@ export async function fetchBotRuns(botId, { limit = 25 } = {}) {
 
 export async function fetchBotLensRunBootstrap(botId) {
   return request(`/api/bots/${encodeURIComponent(botId)}/botlens/bootstrap/run`)
+}
+
+export async function fetchBotLensExactRunBootstrap(runId) {
+  return request(`/api/bots/runs/${encodeURIComponent(runId)}/botlens/bootstrap`)
 }
 
 

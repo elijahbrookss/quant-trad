@@ -1,0 +1,1276 @@
+/* Console v2 uses the existing accent and qt-ops token system so the
+   read-only operator surfaces remain visual siblings of the existing UI. */
+
+.qt2-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.qt2-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 1.75rem;
+  padding: 0.65rem 1.1rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(20, 23, 31, 0.72);
+  backdrop-filter: blur(16px);
+}
+
+.qt2-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.qt2-brand-mark {
+  display: inline-flex;
+  height: 2.1rem;
+  width: 2.1rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--ui-radius-panel);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--accent-alpha-12, var(--accent-alpha-15));
+  color: var(--accent-text-soft);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.qt2-brand-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: rgb(241, 245, 249);
+  line-height: 1.1;
+}
+
+.qt2-brand-kicker {
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgb(100, 116, 139);
+}
+
+.qt2-roomnav {
+  display: flex;
+  align-items: center;
+  gap: 1.4rem;
+  flex: 1;
+}
+
+.qt2-roomnav-btn {
+  position: relative;
+  padding: 0.2rem 0;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgb(100, 116, 139);
+  transition: color 140ms ease;
+}
+
+.qt2-roomnav-btn:hover {
+  color: rgb(203, 213, 225);
+}
+
+.qt2-roomnav-btn::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -0.65rem;
+  height: 1px;
+  background: var(--accent-base);
+  transform: scaleX(0);
+  transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.qt2-roomnav-btn.is-active {
+  color: rgb(241, 245, 249);
+}
+
+.qt2-roomnav-btn.is-active::after {
+  transform: scaleX(1);
+}
+
+.qt2-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border-radius: var(--ui-radius-control);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 0.3rem 0.6rem;
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgb(148, 163, 184);
+}
+
+.qt2-status-pill[data-status='online'] {
+  border-color: rgba(16, 185, 129, 0.4);
+  background: rgba(16, 185, 129, 0.12);
+  color: rgb(167, 243, 208);
+}
+
+.qt2-status-pill[data-status='error'] {
+  border-color: rgba(244, 63, 94, 0.4);
+  background: rgba(244, 63, 94, 0.12);
+  color: rgb(254, 205, 211);
+}
+
+.qt2-status-pill[data-status='connecting'] {
+  border-color: rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.12);
+  color: rgb(253, 230, 138);
+}
+
+.qt2-status-dot {
+  height: 0.4rem;
+  width: 0.4rem;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.qt2-main {
+  flex: 1;
+  padding: 1.1rem 1.25rem 2rem;
+  max-width: 1680px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.qt2-room {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.qt2-room-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.qt2-kicker {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--accent-text-kicker);
+  margin-bottom: 0.25rem;
+}
+
+.qt2-title {
+  font-size: 1.3rem;
+  font-weight: 600;
+  color: rgb(241, 245, 249);
+  letter-spacing: -0.01em;
+}
+
+.qt2-sub {
+  margin-top: 0.3rem;
+  font-size: 0.72rem;
+  color: rgb(148, 163, 184);
+  max-width: 42rem;
+}
+
+.qt2-mode-tabs {
+  display: inline-flex;
+  gap: 0.35rem;
+  border-radius: var(--ui-radius-panel);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  padding: 0.25rem;
+}
+
+.qt2-mode-tab {
+  border-radius: 3px;
+  padding: 0.35rem 0.85rem;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgb(148, 163, 184);
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.qt2-mode-tab:hover {
+  color: rgb(226, 232, 240);
+}
+
+.qt2-mode-tab.is-active {
+  background: var(--accent-alpha-20);
+  color: var(--accent-text-strong);
+}
+
+.qt2-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.qt2-panel {
+  border-radius: var(--ui-radius-shell);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(15, 19, 32, 0.52), rgba(12, 16, 26, 0.5));
+  backdrop-filter: blur(14px);
+  padding: 0.9rem;
+}
+
+.qt2-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.qt2-panel-head h3 {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: rgb(241, 245, 249);
+}
+
+.qt2-panel-head p {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgb(100, 116, 139);
+}
+
+.qt2-section-hd {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.qt2-count {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: rgb(100, 116, 139);
+}
+
+.qt2-fleet-section + .qt2-fleet-section {
+  margin-top: 0.3rem;
+}
+
+.qt2-fleet-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15.5rem, 1fr));
+  gap: 0.6rem;
+  margin-top: 0.6rem;
+}
+
+.qt2-fleet-card {
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  border-radius: var(--ui-radius-panel);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(13, 18, 25, 0.56), rgba(8, 11, 17, 0.6));
+  backdrop-filter: blur(10px);
+  padding: 0.7rem 0.75rem;
+  transition: border-color 140ms ease, transform 140ms ease;
+  cursor: pointer;
+}
+
+.qt2-fleet-card:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  transform: translateY(-1px);
+}
+
+.qt2-fleet-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.qt2-fleet-card-status {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.qt2-fleet-card-mode {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgb(100, 116, 139);
+}
+
+.qt2-fleet-card-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: rgb(241, 245, 249);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qt2-fleet-card-sub {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: rgb(148, 163, 184);
+}
+
+.qt2-fleet-card-detail {
+  font-size: 0.66rem;
+  color: rgb(100, 116, 139);
+}
+
+.qt2-fleet-card-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 0.15rem;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: rgb(148, 163, 184);
+}
+
+.qt2-fleet-card-stats strong {
+  color: rgb(226, 232, 240);
+  font-weight: 600;
+}
+
+.qt2-fleet-card-warn {
+  color: rgb(253, 230, 138);
+}
+
+.qt2-fleet-card-lens {
+  align-self: flex-start;
+  margin-top: 0.15rem;
+  border-radius: 3px;
+  border: 1px solid var(--accent-alpha-40);
+  background: var(--accent-alpha-10);
+  padding: 0.2rem 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent-text-strong);
+}
+
+.qt2-fleet-card-lens:hover {
+  background: var(--accent-alpha-20);
+}
+
+.qt2-tone-emerald .qt2-fleet-card-status { color: rgb(110, 231, 183); }
+.qt2-tone-amber .qt2-fleet-card-status { color: rgb(252, 211, 77); }
+.qt2-tone-sky .qt2-fleet-card-status { color: rgb(125, 211, 252); }
+.qt2-tone-rose .qt2-fleet-card-status { color: rgb(253, 164, 175); }
+.qt2-tone-slate .qt2-fleet-card-status { color: rgb(148, 163, 184); }
+
+.qt2-empty {
+  grid-column: 1 / -1;
+  border-radius: var(--ui-radius-panel);
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  padding: 1.1rem;
+  text-align: center;
+  font-size: 0.7rem;
+  color: rgb(100, 116, 139);
+}
+
+.qt2-error {
+  border-radius: var(--ui-radius-panel);
+  border: 1px solid rgba(244, 63, 94, 0.35);
+  background: rgba(244, 63, 94, 0.1);
+  padding: 0.6rem 0.75rem;
+  font-size: 0.7rem;
+  color: rgb(254, 205, 211);
+}
+
+.qt2-room-loading {
+  border-radius: var(--ui-radius-panel);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(21, 25, 36, 0.4);
+  padding: 0.9rem;
+  font-size: 0.72rem;
+  color: rgb(100, 116, 139);
+  backdrop-filter: blur(6px);
+}
+
+.qt2-coming-soon {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  border-radius: var(--ui-radius-shell);
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  padding: 2.5rem 1.5rem;
+  align-items: flex-start;
+  max-width: 34rem;
+}
+
+.qt2-coming-soon p {
+  font-size: 0.78rem;
+  color: rgb(148, 163, 184);
+  line-height: 1.55;
+}
+
+/*
+ * Routed "lens" page shell (bot/backtest/collector). Previously a Headless
+ * UI Dialog overlay; now a real page under /fleet/bots/:botId etc, so it's
+ * normal document flow inside .qt2-main rather than a fixed/backdrop layer.
+ */
+.qt2-lens-shell {
+  min-height: calc(100vh - 8rem);
+}
+
+/* ===================== Overview ===================== */
+
+.qt2-attention-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+
+.qt2-attention-item {
+  display: grid;
+  grid-template-columns: 5.5rem 1fr auto;
+  align-items: center;
+  gap: 0.75rem;
+  border-radius: var(--ui-radius-panel);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: 3px solid rgba(255, 255, 255, 0.2);
+  background: linear-gradient(180deg, rgba(13, 18, 25, 0.56), rgba(8, 11, 17, 0.6));
+  padding: 0.6rem 0.85rem;
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.qt2-attention-item:hover {
+  background: linear-gradient(180deg, rgba(17, 23, 32, 0.66), rgba(10, 14, 22, 0.7));
+}
+
+.qt2-attention-critical { border-left-color: rgb(244, 63, 94); }
+.qt2-attention-warning { border-left-color: rgb(245, 158, 11); }
+.qt2-attention-info { border-left-color: rgb(56, 189, 248); }
+
+.qt2-attention-severity {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.qt2-attention-critical .qt2-attention-severity { color: rgb(253, 164, 175); }
+.qt2-attention-warning .qt2-attention-severity { color: rgb(252, 211, 77); }
+.qt2-attention-info .qt2-attention-severity { color: rgb(125, 211, 252); }
+
+.qt2-attention-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: rgb(241, 245, 249);
+}
+
+.qt2-attention-detail {
+  font-size: 0.72rem;
+  color: rgb(148, 163, 184);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qt2-attention-empty {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+  border-radius: var(--ui-radius-panel);
+  border: 1px solid rgba(52, 211, 153, 0.25);
+  background: rgba(52, 211, 153, 0.06);
+  color: rgb(167, 243, 208);
+  padding: 0.7rem 0.9rem;
+  font-size: 0.75rem;
+}
+
+.qt2-attention-empty .qt2-status-dot {
+  background: rgb(52, 211, 153);
+  box-shadow: 0 0 10px rgba(52, 211, 153, 0.6);
+}
+
+.qt2-workload-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(24rem, 1fr));
+  gap: 0.85rem;
+  margin-top: 0.6rem;
+}
+
+.qt2-workload-card {
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  border-radius: var(--ui-radius-shell);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(15, 20, 28, 0.6), rgba(9, 12, 19, 0.64));
+  backdrop-filter: blur(12px);
+  padding: 1.1rem 1.2rem;
+}
+
+.qt2-workload-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.qt2-workload-card-kind {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgb(100, 116, 139);
+}
+
+.qt2-workload-card-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: rgb(241, 245, 249);
+}
+
+.qt2-overview-secondary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 0.85rem;
+  margin-top: 0.3rem;
+}
+
+.qt2-greeting {
+  border-radius: var(--ui-radius-shell);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(15, 19, 32, 0.52), rgba(12, 16, 26, 0.5));
+  padding: 1rem 1.1rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.qt2-greeting-title {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: rgb(241, 245, 249);
+}
+
+.qt2-stat-card {
+  border-radius: var(--ui-radius-shell);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(15, 19, 32, 0.52), rgba(12, 16, 26, 0.5));
+  padding: 1rem 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.qt2-stat-card-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: rgb(241, 245, 249);
+}
+
+.qt2-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.6rem;
+  margin-top: 0.2rem;
+}
+
+.qt2-stat-value {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: rgb(226, 232, 240);
+}
+
+.qt2-stat-value-sm {
+  font-size: 0.62rem;
+  font-weight: 500;
+  color: rgb(148, 163, 184);
+}
+
+.qt2-stat-card-footer {
+  margin-top: 0.3rem;
+  font-size: 0.6rem;
+  color: rgb(100, 116, 139);
+}
+
+.qt2-heatmap {
+  display: flex;
+  gap: 0.18rem;
+  overflow-x: auto;
+  padding-bottom: 0.2rem;
+}
+
+.qt2-heatmap-week {
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+}
+
+.qt2-heatmap-cell {
+  width: 0.68rem;
+  height: 0.68rem;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.qt2-heatmap-cell-pad {
+  background: transparent;
+}
+
+.qt2-heatmap-level-0 { background: rgba(255, 255, 255, 0.05); }
+.qt2-heatmap-level-1 { background: var(--accent-alpha-20); }
+.qt2-heatmap-level-2 { background: var(--accent-alpha-40); }
+.qt2-heatmap-level-3 { background: var(--accent-alpha-60); }
+.qt2-heatmap-level-4 { background: var(--accent-base); }
+
+/* ===================== Operator console v2.1 ===================== */
+
+.qt2-status-pill[data-status='reachable'] {
+  border-color: rgba(16, 185, 129, 0.4);
+  background: rgba(16, 185, 129, 0.12);
+  color: rgb(167, 243, 208);
+}
+
+.qt2-status-pill[data-status='unavailable'] {
+  border-color: rgba(244, 63, 94, 0.4);
+  background: rgba(244, 63, 94, 0.12);
+  color: rgb(254, 205, 211);
+}
+
+.qt2-status-pill[data-status='checking'] {
+  border-color: rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.12);
+  color: rgb(253, 230, 138);
+}
+
+.qt2-section {
+  border-radius: var(--ui-radius-shell);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: linear-gradient(180deg, rgba(15, 19, 28, 0.34), rgba(9, 12, 19, 0.4));
+  padding: 0.85rem;
+}
+
+.qt2-section-hd {
+  justify-content: space-between;
+}
+
+.qt2-section-hd > div {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.qt2-section-hd .qt2-kicker {
+  margin: 0;
+}
+
+.qt2-step {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  color: rgba(148, 163, 184, 0.65);
+}
+
+.qt2-section-note {
+  margin: 0.45rem 0 0.7rem;
+  max-width: 74rem;
+  color: rgb(100, 116, 139);
+  font-size: 0.66rem;
+  line-height: 1.5;
+}
+
+.qt2-overview-head {
+  align-items: center;
+}
+
+.qt2-head-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.qt2-greeting-compact {
+  min-width: 12rem;
+  padding: 0.5rem 0.7rem;
+  border-radius: var(--ui-radius-panel);
+}
+
+.qt2-greeting-compact .qt2-kicker {
+  font-size: 0.5rem;
+  margin-bottom: 0.1rem;
+}
+
+.qt2-greeting-compact .qt2-greeting-title {
+  font-size: 0.76rem;
+}
+
+.qt2-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border-radius: var(--ui-radius-control);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.24);
+  padding: 0.48rem 0.68rem;
+  color: rgb(203, 213, 225);
+  font-family: var(--font-mono);
+  font-size: 0.61rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.qt2-button:hover {
+  border-color: var(--accent-alpha-40);
+  color: var(--accent-text-strong);
+}
+
+.qt2-attention-item {
+  grid-template-columns: 5.5rem minmax(10rem, 0.8fr) minmax(12rem, 1.5fr) auto;
+}
+
+.qt2-attention-time,
+.qt2-operation-row time {
+  color: rgb(100, 116, 139);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  white-space: nowrap;
+}
+
+.qt2-attention-empty {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.025);
+  color: rgb(148, 163, 184);
+}
+
+.qt2-attention-empty .qt2-status-dot {
+  background: rgb(148, 163, 184);
+  box-shadow: none;
+}
+
+.qt2-compact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.qt2-operation-row {
+  display: grid;
+  grid-template-columns: 7.5rem minmax(12rem, 1fr) auto auto;
+  align-items: center;
+  gap: 0.75rem;
+  border-radius: var(--ui-radius-panel);
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  background: rgba(0, 0, 0, 0.16);
+  padding: 0.55rem 0.7rem;
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.qt2-operation-row:hover {
+  border-color: var(--accent-alpha-40);
+  background: var(--accent-alpha-10);
+}
+
+.qt2-operation-row strong,
+.qt2-related-card strong {
+  display: block;
+  color: rgb(226, 232, 240);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.qt2-operation-row small,
+.qt2-related-card small,
+.qt2-data-table small {
+  display: block;
+  margin-top: 0.2rem;
+  color: rgb(100, 116, 139);
+  font-size: 0.58rem;
+  line-height: 1.4;
+}
+
+.qt2-kind-label {
+  color: var(--accent-text-soft);
+  font-family: var(--font-mono);
+  font-size: 0.53rem;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.qt2-state-text {
+  color: rgb(148, 163, 184);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  text-transform: capitalize;
+}
+
+.qt2-table-wrap {
+  overflow: auto;
+  border-radius: var(--ui-radius-panel);
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.qt2-data-table {
+  width: 100%;
+  min-width: 62rem;
+  border-collapse: collapse;
+  text-align: left;
+  color: rgb(203, 213, 225);
+  font-size: 0.65rem;
+}
+
+.qt2-data-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(10, 13, 20, 0.96);
+  padding: 0.58rem 0.65rem;
+  color: rgb(100, 116, 139);
+  font-family: var(--font-mono);
+  font-size: 0.53rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.qt2-data-table td {
+  max-width: 18rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 0.62rem 0.65rem;
+  vertical-align: top;
+}
+
+.qt2-data-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.qt2-data-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.qt2-data-table td > strong {
+  color: rgb(226, 232, 240);
+  font-weight: 600;
+}
+
+.qt2-evidence-state {
+  display: inline-flex;
+  max-width: 14rem;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 0.2rem 0.42rem;
+  color: rgb(148, 163, 184);
+  font-family: var(--font-mono);
+  font-size: 0.53rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.qt2-evidence-state.is-success,
+.qt2-evidence-state.is-emerald {
+  border-color: rgba(52, 211, 153, 0.3);
+  background: rgba(52, 211, 153, 0.08);
+  color: rgb(167, 243, 208);
+}
+
+.qt2-evidence-state.is-danger,
+.qt2-evidence-state.is-rose {
+  border-color: rgba(244, 63, 94, 0.32);
+  background: rgba(244, 63, 94, 0.09);
+  color: rgb(254, 205, 211);
+}
+
+.qt2-evidence-state.is-warning,
+.qt2-evidence-state.is-amber {
+  border-color: rgba(245, 158, 11, 0.32);
+  background: rgba(245, 158, 11, 0.08);
+  color: rgb(253, 230, 138);
+}
+
+.qt2-evidence-state.is-info,
+.qt2-evidence-state.is-sky {
+  border-color: rgba(56, 189, 248, 0.28);
+  background: rgba(56, 189, 248, 0.07);
+  color: rgb(186, 230, 253);
+}
+
+.qt2-text-link {
+  color: var(--accent-text-strong);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+}
+
+.qt2-text-link:hover {
+  text-decoration: underline;
+}
+
+.qt2-select,
+.qt2-search {
+  border-radius: var(--ui-radius-control);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgb(15, 18, 26);
+  color: rgb(203, 213, 225);
+  font-family: var(--font-mono);
+  font-size: 0.61rem;
+}
+
+.qt2-select {
+  padding: 0.45rem 0.6rem;
+}
+
+.qt2-heatmap-card {
+  padding-bottom: 0.7rem;
+}
+
+.qt2-heatmap-legend {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.25rem;
+  margin-top: 0.45rem;
+  color: rgb(100, 116, 139);
+  font-family: var(--font-mono);
+  font-size: 0.52rem;
+}
+
+.qt2-heatmap-legend .qt2-heatmap-cell {
+  display: inline-block;
+}
+
+.qt2-outcomes-grid {
+  display: grid;
+  grid-template-columns: minmax(23rem, 0.85fr) minmax(28rem, 1.15fr);
+  align-items: start;
+  gap: 0.75rem;
+}
+
+.qt2-card-heading-row,
+.qt2-subsection-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.qt2-card-heading-row .qt2-kicker {
+  margin: 0;
+}
+
+.qt2-muted,
+.qt2-observation-note {
+  color: rgb(100, 116, 139);
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+}
+
+.qt2-evidence-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  margin-top: auto;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 0.55rem;
+  color: rgb(100, 116, 139);
+  font-size: 0.58rem;
+}
+
+.qt2-evidence-strip a {
+  color: var(--accent-text-strong);
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.qt2-tabs {
+  display: flex;
+  align-items: center;
+  overflow-x: auto;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.075);
+}
+
+.qt2-tabs button {
+  position: relative;
+  flex: 0 0 auto;
+  padding: 0.62rem 0.85rem;
+  color: rgb(100, 116, 139);
+  font-family: var(--font-mono);
+  font-size: 0.59rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.qt2-tabs button.is-active {
+  color: rgb(226, 232, 240);
+}
+
+.qt2-tabs button.is-active::after {
+  content: '';
+  position: absolute;
+  right: 0.75rem;
+  bottom: -1px;
+  left: 0.75rem;
+  height: 2px;
+  background: var(--accent-base);
+}
+
+.qt2-filterbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.qt2-search {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: min(22rem, 100%);
+  padding: 0 0.6rem;
+}
+
+.qt2-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  padding: 0.5rem 0;
+  color: rgb(226, 232, 240);
+}
+
+.qt2-subsection-head {
+  align-items: center;
+  margin: 0.2rem 0 0.55rem;
+}
+
+.qt2-subsection-head h2 {
+  color: rgb(226, 232, 240);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.qt2-subsection-head p {
+  margin-top: 0.15rem;
+  color: rgb(100, 116, 139);
+  font-size: 0.61rem;
+}
+
+.qt2-operations-body {
+  min-height: 20rem;
+}
+
+.qt2-lens-page,
+.qt2-botlens-page {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.qt2-lens-page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.qt2-evidence-layout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.qt2-readout-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--ui-radius-panel);
+}
+
+.qt2-readout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 0.55rem 0.65rem;
+}
+
+.qt2-readout span {
+  color: rgb(100, 116, 139);
+  font-size: 0.58rem;
+}
+
+.qt2-readout strong {
+  overflow-wrap: anywhere;
+  color: rgb(203, 213, 225);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  text-align: right;
+}
+
+.qt2-evidence-body {
+  color: rgb(148, 163, 184);
+  font-size: 0.7rem;
+  line-height: 1.6;
+}
+
+.qt2-related-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+  gap: 0.45rem;
+}
+
+.qt2-related-card {
+  border-radius: var(--ui-radius-panel);
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  background: rgba(0, 0, 0, 0.16);
+  padding: 0.65rem;
+}
+
+.qt2-related-card:hover {
+  border-color: var(--accent-alpha-40);
+}
+
+.qt2-raw-evidence {
+  grid-column: 1 / -1;
+}
+
+.qt2-raw-evidence pre {
+  max-height: 30rem;
+  overflow: auto;
+  border-radius: var(--ui-radius-panel);
+  background: rgba(0, 0, 0, 0.25);
+  padding: 0.75rem;
+  color: rgb(148, 163, 184);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  white-space: pre-wrap;
+}
+
+.qt2-run-evidence-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: var(--ui-radius-panel);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.qt2-run-evidence-strip > span {
+  min-width: 0;
+  background: rgb(13, 17, 24);
+  padding: 0.5rem 0.6rem;
+}
+
+.qt2-run-evidence-strip small,
+.qt2-run-evidence-strip strong {
+  display: block;
+}
+
+.qt2-run-evidence-strip small {
+  color: rgb(100, 116, 139);
+  font-size: 0.52rem;
+}
+
+.qt2-run-evidence-strip strong {
+  margin-top: 0.15rem;
+  overflow: hidden;
+  color: rgb(203, 213, 225);
+  font-size: 0.58rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qt2-run-evidence-strip .is-error strong {
+  color: rgb(254, 205, 211);
+}
+
+@media (max-width: 980px) {
+  .qt2-outcomes-grid,
+  .qt2-evidence-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .qt2-raw-evidence {
+    grid-column: auto;
+  }
+
+  .qt2-run-evidence-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .qt2-topbar {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 0.65rem;
+  }
+
+  .qt2-roomnav {
+    order: 3;
+    width: 100%;
+  }
+
+  .qt2-main {
+    padding: 0.8rem 0.65rem 1.5rem;
+  }
+
+  .qt2-head-actions,
+  .qt2-lens-page-head {
+    align-items: stretch;
+    width: 100%;
+  }
+
+  .qt2-greeting-compact {
+    flex: 1;
+  }
+
+  .qt2-attention-item,
+  .qt2-operation-row {
+    grid-template-columns: 1fr;
+    gap: 0.28rem;
+  }
+
+  .qt2-attention-detail {
+    text-align: left;
+    white-space: normal;
+  }
+
+  .qt2-run-evidence-strip,
+  .qt2-readout-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .qt2-filterbar > * {
+    width: 100%;
+  }
+}
