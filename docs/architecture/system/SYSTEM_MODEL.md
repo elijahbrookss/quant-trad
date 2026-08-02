@@ -118,9 +118,9 @@ degraded state, not fabricated valid execution state.
 - [Execution runtime boundary](../execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md)
 - [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
 - [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)
+- [Operator console v2](../frontend/OPERATOR_CONSOLE_V2.md)
 
 ## Known Gaps
 
-- Frontend-wide architecture beyond BotLens needs a later operator-surface doc.
 - Paper/live runtime mode details should be documented when their collaborators diverge from backtest behavior.
 - SVG diagram generation is pending Mermaid tooling.
