@@ -16,6 +16,8 @@ code_paths:
   - src/market_data/contracts.py
   - src/market_data/requirements.py
   - src/data_providers/providers/coinbase.py
+  - src/data_providers/registry.py
+  - portal/backend/service/providers/provider_service.py
   - portal/backend/db/market_data_models.py
   - portal/backend/service/market/collector_service.py
   - portal/backend/service/market/runtime_market_data.py
@@ -42,9 +44,10 @@ explicit instrument without choosing a provider endpoint or guessing symbols.
 
 Coinbase Advanced Trade exposes current futures open interest through its product
 response but does not provide historical backfill or a provider event timestamp
-for that field. A durable poller therefore needs explicit sampling, known-at,
-retry, gap, pacing, and ownership semantics. Backtests must use accumulated facts
-from a frozen dataset; they must never poll Coinbase during execution.
+for that field. Quant-Trad polls the public Advanced Trade product endpoint, so
+current OI does not require account credentials. A durable poller still needs
+explicit sampling, known-at, retry, gap, pacing, and ownership semantics.
+Backtests use accumulated facts from a frozen dataset and never poll Coinbase.
 
 ## Decision
 
@@ -60,6 +63,14 @@ lease generation, and attempt evidence. Workers claim due work with row locking,
 bounded concurrency, expiring leases, and a secret token hash. The fact append
 transaction rechecks that ownership fence, so a stale worker cannot publish.
 Missed schedules and exhausted attempts create immutable gap evidence.
+
+Provider venues declare only operations Quant-Trad implements. Each declared
+feature states one authentication mode: `public`, `credentials`, or
+`external_auth`. Undeclared operations fail as unsupported and are not
+advertised as a catalog of upstream-provider features. Credential keys remain
+defined once at the provider/venue boundary, and encrypted references are
+resolved only by authenticated provider operations. Collection definitions
+never carry credentials or credential references.
 
 The first handler is Coinbase venue-specific `derivatives.open_interest.v1`.
 `sample_time` is the scheduled poll identity. Because the provider supplies no
@@ -81,6 +92,10 @@ each bar and clears it between bars.
 ## Invariants
 
 - Consumers never declare provider, endpoint, table, poll schedule, or fallback.
+- An operation is callable only when declared in the provider feature contract;
+  declarations describe implemented Quant-Trad behavior, not every upstream
+  provider offering.
+- Public operations do not access the provider credential store.
 - Instrument relationships use canonical IDs supplied by run configuration; no
   symbol parsing infers underlying or benchmark identity.
 - A read miss never calls Coinbase or another provider.

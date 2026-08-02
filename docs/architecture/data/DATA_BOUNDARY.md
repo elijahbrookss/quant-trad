@@ -64,6 +64,21 @@ Provider adapters are acquisition-only anti-corruption boundaries. They isolate
 API details, provider product IDs, pagination, and response metadata. They do
 not create tables, choose fallback providers, or format runtime frames.
 
+Provider/venue feature contracts enumerate only operations implemented by
+Quant-Trad. Each declared operation states whether access is `public`, requires
+shared provider `credentials`, or depends on `external_auth`. An undeclared
+operation is unsupported and fails at the provider boundary; the API does not
+advertise unbuilt upstream features. Provider errors still propagate with their
+operation context because declared access is an operator contract, not a promise
+that an upstream API can never change.
+
+Credential field names live once on the provider/venue registry. Secret values
+live only in encrypted provider credential references. Collectors, bots, and run
+configuration do not copy secrets or credential references. Coinbase Advanced
+Trade product metadata, public candles, public live data, and current OI are
+declared public. Authenticated account-fee lookup is a separate operation and
+uses the same shared provider credential record.
+
 ## Canonical Flows
 
 1. Historical candles are requested explicitly through an audited CLI or API
@@ -86,6 +101,20 @@ not create tables, choose fallback providers, or format runtime frames.
 Logical series are keyed by canonical instrument, fact type, contract version,
 and optional timeframe. Candles and OI share one database-wide market fact
 commit sequence, allowing one mixed-fact dataset watermark.
+
+Physical fact storage is typed by fact contract, not by provider, venue, or
+instrument. `candle_versions` stores all `candle.ohlcv.v1` series and
+`open_interest_versions` stores all `derivatives.open_interest.v1` series. The
+generic source, series, ingestion, gap, dataset, collection-definition,
+collection-attempt, pacing, lease, and commit-clock tables are shared.
+
+A new fact family gets a typed revision table only when its value and temporal
+constraints differ materially. It does not get one table per exchange or symbol.
+This keeps database constraints and causal reads explicit without collapsing
+unrelated facts into a universal JSON payload. The scheduler itself is already
+provider-neutral. When a second point-in-time fact such as funding is
+implemented, repeated repository and collector dispatch is the signal to
+introduce a fact-handler registry.
 
 ### Candles
 
@@ -154,7 +183,8 @@ replacing source provenance and quality.
 ## Failure, Recovery, And Scaling
 
 - Missing canonical data fails without provider fallback.
-- Missing credentials fail before explicit acquisition or polling.
+- Missing credentials fail before an explicitly authenticated provider
+  operation. Public operations never consult the credential store.
 - Unsupported provider, venue, product, fact contract, or instrument role fails
   with context.
 - Duplicate, malformed, provisional, conflicting, or out-of-window facts fail
@@ -185,6 +215,9 @@ replacing source provenance and quality.
 - Instrument relationships are canonical IDs, never symbol guesses.
 - Provider credentials flow through credential references, not bot or run
   configuration.
+- Provider feature declarations include only implemented operations and their
+  authentication mode; undeclared requests fail as unsupported.
+- No provider error is reclassified from guessed response text.
 
 ## Known Gaps
 

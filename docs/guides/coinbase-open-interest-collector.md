@@ -4,12 +4,15 @@ The first continuous typed-fact collector polls Coinbase Advanced Trade for the
 current open interest of one explicitly mapped futures product. It stores
 append-only `derivatives.open_interest.v1` observations. It does not provide
 historical backfill, funding, basis, aggregated OI, or live trading.
+The collector uses Coinbase Advanced Trade's public product endpoint.
 
 ## Preconditions
 
 - The canonical instrument already exists with datasource `COINBASE`, exchange
   `COINBASE_DIRECT`, and a futures instrument type.
-- `secrets.env` contains the Coinbase credentials already used by the platform.
+- No Coinbase credential is required for product metadata, candles, public live
+  market data, or current OI. Authenticated operations use the shared provider
+  credential store and are separate from this collector.
 - The operator knows the exact Coinbase provider product ID. The platform does
   not infer it from the canonical symbol.
 - The backend, TimescaleDB, and collector worker are running. The repository
@@ -61,6 +64,11 @@ unavailability. Required missing or stale input fails loudly.
   exchange event time.
 - `known_at` is platform acceptance after receipt because Coinbase does not
   expose an event timestamp for this field.
+- Collection definitions contain provider, venue, and product identity but never
+  credentials or credential references. The Coinbase adapter owns any credential
+  resolution for explicitly authenticated features.
+- Coinbase HTTP or payload failures propagate through the provider boundary and
+  become failed collection attempts; the worker does not guess auth semantics.
 - A scheduled sample is idempotent. Missed schedules and exhausted retries are
   recorded as gap evidence.
 - Definitions, attempts, provider pacing, retries, and ownership leases are
