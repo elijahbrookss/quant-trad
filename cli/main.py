@@ -1418,6 +1418,95 @@ def _cmd_data_market_structure_proof(args: argparse.Namespace) -> int:
     return 0 if result.get("status") == "completed" else 1
 
 
+def _cmd_data_market_structure_configure(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            "/api/market-data/market-structure/pairs",
+            payload={
+                "pair_id": args.pair,
+                "auth_mode": args.auth_mode,
+                "max_spool_bytes": int(args.spool_gib * 1024**3),
+                "max_segment_bytes": int(args.segment_mib * 1024**2),
+                "enable_production": False,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_definitions(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/market-data/market-structure/definitions",
+            params={"definition_id": args.definition_id},
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_sessions(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/market-data/market-structure/sessions",
+            params={
+                "definition_id": args.definition_id,
+                "limit": args.limit,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_status(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/status",
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_capture(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/capture",
+            payload={
+                "duration_seconds": args.duration,
+                "storage_root": args.storage_root,
+                "owner_id": args.owner_id,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_replay(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/manifests/{quote(args.manifest_id, safe='')}/replay",
+            payload={"storage_root": args.storage_root},
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_reconcile_recent(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/reconcile-recent",
+            params={"limit": args.limit},
+        )
+    )
+    return 0
+
+
 def _cmd_research_items_list(args: argparse.Namespace) -> int:
     payload = _client(args).request_json(
         "GET",
@@ -3260,6 +3349,80 @@ def build_parser() -> argparse.ArgumentParser:
         help="Local proof output directory; defaults under logs/market-structure-proof/.",
     )
     data_market_structure_proof.set_defaults(func=_cmd_data_market_structure_proof)
+
+    data_market_structure = data_sub.add_parser(
+        "market-structure",
+        help="Configure, capture, inspect, and replay the bounded market-structure plane.",
+    )
+    data_market_structure_sub = data_market_structure.add_subparsers(
+        dest="data_market_structure_command",
+        required=True,
+    )
+    data_market_structure_configure = data_market_structure_sub.add_parser(
+        "configure-pair",
+        help="Register one approved futures/spot pair without production enrollment.",
+    )
+    data_market_structure_configure.add_argument(
+        "--pair",
+        choices=["bip_btc", "etp_eth", "slp_sol"],
+        default="bip_btc",
+    )
+    data_market_structure_configure.add_argument(
+        "--auth-mode",
+        choices=["public", "authenticated"],
+        default="authenticated",
+    )
+    data_market_structure_configure.add_argument("--spool-gib", type=float, default=8.0)
+    data_market_structure_configure.add_argument("--segment-mib", type=float, default=128.0)
+    data_market_structure_configure.set_defaults(
+        func=_cmd_data_market_structure_configure
+    )
+    data_market_structure_definitions = data_market_structure_sub.add_parser(
+        "definitions",
+        help="Inspect bounded definitions, production blockers, and leases.",
+    )
+    data_market_structure_definitions.add_argument("--definition-id")
+    data_market_structure_definitions.set_defaults(
+        func=_cmd_data_market_structure_definitions
+    )
+    data_market_structure_sessions = data_market_structure_sub.add_parser(
+        "sessions",
+        help="Inspect immutable session lifecycle evidence.",
+    )
+    data_market_structure_sessions.add_argument("--definition-id")
+    data_market_structure_sessions.add_argument("--limit", type=int, default=100)
+    data_market_structure_sessions.set_defaults(func=_cmd_data_market_structure_sessions)
+    data_market_structure_status = data_market_structure_sub.add_parser(
+        "status",
+        help="Inspect archive, quality, coverage, and capacity blockers.",
+    )
+    data_market_structure_status.add_argument("definition_id")
+    data_market_structure_status.set_defaults(func=_cmd_data_market_structure_status)
+    data_market_structure_capture = data_market_structure_sub.add_parser(
+        "capture",
+        help="Run one explicitly bounded non-production market-trade capture.",
+    )
+    data_market_structure_capture.add_argument("definition_id")
+    data_market_structure_capture.add_argument("--duration", type=float, default=60.0)
+    data_market_structure_capture.add_argument("--storage-root")
+    data_market_structure_capture.add_argument("--owner-id")
+    data_market_structure_capture.set_defaults(func=_cmd_data_market_structure_capture)
+    data_market_structure_replay = data_market_structure_sub.add_parser(
+        "replay",
+        help="Verify one acknowledged raw manifest and deterministic trade replay.",
+    )
+    data_market_structure_replay.add_argument("manifest_id")
+    data_market_structure_replay.add_argument("--storage-root")
+    data_market_structure_replay.set_defaults(func=_cmd_data_market_structure_replay)
+    data_market_structure_reconcile = data_market_structure_sub.add_parser(
+        "reconcile-recent",
+        help="Compare a bounded recent Coinbase REST window with canonical trade IDs.",
+    )
+    data_market_structure_reconcile.add_argument("definition_id")
+    data_market_structure_reconcile.add_argument("--limit", type=int, default=100)
+    data_market_structure_reconcile.set_defaults(
+        func=_cmd_data_market_structure_reconcile_recent
+    )
 
     research = subparsers.add_parser("research", help="Research memory and lightweight historical checks.")
     research_sub = research.add_subparsers(dest="research_command", required=True)

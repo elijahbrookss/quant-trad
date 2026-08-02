@@ -3,7 +3,7 @@ component: market-structure-data-plane
 subsystem: data
 layer: design
 doc_type: architecture
-status: proposed
+status: active
 tags:
   - market-data
   - market-structure
@@ -13,7 +13,7 @@ tags:
   - object-storage
   - datasets
   - known-at
-  - proposed
+  - active
 code_paths:
   - src/data_providers/streams
   - src/data_providers/providers/coinbase.py
@@ -34,10 +34,12 @@ code_paths:
 
 ## Status And Campaign Boundary
 
-This is an implementation-ready proposed design. It records discovery and
-decisions for a later campaign; it does not authorize or include collectors,
-database migrations, cloud resources, runtime delivery, strategies, or frontend
-work.
+This is the active phased design. Phase 0 provider proof and Phase 1 bounded
+futures/spot trades are implemented; Phases 2–4 remain approved implementation
+work. No phase or document authorizes production collector enrollment, cloud
+resources, strategy changes, live trading, or frontend work. The implemented
+24-hour capacity proof and explicit budget approval remain deferred until after
+Phase 4 and mandatory before production enrollment.
 
 The allowed live provider boundary is Coinbase Advanced Trade REST and
 WebSocket using the existing provider credential boundary. Public channels may
@@ -106,22 +108,24 @@ The design extends, and does not replace, the contracts in:
 
 ### Concrete Current Limitations
 
-- `CoinbaseAdvancedTradeStream` accepts only `heartbeats`, `ticker`, and
-  `candles`; it does not parse `market_trades` or `level2`.
-- `CanonicalMarketEvent.event_id` is a random UUID and `raw_ref` is parsed
-  metadata, not a deterministic evidence identity or durable raw frame.
-- current sequence tracking is connection-wide. Coinbase documents sequence
-  numbers as increasing per product, so this behavior cannot be reused.
+- Phase 1 now supports `market_trades` plus heartbeats on one product per
+  connection. `level2` parsing and persistent reconstruction remain Phase 2.
+- Market-structure archive identity is deterministic through `raw_record_id`
+  and `spool_segment_id`; the generic `CanonicalMarketEvent.event_id` remains
+  unsuitable as raw evidence identity and is not used for that purpose.
+- observed Advanced Trade sequence tracking is connection-epoch scoped. The
+  bounded collector uses one product per connection and never claims a stronger
+  cross-product ordering contract.
 - the paper runner is candle-specific, owned by a bot run, and publishes only
   after candle persistence. It is not an independently recoverable data plane.
-- OI and funding have typed append-only storage. Dataset planning and runtime
-  delivery support OI but not funding.
-- shared commit-clock, hypertable, and immutability setup currently enumerate
-  candle/OI/funding tables explicitly and will require a later migration for new
-  tables.
-- the live catalog contains BIP, ETP, and SLP Coinbase futures. The only current
-  spot catalog entry is legacy `CCXT/COINBASE BTC/USD`; direct Coinbase
-  BTC-USD, ETH-USD, and SOL-USD instruments must be registered before Phase 1.
+- OI and funding have typed append-only storage. Phase 1 datasets support trades
+  and trade-flow aggregates; canonical runtime requirement delivery still does
+  not support funding or market-structure facts until Phase 4.
+- shared commit-clock, hypertable, and immutability setup now enumerate Phase 1
+  trade/flow tables. It will require extension for Phase 2–4 tables.
+- the live catalog contains BIP, ETP, and SLP Coinbase futures. Phase 1 pair
+  configuration registered canonical direct Coinbase BTC-USD. ETH-USD and
+  SOL-USD remain explicit on-demand registrations and are not enrolled.
 
 ## Source And Coverage Inventory
 
@@ -137,9 +141,9 @@ Status means:
 | Source/channel | Auth | Role/products | Snapshot/incremental and batching | Time and ordering | Duplicate/gap/recovery | Historical value | Retention value | Status |
 |---|---|---|---|---|---|---|---|---|
 | Advanced Trade WS `market_trades`, spot | public; authenticated CDP recommended | BTC-USD, ETH-USD, SOL-USD | initial `snapshot`, then 250 ms `update` batches containing one or more trades | trade `time`; envelope `timestamp`; Phase 0 observed one connection-wide `sequence_num` across subscribed channels, reset on reconnect; local receipt/acceptance becomes known-at | dedupe by provider trade ID; a connection-sequence gap affects every subscription on that connection; typed coverage intervals detect gaps and reconnect; explicit zero requires the complete rule below; recent REST trades validate only | no complete event-level backfill documented | irreplaceable event evidence | confirmed for BIP/BTC proof scope |
-| Advanced Trade WS `market_trades`, CDE futures | same surface/auth contract | BIP, ETP, SLP product IDs | documented schema is the same; product acceptance and futures size units require capture | same fields; maker-side semantics documented | same typed coverage policy, subject to Phase 0 sequence/delivery-assurance capture | no complete event-level backfill documented | irreplaceable event evidence | conditional |
+| Advanced Trade WS `market_trades`, CDE futures | same surface/auth contract | BIP, ETP, SLP product IDs | captured schema is the same; Phase 0 proved product access and contract units | same fields; maker-side semantics documented and captured | same typed coverage policy; BIP Phase 1 live capture passed | no complete event-level backfill documented | irreplaceable event evidence | confirmed semantics; only BIP Phase 1 live-verified |
 | Advanced Trade WS `level2`, spot | public; authenticated CDP recommended | matching spot allowlist | `snapshot` then `update`; each event contains ordered absolute level quantities | update `event_time`; envelope `timestamp`; Phase 0 observed the same connection-wide `sequence_num`; receipt/known-at locally assigned | channel is documented as guaranteed; validate the connection sequence; reconnect resets it and requires a new snapshot | none documented | irreplaceable book evidence | confirmed for BIP/BTC proof scope |
-| Advanced Trade WS `level2`, CDE futures | same surface/auth contract | BIP, ETP, SLP | same documented absolute-quantity contract; product acceptance/units require capture | same fields and local times | same validity contract; no assumed native retransmit | none documented | irreplaceable book evidence | conditional |
+| Advanced Trade WS `level2`, CDE futures | same surface/auth contract | BIP, ETP, SLP | Phase 0 captured the absolute-quantity contract and product units | same fields and local times | same validity contract; no assumed native retransmit | none documented | irreplaceable book evidence | confirmed for Phase 2 implementation; not yet persisted |
 | Advanced Trade WS `heartbeats` | public | every stream session | one-second heartbeat and counter | server current time, envelope time, receipt | counter discontinuity is transport evidence, not a product-book sequence substitute | none | session/gap evidence, low volume | confirmed |
 | Advanced Trade WS `ticker` | public | futures and spot allowlist | snapshot/update, may batch cascading matches | envelope/event receipt; no replacement for trade event time | validation only; not canonical trade recovery | no event history | BBO/trade cross-check only | confirmed |
 | Advanced Trade WS `status` | public | subscribed products | periodic product/currency snapshots | provider/envelope and receipt | revision by material hash | no reliable history promised | product-state cross-check | confirmed, optional |
@@ -1078,6 +1082,10 @@ Value without later phases: verified provider contract, capacity envelope, and
 fixtures that prevent speculative implementation.
 
 ### Phase 1: Futures And Matching Spot Trades
+
+Status: implemented and live-verified for bounded BIP/BTC on 2026-08-02. See
+[Market Structure Phase 1 Trades](MARKET_STRUCTURE_PHASE_1_TRADES.md). ETP/ETH
+and SLP/SOL remain unenrolled, and no stream is production-admitted.
 
 Dependencies: Phase 0 trade/auth/unit proof and operator-authorized provisional
 capacity for implementation. This dependency does not authorize production

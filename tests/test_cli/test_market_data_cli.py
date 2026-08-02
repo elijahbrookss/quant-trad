@@ -358,3 +358,170 @@ def test_data_funding_rate_latest_declares_decision_time_and_staleness(
             "required": ["false"],
         },
     }
+
+
+def test_market_structure_configure_is_bounded_and_never_production_enrolls(
+    monkeypatch,
+) -> None:
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        observed.update(
+            method=request.get_method(),
+            path=urllib.parse.urlparse(request.full_url).path,
+            body=json.loads(request.data.decode("utf-8")),
+        )
+        return _Response({"pair_id": "bip_btc", "production_admitted": False})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "configure-pair",
+            "--pair",
+            "bip_btc",
+            "--auth-mode",
+            "authenticated",
+            "--spool-gib",
+            "8",
+            "--segment-mib",
+            "128",
+        ]
+    )
+    assert exit_code == 0
+    assert observed == {
+        "method": "POST",
+        "path": "/api/market-data/market-structure/pairs",
+        "body": {
+            "pair_id": "bip_btc",
+            "auth_mode": "authenticated",
+            "max_spool_bytes": 8 * 1024**3,
+            "max_segment_bytes": 128 * 1024**2,
+            "enable_production": False,
+        },
+    }
+
+
+def test_market_structure_capture_is_explicitly_bounded(monkeypatch) -> None:
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        observed.update(
+            method=request.get_method(),
+            path=urllib.parse.urlparse(request.full_url).path,
+            body=json.loads(request.data.decode("utf-8")),
+            timeout=timeout,
+        )
+        return _Response({"status": "completed"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "--timeout",
+            "180",
+            "data",
+            "market-structure",
+            "capture",
+            "ms_coinbase_bip_20dec30_cde",
+            "--duration",
+            "60",
+            "--storage-root",
+            "/data/market-structure",
+        ]
+    )
+    assert exit_code == 0
+    assert observed == {
+        "method": "POST",
+        "path": "/api/market-data/market-structure/definitions/ms_coinbase_bip_20dec30_cde/capture",
+        "body": {
+            "duration_seconds": 60.0,
+            "storage_root": "/data/market-structure",
+            "owner_id": None,
+        },
+        "timeout": 180.0,
+    }
+
+
+def test_market_structure_status_and_replay_use_typed_routes(monkeypatch) -> None:
+    observed = []
+
+    def fake_urlopen(request, timeout):
+        observed.append(
+            {
+                "method": request.get_method(),
+                "path": urllib.parse.urlparse(request.full_url).path,
+                "body": json.loads(request.data.decode("utf-8")) if request.data else None,
+            }
+        )
+        return _Response({"schema_version": "test.v1"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "status",
+            "definition-a",
+        ]
+    ) == 0
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "replay",
+            "manifest-a",
+        ]
+    ) == 0
+    assert observed == [
+        {
+            "method": "GET",
+            "path": "/api/market-data/market-structure/definitions/definition-a/status",
+            "body": None,
+        },
+        {
+            "method": "POST",
+            "path": "/api/market-data/market-structure/manifests/manifest-a/replay",
+            "body": {"storage_root": None},
+        },
+    ]
+
+
+def test_market_structure_recent_reconciliation_is_bounded(monkeypatch) -> None:
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        parsed = urllib.parse.urlparse(request.full_url)
+        observed.update(
+            method=request.get_method(),
+            path=parsed.path,
+            query=urllib.parse.parse_qs(parsed.query),
+        )
+        return _Response(
+            {
+                "schema_version": "market.recent_trade_reconciliation.v1",
+                "historical_completeness_claim": "none",
+            }
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "reconcile-recent",
+            "definition-a",
+            "--limit",
+            "25",
+        ]
+    ) == 0
+    assert observed == {
+        "method": "POST",
+        "path": "/api/market-data/market-structure/definitions/definition-a/reconcile-recent",
+        "query": {"limit": ["25"]},
+    }

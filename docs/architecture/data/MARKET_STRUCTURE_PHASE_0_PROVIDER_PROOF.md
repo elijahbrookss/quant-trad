@@ -35,6 +35,12 @@ deferral authorizes implementation only; it does not authorize production
 collector enrollment. ETP/ETH-USD and SLP/SOL-USD passed bounded access/unit
 spot checks but remain unenrolled.
 
+Phase 1 subsequently passed its bounded BIP/BTC implemented-path proof on the
+same date. Its archive, canonical reconciliation, coverage, aggregate, and
+provider-free dataset evidence is recorded in
+[Market Structure Phase 1 Trades](MARKET_STRUCTURE_PHASE_1_TRADES.md). This
+does not change the deferred production gate below.
+
 | Gate | Status | Evidence |
 |---|---|---|
 | One-hour unauthenticated BIP/BTC WS + REST | passed | completed 2026-08-02; report SHA-256 below |
@@ -240,8 +246,9 @@ Advanced Trade field.
 
 ## Provisional Capacity Result
 
-The one-hour measurement is diagnostic only; it cannot approve the Phase 1
-budget. It measured 98,164,925 raw bytes and 12,303,158 Parquet/ZSTD bytes
+The one-hour measurement is sufficient for Phase 1–4 implementation readiness,
+but it cannot approve the production storage/cost budget. It measured
+98,164,925 raw bytes and 12,303,158 Parquet/ZSTD bytes
 (7.97884:1), provisionally annualizing to 100.127002 GiB for the BIP/BTC proof
 scope. The 99th-percentile input rate was 91,661 bytes/s, implying a provisional
 3x-p99 six-hour raw spool of 5.531714 GiB. The maximum frame was 4,923,600 bytes,

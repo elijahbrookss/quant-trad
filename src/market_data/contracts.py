@@ -987,7 +987,16 @@ def build_funding_rate_material_hash(
     )
 
 
-MarketDataRecord = CandleRecord | OpenInterestRecord | FundingRateRecord
+from .structure import MarketTradeRecord, TradeFlowAggregateRecord
+
+
+MarketDataRecord = (
+    CandleRecord
+    | OpenInterestRecord
+    | FundingRateRecord
+    | MarketTradeRecord
+    | TradeFlowAggregateRecord
+)
 
 
 def _record_time(record: MarketDataRecord) -> datetime:
@@ -997,6 +1006,10 @@ def _record_time(record: MarketDataRecord) -> datetime:
         return record.fact.sample_time
     if isinstance(record, FundingRateRecord):
         return record.fact.sample_time
+    if isinstance(record, MarketTradeRecord):
+        return record.fact.provider_event_time
+    if isinstance(record, TradeFlowAggregateRecord):
+        return record.fact.bucket_start
     raise TypeError(
         f"market_data_record_invalid: unsupported record type {type(record).__name__}"
     )
@@ -1007,7 +1020,35 @@ def build_provenance_hash(records: Iterable[MarketDataRecord]) -> str:
 
     rows = sorted(records, key=_record_time)
     normalized: list[dict[str, Any]] = []
+    market_structure_records = any(
+        isinstance(record, (MarketTradeRecord, TradeFlowAggregateRecord))
+        for record in rows
+    )
     for record in rows:
+        if isinstance(record, MarketTradeRecord):
+            normalized.append(
+                {
+                    "fact_time": _canonical_time(_record_time(record)),
+                    "row_hash": record.fact.row_hash,
+                    "source_id": record.source_id,
+                    "version_id": record.version_id,
+                    "provenance_hash": record.provenance_hash,
+                    "quality": dict(record.quality),
+                }
+            )
+            continue
+        if isinstance(record, TradeFlowAggregateRecord):
+            normalized.append(
+                {
+                    "fact_time": _canonical_time(_record_time(record)),
+                    "material_hash": record.fact.material_hash,
+                    "version_id": record.version_id,
+                    "aggregation_version": record.aggregation_version,
+                    "provenance_hash": record.provenance_hash,
+                    "quality": dict(record.quality),
+                }
+            )
+            continue
         provenance = json.loads(
             json.dumps(
                 dict(record.provenance),
@@ -1027,7 +1068,11 @@ def build_provenance_hash(records: Iterable[MarketDataRecord]) -> str:
         )
     return _stable_hash(
         {
-            "schema_version": "market_data_provenance_hash.v2",
+            "schema_version": (
+                "market_data_provenance_hash.v3"
+                if market_structure_records
+                else "market_data_provenance_hash.v2"
+            ),
             "records": normalized,
         }
     )

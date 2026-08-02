@@ -11,6 +11,9 @@ tags:
   - candles
   - open-interest
   - funding-rate
+  - market-structure
+  - trades
+  - raw-archive
   - collectors
   - known-at
   - provenance
@@ -93,23 +96,30 @@ is a separate operation and uses the same shared provider credential record.
 3. A durable collector worker claims enabled schedules from PostgreSQL, applies
    database pacing and bounded retries, polls the exact configured product, and
    appends only while its ownership fence remains current.
-4. Research, indicators, checks, backtests, paper runtime, reports, and APIs read
+4. A bounded market-structure session claims one product-scoped stream, fsyncs
+   each exact frame into a definition-scoped spool, publishes an immutable
+   object archive and record mappings, then appends typed trades, coverage, and
+   causal aggregates under the same market fact commit clock.
+5. Research, indicators, checks, backtests, paper runtime, reports, and APIs read
    canonical storage only. Missing series or facts are explicit errors or
    structured optional caveats.
-5. Backtest preparation resolves transitive requirements, validates coverage,
+6. Backtest preparation resolves transitive requirements, validates coverage,
    and freezes an immutable dataset. Startup admits that dataset against exact
    strategy, indicator, execution-policy, instrument, warmup, and run identity.
 
 ## Implemented Source Facts
 
 Logical series are keyed by canonical instrument, fact type, contract version,
-and optional timeframe. Candles, OI, and funding share one database-wide market
-fact commit sequence, allowing one mixed-fact dataset watermark.
+and optional timeframe. Candles, OI, funding, trades, and trade-flow aggregates
+share one database-wide market fact commit sequence, allowing one mixed-fact
+dataset watermark.
 
 Physical fact storage is typed by fact contract, not by provider, venue, or
 instrument. `candle_versions` stores all `candle.ohlcv.v1` series,
 `open_interest_versions` stores all `derivatives.open_interest.v1` series,
-and `funding_rate_versions` stores all `derivatives.funding_rate.v1` series.
+`funding_rate_versions` stores all `derivatives.funding_rate.v1` series,
+`market_trade_versions` stores all `market.trade.v1` series, and
+`trade_flow_aggregate_versions` stores all `market.trade_flow.v1` series.
 The generic source, series, ingestion, gap, dataset, collection-definition,
 collection-attempt, pacing, lease, and commit-clock tables are shared.
 
@@ -120,6 +130,28 @@ unrelated facts into a universal JSON payload. The scheduler itself is
 provider-neutral. OI and funding use explicit typed collector handlers behind
 the same schedule, retry, pacing, ownership, evidence, and gap lifecycle.
 Lease-fence validation remains one shared repository guard.
+
+### Coinbase Futures/Spot Trades
+
+`market.trade.v1` revisions preserve provider product/trade ID, provider event
+and message time, receipt/acceptance/known-at, exact Decimal price and provider
+size, proven contract/base/quote translations, maker side, explicitly derived
+aggressor side, provider sequence and delivery positions, product-definition
+revision, raw record identity, coverage identity, provenance, quality, and
+commit sequence.
+
+Bounded sessions assign stable `spool_segment_id` and `raw_record_id` values
+before parsing and fsync exact frames to local WAL. Verified immutable
+Parquet/ZSTD objects plus PostgreSQL manifests and record mappings are required
+before canonical publication and dataset eligibility. Stream definitions reuse
+the provider credential registry and cannot contain secrets.
+
+Typed trade coverage intervals distinguish healthy zero-trade periods from
+gaps, disconnects, pending archive upload, and canonicalization lag.
+`market.trade_flow.v1` produces causal one-second and one-minute buckets. The
+initial subscription snapshot is canonical trade evidence but never complete
+live flow. Frozen trade/flow ranges pin all required raw archive objects and can
+be read without a provider.
 
 ### Candles
 
@@ -255,8 +287,9 @@ replacing source provenance and quality.
 - Coinbase funding time is provider-reported but not treated as publication
   time; platform receipt and acceptance govern known-at.
 - Funding delivery into strategy/indicator runtime requirements is not
-  implemented yet. Basis, cross-venue aggregation, expanded market state, L2,
-  order flow, options, and live trading also remain unsupported.
+  implemented yet. Phase 1 event trades and trade-flow dataset reads are
+  implemented, but Level 2, book-derived state, normalized runtime delivery,
+  options, and live trading remain unsupported.
 - Provider publication timestamps are unavailable from some candle endpoints;
   interval-close inference remains explicit provenance.
 - Session/calendar evidence cannot classify every closure.
@@ -270,5 +303,6 @@ replacing source provenance and quality.
 - [ADR 0050: Canonical append-only market data](../decisions/0050-use-one-canonical-append-only-market-data-store.md)
 - [ADR 0051: Frozen datasets for canonical backtests](../decisions/0051-require-frozen-datasets-for-canonical-backtests.md)
 - [ADR 0052: Typed fact collectors and instrument roles](../decisions/0052-use-typed-fact-collectors-and-explicit-instrument-roles.md)
-- [Proposed Market Structure Data Plane](MARKET_STRUCTURE_DATA_PLANE.md)
+- [Market Structure Data Plane](MARKET_STRUCTURE_DATA_PLANE.md)
+- [Market Structure Phase 1 Trades](MARKET_STRUCTURE_PHASE_1_TRADES.md)
 - [Accepted ADR 0053: Tiered market-structure archive and replay](../decisions/0053-use-tiered-market-structure-archive-and-replay-boundary.md)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -17,6 +18,8 @@ from market_data.contracts import (
 from market_data.requirements import UnavailableMarketData
 
 from ..service.market.collector_service import market_data_collector
+from ..service.market.market_structure_service import market_structure_service
+from ..service.storage.repos.market_structure import market_structure_repository
 
 
 router = APIRouter()
@@ -69,6 +72,24 @@ class CollectorCreateRequest(BaseModel):
 
 class CollectorToggleRequest(BaseModel):
     enabled: bool
+
+
+class MarketStructurePairRequest(BaseModel):
+    pair_id: str = "bip_btc"
+    auth_mode: str = "authenticated"
+    max_spool_bytes: int = 8 * 1024**3
+    max_segment_bytes: int = 128 * 1024**2
+    enable_production: bool = False
+
+
+class MarketStructureCaptureRequest(BaseModel):
+    duration_seconds: float = 60.0
+    storage_root: Optional[str] = None
+    owner_id: Optional[str] = None
+
+
+class MarketStructureReplayRequest(BaseModel):
+    storage_root: Optional[str] = None
 
 
 @router.post("/collectors")
@@ -190,6 +211,105 @@ def latest_funding_rate(
     if isinstance(result, UnavailableMarketData):
         return result.to_dict()
     return _record_payload(result)
+
+
+@router.post("/market-structure/pairs")
+def configure_market_structure_pair(
+    req: MarketStructurePairRequest,
+) -> dict[str, Any]:
+    try:
+        return market_structure_service.configure_pair(
+            pair_id=req.pair_id,
+            auth_mode=req.auth_mode,
+            max_spool_bytes=req.max_spool_bytes,
+            max_segment_bytes=req.max_segment_bytes,
+            enable_production=req.enable_production,
+        )
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/market-structure/definitions")
+def list_market_structure_definitions(
+    definition_id: Optional[str] = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "market_structure_definition_catalog.v1",
+        "definitions": market_structure_repository.list_stream_definitions(
+            definition_id=definition_id
+        ),
+    }
+
+
+@router.get("/market-structure/sessions")
+def list_market_structure_sessions(
+    definition_id: Optional[str] = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "market_structure_session_catalog.v1",
+        "sessions": market_structure_repository.list_sessions(
+            definition_id=definition_id,
+            limit=limit,
+        ),
+    }
+
+
+@router.get("/market-structure/definitions/{definition_id}/status")
+def market_structure_status(definition_id: str) -> dict[str, Any]:
+    try:
+        return market_structure_repository.archive_status(
+            definition_id=definition_id
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/market-structure/definitions/{definition_id}/capture")
+def capture_market_structure(
+    definition_id: str,
+    req: MarketStructureCaptureRequest,
+) -> dict[str, Any]:
+    import asyncio
+
+    try:
+        kwargs: dict[str, Any] = {
+            "definition_id": definition_id,
+            "duration_seconds": req.duration_seconds,
+            "owner_id": req.owner_id,
+        }
+        if req.storage_root:
+            kwargs["storage_root"] = Path(req.storage_root)
+        return asyncio.run(market_structure_service.capture_bounded(**kwargs))
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/market-structure/manifests/{manifest_id}/replay")
+def replay_market_structure_manifest(
+    manifest_id: str,
+    req: MarketStructureReplayRequest,
+) -> dict[str, Any]:
+    try:
+        kwargs: dict[str, Any] = {"manifest_id": manifest_id}
+        if req.storage_root:
+            kwargs["storage_root"] = Path(req.storage_root)
+        return market_structure_service.replay_manifest(**kwargs)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/market-structure/definitions/{definition_id}/reconcile-recent")
+def reconcile_recent_market_structure_trades(
+    definition_id: str, limit: int = 100
+) -> dict[str, Any]:
+    try:
+        return market_structure_service.reconcile_recent_trades(
+            definition_id=definition_id,
+            limit=limit,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 __all__ = ["router"]

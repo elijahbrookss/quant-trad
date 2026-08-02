@@ -134,6 +134,27 @@ contract. Ordinary compaction or retention cannot change a frozen dataset.
 - Credentials stay at the provider boundary. Stream definitions declare auth
   mode but contain neither secrets nor credential references.
 
+## Implementation Status
+
+Phase 1 implemented layers 1–4 for bounded Coinbase BIP/BTC trades on
+2026-08-02. The implementation uses stable pre-parse raw identities, fsynced
+definition-scoped spool segments, verified immutable Parquet/ZSTD objects,
+transactional manifests and record mappings, typed trade/coverage/flow
+revisions, and archive-pinned provider-free datasets.
+
+The final live proof reconciled every replayed raw frame and unique provider
+trade ID for both BIP and BTC, returned both definition-scoped spools to zero,
+and froze complete one-second flow ranges with both source objects pinned. See
+[Market Structure Phase 1 Trades](../data/MARKET_STRUCTURE_PHASE_1_TRADES.md).
+
+This implementation chose the stricter permitted publication sequence:
+canonical facts wait for verified object acknowledgement and committed raw
+record mappings. They still reference only stable `raw_record_id` values; no
+fact is mutated to attach a manifest. Phase 2 must reuse this boundary for L2.
+
+No definition is enabled or production-admitted. The post-Phase-4 24-hour
+measurement and explicit budget approval remain unchanged.
+
 ## Consequences
 
 The platform gains deterministic forensic replay and can correct parser or

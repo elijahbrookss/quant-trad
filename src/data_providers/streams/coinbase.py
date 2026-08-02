@@ -426,6 +426,7 @@ class CoinbaseAdvancedTradeStream:
         venue: str = "COINBASE_DIRECT",
         jwt_factory: Callable[[], str] | None = None,
         max_message_bytes: int = COINBASE_WS_MAX_MESSAGE_BYTES,
+        stream_session_id: str | None = None,
     ) -> None:
         self.url = str(url or COINBASE_WS_URL)
         self.provider = str(provider or "COINBASE").upper()
@@ -434,7 +435,9 @@ class CoinbaseAdvancedTradeStream:
         self.max_message_bytes = int(max_message_bytes)
         if self.max_message_bytes < 1:
             raise ValueError("Coinbase WebSocket max_message_bytes must be positive.")
-        self.stream_session_id = uuid4().hex
+        self.stream_session_id = str(stream_session_id or uuid4().hex).strip()
+        if not self.stream_session_id:
+            raise ValueError("Coinbase stream_session_id cannot be empty.")
         self._ws: Any = None
         self._parser = CoinbaseMessageParser(provider=self.provider, venue=self.venue)
         self._connection_epoch = -1

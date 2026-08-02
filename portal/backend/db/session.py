@@ -348,6 +348,8 @@ class Database:
             "candle_versions",
             "open_interest_versions",
             "funding_rate_versions",
+            "market_trade_versions",
+            "trade_flow_aggregate_versions",
         ):
             table_ref = f"market.{table_name}"
             existing = conn.execute(
@@ -397,6 +399,8 @@ class Database:
             ("candle_versions", "candle_open_time"),
             ("open_interest_versions", "sample_time"),
             ("funding_rate_versions", "sample_time"),
+            ("market_trade_versions", "provider_event_time"),
+            ("trade_flow_aggregate_versions", "bucket_start"),
         ):
             conn.execute(
                 text(
@@ -450,6 +454,18 @@ class Database:
             "gap_evidence",
             "datasets",
             "dataset_series",
+            "product_definition_versions",
+            "instrument_role_mapping_versions",
+            "stream_session_events",
+            "raw_archive_manifests",
+            "raw_archive_ranges",
+            "raw_archive_record_mappings",
+            "stream_coverage_interval_versions",
+            "stream_quality_events",
+            "market_trade_identities",
+            "market_trade_versions",
+            "trade_flow_aggregate_versions",
+            "dataset_archive_refs",
         ):
             trigger_name = f"trg_reject_mutation_{table_name}"
             conn.execute(
