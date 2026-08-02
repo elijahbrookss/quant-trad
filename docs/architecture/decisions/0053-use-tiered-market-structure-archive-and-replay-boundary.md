@@ -3,7 +3,7 @@ component: adr-tiered-market-structure-archive-replay
 subsystem: data
 layer: decision
 doc_type: adr
-status: proposed
+status: accepted
 tags:
   - adr
   - market-data
@@ -12,7 +12,7 @@ tags:
   - replay
   - feature-materialization
   - datasets
-  - proposed
+  - accepted
 code_paths:
   - src/data_providers/streams
   - src/market_data
@@ -30,9 +30,11 @@ code_paths:
 
 ## Status
 
-Proposed on 2026-08-02. No runtime, schema, object-store, or collector behavior
-implements this decision yet. Phase 0 provider and capacity proof is required
-before acceptance.
+Accepted for implementation on 2026-08-02 after public and existing-CDP
+one-hour BIP/BTC proofs plus bounded ETP/ETH and SLP/SOL access/unit spot checks.
+No production collector is authorized by this status. The operator deferred the
+24-hour implemented-path capacity measurement and explicit budget approval
+until after Phase 4; both remain mandatory before production enrollment.
 
 ## Context
 
@@ -142,8 +144,10 @@ operational retention.
 
 The design adds operational complexity: local spool capacity, upload
 acknowledgement, object manifests, compaction, pins, replay versions, and two
-independent retention policies. A Phase 0 measurement is mandatory because L2
-cost and throughput cannot be safely inferred from candle/OI rates.
+independent retention policies. The Phase 0 one-hour measurements provide a
+provisional implementation envelope because L2 cost and throughput cannot be
+safely inferred from candle/OI rates. A 24-hour measurement on the implemented
+path remains mandatory before production enrollment.
 
 Raw replay after default retention is possible only for ranges pinned/copied by
 a dataset or explicit retention hold. Manifests remain, but they must report an
@@ -167,12 +171,15 @@ facts.
 - Let backtests read hot operational features or reconstruct from providers.
 - Use direct CDE FIX/UDP as a hidden recovery or enrichment source.
 
-## Evidence Required Before Acceptance
+## Evidence Required Before Production Enrollment
 
 - BIP/BTC Advanced Trade `market_trades` and `level2` proof captures establish
-  product/auth/schema/sequence/reconnect/unit behavior.
-- A 24-hour capture measures rates, compression, index amplification, spool
-  backlog, checkpoint size, and replay speed.
+  product/auth/schema/sequence/reconnect/unit behavior. This evidence passed.
+- bounded ETP/ETH and SLP/SOL spot checks establish access, futures units,
+  reconnect snapshots, and deterministic replay. This evidence passed.
+- after Phase 4, a 24-hour implemented-path capture measures rates,
+  compression, index amplification, spool backlog, object upload, checkpoint
+  size, and replay speed, followed by explicit operator budget approval.
 - duplicate, crash, partial upload, stale-fence, reconnect, checkpoint/full
   replay, gap propagation, and truncation-invariance tests pass.
 - canonical publication before upload preserves stable raw identity; later

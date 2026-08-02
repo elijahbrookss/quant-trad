@@ -482,6 +482,7 @@ class LiveCandleAggregator:
             return None
         event_time = (
             _parse_time(event.get("provider_event_time"))
+            or _parse_time(event.get("provider_message_time"))
             or _parse_time(event.get("received_at"))
             or datetime.now(timezone.utc)
         )

@@ -119,3 +119,21 @@ async def test_provider_stream_smoke_rejects_non_coinbase_provider() -> None:
             symbol="BIP-20DEC30-CDE",
             duration_seconds=0.1,
         )
+
+
+@pytest.mark.asyncio
+async def test_provider_stream_smoke_accepts_authenticated_mode_with_injected_stream() -> None:
+    fake = _FakeStream()
+
+    result = await stream_smoke.run_provider_stream_smoke(
+        provider_id="COINBASE",
+        venue_id="COINBASE_DIRECT",
+        symbol="BIP-20DEC30-CDE",
+        channels=("market_trades",),
+        auth_mode="authenticated",
+        duration_seconds=0.1,
+        stream_factory=lambda: fake,
+    )
+
+    assert result["auth_mode"] == "authenticated"
+    assert result["status"] == "ended_early"

@@ -136,9 +136,9 @@ Status means:
 
 | Source/channel | Auth | Role/products | Snapshot/incremental and batching | Time and ordering | Duplicate/gap/recovery | Historical value | Retention value | Status |
 |---|---|---|---|---|---|---|---|---|
-| Advanced Trade WS `market_trades`, spot | public; authenticated CDP recommended | BTC-USD, ETH-USD, SOL-USD | initial `snapshot`, then 250 ms `update` batches containing one or more trades | trade `time`; envelope `timestamp`; per-product `sequence_num`; local receipt/acceptance becomes known-at | dedupe by provider trade ID; typed coverage intervals detect gaps and reconnect; explicit zero requires the complete rule below; recent REST trades validate only | no complete event-level backfill documented | irreplaceable event evidence | confirmed |
+| Advanced Trade WS `market_trades`, spot | public; authenticated CDP recommended | BTC-USD, ETH-USD, SOL-USD | initial `snapshot`, then 250 ms `update` batches containing one or more trades | trade `time`; envelope `timestamp`; Phase 0 observed one connection-wide `sequence_num` across subscribed channels, reset on reconnect; local receipt/acceptance becomes known-at | dedupe by provider trade ID; a connection-sequence gap affects every subscription on that connection; typed coverage intervals detect gaps and reconnect; explicit zero requires the complete rule below; recent REST trades validate only | no complete event-level backfill documented | irreplaceable event evidence | confirmed for BIP/BTC proof scope |
 | Advanced Trade WS `market_trades`, CDE futures | same surface/auth contract | BIP, ETP, SLP product IDs | documented schema is the same; product acceptance and futures size units require capture | same fields; maker-side semantics documented | same typed coverage policy, subject to Phase 0 sequence/delivery-assurance capture | no complete event-level backfill documented | irreplaceable event evidence | conditional |
-| Advanced Trade WS `level2`, spot | public; authenticated CDP recommended | matching spot allowlist | `snapshot` then `update`; each event contains ordered absolute level quantities | update `event_time`; envelope `timestamp`; per-product `sequence_num`; receipt/known-at locally assigned | channel is documented as guaranteed, but still validate product sequence; reconnect requires new snapshot | none documented | irreplaceable book evidence | confirmed |
+| Advanced Trade WS `level2`, spot | public; authenticated CDP recommended | matching spot allowlist | `snapshot` then `update`; each event contains ordered absolute level quantities | update `event_time`; envelope `timestamp`; Phase 0 observed the same connection-wide `sequence_num`; receipt/known-at locally assigned | channel is documented as guaranteed; validate the connection sequence; reconnect resets it and requires a new snapshot | none documented | irreplaceable book evidence | confirmed for BIP/BTC proof scope |
 | Advanced Trade WS `level2`, CDE futures | same surface/auth contract | BIP, ETP, SLP | same documented absolute-quantity contract; product acceptance/units require capture | same fields and local times | same validity contract; no assumed native retransmit | none documented | irreplaceable book evidence | conditional |
 | Advanced Trade WS `heartbeats` | public | every stream session | one-second heartbeat and counter | server current time, envelope time, receipt | counter discontinuity is transport evidence, not a product-book sequence substitute | none | session/gap evidence, low volume | confirmed |
 | Advanced Trade WS `ticker` | public | futures and spot allowlist | snapshot/update, may batch cascading matches | envelope/event receipt; no replacement for trade event time | validation only; not canonical trade recovery | no event history | BBO/trade cross-check only | confirmed |
@@ -148,9 +148,9 @@ Status means:
 | Advanced Trade REST public market trades | same public/auth ambiguity | one product, recent ticks | recent snapshot, bounded result | provider trade time and ID, receipt | reconcile recent IDs after reconnect; must not claim completeness | recent only, no range pagination contract | bounded validation/reconciliation | conditional |
 | Existing Advanced Trade product OI | current repository public path | BIP, ETP, SLP | scheduled point-in-time poll | no provider event/publication time; sample schedule and receipt/acceptance known-at | existing typed revisions, retries, gaps, fence | no supported backfill in repository | durable contracts, minute-level | confirmed |
 | Existing Advanced Trade product funding | current repository public path | BIP, ETP, SLP | scheduled point-in-time poll | provider `funding_time` preserved; meaning not assumed; receipt/acceptance known-at | existing typed revisions, retries, gaps, fence | no supported backfill in repository | durable rate observation | confirmed; final/predicted meaning conditional |
-| CDE REST historical funding `/rest/funding-rate` | requires DCC-issued CDE key and signature | native CDE symbol such as BIPZ30 | trading-session query returns finalized rows | provider `event_time`; publication/known-at unavailable historically | direct CDE auth and mapping required | yes, by session date | useful semantic/reconciliation source | unsupported under provider boundary |
-| CDE public finalized-funding webpage/files | public client-rendered page; file transport unverified | CDE perpetual-style contracts | displayed/downloadable history is advertised; stable file URL/schema not yet proven | funding event/session time may exist; publication/known-at and revisions unverified | file identity/checksum, pagination, corrections and symbol mapping unverified | advertised | potentially useful finalized reconciliation/backtest source | conditional proof spike; otherwise unsupported |
-| CDE public daily price/volume/OI/settlement files | public historical-data page; file transport unverified | CDE contracts | advertised daily/hourly historical files; exact grains and columns must be captured | trading-session/effective time may exist; publication/known-at and revisions unverified | download identity/checksum and revision behavior unverified | advertised | potentially useful slow-history reconciliation and backtests | conditional proof spike; otherwise unsupported |
+| CDE REST historical funding `/rest/funding-rate` | live unauthenticated proof returns `401`; requires CDE request credentials | native CDE symbol such as BIPZ30 | trading-session query is documented, but unavailable through Advanced Trade/CDP credentials | provider `event_time`; publication/known-at unavailable historically | direct CDE auth and mapping would be required | unavailable inside this campaign's provider boundary | semantic reference only | unsupported under provider boundary |
+| CDE public finalized-funding webpage/files | no stable documented public machine endpoint found; the public historical table does not expose funding | CDE perpetual-style contracts | no admissible source contract | unavailable | no stable identity, schema, revision, pagination, or symbol-mapping contract | not verified | none | unsupported; explicit coverage gap |
+| CDE public daily price/volume/OI/settlement page | public human webpage; rows are loaded through an undocumented website-internal CMS token | CDE contracts including BIP, ETP, and SLP | observed rolling daily rows include price, settlement, volume, block volume, and OI; no stable documented download/API contract | trading date is present; publication time is visible only as mutable CMS metadata and is not a contractual known-at rule | page may be challenged; underlying token, schema, rolling window, and correction behavior are not provider contracts | useful only for bounded manual sanity checks | no canonical retention | unsupported as an automated or dataset source; explicit coverage gap |
 | CDE public derivatives dashboard | public webpage | venue-level and filtered aggregates | current/daily chart values | displayed dates; exact release time and revision policy unverified | no collector contract inferred from page internals | 7/30/90-day UI windows visible | venue-level sanity checks only | unsupported as canonical source |
 | CDE public block-trade webpage | public webpage | reported CDE blocks | table with date/time/product/type/symbol/qty/price | Central Time display; publication latency/ID/revisions absent | no stable machine identity or pagination contract proven | recent page history visible | optional off-book context; not central-book flow | conditional and excluded from Phases 0-4 |
 | CDE REST block-trade API | CDE auth/firm permissions despite OpenAPI ambiguity | firm-owned/permissioned block trades | query/booking surface | native fields | permissioned | bounded by permission | not public market-wide evidence | unsupported |
@@ -181,9 +181,11 @@ root units. The mapping is explicit data; no runtime symbol parsing is allowed.
 | 2 | `44226144-fb38-4566-92c4-580734d76d3c` | `ETP-20DEC30-CDE` | 0.1 ETH/contract | `ETH-USD` | direct Coinbase spot instrument missing |
 | 3 | `bead556e-22e2-4ac0-8ee0-0d8c5310e9a0` | `SLP-20DEC30-CDE` | 5 SOL/contract | `SOL-USD` | direct Coinbase spot instrument missing |
 
-Phase 0 captures BIP/BTC first. ETP/ETH and SLP/SOL are admitted sequentially
-only when measured total storage, CPU, replay, and backlog budgets remain below
-the configured limits with a 3x observed-peak safety factor.
+Phase 0 captured BIP/BTC first, then proved ETP/ETH and SLP/SOL access and units
+through bounded spot checks. All three pairs may be represented by Phase 1–4
+implementation and tests. Production collector enrollment remains sequential
+and blocked until the post-Phase 4 capacity gate proves total storage, CPU,
+replay, and backlog budgets with a 3x observed-p99 safety factor.
 
 ## End-To-End Data Path And Authorities
 
@@ -386,10 +388,14 @@ The deterministic source position is:
  product_id, channel, sequence_num?, receive_ordinal, event_ordinal)
 ```
 
-`sequence_num` is nullable until Phase 0 proves its presence and exact behavior
-for the product/channel. `receive_ordinal` and `event_ordinal` always provide a
-total local order inside an epoch. They do not upgrade a receipt-contiguous
-stream into proof of lossless venue delivery.
+For the BIP/BTC Phase 0 proof, `sequence_num` is a connection-epoch counter
+shared by subscription acknowledgements, heartbeats, trades, L2, and ticker; it
+reset to zero after reconnect. It is not a per-product or per-channel counter.
+The initial topology therefore keeps one product on each connection. A sequence
+gap invalidates every active channel/coverage interval on that connection.
+`receive_ordinal` and `event_ordinal` always provide a total local order inside
+an epoch. They do not upgrade a receipt-contiguous stream into proof of lossless
+venue delivery.
 
 ### State Machine
 
@@ -425,8 +431,9 @@ stream into proof of lossless venue delivery.
    exact duplicate is a no-op. The same non-null sequence/source identity with
    different material is `divergent_duplicate` and invalidates the interval.
 7. **Ordering.** When a sequence is present, the expected next value is the
-   Phase 0-proven per-product successor. A forward jump ends validity. A lower
-   value is ignored only if it matches an exact previously applied event;
+   Phase 0-proven connection-epoch successor across every received channel. A
+   forward jump ends every validity/coverage interval on that connection. A
+   lower value is ignored only if it matches exact previously applied evidence;
    otherwise it is out-of-order evidence and ends validity.
 8. **Absent sequence.** Without a usable sequence, the strongest honest claim
    is `receipt_contiguous`: valid from a complete snapshot while the same TCP
@@ -475,12 +482,15 @@ such as worker identity and wall-clock duration.
 
 ### Honest Limitation
 
-Advanced Trade documents L2 as guaranteed delivery and documents per-product
-sequence numbers generally. Phase 0 must still prove sequence presence, reset,
-batching, and product scope for BIP/ETP/SLP. Until then the architecture does not
-claim native retransmission, a FIX-equivalent sequence, order-level identity,
-queue priority, individual order count, or lossless reconstruction across
-connections. Advanced Trade L2 is an aggregated price-level book.
+Advanced Trade documents L2 as guaranteed delivery. Phase 0 observed a
+connection-wide sequence across multiplexed channels, with a reset on every
+reconnect, for BIP and BTC-USD. It did not prove native retransmission, a
+FIX-equivalent venue sequence, order-level identity, queue priority, individual
+order count, or lossless reconstruction across connections. ETP/ETH and SLP/SOL
+subsequently proved access, unit semantics, reconnect snapshots, and exact book
+replay in a bounded spot check. They remain production-unenrolled pending the
+post-Phase 4 BIP/BTC capacity gate. Advanced Trade L2 is an aggregated
+price-level book.
 
 ## Trade Semantics And Aggregation
 
@@ -555,8 +565,9 @@ span connection epochs.
 
 `ordering_assurance` is a closed versioned enum:
 
-- `provider_sequence_contiguous`: Phase 0 proved a product/channel sequence and
-  every expected successor was observed;
+- `provider_sequence_contiguous`: Phase 0 proved the connection-epoch sequence
+  scope and every expected successor was observed; a gap invalidates all
+  coverage/validity intervals sharing that connection;
 - `provider_delivery_guaranteed`: Coinbase explicitly guarantees the channel
   behavior needed for coverage and Phase 0 verified it for this product class;
 - `receipt_contiguous`: only local receipt order is known;
@@ -849,6 +860,13 @@ Do not approve three-pair L2 rollout from estimates alone. Measure a continuous
 - upload latency, maximum local backlog, reconnect/resnapshot count, and gap
   rate.
 
+On 2026-08-02 the operator accepted the completed public and existing-CDP
+one-hour proofs as sufficient to begin Phase 1–4 implementation and explicitly
+deferred this 24-hour measurement until after Phase 4. This is an implementation
+sequencing decision, not a production-capacity waiver. No production collector
+may be enrolled before the measurement and budget approval below pass against
+the implemented archive, hot-store, replay, and feature paths.
+
 Annualized formulas use measured rates:
 
 ```text
@@ -1036,8 +1054,12 @@ Work:
   CDP credentials;
 - inspect public CDE historical/funding downloads for stable unauthenticated
   URL, schema, publication/revision semantics and checksum identity;
-- run a 24-hour BIP/BTC capacity capture and storage/replay measurement;
-- produce sanitized exact-message fixtures and a signed proof report.
+- record the one-hour provisional capacity envelope and the operator decision
+  deferring the 24-hour production measurement until after Phase 4;
+- produce sanitized exact-message fixtures plus a canonical proof report and
+  detached SHA-256 checksum. The repository has no configured artifact-signing
+  identity, so Phase 0 must not describe a checksum as a cryptographic
+  signature.
 
 Acceptance:
 
@@ -1045,8 +1067,10 @@ Acceptance:
 - maker-side translation and quantity units are proven or aggressive/unit-derived
   outputs remain explicitly disabled;
 - sequence assurance is classified honestly and reconnect always re-snapshots;
-- measured annualized budget, spool cap, file targets, and admission gates are
-  approved;
+- the one-hour provisional annualized archive, spool, checkpoint, and replay
+  envelope is recorded and the operator explicitly authorizes implementation;
+- production enrollment remains blocked on the deferred post-Phase 4 24-hour
+  capacity measurement and budget approval;
 - CDE public history is either admitted through a stable contract or marked
   unsupported; no ambiguous source remains in the Phase 1 dependency graph.
 
@@ -1055,7 +1079,9 @@ fixtures that prevent speculative implementation.
 
 ### Phase 1: Futures And Matching Spot Trades
 
-Dependencies: Phase 0 trade/auth/unit proof and approved capacity.
+Dependencies: Phase 0 trade/auth/unit proof and operator-authorized provisional
+capacity for implementation. This dependency does not authorize production
+collector enrollment.
 
 Work:
 
@@ -1073,12 +1099,13 @@ Acceptance:
 
 - durable-spool-first crash/retry/fence tests pass, and no canonical fact is
   mutated when its manifest-to-record mapping is appended;
-- 24-hour raw-to-canonical trade ID/count/volume reconciliation passes within
+- bounded raw-to-canonical trade ID/count/volume reconciliation passes within
   only explicitly rejected malformed records;
 - duplicate/restart/late-trade/provider-free dataset tests pass, including
   deterministic distinction among zero trades, stream gaps, unhealthy
   connections, pending archive upload, and canonicalization lag;
-- each admitted pair stays inside measured backlog/hot/object budgets;
+- capacity metrics and production blockers are exposed for every configured
+  pair; no collector is production-enrolled yet;
 - `qt` exposes definitions, sessions, archive lag, gaps, replay verification,
   and dataset coverage without direct SQL.
 
@@ -1099,10 +1126,11 @@ Work:
 Acceptance:
 
 - property tests, checkpoint/full replay equality, invalidation suppression,
-  reconnect/resnapshot, spool pressure, and one-day replay SLA pass;
+  reconnect/resnapshot, spool pressure, and bounded replay benchmarks pass;
 - no interval is marked stronger than observed sequence assurance;
 - every invalid source condition creates durable evidence and no derived state;
-- storage remains within the approved L2 budget for at least seven days.
+- projected storage is visible against the provisional envelope; production
+  enrollment still requires the post-Phase 4 measured L2 budget.
 
 Value without later phases: auditable, replayable L2 evidence and valid BBO
 history.
@@ -1151,6 +1179,23 @@ Acceptance:
 Value without later phases: reusable causal feature datasets for any bounded
 research question.
 
+### Post-Phase 4 Production Admission Gate
+
+This gate is required before any market-structure collector is production
+enrolled. It is not part of the Phase 1–4 implementation sequence.
+
+- run a continuous 24-hour BIP/BTC capture on the implemented durable spool,
+  object archive, canonical trade/L2, checkpoint, and feature paths;
+- prove raw-to-canonical reconciliation, one-day full/checkpoint replay under
+  one hour, reconnect/resnapshot, gap propagation, and no silent quality loss;
+- measure actual raw/typed compression, hot-table/index amplification, object
+  upload latency, maximum local backlog, checkpoint cost, and derived growth;
+- set the configured outage spool at no less than the approved 3x observed-p99
+  requirement and prove bounded degradation thresholds;
+- obtain explicit operator monthly/annual byte and cost budget approval in an
+  immutable admission artifact referencing the report checksum;
+- only then enroll BIP/BTC, followed by separately budgeted ETP/ETH and SLP/SOL.
+
 ### Phase 5: Observation Studies And Existing-Strategy Filters
 
 Dependencies: approved Phase 4 datasets; no live-trading authorization.
@@ -1176,27 +1221,20 @@ alpha or deployment claim.
 
 ## Explicit Unknowns, Limitations, And Proof Decisions
 
-### Must Be Resolved In Phase 0
+### Phase 0 Proof Decisions
 
-1. Do BIP/ETP/SLP accept unauthenticated and existing-CDP subscriptions to
-   `market_trades` and `level2`?
-2. Is `sequence_num` present, per product, per channel, shared across channels,
-   reset on subscription, and strictly contiguous for each relevant futures
-   stream?
-3. Does the first event after every futures subscription contain a complete
-   snapshot? Can a top-level frame contain multiple products/events?
-4. Is futures trade/L2 `size` expressed in contracts, root units, or another
-   provider unit, and does it match the effective multiplier?
-5. Are public REST product/book/trade endpoints actually unauthenticated for
-   CDE futures despite their individual reference-page auth annotations?
-6. Does Advanced Trade REST book expose a position compatible with WebSocket
-   sequence? Until proven, it is not a recovery splice.
-7. Are product funding fields predicted, current, accrued, or finalized? What
-   exactly causes `funding_time` to change?
-8. Do the public CDE historical/funding pages expose stable unauthenticated
-   downloadable files with publication time, revision policy, and durable IDs?
-9. What are actual p99/max rates, compression, replay speed, backlog, and annual
-   storage cost for each allowlisted pair?
+| Question | Decision state |
+|---|---|
+| BIP/BTC public `market_trades`, L2, ticker, heartbeat and REST access | passed one-hour public and existing-CDP proofs; authenticated v2 evidence passes the v3 implementation-readiness gate |
+| ETP/ETH and SLP/SOL access/units | passed bounded public access/unit/reconnect/replay spot checks; eligible for implementation configuration but production-unenrolled |
+| `sequence_num` scope | resolved as one connection-epoch counter shared across all received channels; reset to zero on reconnect; not per product/channel |
+| first event after subscription/reconnect | BIP and BTC L2 began with a complete `snapshot` in both public proof epochs; v1 keeps one product per connection and does not depend on multi-product frames |
+| BIP futures trade/L2 size and multiplier | confirmed as contracts, 0.01 BTC/contract, from published specification, live metadata, and observed integral trade/L2 quantities |
+| public REST product/book/recent trades | admitted for bounded BIP/BTC proof/reconciliation; recent trades are not complete history |
+| REST book as WebSocket recovery splice | rejected: observed REST book has provider time but no compatible WebSocket sequence position |
+| Advanced Trade product funding meaning | admitted only as provider-reported observation known on acceptance; API does not prove projected/finalized semantics, so those features remain disabled |
+| public CDE historical/funding machine source | rejected: human page has no stable documented data endpoint; direct historical funding REST returns 401 without CDE credentials |
+| actual p99/max, compression, replay, backlog, annual budget | one-hour diagnostics measured; 24-hour implemented-path capture and explicit operator budget approval deferred until after Phase 4 and mandatory before production enrollment |
 
 ### Explicit Coverage Gaps
 
@@ -1222,7 +1260,7 @@ the likely implementation sites.
 
 | Area | Likely paths/artifacts | Later change |
 |---|---|---|
-| Stream contracts/adapters | `src/data_providers/streams/contracts.py`, `src/data_providers/streams/coinbase.py`, `src/data_providers/streams/__init__.py` | raw receive callback/identity, market-trade/L2 parsing, per-product/channel sequence evidence, authenticated/public subscribe support |
+| Stream contracts/adapters | `src/data_providers/streams/contracts.py`, `src/data_providers/streams/coinbase.py`, `src/data_providers/streams/__init__.py` | raw receive callback/identity, market-trade/L2 parsing, connection-epoch sequence evidence, authenticated/public subscribe support |
 | Provider semantics | `src/data_providers/facts.py`, `src/data_providers/providers/coinbase.py`, `src/data_providers/registry.py` | typed product/trade unit validation and implemented feature declarations only |
 | Core market contracts | `src/market_data/contracts.py`, `src/market_data/requirements.py`, `src/market_data/store.py`, proposed `src/market_data/archive/`, `src/market_data/book/`, `src/market_data/features/` | typed models, source positions, archive manifests, reconstruction/spec/fingerprint contracts |
 | Database models/bootstrap | `portal/backend/db/market_data_models.py`, `portal/backend/db/session.py` | proposed tables, shared fact clock, hypertables, immutability, strict drift checks |

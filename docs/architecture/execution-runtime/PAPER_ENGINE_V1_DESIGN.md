@@ -97,6 +97,9 @@ Current strengths:
   execution path.
 - `src/engines/bot_runtime/live_market.py` owns closed live-candle aggregation
   and buffering for paper workers.
+- Ticker-only provisional display candles use provider message time to select
+  the market-time bucket and local receipt time as `known_at`. They remain
+  display evidence and never become execution/runtime truth.
 - `portal/backend/service/bots/paper_market_stream.py` owns container-local
   provider stream intake for paper workers.
 - `portal/backend/service/bots/market_data_stream_policy.py` owns the

@@ -1392,6 +1392,32 @@ def _cmd_data_funding_rate_latest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_data_market_structure_proof(args: argparse.Namespace) -> int:
+    import asyncio
+
+    from .market_structure_proof import (
+        default_output_dir,
+        run_coinbase_market_structure_proof,
+    )
+
+    output_dir = Path(args.output_dir).expanduser() if args.output_dir else default_output_dir()
+    result = asyncio.run(
+        run_coinbase_market_structure_proof(
+            output_dir=output_dir,
+            product_ids=args.product_id or ("BIP-20DEC30-CDE", "BTC-USD"),
+            channels=args.channel or ("market_trades", "level2", "ticker"),
+            auth_mode=args.auth_mode,
+            duration_seconds=args.duration,
+            reconnect_interval_seconds=args.reconnect_interval,
+            sample_limit=args.sample_limit,
+            rest_limit=args.rest_limit,
+            max_annual_archive_gib=args.max_annual_archive_gib,
+        )
+    )
+    _print_json(result)
+    return 0 if result.get("status") == "completed" else 1
+
+
 def _cmd_research_items_list(args: argparse.Namespace) -> int:
     payload = _client(args).request_json(
         "GET",
@@ -3189,6 +3215,51 @@ def build_parser() -> argparse.ArgumentParser:
     )
     data_funding_latest.add_argument("--optional", action="store_true")
     data_funding_latest.set_defaults(func=_cmd_data_funding_rate_latest)
+    data_market_structure_proof = data_sub.add_parser(
+        "market-structure-proof",
+        help="Capture bounded Coinbase trade/L2 proof evidence and capacity metrics locally.",
+    )
+    data_market_structure_proof.add_argument(
+        "--product-id",
+        action="append",
+        default=[],
+        help="Allowlisted provider product ID. Repeat; defaults to BIP/BTC-USD.",
+    )
+    data_market_structure_proof.add_argument(
+        "--channel",
+        action="append",
+        default=[],
+        choices=["market_trades", "level2", "ticker"],
+        help="Channel subscribed on each product proof connection. Repeat for multiple channels.",
+    )
+    data_market_structure_proof.add_argument(
+        "--auth-mode",
+        choices=["public", "authenticated"],
+        default="public",
+    )
+    data_market_structure_proof.add_argument(
+        "--duration",
+        type=float,
+        default=60.0,
+        help="Capture duration in seconds, from 1 through 86400.",
+    )
+    data_market_structure_proof.add_argument(
+        "--reconnect-interval",
+        type=float,
+        help="Deliberately reconnect each stream at this interval for reset/resnapshot proof.",
+    )
+    data_market_structure_proof.add_argument("--sample-limit", type=int, default=3)
+    data_market_structure_proof.add_argument("--rest-limit", type=int, default=20)
+    data_market_structure_proof.add_argument(
+        "--max-annual-archive-gib",
+        type=float,
+        help="Explicit operator-approved annual archive byte budget for this captured scope.",
+    )
+    data_market_structure_proof.add_argument(
+        "--output-dir",
+        help="Local proof output directory; defaults under logs/market-structure-proof/.",
+    )
+    data_market_structure_proof.set_defaults(func=_cmd_data_market_structure_proof)
 
     research = subparsers.add_parser("research", help="Research memory and lightweight historical checks.")
     research_sub = research.add_subparsers(dest="research_command", required=True)

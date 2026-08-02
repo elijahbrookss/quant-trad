@@ -14,9 +14,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import pandas as pd
 
 try:
+    from coinbase import jwt_generator
     from coinbase.rest import RESTClient
     COINBASE_SDK_AVAILABLE = True
 except ImportError:  # pragma: no cover - handled in __init__
+    jwt_generator = None
     RESTClient = None
     COINBASE_SDK_AVAILABLE = False
 
@@ -202,6 +204,28 @@ class CoinbaseProvider(BaseDataProvider):
             self._public_client = RESTClient(timeout=self._timeout)
         return self._public_client
 
+    def build_websocket_jwt(self) -> str:
+        """Build one short-lived WebSocket JWT through shared credentials."""
+
+        if jwt_generator is None:
+            raise RuntimeError(
+                "Coinbase WebSocket authentication requires coinbase-advanced-py."
+            )
+        api_key, api_secret = self._resolve_credentials()
+        try:
+            token = str(jwt_generator.build_ws_jwt(api_key, api_secret) or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "coinbase_websocket_jwt_failed | error_type=%s",
+                type(exc).__name__,
+            )
+            raise RuntimeError(
+                "Coinbase WebSocket JWT generation failed through the provider credential boundary."
+            ) from exc
+        if not token:
+            raise RuntimeError("Coinbase WebSocket JWT generation returned an empty token.")
+        return token
+
     @staticmethod
     def _response_to_dict(response: Any) -> Dict[str, Any]:
         if response is None:
@@ -213,6 +237,102 @@ class CoinbaseProvider(BaseDataProvider):
         if hasattr(response, "__dict__"):
             return dict(response.__dict__)
         return {}
+
+    def fetch_product_proof(
+        self,
+        product_id: str,
+        *,
+        auth_mode: str = "public",
+    ) -> Dict[str, Any]:
+        """Return one bounded product payload for provider-contract proof."""
+
+        normalized_product_id = str(product_id or "").strip()
+        if not normalized_product_id:
+            raise ValueError("Coinbase product proof requires product_id.")
+        client, authenticated = self._proof_client(auth_mode)
+        try:
+            response = (
+                client.get_product(product_id=normalized_product_id)
+                if authenticated
+                else client.get_public_product(product_id=normalized_product_id)
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise CoinbaseAPIError(
+                "Coinbase product proof failed "
+                f"| product_id={normalized_product_id} auth_mode={auth_mode} error={exc}"
+            ) from exc
+        return self._response_to_dict(response)
+
+    def fetch_product_book_proof(
+        self,
+        product_id: str,
+        *,
+        auth_mode: str = "public",
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        """Return one bounded product-book payload for provider-contract proof."""
+
+        normalized_product_id = str(product_id or "").strip()
+        bounded_limit = max(1, min(int(limit), 1000))
+        if not normalized_product_id:
+            raise ValueError("Coinbase product-book proof requires product_id.")
+        client, authenticated = self._proof_client(auth_mode)
+        try:
+            response = (
+                client.get_product_book(product_id=normalized_product_id, limit=bounded_limit)
+                if authenticated
+                else client.get_public_product_book(
+                    product_id=normalized_product_id,
+                    limit=bounded_limit,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise CoinbaseAPIError(
+                "Coinbase product-book proof failed "
+                f"| product_id={normalized_product_id} auth_mode={auth_mode} error={exc}"
+            ) from exc
+        return self._response_to_dict(response)
+
+    def fetch_recent_market_trades_proof(
+        self,
+        product_id: str,
+        *,
+        auth_mode: str = "public",
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Return bounded recent trades; this is not a completeness backfill."""
+
+        normalized_product_id = str(product_id or "").strip()
+        bounded_limit = max(1, min(int(limit), 1000))
+        if not normalized_product_id:
+            raise ValueError("Coinbase recent-trades proof requires product_id.")
+        client, authenticated = self._proof_client(auth_mode)
+        try:
+            response = (
+                client.get_market_trades(product_id=normalized_product_id, limit=bounded_limit)
+                if authenticated
+                else client.get_public_market_trades(
+                    product_id=normalized_product_id,
+                    limit=bounded_limit,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise CoinbaseAPIError(
+                "Coinbase recent-trades proof failed "
+                f"| product_id={normalized_product_id} auth_mode={auth_mode} error={exc}"
+            ) from exc
+        return self._response_to_dict(response)
+
+    def _proof_client(self, auth_mode: str) -> tuple[RESTClient, bool]:
+        normalized_auth_mode = str(auth_mode or "public").strip().lower()
+        if normalized_auth_mode == "public":
+            return self._ensure_public_client(), False
+        if normalized_auth_mode == "authenticated":
+            return self._ensure_client(), True
+        raise ValueError(
+            "Coinbase proof auth_mode must be 'public' or 'authenticated': "
+            f"{normalized_auth_mode!r}"
+        )
 
     def _load_product(self, symbol: str) -> CoinbaseProduct:
         if not symbol:

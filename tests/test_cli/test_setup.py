@@ -98,6 +98,112 @@ def test_ensure_operator_env_url_encodes_generated_pg_dsn(tmp_path):
     )
 
 
+def test_ensure_operator_env_repairs_stale_canonical_local_pg_dsn(tmp_path) -> None:
+    (tmp_path / "secrets.env").write_text(
+        "\n".join(
+            [
+                "POSTGRES_DB=quanttrad",
+                "POSTGRES_USER=quanttrad",
+                "POSTGRES_PASSWORD=current",
+                "PG_DSN=postgresql+psycopg2://quanttrad:stale@localhost:15432/quanttrad",
+                f"QT_SECURITY_PROVIDER_CREDENTIAL_KEY={qt_setup.generate_fernet_key()}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = qt_setup.ensure_operator_env(tmp_path)
+    values = qt_setup._env_values(tmp_path / "secrets.env")
+
+    assert "PG_DSN" in result["changed"]
+    assert values["PG_DSN"] == (
+        "postgresql+psycopg2://quanttrad:current@localhost:15432/quanttrad"
+    )
+
+
+def test_ensure_operator_env_preserves_nonlocal_pg_dsn(tmp_path) -> None:
+    remote_dsn = "postgresql+psycopg2://remote:user@db.example.test:5432/market"
+    (tmp_path / "secrets.env").write_text(
+        "\n".join(
+            [
+                "POSTGRES_DB=quanttrad",
+                "POSTGRES_USER=quanttrad",
+                "POSTGRES_PASSWORD=current",
+                f"PG_DSN={remote_dsn}",
+                f"QT_SECURITY_PROVIDER_CREDENTIAL_KEY={qt_setup.generate_fernet_key()}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = qt_setup.ensure_operator_env(tmp_path)
+    values = qt_setup._env_values(tmp_path / "secrets.env")
+
+    assert "PG_DSN" not in result["changed"]
+    assert values["PG_DSN"] == remote_dsn
+
+
+def test_ensure_operator_env_preserves_noncanonical_local_pg_dsn(tmp_path) -> None:
+    local_dsn = "postgresql+psycopg2://quanttrad:stale@localhost:5432/quanttrad"
+    (tmp_path / "secrets.env").write_text(
+        "\n".join(
+            [
+                "POSTGRES_DB=quanttrad",
+                "POSTGRES_USER=quanttrad",
+                "POSTGRES_PASSWORD=current",
+                f"PG_DSN={local_dsn}",
+                f"QT_SECURITY_PROVIDER_CREDENTIAL_KEY={qt_setup.generate_fernet_key()}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = qt_setup.ensure_operator_env(tmp_path)
+    values = qt_setup._env_values(tmp_path / "secrets.env")
+
+    assert "PG_DSN" not in result["changed"]
+    assert values["PG_DSN"] == local_dsn
+
+
+def test_pg_dsn_check_rejects_stale_local_credentials_without_exposing_values(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("PG_DSN", raising=False)
+    check = qt_setup._pg_dsn_check(
+        {
+            "PG_DSN": "postgresql+psycopg2://quanttrad:stale@localhost:15432/quanttrad",
+            "POSTGRES_USER": "quanttrad",
+            "POSTGRES_PASSWORD": "current",
+            "POSTGRES_DB": "quanttrad",
+        }
+    )
+
+    assert check.status == "failed"
+    assert "stale" not in check.detail
+    assert "current" not in check.detail
+    assert check.remediation == "Run `qt setup env` to align the single local PG_DSN."
+
+
+def test_pg_dsn_check_accepts_url_encoded_matching_local_credentials(monkeypatch) -> None:
+    monkeypatch.delenv("PG_DSN", raising=False)
+    check = qt_setup._pg_dsn_check(
+        {
+            "PG_DSN": (
+                "postgresql+psycopg2://quant%40user:p%40ss%3Aword%2Fwith%23hash"
+                "@localhost:15432/quant%2Ftrad"
+            ),
+            "POSTGRES_USER": "quant@user",
+            "POSTGRES_PASSWORD": "p@ss:word/with#hash",
+            "POSTGRES_DB": "quant/trad",
+        }
+    )
+
+    assert check.status == "ok"
+
+
 def test_setup_provider_coinbase_uses_canonical_credentials_api(monkeypatch, capsys):
     calls: list[tuple[str, str, dict[str, object] | None]] = []
 

@@ -10,10 +10,20 @@ from data_providers.providers.base import InstrumentType
 
 
 class FakeClient:
-    def __init__(self, *, product=None, candle_provider=None, transaction_summary=None):
+    def __init__(
+        self,
+        *,
+        product=None,
+        candle_provider=None,
+        transaction_summary=None,
+        product_book=None,
+        market_trades=None,
+    ):
         self.product = product
         self.candle_provider = candle_provider
         self.transaction_summary = transaction_summary
+        self.product_book = product_book
+        self.market_trades = market_trades
         self.calls = []
 
     def get_product(self, product_id, **kwargs):
@@ -27,6 +37,30 @@ class FakeClient:
         if self.product is None:
             raise Exception("product_not_found")
         return dict(self.product)
+
+    def get_product_book(self, product_id, limit=None, **kwargs):
+        self.calls.append(
+            {"url_path": "/product_book", "product_id": product_id, "limit": limit}
+        )
+        return dict(self.product_book or {})
+
+    def get_public_product_book(self, product_id, limit=None, **kwargs):
+        self.calls.append(
+            {"url_path": "/market/product_book", "product_id": product_id, "limit": limit}
+        )
+        return dict(self.product_book or {})
+
+    def get_market_trades(self, product_id, limit, **kwargs):
+        self.calls.append(
+            {"url_path": "/products/ticker", "product_id": product_id, "limit": limit}
+        )
+        return dict(self.market_trades or {})
+
+    def get_public_market_trades(self, product_id, limit, **kwargs):
+        self.calls.append(
+            {"url_path": "/market/products/ticker", "product_id": product_id, "limit": limit}
+        )
+        return dict(self.market_trades or {})
 
     def get_candles(self, product_id, start, end, granularity, limit=None, **kwargs):
         self.calls.append(
@@ -57,6 +91,51 @@ def _make_provider(fake_client):
     provider._client = fake_client
     provider._public_client = fake_client
     return provider
+
+
+def test_build_websocket_jwt_uses_shared_provider_credentials(monkeypatch):
+    provider = coinbase_module.CoinbaseProvider()
+    observed = {}
+
+    monkeypatch.setattr(provider, "_resolve_credentials", lambda: ("key-name", "private-key"))
+    monkeypatch.setattr(
+        coinbase_module.jwt_generator,
+        "build_ws_jwt",
+        lambda key, secret: observed.update({"key": key, "secret": secret}) or "signed-token",
+    )
+
+    assert provider.build_websocket_jwt() == "signed-token"
+    assert observed == {"key": "key-name", "secret": "private-key"}
+
+
+@pytest.mark.parametrize(
+    ("auth_mode", "expected_paths"),
+    [
+        (
+            "public",
+            ["/market/products", "/market/product_book", "/market/products/ticker"],
+        ),
+        ("authenticated", ["/products", "/product_book", "/products/ticker"]),
+    ],
+)
+def test_market_structure_rest_proofs_use_explicit_auth_surface(auth_mode, expected_paths):
+    fake = FakeClient(
+        product={"product_id": "BIP-20DEC30-CDE"},
+        product_book={"pricebook": {"product_id": "BIP-20DEC30-CDE"}},
+        market_trades={"trades": [{"trade_id": "1"}]},
+    )
+    provider = _make_provider(fake)
+
+    assert provider.fetch_product_proof(
+        "BIP-20DEC30-CDE", auth_mode=auth_mode
+    )["product_id"] == "BIP-20DEC30-CDE"
+    assert provider.fetch_product_book_proof(
+        "BIP-20DEC30-CDE", auth_mode=auth_mode, limit=5
+    )["pricebook"]["product_id"] == "BIP-20DEC30-CDE"
+    assert provider.fetch_recent_market_trades_proof(
+        "BIP-20DEC30-CDE", auth_mode=auth_mode, limit=5
+    )["trades"][0]["trade_id"] == "1"
+    assert [call["url_path"] for call in fake.calls] == expected_paths
 
 
 def test_interval_mapping_supports_four_hour():

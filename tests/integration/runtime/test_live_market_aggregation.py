@@ -91,6 +91,30 @@ def test_live_candle_aggregator_drops_incomplete_target_when_source_buckets_gap(
     assert snapshot["dropped_incomplete_target_count"] == 1
 
 
+def test_ticker_provisional_uses_provider_message_time_but_receipt_known_at() -> None:
+    aggregator = LiveCandleAggregator(target_timeframe="1m")
+    base = 1_779_019_200
+    event = CanonicalMarketEvent.build(
+        event_kind="market_ticker",
+        provider="COINBASE",
+        venue="COINBASE_DIRECT",
+        symbol="BTC-USD",
+        product_id="BTC-USD",
+        provider_message_time=datetime.fromtimestamp(
+            base + 5,
+            tz=timezone.utc,
+        ).isoformat(),
+        received_at=datetime.fromtimestamp(base + 65, tz=timezone.utc).isoformat(),
+        payload={"price": "100"},
+    )
+
+    provisional = aggregator.provisional_from_event(event)
+
+    assert provisional is not None
+    assert int(provisional.time.timestamp()) == base
+    assert provisional.first_known_at == event.received_at
+
+
 def test_live_candle_store_returns_immutable_closed_candles_after_last_seen() -> None:
     store = LiveCandleStore()
     first = ClosedLiveCandle(
