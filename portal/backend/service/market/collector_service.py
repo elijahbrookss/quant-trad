@@ -11,6 +11,7 @@ from typing import Any, Callable, Mapping, Optional
 
 from data_providers.facts import ProviderOpenInterestSnapshot
 from data_providers.providers.factory import get_provider
+from data_providers.registry import FeatureAuth, feature_contract
 from market_data.contracts import (
     OPEN_INTEREST_FACT_TYPE,
     OPEN_INTEREST_FACT_VERSION,
@@ -31,7 +32,7 @@ from ..storage.repos.market_data import market_data_repo
 from . import instrument_service
 
 
-COINBASE_OI_ADAPTER_VERSION = "coinbase_advanced_trade.open_interest.poll.v1"
+COINBASE_OI_ADAPTER_VERSION = "coinbase_advanced_trade.open_interest.public_poll.v1"
 COLLECTOR_DEFINITION_VERSION = "market_collection_definition.v1"
 COLLECTOR_RESULT_VERSION = "market_collection_result.v1"
 
@@ -111,6 +112,15 @@ class MarketDataCollectorService:
                 "market_collection_definition_invalid: provider spacing is outside poll interval"
             )
         instrument = instrument_service.get_instrument_record(instrument_id)
+        capability = feature_contract(
+            "COINBASE", "COINBASE_DIRECT", "open_interest_current"
+        )
+        if capability.auth != FeatureAuth.PUBLIC:
+            raise RuntimeError(
+                "provider_feature_contract_invalid: Coinbase open-interest "
+                "collector requires declared public access"
+            )
+
         provider_id = str(instrument.get("datasource") or "").strip().upper()
         venue_id = str(instrument.get("exchange") or "").strip().upper()
         if provider_id != "COINBASE" or venue_id != "COINBASE_DIRECT":
@@ -130,7 +140,7 @@ class MarketDataCollectorService:
             lineage={
                 "schema_version": "market_source_lineage.v1",
                 "acquisition": "scheduled_poll",
-                "provider_contract": "coinbase_advanced_trade_get_product",
+                "provider_contract": "coinbase_advanced_trade_get_public_product",
                 "provider_event_time_available": False,
             },
         )
