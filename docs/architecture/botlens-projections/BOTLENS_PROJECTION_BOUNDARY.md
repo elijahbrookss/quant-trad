@@ -11,6 +11,7 @@ tags:
   - debugger
   - read-model
 code_paths:
+  - portal/backend/main.py
   - portal/backend/service/bots/botlens_contract.py
   - portal/backend/service/bots/botlens_bootstrap_service.py
   - portal/backend/service/bots/botlens_chart_service.py
@@ -24,11 +25,13 @@ code_paths:
   - portal/backend/service/bots/botlens_domain_events.py
   - portal/backend/service/bots/botlens_event_retention.py
   - portal/backend/service/bots/botlens_intake_router.py
+  - portal/backend/service/bots/botlens_lifecycle_bridge.py
   - portal/backend/service/bots/botlens_projector_registry.py
   - portal/backend/service/bots/botlens_run_projector.py
   - portal/backend/service/bots/botlens_symbol_projector.py
   - portal/backend/service/bots/botlens_state.py
   - portal/backend/service/bots/botlens_transport.py
+  - portal/backend/service/bots/telemetry_stream.py
   - portal/backend/service/bots/botlens_run_stream.py
   - portal/backend/service/bots/botlens_symbol_service.py
   - portal/backend/service/bots/container_runtime.py
@@ -236,6 +239,16 @@ coalesced. Repeated non-material runtime/status facts may still coalesce while
 queued. If shutdown cannot drain either lane, runtime marks every undelivered
 entry failed and emits lane-specific WARN diagnostics. A failed control flush
 may still use the bounded direct websocket fallback.
+
+Projector registries, queues, readiness events, and tasks are owned by the
+long-lived FastAPI serving loop bound during application lifespan. Synchronous
+startup and watchdog workers persist lifecycle truth first, then marshal the
+hot projection copy onto that serving loop with a thread-safe handoff. They
+must never call `asyncio.run` against the process-global telemetry hub: doing so
+would create projector state on a short-lived loop that cannot serve a later
+BotLens request. If the serving loop is unavailable, the bridge emits a WARN and
+leaves the hot copy deferred; the durable lifecycle record remains authoritative
+and a later bootstrap rebuilds from it.
 
 ## Bounded Hot Views
 
