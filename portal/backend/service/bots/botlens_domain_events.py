@@ -24,6 +24,7 @@ from .botlens_contract import (
     FACT_TYPE_TRADE_UPDATED,
     FACT_TYPE_WALLET_LEDGER_EVENT,
     normalize_fact_entries,
+    normalize_lifecycle_payload,
     normalize_series_key,
 )
 
@@ -3335,22 +3336,26 @@ def build_botlens_domain_events_from_lifecycle(
     run_id: str,
     lifecycle: Mapping[str, Any],
 ) -> List[BotLensDomainEvent]:
-    checkpoint_at = parse_optional_datetime(lifecycle.get("checkpoint_at") or lifecycle.get("updated_at"))
+    normalized_lifecycle = normalize_lifecycle_payload(lifecycle)
+    checkpoint_at = parse_optional_datetime(
+        normalized_lifecycle.get("checkpoint_at")
+        or normalized_lifecycle.get("updated_at")
+    )
     if checkpoint_at is None:
         raise ValueError("lifecycle checkpoint_at/updated_at is required")
-    phase = str(lifecycle.get("phase") or "")
-    status = str(lifecycle.get("status") or "")
+    phase = str(normalized_lifecycle.get("phase") or "")
+    status = str(normalized_lifecycle.get("status") or "")
     event_name = _lifecycle_event_name(phase=phase, status=status)
     context = RunLifecycleContext(
         bot_id=str(bot_id),
         run_id=str(run_id),
         phase=phase,
         status=status,
-        component=_optional_text(lifecycle.get("owner")),
-        message=_optional_text(lifecycle.get("message")),
-        live=bool(lifecycle.get("live")),
-        metadata=_mapping_or_none(lifecycle.get("metadata")),
-        failure=_mapping_or_none(lifecycle.get("failure")),
+        component=_optional_text(normalized_lifecycle.get("owner")),
+        message=_optional_text(normalized_lifecycle.get("message")),
+        live=bool(normalized_lifecycle.get("live")),
+        metadata=_mapping_or_none(normalized_lifecycle.get("metadata")),
+        failure=_mapping_or_none(normalized_lifecycle.get("failure")),
     )
     lifecycle_event = _new_event(
         event_name=event_name,
@@ -3365,7 +3370,7 @@ def build_botlens_domain_events_from_lifecycle(
         context=context,
     )
     events: List[BotLensDomainEvent] = [lifecycle_event]
-    failure = _mapping(lifecycle.get("failure"))
+    failure = _mapping(normalized_lifecycle.get("failure"))
     if failure:
         severity = "ERROR" if context.status in {"failed", "error", "crashed", "startup_failed"} else "WARN"
         fault_context = FaultRecordedContext(

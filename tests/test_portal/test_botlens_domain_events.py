@@ -1819,6 +1819,24 @@ def test_runtime_state_health_event_id_changes_when_recent_transitions_change() 
     assert first_health.event_id != second_health.event_id
 
 
+def test_lifecycle_domain_event_derives_live_readiness_from_canonical_phase() -> None:
+    events = build_botlens_domain_events_from_lifecycle(
+        bot_id="bot-1",
+        run_id="run-1",
+        lifecycle={
+            "phase": "live",
+            "status": "running",
+            "owner": "runtime",
+            "message": "Run is live.",
+            "checkpoint_at": "2026-02-01T00:00:00Z",
+        },
+    )
+
+    lifecycle_event = next(event for event in events if event.event_name.value == "RUN_READY")
+
+    assert lifecycle_event.serialize()["context"]["live"] is True
+
+
 def test_lifecycle_domain_event_carries_runtime_observability_metadata() -> None:
     events = build_botlens_domain_events_from_lifecycle(
         bot_id="bot-1",
