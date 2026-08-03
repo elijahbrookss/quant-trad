@@ -221,11 +221,16 @@ def pytest_collection_modifyitems(config, items):
             items[:] = selected
 
     run_db_tests = _env_flag("RUN_DB_TESTS")
+    if run_db_tests and not _env_flag("QT_DB_TEST_ISOLATED"):
+        raise pytest.UsageError(
+            "database tests require an isolated disposable database; "
+            "use ./scripts/ci/run_test_suite.sh db instead of the live PG_DSN"
+        )
     if run_db_tests:
         return
 
     skip_db = pytest.mark.skip(
-        reason="live DB tests are opt-in; set RUN_DB_TESTS=1 for manual PostgreSQL-backed runs"
+        reason="database tests are isolated; run ./scripts/ci/run_test_suite.sh db"
     )
     for item in items:
         if "db" in item.keywords:

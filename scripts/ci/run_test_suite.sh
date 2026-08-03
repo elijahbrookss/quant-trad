@@ -8,6 +8,9 @@ if [[ -z "$SUITE" ]]; then
 fi
 
 USE_DOCKER="${CI_USE_DOCKER:-0}"
+if [[ "$SUITE" == "db" ]]; then
+  USE_DOCKER=1
+fi
 COMPOSE_FILE="docker/docker-compose.test.yml"
 
 run_pytest_host() {
@@ -69,7 +72,7 @@ case "$SUITE" in
     run_suite "pytest -q"
     ;;
   db)
-    run_suite "RUN_DB_TESTS=1 pytest -q -m db"
+    run_suite "QT_DB_TEST_ISOLATED=1 RUN_DB_TESTS=1 pytest -q -m db"
     ;;
   core)
     run_profiles core
