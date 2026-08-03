@@ -133,6 +133,10 @@ export function shouldLoadMoreBotLensForensics({ status, hasMore, scopeKey }) {
   return Boolean(scopeKey && status !== 'loading' && hasMore !== false)
 }
 
+export function shouldAutoLoadInitialBotLensForensics({ open, scopeKey, transportEligible }) {
+  return Boolean(open && scopeKey && !transportEligible)
+}
+
 const BOTLENS_BOOTSTRAP_RETRY_MS = 1000
 const BOTLENS_EXACT_BOOTSTRAP_TIMEOUT_MS = 30_000
 const RETRYABLE_RUN_BOOTSTRAP_STATES = new Set([
@@ -714,8 +718,18 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
       }
       return
     }
+    if (!shouldAutoLoadInitialBotLensForensics({
+      open,
+      scopeKey: forensicScopeKey,
+      transportEligible,
+    })) {
+      if (forensicReplayRef.current.scopeKey !== forensicScopeKey) {
+        setForensicReplay(emptyForensicReplayState(forensicScopeKey))
+      }
+      return
+    }
     loadMoreDecisionEvidence({ reset: true })
-  }, [forensicScopeKey, loadMoreDecisionEvidence, open, reloadTick])
+  }, [forensicScopeKey, loadMoreDecisionEvidence, open, reloadTick, transportEligible])
 
   useEffect(() => {
     if (!shouldLoadInitialBotLensHistory({

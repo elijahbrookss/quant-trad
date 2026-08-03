@@ -5,6 +5,7 @@ import {
   resolveSelectedSymbolVisualRefreshIntervalMs,
   resolveBotLensInitialHistoryEnd,
   mergeBotLensForensicDocuments,
+  shouldAutoLoadInitialBotLensForensics,
   shouldLoadMoreBotLensForensics,
   shouldLoadInitialBotLensHistory,
   shouldRetryBotLensRunBootstrap,
@@ -12,6 +13,25 @@ import {
   shouldLoadOlderBotLensHistory,
   shouldPollSelectedSymbolVisual,
 } from '../src/features/bots/botlens/hooks/useBotLensController.js'
+
+test('active BotLens leaves durable forensic replay operator-triggered', () => {
+  assert.equal(
+    shouldAutoLoadInitialBotLensForensics({
+      open: true,
+      scopeKey: 'run-live:instrument-btc|1m',
+      transportEligible: true,
+    }),
+    false,
+  )
+  assert.equal(
+    shouldAutoLoadInitialBotLensForensics({
+      open: true,
+      scopeKey: 'run-terminal:instrument-btc|1m',
+      transportEligible: false,
+    }),
+    true,
+  )
+})
 
 test('load older history stays blocked while a chart retrieval request is already in flight', () => {
   assert.equal(

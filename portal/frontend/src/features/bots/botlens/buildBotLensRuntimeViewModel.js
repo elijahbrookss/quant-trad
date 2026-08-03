@@ -899,6 +899,7 @@ export function buildBotLensRuntimeViewModel({
         status: forensicStatus || (selectedSymbolBootstrapStatus === 'loading' ? 'loading' : 'ready'),
         error: forensicError || null,
         hasMore: forensicHasMore !== false,
+        autoLoad: !Boolean(runState?.transportEligible),
         nextCursor: forensicNextCursor || { afterSeq: 0, afterRowId: 0 },
         summaryRows: decisionSummaryRows,
         walletRows,

@@ -312,7 +312,7 @@ const DecisionsTab = memo(function DecisionsTab({ model, onLoadMore }) {
   const sentinelRef = useRef(null)
 
   useEffect(() => {
-    if (!model.hasMore || model.status === 'loading') return undefined
+    if (model.autoLoad === false || !model.hasMore || model.status === 'loading') return undefined
     const root = scrollRef.current
     const sentinel = sentinelRef.current
     if (!root || !sentinel || typeof IntersectionObserver === 'undefined') return undefined
@@ -321,7 +321,7 @@ const DecisionsTab = memo(function DecisionsTab({ model, onLoadMore }) {
     }, { root, rootMargin: '180px 0px' })
     observer.observe(sentinel)
     return () => observer.disconnect()
-  }, [model.hasMore, model.status, onLoadMore])
+  }, [model.autoLoad, model.hasMore, model.status, onLoadMore])
 
   return (
     <div className="grid h-full gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(18rem,22rem)]">
@@ -354,7 +354,11 @@ const DecisionsTab = memo(function DecisionsTab({ model, onLoadMore }) {
                 disabled={model.status === 'loading'}
                 className="rounded-[3px] border border-white/10 bg-black/25 px-3 py-2 text-xs font-semibold text-slate-300 transition hover:border-white/20 hover:text-slate-100 disabled:cursor-wait disabled:opacity-60"
               >
-                {model.status === 'loading' ? 'Streaming evidence…' : 'Continue replay'}
+                {model.status === 'loading'
+                  ? 'Loading evidence…'
+                  : model.autoLoad === false && model.status === 'idle'
+                    ? 'Load durable replay'
+                    : 'Continue replay'}
               </button>
             ) : (
               <span className="text-xs text-slate-600">Complete for this instrument.</span>
