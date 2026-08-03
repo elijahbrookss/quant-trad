@@ -110,27 +110,27 @@ export function useOverviewBacktestActivity(
       const top = requests[0].status === 'fulfilled'
         ? requests[0].value?.items?.[0] || null
         : null
-      if (requests[0].status === 'rejected') nextErrors.push('Top-result projection unavailable.')
+      if (requests[0].status === 'rejected') nextErrors.push({ component: 'Top result', error: requests[0].reason?.message || 'Top-result projection unavailable.' })
       const recentReports = requests[1].status === 'fulfilled'
         ? requests[1].value?.items || []
         : []
-      if (requests[1].status === 'rejected') nextErrors.push('Recent backtests unavailable.')
+      if (requests[1].status === 'rejected') nextErrors.push({ component: 'Recent outcomes', error: requests[1].reason?.message || 'Recent backtests unavailable.' })
       const nextResearchItems = requests[2].status === 'fulfilled'
         ? requests[2].value
         : []
-      if (requests[2].status === 'rejected') nextErrors.push('Research memory unavailable.')
+      if (requests[2].status === 'rejected') nextErrors.push({ component: 'Research attention', error: requests[2].reason?.message || 'Research memory unavailable.' })
       const nextActivity = requests[3].status === 'fulfilled'
         ? requests[3].value
         : null
-      if (requests[3].status === 'rejected') nextErrors.push('Activity aggregation unavailable.')
+      if (requests[3].status === 'rejected') nextErrors.push({ component: 'Research activity', error: requests[3].reason?.message || 'Activity aggregation unavailable.' })
 
       let dataset = null
       if (top?.run_id) {
         try {
           const report = await getReport(top.run_id)
           dataset = report?.identity || report?.context?.dataset_identity || null
-        } catch {
-          nextErrors.push('Top-result dataset identity unavailable.')
+        } catch (error) {
+          nextErrors.push({ component: 'Top result', error: error?.message || 'Top-result dataset identity unavailable.' })
         }
       }
       if (!mounted) return

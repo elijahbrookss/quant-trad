@@ -12,6 +12,9 @@ test('Overview is a compact dashboard rather than a numbered operational report'
   const overview = source(path.join('v2', 'rooms', 'OverviewRoom.jsx'))
   assert.match(overview, /qt2-summary-grid/)
   assert.match(overview, /attentionItems\.slice\(0, 3\)/)
+  assert.match(overview, /ComponentAvailability issues={attentionIssues}/)
+  assert.match(overview, /Partial evidence/)
+  assert.doesNotMatch(overview, /operationsErrors\.join|researchFeed\.errors\.join/)
   assert.doesNotMatch(overview, /qt2-step|function MarketPosture|function RecentOutcomes/)
 })
 
