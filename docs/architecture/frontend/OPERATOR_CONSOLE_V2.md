@@ -21,6 +21,7 @@ code_paths:
   - portal/frontend/src/features/collectors
   - portal/frontend/src/features/market-structure
   - portal/frontend/src/features/bots/botlens
+  - portal/frontend/src/components/bots
   - portal/frontend/src/adapters/marketData.adapter.js
   - portal/frontend/src/adapters/research.adapter.js
   - portal/backend/controller/bots.py
@@ -35,41 +36,40 @@ code_paths:
 
 ## Purpose
 
-Operator Console v2 is Quant Trad's bounded human inspection surface. It answers
-what needs attention, what is actually running, whether market evidence is
-usable, and what persisted research outcomes exist. It does not start, stop,
-configure, import, promote, or otherwise mutate platform state.
+Operator Console v2 is Quant Trad's bounded human inspection surface. It is a
+dashboard and evidence browser, not an alternate workflow engine.
 
-The initial information architecture is deliberately limited to two primary
-rooms:
+The information architecture has two primary rooms:
 
-- **Overview** is the evidence-first entry point.
-- **Operations** is the searchable inventory of run instances, data-plane
-  evidence, research evidence, and their definitions.
+- **Overview** answers whether anything needs the operator now.
+- **Operations** locates run, collector, market-data, and research evidence.
 
-BotLens, collector evidence, and research evidence are contextual lenses reached
-from those rooms. They are not additional top-level products.
+BotLens, collector attempts, and research trails are contextual lenses opened
+from those rooms. The primary rooms stay sparse; technical identity, attempts,
+timestamps, diagnostics, and raw payloads belong in lenses or context menus.
 
 ## Boundary Contract
 
 The console owns:
 
-- browser-local filters, sort order, selected tabs, and safe navigation origin;
+- browser-local filters, sort order, pagination, tabs, and safe navigation;
 - view models over typed backend read contracts;
 - explicit loading, partial, unavailable, stale, invalid, and empty states;
 - bounded refresh and polling of read-only projections;
-- run-scoped navigation to persisted supporting evidence.
+- run-scoped navigation to persisted supporting evidence;
+- readable operator summaries with copyable technical error details.
 
 The console does not own:
 
-- runtime, collector, or stream lifecycle;
-- scheduling, retries, leases, fencing, or liveness;
+- runtime, container, collector, or stream lifecycle;
+- scheduling, retries, leases, fencing, or process liveness;
 - report generation, research mutation, or strategy authoring;
 - market-data reconstruction, admission, normalization, or quality truth;
 - alternate run identity or report semantics.
 
-The v2 adapters used by the primary rooms issue GET requests only. The v1
-application remains a separate entrypoint while the operator console matures.
+The v2 adapters used by the primary rooms issue GET requests only. A rerun
+option copies the canonical `qt bots start ... --dataset-id ...` command; it
+does not start a run from the browser.
 
 ## Evidence Flow
 
@@ -83,119 +83,115 @@ durable runtime / market / research truth
   -> exact run, collector, or research lens
 ```
 
-Frontend state may improve first paint, but it is never authoritative. A run
-link carries a matching navigation hint for immediate rendering and then fetches
-the exact route `run_id`. A mismatched response is rejected rather than rendered
-under the requested identity.
+Frontend state may improve first paint, but it is never authoritative. Exact
+run routes refresh the navigation hint from `run_id` and reject mismatched
+scope.
 
 ## Overview Contract
 
-Overview preserves this order:
+Overview is intentionally dashboard-shaped:
 
-1. attention;
-2. current operations;
-3. market-data posture;
-4. research activity;
-5. recent outcomes.
+- four rollups: attention, active runs, collector delivery, and market pairs;
+- at most three current attention items;
+- at most four active evidence rows;
+- one bounded activity heatmap;
+- one top completed result.
+
+There are no numbered report sections and no complete operational tables on
+Overview.
 
 Attention uses a fixed 72-hour lookback, deduplicates by canonical evidence
-identity, and sorts by severity followed by evidence recency. Healthy evidence,
-disabled schedules, and terminal failures outside the lookback do not appear.
+identity, and sorts by severity followed by recency. Active work contains real
+run instances, in-flight attempts, and leased stream sessions. Enabled
+definitions are never counted as running.
 
-Current operations contains actual active run instances, in-flight collector
-attempts, and currently leased stream sessions. Enabled bot or collector
-definitions are configuration and are never counted as running work.
-
-Market posture exposes collection, coverage, book validity, archive state,
-normalization, admission, quality evidence, and latest observation separately.
-It does not collapse them into a platform-health claim. In particular, a
-configured or recently collected BIP/BTC pair is not treated as production
-admitted without explicit persisted admission evidence.
-
-The activity heatmap uses backend aggregates, zero-filled UTC days, a named
-timestamp field, and explicit qualifying lifecycle states. The frontend offers
-only activity types supported by those contracts. Top result considers
-completed backtests only and uses deterministic metric, completion-time, and
-`run_id` ordering.
+Collector rollups mean **on-schedule delivery evidence**. They do not imply the
+collector process is alive. Market posture keeps collection, coverage, book
+validity, archive, normalization, admission, and quality evidence independent.
 
 ## Operations Contract
 
-Operations keeps four concepts separate:
+Operations has four inventories:
 
-- persisted run instances;
-- collector schedule definitions and their delivery attempts;
-- continuous stream definitions and session evidence;
-- bot and research definitions/evidence.
+| Inventory | Primary row grain | Deep detail |
+| --- | --- | --- |
+| Runs | persisted run instance | BotLens modal, report/research evidence, copy-only rerun command |
+| Collectors | provider + provider product/instrument | individual fact schedule and recent attempts |
+| Market data | configured futures/spot pair | independent quality and admission states |
+| Research | persisted research item | relationship trail and raw provider-free evidence |
 
-The initial run inventory is bounded to the latest 50 persisted runs per bot
-definition. That bound is visible operationally and can later become a paged
-backend projection; it must not be described as complete history.
+Collector rows group facts such as `derivatives.open_interest` and
+`derivatives.funding_rate` under the same provider and provider product.
+Canonical instrument identity remains visible but is not the primary label.
 
-Collector health is delivery evidence, not process liveness. An enabled
-definition with no attempt evidence is unknown. A recent successful attempt can
-be on schedule, while process liveness still remains unknown because the current
-contract has no heartbeat.
+Every inventory uses explicit page controls. The current read model remains
+bounded to the latest 50 runs per bot definition and 200 research records, then
+uses 12-row client pages. This removes unbounded visual scrolling but is not a
+global server-pagination contract. A later scale slice should replace the
+per-definition run fan-out with a typed global cursor projection.
 
-Continuous stream sessions are shown from persisted session events and fenced
-lease evidence. Schedule attempts and stream sessions never share a synthetic
-"running" state.
+## BotLens Modal And Replay
 
-## Read Projections
+Run inspection is a routed modal with a blurred background and a four-field
+evidence header. Closing the modal returns to its originating inventory.
 
-The console composes existing read APIs with these bounded additions:
+Eligibility rules:
 
-| Projection | Purpose |
-| --- | --- |
-| `GET /api/bots/runs/{run_id}` | Exact persisted run, lifecycle, lease, report, and definition evidence |
-| `GET /api/bots/runs/{run_id}/botlens/bootstrap` | Exact run-scoped BotLens bootstrap; historical transport remains closed |
-| `GET /api/reports/activity` | Zero-filled completed-backtest activity by UTC day |
-| `GET /api/reports?sort=...` | Deterministic completed-result ordering using supported metric sorts |
-| `GET /api/research/activity` | Zero-filled activity for supported persisted research evidence types |
-| Existing market-structure reads | Definitions, sessions, status, normalization specifications, and latest facts |
+- active eligible runs are labeled **Open BotLens**;
+- terminal persisted projections are labeled **Open replay** and
+  **Rebuildable**;
+- runs without reported BotLens evidence render a disabled action;
+- direct routes remain safe and render explicit unavailable/error states.
 
-A missing bot definition does not erase a persisted historical run. Exact run
-and BotLens projections fall back to the stored run identity and mark definition
-availability explicitly.
+Historical bootstrap is bounded to 30 seconds. A timeout states that historical
+replay did not become ready and offers retry/report evidence; it never spins
+indefinitely. Chart history is fetched in 240-bar pages. Panning to the left
+edge triggers one guarded page request; moving away rearms the trigger. The
+manual **Load earlier** action remains as an accessible fallback.
 
-## Refresh, Failure, And Trust
+This does not claim that the full historical decision ledger is already
+available in BotLens. Persisted report datasets remain authoritative for
+completed decisions and trades until cold BotLens reconstruction proves equal,
+bounded, and operationally reliable.
 
-- API reachability is labeled connectivity only and is not a platform-health
-  summary.
-- Independent sources may fail independently; successful evidence remains
-  visible alongside actionable error text.
-- Polling never calls watchdog or mutation-bearing endpoints.
-- Empty means the authoritative read returned no matching evidence. Unknown
-  means the required evidence or contract is absent. Unavailable means the read
-  failed.
-- Client clocks are used only for presentation and bounded age/lookback
-  evaluation over persisted timestamps.
+## Liveness And Freshness Language
 
-## Routing
+The console may say:
 
-Primary routes are `/overview` and `/operations`. Contextual evidence routes
-are:
+- API reachable: the health request succeeded;
+- definitions streaming: the definition SSE projection is connected;
+- BotLens live: an eligible run projection is sequenced and resynchronizable;
+- on schedule: collector attempts satisfy delivery timing.
 
-- `/operations/runs/:runId`;
-- `/operations/collectors/:definitionId`;
-- `/operations/research/:itemId`.
+The console may not collapse those facts into “platform healthy” or “containers
+live.” There is no authoritative platform-wide container or collector
+heartbeat in the current contracts.
 
-Legacy v2 room routes redirect into the bounded information architecture.
-Mutation-oriented legacy rooms are not mounted in the v2 entrypoint.
+## Failure Presentation
+
+Known technical failures are translated into operator language while preserving
+the exact detail behind a disclosure and copy action. For example,
+`market_normalization_spec_storage_corrupt: hash mismatch` becomes a
+normalization-integrity failure with the raw message available for forensics.
+
+Independent sources fail independently. Successful evidence stays visible.
+Unknown means a contract/evidence fact is absent; unavailable means a read
+failed; invalid means evidence explicitly failed a validity contract.
 
 ## Deliberate Limits
 
-- The console has no authoritative platform-wide heartbeat.
-- Run inventory is per-definition and bounded rather than globally paginated.
-- Historical BotLens uses persisted/rebuildable evidence and does not open live
-  transport.
-- Backend report activity uses `ended_at`; supported research memory activity
-  uses `created_at`, and research-check completion currently uses persisted
-  check creation as the documented completion proxy.
-- Bundle splitting is a performance follow-up; it does not change projection
-  ownership or evidence semantics.
+- no authoritative platform-wide heartbeat;
+- no browser mutation or run-control commands;
+- no complete historical inventory beyond the visible read bounds;
+- no claim that every completed run has usable BotLens evidence;
+- no claim that hot BotLens projection equals complete persisted replay until
+  the deterministic reconciliation tests pass;
+- no frontend suppression of backend collision, gap, quality, or readiness
+  evidence.
 
 ## Related Docs
 
+- [Operator validation](../../engineering/frontend-v2-operator-validation.md)
 - [System architecture model](../system/SYSTEM_MODEL.md)
 - [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
 - [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)
