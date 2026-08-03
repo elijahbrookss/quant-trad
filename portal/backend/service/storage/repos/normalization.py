@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -20,6 +21,10 @@ from market_data.normalization import (
 )
 
 from ._shared import db
+
+
+logger = logging.getLogger(__name__)
+_WARNED_LEGACY_SPEC_IDS: set[str] = set()
 
 
 @dataclass(frozen=True)
@@ -67,6 +72,41 @@ def _spec_from_row(row: Mapping[str, Any]) -> NormalizationSpec:
     )
     if spec.spec_id != str(row["id"]) or spec.spec_hash != str(row["spec_hash"]):
         raise RuntimeError("market_normalization_spec_storage_corrupt: hash mismatch")
+    return spec
+
+
+def _unreferenced_legacy_spec_from_row(row: Mapping[str, Any]) -> Optional[NormalizationSpec]:
+    """Recognize the retired 40-hex identity without weakening hash checks."""
+
+    spec = NormalizationSpec(
+        feature_name=str(row["feature_name"]),
+        semantic_version=str(row["semantic_version"]),
+        input_fact_type=str(row["input_fact_type"]),
+        output_fact_type=str(row["output_fact_type"]),
+        formula=str(row["formula"]),
+        units=str(row["units"]),
+        window_seconds=(
+            int(row["window_seconds"])
+            if row.get("window_seconds") is not None
+            else None
+        ),
+        minimum_observations=int(row["minimum_observations"]),
+        warmup_observations=int(row["warmup_observations"]),
+        partition=str(row["partition"]),
+        missing_behavior=str(row["missing_behavior"]),
+        materialization_mode=str(row["materialization_mode"]),
+        parameters=dict(row.get("parameters") or {}),
+    )
+    stored_id = str(row["id"])
+    stored_hash = str(row["spec_hash"])
+    legacy_id = f"nsp_{spec.spec_hash[:40]}"
+    if spec.spec_hash != stored_hash or stored_id != legacy_id:
+        return None
+    if int(row.get("materialized_ref_count") or 0) > 0 or int(row.get("dataset_ref_count") or 0) > 0:
+        raise RuntimeError(
+            "market_normalization_legacy_identity_referenced: "
+            f"spec_id={stored_id}"
+        )
     return spec
 
 
@@ -170,12 +210,40 @@ class PostgresNormalizationRepository:
             rows = session.execute(
                 text(
                     """
-                    SELECT * FROM market.normalization_specs
+                    SELECT specs.*,
+                           (
+                               SELECT COUNT(*)
+                               FROM market.normalized_feature_versions AS values
+                               WHERE values.spec_id = specs.id
+                           ) AS materialized_ref_count,
+                           (
+                               SELECT COUNT(*)
+                               FROM market.dataset_normalization_refs AS refs
+                               WHERE refs.spec_id = specs.id
+                           ) AS dataset_ref_count
+                    FROM market.normalization_specs AS specs
                     ORDER BY feature_name, semantic_version, id
                     """
                 )
             ).mappings().all()
-        return tuple(_spec_from_row(row) for row in rows)
+        specs: list[NormalizationSpec] = []
+        for row in rows:
+            try:
+                specs.append(_spec_from_row(row))
+                continue
+            except RuntimeError:
+                legacy = _unreferenced_legacy_spec_from_row(row)
+                if legacy is None:
+                    raise
+            stored_id = str(row["id"])
+            if stored_id not in _WARNED_LEGACY_SPEC_IDS:
+                logger.warning(
+                    "market_normalization_legacy_spec_quarantined | spec_id=%s | spec_hash=%s | references=0",
+                    stored_id,
+                    row["spec_hash"],
+                )
+                _WARNED_LEGACY_SPEC_IDS.add(stored_id)
+        return tuple(specs)
 
     def ingest(
         self,

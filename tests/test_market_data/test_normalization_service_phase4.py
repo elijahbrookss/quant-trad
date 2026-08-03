@@ -11,6 +11,10 @@ from portal.backend.service.market.normalization_service import (
     MarketNormalizationService,
     builtin_normalization_specs,
 )
+from portal.backend.service.storage.repos.normalization import (
+    _spec_from_row,
+    _unreferenced_legacy_spec_from_row,
+)
 
 
 BASE = datetime(2026, 8, 2, 12, 0, tzinfo=UTC)
@@ -209,3 +213,46 @@ def test_materialization_rejects_decision_before_complete_range() -> None:
             end=BASE + timedelta(minutes=2),
             known_at=BASE + timedelta(minutes=1),
         )
+
+
+def _stored_spec_row(spec, *, spec_id: str, spec_hash: str | None = None, refs: int = 0):
+    return {
+        **spec.material(),
+        "id": spec_id,
+        "spec_hash": spec_hash or spec.spec_hash,
+        "materialized_ref_count": refs,
+        "dataset_ref_count": 0,
+    }
+
+
+def test_unreferenced_legacy_spec_identity_is_verified_before_quarantine() -> None:
+    spec = _funding_bps_spec()
+    row = _stored_spec_row(spec, spec_id=f"nsp_{spec.spec_hash[:40]}")
+
+    with pytest.raises(RuntimeError, match="storage_corrupt"):
+        _spec_from_row(row)
+
+    assert _unreferenced_legacy_spec_from_row(row) == spec
+
+
+def test_legacy_spec_quarantine_rejects_material_hash_mismatch() -> None:
+    spec = _funding_bps_spec()
+    row = _stored_spec_row(
+        spec,
+        spec_id=f"nsp_{spec.spec_hash[:40]}",
+        spec_hash="0" * 64,
+    )
+
+    assert _unreferenced_legacy_spec_from_row(row) is None
+
+
+def test_referenced_legacy_spec_identity_remains_fail_loud() -> None:
+    spec = _funding_bps_spec()
+    row = _stored_spec_row(
+        spec,
+        spec_id=f"nsp_{spec.spec_hash[:40]}",
+        refs=1,
+    )
+
+    with pytest.raises(RuntimeError, match="legacy_identity_referenced"):
+        _unreferenced_legacy_spec_from_row(row)

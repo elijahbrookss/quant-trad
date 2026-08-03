@@ -91,6 +91,13 @@ supporting dual readers or writers. Provider credential helpers do not create
 their own table; `portal_provider_credential_refs` remains owned by portal ORM
 metadata.
 
+Normalization specifications are immutable evidence. Catalog reads recompute
+the full material hash and require the current 31-hex identity. A retired
+40-hex identity may be quarantined from the executable catalog only when its
+full material hash verifies independently and both normalized-fact and frozen-
+dataset reference counts are zero. Referenced legacy identities and every true
+hash mismatch remain fail-loud; runtime code never deletes or rewrites the row.
+
 ## Diagram Walkthrough
 
 [runtime-event-ledger-flow.mmd](diagrams/runtime-event-ledger-flow.mmd) shows:
