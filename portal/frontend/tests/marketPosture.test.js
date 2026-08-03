@@ -24,6 +24,7 @@ test('market posture never infers BIP/BTC admission from configuration or recent
         instrument_id: 'bip-future',
         poll_interval_seconds: 60,
         next_scheduled_at: '2026-08-02T12:01:00Z',
+        worker_health: { status: 'alive' },
       },
       attempts: [{ status: 'succeeded', started_at: '2026-08-02T11:59:00Z', finished_at: '2026-08-02T11:59:05Z' }],
     }],
@@ -32,7 +33,7 @@ test('market posture never infers BIP/BTC admission from configuration or recent
 
   assert.equal(rows[0].label, 'BIP / BTC')
   assert.equal(rows[0].collection.value, 'recent_success')
-  assert.match(rows[0].collection.detail, /process liveness unobserved/)
+  assert.match(rows[0].collection.detail, /worker heartbeat current/)
   assert.equal(rows[0].admission.value, 'not_admitted')
   assert.equal(rows[0].coverage.value, 'unavailable')
 })

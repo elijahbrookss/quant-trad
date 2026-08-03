@@ -1,5 +1,6 @@
 import { createLogger } from '../utils/logger.js'
 import { API_ORIGIN } from '../config/appConfig.js'
+import { openSse } from './realtime.adapter.js'
 
 const BASE = API_ORIGIN
 const log = createLogger('MarketDataAdapter')
@@ -44,6 +45,17 @@ function buildQuery(params = {}) {
   })
   const text = query.toString()
   return text ? `?${text}` : ''
+}
+
+export async function fetchCollectorSnapshot({ attemptLimit = 5 } = {}) {
+  return request('/api/market-data/collectors/snapshot' + buildQuery({ attempt_limit: attemptLimit }))
+}
+
+export function openCollectorsStream({ attemptLimit = 5 } = {}) {
+  return openSse(
+    '/api/market-data/collectors/stream' + buildQuery({ attempt_limit: attemptLimit }),
+    { withCredentials: false, base: BASE },
+  )
 }
 
 export async function listCollectorDefinitions({ definitionId } = {}) {

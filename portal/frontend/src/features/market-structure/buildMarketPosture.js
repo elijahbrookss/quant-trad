@@ -134,6 +134,12 @@ function collectorState(entries, nowEpochMs) {
   }))
   const state = worstState(
     states.map(({ health }) => {
+      if (health.status === 'offline') {
+        return { label: 'Collector offline', tone: 'danger', value: 'offline' }
+      }
+      if (health.status === 'stalled') {
+        return { label: 'Attempt stalled', tone: 'danger', value: 'stalled' }
+      }
       if (health.status === 'failed') {
         return { label: 'Latest attempt failed', tone: 'danger', value: 'failed' }
       }
@@ -152,13 +158,16 @@ function collectorState(entries, nowEpochMs) {
       return { label: 'Timing unknown', tone: 'warning', value: 'unknown' }
     }),
   )
+  const workerDetail = states.every(({ health }) => health.workerAlive)
+    ? 'worker heartbeat current'
+    : 'worker heartbeat unavailable'
   const factLabels = states
     .map(({ factType }) => String(factType || '').split('.').pop())
     .filter(Boolean)
     .sort()
   return {
     ...state,
-    detail: `${factLabels.join(' + ') || 'scheduled facts'} · process liveness unobserved`,
+    detail: `${factLabels.join(' + ') || 'scheduled facts'} · ${workerDetail}`,
     lastSuccessAt: latestAt(states.map(({ health }) => health.lastSuccessAt)),
   }
 }

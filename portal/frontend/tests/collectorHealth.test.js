@@ -10,6 +10,7 @@ function definition(overrides = {}) {
     enabled: true,
     poll_interval_seconds: 60,
     next_scheduled_at: '2026-08-02T11:59:30Z',
+    worker_health: { status: 'alive' },
     ...overrides,
   }
 }
@@ -24,7 +25,37 @@ test('collector health is healthy only when enabled, has a recorded success, and
   assert.equal(health.schedulerEnabled, true)
   assert.equal(health.overdue, false)
   assert.equal(health.stale, false)
-  assert.equal(health.processLivenessUnknown, true)
+  assert.equal(health.workerAlive, true)
+  assert.equal(health.processLivenessUnknown, false)
+})
+
+test('collector health is offline when delivery is recent but no worker heartbeat is current', () => {
+  const attempts = [
+    { started_at: '2026-08-02T11:58:00Z', finished_at: '2026-08-02T11:58:05Z', status: 'succeeded' },
+  ]
+  const health = deriveCollectorHealth(
+    definition({ worker_health: { status: 'unavailable' } }),
+    attempts,
+    NOW,
+  )
+
+  assert.equal(health.deliveryStatus, 'healthy')
+  assert.equal(health.status, 'offline')
+})
+
+test('collector health is stalled when a running attempt lease has expired', () => {
+  const attempts = [
+    { started_at: '2026-08-02T11:59:00Z', status: 'running' },
+    { started_at: '2026-08-02T11:58:00Z', finished_at: '2026-08-02T11:58:05Z', status: 'succeeded' },
+  ]
+  const health = deriveCollectorHealth(
+    definition({ lease_active: true, lease_current: false }),
+    attempts,
+    NOW,
+  )
+
+  assert.equal(health.status, 'stalled')
+  assert.equal(health.activeAttemptStalled, true)
 })
 
 test('collector health is failed when the latest recorded attempt failed, even without an earlier success', () => {

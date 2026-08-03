@@ -4,6 +4,8 @@ import { deriveCollectorHealth, COLLECTOR_HEALTH_COPY } from './collectorHealth.
 const STATUS_TONE = {
   healthy: 'emerald',
   failed: 'rose',
+  offline: 'rose',
+  stalled: 'rose',
   disabled: 'slate',
   overdue: 'rose',
   stale: 'amber',
@@ -13,6 +15,8 @@ const STATUS_TONE = {
 const STATUS_BADGE_LABEL = {
   healthy: 'On schedule',
   failed: 'Failed',
+  offline: 'Offline',
+  stalled: 'Stalled',
   disabled: 'Disabled',
   overdue: 'Overdue',
   stale: 'Stale',
@@ -39,13 +43,15 @@ function statusDetailFor(health, nowEpochMs) {
       : 'scheduler disabled · no successful attempt recorded'
   }
   if (health.status === 'failed') return 'latest collection attempt failed'
+  if (health.status === 'offline') return 'worker heartbeat expired · delivery may be stale'
+  if (health.status === 'stalled') return 'active attempt lease expired before completion'
   if (health.status === 'overdue') {
     return `past expected poll time · next expected ${formatRelativeTime(health.nextExpectedAt, { nowEpochMs }) || 'unknown'}`
   }
   if (health.status === 'stale') {
     return `last success ${formatRelativeTime(health.lastSuccessAt, { nowEpochMs }) || 'unknown'} · connection stale`
   }
-  return `last success ${formatRelativeTime(health.lastSuccessAt, { nowEpochMs }) || 'unknown'} · process liveness unobserved`
+  return `last success ${formatRelativeTime(health.lastSuccessAt, { nowEpochMs }) || 'unknown'} · worker heartbeat current`
 }
 
 /**

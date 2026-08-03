@@ -12,10 +12,13 @@ function toEpochMs(value) {
  * `status` distinguishes delivery evidence from scheduler configuration.
  * Missing timestamps (no recorded successful attempt, no next-scheduled time)
  * always produce 'unknown', never silently fall through to 'healthy'.
- * Even 'healthy' means on-schedule delivery only; process liveness is unknown.
+ * 'healthy' requires both a current worker heartbeat and on-schedule delivery evidence.
  */
 export function deriveCollectorHealth(definition, attempts = [], nowEpochMs = Date.now()) {
   const schedulerEnabled = Boolean(definition?.enabled)
+  const workerStatus = String(definition?.worker_health?.status || 'unknown')
+  const workerAlive = workerStatus === 'alive'
+  const workerLivenessKnown = workerStatus !== 'unknown'
   const pollIntervalMs = Math.max(1, Number(definition?.poll_interval_seconds) || 0) * 1000
 
   const sortedAttempts = Array.isArray(attempts)
@@ -39,41 +42,58 @@ export function deriveCollectorHealth(definition, attempts = [], nowEpochMs = Da
   const overdue = nextExpectedEpochMs != null && nowEpochMs > nextExpectedEpochMs + graceMs
   const stale = lastSuccessEpochMs != null && nowEpochMs - lastSuccessEpochMs > staleMs
 
-  let status
+  let deliveryStatus
   if (!schedulerEnabled) {
-    status = 'disabled'
+    deliveryStatus = 'disabled'
   } else if (
     lastAttemptStatus === 'failed'
     && lastAttemptEpochMs !== null
     && (lastSuccessEpochMs === null || lastAttemptEpochMs >= lastSuccessEpochMs)
   ) {
-    status = 'failed'
+    deliveryStatus = 'failed'
   } else if (lastSuccessEpochMs == null || nextExpectedEpochMs == null) {
-    status = 'unknown'
+    deliveryStatus = 'unknown'
   } else if (overdue) {
-    status = 'overdue'
+    deliveryStatus = 'overdue'
   } else if (stale) {
-    status = 'stale'
+    deliveryStatus = 'stale'
   } else {
-    status = 'healthy'
+    deliveryStatus = 'healthy'
+  }
+
+  const activeAttemptStalled = lastAttemptStatus === 'running'
+    && definition?.lease_active === true
+    && definition?.lease_current === false
+  let status = deliveryStatus
+  if (schedulerEnabled && activeAttemptStalled) {
+    status = 'stalled'
+  } else if (schedulerEnabled && !workerAlive) {
+    status = workerLivenessKnown ? 'offline' : 'unknown'
   }
 
   return {
     status,
+    deliveryStatus,
     schedulerEnabled,
+    workerStatus,
+    workerAlive,
+    workerLivenessKnown,
+    activeAttemptStalled,
     lastAttemptAt,
     lastAttemptStatus,
     lastSuccessAt,
     nextExpectedAt,
     overdue,
     stale,
-    processLivenessUnknown: true,
+    processLivenessUnknown: !workerLivenessKnown,
   }
 }
 
 export const COLLECTOR_HEALTH_COPY = {
   healthy: 'On schedule — recent delivery evidence',
   failed: 'Latest collection attempt failed',
+  offline: 'Collector worker heartbeat expired',
+  stalled: 'Active collection attempt lost its lease',
   overdue: 'Overdue — past expected poll time',
   stale: 'Stale — no recent successful attempt',
   unknown: 'Timing or successful-attempt evidence is missing',

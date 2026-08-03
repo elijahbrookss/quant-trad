@@ -1,18 +1,20 @@
 import { useCallback, useEffect, useState } from 'react'
-import { listCollectorDefinitions, fetchCollectorAttempts, listInstruments } from '../../adapters/marketData.adapter.js'
+import { fetchCollectorSnapshot, openCollectorsStream } from '../../adapters/marketData.adapter.js'
 
-const POLL_INTERVAL_MS = 30_000
 const ATTEMPTS_LIMIT = 5
 
 /**
- * Collectors have no SSE/WS feed (no per-collector container, no heartbeat —
- * see collectorHealth.js), so this polls on an interval instead of streaming.
- * Reschedules only after the previous fetch settles, so a slow response never
- * causes overlapping requests.
+ * One bounded persisted snapshot hydrates the collector inventory. The SSE
+ * projection replaces it atomically as liveness, attempts, or schedules change.
+ * A failed live channel never discards the last persisted snapshot.
  */
 export function useCollectorsFeed() {
   const [collectors, setCollectors] = useState([])
   const [instruments, setInstruments] = useState([])
+  const [workers, setWorkers] = useState([])
+  const [workerHealth, setWorkerHealth] = useState({ status: 'unknown' })
+  const [streamStatus, setStreamStatus] = useState('connecting')
+  const [streamError, setStreamError] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [observedAt, setObservedAt] = useState(null)
@@ -21,60 +23,101 @@ export function useCollectorsFeed() {
 
   useEffect(() => {
     let mounted = true
-    let timeoutId = null
+    let fallbackIntervalId = null
+    const source = openCollectorsStream({ attemptLimit: ATTEMPTS_LIMIT })
 
-    async function load() {
+    function applySnapshot(snapshot) {
+      if (!mounted || !snapshot) return
+      const rows = Array.isArray(snapshot.collectors)
+        ? snapshot.collectors.map((entry) => ({
+            definition: {
+              ...entry.definition,
+              worker_health: snapshot.worker_health || { status: "unknown" },
+            },
+            attempts: Array.isArray(entry.attempts) ? entry.attempts : [],
+            attemptsAvailable: entry.attempts_available !== false,
+            attemptsError: entry.attempts_error || null,
+          }))
+        : []
+      const instrumentMap = new Map()
+      rows.forEach(({ definition }) => {
+        if (!definition?.instrument_id) return
+        instrumentMap.set(String(definition.instrument_id), {
+          id: definition.instrument_id,
+          symbol: definition.instrument_symbol || definition.instrument_id,
+          instrument_type: definition.instrument_type || null,
+          datasource: definition.provider || null,
+          exchange: definition.venue || null,
+        })
+      })
+      setCollectors(rows)
+      setInstruments([...instrumentMap.values()])
+      setWorkers(Array.isArray(snapshot.workers) ? snapshot.workers : [])
+      setWorkerHealth(snapshot.worker_health || { status: "unknown" })
+      setObservedAt(snapshot.observed_at || new Date().toISOString())
+      setError(null)
+      setLoading(false)
+    }
+
+    async function loadSnapshot() {
       try {
-        const [definitions, instrumentRows] = await Promise.all([
-          listCollectorDefinitions(),
-          listInstruments(),
-        ])
-        const attemptResults = await Promise.allSettled(
-          definitions.map(async (definition) => {
-            const attempts = await fetchCollectorAttempts(definition.id, {
-              limit: ATTEMPTS_LIMIT,
-            })
-            return { definition, attempts }
-          }),
-        )
-        if (!mounted) return
-        const failures = attemptResults.filter(
-          (result) => result.status === 'rejected',
-        )
-        const withAttempts = attemptResults.map((result, index) => (
-          result.status === 'fulfilled'
-            ? { ...result.value, attemptsAvailable: true, attemptsError: null }
-            : {
-                definition: definitions[index],
-                attempts: [],
-                attemptsAvailable: false,
-                attemptsError: result.reason?.message || 'Attempt history unavailable',
-              }
-        ))
-        setCollectors(withAttempts)
-        setInstruments(instrumentRows)
-        setError(
-          failures.length
-            ? `Attempt history unavailable for ${failures.length} collector${failures.length === 1 ? '' : 's'}.`
-            : null,
-        )
-        setObservedAt(new Date().toISOString())
+        const snapshot = await fetchCollectorSnapshot({ attemptLimit: ATTEMPTS_LIMIT })
+        applySnapshot(snapshot)
       } catch (err) {
-        if (mounted) setError(err?.message || 'Unable to load collectors')
-      } finally {
-        if (mounted) {
-          setLoading(false)
-          timeoutId = setTimeout(load, POLL_INTERVAL_MS)
-        }
+        if (!mounted) return
+        setError(err?.message || "Unable to load market collection status")
+        setLoading(false)
       }
     }
 
-    load()
+    function onStreamSnapshot(event) {
+      try {
+        applySnapshot(JSON.parse(event.data))
+        setStreamStatus("connected")
+        setStreamError(null)
+      } catch (err) {
+        setStreamStatus("invalid")
+        setStreamError(err?.message || "Live market status update was invalid")
+      }
+    }
+
+    loadSnapshot()
+    if (source) {
+      source.addEventListener("snapshot", onStreamSnapshot)
+      source.addEventListener("delta", onStreamSnapshot)
+      source.onopen = () => {
+        if (!mounted) return
+        setStreamStatus("connected")
+        setStreamError(null)
+      }
+      source.onerror = () => {
+        if (!mounted) return
+        setStreamStatus("reconnecting")
+        setStreamError("Live market status is reconnecting; persisted snapshot remains visible.")
+      }
+    } else {
+      setStreamStatus("unavailable")
+      setStreamError("Live market status is unavailable; using bounded snapshot refresh.")
+      fallbackIntervalId = setInterval(loadSnapshot, 30_000)
+    }
+
     return () => {
       mounted = false
-      if (timeoutId) clearTimeout(timeoutId)
+      source?.close()
+      if (fallbackIntervalId) clearInterval(fallbackIntervalId)
     }
   }, [refreshRevision])
 
-  return { collectors, instruments, loading, error, observedAt, refresh }
+  return {
+    collectors,
+    instruments,
+    workers,
+    workerHealth,
+    streamStatus,
+    streamError,
+    loading,
+    error,
+    observedAt,
+    refresh,
+  }
 }
