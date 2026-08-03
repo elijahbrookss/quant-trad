@@ -93,9 +93,10 @@ is a separate operation and uses the same shared provider credential record.
    consumer can read them.
 2. Paper aggregation persists each closed candle before making it visible to
    runtime.
-3. A durable collector worker claims enabled schedules from PostgreSQL, applies
-   database pacing and bounded retries, polls the exact configured product, and
-   appends only while its ownership fence remains current.
+3. A durable collector worker registers a process heartbeat independent of any
+   schedule lease, claims enabled schedules from PostgreSQL, applies database
+   pacing and bounded retries, polls the exact configured product, and appends
+   only while its ownership fence remains current.
 4. A bounded market-structure session claims one product-scoped stream, fsyncs
    each exact frame into a definition-scoped spool, publishes an immutable
    object archive and record mappings, then appends typed trades, coverage, and
@@ -122,6 +123,11 @@ instrument. `candle_versions` stores all `candle.ohlcv.v1` series,
 `trade_flow_aggregate_versions` stores all `market.trade_flow.v1` series.
 The generic source, series, ingestion, gap, dataset, collection-definition,
 collection-attempt, pacing, lease, and commit-clock tables are shared.
+`collector_worker_state` is a mutable operational read model: its independent
+heartbeat proves idle or in-flight process liveness without becoming a market
+fact. Successful and failed collection attempts retain one bounded typed timing
+payload separating schedule lag, pacing, provider request wall time, contract
+validation, canonical normalization, lease heartbeat, and persistence.
 
 Phase 3 market-state tables preserve typed BBO, depth, flow, futures/spot,
 derivative-state, and response facts. Phase 4 adds immutable normalization specs
@@ -260,6 +266,9 @@ replacing source provenance and quality.
 - Duplicate, malformed, provisional, conflicting, or out-of-window facts fail
   before acceptance.
 - Append-only table mutations are rejected by database triggers.
+- Collector worker heartbeat expiry is explicit and independent from schedule
+  freshness. An enabled definition is healthy only when both worker liveness and
+  recent delivery evidence are current.
 - Collector work is idempotent by scheduled sample, resumable after restart,
   paced in PostgreSQL, bounded in retries, and fenced across processes.
 - Candle, OI, and funding revisions are TimescaleDB hypertables indexed for

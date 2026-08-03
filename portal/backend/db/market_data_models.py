@@ -494,6 +494,43 @@ class MarketCollectionAttemptRecord(Base):
     )
 
 
+class MarketCollectorWorkerStateRecord(Base):
+    """Mutable liveness projection for one scheduled market-fact worker."""
+
+    __tablename__ = "collector_worker_state"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('starting', 'idle', 'collecting', 'degraded', 'stopping', 'stopped')",
+            name="ck_market_collector_worker_state",
+        ),
+        Index("ix_market_collector_worker_expiry", "expires_at"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    worker_id = Column(String(128), primary_key=True)
+    worker_role = Column(String(64), nullable=False)
+    worker_version = Column(String(64), nullable=False)
+    state = Column(String(16), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    heartbeat_at = Column(DateTime(timezone=True), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    last_loop_at = Column(DateTime(timezone=True), nullable=True)
+    active_definition_id = Column(
+        String(64),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.collection_definitions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    active_attempt_id = Column(String(64), nullable=True)
+    last_error = Column(Text, nullable=True)
+    capabilities = Column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    context = Column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
 class MarketProviderRateBudgetRecord(Base):
     """Database-coordinated minimum-spacing budget for provider poll requests."""
 

@@ -70,8 +70,10 @@ market-state evidence was unavailable and observability evidence was truncated.
 
 The diagnostic summary contained:
 
-- 623 critical `botlens_ingest_persist_failed` events caused by one runtime
-  event identity colliding with divergent material;
+- 1,742 `botlens_ingest_persist_failed` events, all caused by one
+  `SERIES_METADATA_REPORTED` event identity being reused with divergent timing
+  material; canonical decisions and trades remained durable, but exact
+  live-to-ledger reconciliation was not certifiable;
 - 23 slow database-write diagnostics;
 - a pessimistic intrabar fallback because the frozen dataset did not contain
   one-minute candles;

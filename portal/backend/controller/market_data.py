@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from market_data.contracts import (
@@ -24,6 +28,31 @@ from ..service.storage.repos.market_structure import market_structure_repository
 
 
 router = APIRouter()
+
+
+def _collector_material(snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "collectors": snapshot.get("collectors", []),
+        "workers": snapshot.get("workers", []),
+        "worker_health": {
+            key: value
+            for key, value in dict(snapshot.get("worker_health") or {}).items()
+            if key != "observed_at"
+        },
+    }
+
+
+def _collector_fingerprint(snapshot: dict[str, Any]) -> str:
+    payload = json.dumps(
+        _collector_material(snapshot), sort_keys=True, separators=(",", ":"), default=str
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _format_sse(event: str, payload: dict[str, Any], *, event_id: int) -> str:
+    body = json.dumps(payload, separators=(",", ":"), default=str)
+    return f"id: {event_id}\nevent: {event}\ndata: {body}\n\n"
+
 
 
 def _time(value: str) -> datetime:
@@ -168,6 +197,53 @@ def list_collectors(definition_id: Optional[str] = None) -> dict[str, Any]:
             definition_id=definition_id
         ),
     }
+
+
+@router.get("/collectors/snapshot")
+def get_collector_snapshot(
+    attempt_limit: int = Query(default=5, ge=1, le=100),
+) -> dict[str, Any]:
+    return market_data_collector.collector_snapshot(attempt_limit=attempt_limit)
+
+
+@router.get("/collectors/stream")
+async def stream_collectors(
+    attempt_limit: int = Query(default=5, ge=1, le=100),
+) -> StreamingResponse:
+    async def event_iterator():
+        event_id = 1
+        snapshot = market_data_collector.collector_snapshot(
+            attempt_limit=attempt_limit
+        )
+        fingerprint = _collector_fingerprint(snapshot)
+        yield _format_sse("snapshot", snapshot, event_id=event_id)
+        keepalive_ticks = 0
+        while True:
+            try:
+                await asyncio.sleep(2.0)
+                current = await asyncio.to_thread(
+                    market_data_collector.collector_snapshot,
+                    attempt_limit=attempt_limit,
+                )
+            except asyncio.CancelledError:
+                break
+            current_fingerprint = _collector_fingerprint(current)
+            if current_fingerprint != fingerprint:
+                event_id += 1
+                fingerprint = current_fingerprint
+                yield _format_sse("delta", current, event_id=event_id)
+                keepalive_ticks = 0
+                continue
+            keepalive_ticks += 1
+            if keepalive_ticks >= 8:
+                yield ": keepalive\n\n"
+                keepalive_ticks = 0
+
+    return StreamingResponse(
+        event_iterator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/collectors/{definition_id}/enabled")

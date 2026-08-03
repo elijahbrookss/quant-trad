@@ -24,6 +24,9 @@ code_paths:
   - src/engines/bot_runtime/runtime/components/overlay_delta.py
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
   - portal/backend/service/storage/repos/observability.py
+  - portal/backend/service/storage/repos/market_collection.py
+  - portal/backend/service/market/collector_service.py
+  - portal/backend/workers/market_data_collector.py
   - cli/logs.py
   - src/core/logger.py
   - src/utils/logging_utils.py
@@ -154,6 +157,9 @@ complete database pressure signal.
 - control-plane telemetry flush status for runtime lifecycle and bootstrap
   messages,
 - storage write timing,
+- scheduled market-fact worker heartbeat/expiry and active-attempt scope,
+- bounded collector attempt stage timing for pacing, provider request,
+  normalization, validation, persistence, and total visibility lag,
 - projection failures,
 - continuity summaries,
 - lifecycle and startup timing.
@@ -198,6 +204,10 @@ complete database pressure signal.
   writes. Persistence runs in bounded background batches and emits explicit
   errors on failure so API websocket receive loops are not held hostage by
   ordinary projection/debug storage pressure.
+- Scheduled collector liveness is a mutable worker-state projection. Heartbeat
+  expiry means the process is not proven alive; it does not rewrite previously
+  accepted market facts. Attempt timing stays bounded inside the existing typed
+  attempt evidence instead of creating one durable metric row per stage.
 - Dashboard gaps should point back to missing instrumentation or storage, not hidden execution semantics.
 - If Promtail/Loki are down while a short-lived bot container starts and exits,
   and the container is later removed, Loki cannot retroactively recover that

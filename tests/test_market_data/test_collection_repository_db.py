@@ -102,6 +102,36 @@ def test_collection_claim_fences_fact_mutation_and_completion() -> None:
     assert attempts[0]["status"] == "succeeded"
     assert attempts[0]["ingestion_run_id"] == claim.attempt_id
 
+    worker_id = f"collector-worker-{token}"
+    registered_worker = market_collection_repo.register_worker(
+        worker_id=worker_id,
+        worker_role="scheduled_market_fact_collector",
+        worker_version="test.v1",
+        ttl_seconds=30,
+        capabilities={"fact_types": [OPEN_INTEREST_FACT_TYPE]},
+        context={"fixture": True},
+    )
+    assert registered_worker["state"] == "starting"
+    market_collection_repo.heartbeat_worker(
+        worker_id=worker_id,
+        ttl_seconds=30,
+        state="collecting",
+        active_definition_id=definition_id,
+        active_attempt_id=claim.attempt_id,
+    )
+    workers = market_collection_repo.list_worker_states()
+    live_worker = next(row for row in workers if row["worker_id"] == worker_id)
+    assert live_worker["alive"] is True
+    assert live_worker["active_definition_id"] == definition_id
+    market_collection_repo.stop_worker(worker_id=worker_id)
+    stopped_worker = next(
+        row
+        for row in market_collection_repo.list_worker_states()
+        if row["worker_id"] == worker_id
+    )
+    assert stopped_worker["alive"] is False
+    assert stopped_worker["state"] == "stopped"
+
     stale_time = claim.scheduled_for + timedelta(minutes=1)
     stale_fact = OpenInterestFact(
         sample_time=stale_time,

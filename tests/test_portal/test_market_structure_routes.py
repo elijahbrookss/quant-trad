@@ -16,6 +16,49 @@ def _client() -> TestClient:
     return TestClient(app)
 
 
+def test_collector_snapshot_route_is_bounded_and_observed(monkeypatch) -> None:
+    observed = {}
+
+    def fake_snapshot(*, attempt_limit: int):
+        observed["attempt_limit"] = attempt_limit
+        return {
+            "schema_version": "market_collector_snapshot.v1",
+            "observed_at": "2026-08-02T12:00:00+00:00",
+            "worker_health": {"status": "alive"},
+            "workers": [],
+            "collectors": [],
+        }
+
+    monkeypatch.setattr(
+        controller.market_data_collector, "collector_snapshot", fake_snapshot
+    )
+    response = _client().get(
+        "/api/market-data/collectors/snapshot", params={"attempt_limit": 7}
+    )
+
+    assert response.status_code == 200
+    assert observed["attempt_limit"] == 7
+    assert response.json()["worker_health"]["status"] == "alive"
+
+
+def test_collector_stream_fingerprint_ignores_observation_clock_only() -> None:
+    first = {
+        "observed_at": "2026-08-02T12:00:00+00:00",
+        "worker_health": {"status": "alive", "observed_at": "first"},
+        "workers": [{"worker_id": "worker-a", "heartbeat_at": "same"}],
+        "collectors": [],
+    }
+    second = {
+        **first,
+        "observed_at": "2026-08-02T12:00:02+00:00",
+        "worker_health": {"status": "alive", "observed_at": "second"},
+        "workers": [{"worker_id": "worker-a", "heartbeat_at": "same"}],
+    }
+    assert controller._collector_fingerprint(first) == controller._collector_fingerprint(second)
+    second["workers"][0]["heartbeat_at"] = "new"
+    assert controller._collector_fingerprint(first) != controller._collector_fingerprint(second)
+
+
 def test_market_structure_pair_route_never_implies_production(monkeypatch) -> None:
     observed = {}
 
