@@ -14,6 +14,7 @@ export function buildRunRows(runs = [], { nowEpochMs = Date.now() } = {}) {
   return runs.map((run) => {
     const status = String(run?.runtime_status || run?.lifecycle?.status || run?.status || 'unknown').toLowerCase()
     const definition = run?.definition || {}
+    const totalTrades = run?.summary?.total_trades
     return {
       id: run.run_id,
       run,
@@ -34,6 +35,8 @@ export function buildRunRows(runs = [], { nowEpochMs = Date.now() } = {}) {
       simulatedStart: run.backtest_start || null,
       simulatedEnd: run.backtest_end || null,
       netPnl: run?.summary?.net_pnl,
+      totalTrades: Number.isFinite(Number(totalTrades)) ? Number(totalTrades) : null,
+      datasetId: run?.config_snapshot?.dataset_binding?.dataset_id || run?.dataset_id || null,
       warningCount: Number(run?.summary?.warning_count || run?.warning_count || 0),
       botLensAvailable: Boolean(run.botlens_available),
       botLensReason: run.botlens_reason || null,

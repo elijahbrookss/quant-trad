@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { listCollectorDefinitions, fetchCollectorAttempts } from '../../adapters/marketData.adapter.js'
+import { listCollectorDefinitions, fetchCollectorAttempts, listInstruments } from '../../adapters/marketData.adapter.js'
 
 const POLL_INTERVAL_MS = 30_000
 const ATTEMPTS_LIMIT = 5
@@ -12,6 +12,7 @@ const ATTEMPTS_LIMIT = 5
  */
 export function useCollectorsFeed() {
   const [collectors, setCollectors] = useState([])
+  const [instruments, setInstruments] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [observedAt, setObservedAt] = useState(null)
@@ -24,7 +25,10 @@ export function useCollectorsFeed() {
 
     async function load() {
       try {
-        const definitions = await listCollectorDefinitions()
+        const [definitions, instrumentRows] = await Promise.all([
+          listCollectorDefinitions(),
+          listInstruments(),
+        ])
         const attemptResults = await Promise.allSettled(
           definitions.map(async (definition) => {
             const attempts = await fetchCollectorAttempts(definition.id, {
@@ -48,6 +52,7 @@ export function useCollectorsFeed() {
               }
         ))
         setCollectors(withAttempts)
+        setInstruments(instrumentRows)
         setError(
           failures.length
             ? `Attempt history unavailable for ${failures.length} collector${failures.length === 1 ? '' : 's'}.`
@@ -71,5 +76,5 @@ export function useCollectorsFeed() {
     }
   }, [refreshRevision])
 
-  return { collectors, loading, error, observedAt, refresh }
+  return { collectors, instruments, loading, error, observedAt, refresh }
 }

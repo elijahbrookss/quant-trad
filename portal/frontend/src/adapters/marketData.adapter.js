@@ -5,8 +5,9 @@ const BASE = API_ORIGIN
 const log = createLogger('MarketDataAdapter')
 
 // Deliberately read-only: this adapter wraps GET collector, market-structure,
-// normalization-spec, and latest-fact projections. Mutation endpoints are
-// intentionally absent; v2 cannot operate collectors or materialize data.
+// normalization-spec, instrument, and latest-fact projections. Mutation
+// endpoints are intentionally absent; v2 cannot operate collectors or
+// materialize data.
 
 async function request(path, options = {}) {
   const res = await fetch(`${BASE}${path}`, {
@@ -48,6 +49,11 @@ function buildQuery(params = {}) {
 export async function listCollectorDefinitions({ definitionId } = {}) {
   const payload = await request(`/api/market-data/collectors${buildQuery({ definition_id: definitionId })}`)
   return Array.isArray(payload?.definitions) ? payload.definitions : []
+}
+
+export async function listInstruments() {
+  const payload = await request('/api/instruments/')
+  return Array.isArray(payload) ? payload : []
 }
 
 export async function fetchCollectorAttempts(definitionId, { limit } = {}) {

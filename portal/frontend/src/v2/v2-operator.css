@@ -1,0 +1,475 @@
+/* Minimal operator-console refinements layered over the shared v2 shell. */
+
+.qt2-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 2.1rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--ui-radius-control);
+  background: rgba(0, 0, 0, 0.2);
+  padding: 0.42rem 0.65rem;
+  color: rgb(203, 213, 225);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+}
+
+.qt2-icon-button:hover {
+  border-color: var(--accent-alpha-40);
+  color: white;
+}
+
+.qt2-dashboard {
+  gap: 0.8rem;
+}
+
+.qt2-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.qt2-summary-card {
+  position: relative;
+  min-height: 7rem;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: var(--ui-radius-shell);
+  background: rgba(10, 13, 20, 0.48);
+  padding: 0.85rem;
+  transition: border-color 140ms ease, transform 140ms ease;
+}
+
+.qt2-summary-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.qt2-summary-card::after {
+  position: absolute;
+  inset: auto 0 0;
+  height: 2px;
+  background: rgba(148, 163, 184, 0.32);
+  content: '';
+}
+
+.qt2-summary-card.is-success::after { background: rgb(52, 211, 153); }
+.qt2-summary-card.is-warning::after { background: rgb(245, 158, 11); }
+.qt2-summary-card.is-danger::after { background: rgb(244, 63, 94); }
+.qt2-summary-card.is-info::after { background: rgb(56, 189, 248); }
+
+.qt2-summary-card > span,
+.qt2-summary-card > small {
+  display: block;
+  color: rgb(100, 116, 139);
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+}
+
+.qt2-summary-card > span {
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.qt2-summary-card > strong {
+  display: block;
+  margin: 0.42rem 0 0.2rem;
+  color: rgb(241, 245, 249);
+  font-size: 1.55rem;
+  font-weight: 570;
+}
+
+.qt2-dashboard-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(20rem, 0.85fr);
+  gap: 0.65rem;
+}
+
+.qt2-dashboard-grid-secondary {
+  align-items: start;
+  grid-template-columns: minmax(0, 1fr) minmax(24rem, 0.8fr);
+}
+
+.qt2-dashboard-panel {
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: var(--ui-radius-shell);
+  background: rgba(10, 13, 20, 0.34);
+  padding: 0.8rem;
+}
+
+.qt2-dashboard-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.7rem;
+  margin-bottom: 0.65rem;
+}
+
+.qt2-dashboard-panel-head h2 {
+  color: rgb(226, 232, 240);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.qt2-dashboard-panel-head p,
+.qt2-dashboard-panel-head > span,
+.qt2-dashboard-more {
+  margin-top: 0.15rem;
+  color: rgb(100, 116, 139);
+  font-size: 0.58rem;
+}
+
+.qt2-dashboard-panel-head > a {
+  color: var(--accent-text-strong);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+}
+
+.qt2-dashboard-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.qt2-dashboard-list > a {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.055);
+  padding: 0.62rem 0.15rem;
+}
+
+.qt2-dashboard-list > a:first-child {
+  border-top: 0;
+}
+
+.qt2-dashboard-list strong,
+.qt2-dashboard-list small {
+  display: block;
+}
+
+.qt2-dashboard-list strong {
+  overflow: hidden;
+  color: rgb(226, 232, 240);
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qt2-dashboard-list small,
+.qt2-dashboard-list time {
+  color: rgb(100, 116, 139);
+  font-family: var(--font-mono);
+  font-size: 0.53rem;
+}
+
+.qt2-dashboard-list time {
+  white-space: nowrap;
+}
+
+.qt2-dashboard-empty {
+  padding: 1.25rem 0.4rem;
+  color: rgb(100, 116, 139);
+  font-size: 0.64rem;
+  line-height: 1.5;
+}
+
+.qt2-operator-error {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.65rem;
+  border: 1px solid rgba(245, 158, 11, 0.24);
+  border-radius: var(--ui-radius-panel);
+  background: rgba(245, 158, 11, 0.065);
+  padding: 0.68rem 0.75rem;
+  color: rgb(253, 230, 138);
+}
+
+.qt2-operator-error strong {
+  display: block;
+  color: rgb(254, 243, 199);
+  font-size: 0.68rem;
+}
+
+.qt2-operator-error p,
+.qt2-operator-error summary {
+  margin-top: 0.15rem;
+  color: rgb(180, 160, 114);
+  font-size: 0.59rem;
+  line-height: 1.5;
+}
+
+.qt2-operator-error summary {
+  cursor: pointer;
+  font-family: var(--font-mono);
+}
+
+.qt2-operator-error pre {
+  max-height: 10rem;
+  margin-top: 0.4rem;
+  overflow: auto;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 0.55rem;
+  color: rgb(203, 213, 225);
+  font-size: 0.55rem;
+  white-space: pre-wrap;
+}
+
+.qt2-operator-error .qt2-icon-button {
+  min-width: 7rem;
+}
+
+.qt2-run-table,
+.qt2-collector-table {
+  min-width: 55rem;
+}
+
+.qt2-market-table {
+  min-width: 64rem;
+}
+
+.qt2-research-table {
+  min-width: 60rem;
+}
+
+.qt2-actions-cell {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  min-width: 12rem;
+}
+
+.qt2-button-primary {
+  border-color: var(--accent-alpha-40);
+  background: var(--accent-alpha-12);
+  color: var(--accent-text-strong);
+}
+
+.qt2-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.qt2-context-menu {
+  position: relative;
+}
+
+.qt2-context-menu > summary {
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  cursor: pointer;
+  list-style: none;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--ui-radius-control);
+  color: rgb(148, 163, 184);
+}
+
+.qt2-context-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.qt2-context-menu > div {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 0.3rem);
+  right: 0;
+  min-width: 14rem;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--ui-radius-panel);
+  background: rgb(15, 18, 26);
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.48);
+}
+
+.qt2-context-menu button,
+.qt2-context-menu a,
+.qt2-context-menu > div > span {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.45rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+  padding: 0.58rem 0.65rem;
+  color: rgb(203, 213, 225);
+  font-size: 0.6rem;
+  text-align: left;
+}
+
+.qt2-context-menu button:hover,
+.qt2-context-menu a:hover {
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.qt2-context-menu small {
+  margin: 0 0 0 auto;
+}
+
+.qt2-context-menu > div > span {
+  color: rgb(100, 116, 139);
+  line-height: 1.45;
+}
+
+.qt2-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.qt2-chip-list span {
+  border: 1px solid rgba(255, 255, 255, 0.085);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.025);
+  padding: 0.2rem 0.42rem;
+  color: rgb(148, 163, 184);
+  font-family: var(--font-mono);
+  font-size: 0.52rem;
+}
+
+.qt2-collector-summary,
+.qt2-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: rgb(100, 116, 139);
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+}
+
+.qt2-collector-summary {
+  margin-bottom: 0.55rem;
+}
+
+.qt2-collector-summary strong {
+  color: rgb(203, 213, 225);
+}
+
+.qt2-pagination {
+  margin-top: 0.55rem;
+}
+
+.qt2-pagination > div {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.qt2-pagination button {
+  display: grid;
+  width: 1.8rem;
+  height: 1.8rem;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: var(--ui-radius-control);
+}
+
+.qt2-pagination button:disabled {
+  opacity: 0.3;
+}
+
+.qt2-lens-backdrop {
+  animation: qt2-lens-fade 170ms ease-out both;
+}
+
+.qt2-lens-dialog {
+  animation: qt2-lens-rise 220ms cubic-bezier(0.2, 0.85, 0.3, 1) both;
+  box-shadow: 0 32px 90px rgba(0, 0, 0, 0.66);
+}
+
+.qt2-run-evidence-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.qt2-run-evidence-strip > span {
+  min-width: 0;
+  background: rgb(11, 14, 21);
+  padding: 0.5rem 0.7rem;
+}
+
+.qt2-run-evidence-strip small,
+.qt2-run-evidence-strip strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qt2-run-evidence-strip small {
+  color: rgb(100, 116, 139);
+  font-size: 0.5rem;
+  text-transform: uppercase;
+}
+
+.qt2-run-evidence-strip strong {
+  margin-top: 0.16rem;
+  color: rgb(203, 213, 225);
+  font-size: 0.59rem;
+}
+
+.qt2-route-modal {
+  position: fixed;
+  z-index: 70;
+  inset: 0;
+  display: grid;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(12px);
+  place-items: center;
+}
+
+.qt2-route-modal-card {
+  width: min(38rem, 100%);
+}
+
+@keyframes qt2-lens-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes qt2-lens-rise {
+  from { opacity: 0; transform: translateY(12px) scale(0.992); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (max-width: 1050px) {
+  .qt2-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .qt2-dashboard-grid,
+  .qt2-dashboard-grid-secondary {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 680px) {
+  .qt2-summary-grid,
+  .qt2-run-evidence-strip {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .qt2-operator-error {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .qt2-operator-error .qt2-icon-button {
+    grid-column: 2;
+    justify-self: start;
+  }
+}
+
+.app-motion-reduced .qt2-lens-backdrop,
+.app-motion-reduced .qt2-lens-dialog {
+  animation: none;
+}

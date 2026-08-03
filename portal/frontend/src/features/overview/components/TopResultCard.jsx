@@ -51,9 +51,7 @@ export function TopResultCard({ result, dataset }) {
       </div>
       <div className="qt2-evidence-strip">
         <span>Dataset <strong className="qt-mono">{datasetLabel(dataset)}</strong></span>
-        <Link to={'/operations/runs/' + result.run_id} state={{ run: result, from: '/overview' }}>
-          Inspect run evidence
-        </Link>
+        <Link to="/operations?tab=runs">Find run evidence</Link>
       </div>
     </div>
   )
