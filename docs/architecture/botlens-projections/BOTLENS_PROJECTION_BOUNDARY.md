@@ -211,6 +211,14 @@ DB batch has completed, but the run is not finalized until that source-side
 buffer drains. Seeing a live message first does not make projection state
 canonical.
 
+Transport-owned durable rows use one ordered persistence writer per
+`(bot_id, run_id)`. All series and message kinds for the same run share that
+writer because the durable event-sequence allocator is run-owned; concurrent
+writes for one run would only contend on the same allocator row and amplify
+latency. Independent runs retain independent writer locks and may persist in
+parallel. The locks are process-local coordination only—database idempotency and
+the durable event identity remain authoritative across retries or restarts.
+
 Producer-side fanout is a bounded projection handoff after sequence assignment.
 Execution enqueues the committed live payload and keeps walking forward; the
 dispatcher owns websocket/subscriber pressure and drains during terminal runtime
@@ -234,6 +242,12 @@ runtime database. Bootstrap snapshots send the latest configured candle window
 and bounded debug context. Live updates are delta-only fact batches derived from
 backend projections. Older history belongs to cold chart-history and forensic
 reads.
+
+An active operator lens renders this bounded bootstrap immediately and does not
+eagerly reconstruct the same latest window from the durable ledger when candles
+are already present. The cold path is entered only as an explicit history read
+or as a fallback for a missing live base. Terminal lenses continue to use
+durable pages for completeness claims.
 
 The fact stream is compacted before it reaches backend projectors.
 `runtime_state_observed` carries compact health/runtime fields, not the full

@@ -70,6 +70,12 @@ thread. It no longer imports or uses `websockets.sync`. Close semantics are:
   expires,
 - close the async websocket from the worker loop.
 
+Backend ingest may receive independent persistence tasks for several series or
+message kinds. Those tasks share one process-local write lock per
+`(bot_id, run_id)` before appending to the run-owned event sequence allocator.
+This removes self-contention and preserves append ordering within a run without
+serializing independent runs globally.
+
 ## Consequences
 
 - Terminal lifecycle delivery no longer depends first on creating a fresh
@@ -79,6 +85,8 @@ thread. It no longer imports or uses `websockets.sync`. Close semantics are:
 - Runtime facts remain projection/debug telemetry, but already accepted facts
   receive a bounded shutdown delivery attempt. Lifecycle control messages stay
   prioritized.
+- Durable ingest for one run cannot race itself on the sequence allocator;
+  separate runs can still use database capacity concurrently.
 - A control flush timeout is visible as observability, not hidden by a silent
   queue clear.
 - The fallback direct websocket can still duplicate a lifecycle event if the

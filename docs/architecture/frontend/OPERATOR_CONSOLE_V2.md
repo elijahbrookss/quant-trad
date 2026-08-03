@@ -209,6 +209,21 @@ Chart-history reconstruction is a blocking database/replay read and therefore
 runs in FastAPI's worker threadpool, never on the shared async event loop that
 owns health, live streams, and navigation reads.
 
+Active BotLens opens are bootstrap-first. When the hot selected-symbol
+bootstrap already contains a bounded candle window, the console renders that
+window and attaches the live stream without issuing the initial cold
+chart-history request. Cold reconstruction remains available when bootstrap
+has no candles and when the operator explicitly moves left. Completed runs
+still request their initial durable 240-bar page because terminal replay, not a
+live projection, owns their historical completeness evidence.
+
+Bot controller handlers that call synchronous SQL, Docker inspection, dataset
+preparation, or forensic services execute in FastAPI's worker threadpool. The
+SSE initial fleet snapshot and live-WebSocket run resolution explicitly offload
+the same blocking work. A slow container inspection or replay may delay its own
+component, but it must not occupy the async event loop that serves health,
+navigation, or unrelated live sockets.
+
 Dataset-bound backtest charts read only the run's frozen dataset series at its
 recorded commit boundary. They never fall through to later canonical revisions.
 The initial view requests the latest 240 bars, left-edge movement requests one
