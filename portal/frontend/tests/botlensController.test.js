@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 
 import {
   resolveSelectedSymbolVisualRefreshIntervalMs,
+  resolveBotLensInitialHistoryEnd,
+  shouldLoadInitialBotLensHistory,
   shouldRetryBotLensRunBootstrap,
   shouldRetryBotLensSelectedSymbolBootstrap,
   shouldLoadOlderBotLensHistory,
@@ -39,6 +41,51 @@ test('load older history requires an active run, selected symbol, and at least o
       chartHistoryStatus: 'ready',
     }),
     false,
+  )
+})
+
+test('load older history stops at the frozen dataset boundary', () => {
+  assert.equal(
+    shouldLoadOlderBotLensHistory({
+      activeRunId: 'run-1',
+      selectedSymbolKey: 'instrument-btc|1m',
+      chartCandles: [{ time: 1767225600, open: 1, high: 1, low: 1, close: 1 }],
+      chartHistoryStatus: 'ready',
+      hasMoreBefore: false,
+    }),
+    false,
+  )
+})
+
+test('completed dataset runs request an initial bounded chart page', () => {
+  assert.equal(
+    shouldLoadInitialBotLensHistory({
+      open: true,
+      activeRunId: 'run-1',
+      selectedSymbolKey: 'instrument-btc|1m',
+      selectedSymbolReady: true,
+      datasetId: 'mds-frozen',
+      chartHistoryStatus: 'idle',
+    }),
+    true,
+  )
+  assert.equal(
+    shouldLoadInitialBotLensHistory({
+      open: true,
+      activeRunId: 'run-1',
+      selectedSymbolKey: 'instrument-btc|1m',
+      selectedSymbolReady: true,
+      datasetId: '',
+      chartHistoryStatus: 'idle',
+    }),
+    false,
+  )
+  assert.equal(
+    resolveBotLensInitialHistoryEnd({
+      backtest_end: '2026-01-02T00:00:00Z',
+      ended_at: '2026-01-02T00:00:05Z',
+    }),
+    '2026-01-02T00:00:00Z',
   )
 })
 

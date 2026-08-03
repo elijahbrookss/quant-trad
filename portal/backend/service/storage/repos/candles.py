@@ -283,8 +283,118 @@ def list_candles_for_series(
     return sorted(normalized, key=lambda row: int(row["time"]))
 
 
+def read_frozen_dataset_candles(
+    *,
+    dataset_id: str,
+    series_id: int,
+    start: Any,
+    end: Any,
+    limit: int,
+    prefer_latest: bool = False,
+) -> Dict[str, Any]:
+    """Read a bounded candle page at the dataset series frozen commit boundary."""
+
+    normalized_dataset_id = str(dataset_id or "").strip()
+    if not normalized_dataset_id:
+        raise ValueError("market_dataset_id_required")
+    normalized_limit = max(1, min(int(limit or 320), 2000))
+    requested_start = _parse_optional_timestamp(start)
+    requested_end = _parse_optional_timestamp(end)
+    if requested_start is not None and requested_end is not None and requested_end <= requested_start:
+        return {"candles": [], "has_more_before": False, "has_more_after": False}
+
+    with db.session() as session:
+        frozen = session.execute(
+            text(
+                """
+                SELECT range_start, range_end, max_commit_seq
+                FROM market.dataset_series
+                WHERE dataset_id = :dataset_id AND series_id = :series_id
+                """
+            ),
+            {"dataset_id": normalized_dataset_id, "series_id": int(series_id)},
+        ).mappings().first()
+        if frozen is None:
+            raise ValueError(
+                "market_dataset_series_unknown: "
+                f"dataset_id={normalized_dataset_id} series_id={series_id}"
+            )
+
+        effective_start = max(
+            value for value in (requested_start, frozen["range_start"]) if value is not None
+        )
+        effective_end = min(
+            value for value in (requested_end, frozen["range_end"]) if value is not None
+        )
+        if effective_end <= effective_start:
+            return {
+                "candles": [],
+                "has_more_before": False,
+                "has_more_after": False,
+                "range_start": frozen["range_start"],
+                "range_end": frozen["range_end"],
+                "max_commit_seq": int(frozen["max_commit_seq"]),
+            }
+        order_sql = "DESC" if prefer_latest else "ASC"
+        rows = session.execute(
+            text(
+                f"""
+                WITH visible AS (
+                    SELECT DISTINCT ON (candle_open_time)
+                        candle_open_time, open, high, low, close, volume, revision,
+                        market_commit_seq
+                    FROM market.candle_versions
+                    WHERE series_id = :series_id
+                      AND market_commit_seq <= :max_commit_seq
+                      AND candle_open_time >= :start_at
+                      AND candle_open_time < :end_at
+                    ORDER BY candle_open_time, revision DESC
+                )
+                SELECT * FROM visible
+                ORDER BY candle_open_time {order_sql}
+                LIMIT :page_limit
+                """
+            ),
+            {
+                "series_id": int(series_id),
+                "max_commit_seq": int(frozen["max_commit_seq"]),
+                "start_at": effective_start,
+                "end_at": effective_end,
+                "page_limit": normalized_limit + 1,
+            },
+        ).mappings().all()
+
+    has_extra = len(rows) > normalized_limit
+    selected = rows[:normalized_limit]
+    candles = sorted(
+        [
+            {
+                "time": int(row["candle_open_time"].timestamp()),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["volume"]) if row.get("volume") is not None else None,
+                "revision": int(row["revision"]),
+                "market_commit_seq": int(row["market_commit_seq"]),
+            }
+            for row in selected
+        ],
+        key=lambda row: int(row["time"]),
+    )
+    return {
+        "candles": candles,
+        "has_more_before": bool(has_extra and prefer_latest),
+        "has_more_after": bool(has_extra and not prefer_latest),
+        "range_start": frozen["range_start"],
+        "range_end": frozen["range_end"],
+        "max_commit_seq": int(frozen["max_commit_seq"]),
+    }
+
+
 __all__ = [
     "get_candle_storage_summary",
     "list_candle_provider_gap_evidence",
     "list_candles_for_series",
+    "read_frozen_dataset_candles",
 ]

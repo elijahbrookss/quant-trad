@@ -4,7 +4,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any, Dict, Optional
 
 
-CHART_RETRIEVAL_SCHEMA_VERSION = 1
+CHART_RETRIEVAL_SCHEMA_VERSION = 2
 
 
 def _chart_candle_contract(candle: Mapping[str, Any]) -> Dict[str, Any]:
@@ -31,6 +31,7 @@ def chart_history_response_contract(
     candles: Iterable[Mapping[str, Any]],
     has_more_before: bool,
     has_more_after: bool,
+    evidence_source: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     candle_list = [_chart_candle_contract(entry) for entry in candles]
     returned_start = candle_list[0]["time"] if candle_list else None
@@ -51,6 +52,7 @@ def chart_history_response_contract(
             "has_more_after": bool(has_more_after),
         },
         "candles": candle_list,
+        "evidence_source": dict(evidence_source or {}),
     }
 
 

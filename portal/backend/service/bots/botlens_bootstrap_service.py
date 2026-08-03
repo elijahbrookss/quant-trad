@@ -71,6 +71,9 @@ def _run_meta(
     row = _mapping(get_bot_run(run_id))
     config_snapshot = _mapping(row.get("config_snapshot"))
     bot_snapshot = _mapping(config_snapshot.get("bot"))
+    dataset_binding = _mapping(config_snapshot.get("dataset_binding"))
+    evaluation_range = _mapping(dataset_binding.get("evaluation_range"))
+    materialization_range = _mapping(dataset_binding.get("materialization_range"))
     risk_snapshot = _mapping(bot_snapshot.get("risk")) or _mapping(projected_bot.get("risk"))
     execution_mode = _normalize_execution_mode(
         row.get("execution_mode")
@@ -95,6 +98,19 @@ def _run_meta(
         "intrabar_execution": execution_mode == "full",
         "started_at": row.get("started_at"),
         "ended_at": row.get("ended_at"),
+        "backtest_start": evaluation_range.get("start"),
+        "backtest_end": evaluation_range.get("end_exclusive"),
+        "materialization_start": materialization_range.get("start"),
+        "materialization_end": materialization_range.get("end_exclusive"),
+        "dataset": (
+            {
+                "dataset_id": dataset_binding.get("dataset_id"),
+                "dataset_hash": dataset_binding.get("dataset_hash"),
+                "max_commit_seq": dataset_binding.get("max_commit_seq"),
+            }
+            if dataset_binding
+            else None
+        ),
         "strategy_id": row.get("strategy_id"),
         "strategy_name": row.get("strategy_name"),
         "run_type": row.get("run_type"),

@@ -531,6 +531,100 @@ def test_get_symbol_chart_history_falls_back_to_source_candle_storage(
     assert captured["timeframe"] == "1m"
 
 
+def test_dataset_bound_chart_reads_only_the_frozen_series(monkeypatch: pytest.MonkeyPatch) -> None:
+    binding = {
+        "dataset_id": "mds-frozen",
+        "dataset_hash": "hash-frozen",
+        "series": [
+            {
+                "series_id": 7,
+                "instrument_id": "instrument-btc",
+                "fact_type": "candle.ohlcv",
+                "timeframe_seconds": 60,
+                "max_commit_seq": 73,
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        chart_svc,
+        "get_bot_run",
+        lambda run_id: {
+            "run_id": run_id,
+            "bot_id": "bot-1",
+            "config_snapshot": {"dataset_binding": binding},
+        },
+    )
+    monkeypatch.setattr(chart_svc, "iter_all_run_domain_truth", lambda **kwargs: iter([]))
+    monkeypatch.setattr(
+        chart_svc,
+        "list_candles_for_series",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("must not read mutable candles")),
+    )
+    captured: dict[str, Any] = {}
+
+    def _frozen(**kwargs):
+        captured.update(kwargs)
+        return {
+            "candles": [
+                {"time": 1, "open": 1.0, "high": 1.5, "low": 0.5, "close": 1.25}
+            ],
+            "has_more_before": True,
+            "has_more_after": False,
+            "max_commit_seq": 73,
+        }
+
+    monkeypatch.setattr(chart_svc, "read_frozen_dataset_candles", _frozen)
+
+    result = chart_svc.get_symbol_chart_history(
+        run_id="run-1",
+        symbol_key="instrument-btc|1m",
+        start_time=None,
+        end_time="1970-01-01T00:00:04Z",
+        limit=10,
+    )
+
+    assert [row["time"] for row in result["candles"]] == [1]
+    assert captured["dataset_id"] == "mds-frozen"
+    assert captured["series_id"] == 7
+    assert result["evidence_source"] == {
+        "kind": "frozen_dataset",
+        "dataset_id": "mds-frozen",
+        "dataset_hash": "hash-frozen",
+        "series_id": 7,
+        "max_commit_seq": 73,
+    }
+    assert result["range"]["has_more_before"] is True
+
+
+def test_dataset_bound_chart_fails_loud_when_series_is_not_frozen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        chart_svc,
+        "get_bot_run",
+        lambda run_id: {
+            "run_id": run_id,
+            "bot_id": "bot-1",
+            "config_snapshot": {
+                "dataset_binding": {
+                    "dataset_id": "mds-frozen",
+                    "series": [],
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(chart_svc, "iter_all_run_domain_truth", lambda **kwargs: iter([]))
+
+    with pytest.raises(ValueError, match="botlens_chart_frozen_series_missing"):
+        chart_svc.get_symbol_chart_history(
+            run_id="run-1",
+            symbol_key="instrument-btc|1m",
+            start_time=None,
+            end_time="1970-01-01T00:00:04Z",
+            limit=10,
+        )
+
+
 def test_get_symbol_chart_history_rejects_invalid_truth_candle_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(chart_svc, "get_bot_run", lambda run_id: {"run_id": run_id, "bot_id": "bot-1"})
     monkeypatch.setattr(

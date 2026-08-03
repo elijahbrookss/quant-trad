@@ -2,13 +2,19 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 from .botlens_chart_contracts import chart_history_response_contract
 from .botlens_contract import normalize_series_key
 from .botlens_domain_events import canonicalize_botlens_candle
 from .botlens_retrieval_queries import iter_all_run_domain_truth
-from ..storage.repos.candles import list_candles_for_series
+from data_providers.utils.ohlcv import interval_to_timedelta
+from market_data.contracts import CANDLE_FACT_TYPE
+
+from ..storage.repos.candles import (
+    list_candles_for_series,
+    read_frozen_dataset_candles,
+)
 
 _CANDLE_EVENT_NAMES = ("CANDLE_OBSERVED",)
 
@@ -42,12 +48,12 @@ def _isoformat_or_none(value: Optional[datetime]) -> Optional[str]:
     return value.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _run_bot_id(*, run_id: str) -> str:
+def _run_row(*, run_id: str) -> Dict[str, Any]:
     run_row = get_bot_run(str(run_id)) or {}
     bot_id = str(run_row.get("bot_id") or "").strip()
     if not bot_id:
         raise ValueError(f"bot_id missing for run_id={run_id}")
-    return bot_id
+    return dict(run_row)
 
 
 def _series_identity(symbol_key: str) -> tuple[str | None, str | None]:
@@ -57,6 +63,39 @@ def _series_identity(symbol_key: str) -> tuple[str | None, str | None]:
     instrument_id = instrument_id.strip()
     timeframe = timeframe.strip()
     return instrument_id or None, timeframe or None
+
+
+def _mapping(value: Any) -> Dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _frozen_candle_series(
+    *,
+    run_row: Mapping[str, Any],
+    instrument_id: str,
+    timeframe: str,
+) -> Optional[tuple[Dict[str, Any], Dict[str, Any]]]:
+    config_snapshot = _mapping(run_row.get("config_snapshot"))
+    binding = _mapping(config_snapshot.get("dataset_binding"))
+    if not binding:
+        return None
+    dataset_id = str(binding.get("dataset_id") or "").strip()
+    if not dataset_id:
+        raise ValueError("botlens_chart_dataset_binding_missing_id")
+    timeframe_seconds = int(interval_to_timedelta(timeframe).total_seconds())
+    for candidate in binding.get("series") or []:
+        series = _mapping(candidate)
+        if (
+            str(series.get("instrument_id") or "") == instrument_id
+            and str(series.get("fact_type") or "") == CANDLE_FACT_TYPE
+            and int(series.get("timeframe_seconds") or 0) == timeframe_seconds
+        ):
+            return binding, series
+    raise ValueError(
+        "botlens_chart_frozen_series_missing: "
+        f"run_id={run_row.get('run_id')} dataset_id={dataset_id} "
+        f"instrument_id={instrument_id} timeframe={timeframe}"
+    )
 
 
 def _fits_range(*, candle_time: int, start_epoch: Optional[int], end_epoch: Optional[int]) -> bool:
@@ -106,7 +145,11 @@ def get_symbol_chart_history(
     if start_dt is not None and end_dt is not None and start_dt >= end_dt:
         raise ValueError("start_time must be earlier than end_time")
 
-    bot_id = _run_bot_id(run_id=run_id)
+    run_row = _run_row(run_id=run_id)
+    bot_id = str(run_row["bot_id"])
+    instrument_id, timeframe = _series_identity(normalized_symbol_key)
+    if not instrument_id or not timeframe:
+        raise ValueError("canonical symbol_key must contain instrument_id|timeframe")
     start_epoch = int(start_dt.timestamp()) if start_dt is not None else None
     end_epoch = int(end_dt.timestamp()) if end_dt is not None else None
     has_more_before = False
@@ -141,16 +184,43 @@ def get_symbol_chart_history(
             else:
                 has_more_after = True
 
+    evidence_source: Dict[str, Any] = {"kind": "domain_event_ledger"}
     if not candles_by_time:
-        instrument_id, timeframe = _series_identity(normalized_symbol_key)
-        source_candles = list_candles_for_series(
-            instrument_id=instrument_id or "",
-            timeframe=timeframe or "",
-            start=start_dt,
-            end=end_dt,
-            limit=normalized_limit,
-            prefer_latest=prefer_latest_window,
+        frozen_source = _frozen_candle_series(
+            run_row=run_row,
+            instrument_id=instrument_id,
+            timeframe=timeframe,
         )
+        if frozen_source is not None:
+            binding, series = frozen_source
+            frozen_page = read_frozen_dataset_candles(
+                dataset_id=str(binding["dataset_id"]),
+                series_id=int(series["series_id"]),
+                start=start_dt,
+                end=end_dt,
+                limit=normalized_limit,
+                prefer_latest=prefer_latest_window,
+            )
+            source_candles = list(frozen_page.get("candles") or [])
+            has_more_before = bool(frozen_page.get("has_more_before"))
+            has_more_after = bool(frozen_page.get("has_more_after"))
+            evidence_source = {
+                "kind": "frozen_dataset",
+                "dataset_id": str(binding["dataset_id"]),
+                "dataset_hash": str(binding.get("dataset_hash") or ""),
+                "series_id": int(series["series_id"]),
+                "max_commit_seq": int(series.get("max_commit_seq") or frozen_page.get("max_commit_seq") or 0),
+            }
+        else:
+            source_candles = list_candles_for_series(
+                instrument_id=instrument_id,
+                timeframe=timeframe,
+                start=start_dt,
+                end=end_dt,
+                limit=normalized_limit,
+                prefer_latest=prefer_latest_window,
+            )
+            evidence_source = {"kind": "canonical_hot_store"}
         for candle in source_candles:
             candle_time = int(candle["time"])
             candles_by_time[candle_time] = candle
@@ -165,6 +235,7 @@ def get_symbol_chart_history(
         candles=ordered,
         has_more_before=has_more_before,
         has_more_after=has_more_after,
+        evidence_source=evidence_source,
     )
 
 

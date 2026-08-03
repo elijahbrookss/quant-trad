@@ -37,14 +37,38 @@ export function shouldLoadOlderBotLensHistory({
   selectedSymbolKey,
   chartCandles,
   chartHistoryStatus,
+  hasMoreBefore,
 }) {
   return Boolean(
     activeRunId
     && selectedSymbolKey
     && Array.isArray(chartCandles)
     && chartCandles.length > 0
-    && chartHistoryStatus !== 'loading',
+    && chartHistoryStatus !== 'loading'
+    && hasMoreBefore !== false,
   )
+}
+
+export function shouldLoadInitialBotLensHistory({
+  open,
+  activeRunId,
+  selectedSymbolKey,
+  selectedSymbolReady,
+  datasetId,
+  chartHistoryStatus,
+}) {
+  return Boolean(
+    open
+    && activeRunId
+    && selectedSymbolKey
+    && selectedSymbolReady
+    && datasetId
+    && chartHistoryStatus === 'idle',
+  )
+}
+
+export function resolveBotLensInitialHistoryEnd(runMeta) {
+  return runMeta?.backtest_end || runMeta?.materialization_end || runMeta?.ended_at || null
 }
 
 export function resolveBotLensContractState(payload, fallback = 'idle') {
@@ -199,6 +223,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   const bootstrapTokenRef = useRef(0)
   const bootstrapLoadRef = useRef(new Set())
   const snapshotRefreshLoadRef = useRef(new Set())
+  const initialChartLoadRef = useRef(new Set())
   const latestSelectionRef = useRef({ runId: null, symbolKey: null })
   const latestSelectionBootstrapRequestRef = useRef({ runId: null, symbolKey: null, requestId: 0 })
 
@@ -258,6 +283,9 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
   const chartHistoryCacheCount = useMemo(() => selectChartHistoryCacheCount(state), [chartHistoryBySymbol])
   const transportEligible = Boolean(state.runState?.transportEligible)
+  const runMeta = state.runState?.runMeta || null
+  const datasetId = String(runMeta?.dataset?.dataset_id || '').trim()
+  const initialHistoryEnd = resolveBotLensInitialHistoryEnd(runMeta)
 
   useEffect(() => {
     latestSelectionRef.current = {
@@ -269,6 +297,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   const refreshSession = useCallback(() => {
     bootstrapLoadRef.current.clear()
     snapshotRefreshLoadRef.current.clear()
+    initialChartLoadRef.current.clear()
     setReloadTick((value) => value + 1)
   }, [])
 
@@ -400,6 +429,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     if (!open || !bot?.id) {
       bootstrapLoads.clear()
       snapshotRefreshLoadRef.current.clear()
+      initialChartLoadRef.current.clear()
       dispatch({ type: 'session/reset', botId: bot?.id || null })
       return
     }
@@ -541,6 +571,80 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     }
   }, [activeRunId, bot?.id, loadSelectedSymbolSnapshot, logger, open, selectedLabel, selectedSymbolKey, selectedSymbolReady])
 
+  useEffect(() => {
+    if (!shouldLoadInitialBotLensHistory({
+      open,
+      activeRunId,
+      selectedSymbolKey,
+      selectedSymbolReady,
+      datasetId,
+      chartHistoryStatus,
+    })) return undefined
+
+    const requestKey = [activeRunId, selectedSymbolKey].join(':')
+    if (initialChartLoadRef.current.has(requestKey)) return undefined
+    initialChartLoadRef.current.add(requestKey)
+    let cancelled = false
+    dispatch({
+      type: 'retrieval/chartRequest',
+      runId: activeRunId,
+      symbolKey: selectedSymbolKey,
+    })
+    fetchBotLensChartHistory(activeRunId, selectedSymbolKey, {
+      endTime: initialHistoryEnd || undefined,
+      limit: 240,
+    })
+      .then((page) => {
+        if (cancelled) return
+        if (String(page?.run_id || '') !== String(activeRunId)) {
+          throw new Error('Chart history returned a mismatched run scope')
+        }
+        if (normalizeSeriesKey(page?.symbol_key || '') !== normalizeSeriesKey(selectedSymbolKey)) {
+          throw new Error('Chart history returned a mismatched symbol scope')
+        }
+        dispatch({
+          type: 'retrieval/chartSuccess',
+          runId: activeRunId,
+          symbolKey: selectedSymbolKey,
+          candles: Array.isArray(page?.candles) ? page.candles : [],
+          range: page?.range,
+          evidenceSource: page?.evidence_source,
+        })
+      })
+      .catch((err) => {
+        if (cancelled) return
+        dispatch({
+          type: 'retrieval/chartFailed',
+          runId: activeRunId,
+          symbolKey: selectedSymbolKey,
+          error: err?.message || 'Frozen chart retrieval failed',
+        })
+        logger.warn('botlens_initial_history_failed', {
+          bot_id: bot?.id || null,
+          run_id: activeRunId,
+          symbol_key: selectedSymbolKey,
+          dataset_id: datasetId,
+        }, err)
+      })
+      .finally(() => {
+        initialChartLoadRef.current.delete(requestKey)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    activeRunId,
+    bot?.id,
+    chartHistoryStatus,
+    datasetId,
+    initialHistoryEnd,
+    logger,
+    open,
+    selectedSymbolKey,
+    selectedSymbolReady,
+  ])
+
   useBotLensLiveTransport({
     open,
     botId: bot?.id || null,
@@ -586,6 +690,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
       selectedSymbolKey,
       chartCandles,
       chartHistoryStatus,
+      hasMoreBefore: chartHistory?.range?.has_more_before,
     })) {
       return
     }
@@ -605,6 +710,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
         symbolKey: selectedSymbolKey,
         candles,
         range: page?.range,
+        evidenceSource: page?.evidence_source,
       })
     } catch (err) {
       dispatch({
@@ -623,7 +729,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
         err,
       )
     }
-  }, [activeRunId, bot?.id, chartCandles, chartHistoryStatus, dispatch, logger, selectedSymbolKey])
+  }, [activeRunId, bot?.id, chartCandles, chartHistory?.range?.has_more_before, chartHistoryStatus, dispatch, logger, selectedSymbolKey])
 
   const clearError = useCallback(() => {
     dispatch({ type: 'ui/error', error: null })
@@ -633,6 +739,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     dispatch({ type: 'session/reset', botId: bot?.id || null })
     bootstrapLoadRef.current.clear()
     snapshotRefreshLoadRef.current.clear()
+    initialChartLoadRef.current.clear()
     onClose?.()
   }, [bot?.id, onClose])
 

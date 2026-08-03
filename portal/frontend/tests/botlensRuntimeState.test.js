@@ -334,10 +334,15 @@ test('chart retrieval stays out of base symbol state and composes at selector ti
       returned_start_time: '2025-12-31T23:59:00Z',
       returned_end_time: '2026-01-01T00:00:00Z',
     },
+    evidenceSource: { kind: 'frozen_dataset', dataset_id: 'mds-frozen' },
   })
 
   assert.equal(selectSelectedSymbolState(state).candles.length, 1)
   assert.equal(state.retrieval.chartHistoryBySymbol['instrument-btc|1m'].candles.length, 1)
+  assert.deepEqual(
+    state.retrieval.chartHistoryBySymbol['instrument-btc|1m'].evidenceSource,
+    { kind: 'frozen_dataset', dataset_id: 'mds-frozen' },
+  )
   assert.deepEqual(
     selectSelectedSymbolChartCandles(state).map((row) => row.time),
     [1767225540, 1767225600],

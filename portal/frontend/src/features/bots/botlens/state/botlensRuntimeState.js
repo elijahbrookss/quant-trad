@@ -112,7 +112,7 @@ function commitProjectionStore(state, projectionStore) {
   }
 }
 
-function updateChartHistoryCache(cache, { symbolKey, candles, range }) {
+function updateChartHistoryCache(cache, { symbolKey, candles, range, evidenceSource }) {
   const existing = cache?.[symbolKey] || null
   return {
     ...(cache || {}),
@@ -122,6 +122,9 @@ function updateChartHistoryCache(cache, { symbolKey, candles, range }) {
       error: null,
       candles: mergeCanonicalCandles(candles || [], existing?.candles || []),
       range: range && typeof range === 'object' ? { ...range } : existing?.range || null,
+      evidenceSource: evidenceSource && typeof evidenceSource === 'object'
+        ? { ...evidenceSource }
+        : existing?.evidenceSource || null,
     },
   }
 }
@@ -483,6 +486,7 @@ export function reduceBotLensState(state, action) {
               symbolKey: normalizedSymbolKey,
               candles: action.candles,
               range: action.range,
+              evidenceSource: action.evidenceSource,
             },
           ),
         },
