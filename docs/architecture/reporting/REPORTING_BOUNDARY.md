@@ -55,6 +55,16 @@ boundary. Report materializations also record the builder source revision; a
 ready artifact built by another source revision is stale for the current backend
 and must be rebuilt before serving or comparing.
 
+Interactive report pages share one bounded in-process `RunResearchDataset`
+reconstruction cache. Active runs, alternate builders, and sources whose durable
+fingerprint cannot be proven receive only the 15-second request-burst cache.
+Canonical terminal-run datasets may remain in an eight-entry LRU for at most 15
+minutes only when the run/event/trade input fingerprint is identical before and
+after reconstruction. After the burst window, every reuse rechecks that durable
+fingerprint. A mismatch or unavailable proof evicts the entry and rebuilds from
+durable truth; this cache is never persisted, never crosses backend processes,
+and never becomes report or comparison truth.
+
 Paired run-report comparison reads ready `RunReportDTO` artifacts from
 `portal_report_materializations`. It returns structured blockers for
 non-terminal, missing, building, failed, or stale report artifacts and does not

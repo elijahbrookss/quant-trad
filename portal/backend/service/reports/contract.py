@@ -39,13 +39,29 @@ _COMPARABLE_SUMMARY_METRICS = (
     "accepted_decisions",
     "rejected_decisions",
 )
-_DATASET_CACHE_TTL_SECONDS = 15.0
-_DATASET_CACHE_MAX_ENTRIES = 32
+_DATASET_CACHE_BURST_TTL_SECONDS = 15.0
+_DATASET_CACHE_VALIDATED_TTL_SECONDS = 900.0
+_DATASET_CACHE_MAX_ENTRIES = 8
+_DATASET_CACHE_TERMINAL_STATUSES = frozenset(
+    {
+        "completed",
+        "degraded_terminal",
+        "failed",
+        "error",
+        "startup_failed",
+        "crashed",
+        "stopped",
+        "cancelled",
+        "canceled",
+    }
+)
 _DatasetBuilder = Callable[[str], Dict[str, Any]]
 _DatasetCacheKey = Tuple[str, _DatasetBuilder]
-_DATASET_CACHE: "OrderedDict[_DatasetCacheKey, Tuple[float, Dict[str, Any]]]" = OrderedDict()
+_DatasetCacheEntry = Tuple[float, Optional[str], Dict[str, Any]]
+_DATASET_CACHE: "OrderedDict[_DatasetCacheKey, _DatasetCacheEntry]" = OrderedDict()
 _DATASET_INFLIGHT: Dict[_DatasetCacheKey, Future] = {}
 _DATASET_CACHE_LOCK = threading.RLock()
+_CANONICAL_DATASET_BUILDER = build_run_research_dataset
 
 
 def _mapping(value: Any) -> Dict[str, Any]:
@@ -92,16 +108,36 @@ def _dataset_cache_key(run_id: str) -> _DatasetCacheKey:
     return (str(run_id), build_run_research_dataset)
 
 
-def _cached_dataset_unlocked(key: _DatasetCacheKey) -> Optional[Dict[str, Any]]:
+def _cache_entry_unlocked(key: _DatasetCacheKey) -> Optional[_DatasetCacheEntry]:
     entry = _DATASET_CACHE.get(key)
     if not entry:
         return None
-    stored_at, dataset = entry
-    if time.monotonic() - stored_at > _DATASET_CACHE_TTL_SECONDS:
+    stored_at, _input_fingerprint, _dataset_payload = entry
+    if time.monotonic() - stored_at > _DATASET_CACHE_VALIDATED_TTL_SECONDS:
         _DATASET_CACHE.pop(key, None)
         return None
-    _DATASET_CACHE.move_to_end(key)
-    return dataset
+    return entry
+
+
+def _canonical_terminal_input_fingerprint(run_id: str) -> Optional[str]:
+    if build_run_research_dataset is not _CANONICAL_DATASET_BUILDER:
+        return None
+    try:
+        state = report_data.compute_report_input_fingerprint(run_id)
+    except Exception as exc:  # noqa: BLE001 - retain the existing short burst cache when validation is unavailable.
+        logger.warning(
+            with_log_context(
+                "report_dataset_cache_fingerprint_unavailable",
+                build_log_context(run_id=run_id, error=str(exc)),
+            )
+        )
+        return None
+    payload = _mapping(state.get("input_fingerprint_payload"))
+    status = str(payload.get("status") or "").strip().lower()
+    fingerprint = str(state.get("input_fingerprint") or "").strip()
+    if status not in _DATASET_CACHE_TERMINAL_STATUSES or not fingerprint:
+        return None
+    return fingerprint
 
 
 def clear_report_dataset_cache(run_id: Optional[str] = None) -> None:
@@ -118,8 +154,13 @@ def clear_report_dataset_cache(run_id: Optional[str] = None) -> None:
                 _DATASET_CACHE.pop(key, None)
 
 
-def _store_dataset_unlocked(key: _DatasetCacheKey, dataset: Dict[str, Any]) -> None:
-    _DATASET_CACHE[key] = (time.monotonic(), dataset)
+def _store_dataset_unlocked(
+    key: _DatasetCacheKey,
+    dataset: Dict[str, Any],
+    *,
+    input_fingerprint: Optional[str],
+) -> None:
+    _DATASET_CACHE[key] = (time.monotonic(), input_fingerprint, dataset)
     _DATASET_CACHE.move_to_end(key)
     while len(_DATASET_CACHE) > _DATASET_CACHE_MAX_ENTRIES:
         _DATASET_CACHE.popitem(last=False)
@@ -127,11 +168,52 @@ def _store_dataset_unlocked(key: _DatasetCacheKey, dataset: Dict[str, Any]) -> N
 
 def _dataset(run_id: str) -> Dict[str, Any]:
     key = _dataset_cache_key(run_id)
+    validation_candidate: Optional[Tuple[float, str]] = None
     with _DATASET_CACHE_LOCK:
-        cached = _cached_dataset_unlocked(key)
-        if cached is not None:
-            logger.debug(with_log_context("report_dataset_cache_hit", build_log_context(run_id=run_id)))
-            return cached
+        entry = _cache_entry_unlocked(key)
+        if entry is not None:
+            stored_at, input_fingerprint, dataset = entry
+            age_seconds = max(time.monotonic() - stored_at, 0.0)
+            if age_seconds <= _DATASET_CACHE_BURST_TTL_SECONDS:
+                _DATASET_CACHE.move_to_end(key)
+                logger.debug(
+                    with_log_context(
+                        "report_dataset_cache_hit",
+                        build_log_context(run_id=run_id, validation="burst"),
+                    )
+                )
+                return dataset
+            if input_fingerprint:
+                validation_candidate = (stored_at, input_fingerprint)
+
+    if validation_candidate is not None:
+        current_fingerprint = _canonical_terminal_input_fingerprint(run_id)
+        with _DATASET_CACHE_LOCK:
+            entry = _cache_entry_unlocked(key)
+            if entry is not None and entry[0] == validation_candidate[0]:
+                if current_fingerprint and current_fingerprint == validation_candidate[1]:
+                    _DATASET_CACHE.move_to_end(key)
+                    logger.debug(
+                        with_log_context(
+                            "report_dataset_cache_hit",
+                            build_log_context(
+                                run_id=run_id,
+                                validation="durable_input_fingerprint",
+                            ),
+                        )
+                    )
+                    return entry[2]
+                _DATASET_CACHE.pop(key, None)
+
+    with _DATASET_CACHE_LOCK:
+        entry = _cache_entry_unlocked(key)
+        if entry is not None:
+            stored_at, _input_fingerprint, dataset = entry
+            if max(time.monotonic() - stored_at, 0.0) <= _DATASET_CACHE_BURST_TTL_SECONDS:
+                _DATASET_CACHE.move_to_end(key)
+                logger.debug(with_log_context("report_dataset_cache_hit", build_log_context(run_id=run_id)))
+                return dataset
+            _DATASET_CACHE.pop(key, None)
         future = _DATASET_INFLIGHT.get(key)
         if future is None:
             future = Future()
@@ -146,6 +228,7 @@ def _dataset(run_id: str) -> Dict[str, Any]:
 
     try:
         logger.debug(with_log_context("report_dataset_build_start", build_log_context(run_id=run_id)))
+        input_fingerprint_before = _canonical_terminal_input_fingerprint(run_id)
         dataset = build_run_research_dataset(run_id)
     except BaseException as exc:
         with _DATASET_CACHE_LOCK:
@@ -153,8 +236,19 @@ def _dataset(run_id: str) -> Dict[str, Any]:
             future.set_exception(exc)
         raise
 
+    input_fingerprint_after = _canonical_terminal_input_fingerprint(run_id)
+    validated_fingerprint = (
+        input_fingerprint_after
+        if input_fingerprint_before
+        and input_fingerprint_before == input_fingerprint_after
+        else None
+    )
     with _DATASET_CACHE_LOCK:
-        _store_dataset_unlocked(key, dataset)
+        _store_dataset_unlocked(
+            key,
+            dataset,
+            input_fingerprint=validated_fingerprint,
+        )
         _DATASET_INFLIGHT.pop(key, None)
         future.set_result(dataset)
     logger.debug(with_log_context("report_dataset_build_done", build_log_context(run_id=run_id)))
