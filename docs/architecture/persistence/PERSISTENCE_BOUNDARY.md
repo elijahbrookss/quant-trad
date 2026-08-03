@@ -26,6 +26,7 @@ code_paths:
   - portal/backend/service/bots/botlens_canonical_facts.py
   - portal/backend/service/bots/botlens_event_retention.py
   - src/engines/bot_runtime/runtime/components/canonical_facts.py
+  - src/engines/bot_runtime/runtime/components/persistence_buffer.py
   - src/engines/bot_runtime/runtime/components/step_trace_buffer.py
   - src/engines/bot_runtime/runtime/components/step_trace_rollup.py
   - src/engines/bot_runtime/runtime/components/overlay_delta.py
@@ -262,6 +263,18 @@ a bounded per-process event-id idempotence cache to avoid repeated no-op DB
 prechecks for stable health, overlay, diagnostic, or stats facts. The database
 uniqueness constraint remains the final correctness guard after restarts or
 retries.
+
+The runtime trade-snapshot and trade-event read models use the same strict
+failure policy through a dedicated ordered writer. The bar path copies each
+typed payload into a bounded queue; one background worker writes accepted
+payloads in enqueue order so an open snapshot cannot be overtaken by its close
+snapshot or related event. These writes are never coalesced or dropped.
+`persistence_queue_max`, `persistence_batch_size`,
+`persistence_flush_interval_s`, and `persistence_drain_timeout_s` bound the
+queue, batch, live lag, and terminal wait. Queue overflow, repository writer
+failure, and terminal drain timeout fail the run. Terminal completion is not
+published until this queue drains, while failure cleanup makes a best effort to
+drain already accepted records without replacing the original runtime error.
 
 Projection fanout uses a separate bounded dispatcher over the already committed
 batch. That dispatcher is not a second persistence authority and must not assign

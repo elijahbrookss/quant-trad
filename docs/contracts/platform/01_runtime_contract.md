@@ -182,6 +182,11 @@ projection resync. They must not fail an otherwise valid run. Canonical runtime
 persistence remains strict: durable fact persistence overflow, writer failure,
 or terminal persistence drain timeout is a runtime failure.
 
+Trade snapshot/event persistence may run on one ordered background writer to
+keep database latency out of `apply_bar`, but it remains strict runtime
+persistence: accepted payloads may not be dropped or reordered, capacity is
+bounded, and successful terminal status requires a completed durable drain.
+
 Rules:
 
 - run projector rebuild failures must surface `health.status=projection_error`, readiness false, and a bounded fault explaining the failed rebuild,

@@ -257,7 +257,7 @@ class RuntimeExecutionLoopMixin:
                 self._flush_canonical_fact_appender("runtime_loop_failed", shutdown=True)
             except Exception:
                 logger.exception(with_log_context("bot_runtime_canonical_fact_failed_drain_failed", context))
-            self._flush_persistence_buffer("runtime_loop_failed")
+            self._flush_persistence_buffer("runtime_loop_failed", raise_on_error=False)
             self._flush_step_trace_buffer("runtime_loop_failed", shutdown=True)
             self._persist_runtime_state("error")
             self._persist_run_artifact("error")
