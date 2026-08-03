@@ -1062,10 +1062,10 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             ),
             materialization=ReportMaterializationSettings(
                 terminal_auto_enqueue_enabled=_coerce_bool(
-                    report_materialization_payload.get("terminal_auto_enqueue_enabled"), False
+                    report_materialization_payload.get("terminal_auto_enqueue_enabled"), True
                 ),
                 terminal_auto_enqueue_delay_seconds=_coerce_float(
-                    report_materialization_payload.get("terminal_auto_enqueue_delay_seconds"), 0.0, minimum=0.0
+                    report_materialization_payload.get("terminal_auto_enqueue_delay_seconds"), 1.0, minimum=0.0
                 ),
             ),
         ),

@@ -191,8 +191,8 @@ frontend:
 
 reports:
   materialization:
-    terminal_auto_enqueue_enabled: false
-    terminal_auto_enqueue_delay_seconds: 0
+    terminal_auto_enqueue_enabled: true
+    terminal_auto_enqueue_delay_seconds: 1
   artifacts:
     enabled: true
     root_dir: reports

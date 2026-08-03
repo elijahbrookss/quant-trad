@@ -20,6 +20,9 @@ code_paths:
   - portal/backend/service/storage/repos/report_materializations.py
   - portal/backend/service/storage/repos/candles.py
   - portal/backend/service/storage/repos/runtime_events.py
+  - portal/backend/service/bots/botlens_intake_router.py
+  - config/defaults.yaml
+  - src/core/settings.py
   - docs/architecture/reporting/diagrams/run-research-dataset-flow.mmd
 ---
 # Reporting Boundary
@@ -40,11 +43,19 @@ research-performance sections while keeping raw rows available only as
 referenced/debug data.
 
 Terminal report artifacts are materialized separately from run lifecycle truth.
-When a run reaches a terminal status, the backend may enqueue a
-`RunReportDTO` build and persist the artifact/status in
+When a run reaches a terminal status, the backend enqueues a
+`RunReportDTO` build that persists the artifact/status in
 `portal_report_materializations`. Report states (`not_started`, `building`,
 `ready`, `failed`, `stale`) do not alter run terminal status; report build
 failure is a reporting condition, not a runtime failure.
+
+The default enqueue is asynchronous and delayed one second after terminal
+lifecycle intake. The delay lets immediately preceding bounded projection
+intake settle without putting report work on the execution critical path. A
+manual `POST /run-report/build` remains the retry/explicit-build boundary. The
+build's durable input fingerprint is authoritative: late durable input makes an
+artifact stale and forces a rebuild rather than allowing an old report to look
+ready.
 
 Materialized report artifacts are valid only for the exact durable input
 fingerprint recorded with the artifact. The fingerprint includes the run row,
