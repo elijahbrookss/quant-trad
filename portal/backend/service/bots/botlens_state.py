@@ -7,7 +7,7 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, MutableMapping, Optional, Tuple
 
 from core.settings import get_settings
 
@@ -877,7 +877,12 @@ def _overlay_patch_fingerprint(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _apply_polyline_tail_patch(payload: Dict[str, Any], value: Any) -> None:
+def _apply_polyline_tail_patch(
+    payload: Dict[str, Any],
+    value: Any,
+    *,
+    verified_base_fingerprint: str | None = None,
+) -> str:
     patch = value if isinstance(value, Mapping) else {}
     expected_fingerprint = str(patch.get("expected_fingerprint") or "").strip()
     result_fingerprint = str(patch.get("result_fingerprint") or "").strip()
@@ -887,7 +892,8 @@ def _apply_polyline_tail_patch(payload: Dict[str, Any], value: Any) -> None:
         raise ValueError("overlay_delta.polyline_tail contract is incomplete")
     if not isinstance(polylines, list):
         raise ValueError("overlay_delta.polyline_tail requires existing polylines")
-    if _overlay_patch_fingerprint(polylines) != expected_fingerprint:
+    base_fingerprint = verified_base_fingerprint or _overlay_patch_fingerprint(polylines)
+    if base_fingerprint != expected_fingerprint:
         raise ValueError("overlay_delta.polyline_tail base fingerprint mismatch")
     next_polylines = [dict(line) if isinstance(line, Mapping) else line for line in polylines]
     for entry in entries:
@@ -911,13 +917,25 @@ def _apply_polyline_tail_patch(payload: Dict[str, Any], value: Any) -> None:
             **dict(line),
             "points": [*points[drop_prefix:], *append],
         }
-    if _overlay_patch_fingerprint(next_polylines) != result_fingerprint:
+    actual_result_fingerprint = _overlay_patch_fingerprint(next_polylines)
+    if actual_result_fingerprint != result_fingerprint:
         raise ValueError("overlay_delta.polyline_tail result fingerprint mismatch")
     payload["polylines"] = next_polylines
+    return actual_result_fingerprint
 
 
-def apply_overlay_delta(overlays: Any, delta: Any) -> Tuple[Dict[str, Any], ...]:
-    current = project_overlay_state(overlays)
+def apply_overlay_delta(
+    overlays: Any,
+    delta: Any,
+    *,
+    defer_revisions: bool = False,
+    verified_polyline_fingerprints: MutableMapping[str, str] | None = None,
+) -> Tuple[Dict[str, Any], ...]:
+    current = (
+        tuple(dict(overlay) for overlay in overlays if isinstance(overlay, Mapping))
+        if defer_revisions and isinstance(overlays, (list, tuple))
+        else project_overlay_state(overlays)
+    )
     payload = delta if isinstance(delta, Mapping) else {}
     overlay_commit_seq = _overlay_clock_int(payload.get("overlay_commit_seq"), 0)
     base_overlay_commit_seq = _overlay_clock_int(payload.get("base_overlay_commit_seq"), -1)
@@ -946,6 +964,8 @@ def apply_overlay_delta(overlays: Any, delta: Any) -> Tuple[Dict[str, Any], ...]
             continue
         if op_name == "remove":
             overlay_map.pop(key, None)
+            if verified_polyline_fingerprints is not None:
+                verified_polyline_fingerprints.pop(key, None)
             continue
         if op_name == "patch":
             existing = overlay_map.get(key)
@@ -960,15 +980,34 @@ def apply_overlay_delta(overlays: Any, delta: Any) -> Tuple[Dict[str, Any], ...]
             for replace_key, replace_value in replace.items():
                 payload[str(replace_key)] = replace_value
             if patch.get("polyline_tail") is not None:
-                _apply_polyline_tail_patch(payload, patch.get("polyline_tail"))
+                verified_result = _apply_polyline_tail_patch(
+                    payload,
+                    patch.get("polyline_tail"),
+                    verified_base_fingerprint=(
+                        verified_polyline_fingerprints.get(key)
+                        if verified_polyline_fingerprints is not None
+                        else None
+                    ),
+                )
+                if verified_polyline_fingerprints is not None:
+                    verified_polyline_fingerprints[key] = verified_result
+            elif verified_polyline_fingerprints is not None:
+                verified_polyline_fingerprints.pop(key, None)
             normalized["payload"] = payload
             payload_summary = patch.get("payload_summary") if isinstance(patch.get("payload_summary"), Mapping) else None
             if payload_summary is not None:
                 normalized["payload_summary"] = dict(payload_summary)
             normalized["overlay_id"] = key
-            normalized["overlay_revision"] = overlay_revision(
-                {entry_key: entry_value for entry_key, entry_value in normalized.items() if entry_key != "overlay_revision"}
-            )
+            if defer_revisions:
+                normalized.pop("overlay_revision", None)
+            else:
+                normalized["overlay_revision"] = overlay_revision(
+                    {
+                        entry_key: entry_value
+                        for entry_key, entry_value in normalized.items()
+                        if entry_key != "overlay_revision"
+                    }
+                )
             overlay_map[key] = normalized
             continue
         if op_name != "upsert":
@@ -978,9 +1017,18 @@ def apply_overlay_delta(overlays: Any, delta: Any) -> Tuple[Dict[str, Any], ...]
             continue
         normalized = dict(overlay)
         normalized["overlay_id"] = key
-        normalized["overlay_revision"] = overlay_revision(
-            {entry_key: entry_value for entry_key, entry_value in normalized.items() if entry_key != "overlay_revision"}
-        )
+        if verified_polyline_fingerprints is not None:
+            verified_polyline_fingerprints.pop(key, None)
+        if defer_revisions:
+            normalized.pop("overlay_revision", None)
+        else:
+            normalized["overlay_revision"] = overlay_revision(
+                {
+                    entry_key: entry_value
+                    for entry_key, entry_value in normalized.items()
+                    if entry_key != "overlay_revision"
+                }
+            )
         overlay_map[key] = normalized
     overlays_out = list(overlay_map.values())
     if len(overlays_out) > _MAX_OVERLAYS:

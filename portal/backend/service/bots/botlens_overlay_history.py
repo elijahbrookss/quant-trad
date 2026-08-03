@@ -7,7 +7,7 @@ import json
 from typing import Any, Dict, Iterable
 
 from .botlens_retrieval_queries import DomainTruthEvent
-from .botlens_state import apply_overlay_delta
+from .botlens_state import apply_overlay_delta, project_overlay_state
 
 
 _TERMINAL_RUN_STATUSES = {"completed", "cancelled", "canceled", "failed", "stopped"}
@@ -320,6 +320,9 @@ def build_chart_overlay_history(
     first_overlay_seq: int | None = None
     latest_projection: Dict[str, Any] = {}
     projected_through: int | None = None
+    # Replay owns this state exclusively. Each cached value is the computed and
+    # validated result of the preceding tail patch; non-tail mutations evict it.
+    verified_polyline_fingerprints: dict[str, str] = {}
 
     for event in rows:
         context = _mapping(event.context)
@@ -346,7 +349,12 @@ def build_chart_overlay_history(
             reason_codes.append("overlay_timeline_gap_or_order_violation")
             break
         try:
-            overlays = apply_overlay_delta(overlays, delta)
+            overlays = apply_overlay_delta(
+                overlays,
+                delta,
+                defer_revisions=True,
+                verified_polyline_fingerprints=verified_polyline_fingerprints,
+            )
         except ValueError as exc:
             ordering_assured = False
             reason_codes.append(f"overlay_delta_invalid:{exc}")
@@ -396,14 +404,15 @@ def build_chart_overlay_history(
         and cadence_covers_range
         and (not terminal_checkpoint_required or terminal_checkpoint_present)
     )
+    projected_overlays = project_overlay_state(overlays)
     clipped = _clip_overlays(
-        overlays,
+        projected_overlays,
         start_epoch=int(range_start_epoch),
         end_epoch=int(range_end_epoch),
     )
     payload_truncated = any(
         bool(_mapping(overlay.get("payload_summary")).get("truncated"))
-        for overlay in overlays
+        for overlay in projected_overlays
     )
     if payload_truncated:
         reason_codes.append("overlay_payload_truncated")

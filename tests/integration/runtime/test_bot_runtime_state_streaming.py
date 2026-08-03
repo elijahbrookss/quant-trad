@@ -157,7 +157,7 @@ def test_overlay_delta_patches_stable_overlay_payload_changes() -> None:
 
 
 def test_overlay_delta_encodes_large_rolling_polylines_as_small_exact_tail_patch() -> None:
-    from portal.backend.service.bots.botlens_state import apply_overlay_delta
+    from portal.backend.service.bots.botlens_state import apply_overlay_delta, project_overlay_state
 
     runtime = _DummyRuntime()
     cache: dict[str, object] = {}
@@ -195,6 +195,21 @@ def test_overlay_delta_encodes_large_rolling_polylines_as_small_exact_tail_patch
     projected = apply_overlay_delta([first["ops"][0]["overlay"]], second)
     assert projected[0]["payload"]["polylines"] == overlay(25)["payload"]["polylines"]
 
+    verified_fingerprints: dict[str, str] = {}
+    deferred_first = apply_overlay_delta(
+        (),
+        first,
+        defer_revisions=True,
+        verified_polyline_fingerprints=verified_fingerprints,
+    )
+    deferred_second = apply_overlay_delta(
+        deferred_first,
+        second,
+        defer_revisions=True,
+        verified_polyline_fingerprints=verified_fingerprints,
+    )
+    assert project_overlay_state(deferred_second) == projected
+
     corrupted = [dict(first["ops"][0]["overlay"])]
     corrupted[0]["payload"] = {
         **dict(corrupted[0]["payload"]),
@@ -202,3 +217,13 @@ def test_overlay_delta_encodes_large_rolling_polylines_as_small_exact_tail_patch
     }
     with pytest.raises(ValueError, match="base fingerprint mismatch"):
         apply_overlay_delta(corrupted, second)
+
+    corrupted_result = json.loads(json.dumps(second))
+    corrupted_result["ops"][0]["payload_patch"]["polyline_tail"]["result_fingerprint"] = "0" * 64
+    with pytest.raises(ValueError, match="result fingerprint mismatch"):
+        apply_overlay_delta(
+            deferred_first,
+            corrupted_result,
+            defer_revisions=True,
+            verified_polyline_fingerprints={},
+        )
