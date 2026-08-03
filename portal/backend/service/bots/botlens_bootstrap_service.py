@@ -324,49 +324,51 @@ async def get_botlens_run_bootstrap(*, run_id: str) -> Dict[str, Any]:
     )
     if not selected_symbol_key:
         raise ValueError(f"BotLens could not resolve a default symbol for run_id={active_run_id}")
-    ensure_symbol_started = time.perf_counter()
-    selected_symbol_state = await _telemetry_hub().ensure_symbol_snapshot(
-        run_id=active_run_id,
-        bot_id=str(bot_id),
-        symbol_key=selected_symbol_key,
-    )
-    _observe_projection_read(
-        started=ensure_symbol_started,
-        bot_id=bot_id,
-        run_id=active_run_id,
-        source_reason="ensure_symbol_snapshot",
-    )
-    if selected_symbol_state.readiness.snapshot_ready:
-        continuity_summary = continuity_summary_from_candles(
-            selected_symbol_state.candles.candles,
-            timeframe=selected_symbol_state.identity.timeframe,
-            series_key=selected_symbol_state.symbol_key,
+    selected_symbol_state = None
+    if transport_eligible:
+        ensure_symbol_started = time.perf_counter()
+        selected_symbol_state = await _telemetry_hub().ensure_symbol_snapshot(
+            run_id=active_run_id,
+            bot_id=str(bot_id),
+            symbol_key=selected_symbol_key,
         )
-        if should_persist_observer_continuity(
-            stage="botlens_run_bootstrap_snapshot",
-            message_kind="ephemeral",
-            boundary_name="run_bootstrap_selected_symbol",
-        ):
-            emit_candle_continuity_summary(
-                _OBSERVER,
-                stage="botlens_run_bootstrap_snapshot",
-                summary=continuity_summary,
-                bot_id=bot_id,
-                run_id=active_run_id,
-                instrument_id=selected_symbol_state.identity.instrument_id,
-                series_key=selected_symbol_state.symbol_key,
-                symbol=selected_symbol_state.identity.symbol,
+        _observe_projection_read(
+            started=ensure_symbol_started,
+            bot_id=bot_id,
+            run_id=active_run_id,
+            source_reason="ensure_symbol_snapshot",
+        )
+        if selected_symbol_state.readiness.snapshot_ready:
+            continuity_summary = continuity_summary_from_candles(
+                selected_symbol_state.candles.candles,
                 timeframe=selected_symbol_state.identity.timeframe,
+                series_key=selected_symbol_state.symbol_key,
+            )
+            if should_persist_observer_continuity(
+                stage="botlens_run_bootstrap_snapshot",
                 message_kind="ephemeral",
                 boundary_name="run_bootstrap_selected_symbol",
-                extra={
-                    "contract": "botlens_run_bootstrap",
-                    "scope": "selected_symbol",
-                    "snapshot_seq": int(selected_symbol_state.seq or 0),
-                    "materiality": "diagnostic",
-                    "diagnostic_scope": "botlens_observer",
-                },
-            )
+            ):
+                emit_candle_continuity_summary(
+                    _OBSERVER,
+                    stage="botlens_run_bootstrap_snapshot",
+                    summary=continuity_summary,
+                    bot_id=bot_id,
+                    run_id=active_run_id,
+                    instrument_id=selected_symbol_state.identity.instrument_id,
+                    series_key=selected_symbol_state.symbol_key,
+                    symbol=selected_symbol_state.identity.symbol,
+                    timeframe=selected_symbol_state.identity.timeframe,
+                    message_kind="ephemeral",
+                    boundary_name="run_bootstrap_selected_symbol",
+                    extra={
+                        "contract": "botlens_run_bootstrap",
+                        "scope": "selected_symbol",
+                        "snapshot_seq": int(selected_symbol_state.seq or 0),
+                        "materiality": "diagnostic",
+                        "diagnostic_scope": "botlens_observer",
+                    },
+                )
 
     return _observe_run_bootstrap_response(
         started=request_started,

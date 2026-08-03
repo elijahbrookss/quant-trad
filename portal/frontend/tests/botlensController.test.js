@@ -65,7 +65,7 @@ test('completed dataset runs request an initial bounded chart page', () => {
       open: true,
       activeRunId: 'run-1',
       selectedSymbolKey: 'instrument-btc|1m',
-      selectedSymbolReady: true,
+      selectedSymbolReady: false,
       datasetId: 'mds-frozen',
       chartHistoryStatus: 'idle',
     }),

@@ -54,7 +54,6 @@ export function shouldLoadInitialBotLensHistory({
   open,
   activeRunId,
   selectedSymbolKey,
-  selectedSymbolReady,
   datasetId,
   chartHistoryStatus,
 }) {
@@ -62,7 +61,6 @@ export function shouldLoadInitialBotLensHistory({
     open
     && activeRunId
     && selectedSymbolKey
-    && selectedSymbolReady
     && datasetId
     && chartHistoryStatus === 'idle',
   )
@@ -699,21 +697,20 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   }, [activeRunId, bot?.id, forensicScopeKey, logger, selectedSymbolKey])
 
   useEffect(() => {
-    if (!open || !selectedSymbolReady || !forensicScopeKey) {
+    if (!open || !forensicScopeKey) {
       if (forensicReplayRef.current.scopeKey) {
         setForensicReplay(emptyForensicReplayState())
       }
       return
     }
     loadMoreDecisionEvidence({ reset: true })
-  }, [forensicScopeKey, loadMoreDecisionEvidence, open, reloadTick, selectedSymbolReady])
+  }, [forensicScopeKey, loadMoreDecisionEvidence, open, reloadTick])
 
   useEffect(() => {
     if (!shouldLoadInitialBotLensHistory({
       open,
       activeRunId,
       selectedSymbolKey,
-      selectedSymbolReady,
       datasetId,
       chartHistoryStatus,
     })) return undefined
@@ -779,7 +776,6 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     logger,
     open,
     selectedSymbolKey,
-    selectedSymbolReady,
   ])
 
   useBotLensLiveTransport({

@@ -150,6 +150,52 @@ def test_selected_symbol_snapshot_contract_is_symbol_scoped_and_not_detail_contr
     assert "detail" not in payload
 
 
+def test_selected_symbol_snapshot_bounds_heavy_evidence_and_reports_window() -> None:
+    symbol_state = replace(
+        _symbol_state(),
+        signals=SymbolSignalsState(
+            signals=tuple({"event_id": f"signal-{index}"} for index in range(40))
+        ),
+        decisions=SymbolDecisionsState(
+            decisions=tuple({"event_id": f"decision-{index}"} for index in range(40))
+        ),
+        trades=SymbolTradesState(
+            trades=tuple(
+                {"trade_id": f"trade-{index}", "symbol_key": "instrument-btc|1m"}
+                for index in range(80)
+            )
+        ),
+    )
+
+    payload = selected_symbol_snapshot_contract(
+        bot_id="bot-1",
+        run_id="run-1",
+        symbol_key="instrument-btc|1m",
+        symbol_state=symbol_state,
+        symbol_catalog_entry=None,
+        run_health={"status": "completed"},
+        run_bootstrap_seq=11,
+        base_seq=17,
+        stream_session_id=None,
+        run_live=False,
+        transport_eligible=False,
+        message="BotLens selected-symbol snapshot ready.",
+    )
+
+    current = payload["selected_symbol"]["current"]
+    assert len(current["signals"]) == 32
+    assert current["signals"][0]["event_id"] == "signal-8"
+    assert len(current["decisions"]) == 32
+    assert len(current["recent_trades"]) == 64
+    assert current["evidence_window"]["signals"] == {
+        "ordering": "latest_tail",
+        "included": 32,
+        "available": 40,
+        "truncated": True,
+    }
+    assert current["evidence_window"]["recent_trades"]["available"] == 80
+
+
 def test_symbol_detail_contract_remains_separate_from_selected_symbol_snapshot_contract() -> None:
     symbol_state = _symbol_state()
 

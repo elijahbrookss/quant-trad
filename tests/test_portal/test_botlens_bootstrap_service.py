@@ -229,6 +229,9 @@ def test_get_botlens_run_bootstrap_loads_exact_historical_run_without_live_trans
         catalog_discovered=True,
         run_live=False,
     )
+    telemetry_hub.ensure_symbol_snapshot = lambda **kwargs: pytest.fail(
+        "terminal run bootstrap must not rebuild selected-symbol state"
+    )
     monkeypatch.setattr(svc, "_telemetry_hub", lambda: telemetry_hub)
     monkeypatch.setattr(
         svc.bot_service,
@@ -262,6 +265,8 @@ def test_get_botlens_run_bootstrap_loads_exact_historical_run_without_live_trans
     assert result["run"]["meta"]["status"] == "completed"
     assert result["readiness"]["run_live"] is False
     assert result["live_transport"]["eligible"] is False
+    assert result["selected_symbol"] is None
+    assert result["bootstrap"]["selected_symbol_snapshot_required"] is True
 
 
 def test_get_botlens_historical_run_bootstrap_survives_missing_definition(monkeypatch) -> None:

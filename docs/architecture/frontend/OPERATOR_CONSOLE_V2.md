@@ -186,7 +186,11 @@ Eligibility rules:
 
 Historical bootstrap is bounded to 30 seconds. A timeout states that historical
 replay did not become ready and offers retry/report evidence; it never spins
-indefinitely. Run inventory determines replay eligibility from either a hot
+indefinitely. Terminal run bootstrap reconstructs run/catalog scope only and
+marks selected-symbol state as a required secondary read. That lets the frozen
+240-bar chart and the first durable forensic page load in parallel with cold
+symbol projection instead of blocking all useful content behind it. Run
+inventory determines replay eligibility from either a hot
 projection or compact durable BotLens-ledger evidence; the inventory read never
 reconstructs the run.
 
@@ -195,6 +199,11 @@ recorded commit boundary. They never fall through to later canonical revisions.
 The initial view requests the latest 240 bars, left-edge movement requests one
 guarded older page, and the manual **Load earlier** action remains as an
 accessible fallback. Every chart response names its evidence source.
+
+Selected-symbol snapshots are latest-tail views: 32 signals, 32 decisions, 64
+trade states, 32 logs, and 160 overlays at most. Each concern reports included,
+available, ordering, and truncation metadata. These windows make initial state
+responsive; they are not completeness claims.
 
 Decision replay uses the typed durable event ledger in ascending 200-event
 pages keyed by after_seq and after_row_id and scoped to the selected instrument.

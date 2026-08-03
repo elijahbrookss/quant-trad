@@ -165,6 +165,32 @@ def _symbol_detail_payload(state: SymbolProjectionSnapshot, *, run_health: Mappi
     }
 
 
+_SNAPSHOT_SIGNAL_LIMIT = 32
+_SNAPSHOT_DECISION_LIMIT = 32
+_SNAPSHOT_TRADE_LIMIT = 64
+_SNAPSHOT_LOG_LIMIT = 32
+_SNAPSHOT_OVERLAY_LIMIT = 160
+
+
+def _latest_tail(values: Any, limit: int) -> list[Dict[str, Any]]:
+    entries = tuple(values or ())
+    return [
+        dict(entry)
+        for entry in entries[-max(1, int(limit)):]
+        if isinstance(entry, Mapping)
+    ]
+
+
+def _evidence_window(values: Any, included: list[Dict[str, Any]]) -> Dict[str, Any]:
+    available = len(tuple(values or ()))
+    return {
+        "ordering": "latest_tail",
+        "included": len(included),
+        "available": available,
+        "truncated": available > len(included),
+    }
+
+
 def _symbol_current_payload(
     state: SymbolProjectionSnapshot,
     *,
@@ -175,6 +201,11 @@ def _symbol_current_payload(
         timeframe=state.identity.timeframe,
         series_key=state.symbol_key,
     ).to_dict()
+    signals = _latest_tail(state.signals.signals, _SNAPSHOT_SIGNAL_LIMIT)
+    decisions = _latest_tail(state.decisions.decisions, _SNAPSHOT_DECISION_LIMIT)
+    trades = _latest_tail(state.trades.trades, _SNAPSHOT_TRADE_LIMIT)
+    logs = _latest_tail(state.diagnostics.diagnostics, _SNAPSHOT_LOG_LIMIT)
+    overlays = _latest_tail(state.overlays.overlays, _SNAPSHOT_OVERLAY_LIMIT)
     return {
         **_symbol_overlay_cursor_payload(state),
         "candles": [dict(entry) for entry in state.candles.candles],
@@ -183,11 +214,18 @@ def _symbol_current_payload(
             if state.provisional_candle.provisional_candle is not None
             else None
         ),
-        "overlays": [dict(entry) for entry in state.overlays.overlays],
-        "signals": [dict(entry) for entry in state.signals.signals],
-        "decisions": [dict(entry) for entry in state.decisions.decisions],
-        "recent_trades": [dict(entry) for entry in state.trades.trades],
-        "logs": [dict(entry) for entry in state.diagnostics.diagnostics],
+        "overlays": overlays,
+        "signals": signals,
+        "decisions": decisions,
+        "recent_trades": trades,
+        "logs": logs,
+        "evidence_window": {
+            "signals": _evidence_window(state.signals.signals, signals),
+            "decisions": _evidence_window(state.decisions.decisions, decisions),
+            "recent_trades": _evidence_window(state.trades.trades, trades),
+            "logs": _evidence_window(state.diagnostics.diagnostics, logs),
+            "overlays": _evidence_window(state.overlays.overlays, overlays),
+        },
         "stats": dict(state.stats.stats),
         "runtime": _runtime_payload(run_health),
         "continuity": continuity,

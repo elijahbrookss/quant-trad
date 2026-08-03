@@ -156,8 +156,17 @@ dataset-bound run never silently falls through to later canonical revisions.
 
 Run inventories do not reconstruct terminal projections. They batch one compact
 durable-ledger summary per requested run and report replay eligibility from that
-evidence or from an existing hot projection. Selecting a terminal run performs
-the exact reconstruction under the bounded bootstrap timeout.
+evidence or from an existing hot projection. Selecting a terminal run rebuilds
+only run/catalog scope under the bounded bootstrap timeout; it does not embed a
+full selected-symbol history. The selected-symbol projector is a secondary read,
+while a dataset-bound chart and forensic cursor pages may begin as soon as run
+scope identifies the frozen dataset and canonical series.
+
+Selected-symbol snapshot transport is an explicit latest-tail window: 32 signals,
+32 decisions, 64 trade states, 32 diagnostics, and 160 overlays. Every concern
+reports included and available counts, `ordering=latest_tail`, and whether it
+was truncated. The full projector remains authoritative for live state; the
+durable cursor path is authoritative for complete historical inspection.
 
 Cold decision inspection pages typed domain truth by run, selected series, and
 the stable after_seq/after_row_id cursor. Each page is bounded to 200 events in
