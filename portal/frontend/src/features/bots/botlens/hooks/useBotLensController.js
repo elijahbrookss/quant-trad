@@ -61,6 +61,7 @@ export function isBotLensSelectedSymbolSnapshotReady(payload) {
 }
 
 const BOTLENS_BOOTSTRAP_RETRY_MS = 1000
+const BOTLENS_EXACT_BOOTSTRAP_TIMEOUT_MS = 30_000
 const RETRYABLE_RUN_BOOTSTRAP_STATES = new Set([
   'waiting_for_symbols',
   'start_requested',
@@ -90,6 +91,24 @@ function delay(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, Math.max(0, Number(ms || 0) || 0))
   })
+}
+
+function historicalReplayTimeoutError() {
+  const error = new Error('Historical BotLens replay timed out')
+  error.name = 'TimeoutError'
+  return error
+}
+
+async function fetchExactRunBootstrapBeforeDeadline(runId, deadlineEpochMs) {
+  const remainingMs = deadlineEpochMs - Date.now()
+  if (remainingMs <= 0) throw historicalReplayTimeoutError()
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return fetchBotLensExactRunBootstrap(runId, { signal: AbortSignal.timeout(remainingMs) })
+  }
+  return Promise.race([
+    fetchBotLensExactRunBootstrap(runId),
+    delay(remainingMs).then(() => { throw historicalReplayTimeoutError() }),
+  ])
 }
 
 export function shouldRetryBotLensRunBootstrap(payload) {
@@ -396,10 +415,11 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
 
     const load = async () => {
       let initialSelectedSymbolKey = ''
+      const exactBootstrapDeadline = runId ? Date.now() + BOTLENS_EXACT_BOOTSTRAP_TIMEOUT_MS : null
       try {
         while (!cancelled && token === bootstrapTokenRef.current) {
           const runBootstrap = runId
-            ? await fetchBotLensExactRunBootstrap(runId)
+            ? await fetchExactRunBootstrapBeforeDeadline(runId, exactBootstrapDeadline)
             : await fetchBotLensRunBootstrap(bot.id)
           if (cancelled || token !== bootstrapTokenRef.current) return
           const returnedRunId = String(
@@ -423,11 +443,13 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
             return
           }
           if (shouldRetryBotLensRunBootstrap(runBootstrap)) {
+            const remainingMs = exactBootstrapDeadline ? exactBootstrapDeadline - Date.now() : BOTLENS_BOOTSTRAP_RETRY_MS
+            if (remainingMs <= 0) throw historicalReplayTimeoutError()
             dispatch({
               type: 'run/bootstrapPending',
               statusMessage: String(runBootstrap?.message || 'Waiting for BotLens run bootstrap...'),
             })
-            await delay(BOTLENS_BOOTSTRAP_RETRY_MS)
+            await delay(Math.min(BOTLENS_BOOTSTRAP_RETRY_MS, remainingMs))
             continue
           }
           dispatch({
@@ -438,10 +460,14 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
         }
       } catch (err) {
         if (cancelled || token !== bootstrapTokenRef.current) return
+        const timedOut = ['AbortError', 'TimeoutError'].includes(String(err?.name || ''))
+        const message = timedOut
+          ? 'Historical BotLens replay did not become ready within 30 seconds. Retry, or inspect the persisted report evidence.'
+          : err?.message || 'BotLens bootstrap failed'
         dispatch({
           type: 'run/bootstrapFailed',
-          error: err?.message || 'BotLens bootstrap failed',
-          statusMessage: 'BotLens bootstrap failed.',
+          error: message,
+          statusMessage: message,
         })
         logger.warn('botlens_bootstrap_load_failed', { bot_id: bot.id, run_id: runId || null }, err)
       } finally {

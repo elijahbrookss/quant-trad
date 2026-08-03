@@ -2,13 +2,13 @@ import { Dialog, DialogPanel } from '@headlessui/react'
 import { BotLensContent } from './BotLensContent.jsx'
 
 /**
- * Modal shell used by v1 (BotPanel) and any v2 caller that still wants an
- * overlay. The routed v2 lens page uses BotLensRuntimePageView instead —
- * both share BotLensContent so tab/table/chart logic exists exactly once.
+ * Shared modal lens. Browser navigation selects the run, but the lens remains
+ * an inspection overlay so closing it returns to the operator inventory.
  */
 export function BotLensRuntimeView({
   model,
   changeSelectedSymbol,
+  contextHeader = null,
   loadOlderHistory,
   onClose,
   open,
@@ -16,9 +16,10 @@ export function BotLensRuntimeView({
 }) {
   return (
     <Dialog open={open} onClose={onClose} className="relative z-[75]">
-      <div className="fixed inset-0 bg-black/80 backdrop-blur-sm" aria-hidden="true" />
+      <div className="qt2-lens-backdrop fixed inset-0 bg-black/80 backdrop-blur-md" aria-hidden="true" />
       <div className="fixed inset-0 overflow-y-auto px-3 py-3 sm:px-4 sm:py-4">
-        <DialogPanel className="qt-ops-shell qt-botlens-shell mx-auto flex min-h-[calc(100vh-1.5rem)] w-full max-w-[min(96vw,118rem)] flex-col overflow-hidden">
+        <DialogPanel className="qt2-lens-dialog qt-ops-shell qt-botlens-shell mx-auto flex min-h-[calc(100vh-1.5rem)] w-full max-w-[min(96vw,118rem)] flex-col overflow-hidden">
+          {contextHeader}
           <BotLensContent
             model={model}
             changeSelectedSymbol={changeSelectedSymbol}

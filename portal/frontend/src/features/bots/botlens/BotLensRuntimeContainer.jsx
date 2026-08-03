@@ -9,7 +9,7 @@ import { BotLensRuntimePageView } from './BotLensRuntimePageView.jsx'
  * routed lens). Both variants render the same BotLensContent; only the
  * outer chrome differs. See BotLensRuntimeView.jsx / BotLensRuntimePageView.jsx.
  */
-export function BotLensRuntimeContainer({ bot, runId = null, open = Boolean(bot), onClose, variant = 'dialog' }) {
+export function BotLensRuntimeContainer({ bot, runId = null, open = Boolean(bot), onClose, variant = 'dialog', contextHeader = null }) {
   const controller = useBotLensController({ open, bot, onClose, runId })
   const runState = controller.runState
 
@@ -109,6 +109,7 @@ export function BotLensRuntimeContainer({ bot, runId = null, open = Boolean(bot)
   return (
     <View
       model={model}
+      contextHeader={contextHeader}
       changeSelectedSymbol={controller.changeSelectedSymbol}
       loadOlderHistory={controller.loadOlderHistory}
       onClose={controller.closeModal}

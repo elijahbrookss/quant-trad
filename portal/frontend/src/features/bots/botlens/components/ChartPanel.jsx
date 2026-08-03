@@ -178,6 +178,7 @@ function ChartViewport({
   isFullscreen,
   model,
   onLoadOlderHistory,
+  onNearHistoryStart,
   onToggleFullscreen,
   overlayVisibility,
   viewportResetKey,
@@ -206,12 +207,12 @@ function ChartViewport({
         <button
           type="button"
           onClick={onLoadOlderHistory}
-          disabled={!model.candles.length}
+          disabled={!model.candles.length || model.historyStatus === 'loading'}
           className="inline-flex h-8 items-center gap-1.5 rounded-[3px] border border-white/10 bg-black/45 px-2.5 text-xs font-semibold text-slate-200 transition hover:border-white/20 hover:bg-black/60 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
           title="Load older chart history"
         >
           <RefreshCcw className="size-3.5" />
-          Older
+          Load earlier
         </button>
         <button
           type="button"
@@ -237,6 +238,7 @@ function ChartViewport({
             playbackSpeed={model.playbackSpeed}
             timeframe={model.timeframe}
             overlayVisibility={overlayVisibility}
+            onNearHistoryStart={onNearHistoryStart}
             viewportResetKey={viewportResetKey}
             heightClass={chartHeightClass}
           />
@@ -323,6 +325,7 @@ export const ChartPanel = memo(function ChartPanel({
         isFullscreen={isFullscreen}
         model={model}
         onLoadOlderHistory={onLoadOlderHistory}
+        onNearHistoryStart={onLoadOlderHistory}
         onToggleFullscreen={() => setIsFullscreen((value) => !value)}
         overlayVisibility={overlayVisibility}
         viewportResetKey={viewportResetKey}

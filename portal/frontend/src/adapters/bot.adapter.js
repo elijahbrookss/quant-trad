@@ -115,8 +115,8 @@ export async function fetchBotLensRunBootstrap(botId) {
   return request(`/api/bots/${encodeURIComponent(botId)}/botlens/bootstrap/run`)
 }
 
-export async function fetchBotLensExactRunBootstrap(runId) {
-  return request(`/api/bots/runs/${encodeURIComponent(runId)}/botlens/bootstrap`)
+export async function fetchBotLensExactRunBootstrap(runId, options = {}) {
+  return request(`/api/bots/runs/${encodeURIComponent(runId)}/botlens/bootstrap`, options)
 }
 
 

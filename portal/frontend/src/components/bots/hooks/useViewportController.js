@@ -92,7 +92,7 @@ const buildGhostPoints = (candles = [], segments = []) => {
   return ghostPoints
 }
 
-export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef, latestCandlesRef, debugRanges = false }) => {
+export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef, latestCandlesRef, debugRanges = false, onNearHistoryStart = null }) => {
   const lockedRef = useRef(true)
   const animationActiveRef = useRef(false)
   const userOverrideUntilRef = useRef(0)
@@ -101,6 +101,7 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
   const preferredSpanBarsRef = useRef(DEFAULT_CAMERA_SPAN_BARS)
   const lastLogicalRangeRef = useRef(null)
   const interactionRef = useRef({ dragging: false, wheelUntil: 0 })
+  const nearHistoryTriggeredRef = useRef(false)
   const logger = useMemo(() => createLogger('ViewportController'), [])
 
   const applyRange = useCallback((range, logicalRange) => {
@@ -290,6 +291,13 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
           }).logicalRange
           notifyUserInteraction(INTERACTION_SUPPRESS_MS)
           setLocked(isLogicalRangePinnedToLatest(logicalRange, liveLogicalRange))
+          const leftEdge = Number(logicalRange?.from)
+          if (Number.isFinite(leftEdge) && leftEdge <= 12 && !nearHistoryTriggeredRef.current) {
+            nearHistoryTriggeredRef.current = true
+            onNearHistoryStart?.()
+          } else if (Number.isFinite(leftEdge) && leftEdge > 24) {
+            nearHistoryTriggeredRef.current = false
+          }
         }
       }
       const handleTimeRangeChange = (timeRange) => {
@@ -340,7 +348,7 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
         containerEl.removeEventListener('wheel', markWheel)
       }
     },
-    [barSpacingRef, chartRef, debugRanges, latestCandlesRef, logger, notifyUserInteraction, setLocked],
+    [barSpacingRef, chartRef, debugRanges, latestCandlesRef, logger, notifyUserInteraction, onNearHistoryStart, setLocked],
   )
 
   useEffect(() => {

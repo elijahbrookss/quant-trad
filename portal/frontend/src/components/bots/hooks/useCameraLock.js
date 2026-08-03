@@ -9,6 +9,7 @@ export const useCameraLock = ({
   latestCandlesRef,
   markerManager,
   debugRanges = false,
+  onNearHistoryStart = null,
 }) => {
   const {
     setLocked,
@@ -18,7 +19,7 @@ export const useCameraLock = ({
     attachRangeGuards,
     lockedRef,
     resetViewport,
-  } = useViewportController({ chartRef, levelSeriesRef, barSpacingRef, latestCandlesRef, debugRanges })
+  } = useViewportController({ chartRef, levelSeriesRef, barSpacingRef, latestCandlesRef, debugRanges, onNearHistoryStart })
 
   const lock = useCallback(() => setLocked(true), [setLocked])
   const unlock = useCallback(() => setLocked(false), [setLocked])

@@ -149,6 +149,7 @@ export function BotLensChart({
   heightClass = 'h-[360px]',
   timeframe = null,
   overlayVisibility = {},
+  onNearHistoryStart = null,
   viewportResetKey = null,
 }) {
   const containerRef = useRef(null)
@@ -271,6 +272,7 @@ export function BotLensChart({
     latestCandlesRef,
     markerManager,
     debugRanges,
+    onNearHistoryStart,
   })
 
   const { pulseTradeElements, clearPulseArtifacts } = usePulseMarkers({

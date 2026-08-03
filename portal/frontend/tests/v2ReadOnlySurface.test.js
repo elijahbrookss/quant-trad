@@ -74,7 +74,7 @@ test('run-scoped BotLens always performs authoritative exact-run and research-ev
   const controller = source(path.join('features', 'bots', 'botlens', 'hooks', 'useBotLensController.js'))
   assert.ok(room.includes('fetchRun(runId)'))
   assert.ok(room.includes('fetchRunResearchEvidence(runId)'))
-  assert.ok(controller.includes('fetchBotLensExactRunBootstrap(runId)'))
+  assert.match(controller, /fetchBotLensExactRunBootstrap\(runId(?:,|\))/)
   assert.equal(room.includes('fetchBot(botId)'), false)
 })
 
