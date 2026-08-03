@@ -123,6 +123,43 @@ def test_market_structure_operator_snapshot_is_consolidated(monkeypatch) -> None
     assert payload["sessions"][0]["limit"] == 17
     assert payload["status_by_definition"]["definition-a"]["manifest_count"] == 1
     assert payload["observed_at"]
+    assert payload["component_errors"] == {}
+
+
+def test_market_structure_snapshot_isolates_normalization_integrity_failure(monkeypatch) -> None:
+    monkeypatch.setattr(
+        controller.market_structure_repository,
+        "list_stream_definitions",
+        lambda: [{"id": "definition-a"}],
+    )
+    monkeypatch.setattr(
+        controller.market_structure_repository,
+        "list_sessions",
+        lambda **kwargs: [{"session_id": "session-a"}],
+    )
+    monkeypatch.setattr(
+        controller.market_structure_repository,
+        "list_archive_status_summaries",
+        lambda: {"definition-a": {"manifest_count": 1}},
+    )
+
+    def corrupt_specs():
+        raise RuntimeError("market_normalization_spec_storage_corrupt: hash mismatch")
+
+    monkeypatch.setattr(
+        controller.market_normalization_service, "list_specs", corrupt_specs
+    )
+    response = _client().get("/api/market-data/market-structure/snapshot")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["definitions"] == [{"id": "definition-a"}]
+    assert payload["sessions"] == [{"session_id": "session-a"}]
+    assert payload["status_by_definition"]["definition-a"]["manifest_count"] == 1
+    assert payload["normalization_specs"] == []
+    error = payload["component_errors"]["normalization_specs"]
+    assert error["code"] == "market_structure_normalization_specs_unavailable"
+    assert "hash mismatch" in error["details"]
 
 
 def test_market_structure_pair_route_never_implies_production(monkeypatch) -> None:

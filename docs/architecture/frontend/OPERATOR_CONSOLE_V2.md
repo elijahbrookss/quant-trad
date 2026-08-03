@@ -25,6 +25,7 @@ code_paths:
   - portal/frontend/src/adapters/marketData.adapter.js
   - portal/frontend/src/adapters/research.adapter.js
   - portal/backend/controller/bots.py
+  - portal/backend/controller/market_data.py
   - portal/backend/controller/reports.py
   - portal/backend/controller/research.py
   - portal/backend/service/bots/bot_service.py
@@ -151,6 +152,16 @@ pages are not the historical retrieval contract. Market inventory uses
 the scheduled-fact projection has its own durable snapshot and stream. Research
 remains bounded to 200 records. Only the selected task domain performs its
 secondary inventory reads.
+
+The market snapshot is a partial-success contract. `component_errors` is keyed
+by `definitions`, `sessions`, `normalization_specs`, or `status_by_definition`;
+each value contains a stable code, readable message, and exact technical detail.
+A failed component returns its typed empty fallback while healthy components
+remain visible. The backend emits one warning per distinct component failure
+and one recovery event rather than logging every five-second stream poll. The
+frontend marks normalization unavailable when its component read failed and
+renders each error inside Structure Streams; it never reinterprets a failed read
+as evidence that no specifications exist.
 
 Market Lens is a routed, blurred modal over Operations. It exposes four
 component-owned views: Status, Facts, Attempts, and Quality. Facts are read from

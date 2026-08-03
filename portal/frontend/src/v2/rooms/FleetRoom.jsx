@@ -9,7 +9,7 @@ import {
   buildMarketPostureRows,
   buildStreamSessionRows,
 } from '../../features/market-structure/buildMarketPosture.js'
-import { useMarketStructureFeed } from '../../features/market-structure/useMarketStructureFeed.js'
+import { formatMarketStructureComponentError, useMarketStructureFeed } from '../../features/market-structure/useMarketStructureFeed.js'
 import {
   buildRunRows,
   filterAndSortRunRows,
@@ -331,9 +331,10 @@ export function FleetRoom() {
     sessions: marketFeed.sessions,
     statusByDefinition: marketFeed.statusByDefinition,
     normalizationSpecs: marketFeed.normalizationSpecs,
+    normalizationAvailable: !marketFeed.componentErrors.normalization_specs,
     collectors: collectorFeed.collectors,
     nowEpochMs,
-  }).filter((row) => matchesMarketQuery(row, query)), [marketFeed.definitions, marketFeed.sessions, marketFeed.statusByDefinition, marketFeed.normalizationSpecs, collectorFeed.collectors, nowEpochMs, query])
+  }).filter((row) => matchesMarketQuery(row, query)), [marketFeed.definitions, marketFeed.sessions, marketFeed.statusByDefinition, marketFeed.normalizationSpecs, marketFeed.componentErrors.normalization_specs, collectorFeed.collectors, nowEpochMs, query])
   const statusOptions = useMemo(() => {
     const source = tab === 'research' ? researchItems.map((item) => item.status) : runInventory.runs.map((run) => run.runtime_status || run.status)
     return [...new Set(source.filter(Boolean))].sort()
@@ -343,6 +344,9 @@ export function FleetRoom() {
   const runPageModel = paginateRows(runRows, 1, Math.max(PAGE_SIZE, runRows.length))
   const collectorPageModel = paginateRows(collectorGroups, 1, Math.max(PAGE_SIZE, collectorGroups.length))
   const marketPageModel = paginateRows(postureRows, 1, Math.max(PAGE_SIZE, postureRows.length))
+  const marketComponentErrors = Object.entries(marketFeed.componentErrors)
+    .map(([component, error]) => ({ component, error: formatMarketStructureComponentError(error) }))
+    .filter((entry) => entry.error)
 
   function selectTab(nextTab) {
     setStatus('all')
@@ -405,6 +409,7 @@ export function FleetRoom() {
               <div className="qt2-inventory-heading"><div><h2 id="structure-streams-heading">Structure streams</h2><p>Coverage, book validity, archive, normalization, and admission.</p></div><span>{postureRows.length}</span></div>
               {marketFeed.error ? <OperatorErrorNotice error={marketFeed.error} compact /> : null}
               {marketFeed.streamError ? <OperatorErrorNotice error={marketFeed.streamError} compact /> : null}
+              {marketComponentErrors.map(({ component, error }) => <div className="qt2-component-boundary" data-component={component} key={component}><OperatorErrorNotice error={error} compact /></div>)}
               <MarketDataTable pageModel={marketPageModel} loading={marketFeed.loading} streamCount={streamRows.length} showPagination={false} />
             </section>
           </div>

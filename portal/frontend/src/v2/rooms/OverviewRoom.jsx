@@ -4,7 +4,7 @@ import { RefreshCcw } from 'lucide-react'
 import { useFleetBotsFeed } from '../../features/bots/page/useFleetBotsFeed.js'
 import { buildCollectorCardViewModel } from '../../features/collectors/buildCollectorCardViewModel.js'
 import { useCollectorsFeed } from '../../features/collectors/useCollectorsFeed.js'
-import { useMarketStructureFeed } from '../../features/market-structure/useMarketStructureFeed.js'
+import { formatMarketStructureComponentError, useMarketStructureFeed } from '../../features/market-structure/useMarketStructureFeed.js'
 import {
   buildMarketPostureRows,
   buildStreamSessionRows,
@@ -81,9 +81,10 @@ export function OverviewRoom() {
     sessions: marketFeed.sessions,
     statusByDefinition: marketFeed.statusByDefinition,
     normalizationSpecs: marketFeed.normalizationSpecs,
+    normalizationAvailable: !marketFeed.componentErrors.normalization_specs,
     collectors: collectorFeed.collectors,
     nowEpochMs,
-  }), [marketFeed.definitions, marketFeed.sessions, marketFeed.statusByDefinition, marketFeed.normalizationSpecs, collectorFeed.collectors, nowEpochMs])
+  }), [marketFeed.definitions, marketFeed.sessions, marketFeed.statusByDefinition, marketFeed.normalizationSpecs, marketFeed.componentErrors.normalization_specs, collectorFeed.collectors, nowEpochMs])
   const streamRows = useMemo(() => buildStreamSessionRows({
     definitions: marketFeed.definitions,
     sessions: marketFeed.sessions,
@@ -149,7 +150,7 @@ export function OverviewRoom() {
         <SummaryCard label="Attention" value={attentionItems.length || 'Clear'} detail={attentionItems.length ? "Within " + ATTENTION_CONTRACT.lookbackHours + " hours" : 'No known actionable issues'} tone={attentionItems.length ? 'danger' : 'success'} to="/operations" loading={operationsLoading && !attentionItems.length} error={attentionError} />
         <SummaryCard label="Active runs" value={activeRuns} detail={activeRuns === 1 ? 'One live run projection' : 'Run instances evidenced active'} tone={activeRuns ? 'info' : 'neutral'} to="/operations?tab=runs" loading={runInventory.loading && !runInventory.runs.length} error={botsError || runInventory.error} />
         <SummaryCard label="Collectors" value={collectorSummary.enabled ? `${collectorSummary.healthy}/${collectorSummary.enabled}` : 'None'} detail={collectorSummary.issues ? `${collectorSummary.issues} schedule${collectorSummary.issues === 1 ? '' : 's'} need attention` : 'On-schedule delivery evidence'} tone={collectorSummary.issues ? 'warning' : 'success'} to="/operations?tab=market" loading={collectorFeed.loading && !collectorFeed.collectors.length} error={collectorFeed.error} />
-        <SummaryCard label="Market pairs" value={postureRows.length || 'None'} detail={marketIssues ? `${marketIssues} pair${marketIssues === 1 ? '' : 's'} need review` : 'No known quality issues'} tone={marketIssues ? 'warning' : 'success'} to="/operations?tab=market" loading={marketFeed.loading && !postureRows.length} error={marketFeed.error} />
+        <SummaryCard label="Market pairs" value={postureRows.length || 'None'} detail={marketIssues ? `${marketIssues} pair${marketIssues === 1 ? '' : 's'} need review` : 'No known quality issues'} tone={marketIssues ? 'warning' : 'success'} to="/operations?tab=market" loading={marketFeed.loading && !postureRows.length} error={marketFeed.error || formatMarketStructureComponentError(marketFeed.componentErrors.definitions)} />
       </div>
 
       <div className="qt2-dashboard-grid">

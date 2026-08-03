@@ -24,6 +24,8 @@ test('Operations uses three task domains, grouped Market evidence, and cursor-ba
   assert.match(operations, /runInventory\.loadMore/)
   assert.match(operations, /BotLens unavailable/)
   assert.match(operations, /Copy rerun command/)
+  assert.match(operations, /marketComponentErrors.map/)
+  assert.match(operations, /data-component=\{component\}/)
   assert.doesNotMatch(operations, /id: \x27collectors\x27|id: \x27market-data\x27/)
   assert.doesNotMatch(operations, /errors\.map/)
 })

@@ -61,3 +61,21 @@ test('market posture reports invalid coverage independently from archive availab
   assert.equal(rows[0].coverage.value, 'invalid')
   assert.equal(rows[0].archive.value, 'available')
 })
+
+test('market posture marks normalization unavailable when its snapshot component failed', () => {
+  const rows = buildMarketPostureRows({
+    definitions: [{
+      id: 'stream-1',
+      enabled: true,
+      production_admitted: false,
+      provider_product_id: 'SLP-20DEC30-CDE',
+      config: { pair_id: 'slp_sol' },
+    }],
+    normalizationSpecs: [],
+    normalizationAvailable: false,
+  })
+
+  assert.equal(rows[0].normalization.value, 'unavailable')
+  assert.equal(rows[0].normalization.label, 'Normalization unavailable')
+  assert.equal(rows[0].normalization.tone, 'warning')
+})

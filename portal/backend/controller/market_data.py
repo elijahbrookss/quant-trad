@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -28,6 +29,7 @@ from ..service.storage.repos.market_structure import market_structure_repository
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _collector_material(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -49,15 +51,80 @@ def _collector_fingerprint(snapshot: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+_market_structure_component_errors: dict[str, str] = {}
+
+
+def _read_market_structure_component(
+    component: str,
+    label: str,
+    reader: Callable[[], Any],
+    fallback: Any,
+) -> tuple[Any, Optional[dict[str, str]]]:
+    try:
+        value = reader()
+    except Exception as exc:
+        signature = f"{type(exc).__name__}:{exc}"
+        if _market_structure_component_errors.get(component) != signature:
+            logger.warning(
+                "market_structure_snapshot_component_unavailable component=%s error=%s",
+                component,
+                exc,
+            )
+            _market_structure_component_errors[component] = signature
+        return fallback, {
+            "code": f"market_structure_{component}_unavailable",
+            "message": f"{label} are unavailable.",
+            "details": str(exc),
+        }
+    if _market_structure_component_errors.pop(component, None) is not None:
+        logger.info(
+            "market_structure_snapshot_component_recovered component=%s", component
+        )
+    return value, None
+
+
 def _market_structure_snapshot(*, session_limit: int = 250) -> dict[str, Any]:
+    limit = max(1, min(int(session_limit or 250), 500))
+    component_errors: dict[str, dict[str, str]] = {}
+    definitions, error = _read_market_structure_component(
+        "definitions",
+        "Stream definitions",
+        market_structure_repository.list_stream_definitions,
+        [],
+    )
+    if error:
+        component_errors["definitions"] = error
+    sessions, error = _read_market_structure_component(
+        "sessions",
+        "Stream sessions",
+        lambda: market_structure_repository.list_sessions(limit=limit),
+        [],
+    )
+    if error:
+        component_errors["sessions"] = error
+    normalization_specs, error = _read_market_structure_component(
+        "normalization_specs",
+        "Normalization specifications",
+        market_normalization_service.list_specs,
+        [],
+    )
+    if error:
+        component_errors["normalization_specs"] = error
+    status_by_definition, error = _read_market_structure_component(
+        "status_by_definition",
+        "Archive and quality summaries",
+        market_structure_repository.list_archive_status_summaries,
+        {},
+    )
+    if error:
+        component_errors["status_by_definition"] = error
     return {
         "schema_version": "market_structure_operator_snapshot.v1",
-        "definitions": market_structure_repository.list_stream_definitions(),
-        "sessions": market_structure_repository.list_sessions(
-            limit=max(1, min(int(session_limit or 250), 500))
-        ),
-        "normalization_specs": market_normalization_service.list_specs(),
-        "status_by_definition": market_structure_repository.list_archive_status_summaries(),
+        "definitions": definitions,
+        "sessions": sessions,
+        "normalization_specs": normalization_specs,
+        "status_by_definition": status_by_definition,
+        "component_errors": component_errors,
         "observed_at": datetime.now(UTC).isoformat(),
     }
 

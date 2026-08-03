@@ -187,6 +187,7 @@ export function buildMarketPostureRows({
   sessions = [],
   statusByDefinition = {},
   normalizationSpecs = [],
+  normalizationAvailable = true,
   collectors = [],
   nowEpochMs = Date.now(),
 } = {}) {
@@ -237,7 +238,13 @@ export function buildMarketPostureRows({
           .filter(Boolean),
       ),
     )
-    const normalization = frozenDatasetIds.size
+    const normalization = !normalizationAvailable
+      ? {
+          label: 'Normalization unavailable',
+          tone: 'warning',
+          value: 'unavailable',
+        }
+      : frozenDatasetIds.size
       ? {
           label: `${frozenDatasetIds.size} frozen dataset${frozenDatasetIds.size === 1 ? '' : 's'}`,
           tone: 'success',

@@ -4,11 +4,17 @@ import {
   openMarketStructureStream,
 } from '../../adapters/marketData.adapter.js'
 
+export function formatMarketStructureComponentError(error) {
+  if (!error) return null
+  return [error.message, error.details || error.code].filter(Boolean).join(' ')
+}
+
 export function useMarketStructureFeed({ enabled = true } = {}) {
   const [definitions, setDefinitions] = useState([])
   const [sessions, setSessions] = useState([])
   const [normalizationSpecs, setNormalizationSpecs] = useState([])
   const [statusByDefinition, setStatusByDefinition] = useState({})
+  const [componentErrors, setComponentErrors] = useState({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [streamError, setStreamError] = useState(null)
@@ -33,6 +39,7 @@ export function useMarketStructureFeed({ enabled = true } = {}) {
       setDefinitions(nextDefinitions)
       setSessions(Array.isArray(payload.sessions) ? payload.sessions : [])
       setNormalizationSpecs(Array.isArray(payload.normalization_specs) ? payload.normalization_specs : [])
+      setComponentErrors(payload.component_errors && typeof payload.component_errors === 'object' ? payload.component_errors : {})
       setStatusByDefinition(Object.fromEntries(nextDefinitions.map((definition) => {
         const value = summaries[definition.id]
         return [definition.id, value
@@ -48,7 +55,7 @@ export function useMarketStructureFeed({ enabled = true } = {}) {
       try {
         applyPayload(JSON.parse(event.data))
         setStreamError(null)
-      } catch (_error) {
+      } catch {
         setStreamError('Live market update could not be read; reconnecting.')
       }
     }
@@ -88,6 +95,7 @@ export function useMarketStructureFeed({ enabled = true } = {}) {
     sessions,
     normalizationSpecs,
     statusByDefinition,
+    componentErrors,
     loading,
     error,
     streamError,
