@@ -212,10 +212,12 @@ owns health, live streams, and navigation reads.
 Active BotLens opens are bootstrap-first. When the hot selected-symbol
 bootstrap already contains a bounded candle window, the console renders that
 window and attaches the live stream without issuing the initial cold
-chart-history request. Cold reconstruction remains available when bootstrap
-has no candles and when the operator explicitly moves left. Completed runs
-still request their initial durable 240-bar page because terminal replay, not a
-live projection, owns their historical completeness evidence.
+chart-history request or automatically scanning the first 200 forensic events.
+Cold reconstruction remains available when bootstrap has no candles, when the
+operator explicitly moves left, or through **Load durable replay**. Completed
+runs still request their initial durable 240-bar and forensic pages because
+terminal replay, not a live projection, owns their historical completeness
+evidence.
 
 Bot controller handlers that call synchronous SQL, Docker inspection, dataset
 preparation, or forensic services execute in FastAPI's worker threadpool. The
@@ -238,8 +240,15 @@ truncation, and fingerprint evidence. Old runs without retained deltas say
 **overlays not retained for this run**; incomplete pages say **bounded replay**;
 only proven pages say **ledger verified**.
 
-Selected-symbol snapshots are latest-tail views: 32 signals, 32 decisions, 64
-trade states, 32 logs, and 160 overlays at most. Each concern reports included,
+Terminal overlay reconstruction avoids repeated presentation serialization
+inside the delta loop, but it still verifies ordering and every typed tail-patch
+result before emitting the same stable page fingerprint. Performance work must
+not turn a corrupt overlay chain into apparently complete chart evidence.
+
+Selected-symbol snapshots are latest-tail views: 16 signals, 16 decisions, 32
+trade states, 16 logs, and 160 overlays at most. Runtime warning detail is also
+limited to the latest 16 entries while the total count, type/severity summary,
+and durable forensic/report paths remain available. Each concern reports included,
 available, ordering, and truncation metadata. These windows make initial state
 responsive; they are not completeness claims.
 

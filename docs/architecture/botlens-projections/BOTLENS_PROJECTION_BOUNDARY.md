@@ -166,8 +166,10 @@ full selected-symbol history. The selected-symbol projector is a secondary read,
 while a dataset-bound chart and forensic cursor pages may begin as soon as run
 scope identifies the frozen dataset and canonical series.
 
-Selected-symbol snapshot transport is an explicit latest-tail window: 32 signals,
-32 decisions, 64 trade states, 32 diagnostics, and 160 overlays. Every concern
+Selected-symbol snapshot transport is an explicit latest-tail window: 16 signals,
+16 decisions, 32 trade states, 16 diagnostics, and 160 overlays. Runtime health
+includes no more than 16 latest warning details while retaining the untruncated
+warning count and typed summary. Every concern
 reports included and available counts, `ordering=latest_tail`, and whether it
 was truncated. The full projector remains authoritative for live state; the
 durable cursor path is authoritative for complete historical inspection.
@@ -245,9 +247,10 @@ reads.
 
 An active operator lens renders this bounded bootstrap immediately and does not
 eagerly reconstruct the same latest window from the durable ledger when candles
-are already present. The cold path is entered only as an explicit history read
-or as a fallback for a missing live base. Terminal lenses continue to use
-durable pages for completeness claims.
+are already present. It also leaves the first durable forensic page behind the
+explicit **Load durable replay** action. The cold path is entered only as an
+explicit history read or as a fallback for a missing live base. Terminal lenses
+continue to use durable pages for completeness claims.
 
 The fact stream is compacted before it reaches backend projectors.
 `runtime_state_observed` carries compact health/runtime fields, not the full
@@ -296,6 +299,12 @@ causally stop before the returned page end, and clip the resulting geometry to
 the returned candle window. Terminal immutable timelines are held in an
 eight-entry process-local LRU so left-pan pages do not requery the same ledger;
 each page still performs its own causal time cut and stable fingerprint.
+Replay may defer presentation-only `overlay_revision` serialization until the
+final projected state and reuse a base fingerprint only when that fingerprint
+was computed and validated from the immediately preceding tail patch. Every
+tail-patch result is still recomputed and checked, and any non-tail mutation
+invalidates the cached base. This is a CPU optimization, not a weaker replay
+contract.
 
 Historical overlay completeness is conditional, never inferred. The page must
 have runtime-assigned run-order evidence and contiguous overlay clocks, a
