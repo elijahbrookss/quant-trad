@@ -21,6 +21,9 @@ code_paths:
 
 Accepted on 2026-05-20.
 
+Amended on 2026-08-03 after retained overlay evidence made pre-emptive
+general-lane discard unsafe.
+
 ## Context
 
 A parallel backtest stress run completed successfully, but terminal telemetry
@@ -58,9 +61,13 @@ The telemetry worker uses one async websocket connection owned by its worker
 thread. It no longer imports or uses `websockets.sync`. Close semantics are:
 
 - stop accepting new telemetry,
-- drop ordinary queued emit telemetry,
-- flush queued control messages up to the bounded timeout,
-- log `telemetry_control_flush_timeout` if control messages cannot be flushed,
+- prioritize control messages,
+- drain accepted control and general-lane messages up to one bounded timeout,
+- never coalesce material facts such as trades, decisions, wallet ledger
+  events, or retained overlay operations,
+- mark remaining messages failed and log
+  `telemetry_shutdown_flush_timeout` with the owning lane when the deadline
+  expires,
 - close the async websocket from the worker loop.
 
 ## Consequences
@@ -69,8 +76,9 @@ thread. It no longer imports or uses `websockets.sync`. Close semantics are:
   websocket during shutdown pressure.
 - The `websockets.sync` recv-thread shutdown assertion is removed from the
   runtime telemetry path.
-- Runtime facts remain best-effort projection/debug telemetry; lifecycle control
-  messages get bounded flush semantics.
+- Runtime facts remain projection/debug telemetry, but already accepted facts
+  receive a bounded shutdown delivery attempt. Lifecycle control messages stay
+  prioritized.
 - A control flush timeout is visible as observability, not hidden by a silent
   queue clear.
 - The fallback direct websocket can still duplicate a lifecycle event if the

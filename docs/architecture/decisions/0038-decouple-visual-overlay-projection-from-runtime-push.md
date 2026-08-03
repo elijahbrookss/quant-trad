@@ -42,6 +42,10 @@ Accepted on 2026-06-15.
 Amended on 2026-08-03 to retain the bounded delta timeline as non-authoritative
 research context and replay it into causally paged historical chart geometry.
 
+Amended on 2026-08-03 to encode rolling polylines as fingerprinted tail patches,
+preserve overlay facts through transport pressure, and replay by the
+overlay-scoped clock rather than persistence arrival order.
+
 Amends [ADR 0028](0028-use-bounded-projection-dispatch-for-botlens-live-facts.md):
 runtime still emits bounded BotLens facts, but selected-symbol visual overlay
 geometry is no longer built inside the ordinary runtime push-update batch.
@@ -87,6 +91,9 @@ projection step. That step:
 - includes projection metadata in the overlay delta:
   `mode`, `window_bars`, `emit_every_bars`, `bar_index`, `reason`, and `terminal`,
 - records compaction/truncation evidence in each bounded overlay summary,
+- encodes recurring rolling-polyline updates as expected-count,
+  drop-prefix, and append-tail operations with previous/result SHA-256
+  fingerprints,
 - records `overlay_projection` timing and count metrics separately from
   `step_push_update`.
 
@@ -108,6 +115,12 @@ without retained deltas remain explicitly unavailable. Terminal timelines with
 a final checkpoint may be reused in a bounded process-local LRU; every page is
 still causally sliced before rendering.
 
+Because retained overlay deltas are ordered evidence, the telemetry emitter
+does not coalesce `overlay_ops_emitted` batches. Accepted batches receive a
+bounded shutdown drain. The database may commit batches in a different order
+when independent persistence work completes, so historical replay sorts by
+`overlay_commit_seq` and then proves every base/next transition.
+
 ## Consequences
 
 - `step_push_update` timing becomes a cleaner measure of compact fact
@@ -115,6 +128,8 @@ still causally sliced before rendering.
 - Overlay cost is visible under `overlay_projection` metrics, making future
   pressure easier to locate.
 - Long runs avoid replaying or serializing full visual history on every bar.
+- A rolling 640-point render window pays one bounded checkpoint followed by
+  small exact tail patches instead of full-window retransmission.
 - Frontend overlay state receives projection metadata and can tell the user
   whether the visible overlays are bounded projections.
 - Completed new runs can provide deterministic page-by-page overlay geometry

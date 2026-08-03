@@ -218,10 +218,14 @@ flush. Subscriber failures, queue overflow, or drain timeout degrade BotLens
 projection and require resync. Canonical persistence remains fail-loud.
 
 Runtime lifecycle, bootstrap, and shutdown messages use the telemetry control
-lane. The control lane is still projection input, but shutdown must attempt a
-bounded control flush before ordinary live/debug telemetry is abandoned. If the
-flush cannot prove delivery, runtime emits WARN-level diagnostics and may try a
-bounded direct websocket fallback.
+lane. The control lane is still projection input and remains prioritized.
+Accepted general-lane messages drain within the same bounded shutdown deadline
+instead of being discarded immediately. Material facts—including
+`overlay_ops_emitted`, decisions, trades, and wallet ledger facts—are never
+coalesced. Repeated non-material runtime/status facts may still coalesce while
+queued. If shutdown cannot drain either lane, runtime marks every undelivered
+entry failed and emits lane-specific WARN diagnostics. A failed control flush
+may still use the bounded direct websocket fallback.
 
 ## Bounded Hot Views
 
@@ -236,7 +240,13 @@ The fact stream is compacted before it reaches backend projectors.
 runtime snapshot. `series_state_observed` carries routing identity only.
 `series_stats_updated` carries the compact reportable summary.
 `overlay_ops_emitted` carries bounded render overlays with overlay clocks, not
-unbounded indicator history. Wallet ledger and diagnostic facts keep full
+unbounded indicator history. Rolling polyline changes use a typed tail patch:
+the patch names the line index, expected point count, dropped prefix, and
+appended points, and carries SHA-256 fingerprints for both the previous and
+resulting polyline collection. A mismatch fails replay rather than silently
+accepting divergent geometry. The first overlay state remains a bounded full
+checkpoint; recurring changes avoid retransmitting the entire rolling window.
+Wallet ledger and diagnostic facts keep full
 canonical payloads on the producer-side canonical append path while live
 transport drops repeated wallet snapshots and raw diagnostic context that the
 hot view does not need.
@@ -266,14 +276,16 @@ Visual overlays are projection/read-model artifacts. They are not stored on
 `StrategySeries`, do not participate in strategy decisions, and are not built by
 ordinary runtime push updates. Overlay deltas remain bounded viewport evidence,
 but new runs retain those deltas as Tier 2 research context. Chart-history reads
-replay the scoped overlay clock from the beginning of the selected series,
+sort retained events by the scoped overlay clock rather than database arrival
+order, replay that clock from the beginning of the selected series,
 causally stop before the returned page end, and clip the resulting geometry to
 the returned candle window. Terminal immutable timelines are held in an
 eight-entry process-local LRU so left-pan pages do not requery the same ledger;
 each page still performs its own causal time cut and stable fingerprint.
 
 Historical overlay completeness is conditional, never inferred. The page must
-have contiguous `run_seq` and overlay clocks, a projection window that covers
+have runtime-assigned run-order evidence and contiguous overlay clocks, a
+projection window that covers
 the returned candles, cadence coverage through the returned last candle, no
 payload truncation, and—on the latest terminal page—a terminal checkpoint. A
 gap, invalid delta, cadence hole, missing checkpoint, or truncated payload

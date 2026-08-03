@@ -134,7 +134,8 @@ Operations has three task domains rather than exposing backend subsystem names:
 
 | Domain | Primary row grain | Deep detail |
 | --- | --- | --- |
-| Runs | persisted run instance | BotLens modal, report/research evidence, copy-only rerun command |
+| Runs / Current | active run projected by the live fleet feed | BotLens modal and run actions |
+| Runs / History | persisted terminal or prior run instance | replay, report/research evidence, copy-only rerun command |
 | Market | grouped scheduled facts and configured structure pairs | Market Lens facts, attempts, latency, and quality |
 | Research | persisted research item | relationship trail and raw provider-free evidence |
 
@@ -145,10 +146,19 @@ coverage, book-validity, archive, normalization, admission, and quality states
 for configured futures/spot relationships. The grouping reduces scan cost but
 does not merge their typed backend contracts.
 
-Run inventory uses `bot_run_inventory.v1`: one reverse-chronological server
-window with a stable `(before_sort_at, before_run_id)` continuation cursor.
-**Load older runs** appends and deduplicates the next bounded window; numbered
-pages are not the historical retrieval contract. Market inventory uses
+Runs opens on **Current**. Current run cards are derived from the live fleet
+projection and include only evidenced starting, running, paused, or degraded
+run instances. Overview uses the same live projection and never opens the
+global historical inventory endpoint. A configured or terminal bot definition
+is not an active run.
+
+**History** is an explicit secondary view. Only after the operator selects it
+does the console read `bot_run_inventory.v1`: one 20-run
+reverse-chronological server window with a stable
+`(before_sort_at, before_run_id)` continuation cursor. **Load older runs**
+appends and deduplicates the next bounded window; numbered pages are not the
+historical retrieval contract, and the console never attempts to preload every
+completed run or replay. Market inventory uses
 `market_structure_operator_snapshot.v1` plus a change-only SSE stream, while
 the scheduled-fact projection has its own durable snapshot and stream. Research
 remains bounded to 200 records. Only the selected task domain performs its
@@ -194,6 +204,10 @@ symbol projection instead of blocking all useful content behind it. Run
 inventory determines replay eligibility from either a hot
 projection or compact durable BotLens-ledger evidence; the inventory read never
 reconstructs the run.
+
+Chart-history reconstruction is a blocking database/replay read and therefore
+runs in FastAPI's worker threadpool, never on the shared async event loop that
+owns health, live streams, and navigation reads.
 
 Dataset-bound backtest charts read only the run's frozen dataset series at its
 recorded commit boundary. They never fall through to later canonical revisions.
