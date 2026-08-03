@@ -5,6 +5,7 @@ import { BotLensChart } from '../../../../components/bots/BotLensChart.jsx'
 import { OverlayToggleBar } from '../../../../components/bots/OverlayToggleBar.jsx'
 import { useChartState } from '../../../../contexts/ChartStateContext.jsx'
 import { SymbolSelectorPanel } from './SymbolSelectorPanel.jsx'
+import { OperatorErrorNotice } from '../../../../v2/components/OperatorErrorNotice.jsx'
 
 const RUNTIME_CHART_ID = 'botlens-runtime-chart'
 
@@ -207,7 +208,7 @@ function ChartViewport({
         <button
           type="button"
           onClick={onLoadOlderHistory}
-          disabled={!model.candles.length || model.historyStatus === 'loading'}
+          disabled={!model.candles.length || model.historyStatus === 'loading' || !model.hasMoreBefore}
           className="inline-flex h-8 items-center gap-1.5 rounded-[3px] border border-white/10 bg-black/45 px-2.5 text-xs font-semibold text-slate-200 transition hover:border-white/20 hover:bg-black/60 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
           title="Load older chart history"
         >
@@ -293,7 +294,12 @@ export const ChartPanel = memo(function ChartPanel({
               </span>
             ) : null}
             {model.historyStatus === 'loading' ? (
-              <span className="text-xs text-slate-500">Loading older bars</span>
+              <span className="text-xs text-slate-500">Loading bars</span>
+            ) : null}
+            {model.historyEvidenceSource?.kind ? (
+              <span className="text-xs text-slate-500">
+                source {model.historyEvidenceSource.kind.replaceAll('_', ' ')}
+              </span>
             ) : null}
             {overlayCount > 0 ? (
               <span className="text-xs text-slate-500">
@@ -318,6 +324,8 @@ export const ChartPanel = memo(function ChartPanel({
       />
 
       <LiveTradeStrip entries={model.liveTrades} onSelectSymbol={onSelectSymbol} />
+
+      {model.historyError ? <OperatorErrorNotice error={model.historyError} compact /> : null}
 
       <ChartViewport
         canRefocus={canRefocus}

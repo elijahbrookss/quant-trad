@@ -422,6 +422,66 @@ test('runtime view model merges signal decision and trade events into the decisi
   assert.equal(new Set(model.inspection.trades.recentTrades.map((row) => row.key)).size, 2)
 })
 
+test('runtime view model merges and deduplicates cursor-replayed forensic evidence', () => {
+  const base = buildControllerLike(bootstrapState())
+  const model = buildBotLensRuntimeViewModel({
+    ...base,
+    forensicDocuments: [
+      {
+        document_id: 'decision-1',
+        cursor: { after_seq: 5, after_row_id: 11 },
+        truth: {
+          event_id: 'decision-1',
+          event_name: 'DECISION_EMITTED',
+          event_ts: '2026-01-01T00:01:00Z',
+          series_key: 'instrument-btc|1m',
+          context: {
+            decision_id: 'decision-1',
+            decision_state: 'rejected',
+            reason_code: 'risk_limit',
+            message: 'Risk limit blocked entry',
+            bar_time: '2026-01-01T00:01:00Z',
+          },
+        },
+      },
+      {
+        document_id: 'trade-close-1',
+        cursor: { after_seq: 6, after_row_id: 12 },
+        truth: {
+          event_id: 'trade-close-1',
+          event_name: 'TRADE_CLOSED',
+          event_ts: '2026-01-01T00:02:00Z',
+          series_key: 'instrument-btc|1m',
+          context: {
+            trade_id: 'trade-1',
+            trade_state: 'closed',
+            exit_price: 102,
+            trade_net_pnl: 2,
+            bar_time: '2026-01-01T00:02:00Z',
+          },
+        },
+      },
+    ],
+    forensicStatus: 'ready',
+    forensicHasMore: false,
+    forensicNextCursor: { afterSeq: 6, afterRowId: 12 },
+  })
+
+  const entries = model.inspection.decisions.entries
+  assert.equal(new Set(entries.map((entry) => entry.event_id)).size, entries.length)
+  assert.equal(entries.filter((entry) => entry.event_id === 'decision-1').length, 1)
+  assert.equal(
+    entries.find((entry) => entry.event_id === 'decision-1')?.reason_code,
+    'risk_limit',
+  )
+  assert.equal(model.inspection.decisions.hasMore, false)
+  assert.deepEqual(model.inspection.decisions.nextCursor, { afterSeq: 6, afterRowId: 12 })
+  assert.equal(
+    model.inspection.decisions.summaryRows.find((row) => row.key === 'rejected')?.value,
+    '1',
+  )
+})
+
 test('runtime view model suppresses generic ready notices in the top-level modal strip', () => {
   const model = buildBotLensRuntimeViewModel(buildControllerLike(bootstrapState()))
 

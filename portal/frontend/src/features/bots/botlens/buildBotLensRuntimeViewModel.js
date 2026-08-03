@@ -349,19 +349,72 @@ export function buildBotLensDecisionLedgerEntries({
     })
 }
 
-function buildDecisionSummaryRows({ signals = [], decisions = [], trades = [], ledgerEntries = [] }) {
-  const accepted = (Array.isArray(decisions) ? decisions : []).filter(
-    (entry) => String(entry?.decision_state || '').trim().toLowerCase() === 'accepted',
-  ).length
-  const rejected = (Array.isArray(decisions) ? decisions : []).filter(
-    (entry) => String(entry?.decision_state || '').trim().toLowerCase() === 'rejected',
-  ).length
+export function buildBotLensForensicLedgerEntries(documents = []) {
+  const signals = []
+  const decisions = []
+  const trades = []
+  ;(Array.isArray(documents) ? documents : []).forEach((document) => {
+    const truth = document?.truth && typeof document.truth === 'object' ? document.truth : {}
+    const context = truth.context && typeof truth.context === 'object' ? truth.context : {}
+    const eventName = String(truth.event_name || '').trim().toUpperCase()
+    const entry = {
+      ...context,
+      event_id: truth.event_id || document?.document_id || null,
+      parent_event_id: truth.parent_event_id || null,
+      root_id: truth.root_event_id || null,
+      event_ts: truth.event_ts || context.event_ts || context.bar_time || null,
+      known_at: truth.known_at || null,
+      event_name: eventName,
+      series_key: truth.series_key || null,
+      seq: truth.seq,
+      row_id: truth.row_id,
+    }
+    if (eventName === 'SIGNAL_EMITTED') {
+      signals.push(entry)
+    } else if (eventName === 'DECISION_EMITTED') {
+      decisions.push(entry)
+    } else if (eventName === 'ENTRY_FILLED' || eventName === 'EXIT_FILLED') {
+      trades.push({
+        ...entry,
+        trade_state: eventName === 'EXIT_FILLED' ? 'closed' : 'opened',
+        entry_price: eventName === 'ENTRY_FILLED' ? context.price : context.entry_price,
+        exit_price: eventName === 'EXIT_FILLED' ? context.price : context.exit_price,
+        status: eventName === 'EXIT_FILLED' ? 'closed' : 'open',
+      })
+    } else if (['TRADE_OPENED', 'TRADE_UPDATED', 'TRADE_CLOSED'].includes(eventName)) {
+      trades.push(entry)
+    }
+  })
+  return buildBotLensDecisionLedgerEntries({ signals, decisions, trades })
+}
+
+function mergeLedgerEntries(...groups) {
+  const byId = new Map()
+  groups.flat().filter(Boolean).forEach((entry) => {
+    const eventId = String(entry?.event_id || '').trim()
+    if (eventId) byId.set(eventId, entry)
+  })
+  return Array.from(byId.values()).sort((left, right) => {
+    const leftTs = Date.parse(left.created_at || left.event_ts || '') || 0
+    const rightTs = Date.parse(right.created_at || right.event_ts || '') || 0
+    if (leftTs !== rightTs) return leftTs - rightTs
+    return String(left.event_id || '').localeCompare(String(right.event_id || ''))
+  })
+}
+
+function buildDecisionSummaryRows({ ledgerEntries = [] }) {
+  const entries = Array.isArray(ledgerEntries) ? ledgerEntries : []
+  const signals = entries.filter((entry) => entry.event_type === 'signal').length
+  const decisions = entries.filter((entry) => entry.event_type === 'decision')
+  const accepted = decisions.filter((entry) => entry.event_subtype === 'signal_accepted').length
+  const rejected = decisions.filter((entry) => entry.event_subtype === 'signal_rejected').length
+  const trades = entries.filter((entry) => entry.event_type === 'execution').length
   return [
     { key: 'ledger-events', label: 'Ledger Events', value: String(ledgerEntries.length) },
-    { key: 'signals', label: 'Signals Emitted', value: String((Array.isArray(signals) ? signals : []).length) },
+    { key: 'signals', label: 'Signals Emitted', value: String(signals) },
     { key: 'accepted', label: 'Accepted Decisions', value: String(accepted) },
     { key: 'rejected', label: 'Rejected Decisions', value: String(rejected) },
-    { key: 'trades', label: 'Trade Executions', value: String((Array.isArray(trades) ? trades : []).length) },
+    { key: 'trades', label: 'Trade Executions', value: String(trades) },
   ]
 }
 
@@ -487,6 +540,11 @@ export function buildBotLensRuntimeViewModel({
   chartOverlays,
   chartTrades,
   error,
+  forensicDocuments,
+  forensicError,
+  forensicHasMore,
+  forensicNextCursor,
+  forensicStatus,
   logs,
   openTrades,
   runState,
@@ -533,11 +591,16 @@ export function buildBotLensRuntimeViewModel({
       ? runState.health
       : {}
   const selectedOpenTradeCount = Number(selectedSummary?.open_trade_count || 0)
-  const decisionLedgerEntries = buildBotLensDecisionLedgerEntries({
+  const snapshotDecisionLedgerEntries = buildBotLensDecisionLedgerEntries({
     signals: selectedSymbolSignals,
     decisions: selectedSymbolDecisions,
     trades: chartTrades,
   })
+  const forensicDecisionLedgerEntries = buildBotLensForensicLedgerEntries(forensicDocuments)
+  const decisionLedgerEntries = mergeLedgerEntries(
+    snapshotDecisionLedgerEntries,
+    forensicDecisionLedgerEntries,
+  )
   const decisionCount = decisionLedgerEntries.length
   const decisionSummaryRows = buildDecisionSummaryRows({
     signals: selectedSymbolSignals,
@@ -753,6 +816,9 @@ export function buildBotLensRuntimeViewModel({
       },
       liveTrades: currentStatePanels.tradeActivity.openTrades,
       historyStatus: chartHistoryStatus || 'idle',
+      historyError: chartHistory?.error || null,
+      historyEvidenceSource: chartHistory?.evidenceSource || null,
+      hasMoreBefore: chartHistory?.range?.has_more_before !== false,
       historyCount: Number(chartHistory?.candles?.length || 0),
       cacheCount: Number(chartHistoryCacheCount || 0),
       candles: Array.isArray(chartCandles) ? chartCandles : [],
@@ -827,8 +893,10 @@ export function buildBotLensRuntimeViewModel({
       },
       decisions: {
         entries: decisionLedgerEntries,
-        status: selectedSymbolBootstrapStatus === 'loading' ? 'loading' : 'ready',
-        nextCursor: { afterSeq: Number(selectedSymbolState?.seq || 0), afterRowId: 0 },
+        status: forensicStatus || (selectedSymbolBootstrapStatus === 'loading' ? 'loading' : 'ready'),
+        error: forensicError || null,
+        hasMore: forensicHasMore !== false,
+        nextCursor: forensicNextCursor || { afterSeq: 0, afterRowId: 0 },
         summaryRows: decisionSummaryRows,
         walletRows,
         latestRows: decisionLatestRows,

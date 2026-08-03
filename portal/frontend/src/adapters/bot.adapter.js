@@ -155,6 +155,33 @@ export async function fetchBotLensChartHistory(runId, seriesKey, { startTime, en
   return request(`/api/bots/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/chart?${params.toString()}`)
 }
 
+export async function fetchBotLensForensicEvents(
+  botId,
+  runId,
+  {
+    seriesKey,
+    afterSeq = 0,
+    afterRowId = 0,
+    limit = 200,
+    eventNames = [],
+  } = {},
+) {
+  const params = new URLSearchParams()
+  params.set('after_seq', String(Math.max(0, Number(afterSeq) || 0)))
+  params.set('after_row_id', String(Math.max(0, Number(afterRowId) || 0)))
+  params.set('limit', String(Math.max(1, Math.min(Number(limit) || 200, 1000))))
+  if (seriesKey) params.set('series_key', String(seriesKey))
+  eventNames.forEach((eventName) => {
+    const normalized = String(eventName || '').trim().toUpperCase()
+    if (normalized) params.append('event_name', normalized)
+  })
+  return request(
+    '/api/bots/' + encodeURIComponent(botId)
+      + '/runs/' + encodeURIComponent(runId)
+      + '/forensics/events?' + params.toString(),
+  )
+}
+
 export function openBotLensLiveStream(botId, {
   resumeFromSeq = 0,
   streamSessionId = null,

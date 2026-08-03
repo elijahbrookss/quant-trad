@@ -5,6 +5,7 @@ import { ActiveTradeChip } from '../../../components/bots/ActiveTradeChip.jsx'
 import DecisionTrace from '../../../components/bots/DecisionTrace/index.jsx'
 import { useOverlayControls } from '../../../components/bots/hooks/useOverlayControls.js'
 import { ChartPanel } from './components/ChartPanel.jsx'
+import { OperatorErrorNotice, OperatorSkeleton } from '../../../v2/components/OperatorErrorNotice.jsx'
 
 function noticeClassName(tone) {
   if (tone === 'error') return 'border-rose-500/35 bg-rose-500/10 text-rose-100'
@@ -306,26 +307,64 @@ const TradesTab = memo(function TradesTab({ model, hoveredTradeId, onHoverTrade,
   )
 })
 
-const DecisionsTab = memo(function DecisionsTab({ model }) {
+const DecisionsTab = memo(function DecisionsTab({ model, onLoadMore }) {
+  const scrollRef = useRef(null)
+  const sentinelRef = useRef(null)
+
+  useEffect(() => {
+    if (!model.hasMore || model.status === 'loading') return undefined
+    const root = scrollRef.current
+    const sentinel = sentinelRef.current
+    if (!root || !sentinel || typeof IntersectionObserver === 'undefined') return undefined
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) onLoadMore?.()
+    }, { root, rootMargin: '180px 0px' })
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [model.hasMore, model.status, onLoadMore])
+
   return (
     <div className="grid h-full gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(18rem,22rem)]">
       <section className="qt-ops-console overflow-hidden">
         <header className="border-b border-white/8 px-4 py-3">
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-            <p className="text-sm font-semibold text-slate-100">Decision ledger</p>
-            <span className="text-xs text-slate-500">status {model.status}</span>
+            <p className="text-sm font-semibold text-slate-100">Decision replay</p>
+            <span className="text-xs text-slate-500">{model.entries.length} events · {model.status}</span>
             <span className="qt-mono text-[11px] text-slate-500">
-              seq {model.nextCursor.afterSeq}
+              cursor {model.nextCursor.afterSeq}:{model.nextCursor.afterRowId}
             </span>
           </div>
         </header>
-        <div className="h-[calc(100%-3.5rem)] overflow-auto p-3">
-          <DecisionTrace ledgerEvents={model.entries} />
+        {model.error ? (
+          <div className="border-b border-white/8 p-3">
+            <OperatorErrorNotice error={model.error} compact />
+          </div>
+        ) : null}
+        <div ref={scrollRef} className="h-[calc(100%-3.5rem)] overflow-auto p-3">
+          {model.status === 'loading' && !model.entries.length ? (
+            <OperatorSkeleton rows={5} label="Loading decision replay evidence" />
+          ) : (
+            <DecisionTrace ledgerEvents={model.entries} />
+          )}
+          <div ref={sentinelRef} className="flex min-h-12 items-center justify-center py-3">
+            {model.hasMore ? (
+              <button
+                type="button"
+                onClick={onLoadMore}
+                disabled={model.status === 'loading'}
+                className="rounded-[3px] border border-white/10 bg-black/25 px-3 py-2 text-xs font-semibold text-slate-300 transition hover:border-white/20 hover:text-slate-100 disabled:cursor-wait disabled:opacity-60"
+              >
+                {model.status === 'loading' ? 'Streaming evidence…' : 'Continue replay'}
+              </button>
+            ) : (
+              <span className="text-xs text-slate-600">Complete for this instrument.</span>
+            )}
+          </div>
         </div>
       </section>
 
       <div className="space-y-4">
-        <ReadoutTable title="Ledger Summary" rows={model.summaryRows} />
+        <ReadoutTable title="Loaded Evidence" rows={model.summaryRows} />
         <ReadoutTable title="Capital + P&L" rows={model.walletRows} />
         <ReadoutTable title="Latest Activity" rows={model.latestRows} />
       </div>
@@ -407,6 +446,7 @@ export function BotLensContent({
   model,
   changeSelectedSymbol,
   loadOlderHistory,
+  loadMoreDecisionEvidence,
   onClose,
   open,
   refreshSession,
@@ -444,7 +484,12 @@ export function BotLensContent({
     [model.retrievalPanels.chart, visibleOverlays],
   )
 
-  let tabContent = <DecisionsTab model={model.inspection.decisions} />
+  let tabContent = (
+    <DecisionsTab
+      model={model.inspection.decisions}
+      onLoadMore={loadMoreDecisionEvidence}
+    />
+  )
   if (activeTab === 'trades') {
     tabContent = (
       <TradesTab

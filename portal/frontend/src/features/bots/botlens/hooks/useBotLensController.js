@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 import {
   fetchBotLensChartHistory,
   fetchBotLensExactRunBootstrap,
+  fetchBotLensForensicEvents,
   fetchBotLensRunBootstrap,
   fetchBotLensSelectedSymbolSnapshot,
 } from '../../../../adapters/bot.adapter.js'
@@ -82,6 +83,47 @@ export function isBotLensRunBootstrapReady(payload) {
 
 export function isBotLensSelectedSymbolSnapshotReady(payload) {
   return ['ready', 'snapshot_ready'].includes(resolveBotLensContractState(payload))
+}
+
+const BOTLENS_DECISION_EVENT_NAMES = [
+  'SIGNAL_EMITTED',
+  'DECISION_EMITTED',
+  'ENTRY_FILLED',
+  'EXIT_FILLED',
+  'TRADE_OPENED',
+  'TRADE_UPDATED',
+  'TRADE_CLOSED',
+]
+
+function emptyForensicReplayState(scopeKey = null) {
+  return {
+    scopeKey,
+    documents: [],
+    status: 'idle',
+    error: null,
+    hasMore: true,
+    nextCursor: { afterSeq: 0, afterRowId: 0 },
+  }
+}
+
+export function mergeBotLensForensicDocuments(existing, incoming) {
+  const byId = new Map()
+  ;[...(Array.isArray(existing) ? existing : []), ...(Array.isArray(incoming) ? incoming : [])]
+    .forEach((document) => {
+      const documentId = String(document?.document_id || '').trim()
+      if (documentId) byId.set(documentId, document)
+    })
+  return Array.from(byId.values()).sort((left, right) => {
+    const leftCursor = left?.cursor || {}
+    const rightCursor = right?.cursor || {}
+    const seqDelta = Number(leftCursor.after_seq || 0) - Number(rightCursor.after_seq || 0)
+    if (seqDelta !== 0) return seqDelta
+    return Number(leftCursor.after_row_id || 0) - Number(rightCursor.after_row_id || 0)
+  })
+}
+
+export function shouldLoadMoreBotLensForensics({ status, hasMore, scopeKey }) {
+  return Boolean(scopeKey && status !== 'loading' && hasMore !== false)
 }
 
 const BOTLENS_BOOTSTRAP_RETRY_MS = 1000
@@ -218,12 +260,16 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     createInitialBotLensState({ botId: bot?.id || null }),
   )
   const [reloadTick, setReloadTick] = useState(0)
+  const [forensicReplay, setForensicReplay] = useState(() => emptyForensicReplayState())
   const stateRef = useRef(state)
   stateRef.current = state
   const bootstrapTokenRef = useRef(0)
   const bootstrapLoadRef = useRef(new Set())
   const snapshotRefreshLoadRef = useRef(new Set())
   const initialChartLoadRef = useRef(new Set())
+  const forensicReplayRef = useRef(forensicReplay)
+  forensicReplayRef.current = forensicReplay
+  const forensicLoadRef = useRef(new Set())
   const latestSelectionRef = useRef({ runId: null, symbolKey: null })
   const latestSelectionBootstrapRequestRef = useRef({ runId: null, symbolKey: null, requestId: 0 })
 
@@ -286,6 +332,9 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   const runMeta = state.runState?.runMeta || null
   const datasetId = String(runMeta?.dataset?.dataset_id || '').trim()
   const initialHistoryEnd = resolveBotLensInitialHistoryEnd(runMeta)
+  const forensicScopeKey = activeRunId && selectedSymbolKey
+    ? [activeRunId, selectedSymbolKey].join(':')
+    : null
 
   useEffect(() => {
     latestSelectionRef.current = {
@@ -298,6 +347,8 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     bootstrapLoadRef.current.clear()
     snapshotRefreshLoadRef.current.clear()
     initialChartLoadRef.current.clear()
+    forensicLoadRef.current.clear()
+    setForensicReplay(emptyForensicReplayState())
     setReloadTick((value) => value + 1)
   }, [])
 
@@ -430,6 +481,8 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
       bootstrapLoads.clear()
       snapshotRefreshLoadRef.current.clear()
       initialChartLoadRef.current.clear()
+      forensicLoadRef.current.clear()
+      setForensicReplay(emptyForensicReplayState())
       dispatch({ type: 'session/reset', botId: bot?.id || null })
       return
     }
@@ -570,6 +623,90 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
       cancelled = true
     }
   }, [activeRunId, bot?.id, loadSelectedSymbolSnapshot, logger, open, selectedLabel, selectedSymbolKey, selectedSymbolReady])
+
+  const loadMoreDecisionEvidence = useCallback(async ({ reset = false } = {}) => {
+    const scopeKey = forensicScopeKey
+    if (!scopeKey || !activeRunId || !selectedSymbolKey || !bot?.id) return
+    const current = forensicReplayRef.current
+    if (!reset && !shouldLoadMoreBotLensForensics({
+      status: current.status,
+      hasMore: current.hasMore,
+      scopeKey: current.scopeKey === scopeKey ? scopeKey : null,
+    })) return
+
+    const cursor = reset
+      ? { afterSeq: 0, afterRowId: 0 }
+      : current.nextCursor || { afterSeq: 0, afterRowId: 0 }
+    const requestKey = [scopeKey, cursor.afterSeq, cursor.afterRowId].join(':')
+    if (forensicLoadRef.current.has(requestKey)) return
+    forensicLoadRef.current.add(requestKey)
+    setForensicReplay((previous) => ({
+      ...(reset || previous.scopeKey !== scopeKey
+        ? emptyForensicReplayState(scopeKey)
+        : previous),
+      scopeKey,
+      status: 'loading',
+      error: null,
+    }))
+
+    try {
+      const page = await fetchBotLensForensicEvents(bot.id, activeRunId, {
+        seriesKey: selectedSymbolKey,
+        afterSeq: cursor.afterSeq,
+        afterRowId: cursor.afterRowId,
+        limit: 200,
+        eventNames: BOTLENS_DECISION_EVENT_NAMES,
+      })
+      if (String(page?.run_id || '') !== String(activeRunId)) {
+        throw new Error('Decision replay returned a mismatched run scope')
+      }
+      setForensicReplay((previous) => {
+        if (previous.scopeKey !== scopeKey) return previous
+        const next = page?.next_cursor || {}
+        return {
+          ...previous,
+          documents: mergeBotLensForensicDocuments(
+            reset ? [] : previous.documents,
+            page?.documents,
+          ),
+          status: 'ready',
+          error: null,
+          hasMore: Boolean(page?.has_more),
+          nextCursor: {
+            afterSeq: Number(next.after_seq || cursor.afterSeq || 0),
+            afterRowId: Number(next.after_row_id || cursor.afterRowId || 0),
+          },
+        }
+      })
+    } catch (err) {
+      setForensicReplay((previous) => previous.scopeKey === scopeKey
+        ? {
+            ...previous,
+            status: 'error',
+            error: err?.message || 'Decision replay failed',
+          }
+        : previous)
+      logger.warn('botlens_decision_replay_failed', {
+        bot_id: bot.id,
+        run_id: activeRunId,
+        symbol_key: selectedSymbolKey,
+        after_seq: cursor.afterSeq,
+        after_row_id: cursor.afterRowId,
+      }, err)
+    } finally {
+      forensicLoadRef.current.delete(requestKey)
+    }
+  }, [activeRunId, bot?.id, forensicScopeKey, logger, selectedSymbolKey])
+
+  useEffect(() => {
+    if (!open || !selectedSymbolReady || !forensicScopeKey) {
+      if (forensicReplayRef.current.scopeKey) {
+        setForensicReplay(emptyForensicReplayState())
+      }
+      return
+    }
+    loadMoreDecisionEvidence({ reset: true })
+  }, [forensicScopeKey, loadMoreDecisionEvidence, open, reloadTick, selectedSymbolReady])
 
   useEffect(() => {
     if (!shouldLoadInitialBotLensHistory({
@@ -740,6 +877,8 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     bootstrapLoadRef.current.clear()
     snapshotRefreshLoadRef.current.clear()
     initialChartLoadRef.current.clear()
+    forensicLoadRef.current.clear()
+    setForensicReplay(emptyForensicReplayState())
     onClose?.()
   }, [bot?.id, onClose])
 
@@ -755,6 +894,11 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     closeModal,
     changeSelectedSymbol,
     error: state.ui.error,
+    forensicDocuments: forensicReplay.documents,
+    forensicError: forensicReplay.error,
+    forensicHasMore: forensicReplay.hasMore,
+    forensicNextCursor: forensicReplay.nextCursor,
+    forensicStatus: forensicReplay.status,
     loadOlderHistory,
     logs: selectedSymbolLogs,
     openTrades,

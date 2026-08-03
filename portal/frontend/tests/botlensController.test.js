@@ -4,6 +4,8 @@ import assert from 'node:assert/strict'
 import {
   resolveSelectedSymbolVisualRefreshIntervalMs,
   resolveBotLensInitialHistoryEnd,
+  mergeBotLensForensicDocuments,
+  shouldLoadMoreBotLensForensics,
   shouldLoadInitialBotLensHistory,
   shouldRetryBotLensRunBootstrap,
   shouldRetryBotLensSelectedSymbolBootstrap,
@@ -86,6 +88,29 @@ test('completed dataset runs request an initial bounded chart page', () => {
       ended_at: '2026-01-02T00:00:05Z',
     }),
     '2026-01-02T00:00:00Z',
+  )
+})
+
+test('forensic replay deduplicates cursor documents and blocks completed streams', () => {
+  const merged = mergeBotLensForensicDocuments(
+    [
+      { document_id: 'event-1', cursor: { after_seq: 2, after_row_id: 4 }, truth: { value: 'old' } },
+    ],
+    [
+      { document_id: 'event-2', cursor: { after_seq: 1, after_row_id: 3 }, truth: {} },
+      { document_id: 'event-1', cursor: { after_seq: 2, after_row_id: 4 }, truth: { value: 'new' } },
+    ],
+  )
+
+  assert.deepEqual(merged.map((entry) => entry.document_id), ['event-2', 'event-1'])
+  assert.equal(merged[1].truth.value, 'new')
+  assert.equal(
+    shouldLoadMoreBotLensForensics({ status: 'ready', hasMore: true, scopeKey: 'run:symbol' }),
+    true,
+  )
+  assert.equal(
+    shouldLoadMoreBotLensForensics({ status: 'ready', hasMore: false, scopeKey: 'run:symbol' }),
+    false,
   )
 })
 

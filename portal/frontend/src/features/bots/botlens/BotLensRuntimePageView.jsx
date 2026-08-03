@@ -11,6 +11,7 @@ export function BotLensRuntimePageView({
   model,
   changeSelectedSymbol,
   loadOlderHistory,
+  loadMoreDecisionEvidence,
   onClose,
   open,
   refreshSession,
@@ -21,6 +22,7 @@ export function BotLensRuntimePageView({
         model={model}
         changeSelectedSymbol={changeSelectedSymbol}
         loadOlderHistory={loadOlderHistory}
+        loadMoreDecisionEvidence={loadMoreDecisionEvidence}
         onClose={onClose}
         open={open}
         refreshSession={refreshSession}
