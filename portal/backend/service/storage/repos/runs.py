@@ -6,6 +6,8 @@ import hashlib
 import json
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import and_, or_
+
 from ._shared import BotRunRecord, SQLAlchemyError, _json_safe, _parse_optional_timestamp, _utcnow, db, func, logger, select
 
 _NON_MATERIAL_CONFIG_KEYS = {
@@ -224,6 +226,38 @@ def list_bot_runs(
             exc,
         )
         raise
+
+
+def list_bot_runs_page(
+    *,
+    limit: int = 100,
+    before_sort_at: Optional[str] = None,
+    before_run_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return one stable, reverse-chronological run inventory window."""
+
+    if not db.available:
+        return []
+    bounded_limit = max(1, min(int(limit or 100), 250))
+    sort_at = func.coalesce(
+        BotRunRecord.started_at,
+        BotRunRecord.updated_at,
+        BotRunRecord.created_at,
+    )
+    query = select(BotRunRecord)
+    cursor_at = _parse_optional_timestamp(before_sort_at)
+    cursor_run_id = str(before_run_id or "").strip()
+    if cursor_at is not None:
+        query = query.where(
+            or_(
+                sort_at < cursor_at,
+                and_(sort_at == cursor_at, BotRunRecord.run_id < cursor_run_id),
+            )
+        )
+    query = query.order_by(sort_at.desc(), BotRunRecord.run_id.desc()).limit(bounded_limit)
+    with db.session() as session:
+        rows = session.execute(query).scalars().all()
+    return [row.to_dict() for row in rows]
 
 
 def count_bot_runs_by_day(

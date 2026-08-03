@@ -49,6 +49,31 @@ def _collector_fingerprint(snapshot: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _market_structure_snapshot(*, session_limit: int = 250) -> dict[str, Any]:
+    return {
+        "schema_version": "market_structure_operator_snapshot.v1",
+        "definitions": market_structure_repository.list_stream_definitions(),
+        "sessions": market_structure_repository.list_sessions(
+            limit=max(1, min(int(session_limit or 250), 500))
+        ),
+        "normalization_specs": market_normalization_service.list_specs(),
+        "status_by_definition": market_structure_repository.list_archive_status_summaries(),
+        "observed_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _market_structure_fingerprint(snapshot: dict[str, Any]) -> str:
+    material = {
+        key: value
+        for key, value in snapshot.items()
+        if key != "observed_at"
+    }
+    payload = json.dumps(
+        material, sort_keys=True, separators=(",", ":"), default=str
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _format_sse(event: str, payload: dict[str, Any], *, event_id: int) -> str:
     body = json.dumps(payload, separators=(",", ":"), default=str)
     return f"id: {event_id}\nevent: {event}\ndata: {body}\n\n"
@@ -416,6 +441,50 @@ def compare_market_normalization(
         )
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+@router.get("/market-structure/snapshot")
+def market_structure_operator_snapshot(session_limit: int = 250) -> dict[str, Any]:
+    return _market_structure_snapshot(session_limit=session_limit)
+
+
+@router.get("/market-structure/stream")
+async def stream_market_structure_operator_snapshot(
+    session_limit: int = 250,
+) -> StreamingResponse:
+    async def event_iterator():
+        event_id = 1
+        snapshot = await asyncio.to_thread(
+            _market_structure_snapshot, session_limit=session_limit
+        )
+        fingerprint = _market_structure_fingerprint(snapshot)
+        yield _format_sse("snapshot", snapshot, event_id=event_id)
+        idle_ticks = 0
+        while True:
+            try:
+                await asyncio.sleep(5)
+                next_snapshot = await asyncio.to_thread(
+                    _market_structure_snapshot, session_limit=session_limit
+                )
+            except asyncio.CancelledError:
+                break
+            next_fingerprint = _market_structure_fingerprint(next_snapshot)
+            if next_fingerprint != fingerprint:
+                event_id += 1
+                fingerprint = next_fingerprint
+                idle_ticks = 0
+                yield _format_sse("delta", next_snapshot, event_id=event_id)
+                continue
+            idle_ticks += 1
+            if idle_ticks >= 4:
+                idle_ticks = 0
+                yield ": keepalive\n\n"
+
+    return StreamingResponse(
+        event_iterator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.get("/market-structure/definitions")
 def list_market_structure_definitions(
     definition_id: Optional[str] = None,

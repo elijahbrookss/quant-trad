@@ -118,6 +118,12 @@ class _FakeStorage:
     def list_bot_runs(self, bot_id: str):
         return [dict(self.run)] if str(bot_id) == "bot-1" else []
 
+    def list_bot_runs_page(
+        self, *, limit=100, before_sort_at=None, before_run_id=None
+    ):
+        _ = before_sort_at, before_run_id
+        return [dict(self.run)][:limit]
+
 
 class _FakeTelemetryHub:
     def __init__(self, snapshots: dict[str, object] | None = None) -> None:
@@ -139,6 +145,21 @@ class _FakeComposition:
             watchdog_status=lambda: {},
         )
         self.watchdog = SimpleNamespace(set_orphan_callback=lambda callback: None)
+
+
+def test_list_bot_runs_inventory_is_bounded_and_does_not_replay(monkeypatch):
+    composition = _FakeComposition(config_service=_FakeConfigService(), storage=_FakeStorage())
+    monkeypatch.setattr(bot_service, "_composition", lambda: composition)
+    monkeypatch.setattr(bot_service, "_telemetry_hub", lambda: _FakeTelemetryHub())
+
+    result = bot_service.list_bot_runs_inventory(limit=25)
+
+    assert result["schema_version"] == "bot_run_inventory.v1"
+    assert result["runs"][0]["run_id"] == "run-1"
+    assert result["runs"][0]["is_active"] is True
+    assert result["runs"][0]["botlens_available"] is False
+    assert result["next_cursor"] is None
+    assert result["observed_at"]
 
 
 def test_list_bot_runs_for_bot_reports_snapshot_unavailable_without_replay(monkeypatch):

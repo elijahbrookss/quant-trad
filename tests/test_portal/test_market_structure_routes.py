@@ -59,6 +59,41 @@ def test_collector_stream_fingerprint_ignores_observation_clock_only() -> None:
     assert controller._collector_fingerprint(first) != controller._collector_fingerprint(second)
 
 
+def test_market_structure_operator_snapshot_is_consolidated(monkeypatch) -> None:
+    monkeypatch.setattr(
+        controller.market_structure_repository,
+        "list_stream_definitions",
+        lambda: [{"id": "definition-a"}],
+    )
+    monkeypatch.setattr(
+        controller.market_structure_repository,
+        "list_sessions",
+        lambda **kwargs: [{"session_id": "session-a", "limit": kwargs["limit"]}],
+    )
+    monkeypatch.setattr(
+        controller.market_structure_repository,
+        "list_archive_status_summaries",
+        lambda: {"definition-a": {"manifest_count": 1}},
+    )
+    monkeypatch.setattr(
+        controller.market_normalization_service,
+        "list_specs",
+        lambda: [{"spec_id": "spec-a"}],
+    )
+
+    response = _client().get(
+        "/api/market-data/market-structure/snapshot",
+        params={"session_limit": 17},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schema_version"] == "market_structure_operator_snapshot.v1"
+    assert payload["sessions"][0]["limit"] == 17
+    assert payload["status_by_definition"]["definition-a"]["manifest_count"] == 1
+    assert payload["observed_at"]
+
+
 def test_market_structure_pair_route_never_implies_production(monkeypatch) -> None:
     observed = {}
 

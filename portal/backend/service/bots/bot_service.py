@@ -689,6 +689,101 @@ def get_bot_run_inspection(run_id: str) -> Dict[str, Any]:
     }
 
 
+def _run_inventory_sort_at(run: Mapping[str, Any]) -> str:
+    return str(
+        run.get("started_at")
+        or run.get("updated_at")
+        or run.get("created_at")
+        or ""
+    )
+
+
+def list_bot_runs_inventory(
+    *,
+    limit: int = 100,
+    before_sort_at: str | None = None,
+    before_run_id: str | None = None,
+) -> Dict[str, Any]:
+    """Return one bounded global run window without per-definition fan-out."""
+
+    bounded_limit = max(1, min(int(limit or 100), 100))
+    rows = _composition().storage.list_bot_runs_page(
+        limit=bounded_limit + 1,
+        before_sort_at=before_sort_at,
+        before_run_id=before_run_id,
+    )
+    has_more = len(rows) > bounded_limit
+    selected = list(rows[:bounded_limit])
+    bot_ids = sorted(
+        {str(run.get("bot_id") or "").strip() for run in selected}
+        - {""}
+    )
+    lifecycles = _composition().storage.list_latest_bot_run_lifecycles(bot_ids)
+    projected_runs: list[Dict[str, Any]] = []
+    for run in selected:
+        run_id = str(run.get("run_id") or "").strip()
+        bot_id = str(run.get("bot_id") or "").strip()
+        lifecycle = _as_mapping(lifecycles.get(bot_id))
+        summary_state = _telemetry_hub().get_run_snapshot(run_id=run_id)
+        runtime_payload = (
+            _as_mapping(summary_state.health.to_dict())
+            if summary_state is not None
+            else {}
+        )
+        persisted_status = str(run.get("status") or "unknown")
+        runtime_status = (
+            persisted_status
+            if is_terminal_run_state(status=persisted_status)
+            else str(
+                runtime_payload.get("status")
+                or (lifecycle.get("status") if lifecycle.get("run_id") == run_id else None)
+                or persisted_status
+            )
+        )
+        summary = dict(run.get("summary") or {})
+        if not summary and summary_state is not None:
+            total_trades = sum(
+                int((_as_mapping(item).get("stats") or {}).get("total_trades") or 0)
+                for item in summary_state.symbol_catalog.entries.values()
+            )
+            if total_trades > 0:
+                summary = {"total_trades": total_trades}
+        is_active = (
+            str(lifecycle.get("run_id") or "") == run_id
+            and is_active_run_state(
+                status=lifecycle.get("status"),
+                phase=lifecycle.get("phase"),
+            )
+        )
+        projected_runs.append(
+            {
+                **dict(run),
+                "is_active": is_active,
+                "runtime_status": runtime_status,
+                "botlens_available": summary_state is not None,
+                "botlens_reason": None if summary_state is not None else "snapshot_unavailable",
+                "last_snapshot_at": runtime_payload.get("last_event_at"),
+                "known_at": runtime_payload.get("last_event_at"),
+                "seq": int(summary_state.seq or 0) if summary_state is not None else None,
+                "summary": summary,
+            }
+        )
+    cursor_run = projected_runs[-1] if has_more and projected_runs else None
+    return {
+        "schema_version": "bot_run_inventory.v1",
+        "runs": projected_runs,
+        "next_cursor": (
+            {
+                "before_sort_at": _run_inventory_sort_at(cursor_run),
+                "before_run_id": cursor_run.get("run_id"),
+            }
+            if cursor_run is not None
+            else None
+        ),
+        "observed_at": datetime.now(UTC).isoformat(),
+    }
+
+
 def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
     current = get_bot(bot_id)
     active_run_id = str(current.get("active_run_id") or "").strip() or None

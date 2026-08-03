@@ -239,6 +239,19 @@ async def stream_bots() -> StreamingResponse:
     return StreamingResponse(event_iterator(), media_type="text/event-stream", headers=headers)
 
 
+@router.get("/runs")
+def bot_run_inventory(
+    limit: int = 100,
+    before_sort_at: Optional[str] = None,
+    before_run_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    return bot_service.list_bot_runs_inventory(
+        limit=max(1, min(int(limit or 100), 100)),
+        before_sort_at=before_sort_at,
+        before_run_id=before_run_id,
+    )
+
+
 @router.get("/{bot_id}/run-context")
 async def get_bot_run_context(bot_id: str) -> Dict[str, Any]:
     """Return the effective bot run context without full UI projections."""

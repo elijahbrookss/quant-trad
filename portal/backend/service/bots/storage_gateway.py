@@ -26,6 +26,7 @@ from ..storage.repos.runs import (
     get_bot_run,
     list_bot_runs,
     list_bot_runs_by_ids,
+    list_bot_runs_page,
     list_latest_bot_runs_by_bot_ids,
     upsert_bot_run,
 )
@@ -126,6 +127,14 @@ class BotStorageGateway(Protocol):
         *,
         bot_id: Optional[str] = None,
         limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]: ...
+
+    def list_bot_runs_page(
+        self,
+        *,
+        limit: int = 100,
+        before_sort_at: Optional[str] = None,
+        before_run_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]: ...
 
 
@@ -269,6 +278,19 @@ class RepositoryBotStorageGateway:
         if limit and int(limit) > 0:
             return list(rows)[: int(limit)]
         return list(rows)
+
+    def list_bot_runs_page(
+        self,
+        *,
+        limit: int = 100,
+        before_sort_at: Optional[str] = None,
+        before_run_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        return list_bot_runs_page(
+            limit=limit,
+            before_sort_at=before_sort_at,
+            before_run_id=before_run_id,
+        )
 
 
 def build_bot_storage_gateway() -> BotStorageGateway:

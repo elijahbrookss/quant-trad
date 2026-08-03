@@ -2570,6 +2570,97 @@ class PostgresMarketStructureRepository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
+    def list_archive_status_summaries(self) -> dict[str, dict[str, Any]]:
+        """Return operator-list status for every definition in one DB round trip."""
+
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT definitions.id AS definition_id,
+                           COALESCE(manifests.manifest_count, 0) AS manifest_count,
+                           COALESCE(manifests.archive_bytes, 0) AS archive_bytes,
+                           COALESCE(manifests.archived_records, 0) AS archived_records,
+                           COALESCE(manifests.mapping_lag_records, 0) AS archive_mapping_lag_records,
+                           manifests.last_acknowledged_at,
+                           COALESCE(quality.counts, '{}'::jsonb) AS quality_counts,
+                           COALESCE(coverage.intervals, '[]'::jsonb) AS coverage_intervals,
+                           COALESCE(book.intervals, '[]'::jsonb) AS book_validity_intervals,
+                           COALESCE(datasets.coverage, '[]'::jsonb) AS dataset_coverage
+                    FROM market.stream_definitions AS definitions
+                    LEFT JOIN LATERAL (
+                        SELECT count(*) AS manifest_count,
+                               COALESCE(sum(manifest.byte_count), 0) AS archive_bytes,
+                               COALESCE(sum(manifest.record_count), 0) AS archived_records,
+                               max(manifest.acknowledged_at) AS last_acknowledged_at,
+                               COALESCE(sum(
+                                   manifest.record_count - (
+                                       SELECT count(*)
+                                       FROM market.raw_archive_record_mappings AS mapping
+                                       WHERE mapping.manifest_id = manifest.id
+                                   )
+                               ), 0) AS mapping_lag_records
+                        FROM market.raw_archive_manifests AS manifest
+                        WHERE manifest.definition_id = definitions.id
+                    ) AS manifests ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT jsonb_object_agg(grouped.classification, grouped.count) AS counts
+                        FROM (
+                            SELECT classification, count(*) AS count
+                            FROM market.stream_quality_events
+                            WHERE definition_id = definitions.id
+                            GROUP BY classification
+                        ) AS grouped
+                    ) AS quality ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT jsonb_agg(to_jsonb(selected) ORDER BY selected.known_at DESC) AS intervals
+                        FROM (
+                            SELECT DISTINCT ON (interval_id)
+                                   interval_id, revision, status, ordering_assurance,
+                                   archive_status, opening_effective_at,
+                                   closing_effective_at, known_at
+                            FROM market.stream_coverage_interval_versions
+                            WHERE definition_id = definitions.id
+                            ORDER BY interval_id, revision DESC
+                        ) AS selected
+                    ) AS coverage ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT jsonb_agg(to_jsonb(selected) ORDER BY selected.known_at DESC) AS intervals
+                        FROM (
+                            SELECT DISTINCT ON (interval_id)
+                                   interval_id, revision, status, ordering_assurance,
+                                   opening_effective_at, last_valid_effective_at,
+                                   closing_effective_at, last_state_hash, known_at
+                            FROM market.book_validity_interval_versions
+                            WHERE series_id = definitions.series_id
+                            ORDER BY interval_id, revision DESC
+                        ) AS selected
+                    ) AS book ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT jsonb_agg(to_jsonb(scoped) ORDER BY scoped.range_end DESC) AS coverage
+                        FROM (
+                            SELECT dataset_series.dataset_id, dataset_series.series_id,
+                                   dataset_series.range_start, dataset_series.range_end,
+                                   dataset_series.row_count, dataset_series.material_hash,
+                                   dataset_series.quality_summary
+                            FROM market.dataset_series AS dataset_series
+                            WHERE dataset_series.series_id = definitions.series_id
+                            ORDER BY dataset_series.range_end DESC
+                            LIMIT 25
+                        ) AS scoped
+                    ) AS datasets ON TRUE
+                    ORDER BY definitions.id
+                    """
+                )
+            ).mappings().all()
+        return {
+            str(row["definition_id"]): {
+                "schema_version": "market.stream_archive_status_summary.v1",
+                **dict(row),
+            }
+            for row in rows
+        }
+
     def archive_status(self, *, definition_id: str) -> dict[str, Any]:
         with db.session() as session:
             definition = session.execute(
