@@ -22,7 +22,7 @@ import {
 import { AttentionRail } from '../../features/overview/components/AttentionRail.jsx'
 import { TopResultCard } from '../../features/overview/components/TopResultCard.jsx'
 import { ActivityHeatmap } from '../../features/overview/components/ActivityHeatmap.jsx'
-import { OperatorErrorNotice } from '../components/OperatorErrorNotice.jsx'
+import { OperatorErrorNotice, OperatorSkeleton } from '../components/OperatorErrorNotice.jsx'
 
 function formatTime(value) {
   if (!value) return 'Evidence time unavailable'
@@ -30,12 +30,12 @@ function formatTime(value) {
   return Number.isNaN(parsed.getTime()) ? 'Evidence time unavailable' : parsed.toLocaleString()
 }
 
-function SummaryCard({ label, value, detail, tone = 'neutral', to }) {
+function SummaryCard({ label, value, detail, tone = "neutral", to, loading = false, error = null }) {
   return (
-    <Link className={`qt2-summary-card is-${tone}`} to={to}>
+    <Link className={"qt2-summary-card is-" + (error ? "warning" : tone)} to={to} aria-busy={loading}>
       <span>{label}</span>
-      <strong>{value}</strong>
-      <small>{detail}</small>
+      {loading ? <div className="qt2-summary-skeleton qt2-skeleton" /> : <strong>{error ? "Unavailable" : value}</strong>}
+      <small>{error ? "Open the owning view for details" : detail}</small>
     </Link>
   )
 }
@@ -113,7 +113,19 @@ export function OverviewRoom() {
   const activeRuns = currentOperations.filter((item) => ['run', 'backtest'].includes(item.kind)).length
   const marketIssues = marketIssueCount(postureRows)
   const filter = ACTIVITY_FILTERS.find((item) => item.value === activityType)
-  const errors = [botsError, runInventory.error, collectorFeed.error, marketFeed.error, ...researchFeed.errors].filter(Boolean)
+  const operationsErrors = [
+    botsError,
+    runInventory.error,
+    collectorFeed.error,
+    collectorFeed.streamError,
+    marketFeed.error,
+    marketFeed.streamError,
+  ].filter(Boolean)
+  const researchError = researchFeed.errors.length
+    ? researchFeed.errors.join(' ')
+    : null
+  const operationsLoading = runInventory.loading || collectorFeed.loading || marketFeed.loading
+  const attentionError = [...operationsErrors, researchError].filter(Boolean).join(" ") || null
 
   function refresh() {
     refreshBots()
@@ -133,13 +145,11 @@ export function OverviewRoom() {
         <button type="button" className="qt2-icon-button" onClick={refresh}><RefreshCcw size={14} />Refresh</button>
       </div>
 
-      {errors.map((error, index) => <OperatorErrorNotice error={error} key={String(error) + index} />)}
-
       <div className="qt2-summary-grid">
-        <SummaryCard label="Attention" value={attentionItems.length || 'Clear'} detail={attentionItems.length ? `Within ${ATTENTION_CONTRACT.lookbackHours} hours` : 'No known actionable issues'} tone={attentionItems.length ? 'danger' : 'success'} to="/operations" />
-        <SummaryCard label="Active runs" value={activeRuns} detail={activeRuns === 1 ? 'One live run projection' : 'Run instances evidenced active'} tone={activeRuns ? 'info' : 'neutral'} to="/operations?tab=runs" />
-        <SummaryCard label="Collectors" value={collectorSummary.enabled ? `${collectorSummary.healthy}/${collectorSummary.enabled}` : 'None'} detail={collectorSummary.issues ? `${collectorSummary.issues} schedule${collectorSummary.issues === 1 ? '' : 's'} need attention` : 'On-schedule delivery evidence'} tone={collectorSummary.issues ? 'warning' : 'success'} to="/operations?tab=collectors" />
-        <SummaryCard label="Market pairs" value={postureRows.length || 'None'} detail={marketIssues ? `${marketIssues} pair${marketIssues === 1 ? '' : 's'} need review` : 'No known quality issues'} tone={marketIssues ? 'warning' : 'success'} to="/operations?tab=market-data" />
+        <SummaryCard label="Attention" value={attentionItems.length || 'Clear'} detail={attentionItems.length ? "Within " + ATTENTION_CONTRACT.lookbackHours + " hours" : 'No known actionable issues'} tone={attentionItems.length ? 'danger' : 'success'} to="/operations" loading={operationsLoading && !attentionItems.length} error={attentionError} />
+        <SummaryCard label="Active runs" value={activeRuns} detail={activeRuns === 1 ? 'One live run projection' : 'Run instances evidenced active'} tone={activeRuns ? 'info' : 'neutral'} to="/operations?tab=runs" loading={runInventory.loading && !runInventory.runs.length} error={botsError || runInventory.error} />
+        <SummaryCard label="Collectors" value={collectorSummary.enabled ? `${collectorSummary.healthy}/${collectorSummary.enabled}` : 'None'} detail={collectorSummary.issues ? `${collectorSummary.issues} schedule${collectorSummary.issues === 1 ? '' : 's'} need attention` : 'On-schedule delivery evidence'} tone={collectorSummary.issues ? 'warning' : 'success'} to="/operations?tab=market" loading={collectorFeed.loading && !collectorFeed.collectors.length} error={collectorFeed.error} />
+        <SummaryCard label="Market pairs" value={postureRows.length || 'None'} detail={marketIssues ? `${marketIssues} pair${marketIssues === 1 ? '' : 's'} need review` : 'No known quality issues'} tone={marketIssues ? 'warning' : 'success'} to="/operations?tab=market" loading={marketFeed.loading && !postureRows.length} error={marketFeed.error} />
       </div>
 
       <div className="qt2-dashboard-grid">
@@ -148,7 +158,8 @@ export function OverviewRoom() {
             <div><h2>Needs attention</h2><p>Only current actionable evidence.</p></div>
             <Link to="/operations">Open operations</Link>
           </div>
-          <AttentionRail items={attentionItems.slice(0, 3)} lookbackHours={ATTENTION_CONTRACT.lookbackHours} />
+          {attentionError ? <OperatorErrorNotice error={attentionError} compact /> : null}
+          {operationsLoading && !attentionItems.length ? <OperatorSkeleton rows={3} label="Loading attention evidence" /> : <AttentionRail items={attentionItems.slice(0, 3)} lookbackHours={ATTENTION_CONTRACT.lookbackHours} />}
           {attentionItems.length > 3 ? <p className="qt2-dashboard-more">+{attentionItems.length - 3} more in Operations</p> : null}
         </section>
 
@@ -157,7 +168,8 @@ export function OverviewRoom() {
             <div><h2>Now</h2><p>Active evidence, not configured intent.</p></div>
             <span>{currentOperations.length}</span>
           </div>
-          <CurrentOperations operations={currentOperations} />
+          {operationsErrors.length ? <OperatorErrorNotice error={operationsErrors.join(" ")} compact /> : null}
+          {operationsLoading && !currentOperations.length ? <OperatorSkeleton rows={4} label="Loading current operations" /> : <CurrentOperations operations={currentOperations} />}
         </section>
       </div>
 
@@ -169,9 +181,13 @@ export function OverviewRoom() {
               {ACTIVITY_FILTERS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
             </select>
           </div>
-          <ActivityHeatmap days={researchFeed.activity?.days || []} activityLabel={filter?.label || 'Persisted activity'} />
+          {researchError ? <OperatorErrorNotice error={researchError} compact /> : null}
+          {researchFeed.loading && !researchFeed.activity ? <OperatorSkeleton rows={4} label="Loading research activity" /> : <ActivityHeatmap days={researchFeed.activity?.days || []} activityLabel={filter?.label || 'Persisted activity'} />}
         </section>
-        <TopResultCard result={researchFeed.topResult} dataset={researchFeed.topResultDataset} />
+        <div className="qt2-component-boundary">
+          {researchError ? <OperatorErrorNotice error={researchError} compact /> : null}
+          {researchFeed.loading && !researchFeed.topResult ? <OperatorSkeleton rows={4} label="Loading top result" /> : <TopResultCard result={researchFeed.topResult} dataset={researchFeed.topResultDataset} />}
+        </div>
       </div>
     </div>
   )

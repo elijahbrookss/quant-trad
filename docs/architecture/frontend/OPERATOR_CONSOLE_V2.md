@@ -45,9 +45,9 @@ dashboard and evidence browser, not an alternate workflow engine.
 The information architecture has two primary rooms:
 
 - **Overview** answers whether anything needs the operator now.
-- **Operations** locates run, collector, market-data, and research evidence.
+- **Operations** locates run, market, and research evidence.
 
-BotLens, collector attempts, and research trails are contextual lenses opened
+BotLens, Market Lens, and research trails are contextual lenses opened
 from those rooms. The primary rooms stay sparse; technical identity, attempts,
 timestamps, diagnostics, and raw payloads belong in lenses or context menus.
 
@@ -55,7 +55,7 @@ timestamps, diagnostics, and raw payloads belong in lenses or context menus.
 
 The console owns:
 
-- browser-local filters, sort order, pagination, tabs, and safe navigation;
+- browser-local filters, sort order, cursor-window state, tabs, and safe navigation;
 - view models over typed backend read contracts;
 - explicit loading, partial, unavailable, stale, invalid, and empty states;
 - bounded snapshots, cursors, and change-only streams over read-only projections;
@@ -73,6 +73,21 @@ The console does not own:
 The v2 adapters used by the primary rooms issue GET requests only. A rerun
 option copies the canonical `qt bots start ... --dataset-id ...` command; it
 does not start a run from the browser.
+
+## Navigation And Visual Language
+
+The shell uses a persistent left rail with only **Overview** and **Operations**.
+The rail is keyboard-operable, collapsible, and remembers the browser-local
+preference. Collapsing navigation changes presentation only; it never changes
+route or evidence state. On narrow screens it becomes an icon rail instead of
+covering the workspace.
+
+The visual hierarchy is intentionally restrained: matte work surfaces carry
+tables and charts; glass and backdrop blur are reserved for the navigation
+shell, routed lenses, menus, and modal overlays. Warm ivory and brass establish
+the luxury tone, while cyan is reserved for live evidence. Motion is short,
+functional, and disabled by the existing reduced-motion preference. Loading
+uses component-shaped skeletons so stale values are not painted as current.
 
 ## Evidence Flow
 
@@ -113,20 +128,37 @@ validity, archive, normalization, admission, and quality evidence independent.
 
 ## Operations Contract
 
-Operations has four inventories:
+Operations has three task domains rather than exposing backend subsystem names:
 
-| Inventory | Primary row grain | Deep detail |
+| Domain | Primary row grain | Deep detail |
 | --- | --- | --- |
 | Runs | persisted run instance | BotLens modal, report/research evidence, copy-only rerun command |
-| Collectors | provider + provider product/instrument | individual fact schedule and recent attempts |
-| Market data | configured futures/spot pair | independent quality and admission states |
+| Market | grouped scheduled facts and configured structure pairs | Market Lens facts, attempts, latency, and quality |
 | Research | persisted research item | relationship trail and raw provider-free evidence |
 
-Collector rows group facts such as `derivatives.open_interest` and
-`derivatives.funding_rate` under the same provider and provider product.
-Canonical instrument identity remains visible but is not the primary label.
+The Market domain keeps two explicit sections. **Scheduled facts** groups facts
+such as `derivatives.open_interest` and `derivatives.funding_rate` by provider
+and provider product/instrument. **Structure streams** preserves independent
+coverage, book-validity, archive, normalization, admission, and quality states
+for configured futures/spot relationships. The grouping reduces scan cost but
+does not merge their typed backend contracts.
 
-Run inventory uses `bot_run_inventory.v1`: one reverse-chronological, 100-row server window with a stable `(before_sort_at, before_run_id)` continuation cursor. It does not fan out by bot definition. Market inventory uses `market_structure_operator_snapshot.v1` plus a change-only SSE stream; the compact list projection is built in one database round trip while full per-definition archive, coverage, book, and quality forensics stay lazy behind the lens. Research remains bounded to 200 records. Client tables may window these results, but numbered pages are not the primary historical retrieval contract.
+Run inventory uses `bot_run_inventory.v1`: one reverse-chronological server
+window with a stable `(before_sort_at, before_run_id)` continuation cursor.
+**Load older runs** appends and deduplicates the next bounded window; numbered
+pages are not the historical retrieval contract. Market inventory uses
+`market_structure_operator_snapshot.v1` plus a change-only SSE stream, while
+the scheduled-fact projection has its own durable snapshot and stream. Research
+remains bounded to 200 records. Only the selected task domain performs its
+secondary inventory reads.
+
+Market Lens is a routed, blurred modal over Operations. It exposes four
+component-owned views: Status, Facts, Attempts, and Quality. Facts are read from
+a bounded canonical typed-fact window (maximum seven days and 1,000 samples);
+the lens never calls the provider or reconstructs missing history. Attempt bars
+show wall time and provider request time independently when provider timing
+evidence is present. Missing provider timing is labeled unavailable rather than
+interpreted as zero.
 
 ## BotLens Modal And Replay
 
@@ -171,7 +203,11 @@ the exact detail behind a disclosure and copy action. For example,
 `market_normalization_spec_storage_corrupt: hash mismatch` becomes a
 normalization-integrity failure with the raw message available for forensics.
 
-Independent sources fail independently. Successful evidence stays visible.
+Errors render beside the component and action they affect, not in a page-level
+stack. Summary cards, attention, current operations, scheduled facts, structure
+streams, research evidence, and lenses each own their loading and failure state.
+A readable summary is primary; a disclosure and copy action preserve exact
+technical details. Independent sources fail independently. Successful evidence stays visible.
 Unknown means a contract/evidence fact is absent; unavailable means a read
 failed; invalid means evidence explicitly failed a validity contract.
 
@@ -179,7 +215,7 @@ failed; invalid means evidence explicitly failed a validity contract.
 
 - no single synthetic platform-wide heartbeat; collector workers, bot containers, streams, and API reachability retain separate authority;
 - no browser mutation or run-control commands;
-- no complete historical inventory beyond the visible read bounds;
+- no unbounded historical inventory; run history advances only through the stable cursor;
 - no claim that every completed run has usable BotLens evidence;
 - no claim that hot BotLens projection equals complete persisted replay until
   the deterministic reconciliation tests pass;

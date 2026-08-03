@@ -16,14 +16,13 @@ import {
   filterResearchRows,
 } from '../../features/operations/buildOperationsViewModel.js'
 import { useRunInventory } from '../../features/operations/useRunInventory.js'
-import { OperatorErrorNotice } from '../components/OperatorErrorNotice.jsx'
+import { OperatorErrorNotice, OperatorSkeleton } from '../components/OperatorErrorNotice.jsx'
 import { Pagination, paginateRows } from '../components/Pagination.jsx'
 
 const PAGE_SIZE = 12
 const TABS = [
   { id: 'runs', label: 'Runs' },
-  { id: 'collectors', label: 'Collectors' },
-  { id: 'market-data', label: 'Market data' },
+  { id: 'market', label: 'Market' },
   { id: 'research', label: 'Research' },
 ]
 
@@ -80,8 +79,8 @@ function RunMenu({ row }) {
   )
 }
 
-function RunsTable({ pageModel, loading, onPageChange }) {
-  if (loading && !pageModel.total) return <div className="qt2-empty">Loading persisted run inventory…</div>
+function RunsTable({ pageModel, loading, hasMore, loadingMore, onLoadMore }) {
+  if (loading && !pageModel.total) return <OperatorSkeleton rows={5} label="Loading persisted run inventory" />
   if (!pageModel.total) return <div className="qt2-empty">No runs match the current filters.</div>
   return (
     <>
@@ -108,7 +107,10 @@ function RunsTable({ pageModel, loading, onPageChange }) {
           </tbody>
         </table>
       </div>
-      <Pagination {...pageModel} onChange={onPageChange} />
+      <div className="qt2-cursor-footer">
+        <span>{pageModel.total} loaded run{pageModel.total === 1 ? '' : 's'}</span>
+        {hasMore ? <button type="button" className="qt2-button" onClick={onLoadMore} disabled={loadingMore}>{loadingMore ? 'Loading older…' : 'Load older runs'}</button> : <span>Beginning of available history</span>}
+      </div>
     </>
   )
 }
@@ -161,14 +163,14 @@ function buildCollectorGroups(collectorFeed, nowEpochMs, query) {
     .sort((left, right) => left.provider.localeCompare(right.provider) || left.productId.localeCompare(right.productId))
 }
 
-function CollectorsTable({ pageModel, loading, onPageChange }) {
-  if (loading && !pageModel.total) return <div className="qt2-empty">Loading collector delivery evidence…</div>
+function CollectorsTable({ pageModel, loading, onPageChange, showPagination = true }) {
+  if (loading && !pageModel.total) return <OperatorSkeleton rows={4} label="Loading collector health" />
   if (!pageModel.total) return <div className="qt2-empty">No collectors match the current filter.</div>
   return (
     <>
       <div className="qt2-collector-summary">
         <span><strong>{pageModel.total}</strong> provider/instrument groups</span>
-        <span>“On schedule” describes delivery evidence only. Process liveness is not observed.</span>
+        <span>Healthy requires a live worker heartbeat, current schedule, and fresh delivery.</span>
       </div>
       <div className="qt2-table-wrap">
         <table className="qt2-data-table qt2-collector-table">
@@ -186,12 +188,12 @@ function CollectorsTable({ pageModel, loading, onPageChange }) {
                     <small>{group.healthyCount}/{group.enabledCount} enabled schedules on time</small>
                   </td>
                   <td className="qt2-actions-cell">
-                    {firstIssue ? <Link className="qt2-button" to={'/operations/collectors/' + firstIssue.definition.id} state={{ from: '/operations?tab=collectors' }}>Inspect</Link> : null}
+                    {firstIssue ? <Link className="qt2-button" to={'/operations/market/' + firstIssue.definition.id} state={{ from: '/operations?tab=market' }}>Inspect</Link> : null}
                     <details className="qt2-context-menu">
                       <summary aria-label={`Collector schedules for ${group.productId}`}><MoreHorizontal size={16} /></summary>
                       <div>
                         {group.facts.map(({ definition, vm }) => (
-                          <Link key={definition.id} to={'/operations/collectors/' + definition.id} state={{ from: '/operations?tab=collectors' }}>
+                          <Link key={definition.id} to={'/operations/market/' + definition.id} state={{ from: '/operations?tab=market' }}>
                             {definition.fact_type}<small>{vm.statusLabel}</small>
                           </Link>
                         ))}
@@ -204,13 +206,13 @@ function CollectorsTable({ pageModel, loading, onPageChange }) {
           </tbody>
         </table>
       </div>
-      <Pagination {...pageModel} onChange={onPageChange} />
+      {showPagination ? <Pagination {...pageModel} onChange={onPageChange} /> : null}
     </>
   )
 }
 
-function MarketDataTable({ pageModel, loading, streamCount, onPageChange }) {
-  if (loading && !pageModel.total) return <div className="qt2-empty">Loading market-data evidence…</div>
+function MarketDataTable({ pageModel, loading, streamCount, onPageChange, showPagination = true }) {
+  if (loading && !pageModel.total) return <OperatorSkeleton rows={3} label="Loading market evidence" />
   if (!pageModel.total) return <div className="qt2-empty">No market-data pairs match the current filter.</div>
   return (
     <>
@@ -234,13 +236,13 @@ function MarketDataTable({ pageModel, loading, streamCount, onPageChange }) {
           </tbody>
         </table>
       </div>
-      <Pagination {...pageModel} onChange={onPageChange} />
+      {showPagination ? <Pagination {...pageModel} onChange={onPageChange} /> : null}
     </>
   )
 }
 
 function ResearchTable({ pageModel, loading, onPageChange }) {
-  if (loading && !pageModel.total) return <div className="qt2-empty">Loading research evidence…</div>
+  if (loading && !pageModel.total) return <OperatorSkeleton rows={5} label="Loading research evidence" />
   if (!pageModel.total) return <div className="qt2-empty">No research evidence matches the current filters.</div>
   return (
     <>
@@ -267,12 +269,15 @@ function matchesMarketQuery(row, query) {
 
 export function FleetRoom() {
   const [params, setParams] = useSearchParams()
-  const requestedTab = params.get('tab') === 'data-plane' ? 'market-data' : params.get('tab')
+  const rawTab = params.get('tab')
+  const requestedTab = ['data-plane', 'collectors', 'market-data'].includes(rawTab)
+    ? 'market'
+    : rawTab
   const tab = TABS.some((item) => item.id === requestedTab) ? requestedTab : 'runs'
   const { sortedBots, error: botsError, nowEpochMs, hasReceivedSnapshot, refresh: refreshBots } = useFleetBotsFeed()
-  const runInventory = useRunInventory(sortedBots)
-  const collectorFeed = useCollectorsFeed()
-  const marketFeed = useMarketStructureFeed()
+  const runInventory = useRunInventory(sortedBots, { enabled: tab === 'runs' })
+  const collectorFeed = useCollectorsFeed({ enabled: tab === 'market' })
+  const marketFeed = useMarketStructureFeed({ enabled: tab === 'market' })
   const [researchItems, setResearchItems] = useState([])
   const [researchLoading, setResearchLoading] = useState(true)
   const [researchError, setResearchError] = useState(null)
@@ -284,6 +289,10 @@ export function FleetRoom() {
   const [page, setPage] = useState(1)
 
   useEffect(() => {
+    if (tab !== 'research') {
+      setResearchLoading(false)
+      return undefined
+    }
     let mounted = true
     setResearchLoading(true)
     listResearchItems({ limit: 200 })
@@ -300,7 +309,7 @@ export function FleetRoom() {
         if (mounted) setResearchLoading(false)
       })
     return () => { mounted = false }
-  }, [researchRevision])
+  }, [researchRevision, tab])
 
   useEffect(() => setPage(1), [tab, query, status, runType, sort])
 
@@ -329,9 +338,11 @@ export function FleetRoom() {
     const source = tab === 'research' ? researchItems.map((item) => item.status) : runInventory.runs.map((run) => run.runtime_status || run.status)
     return [...new Set(source.filter(Boolean))].sort()
   }, [tab, researchItems, runInventory.runs])
-  const visibleRows = tab === 'runs' ? runRows : tab === 'collectors' ? collectorGroups : tab === 'market-data' ? postureRows : researchRows
+  const visibleRows = tab === 'research' ? researchRows : []
   const pageModel = paginateRows(visibleRows, page, PAGE_SIZE)
-  const errors = [botsError, runInventory.error, collectorFeed.error, marketFeed.error, researchError].filter(Boolean)
+  const runPageModel = paginateRows(runRows, 1, Math.max(PAGE_SIZE, runRows.length))
+  const collectorPageModel = paginateRows(collectorGroups, 1, Math.max(PAGE_SIZE, collectorGroups.length))
+  const marketPageModel = paginateRows(postureRows, 1, Math.max(PAGE_SIZE, postureRows.length))
 
   function selectTab(nextTab) {
     setStatus('all')
@@ -339,11 +350,15 @@ export function FleetRoom() {
   }
 
   function refresh() {
-    refreshBots()
-    runInventory.refresh()
-    collectorFeed.refresh()
-    marketFeed.refresh()
-    setResearchRevision((value) => value + 1)
+    if (tab === 'runs') {
+      refreshBots()
+      runInventory.refresh()
+    } else if (tab === 'market') {
+      collectorFeed.refresh()
+      marketFeed.refresh()
+    } else {
+      setResearchRevision((value) => value + 1)
+    }
   }
 
   return (
@@ -354,29 +369,52 @@ export function FleetRoom() {
           <p className="qt2-sub">Find the thing first. Open the evidence only when you need it.</p>
         </div>
         <div className="qt2-head-actions">
-          <span className="qt2-observation-note">{hasReceivedSnapshot ? 'Definitions streaming' : 'Definitions connecting'} · inventories polled</span>
+          <span className="qt2-observation-note">{tab === 'runs' ? (hasReceivedSnapshot ? 'Run definitions live' : 'Run definitions connecting') : tab === 'market' ? 'Market snapshots + live deltas' : 'Bounded research inventory'}</span>
           <button type="button" className="qt2-icon-button" onClick={refresh}><RefreshCcw size={14} />Refresh</button>
         </div>
       </div>
-
-      {errors.map((error, index) => <OperatorErrorNotice error={error} key={String(error) + index} />)}
 
       <div className="qt2-tabs" role="tablist" aria-label="Operations inventory">
         {TABS.map((item) => <button type="button" role="tab" aria-selected={tab === item.id} key={item.id} className={tab === item.id ? 'is-active' : ''} onClick={() => selectTab(item.id)}>{item.label}</button>)}
       </div>
 
       <div className="qt2-filterbar">
-        <label className="qt2-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tab === 'collectors' ? 'Provider, instrument, or fact' : 'Filter this inventory'} /></label>
+        <label className="qt2-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tab === 'market' ? 'Provider, instrument, pair, or fact' : 'Filter this inventory'} /></label>
         {(tab === 'runs' || tab === 'research') ? <select className="qt2-select" value={status} onChange={(event) => setStatus(event.target.value)}><option value="all">All states</option>{statusOptions.map((value) => <option value={value} key={value}>{value}</option>)}</select> : null}
         {tab === 'runs' ? <select className="qt2-select" value={runType} onChange={(event) => setRunType(event.target.value)}><option value="all">All run types</option><option value="live">Live</option><option value="paper">Paper</option><option value="backtest">Backtest</option></select> : null}
         {tab === 'runs' ? <select className="qt2-select" value={sort} onChange={(event) => setSort(event.target.value)}><option value="recent">Newest started</option><option value="oldest">Oldest started</option><option value="status">State</option><option value="definition">Definition</option></select> : null}
       </div>
 
       <section className="qt2-section qt2-operations-body">
-        {tab === 'runs' ? <RunsTable pageModel={pageModel} loading={runInventory.loading} onPageChange={setPage} /> : null}
-        {tab === 'collectors' ? <CollectorsTable pageModel={pageModel} loading={collectorFeed.loading} onPageChange={setPage} /> : null}
-        {tab === 'market-data' ? <MarketDataTable pageModel={pageModel} loading={marketFeed.loading} streamCount={streamRows.length} onPageChange={setPage} /> : null}
-        {tab === 'research' ? <ResearchTable pageModel={pageModel} loading={researchLoading} onPageChange={setPage} /> : null}
+        {tab === 'runs' ? (
+          <>
+            {botsError ? <OperatorErrorNotice error={botsError} compact /> : null}
+            {runInventory.error ? <OperatorErrorNotice error={runInventory.error} compact /> : null}
+            <RunsTable pageModel={runPageModel} loading={runInventory.loading} hasMore={runInventory.hasMore} loadingMore={runInventory.loadingMore} onLoadMore={runInventory.loadMore} />
+          </>
+        ) : null}
+        {tab === 'market' ? (
+          <div className="qt2-market-inventory-stack">
+            <section aria-labelledby="scheduled-facts-heading">
+              <div className="qt2-inventory-heading"><div><h2 id="scheduled-facts-heading">Scheduled facts</h2><p>Provider, instrument, worker liveness, schedule, and delivery.</p></div><span>{collectorGroups.length}</span></div>
+              {collectorFeed.error ? <OperatorErrorNotice error={collectorFeed.error} compact /> : null}
+              {collectorFeed.streamError ? <OperatorErrorNotice error={collectorFeed.streamError} compact /> : null}
+              <CollectorsTable pageModel={collectorPageModel} loading={collectorFeed.loading} showPagination={false} />
+            </section>
+            <section aria-labelledby="structure-streams-heading">
+              <div className="qt2-inventory-heading"><div><h2 id="structure-streams-heading">Structure streams</h2><p>Coverage, book validity, archive, normalization, and admission.</p></div><span>{postureRows.length}</span></div>
+              {marketFeed.error ? <OperatorErrorNotice error={marketFeed.error} compact /> : null}
+              {marketFeed.streamError ? <OperatorErrorNotice error={marketFeed.streamError} compact /> : null}
+              <MarketDataTable pageModel={marketPageModel} loading={marketFeed.loading} streamCount={streamRows.length} showPagination={false} />
+            </section>
+          </div>
+        ) : null}
+        {tab === 'research' ? (
+          <>
+            {researchError ? <OperatorErrorNotice error={researchError} compact /> : null}
+            <ResearchTable pageModel={pageModel} loading={researchLoading} onPageChange={setPage} />
+          </>
+        ) : null}
       </section>
     </div>
   )

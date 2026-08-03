@@ -473,3 +473,508 @@
 .app-motion-reduced .qt2-lens-dialog {
   animation: none;
 }
+
+
+/* Operator Console luxury-tech shell. Glass is reserved for navigation and lenses;
+   working surfaces remain matte and quiet. */
+.qt2-shell {
+  --qt2-obsidian: #090a0d;
+  --qt2-surface: #111318;
+  --qt2-surface-raised: #171a20;
+  --qt2-ivory: #f0ece3;
+  --qt2-muted: #96999f;
+  --qt2-brass: #c2a46d;
+  --qt2-live: #64cbd3;
+  display: grid;
+  grid-template-columns: 15rem minmax(0, 1fr);
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 84% -12%, rgba(194, 164, 109, 0.065), transparent 31rem),
+    linear-gradient(145deg, #090a0d 0%, #0c0e12 54%, #090a0d 100%);
+  color: var(--qt2-ivory);
+  transition: grid-template-columns 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.qt2-shell.is-sidebar-collapsed {
+  grid-template-columns: 4.65rem minmax(0, 1fr);
+}
+
+.qt2-sidebar {
+  position: sticky;
+  z-index: 40;
+  top: 0;
+  display: flex;
+  min-width: 0;
+  height: 100vh;
+  flex-direction: column;
+  gap: 1.25rem;
+  overflow: hidden;
+  border-right: 1px solid rgba(240, 236, 227, 0.08);
+  background: rgba(13, 15, 19, 0.76);
+  padding: 1rem 0.85rem;
+  backdrop-filter: blur(24px) saturate(115%);
+  box-shadow: 18px 0 54px rgba(0, 0, 0, 0.16);
+}
+
+.qt2-brand {
+  min-height: 2.5rem;
+  flex: 0 0 auto;
+}
+
+.qt2-brand-mark {
+  flex: 0 0 2.25rem;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-color: rgba(194, 164, 109, 0.28);
+  background: linear-gradient(145deg, rgba(194, 164, 109, 0.16), rgba(194, 164, 109, 0.035));
+  color: #e1c995;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.055);
+}
+
+.qt2-brand-title {
+  color: var(--qt2-ivory);
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.9rem;
+  letter-spacing: -0.015em;
+}
+
+.qt2-brand-kicker {
+  color: #7d7f84;
+  letter-spacing: 0.13em;
+}
+
+.qt2-roomnav {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.3rem;
+}
+
+.qt2-roomnav-btn {
+  display: flex;
+  min-height: 2.7rem;
+  align-items: center;
+  gap: 0.72rem;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 0.65rem;
+  padding: 0.65rem 0.72rem;
+  color: #8f9298;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.76rem;
+  font-weight: 520;
+  letter-spacing: 0;
+  text-transform: none;
+  transition: color 150ms ease, background 150ms ease, border-color 150ms ease;
+}
+
+.qt2-roomnav-btn::after {
+  display: none;
+}
+
+.qt2-roomnav-btn svg {
+  flex: 0 0 auto;
+}
+
+.qt2-roomnav-btn:hover {
+  background: rgba(240, 236, 227, 0.035);
+  color: #d4d0c7;
+}
+
+.qt2-roomnav-btn.is-active {
+  border-color: rgba(194, 164, 109, 0.18);
+  background: linear-gradient(90deg, rgba(194, 164, 109, 0.12), rgba(194, 164, 109, 0.035));
+  color: #eadab8;
+}
+
+.qt2-sidebar-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.qt2-status-pill,
+.qt2-sidebar-toggle {
+  display: flex;
+  min-height: 2.35rem;
+  align-items: center;
+  gap: 0.55rem;
+  overflow: hidden;
+  border: 1px solid rgba(240, 236, 227, 0.075);
+  border-radius: 0.58rem;
+  padding: 0.55rem 0.68rem;
+  color: #8e9197;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.66rem;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.qt2-sidebar-toggle {
+  width: 100%;
+  cursor: pointer;
+  background: transparent;
+  text-align: left;
+}
+
+.qt2-sidebar-toggle:hover {
+  background: rgba(240, 236, 227, 0.035);
+  color: #d4d0c7;
+}
+
+.qt2-status-pill[data-status="reachable"] { color: #9ad6bc; }
+.qt2-status-pill[data-status="unavailable"] { color: #ee9a96; }
+.qt2-status-pill[data-status="checking"] { color: #d5bd88; }
+.qt2-status-pill[data-status="reachable"] .qt2-status-dot { box-shadow: 0 0 0 4px rgba(100, 203, 211, 0.08); }
+
+.qt2-shell.is-sidebar-collapsed .qt2-brand > div,
+.qt2-shell.is-sidebar-collapsed .qt2-roomnav-btn span,
+.qt2-shell.is-sidebar-collapsed .qt2-status-label,
+.qt2-shell.is-sidebar-collapsed .qt2-sidebar-toggle span {
+  display: none;
+}
+
+.qt2-shell.is-sidebar-collapsed .qt2-sidebar {
+  padding-inline: 0.72rem;
+}
+
+.qt2-shell.is-sidebar-collapsed .qt2-roomnav-btn,
+.qt2-shell.is-sidebar-collapsed .qt2-sidebar-toggle,
+.qt2-shell.is-sidebar-collapsed .qt2-status-pill {
+  justify-content: center;
+  padding-inline: 0.55rem;
+}
+
+.qt2-main {
+  min-width: 0;
+  width: 100%;
+  max-width: 1680px;
+  margin: 0 auto;
+  padding: 1.5rem clamp(1rem, 2.2vw, 2.35rem) 3rem;
+}
+
+.qt2-title,
+.qt2-dashboard-panel-head h2,
+.qt2-panel-head h3 {
+  color: var(--qt2-ivory);
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: -0.025em;
+}
+
+.qt2-title {
+  font-size: clamp(1.45rem, 2.25vw, 2.05rem);
+  font-weight: 540;
+}
+
+.qt2-sub {
+  color: var(--qt2-muted);
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+.qt2-summary-card,
+.qt2-dashboard-panel,
+.qt2-section,
+.qt2-panel {
+  border-color: rgba(240, 236, 227, 0.075);
+  background: linear-gradient(160deg, rgba(22, 24, 29, 0.88), rgba(14, 16, 20, 0.92));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.025), 0 16px 42px rgba(0, 0, 0, 0.09);
+  backdrop-filter: none;
+}
+
+.qt2-summary-card::after {
+  background: rgba(194, 164, 109, 0.5);
+}
+
+.qt2-summary-card:hover {
+  border-color: rgba(194, 164, 109, 0.22);
+  transform: translateY(-2px);
+}
+
+.qt2-icon-button,
+.qt2-button {
+  border-color: rgba(240, 236, 227, 0.1);
+  background: rgba(240, 236, 227, 0.025);
+  color: #c8c5bd;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  transition: transform 150ms ease, border-color 150ms ease, background 150ms ease, color 150ms ease;
+}
+
+.qt2-icon-button:hover,
+.qt2-button:hover {
+  border-color: rgba(194, 164, 109, 0.34);
+  background: rgba(194, 164, 109, 0.07);
+  color: var(--qt2-ivory);
+  transform: translateY(-1px);
+}
+
+.qt2-button-primary {
+  border-color: rgba(194, 164, 109, 0.32);
+  background: rgba(194, 164, 109, 0.1);
+  color: #eadab8;
+}
+
+.qt2-lens-backdrop,
+.qt2-route-modal {
+  background: rgba(3, 4, 6, 0.72);
+  backdrop-filter: blur(18px) saturate(90%);
+}
+
+.qt2-lens-dialog,
+.qt2-route-modal-card {
+  border-color: rgba(240, 236, 227, 0.11);
+  background: rgba(15, 17, 21, 0.94);
+  box-shadow: 0 36px 110px rgba(0, 0, 0, 0.7), inset 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.qt2-skeleton {
+  position: relative;
+  overflow: hidden;
+  border-radius: 0.42rem;
+  background: rgba(240, 236, 227, 0.055);
+}
+
+.qt2-skeleton::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(240, 236, 227, 0.07), transparent);
+  animation: qt2-skeleton-sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes qt2-skeleton-sweep {
+  to { transform: translateX(100%); }
+}
+
+@media (max-width: 720px) {
+  .qt2-shell,
+  .qt2-shell.is-sidebar-collapsed {
+    grid-template-columns: 4.25rem minmax(0, 1fr);
+  }
+
+  .qt2-sidebar {
+    padding-inline: 0.55rem;
+  }
+
+  .qt2-sidebar .qt2-brand > div,
+  .qt2-sidebar .qt2-roomnav-btn span,
+  .qt2-sidebar .qt2-status-label,
+  .qt2-sidebar .qt2-sidebar-toggle span {
+    display: none;
+  }
+
+  .qt2-sidebar .qt2-roomnav-btn,
+  .qt2-sidebar .qt2-sidebar-toggle,
+  .qt2-sidebar .qt2-status-pill {
+    justify-content: center;
+    padding-inline: 0.5rem;
+  }
+
+  .qt2-main {
+    padding: 1rem 0.72rem 2rem;
+  }
+}
+
+.app-motion-reduced .qt2-shell,
+.app-motion-reduced .qt2-roomnav-btn,
+.app-motion-reduced .qt2-icon-button,
+.app-motion-reduced .qt2-button {
+  transition: none;
+}
+
+.app-motion-reduced .qt2-skeleton::after {
+  animation: none;
+}
+
+
+.qt2-skeleton-stack {
+  display: grid;
+  gap: 0.55rem;
+  min-height: 5.5rem;
+  align-content: center;
+  padding: 0.55rem 0.1rem;
+}
+
+.qt2-skeleton-stack .qt2-skeleton {
+  display: block;
+  height: 0.72rem;
+}
+
+.qt2-operator-error.is-compact {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  border-color: rgba(238, 154, 150, 0.2);
+  background: rgba(238, 154, 150, 0.045);
+  padding: 0.55rem 0.62rem;
+}
+
+.qt2-operator-error.is-compact p {
+  display: none;
+}
+
+.qt2-operator-error.is-compact .qt2-icon-button {
+  min-width: auto;
+}
+
+.qt2-operator-error.is-compact .qt2-icon-button span {
+  display: none;
+}
+
+
+.qt2-summary-skeleton {
+  width: 58%;
+  height: 1.7rem;
+  margin: 0.52rem 0 0.28rem;
+}
+
+.qt2-market-inventory-stack {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.qt2-market-inventory-stack > section + section {
+  border-top: 1px solid rgba(240, 236, 227, 0.075);
+  padding-top: 1.25rem;
+}
+
+.qt2-inventory-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.qt2-inventory-heading h2 {
+  color: var(--qt2-ivory);
+  font-size: 0.82rem;
+  font-weight: 570;
+}
+
+.qt2-inventory-heading p,
+.qt2-inventory-heading > span {
+  margin-top: 0.16rem;
+  color: var(--qt2-muted);
+  font-size: 0.6rem;
+}
+
+.qt2-inventory-heading > span {
+  border: 1px solid rgba(240, 236, 227, 0.08);
+  border-radius: 999px;
+  padding: 0.2rem 0.48rem;
+  font-family: var(--font-mono);
+}
+
+.qt2-component-boundary {
+  display: grid;
+  min-width: 0;
+  gap: 0.5rem;
+}
+
+.qt2-operations-body > .qt2-operator-error,
+.qt2-market-inventory-stack .qt2-operator-error,
+.qt2-dashboard-panel .qt2-operator-error,
+.qt2-component-boundary .qt2-operator-error {
+  margin-bottom: 0.55rem;
+}
+
+
+.qt2-cursor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  color: var(--qt2-muted);
+  font-size: 0.58rem;
+}
+
+
+.qt2-market-lens-dialog {
+  width: min(72rem, calc(100vw - 2rem));
+  height: min(52rem, calc(100vh - 2rem));
+  border: 1px solid rgba(240, 236, 227, 0.11);
+  border-radius: 0.9rem;
+  background: rgba(15, 17, 21, 0.96);
+}
+
+.qt2-lens-tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid rgba(240, 236, 227, 0.075);
+  padding: 0.45rem 1rem 0;
+}
+
+.qt2-lens-tabs button {
+  border-bottom: 2px solid transparent;
+  padding: 0.58rem 0.8rem;
+  color: var(--qt2-muted);
+  font-size: 0.67rem;
+  transition: color 150ms ease, border-color 150ms ease;
+}
+
+.qt2-lens-tabs button:hover { color: #d4d0c7; }
+.qt2-lens-tabs button.is-active {
+  border-bottom-color: var(--qt2-brass);
+  color: #eadab8;
+}
+
+.qt2-fact-chart,
+.qt2-latency-chart {
+  padding: 1rem;
+}
+
+.qt2-fact-chart svg {
+  width: 100%;
+  height: 12rem;
+  overflow: visible;
+  border-bottom: 1px solid rgba(240, 236, 227, 0.06);
+}
+
+.qt2-fact-chart polyline {
+  stroke: var(--qt2-live);
+  stroke-width: 1.5;
+  filter: drop-shadow(0 0 5px rgba(100, 203, 211, 0.2));
+}
+
+.qt2-fact-chart > div,
+.qt2-latency-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  margin-top: 0.8rem;
+}
+
+.qt2-fact-chart span small,
+.qt2-fact-chart span strong,
+.qt2-latency-summary span small,
+.qt2-latency-summary span strong { display: block; }
+.qt2-fact-chart small,
+.qt2-latency-summary small { color: var(--qt2-muted); font-size: 0.56rem; }
+.qt2-fact-chart strong,
+.qt2-latency-summary strong { margin-top: 0.18rem; color: var(--qt2-ivory); font-size: 0.73rem; }
+
+.qt2-latency-bars {
+  display: flex;
+  height: 9rem;
+  align-items: flex-end;
+  gap: 0.32rem;
+  border-bottom: 1px solid rgba(240, 236, 227, 0.08);
+}
+
+.qt2-latency-bars > span {
+  flex: 1;
+  min-width: 0.28rem;
+  border-radius: 2px 2px 0 0;
+  background: rgba(100, 203, 211, 0.65);
+}
+
+.qt2-latency-bars > span.is-failure { background: rgba(238, 154, 150, 0.75); }
+
+@media (max-width: 680px) {
+  .qt2-market-lens-dialog { width: calc(100vw - 1rem); height: calc(100vh - 1rem); }
+  .qt2-fact-chart > div, .qt2-latency-summary { grid-template-columns: 1fr; }
+  .qt2-lens-tabs { overflow-x: auto; }
+}

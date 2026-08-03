@@ -36,7 +36,7 @@ export function humanizeOperatorError(error) {
       }
 }
 
-export function OperatorErrorNotice({ error }) {
+export function OperatorErrorNotice({ error, compact = false }) {
   const [copied, setCopied] = useState(false)
   const model = useMemo(() => humanizeOperatorError(error), [error])
 
@@ -51,7 +51,7 @@ export function OperatorErrorNotice({ error }) {
   }
 
   return (
-    <div className="qt2-operator-error" role="alert">
+    <div className={"qt2-operator-error" + (compact ? " is-compact" : "")} role="alert">
       <TriangleAlert size={16} aria-hidden="true" />
       <div>
         <strong>{model.title}</strong>
@@ -65,6 +65,17 @@ export function OperatorErrorNotice({ error }) {
         {copied ? <Check size={14} /> : <Clipboard size={14} />}
         <span>{copied ? 'Copied' : 'Copy details'}</span>
       </button>
+    </div>
+  )
+}
+
+
+export function OperatorSkeleton({ rows = 3, label = "Loading operator evidence" }) {
+  return (
+    <div className="qt2-skeleton-stack" role="status" aria-label={label}>
+      {Array.from({ length: Math.max(1, rows) }, (_, index) => (
+        <span className="qt2-skeleton" key={index} style={{ width: index % 2 ? "72%" : "100%" }} />
+      ))}
     </div>
   )
 }

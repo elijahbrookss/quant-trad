@@ -8,7 +8,7 @@ const ATTEMPTS_LIMIT = 5
  * projection replaces it atomically as liveness, attempts, or schedules change.
  * A failed live channel never discards the last persisted snapshot.
  */
-export function useCollectorsFeed() {
+export function useCollectorsFeed({ enabled = true } = {}) {
   const [collectors, setCollectors] = useState([])
   const [instruments, setInstruments] = useState([])
   const [workers, setWorkers] = useState([])
@@ -22,6 +22,11 @@ export function useCollectorsFeed() {
   const refresh = useCallback(() => setRefreshRevision((value) => value + 1), [])
 
   useEffect(() => {
+    if (!enabled) {
+      setLoading(false)
+      return undefined
+    }
+    setLoading(true)
     let mounted = true
     let fallbackIntervalId = null
     const source = openCollectorsStream({ attemptLimit: ATTEMPTS_LIMIT })
@@ -106,7 +111,7 @@ export function useCollectorsFeed() {
       source?.close()
       if (fallbackIntervalId) clearInterval(fallbackIntervalId)
     }
-  }, [refreshRevision])
+  }, [enabled, refreshRevision])
 
   return {
     collectors,

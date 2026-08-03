@@ -4,7 +4,7 @@ import {
   openMarketStructureStream,
 } from '../../adapters/marketData.adapter.js'
 
-export function useMarketStructureFeed() {
+export function useMarketStructureFeed({ enabled = true } = {}) {
   const [definitions, setDefinitions] = useState([])
   const [sessions, setSessions] = useState([])
   const [normalizationSpecs, setNormalizationSpecs] = useState([])
@@ -17,6 +17,10 @@ export function useMarketStructureFeed() {
   const refresh = useCallback(() => setRefreshRevision((value) => value + 1), [])
 
   useEffect(() => {
+    if (!enabled) {
+      setLoading(false)
+      return undefined
+    }
     let mounted = true
     let source = null
 
@@ -77,7 +81,7 @@ export function useMarketStructureFeed() {
       mounted = false
       source?.close()
     }
-  }, [refreshRevision])
+  }, [enabled, refreshRevision])
 
   return {
     definitions,

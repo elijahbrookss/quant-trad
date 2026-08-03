@@ -1,5 +1,6 @@
 import { Suspense, lazy, useEffect, useState } from 'react'
 import { BrowserRouter, NavLink, Navigate, Route, Routes, useParams } from 'react-router-dom'
+import { Activity, LayoutDashboard, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import { ChartStateProvider } from '../contexts/ChartStateContext.jsx'
 import { usePortalSettings } from '../contexts/PortalSettingsContext.jsx'
 import { pingApi } from '../adapters/health.adapter.js'
@@ -20,14 +21,23 @@ const ResearchEvidenceRoom = lazy(() =>
   import('./rooms/ResearchEvidenceRoom.jsx').then((module) => ({ default: module.ResearchEvidenceRoom })),
 )
 
+const SIDEBAR_STORAGE_KEY = 'quanttrad.operator.sidebar.collapsed'
 const ROOMS = [
-  { id: 'overview', label: 'Overview', to: '/overview' },
-  { id: 'operations', label: 'Operations', to: '/operations' },
+  { id: 'overview', label: 'Overview', to: '/overview', icon: LayoutDashboard },
+  { id: 'operations', label: 'Operations', to: '/operations', icon: Activity },
 ]
+
+function initialSidebarCollapsed() {
+  try {
+    return window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
 
 function LegacyCollectorRedirect() {
   const { definitionId } = useParams()
-  return <Navigate to={'/operations/collectors/' + definitionId} replace />
+  return <Navigate to={'/operations/market/' + definitionId} replace />
 }
 
 function StatusPill() {
@@ -63,23 +73,28 @@ function StatusPill() {
   return (
     <span className="qt2-status-pill" data-status={status} title="Connectivity only; not a platform-health claim.">
       <span className="qt2-status-dot" />
-      {label}
+      <span className="qt2-status-label">{label}</span>
     </span>
   )
 }
 
-function RoomNav() {
+function RoomNav({ collapsed }) {
   return (
     <nav className="qt2-roomnav" aria-label="Primary">
-      {ROOMS.map((room) => (
-        <NavLink
-          key={room.id}
-          to={room.to}
-          className={({ isActive }) => 'qt2-roomnav-btn ' + (isActive ? 'is-active' : '')}
-        >
-          {room.label}
-        </NavLink>
-      ))}
+      {ROOMS.map((room) => {
+        const Icon = room.icon
+        return (
+          <NavLink
+            key={room.id}
+            to={room.to}
+            className={({ isActive }) => "qt2-roomnav-btn " + (isActive ? "is-active" : "")}
+            title={collapsed ? room.label : undefined}
+          >
+            <Icon size={18} aria-hidden="true" />
+            <span>{room.label}</span>
+          </NavLink>
+        )
+      })}
     </nav>
   )
 }
@@ -90,11 +105,20 @@ function RoomFallback({ label }) {
 
 function AppV2Shell() {
   const { settings } = usePortalSettings()
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(initialSidebarCollapsed)
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(sidebarCollapsed))
+    } catch {
+      // Browser storage is optional; the in-memory preference still works.
+    }
+  }, [sidebarCollapsed])
   const motionClass = settings.motion === 'reduced' ? 'app-motion-reduced' : ''
 
   return (
-    <div className={'qt2-shell ' + motionClass}>
-      <header className="qt2-topbar">
+    <div className={'qt2-shell ' + motionClass + (sidebarCollapsed ? ' is-sidebar-collapsed' : '')}>
+      <aside className="qt2-sidebar">
         <div className="qt2-brand">
           <span className="qt2-brand-mark">QT</span>
           <div>
@@ -102,9 +126,22 @@ function AppV2Shell() {
             <div className="qt2-brand-kicker">Operator console</div>
           </div>
         </div>
-        <RoomNav />
-        <StatusPill />
-      </header>
+        <RoomNav collapsed={sidebarCollapsed} />
+        <div className="qt2-sidebar-foot">
+          <StatusPill />
+          <button
+            type="button"
+            className="qt2-sidebar-toggle"
+            onClick={() => setSidebarCollapsed((value) => !value)}
+            aria-label={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}
+            aria-expanded={!sidebarCollapsed}
+            title={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}
+          >
+            {sidebarCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
+            <span>{sidebarCollapsed ? 'Expand' : 'Collapse'}</span>
+          </button>
+        </div>
+      </aside>
 
       <main className="qt2-main">
         <Routes>
@@ -112,7 +149,8 @@ function AppV2Shell() {
           <Route path="/overview" element={<Suspense fallback={<RoomFallback label="Overview" />}><OverviewRoom /></Suspense>} />
           <Route path="/operations" element={<Suspense fallback={<RoomFallback label="Operations" />}><OperationsRoom /></Suspense>} />
           <Route path="/operations/runs/:runId" element={<Suspense fallback={<RoomFallback label="BotLens" />}><BotLensRoom /></Suspense>} />
-          <Route path="/operations/collectors/:definitionId" element={<Suspense fallback={<RoomFallback label="collector evidence" />}><CollectorLensRoom /></Suspense>} />
+          <Route path="/operations/market/:definitionId" element={<Suspense fallback={<RoomFallback label="market evidence" />}><CollectorLensRoom /></Suspense>} />
+          <Route path="/operations/collectors/:definitionId" element={<LegacyCollectorRedirect />} />
           <Route path="/operations/research/:itemId" element={<Suspense fallback={<RoomFallback label="research evidence" />}><ResearchEvidenceRoom /></Suspense>} />
 
           <Route path="/fleet" element={<Navigate to="/operations" replace />} />

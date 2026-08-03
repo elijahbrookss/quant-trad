@@ -68,6 +68,13 @@ export async function listInstruments() {
   return Array.isArray(payload) ? payload : []
 }
 
+export async function fetchCollectorFactHistory(definitionId, { hours = 24, limit = 240 } = {}) {
+  if (!definitionId) return null
+  return request(
+    "/api/market-data/collectors/" + encodeURIComponent(definitionId) + "/facts" + buildQuery({ hours, limit }),
+  )
+}
+
 export async function fetchCollectorAttempts(definitionId, { limit } = {}) {
   if (!definitionId) return []
   const payload = await request(

@@ -56,12 +56,15 @@ test('v2 primary navigation is bounded to Overview and Operations', () => {
   const roomBlock = app.slice(app.indexOf('const ROOMS'), app.indexOf('function LegacyCollectorRedirect'))
   assert.match(roomBlock, /Overview/)
   assert.match(roomBlock, /Operations/)
+  assert.match(app, /qt2-sidebar-toggle/)
+  assert.match(app, /SIDEBAR_STORAGE_KEY/)
   assert.doesNotMatch(roomBlock, /Fleet|Studio|Research|Reports/)
 })
 
 test('v2 registers exact run and evidence routes and redirects legacy mutation-oriented surfaces', () => {
   const app = source(path.join('v2', 'AppV2.jsx'))
   assert.ok(app.includes('path="/operations/runs/:runId"'))
+  assert.ok(app.includes('path="/operations/market/:definitionId"'))
   assert.ok(app.includes('path="/operations/collectors/:definitionId"'))
   assert.ok(app.includes('path="/operations/research/:itemId"'))
   assert.ok(app.includes('path="/fleet"'))

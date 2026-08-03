@@ -15,15 +15,17 @@ test('Overview is a compact dashboard rather than a numbered operational report'
   assert.doesNotMatch(overview, /qt2-step|function MarketPosture|function RecentOutcomes/)
 })
 
-test('Operations inventories are separated, grouped, and visibly paginated', () => {
+test('Operations uses three task domains, grouped Market evidence, and cursor-backed run history', () => {
   const operations = source(path.join('v2', 'rooms', 'FleetRoom.jsx'))
-  assert.match(operations, /id: 'collectors'/)
-  assert.match(operations, /id: 'market-data'/)
+  assert.match(operations, /id: \x27market\x27/)
+  assert.match(operations, /Scheduled facts/)
+  assert.match(operations, /Structure streams/)
   assert.match(operations, /buildCollectorGroups/)
-  assert.match(operations, /paginateRows\(visibleRows, page, PAGE_SIZE\)/)
+  assert.match(operations, /runInventory\.loadMore/)
   assert.match(operations, /BotLens unavailable/)
   assert.match(operations, /Copy rerun command/)
-  assert.doesNotMatch(operations, /id: 'definitions'/)
+  assert.doesNotMatch(operations, /id: \x27collectors\x27|id: \x27market-data\x27/)
+  assert.doesNotMatch(operations, /errors\.map/)
 })
 
 test('operator errors preserve technical details behind readable copy', () => {
