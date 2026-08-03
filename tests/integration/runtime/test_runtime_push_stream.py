@@ -446,6 +446,9 @@ def test_botlens_fact_stream_overlay_delta_uses_bounded_render_payload() -> None
         "geometry_keys": ["markers", "polylines"],
         "payload_counts": {"markers": 2, "polylines": 1},
         "point_count": 2,
+        "source_payload_counts": {"markers": 3, "polylines": 1},
+        "source_point_count": 9,
+        "truncated": True,
     }
     assert overlay["ui"] == {"label": "ATR", "color": "#38bdf8"}
 
@@ -1937,6 +1940,8 @@ def test_overlay_projection_uses_bar_cadence_and_emits_bounded_delta() -> None:
         "window_bars": 640,
         "emit_every_bars": 3,
         "bar_index": 1,
+        "reason": "test",
+        "terminal": False,
     }
     assert first_delta["ops"][0]["overlay"]["detail_level"] == "bounded_render"
 

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   selectSelectedSymbolChartCandles,
   selectSelectedSymbolChartTrades,
+  selectSelectedSymbolOverlays,
   selectSelectedSymbolState,
 } from '../src/features/bots/botlens/state/botlensRuntimeSelectors.js'
 import {
@@ -442,5 +443,52 @@ test('chart history merges newest-first trade pages without reopening a closed t
   assert.equal(
     state.retrieval.chartHistoryBySymbol['instrument-btc|1m'].overlayEvidence.coverage,
     'live_viewport_only',
+  )
+})
+
+
+test('terminal BotLens uses bounded durable overlay pages while active runs prefer live projection', () => {
+  let state = bootstrapState()
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 120, open: 100, high: 102, low: 99, close: 101 }],
+    overlays: [{ overlay_id: 'history:newest', detail_level: 'bounded_historical_render', payload: { markers: [{ time: 120, price: 101 }] } }],
+    range: { returned_start_time: '1970-01-01T00:02:00Z', returned_end_time: '1970-01-01T00:02:00Z' },
+    overlayEvidence: { complete_for_returned_candles: true, coverage: 'complete', fingerprint: 'page-newest' },
+  })
+
+  assert.equal(selectSelectedSymbolOverlays(state)[0].overlay_id, 'overlay-1')
+
+  state = {
+    ...state,
+    runState: {
+      ...state.runState,
+      lifecycle: { phase: 'completed', status: 'completed' },
+    },
+  }
+  assert.deepEqual(
+    selectSelectedSymbolOverlays(state).map((entry) => entry.overlay_id),
+    ['history:newest'],
+  )
+
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 60, open: 99, high: 101, low: 98, close: 100 }],
+    overlays: [{ overlay_id: 'history:older', detail_level: 'bounded_historical_render', payload: { markers: [{ time: 60, price: 100 }] } }],
+    range: { returned_start_time: '1970-01-01T00:01:00Z', returned_end_time: '1970-01-01T00:01:00Z' },
+    overlayEvidence: { complete_for_returned_candles: true, coverage: 'complete', fingerprint: 'page-older' },
+  })
+
+  assert.deepEqual(
+    selectSelectedSymbolOverlays(state).map((entry) => entry.overlay_id),
+    ['history:newest', 'history:older'],
+  )
+  assert.equal(
+    state.retrieval.chartHistoryBySymbol['instrument-btc|1m'].overlayEvidence.complete_for_loaded_candles,
+    true,
   )
 })

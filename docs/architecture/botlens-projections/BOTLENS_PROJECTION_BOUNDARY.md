@@ -14,6 +14,8 @@ code_paths:
   - portal/backend/service/bots/botlens_contract.py
   - portal/backend/service/bots/botlens_bootstrap_service.py
   - portal/backend/service/bots/botlens_chart_service.py
+  - portal/backend/service/bots/botlens_chart_contracts.py
+  - portal/backend/service/bots/botlens_overlay_history.py
   - portal/backend/service/bots/botlens_forensics_service.py
   - portal/backend/service/storage/repos/candles.py
   - portal/backend/service/storage/repos/runtime_events.py
@@ -47,6 +49,8 @@ code_paths:
   - portal/frontend/src/components/bots/botlensProjection.js
   - portal/frontend/src/features/bots/botlens/buildBotLensRuntimeViewModel.js
   - portal/frontend/src/features/bots/botlens/components/ChartPanel.jsx
+  - portal/frontend/src/features/bots/botlens/state/botlensRuntimeSelectors.js
+  - portal/frontend/src/features/bots/botlens/state/botlensRuntimeState.js
   - docs/architecture/botlens-projections/diagrams/botlens-projection-flow.mmd
 ---
 # BotLens Projection Boundary
@@ -260,12 +264,23 @@ available current trade batch as a projection resync boundary.
 
 Visual overlays are projection/read-model artifacts. They are not stored on
 `StrategySeries`, do not participate in strategy decisions, and are not built by
-ordinary runtime push updates. The current overlay delta is a bounded live
-viewport and is not retained as complete historical overlay evidence. Completed
-chart-history responses therefore report `overlay_evidence.coverage=live_viewport_only`
-and `complete_for_returned_candles=false`; the UI must not advertise a full
-historical overlay toggle for those runs. Frozen candles, typed decisions, and
-durable trades remain independently inspectable.
+ordinary runtime push updates. Overlay deltas remain bounded viewport evidence,
+but new runs retain those deltas as Tier 2 research context. Chart-history reads
+replay the scoped overlay clock from the beginning of the selected series,
+causally stop before the returned page end, and clip the resulting geometry to
+the returned candle window. Terminal immutable timelines are held in an
+eight-entry process-local LRU so left-pan pages do not requery the same ledger;
+each page still performs its own causal time cut and stable fingerprint.
+
+Historical overlay completeness is conditional, never inferred. The page must
+have contiguous `run_seq` and overlay clocks, a projection window that covers
+the returned candles, cadence coverage through the returned last candle, no
+payload truncation, and—on the latest terminal page—a terminal checkpoint. A
+gap, invalid delta, cadence hole, missing checkpoint, or truncated payload
+returns bounded/incomplete evidence with reason codes. Runs created before
+overlay retention return `overlay_timeline_not_retained`; the frontend labels
+them unavailable instead of substituting a live tail. Frozen candles, typed
+decisions, and durable trades remain independently inspectable.
 
 Runtime configures each indicator's render-only overlay-history bound from
 `bot_runtime.botlens.overlay_window_bars` through the indicator engine's single
@@ -280,13 +295,17 @@ The ordinary runtime push update emits compact BotLens facts for candles,
 series state, health, decisions, trades, wallet, logs, and stats. After a bar is
 finalized, a separate `overlay_projection` step may build visible overlay
 geometry, diff it against the overlay projection cache, and emit
-`overlay_ops_emitted` only when there are changed overlay operations.
+`overlay_ops_emitted` only when there are changed overlay operations. A terminal
+bar forces one final delta even when geometry is unchanged; that no-op clock
+advance is the explicit terminal checkpoint, not invented geometry.
 
 Overlay projection cadence is bar based, not wall-clock based. The cadence is
 controlled by `bot_runtime.botlens.overlay_emit_every_bars`, with terminal bars
 forcing a final projection. Projection deltas carry a `projection` object with
-`mode`, `window_bars`, `emit_every_bars`, and `bar_index` so the backend and
-frontend can display the overlay viewport as bounded projection state.
+`mode`, `window_bars`, `emit_every_bars`, `bar_index`, `reason`, and `terminal`
+so the backend and frontend can distinguish live bounded state from a complete
+ledger-backed page. Transport compaction records whether geometry was truncated
+and the source counts; truncated pages cannot be labeled complete.
 
 Trade visuals follow the trade-fact path. Runtime no longer registers or emits
 a runtime-owned trade overlay type. The frontend may draw trade markers,
@@ -316,8 +335,11 @@ runtime ledger remains the recovery source.
 The durable ingest path follows the same retention budget as source-side
 persistence. Source-persisted material facts are not written again by ingest.
 Transport-owned facts are persisted only when they are compact research context
-or material diagnostics. Live-only facts continue through projectors and fanout
-without becoming permanent runtime-event rows.
+or material diagnostics. Bounded `OVERLAY_STATE_CHANGED` deltas are compact
+research context: useful for deterministic rendering but never execution,
+strategy, report, or research-feature authority. Provisional candles and other
+live-only facts continue through projectors and fanout without becoming
+permanent runtime-event rows.
 
 A completed run projection that still has open trades must replay from the
 durable runtime event ledger before publishing terminal projection truth. Replay
@@ -359,7 +381,9 @@ or bootstrap facts.
 - Projection and transport payloads stay bounded.
 - Heavy event history belongs on cold paths.
 - Complete trade markers require ledger-backed range evidence; selected-symbol tails are never presented as complete history.
-- Historical indicator overlays remain unavailable until a separate durable overlay archive contract exists.
+- Historical indicator overlays are page-complete only when the retained bounded
+  timeline proves clocks, cadence, window coverage, terminal state, and no
+  truncation; old or gapped runs remain explicitly unavailable/incomplete.
 - Runtime truth remains in execution events and trade rows.
 - Closed-trade truth in the durable ledger must dominate stale projection
   notifications.

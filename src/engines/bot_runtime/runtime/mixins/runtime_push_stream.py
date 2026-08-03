@@ -735,6 +735,8 @@ class RuntimePushStreamMixin:
         self,
         cache: Dict[str, Any],
         overlays: Sequence[Mapping[str, Any]],
+        *,
+        force: bool = False,
     ) -> Optional[Dict[str, Any]]:
         return build_overlay_delta(
             cache,
@@ -747,6 +749,7 @@ class RuntimePushStreamMixin:
                 )
                 or BOTLENS_FACT_STREAM_OVERLAY_POINT_LIMIT
             ),
+            force=force,
         )
 
     def _overlay_payload_metrics(self, payload: Mapping[str, Any]) -> Tuple[int, int]:
@@ -2301,7 +2304,11 @@ class RuntimePushStreamMixin:
             projection_build_ms = max((time.perf_counter() - build_started) * 1000.0, 0.0)
             delta_started = time.perf_counter()
             working_cache = dict(cache)
-            overlay_delta = self._build_overlay_delta(working_cache, visible_overlays)
+            overlay_delta = self._build_overlay_delta(
+                working_cache,
+                visible_overlays,
+                force=force,
+            )
             delta_ms = max((time.perf_counter() - delta_started) * 1000.0, 0.0)
         except Exception as exc:
             duration_ms = max((time.perf_counter() - projection_started_perf) * 1000.0, 0.0)
@@ -2355,6 +2362,8 @@ class RuntimePushStreamMixin:
                     "window_bars": int(getattr(self, "_botlens_overlay_window_bars", 0) or 0),
                     "emit_every_bars": int(getattr(self, "_botlens_overlay_emit_every_bars", 0) or 0),
                     "bar_index": int(getattr(state, "bar_index", 0) or 0),
+                    "reason": str(reason or "").strip() or None,
+                    "terminal": bool(force and getattr(state, "done", False)),
                 },
             }
             payload = {

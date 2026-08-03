@@ -20,11 +20,16 @@ code_paths:
   - src/engines/bot_runtime/runtime/mixins/runtime_projection.py
   - src/engines/bot_runtime/strategy/series_builder_parts/models.py
   - portal/backend/service/bots/botlens_domain_events.py
+  - portal/backend/service/bots/botlens_event_retention.py
+  - portal/backend/service/bots/botlens_chart_service.py
+  - portal/backend/service/bots/botlens_overlay_history.py
   - portal/backend/service/bots/botlens_state.py
   - portal/backend/service/bots/botlens_transport.py
   - portal/frontend/src/components/bots/botlensProjection.js
   - portal/frontend/src/features/bots/botlens/buildBotLensRuntimeViewModel.js
   - portal/frontend/src/features/bots/botlens/components/ChartPanel.jsx
+  - portal/frontend/src/features/bots/botlens/state/botlensRuntimeSelectors.js
+  - portal/frontend/src/features/bots/botlens/state/botlensRuntimeState.js
   - docs/architecture/botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md
   - docs/architecture/execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md
 ---
@@ -33,6 +38,9 @@ code_paths:
 ## Status
 
 Accepted on 2026-06-15.
+
+Amended on 2026-08-03 to retain the bounded delta timeline as non-authoritative
+research context and replay it into causally paged historical chart geometry.
 
 Amends [ADR 0028](0028-use-bounded-projection-dispatch-for-botlens-live-facts.md):
 runtime still emits bounded BotLens facts, but selected-symbol visual overlay
@@ -74,9 +82,11 @@ projection step. That step:
 - emits at most on the configured bar cadence
   `bot_runtime.botlens.overlay_emit_every_bars`,
 - stores visible overlays in the runtime projection cache,
-- emits `overlay_ops_emitted` only when the overlay delta changes,
+- emits `overlay_ops_emitted` when the overlay delta changes and forces a final
+  no-op clock advance at terminal state,
 - includes projection metadata in the overlay delta:
-  `mode`, `window_bars`, `emit_every_bars`, and `bar_index`,
+  `mode`, `window_bars`, `emit_every_bars`, `bar_index`, `reason`, and `terminal`,
+- records compaction/truncation evidence in each bounded overlay summary,
 - records `overlay_projection` timing and count metrics separately from
   `step_push_update`.
 
@@ -90,6 +100,14 @@ diagnostics and can make BotLens stale or unavailable, but it must not rewrite
 execution truth or fail a valid run. Canonical persistence and execution-state
 errors remain fail-loud.
 
+The backend may retain `OVERLAY_STATE_CHANGED` as Tier 2 research context. This
+does not promote it into canonical run truth. Historical pages replay exact
+overlay clocks, stop at the page's causal end, and are complete only when clock,
+cadence, window, terminal-checkpoint, and truncation checks all pass. Old runs
+without retained deltas remain explicitly unavailable. Terminal timelines with
+a final checkpoint may be reused in a bounded process-local LRU; every page is
+still causally sliced before rendering.
+
 ## Consequences
 
 - `step_push_update` timing becomes a cleaner measure of compact fact
@@ -99,6 +117,10 @@ errors remain fail-loud.
 - Long runs avoid replaying or serializing full visual history on every bar.
 - Frontend overlay state receives projection metadata and can tell the user
   whether the visible overlays are bounded projections.
+- Completed new runs can provide deterministic page-by-page overlay geometry
+  without asking indicators to reconstruct history or making the UI authoritative.
+- Missing events, transport gaps, and compaction are visible as incomplete
+  evidence rather than silently reduced geometry.
 - Removing `StrategySeries.overlays`, the runtime trade-overlay registration,
   and legacy frontend suppression removes a second visual truth layer.
 - The tradeoff is that BotLens overlays can be behind by up to the configured

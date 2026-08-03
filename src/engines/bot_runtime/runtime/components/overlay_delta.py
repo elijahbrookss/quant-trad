@@ -222,6 +222,20 @@ def compact_overlay_for_transport(
         if isinstance(payload_value, Mapping)
         else None
     )
+    source_payload_summary = overlay_payload_summary(payload_value)
+    compacted_payload_summary = overlay_payload_summary(compacted_payload)
+    payload_truncated = bool(
+        isinstance(payload_value, Mapping)
+        and compacted_payload != payload_value
+    )
+    if compacted_payload_summary and payload_truncated:
+        compacted_payload_summary["truncated"] = True
+        compacted_payload_summary["source_payload_counts"] = dict(
+            source_payload_summary.get("payload_counts") or {}
+        )
+        compacted_payload_summary["source_point_count"] = int(
+            source_payload_summary.get("point_count") or 0
+        )
     pane_views = [
         str(entry).strip()
         for entry in (mapping.get("pane_views") if isinstance(mapping.get("pane_views"), list) else [])
@@ -246,7 +260,7 @@ def compact_overlay_for_transport(
         "ui": ui or None,
         "detail_level": "bounded_render",
         "payload": compacted_payload,
-        "payload_summary": overlay_payload_summary(compacted_payload),
+        "payload_summary": compacted_payload_summary,
     }
     for seq_key in (
         "indicator_commit_seq",
@@ -270,6 +284,7 @@ def build_overlay_delta(
     overlays: Sequence[Mapping[str, Any]],
     *,
     max_payload_items: int = _OVERLAY_PAYLOAD_FALLBACK_POINT_LIMIT,
+    force: bool = False,
 ) -> Optional[Dict[str, Any]]:
     previous_entries = cache.get("overlay_entries")
     previous_fingerprints = cache.get("overlay_fingerprints")
@@ -296,11 +311,12 @@ def build_overlay_delta(
         next_fingerprints[key] = overlay_payload_fingerprint(compacted_overlay)
         next_order.append(key)
 
-    if (
+    unchanged = (
         len(previous_entries) == len(next_entries)
         and set(previous_entries.keys()) == set(next_entries.keys())
         and all(previous_fingerprints.get(key) == next_fingerprints.get(key) for key in next_entries.keys())
-    ):
+    )
+    if unchanged and not force:
         return None
 
     next_seq = previous_seq + 1

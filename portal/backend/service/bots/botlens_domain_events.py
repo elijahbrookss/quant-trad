@@ -327,6 +327,17 @@ def _durable_overlay_entry(key: Any, overlay: Any) -> Dict[str, Any]:
         for entry in (mapping.get("pane_views") if isinstance(mapping.get("pane_views"), list) else [])
         if str(entry).strip()
     ]
+    source_summary = _mapping(mapping.get("payload_summary"))
+    durable_summary = _durable_overlay_payload_summary(payload)
+    if source_summary.get("truncated"):
+        durable_summary["truncated"] = True
+        durable_summary["source_payload_counts"] = _mapping(
+            source_summary.get("source_payload_counts")
+        )
+        durable_summary["source_point_count"] = _coerce_int(
+            source_summary.get("source_point_count"),
+            0,
+        )
     durable = {
         "overlay_id": overlay_id,
         "type": _optional_text(mapping.get("type")),
@@ -336,7 +347,7 @@ def _durable_overlay_entry(key: Any, overlay: Any) -> Dict[str, Any]:
         "pane_views": pane_views or None,
         "detail_level": "bounded_render",
         "payload": payload or None,
-        "payload_summary": _durable_overlay_payload_summary(payload),
+        "payload_summary": durable_summary,
     }
     durable["overlay_revision"] = _event_hash("overlay", overlay_id or key, mapping)
     return {
@@ -384,6 +395,8 @@ def _durable_overlay_delta(value: Any) -> Dict[str, Any]:
         "emit_every_bars": _coerce_int(projection.get("emit_every_bars"), 0) or None,
         "bar_index": projection_bar_index if projection_bar_index >= 0 else None,
         "source": _optional_text(projection.get("source")),
+        "reason": _optional_text(projection.get("reason")),
+        "terminal": bool(projection.get("terminal")) or None,
     }
     durable_projection = {
         key: item

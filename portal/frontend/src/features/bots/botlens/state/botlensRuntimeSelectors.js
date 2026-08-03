@@ -78,7 +78,15 @@ export function selectWarningItems(state) {
 }
 
 export function selectSelectedSymbolOverlays(state) {
-  return selectSelectedSymbolBaseSlices(state)?.overlays || []
+  const history = selectSelectedSymbolChartHistory(state)
+  const historyOverlays = Array.isArray(history?.overlays) ? history.overlays : []
+  const lifecycle = state?.runState?.lifecycle || {}
+  const runLive = lifecycle?.run_live === true
+    || ['live', 'running'].includes(String(lifecycle?.phase || lifecycle?.status || '').toLowerCase())
+  if (!runLive && historyOverlays.length) {
+    return historyOverlays
+  }
+  return selectSelectedSymbolBaseSlices(state)?.overlays || historyOverlays
 }
 
 export function selectSelectedSymbolRecentTrades(state) {

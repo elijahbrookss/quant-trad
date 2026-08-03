@@ -4,10 +4,12 @@ from collections import OrderedDict
 import hashlib
 import json
 from datetime import datetime, timezone
+import threading
 from typing import Any, Dict, Mapping, Optional
 
 from .botlens_chart_contracts import chart_history_response_contract
 from .botlens_contract import normalize_series_key
+from .botlens_overlay_history import build_chart_overlay_history
 from .botlens_domain_events import BotLensDomainEventName, canonicalize_botlens_candle
 from .botlens_retrieval_queries import DomainTruthEvent, iter_all_run_domain_truth
 from .botlens_state import (
@@ -25,7 +27,14 @@ from ..storage.repos.candles import (
 
 _CANDLE_EVENT_NAMES = ("CANDLE_OBSERVED",)
 _TRADE_EVENT_NAMES = ("TRADE_OPENED", "TRADE_UPDATED", "TRADE_CLOSED")
+_OVERLAY_EVENT_NAMES = ("OVERLAY_STATE_CHANGED",)
 _TERMINAL_RUN_STATUSES = {"completed", "cancelled", "canceled", "failed", "stopped"}
+_TERMINAL_OVERLAY_TIMELINE_CACHE_MAX = 8
+_TERMINAL_OVERLAY_TIMELINE_CACHE: OrderedDict[
+    tuple[str, str, str],
+    tuple[DomainTruthEvent, ...],
+] = OrderedDict()
+_TERMINAL_OVERLAY_TIMELINE_CACHE_LOCK = threading.RLock()
 
 
 def get_bot_run(run_id: str):
@@ -76,6 +85,67 @@ def _series_identity(symbol_key: str) -> tuple[str | None, str | None]:
 
 def _mapping(value: Any) -> Dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def clear_terminal_overlay_timeline_cache() -> None:
+    with _TERMINAL_OVERLAY_TIMELINE_CACHE_LOCK:
+        _TERMINAL_OVERLAY_TIMELINE_CACHE.clear()
+
+
+def _terminal_overlay_checkpoint_present(event: DomainTruthEvent) -> bool:
+    context = _mapping(getattr(event, "context", None))
+    delta = _mapping(context.get("overlay_delta"))
+    projection = _mapping(delta.get("projection"))
+    return bool(projection.get("terminal"))
+
+
+def _terminal_overlay_timeline(
+    *,
+    bot_id: str,
+    run_id: str,
+    symbol_key: str,
+) -> tuple[DomainTruthEvent, ...]:
+    cache_key = (str(bot_id), str(run_id), str(symbol_key))
+    with _TERMINAL_OVERLAY_TIMELINE_CACHE_LOCK:
+        cached = _TERMINAL_OVERLAY_TIMELINE_CACHE.get(cache_key)
+        if cached is not None:
+            _TERMINAL_OVERLAY_TIMELINE_CACHE.move_to_end(cache_key)
+            return cached
+    events = tuple(
+        event
+        for event in iter_all_run_domain_truth(
+            bot_id=bot_id,
+            run_id=run_id,
+            event_names=_OVERLAY_EVENT_NAMES,
+            series_key=symbol_key,
+        )
+        if str(getattr(event, "event_name", "")).strip().upper() in _OVERLAY_EVENT_NAMES
+    )
+    if not events or not _terminal_overlay_checkpoint_present(events[-1]):
+        return events
+    with _TERMINAL_OVERLAY_TIMELINE_CACHE_LOCK:
+        _TERMINAL_OVERLAY_TIMELINE_CACHE[cache_key] = events
+        _TERMINAL_OVERLAY_TIMELINE_CACHE.move_to_end(cache_key)
+        while len(_TERMINAL_OVERLAY_TIMELINE_CACHE) > _TERMINAL_OVERLAY_TIMELINE_CACHE_MAX:
+            _TERMINAL_OVERLAY_TIMELINE_CACHE.popitem(last=False)
+    return events
+
+
+def _overlay_events_before(
+    events: tuple[DomainTruthEvent, ...],
+    *,
+    range_end: datetime,
+) -> list[DomainTruthEvent]:
+    retained: list[DomainTruthEvent] = []
+    for event in events:
+        context = _mapping(getattr(event, "context", None))
+        event_time = _to_datetime(
+            context.get("bar_time") or getattr(event, "event_ts", None),
+            field_name="overlay_event.bar_time",
+        )
+        if event_time is None or event_time < range_end:
+            retained.append(event)
+    return retained
 
 
 def _frozen_candle_series(
@@ -272,6 +342,65 @@ def _chart_trade_window(
     )
 
 
+def _chart_overlay_window(
+    *,
+    bot_id: str,
+    run_id: str,
+    symbol_key: str,
+    timeframe: str,
+    run_status: str,
+    candles: list[Mapping[str, Any]],
+    has_more_after: bool,
+) -> tuple[list[Dict[str, Any]], Dict[str, Any]]:
+    if not candles:
+        return [], {
+            "schema_version": "botlens_chart_overlay_evidence.v2",
+            "source": "domain_event_ledger",
+            "coverage": "empty_range",
+            "complete_for_returned_candles": False,
+            "ordering_assured": False,
+            "reason_codes": ["no_returned_candles"],
+            "event_count": 0,
+            "overlay_count": 0,
+            "fingerprint": None,
+        }
+    timeframe_seconds = int(interval_to_timedelta(timeframe).total_seconds())
+    range_start_epoch = int(candles[0]["time"])
+    range_end_epoch = int(candles[-1]["time"]) + timeframe_seconds
+    range_end = datetime.fromtimestamp(range_end_epoch, tz=timezone.utc)
+    terminal_run = str(run_status or "").strip().lower() in _TERMINAL_RUN_STATUSES
+    if terminal_run:
+        events = _overlay_events_before(
+            _terminal_overlay_timeline(
+                bot_id=bot_id,
+                run_id=run_id,
+                symbol_key=symbol_key,
+            ),
+            range_end=range_end,
+        )
+    else:
+        events = [
+            event
+            for event in iter_all_run_domain_truth(
+                bot_id=bot_id,
+                run_id=run_id,
+                event_names=_OVERLAY_EVENT_NAMES,
+                series_key=symbol_key,
+                bar_time_lt=_isoformat_or_none(range_end),
+            )
+            if str(getattr(event, "event_name", "")).strip().upper() in _OVERLAY_EVENT_NAMES
+        ]
+    return build_chart_overlay_history(
+        events=events,
+        symbol_key=symbol_key,
+        run_status=run_status,
+        range_start_epoch=range_start_epoch,
+        range_end_epoch=range_end_epoch,
+        timeframe_seconds=timeframe_seconds,
+        has_more_after=has_more_after,
+    )
+
+
 def get_symbol_chart_history(
     *,
     run_id: str,
@@ -380,6 +509,15 @@ def get_symbol_chart_history(
         run_status=str(run_row.get("status") or ""),
         candles=ordered,
     )
+    overlays, overlay_evidence = _chart_overlay_window(
+        bot_id=bot_id,
+        run_id=str(run_id),
+        symbol_key=normalized_symbol_key,
+        timeframe=timeframe,
+        run_status=str(run_row.get("status") or ""),
+        candles=ordered,
+        has_more_after=has_more_after,
+    )
     return chart_history_response_contract(
         run_id=str(run_id),
         symbol_key=normalized_symbol_key,
@@ -388,13 +526,9 @@ def get_symbol_chart_history(
         limit=normalized_limit,
         candles=ordered,
         trades=trades,
+        overlays=overlays,
         trade_evidence=trade_evidence,
-        overlay_evidence={
-            "schema_version": "botlens_chart_overlay_evidence.v1",
-            "coverage": "live_viewport_only",
-            "complete_for_returned_candles": False,
-            "reason": "visual_overlay_transport_not_persisted",
-        },
+        overlay_evidence=overlay_evidence,
         has_more_before=has_more_before,
         has_more_after=has_more_after,
         evidence_source=evidence_source,

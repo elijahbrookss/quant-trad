@@ -35,17 +35,21 @@ def test_retention_tier_map_keeps_material_truth_permanent() -> None:
         assert policy.persist_raw is True
 
 
-def test_retention_tier_map_removes_raw_high_frequency_transport_from_permanent_ledger() -> None:
+def test_retention_tier_map_keeps_bounded_overlay_replay_but_not_ephemeral_transport() -> None:
     expected = {
         "CANDLE_OBSERVED": RuntimeEventRetentionAction.SUMMARIZE,
         "SERIES_STATS_REPORTED": RuntimeEventRetentionAction.SUMMARIZE,
         "HEALTH_STATUS_REPORTED": RuntimeEventRetentionAction.AGGREGATE,
-        "OVERLAY_STATE_CHANGED": RuntimeEventRetentionAction.TRANSPORT_ONLY,
+        "PROVISIONAL_CANDLE_UPDATED": RuntimeEventRetentionAction.TRANSPORT_ONLY,
     }
     for event_name, action in expected.items():
         policy = retention_policy_for_event_name(event_name)
         assert policy.action == action
         assert policy.persist_raw is False
+    overlay = retention_policy_for_event_name("OVERLAY_STATE_CHANGED")
+    assert overlay.tier == RuntimeEventRetentionTier.RESEARCH_CONTEXT
+    assert overlay.action == RuntimeEventRetentionAction.PERSIST
+    assert overlay.persist_raw is True
 
 
 def test_retention_keeps_only_material_diagnostics() -> None:
@@ -69,5 +73,6 @@ def test_tier_map_exposes_standard_event_budget_contract() -> None:
 
     assert rows["CANDLE_OBSERVED"]["action"] == "summarize"
     assert rows["HEALTH_STATUS_REPORTED"]["tier"] == "tier_3_observability_metric"
-    assert rows["OVERLAY_STATE_CHANGED"]["tier"] == "tier_4_live_transport"
+    assert rows["OVERLAY_STATE_CHANGED"]["tier"] == "tier_2_research_context"
+    assert rows["OVERLAY_STATE_CHANGED"]["action"] == "persist"
     assert rows["DECISION_EMITTED"]["action"] == "persist"

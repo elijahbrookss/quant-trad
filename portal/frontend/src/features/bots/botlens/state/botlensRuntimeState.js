@@ -113,10 +113,13 @@ function commitProjectionStore(state, projectionStore) {
   }
 }
 
+const MAX_CHART_OVERLAY_PAGES = 64
+
 function updateChartHistoryCache(cache, {
   symbolKey,
   candles,
   trades,
+  overlays,
   range,
   evidenceSource,
   tradeEvidence,
@@ -147,6 +150,35 @@ function updateChartHistoryCache(cache, {
         page_fingerprints: pageFingerprints,
       }
     : existing?.tradeEvidence || null
+  const pageOverlayEvidence = overlayEvidence && typeof overlayEvidence === 'object'
+    ? { ...overlayEvidence }
+    : null
+  const pageFingerprint = pageOverlayEvidence?.fingerprint
+    || [range?.returned_start_time, range?.returned_end_time].filter(Boolean).join(':')
+  const priorOverlayPages = Array.isArray(existing?.overlayPages) ? existing.overlayPages : []
+  const overlayPages = pageFingerprint
+    ? [
+        ...priorOverlayPages.filter((page) => page.fingerprint !== pageFingerprint),
+        {
+          fingerprint: pageFingerprint,
+          range: range && typeof range === 'object' ? { ...range } : null,
+          overlays: Array.isArray(overlays) ? overlays.map((entry) => ({ ...entry })) : [],
+          evidence: pageOverlayEvidence,
+        },
+      ].slice(-MAX_CHART_OVERLAY_PAGES)
+    : priorOverlayPages
+  const mergedOverlayEvidence = pageOverlayEvidence
+    ? {
+        ...pageOverlayEvidence,
+        loaded_page_count: overlayPages.length,
+        loaded_overlay_count: overlayPages.reduce((total, page) => total + page.overlays.length, 0),
+        complete_for_loaded_candles: Boolean(
+          pageOverlayEvidence.complete_for_returned_candles
+          && overlayPages.every((page) => page.evidence?.complete_for_returned_candles),
+        ),
+        page_fingerprints: overlayPages.map((page) => page.fingerprint),
+      }
+    : existing?.overlayEvidence || null
   return {
     ...(cache || {}),
     [symbolKey]: {
@@ -155,14 +187,14 @@ function updateChartHistoryCache(cache, {
       error: null,
       candles: mergeCanonicalCandles(candles || [], existing?.candles || []),
       trades: mergedTrades,
+      overlays: overlayPages.flatMap((page) => page.overlays),
+      overlayPages,
       range: range && typeof range === 'object' ? { ...range } : existing?.range || null,
       evidenceSource: evidenceSource && typeof evidenceSource === 'object'
         ? { ...evidenceSource }
         : existing?.evidenceSource || null,
       tradeEvidence: mergedTradeEvidence,
-      overlayEvidence: overlayEvidence && typeof overlayEvidence === 'object'
-        ? { ...overlayEvidence }
-        : existing?.overlayEvidence || null,
+      overlayEvidence: mergedOverlayEvidence,
     },
   }
 }
@@ -524,6 +556,7 @@ export function reduceBotLensState(state, action) {
               symbolKey: normalizedSymbolKey,
               candles: action.candles,
               trades: action.trades,
+              overlays: action.overlays,
               range: action.range,
               evidenceSource: action.evidenceSource,
               tradeEvidence: action.tradeEvidence,

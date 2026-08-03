@@ -118,7 +118,54 @@ history. Frozen chart and durable forensic reads begin from that scope in parall
 with the cold symbol projector. Selected-symbol transport reports explicit
 latest-tail included/available counts; the decision surface merges those rows
 with cursor-paged durable domain truth and owns its own loading, error, and
-end-of-stream state. Full historical overlay equivalence is still not claimed.
+end-of-stream state. At that validation point, full historical overlay
+equivalence was not yet claimed.
+
+## Final Exact Acceptance And Replay Contract (2026-08-03)
+
+A third exact provider-free year run exercised the performance and transport
+repairs without changing the frozen dataset or strategy semantics.
+
+| Check | Result |
+| --- | --- |
+| Run | `40551139-b904-408b-ae0b-772b999dd4da` |
+| Wall/runtime time | 478.403 / 444.652 seconds |
+| Performance | 19.8% faster than the 596.541-second post-identity baseline |
+| Semantic result | 599 decisions; 508 accepted; 91 rejected; 508 trades; net P&L -2,200 |
+| Semantic fingerprint | `9aac4007e701a2c36a6e010b1c30805a5c15347e2998171c876d4d7ace64583d` |
+| Transport | Zero connection-loss or send-failure events; 23 client pongs for 23 server pings |
+| Observability | Complete 42-of-42 event coverage; not truncated |
+| Trade marker reconciliation | 508 of 508 entry/exit coordinates matched the durable ledger across six chart pages |
+| Report materialization | 837.8 ms from the warmed immutable dataset; subsequent ready read 0.15 seconds |
+
+The normalization hash warning was also traced to six unreferenced stale pytest
+rows with obsolete 40-character fixture identities. Executable-catalog reads
+now quarantine only that narrow legacy residue. Referenced rows, current
+identity formats, and every real hash disagreement still fail loud. The live
+operator snapshot reports nine executable specifications and no normalization
+component error; no persisted row was rewritten or deleted.
+
+Historical indicator geometry now has a deterministic bounded replay contract
+for runs created after overlay retention is deployed. The runtime emits scoped
+overlay clocks and a forced terminal checkpoint. The backend retains the compact
+timeline, causally replays only events before a chart page end, rejects clock
+gaps, and suppresses completeness for cadence/window gaps, missing terminal
+evidence, or payload truncation. Terminal timelines are queried once through an
+eight-entry LRU and causally sliced per page. The frontend keeps at most 64
+loaded pages and distinguishes **ledger verified**, **bounded replay**, and
+**not retained**.
+
+The broad storage-shape gate rejected an attempted 640-point overlay payload at
+56,374 bytes. The implementation therefore keeps the established 160-point
+durable evidence budget and reports truncation explicitly; it does not purchase
+visual completeness by allowing unbounded runtime events.
+
+This is page-by-page data-geometry equivalence, not a claim that UI pixels are
+research truth. Old runs without retained deltas remain unavailable. A fresh
+post-deployment run must still prove transport-to-ledger overlay persistence in
+the live stack, and browser screenshot/pixel reconciliation remains a visual QA
+gate. Autonomous research must consume typed outputs, durable facts, frozen
+datasets, and materialized reports—not chart pixels.
 
 ## Fresh Post-fix Run Proof (2026-08-03)
 
@@ -207,13 +254,16 @@ The frontend can promise:
 - API connectivity and definition-stream connectivity as separate facts;
 - completed persisted report and dataset evidence when readiness says so;
 - frozen-dataset chart paging and typed decision/trade replay when a terminal
-  run reports durable BotLens evidence.
+  run reports durable BotLens evidence;
+- conditionally complete bounded overlay pages for post-retention runs only when
+  the returned overlay evidence is ledger verified.
 
 The frontend cannot promise:
 
 - near-real-time status for every container;
 - liveness for every platform container or any process that does not publish a typed heartbeat;
 - complete historical overlay replay or usable replay for every completed run;
+- pixel-level equivalence between browser output and canonical research truth;
 - that a completed lifecycle alone implies report, replay, or golden readiness.
 
 ## Remaining Proof And Observation Gates
@@ -231,12 +281,17 @@ Completed in this campaign:
 8. The fresh persisted report is dataset- and results-ready, safe to compare with
    caveats, and reports clean data quality. It remains correctly blocked from
    golden status by unavailable market state and truncated observability.
+9. Trade entry/exit marker coordinates reconcile 508 of 508 across the full
+   loaded year, and bounded overlay replay fails closed on gaps or truncation.
+10. Legacy normalization residue is narrowly quarantined while real or
+    referenced integrity failures remain blocking.
 
 Still required before a golden/full-replay claim:
 
-1. Reconcile decision/trade timestamps and rendered markers visually for the
-   fresh fixture; typed event counts are already reconciled.
-2. Prove full historical overlay equivalence or keep overlays explicitly bounded.
+1. Run a fresh post-deployment overlay-producing fixture and prove persisted
+   page coverage through the live transport/DB path.
+2. Complete browser-level visual QA if a pixel-equivalence claim is desired;
+   pixels remain non-authoritative for autonomous research.
 3. Complete the deferred 24-hour observational gate after Phase 4. The campaign
    retains the one-hour soak as its implementation-time stability gate.
 

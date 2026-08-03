@@ -150,7 +150,7 @@ def _fact_payload() -> dict[str, Any]:
     }
 
 
-def test_append_botlens_canonical_fact_batch_persists_only_budgeted_runtime_truth(monkeypatch) -> None:
+def test_append_botlens_canonical_fact_batch_persists_budgeted_truth_and_overlay_timeline(monkeypatch) -> None:
     """Producer persistence must not require a transport bridge session."""
     captured: dict[str, Any] = {}
 
@@ -174,11 +174,12 @@ def test_append_botlens_canonical_fact_batch_persists_only_budgeted_runtime_trut
 
     assert result["seq"] == 11
     assert result["event_count"] == 8
-    assert result["row_count"] == 4
-    assert result["inserted_rows"] == 4
-    assert result["retention_summary"]["dropped_or_summarized_count"] == 4
+    assert result["row_count"] == 5
+    assert result["inserted_rows"] == 5
+    assert result["retention_summary"]["dropped_or_summarized_count"] == 3
     assert event_names == {
         "SERIES_METADATA_REPORTED",
+        "OVERLAY_STATE_CHANGED",
         "SIGNAL_EMITTED",
         "DECISION_EMITTED",
         "TRADE_OPENED",
@@ -225,9 +226,9 @@ def test_append_botlens_canonical_fact_batches_persists_multiple_payloads_in_one
     assert len(captured["calls"]) == 1
     assert result["batch_count"] == 2
     assert result["event_count"] == 16
-    assert result["row_count"] == 8
-    assert result["inserted_rows"] == 8
-    assert result["retention_summary"]["dropped_or_summarized_count"] == 8
+    assert result["row_count"] == 10
+    assert result["inserted_rows"] == 10
+    assert result["retention_summary"]["dropped_or_summarized_count"] == 6
     assert result["seq_min"] == 11
     assert result["seq_max"] == 12
     assert {row["seq"] for row in captured["calls"][0]["rows"]} == {11, 12}

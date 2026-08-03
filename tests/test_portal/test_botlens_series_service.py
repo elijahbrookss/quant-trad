@@ -764,6 +764,8 @@ def test_completed_chart_history_reconstructs_complete_range_trade_markers(
                     SimpleNamespace(context={"candle": {"time": "1970-01-01T00:02:00Z", "open": 100, "high": 102, "low": 99, "close": 101}}),
                 ]
             )
+        if tuple(kwargs.get("event_names") or ()) == chart_svc._OVERLAY_EVENT_NAMES:
+            return iter([])
         return iter(
             [
                 _event("TRADE_OPENED", "event-open", opened),
@@ -781,7 +783,7 @@ def test_completed_chart_history_reconstructs_complete_range_trade_markers(
         limit=10,
     )
 
-    assert result["schema_version"] == 3
+    assert result["schema_version"] == 4
     assert len(result["trades"]) == 1
     assert result["trades"][0]["trade_id"] == "trade-1"
     assert result["trades"][0]["entry_time"] == "1970-01-01T00:01:00Z"
@@ -791,9 +793,15 @@ def test_completed_chart_history_reconstructs_complete_range_trade_markers(
     assert result["trade_evidence"]["ordering_assured"] is True
     assert result["trade_evidence"]["event_count"] == 2
     assert len(result["trade_evidence"]["fingerprint"]) == 64
+    assert result["overlays"] == []
     assert result["overlay_evidence"] == {
-        "schema_version": "botlens_chart_overlay_evidence.v1",
-        "coverage": "live_viewport_only",
+        "schema_version": "botlens_chart_overlay_evidence.v2",
+        "source": "domain_event_ledger",
+        "coverage": "unavailable",
         "complete_for_returned_candles": False,
-        "reason": "visual_overlay_transport_not_persisted",
+        "ordering_assured": False,
+        "reason_codes": ["overlay_timeline_not_retained"],
+        "event_count": 0,
+        "overlay_count": 0,
+        "fingerprint": None,
     }

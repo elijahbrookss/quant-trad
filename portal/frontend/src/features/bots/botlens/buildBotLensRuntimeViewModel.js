@@ -654,7 +654,7 @@ export function buildBotLensRuntimeViewModel({
     || selectedSymbolState?.live_cursors?.overlay_projection
     || null
   const boundedOverlayCount = (Array.isArray(chartOverlays) ? chartOverlays : [])
-    .filter((overlay) => String(overlay?.detail_level || '').trim().toLowerCase() === 'bounded_render')
+    .filter((overlay) => String(overlay?.detail_level || '').trim().toLowerCase().startsWith('bounded_'))
     .length
 
   const header = {

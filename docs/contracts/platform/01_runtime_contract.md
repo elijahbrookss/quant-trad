@@ -89,6 +89,12 @@ Rules:
 - runtime transport may request those full overlay snapshots on a bounded
   projection cadence, diff them, and stream only changed overlay deltas
   downstream,
+- terminal runtime state must force a final overlay clock checkpoint even when
+  geometry is unchanged; the checkpoint proves timeline completion but does not
+  create execution or strategy truth,
+- bounded overlay deltas may be retained as non-authoritative research context
+  for deterministic chart replay; gaps, cadence holes, missing terminal
+  checkpoints, and truncation must suppress any completeness claim,
 - every declared output must be returned every bar,
 - every declared overlay must be returned for every requested overlay snapshot
   bar,

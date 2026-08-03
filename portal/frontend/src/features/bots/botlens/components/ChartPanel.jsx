@@ -277,6 +277,16 @@ export const ChartPanel = memo(function ChartPanel({
   const loadedTradeCoverageComplete = Boolean(
     tradeEvidence.complete_for_loaded_candles ?? tradeEvidence.complete_for_returned_candles,
   )
+  const overlayEvidence = model.overlayEvidence || {}
+  const overlayCoverageComplete = Boolean(
+    overlayEvidence.complete_for_loaded_candles
+      ?? overlayEvidence.complete_for_returned_candles,
+  )
+  const overlayCoverageLabel = overlayCoverageComplete
+    ? 'ledger verified'
+    : overlayEvidence.coverage === 'unavailable'
+      ? 'not retained'
+      : 'bounded replay'
 
   useEffect(() => {
     if (!isFullscreen) return undefined
@@ -315,8 +325,10 @@ export const ChartPanel = memo(function ChartPanel({
               <span className="text-xs text-slate-500">
                 {overlayCount} {overlayCount === 1 ? 'overlay' : 'overlays'}
                 {overlayProjection.mode ? ' · ' + overlayProjection.mode : ''}
-                {model.overlayEvidence?.complete_for_returned_candles === false ? ' · live window' : ''}
+                {' · ' + overlayCoverageLabel}
               </span>
+            ) : overlayEvidence.coverage === 'unavailable' ? (
+              <span className="text-xs text-slate-500">overlays not retained for this run</span>
             ) : null}
           </div>
           <p className="mt-1 truncate text-xs text-slate-500">

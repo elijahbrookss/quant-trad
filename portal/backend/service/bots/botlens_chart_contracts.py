@@ -4,7 +4,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any, Dict, Optional
 
 
-CHART_RETRIEVAL_SCHEMA_VERSION = 3
+CHART_RETRIEVAL_SCHEMA_VERSION = 4
 
 
 def _chart_candle_contract(candle: Mapping[str, Any]) -> Dict[str, Any]:
@@ -74,6 +74,7 @@ def chart_history_response_contract(
     limit: int,
     candles: Iterable[Mapping[str, Any]],
     trades: Iterable[Mapping[str, Any]],
+    overlays: Iterable[Mapping[str, Any]],
     trade_evidence: Optional[Mapping[str, Any]],
     overlay_evidence: Optional[Mapping[str, Any]],
     has_more_before: bool,
@@ -82,6 +83,7 @@ def chart_history_response_contract(
 ) -> Dict[str, Any]:
     candle_list = [_chart_candle_contract(entry) for entry in candles]
     trade_list = [_chart_trade_contract(entry) for entry in trades]
+    overlay_list = [dict(entry) for entry in overlays]
     returned_start = candle_list[0]["time"] if candle_list else None
     returned_end = candle_list[-1]["time"] if candle_list else None
     return {
@@ -101,6 +103,7 @@ def chart_history_response_contract(
         },
         "candles": candle_list,
         "trades": trade_list,
+        "overlays": overlay_list,
         "trade_evidence": dict(trade_evidence or {}),
         "overlay_evidence": dict(overlay_evidence or {}),
         "evidence_source": dict(evidence_source or {}),

@@ -315,8 +315,8 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   const chartHistory = useMemo(() => selectSelectedSymbolChartHistory(state), [chartHistoryForSymbol, selectedSymbolKey])
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
   const chartHistoryStatus = useMemo(() => selectSelectedSymbolChartHistoryStatus(state), [chartHistoryForSymbol, selectedSymbolKey])
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
-  const selectedSymbolOverlays = useMemo(() => selectSelectedSymbolOverlays(state), [selectedSymbolProjection, selectedSymbolKey])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- live projection and durable history are independently scoped
+  const selectedSymbolOverlays = useMemo(() => selectSelectedSymbolOverlays(state), [selectedSymbolProjection, chartHistoryForSymbol, selectedSymbolKey])
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
   const selectedSymbolRecentTrades = useMemo(() => selectSelectedSymbolRecentTrades(state), [selectedSymbolProjection, selectedSymbolKey])
   // eslint-disable-next-line react-hooks/exhaustive-deps -- history and live tails are independently scoped
@@ -745,6 +745,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
           symbolKey: selectedSymbolKey,
           candles: Array.isArray(page?.candles) ? page.candles : [],
           trades: Array.isArray(page?.trades) ? page.trades : [],
+          overlays: Array.isArray(page?.overlays) ? page.overlays : [],
           range: page?.range,
           evidenceSource: page?.evidence_source,
           tradeEvidence: page?.trade_evidence,
@@ -849,6 +850,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
         symbolKey: selectedSymbolKey,
         candles,
         trades: Array.isArray(page?.trades) ? page.trades : [],
+        overlays: Array.isArray(page?.overlays) ? page.overlays : [],
         range: page?.range,
         evidenceSource: page?.evidence_source,
         tradeEvidence: page?.trade_evidence,

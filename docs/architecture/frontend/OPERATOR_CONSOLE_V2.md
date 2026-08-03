@@ -201,6 +201,14 @@ The initial view requests the latest 240 bars, left-edge movement requests one
 guarded older page, and the manual **Load earlier** action remains as an
 accessible fallback. Every chart response names its evidence source.
 
+New runs may also return bounded historical overlay pages replayed from retained
+overlay deltas. The browser merges at most 64 page payloads and uses durable
+history for terminal runs while active runs continue to prefer the live
+projection. Each page reports ordering, cadence, window, terminal-checkpoint,
+truncation, and fingerprint evidence. Old runs without retained deltas say
+**overlays not retained for this run**; incomplete pages say **bounded replay**;
+only proven pages say **ledger verified**.
+
 Selected-symbol snapshots are latest-tail views: 32 signals, 32 decisions, 64
 trade states, 32 logs, and 160 overlays at most. Each concern reports included,
 available, ordering, and truncation metadata. These windows make initial state
