@@ -278,8 +278,9 @@ and compact catalog facts are retained; raw candle, health, overlay, stats, and
 nonmaterial diagnostic messages are summarized, aggregated, or kept live-only.
 Before retention, the runtime fact stream already compacts high-volume
 projection/debug facts at the source: health facts exclude full snapshots,
-series identity excludes full instrument/provider blobs, stats facts use the
-compact reportable summary, and overlay deltas use bounded render payloads with
+series identity excludes full instrument/provider blobs and is emitted only on
+first discovery or an identity revision, stats facts use the compact reportable
+summary, and overlay deltas use bounded render payloads with
 payload summaries. The storage layer should not depend on a second pass to make
 unbounded live payloads safe.
 

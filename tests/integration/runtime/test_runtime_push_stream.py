@@ -2045,6 +2045,44 @@ def test_push_update_coalesces_unchanged_series_stats() -> None:
     assert "series_stats_updated" not in second_fact_types
 
 
+def test_push_update_coalesces_unchanged_series_metadata_until_identity_revision() -> None:
+    runtime = _PushRuntime()
+    series = SimpleNamespace(
+        instrument={"id": "instrument-bip"},
+        timeframe="1h",
+        strategy_id="strategy-1",
+        symbol="BIP-20DEC30-CDE",
+        datasource="COINBASE",
+        exchange="coinbase_direct",
+        candles=[{"time": 1}, {"time": 2}],
+        risk_engine=SimpleNamespace(
+            trade_revision=0,
+            serialise_trades=lambda: [],
+            stats=lambda: {"total_trades": 0, "net_pnl": 0.0},
+        ),
+    )
+    runtime._series = [series]
+    candle = SimpleNamespace(
+        to_dict=lambda: {"time": 2, "open": 1.5, "high": 2.5, "low": 1.0, "close": 2.0},
+    )
+
+    with patch("engines.bot_runtime.runtime.mixins.runtime_push_stream.time.monotonic", return_value=10.0):
+        runtime._push_update("bar", series=series, candle=candle)
+    with patch("engines.bot_runtime.runtime.mixins.runtime_push_stream.time.monotonic", return_value=11.0):
+        runtime._push_update("bar", series=series, candle=candle)
+    series.symbol = "BIP-REVISED"
+    with patch("engines.bot_runtime.runtime.mixins.runtime_push_stream.time.monotonic", return_value=12.0):
+        runtime._push_update("bar", series=series, candle=candle)
+
+    emitted = [
+        [fact["fact_type"] for fact in payload["facts"]]
+        for payload in runtime.broadcast_payloads
+    ]
+    assert "series_state_observed" in emitted[0]
+    assert "series_state_observed" not in emitted[1]
+    assert "series_state_observed" in emitted[2]
+
+
 def test_push_update_bounds_live_log_and_decision_fact_batches() -> None:
     runtime = _PushRuntime()
     runtime._botlens_fact_stream_log_fact_limit = 2

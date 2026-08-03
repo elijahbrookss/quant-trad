@@ -2898,13 +2898,28 @@ class RuntimePushStreamMixin:
                 if gap_classification:
                     payload["gap_classification"] = gap_classification
                     payload["source_reason"] = "provider_closure"
-                payload["facts"].append(
-                    self._series_state_fact(
-                        series=series,
-                        bar_index=bar_index,
-                        replace_last=bool(replace_last),
-                    )
+                series_state_fact = self._series_state_fact(
+                    series=series,
+                    bar_index=bar_index,
+                    replace_last=bool(replace_last),
                 )
+                series_metadata_fingerprint = json.dumps(
+                    {
+                        key: series_state_fact.get(key)
+                        for key in (
+                            "series_key",
+                            "strategy_id",
+                            "instrument_id",
+                            "symbol",
+                            "timeframe",
+                        )
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if cache.get("series_metadata_fingerprint") != series_metadata_fingerprint:
+                    payload["facts"].append(series_state_fact)
+                    cache["series_metadata_fingerprint"] = series_metadata_fingerprint
                 trade_facts, series_stats, trades_count, trade_entry_refresh_required = self._trade_facts(
                     series=series,
                     cache=cache,

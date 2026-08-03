@@ -178,7 +178,10 @@ Event identity must distinguish distinct observations while remaining stable for
 retries of the same observation. SERIES_METADATA_REPORTED therefore includes
 its known-at observation time in event identity. Reusing an identity for changed
 material remains a fail-loud divergent collision; the projector does not choose
-one row silently.
+one row silently. Series metadata is a revision observation, not a per-bar
+heartbeat: runtime emits it on first series discovery and when routing identity
+changes. Stable bars reuse the cached identity and do not consume durable run
+sequence allocations.
 
 ## Live Handoff Without Execution Authority
 
