@@ -11,6 +11,7 @@ from engines.bot_runtime.core.domain import Candle, LadderPosition, Leg, SameBar
 from engines.bot_runtime.core.execution_policy import exit_policy_for, normalize_liquidity_role
 from engines.bot_runtime.core.runtime_events import RuntimeEventName
 from engines.bot_runtime.deps import BotRuntimeDeps
+from engines.bot_runtime.runtime.components.intrabar import IntrabarSequence
 from engines.bot_runtime.runtime.components.run_context import RunContext
 from engines.bot_runtime.runtime.core import SeriesExecutionState
 from engines.bot_runtime.runtime.runtime import BotRuntime
@@ -219,6 +220,58 @@ def test_full_missing_intrabar_falls_back_to_pessimistic_strategy_bar() -> None:
     ]
     assert len(fallback_events) == 1
     assert fallback_events[0]["context"]["reason"] == "missing_1m_data"
+
+
+def test_frozen_dataset_missing_intrabar_series_is_looked_up_once() -> None:
+    fetch_calls = 0
+
+    def fetch_missing_series(*_args, **_kwargs):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        raise ValueError(
+            "backtest_dataset_series_missing: dataset does not contain exactly one "
+            "series for instrument_id=instrument-btc timeframe_seconds=60"
+        )
+
+    runtime = _runtime_for_intrabar(fetch_missing_series)
+    engine = _engine_with_position("long")
+    series, _, first = _series_state(engine)
+    second = _candle(5, duration_minutes=5)
+
+    first_result = runtime._intrabar_manager.intrabar_sequence(series, first)
+    second_result = runtime._intrabar_manager.intrabar_sequence(series, second)
+
+    assert fetch_calls == 1
+    assert first_result == IntrabarSequence(
+        candles=[],
+        interval="1m",
+        complete=False,
+        fallback_reason="intrabar_missing",
+        expected_count=5,
+        actual_count=0,
+    )
+    assert second_result == first_result
+
+
+def test_transient_intrabar_fetch_failures_are_not_negative_cached() -> None:
+    fetch_calls = 0
+
+    def fetch_transient_failure(*_args, **_kwargs):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        raise RuntimeError("provider timeout")
+
+    runtime = _runtime_for_intrabar(fetch_transient_failure)
+    engine = _engine_with_position("long")
+    series, _, first = _series_state(engine)
+    second = _candle(5, duration_minutes=5)
+
+    first_result = runtime._intrabar_manager.intrabar_sequence(series, first)
+    second_result = runtime._intrabar_manager.intrabar_sequence(series, second)
+
+    assert fetch_calls == 2
+    assert first_result.fallback_reason == "intrabar_missing"
+    assert second_result.fallback_reason == "intrabar_missing"
 
 
 def test_full_single_intrabar_candle_tp_and_stop_falls_back_to_pessimistic() -> None:
