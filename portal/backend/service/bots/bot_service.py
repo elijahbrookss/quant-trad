@@ -39,6 +39,17 @@ def _telemetry_hub():
     return telemetry_hub
 
 
+def _durable_botlens_evidence(run_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    reader = getattr(_composition().storage, "list_botlens_run_evidence", None)
+    if not callable(reader):
+        return {}
+    return {
+        str(key): dict(value)
+        for key, value in dict(reader(run_ids) or {}).items()
+        if isinstance(value, Mapping)
+    }
+
+
 def ensure_watchdog_stream_bridge() -> None:
     _ensure_watchdog_callback()
 
@@ -629,6 +640,8 @@ def get_bot_run_inspection(run_id: str) -> Dict[str, Any]:
     )
     report_status = _report_status(normalized_run_id)
     run_snapshot = _telemetry_hub().get_run_snapshot(run_id=normalized_run_id)
+    ledger_evidence = _durable_botlens_evidence([normalized_run_id]).get(normalized_run_id, {})
+    projection_available = run_snapshot is not None or bool(ledger_evidence)
     runtime_health = (
         _as_mapping(run_snapshot.health.to_dict())
         if run_snapshot is not None
@@ -662,16 +675,18 @@ def get_bot_run_inspection(run_id: str) -> Dict[str, Any]:
             "lifecycle": dict(lifecycle),
             "lease": dict(lease),
             "projection": {
-                "available": run_snapshot is not None,
-                "reason": (
-                    None if run_snapshot is not None else "snapshot_unavailable"
+                "available": projection_available,
+                "reason": None if projection_available else "durable_evidence_unavailable",
+                "source": (
+                    "hot_projection" if run_snapshot is not None else ledger_evidence.get("source")
                 ),
-                "known_at": runtime_health.get("last_event_at"),
+                "known_at": runtime_health.get("last_event_at") or ledger_evidence.get("known_at"),
                 "seq": (
                     int(run_snapshot.seq or 0)
                     if run_snapshot is not None
-                    else None
+                    else ledger_evidence.get("max_seq")
                 ),
+                "event_count": ledger_evidence.get("event_count"),
             },
             "report_materialization": dict(report_status),
         },
@@ -714,6 +729,9 @@ def list_bot_runs_inventory(
     )
     has_more = len(rows) > bounded_limit
     selected = list(rows[:bounded_limit])
+    evidence_by_run = _durable_botlens_evidence(
+        [str(run.get("run_id") or "") for run in selected]
+    )
     bot_ids = sorted(
         {str(run.get("bot_id") or "").strip() for run in selected}
         - {""}
@@ -725,6 +743,8 @@ def list_bot_runs_inventory(
         bot_id = str(run.get("bot_id") or "").strip()
         lifecycle = _as_mapping(lifecycles.get(bot_id))
         summary_state = _telemetry_hub().get_run_snapshot(run_id=run_id)
+        ledger_evidence = evidence_by_run.get(run_id, {})
+        botlens_available = summary_state is not None or bool(ledger_evidence)
         runtime_payload = (
             _as_mapping(summary_state.health.to_dict())
             if summary_state is not None
@@ -760,11 +780,18 @@ def list_bot_runs_inventory(
                 **dict(run),
                 "is_active": is_active,
                 "runtime_status": runtime_status,
-                "botlens_available": summary_state is not None,
-                "botlens_reason": None if summary_state is not None else "snapshot_unavailable",
+                "botlens_available": botlens_available,
+                "botlens_reason": None if botlens_available else "durable_evidence_unavailable",
+                "botlens_source": (
+                    "hot_projection" if summary_state is not None else ledger_evidence.get("source")
+                ),
                 "last_snapshot_at": runtime_payload.get("last_event_at"),
-                "known_at": runtime_payload.get("last_event_at"),
-                "seq": int(summary_state.seq or 0) if summary_state is not None else None,
+                "known_at": runtime_payload.get("last_event_at") or ledger_evidence.get("known_at"),
+                "seq": (
+                    int(summary_state.seq or 0)
+                    if summary_state is not None
+                    else ledger_evidence.get("max_seq")
+                ),
                 "summary": summary,
             }
         )
@@ -797,12 +824,17 @@ def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
 
     ordered = sorted(rows, key=_sort_key, reverse=True)
     selected = ordered[: max(1, int(limit or 25))]
+    evidence_by_run = _durable_botlens_evidence(
+        [str(run.get("run_id") or "") for run in selected]
+    )
     projected_runs: list[Dict[str, Any]] = []
     for run in selected:
         run_id = str(run.get("run_id") or "").strip()
         if not run_id:
             continue
         summary_state = _telemetry_hub().get_run_snapshot(run_id=run_id)
+        ledger_evidence = evidence_by_run.get(run_id, {})
+        botlens_available = summary_state is not None or bool(ledger_evidence)
         runtime_payload = summary_state.health.to_dict() if summary_state is not None else {}
         persisted_status = str(run.get("status") or "")
         runtime_status = (
@@ -826,11 +858,18 @@ def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
                 **dict(run),
                 "is_active": run_id == active_run_id,
                 "runtime_status": runtime_status,
-                "botlens_available": summary_state is not None,
-                "botlens_reason": None if summary_state is not None else "snapshot_unavailable",
+                "botlens_available": botlens_available,
+                "botlens_reason": None if botlens_available else "durable_evidence_unavailable",
+                "botlens_source": (
+                    "hot_projection" if summary_state is not None else ledger_evidence.get("source")
+                ),
                 "last_snapshot_at": runtime_payload.get("last_event_at"),
-                "known_at": runtime_payload.get("last_event_at"),
-                "seq": int(summary_state.seq or 0) if summary_state is not None else None,
+                "known_at": runtime_payload.get("last_event_at") or ledger_evidence.get("known_at"),
+                "seq": (
+                    int(summary_state.seq or 0)
+                    if summary_state is not None
+                    else ledger_evidence.get("max_seq")
+                ),
                 "summary": summary,
             }
         )

@@ -2572,7 +2572,7 @@ def build_botlens_domain_events_from_fact_batch(
             events.append(
                 _new_event(
                     event_name=BotLensDomainEventName.SERIES_METADATA_REPORTED,
-                    event_id=f"botlens:{_event_hash('series_meta', run_id, context.series_key, context.instrument_id, context.symbol, context.timeframe)}",
+                    event_id=f"botlens:{_event_hash('series_meta', run_id, context.series_key, context.instrument_id, context.symbol, context.timeframe, known_at)}",
                     event_ts=known_at,
                     correlation_id=_correlation_id(
                         run_id=run_id,

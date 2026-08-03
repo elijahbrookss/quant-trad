@@ -75,6 +75,33 @@ def test_diagnostic_recorded_uses_structured_fields_without_raw_context_blob() -
     assert "raw" not in payload
 
 
+def test_series_metadata_identity_is_retry_stable_but_distinct_by_observation() -> None:
+    def build(known_at: str):
+        return build_botlens_domain_events_from_fact_batch(
+            bot_id="bot-1",
+            run_id="run-1",
+            payload={
+                "known_at": known_at,
+                "facts": [
+                    {
+                        "fact_type": "series_state_observed",
+                        "series_key": "instrument-btc|1h",
+                        "instrument_id": "instrument-btc",
+                        "symbol": "BTC/USD",
+                        "timeframe": "1h",
+                    }
+                ],
+            },
+        )[0]
+
+    first = build("2026-02-01T00:00:00Z")
+    retry = build("2026-02-01T00:00:00Z")
+    later = build("2026-02-01T01:00:00Z")
+
+    assert first.event_id == retry.event_id
+    assert first.event_id != later.event_id
+
+
 def test_terminal_candle_continuity_summary_round_trips_as_material_diagnostic() -> None:
     events = build_botlens_domain_events_from_fact_batch(
         bot_id="bot-1",

@@ -1683,6 +1683,44 @@ def list_bot_runtime_events(
     return matched_rows
 
 
+def list_botlens_run_evidence(run_ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    """Return one compact durable BotLens-ledger summary per requested run."""
+
+    wanted = sorted(
+        {str(run_id or "").strip() for run_id in run_ids if str(run_id or "").strip()}
+    )
+    if not wanted or not db.available:
+        return {}
+    order_expr = _runtime_order_expression()
+    with db.session() as session:
+        rows = (
+            session.execute(
+                select(
+                    BotRunEventRecord.run_id,
+                    func.count(BotRunEventRecord.id).label("event_count"),
+                    func.max(order_expr).label("max_seq"),
+                    func.max(BotRunEventRecord.id).label("max_row_id"),
+                    func.max(BotRunEventRecord.known_at).label("known_at"),
+                )
+                .where(BotRunEventRecord.run_id.in_(wanted))
+                .where(BotRunEventRecord.event_type.like(f"{BOTLENS_DOMAIN_PREFIX}%"))
+                .group_by(BotRunEventRecord.run_id)
+            )
+            .mappings()
+            .all()
+        )
+    return {
+        str(row["run_id"]): {
+            "source": "durable_event_ledger",
+            "event_count": int(row["event_count"] or 0),
+            "max_seq": int(row["max_seq"] or 0),
+            "max_row_id": int(row["max_row_id"] or 0),
+            "known_at": row["known_at"],
+        }
+        for row in rows
+    }
+
+
 def get_latest_bot_runtime_run_id(bot_id: str) -> Optional[str]:
     """Return the latest run id from the run metadata read model."""
 

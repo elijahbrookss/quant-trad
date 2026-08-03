@@ -34,6 +34,7 @@ class _FakeConfigService:
 
 class _FakeStorage:
     def __init__(self) -> None:
+        self.botlens_evidence = {}
         self.run = {
             "run_id": "run-1",
             "bot_id": "bot-1",
@@ -124,6 +125,13 @@ class _FakeStorage:
         _ = before_sort_at, before_run_id
         return [dict(self.run)][:limit]
 
+    def list_botlens_run_evidence(self, run_ids):
+        return {
+            run_id: dict(self.botlens_evidence[run_id])
+            for run_id in run_ids
+            if run_id in self.botlens_evidence
+        }
+
 
 class _FakeTelemetryHub:
     def __init__(self, snapshots: dict[str, object] | None = None) -> None:
@@ -192,8 +200,58 @@ def test_list_bot_runs_for_bot_reports_snapshot_unavailable_without_replay(monke
 
     assert result["active_run_id"] == "run-1"
     assert result["runs"][0]["botlens_available"] is False
-    assert result["runs"][0]["botlens_reason"] == "snapshot_unavailable"
+    assert result["runs"][0]["botlens_reason"] == "durable_evidence_unavailable"
     assert result["runs"][0]["seq"] is None
+
+
+def test_run_inventory_exposes_durable_botlens_evidence_without_replay(monkeypatch):
+    storage = _FakeStorage()
+    storage.run["status"] = "completed"
+    storage.lifecycle.update({"phase": "completed", "status": "completed"})
+    storage.botlens_evidence["run-1"] = {
+        "source": "durable_event_ledger",
+        "event_count": 3254,
+        "max_seq": 3254,
+        "max_row_id": 9001,
+        "known_at": "2026-04-09T04:21:43Z",
+    }
+    composition = _FakeComposition(config_service=_FakeConfigService(), storage=storage)
+    monkeypatch.setattr(bot_service, "_composition", lambda: composition)
+    monkeypatch.setattr(bot_service, "_telemetry_hub", lambda: _FakeTelemetryHub())
+
+    result = bot_service.list_bot_runs_inventory(limit=25)
+
+    run = result["runs"][0]
+    assert run["botlens_available"] is True
+    assert run["botlens_source"] == "durable_event_ledger"
+    assert run["seq"] == 3254
+    assert run["known_at"] == "2026-04-09T04:21:43Z"
+
+
+def test_run_inspection_exposes_durable_botlens_evidence_without_hot_snapshot(monkeypatch):
+    storage = _FakeStorage()
+    storage.botlens_evidence["run-1"] = {
+        "source": "durable_event_ledger",
+        "event_count": 81,
+        "max_seq": 79,
+        "max_row_id": 120,
+        "known_at": "2026-04-09T04:21:43Z",
+    }
+    composition = _FakeComposition(config_service=_FakeConfigService(), storage=storage)
+    monkeypatch.setattr(bot_service, "_composition", lambda: composition)
+    monkeypatch.setattr(bot_service, "_telemetry_hub", lambda: _FakeTelemetryHub())
+
+    result = bot_service.get_bot_run_inspection("run-1")
+
+    projection = result["run"]["projection"]
+    assert projection == {
+        "available": True,
+        "reason": None,
+        "source": "durable_event_ledger",
+        "known_at": "2026-04-09T04:21:43Z",
+        "seq": 79,
+        "event_count": 81,
+    }
 
 
 def test_list_bot_runs_for_bot_keeps_persisted_terminal_status_when_snapshot_is_stale(monkeypatch):

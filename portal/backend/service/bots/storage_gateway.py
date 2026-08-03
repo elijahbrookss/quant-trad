@@ -32,6 +32,7 @@ from ..storage.repos.runs import (
 )
 from ..storage.repos.runtime_events import (
     get_latest_bot_runtime_run_id,
+    list_botlens_run_evidence,
 )
 
 
@@ -62,6 +63,10 @@ class BotStorageGateway(Protocol):
     ) -> Dict[str, Dict[str, Any]]: ...
 
     def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]: ...
+
+    def list_botlens_run_evidence(
+        self, run_ids: List[str]
+    ) -> Dict[str, Dict[str, Any]]: ...
 
     def get_bot_run_lifecycle(
         self,
@@ -177,6 +182,11 @@ class RepositoryBotStorageGateway:
 
     def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]:
         return get_latest_bot_runtime_run_id(str(bot_id))
+
+    def list_botlens_run_evidence(
+        self, run_ids: List[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        return list_botlens_run_evidence([str(run_id) for run_id in run_ids])
 
     def get_bot_run_lifecycle(
         self,
