@@ -176,13 +176,13 @@ class BotResponse(BotBase):
 
 @router.get("", response_model=List[BotResponse], include_in_schema=False)
 @router.get("/", response_model=List[BotResponse])
-async def list_bots() -> List[Dict[str, Any]]:
+def list_bots() -> List[Dict[str, Any]]:
     return bot_service.list_bots()
 
 
 @router.post("", response_model=BotResponse, status_code=201, include_in_schema=False)
 @router.post("/", response_model=BotResponse, status_code=201)
-async def create_bot(body: BotCreateRequest) -> Dict[str, Any]:
+def create_bot(body: BotCreateRequest) -> Dict[str, Any]:
     try:
         return bot_service.create_bot(**body.dict())
     except ValueError as exc:
@@ -192,22 +192,22 @@ async def create_bot(body: BotCreateRequest) -> Dict[str, Any]:
 
 
 @router.get("/settings-catalog")
-async def bot_settings_catalog() -> Dict[str, Any]:
+def bot_settings_catalog() -> Dict[str, Any]:
     return bot_service.bot_settings_catalog()
 
 
 @router.get("/watchdog")
-async def bot_watchdog_status() -> Dict[str, Any]:
+def bot_watchdog_status() -> Dict[str, Any]:
     return bot_service.watchdog_status()
 
 
 @router.get("/runtime-capacity")
-async def bot_runtime_capacity() -> Dict[str, Any]:
+def bot_runtime_capacity() -> Dict[str, Any]:
     return bot_service.runtime_capacity()
 
 
 @router.get("/run-contexts")
-async def list_bot_run_contexts() -> Dict[str, Any]:
+def list_bot_run_contexts() -> Dict[str, Any]:
     """Return compact bot run contexts for CLI/research orchestration."""
 
     return bot_service.list_bot_run_contexts()
@@ -215,7 +215,7 @@ async def list_bot_run_contexts() -> Dict[str, Any]:
 
 @router.get("/stream")
 async def stream_bots() -> StreamingResponse:
-    release, channel, initial = bot_service.bots_stream()
+    release, channel, initial = await asyncio.to_thread(bot_service.bots_stream)
 
     async def event_iterator():
         try:
@@ -253,7 +253,7 @@ def bot_run_inventory(
 
 
 @router.get("/{bot_id}/run-context")
-async def get_bot_run_context(bot_id: str) -> Dict[str, Any]:
+def get_bot_run_context(bot_id: str) -> Dict[str, Any]:
     """Return the effective bot run context without full UI projections."""
 
     try:
@@ -263,7 +263,7 @@ async def get_bot_run_context(bot_id: str) -> Dict[str, Any]:
 
 
 @router.get("/{bot_id}", response_model=BotResponse)
-async def get_bot(bot_id: str) -> Dict[str, Any]:
+def get_bot(bot_id: str) -> Dict[str, Any]:
     try:
         return bot_service.get_bot(bot_id)
     except KeyError as exc:
@@ -271,7 +271,7 @@ async def get_bot(bot_id: str) -> Dict[str, Any]:
 
 
 @router.put("/{bot_id}", response_model=BotResponse)
-async def update_bot(bot_id: str, body: BotUpdateRequest) -> Dict[str, Any]:
+def update_bot(bot_id: str, body: BotUpdateRequest) -> Dict[str, Any]:
     try:
         payload = body.dict(exclude_unset=True)
         return bot_service.update_bot(bot_id, **payload)
@@ -282,13 +282,13 @@ async def update_bot(bot_id: str, body: BotUpdateRequest) -> Dict[str, Any]:
 
 
 @router.delete("/{bot_id}", status_code=204, response_class=Response)
-async def delete_bot(bot_id: str) -> Response:
+def delete_bot(bot_id: str) -> Response:
     bot_service.delete_bot_record(bot_id)
     return Response(status_code=204)
 
 
 @router.post("/{bot_id}/start")
-async def start_bot(
+def start_bot(
     bot_id: str,
     body: Optional[BotStartRequest] = None,
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-ID"),
@@ -306,7 +306,7 @@ async def start_bot(
 
 
 @router.post("/{bot_id}/runs/start")
-async def start_bot_run_context(
+def start_bot_run_context(
     bot_id: str,
     body: Optional[BotStartRequest] = None,
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-ID"),
@@ -326,7 +326,7 @@ async def start_bot_run_context(
 
 
 @router.get("/{bot_id}/runs/{run_id}/status")
-async def get_bot_run_status(bot_id: str, run_id: str) -> Dict[str, Any]:
+def get_bot_run_status(bot_id: str, run_id: str) -> Dict[str, Any]:
     """Return compact run status for polling/watching long-running CLI work."""
 
     try:
@@ -338,7 +338,7 @@ async def get_bot_run_status(bot_id: str, run_id: str) -> Dict[str, Any]:
 
 
 @router.post("/{bot_id}/data-preflight")
-async def preflight_bot_data(bot_id: str, body: BotDataPreflightRequest) -> Dict[str, Any]:
+def preflight_bot_data(bot_id: str, body: BotDataPreflightRequest) -> Dict[str, Any]:
     """Return compact pre-run candle coverage for a bot/window."""
 
     try:
@@ -350,7 +350,7 @@ async def preflight_bot_data(bot_id: str, body: BotDataPreflightRequest) -> Dict
 
 
 @router.post("/{bot_id}/backtest-dataset/prepare")
-async def prepare_bot_backtest_dataset(
+def prepare_bot_backtest_dataset(
     bot_id: str,
     body: BotBacktestDatasetPrepareRequest,
 ) -> Dict[str, Any]:
@@ -372,7 +372,7 @@ async def prepare_bot_backtest_dataset(
         raise HTTPException(409, str(exc)) from exc
 
 @router.post("/{bot_id}/stop")
-async def stop_bot(
+def stop_bot(
     bot_id: str,
     body: Optional[BotStopRequest] = None,
     preserve_container: bool = False,
@@ -395,7 +395,7 @@ async def stop_bot(
 
 
 @router.post("/{bot_id}/runs/{run_id}/cancel")
-async def cancel_bot_run(
+def cancel_bot_run(
     bot_id: str,
     run_id: str,
     body: Optional[BotStopRequest] = None,
@@ -484,7 +484,7 @@ def bot_run_lifecycle_events(bot_id: str, run_id: str) -> Dict[str, Any]:
 
 
 @router.get("/{bot_id}/runs/{run_id}/forensics/signals/{signal_id}")
-async def bot_run_signal_forensics(
+def bot_run_signal_forensics(
     bot_id: str,
     run_id: str,
     signal_id: str,
@@ -502,7 +502,7 @@ async def bot_run_signal_forensics(
 
 
 @router.get("/{bot_id}/runs/{run_id}/forensics/events")
-async def bot_run_forensic_events(
+def bot_run_forensic_events(
     bot_id: str,
     run_id: str,
     after_seq: int = 0,
@@ -741,7 +741,7 @@ async def bot_lens_active_live(
     websocket: WebSocket,
 ) -> None:
     try:
-        resolved = resolve_active_botlens_stream(bot_id=str(bot_id))
+        resolved = await asyncio.to_thread(resolve_active_botlens_stream, bot_id=str(bot_id))
     except (KeyError, ValueError) as exc:
         await websocket.accept()
         logger.warning("botlens_live_ws_open_failed | bot_id=%s | error=%s", bot_id, str(exc))

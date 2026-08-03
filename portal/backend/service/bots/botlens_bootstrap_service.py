@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Mapping
@@ -67,8 +68,9 @@ def _run_meta(
     run_id: str,
     projected_bot: Mapping[str, Any],
     health_state: Mapping[str, Any],
+    run_row: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    row = _mapping(get_bot_run(run_id))
+    row = _mapping(run_row) or _mapping(get_bot_run(run_id))
     config_snapshot = _mapping(row.get("config_snapshot"))
     bot_snapshot = _mapping(config_snapshot.get("bot"))
     dataset_binding = _mapping(config_snapshot.get("dataset_binding"))
@@ -119,6 +121,49 @@ def _run_meta(
         "symbols": list(row.get("symbols") or []) if isinstance(row.get("symbols"), list) else [],
         "summary": dict(row.get("summary") or {}) if isinstance(row.get("summary"), Mapping) else {},
     }
+
+
+def _load_run_bootstrap_context(
+    run_id: str,
+) -> tuple[Dict[str, Any], str, Dict[str, Any], Dict[str, Any], bool]:
+    """Load blocking SQL/Docker projection inputs outside the ASGI event loop."""
+
+    run_row = _mapping(get_bot_run(run_id))
+    if not run_row:
+        raise KeyError(run_id)
+    bot_id = str(run_row.get("bot_id") or "").strip()
+    if not bot_id:
+        raise ValueError(f"BotLens run is missing bot identity: run_id={run_id}")
+    try:
+        projected_bot = _mapping(bot_service.get_bot(bot_id))
+    except KeyError:
+        projected_bot = {
+            "id": bot_id,
+            "name": run_row.get("bot_name"),
+            "strategy_id": run_row.get("strategy_id"),
+            "strategy_variant_name": run_row.get("strategy_name"),
+            "run_type": run_row.get("run_type"),
+            "execution_mode": run_row.get("execution_mode"),
+            "status": run_row.get("status"),
+            "active_run_id": None,
+            "lifecycle": {},
+        }
+    if str(projected_bot.get("id") or "") != bot_id:
+        raise ValueError(
+            f"BotLens run ownership mismatch: bot_id={bot_id} run_id={run_id}"
+        )
+    lifecycle = (
+        _mapping(get_bot_run_lifecycle(run_id))
+        or _mapping(projected_bot.get("lifecycle"))
+    )
+    bot_status = str(
+        lifecycle.get("status") or run_row.get("status") or ""
+    ).strip().lower()
+    transport_eligible = (
+        str(projected_bot.get("active_run_id") or "").strip() == run_id
+        and bot_status in _ACTIVE_STATUSES
+    )
+    return run_row, bot_id, projected_bot, lifecycle, transport_eligible
 
 
 def _startup_bootstrap_state(
@@ -238,40 +283,9 @@ async def get_botlens_run_bootstrap(*, run_id: str) -> Dict[str, Any]:
     active_run_id = str(run_id or "").strip()
     if not active_run_id:
         raise ValueError("run_id is required")
-    run_row = _mapping(get_bot_run(active_run_id))
-    if not run_row:
-        raise KeyError(active_run_id)
-    bot_id = str(run_row.get("bot_id") or "").strip()
-    if not bot_id:
-        raise ValueError(f"BotLens run is missing bot identity: run_id={active_run_id}")
-    try:
-        projected_bot = _mapping(bot_service.get_bot(str(bot_id)))
-    except KeyError:
-        projected_bot = {
-            "id": bot_id,
-            "name": run_row.get("bot_name"),
-            "strategy_id": run_row.get("strategy_id"),
-            "strategy_variant_name": run_row.get("strategy_name"),
-            "run_type": run_row.get("run_type"),
-            "execution_mode": run_row.get("execution_mode"),
-            "status": run_row.get("status"),
-            "active_run_id": None,
-            "lifecycle": {},
-        }
-    if str(projected_bot.get("id") or "") != bot_id:
-        raise ValueError(
-            f"BotLens run ownership mismatch: bot_id={bot_id} run_id={active_run_id}"
-        )
-    lifecycle = (
-        _mapping(get_bot_run_lifecycle(active_run_id))
-        or _mapping(projected_bot.get("lifecycle"))
-    )
-    bot_status = str(
-        lifecycle.get("status") or run_row.get("status") or ""
-    ).strip().lower()
-    transport_eligible = (
-        str(projected_bot.get("active_run_id") or "").strip() == active_run_id
-        and bot_status in _ACTIVE_STATUSES
+    run_row, bot_id, projected_bot, lifecycle, transport_eligible = await asyncio.to_thread(
+        _load_run_bootstrap_context,
+        active_run_id,
     )
 
     ensure_started = time.perf_counter()
@@ -302,7 +316,12 @@ async def get_botlens_run_bootstrap(*, run_id: str) -> Dict[str, Any]:
             response=run_bootstrap_contract(
                 bot_id=str(bot_id),
                 run_id=active_run_id,
-                run_meta=_run_meta(run_id=active_run_id, projected_bot=projected_bot, health_state=run_state.health.to_dict()),
+                run_meta=_run_meta(
+                    run_id=active_run_id,
+                    projected_bot=projected_bot,
+                    health_state=run_state.health.to_dict(),
+                    run_row=run_row,
+                ),
                 lifecycle=run_state.lifecycle.to_dict() or lifecycle,
                 health=run_state.health.to_dict(),
                 symbol_catalog={},
@@ -376,7 +395,12 @@ async def get_botlens_run_bootstrap(*, run_id: str) -> Dict[str, Any]:
         response=run_bootstrap_contract(
             bot_id=str(bot_id),
             run_id=active_run_id,
-            run_meta=_run_meta(run_id=active_run_id, projected_bot=projected_bot, health_state=run_state.health.to_dict()),
+            run_meta=_run_meta(
+                run_id=active_run_id,
+                projected_bot=projected_bot,
+                health_state=run_state.health.to_dict(),
+                run_row=run_row,
+            ),
             lifecycle=run_state.lifecycle.to_dict() or lifecycle,
             health=run_state.health.to_dict(),
             symbol_catalog=symbol_index,
@@ -398,7 +422,7 @@ async def get_active_botlens_run_bootstrap(*, bot_id: str) -> Dict[str, Any]:
     """Compatibility read for the active run attached to one bot definition."""
 
     request_started = time.perf_counter()
-    projected_bot = _mapping(bot_service.get_bot(str(bot_id)))
+    projected_bot = _mapping(await asyncio.to_thread(bot_service.get_bot, str(bot_id)))
     active_run_id = str(projected_bot.get("active_run_id") or "").strip() or None
     if active_run_id:
         return await get_botlens_run_bootstrap(run_id=active_run_id)
