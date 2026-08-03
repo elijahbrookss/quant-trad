@@ -22,6 +22,7 @@ import asyncio
 import logging
 import threading
 import time
+import weakref
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from collections.abc import Mapping
@@ -164,6 +165,9 @@ class IntakeRouter:
         self._persist_idempotence_max_event_ids = max(int(persist_idempotence_max_event_ids), 0)
         self._persist_lock = asyncio.Lock()
         self._pending_persist_batches: dict[tuple[Any, ...], _PendingPersistBatch] = {}
+        self._persist_run_locks: weakref.WeakValueDictionary[
+            tuple[str, str], asyncio.Lock
+        ] = weakref.WeakValueDictionary()
         self._persist_tasks: set[asyncio.Task[None]] = set()
         self._persisted_event_ids: dict[tuple[str, str, str, str, str], OrderedDict[str, None]] = {}
         self._scheduled_event_ids: dict[tuple[str, str, str, str, str], OrderedDict[str, None]] = {}
@@ -328,21 +332,34 @@ class IntakeRouter:
     async def _flush_rows(self, key: tuple[Any, ...]) -> None:
         async with self._persist_lock:
             pending = self._pending_persist_batches.pop(key, None)
-        if pending is None:
-            return
+            if pending is None:
+                return
+            run_key = (
+                str(pending.context.get("bot_id") or "").strip(),
+                str(pending.context.get("run_id") or "").strip(),
+            )
+            run_lock = self._persist_run_locks.get(run_key)
+            if run_lock is None:
+                run_lock = asyncio.Lock()
+                self._persist_run_locks[run_key] = run_lock
         rows = [dict(row) for row in pending.rows]
         context = {
             **dict(pending.context),
             "batch_size": len(rows),
         }
         try:
-            inserted = int(
-                await asyncio.to_thread(
-                    record_bot_runtime_events_batch,
-                    rows,
-                    context=context,
+            # The event-sequence allocator is owned per run. Concurrent writes
+            # for the same run only contend on that row and amplify latency;
+            # serialize them here while allowing independent runs to persist in
+            # parallel.
+            async with run_lock:
+                inserted = int(
+                    await asyncio.to_thread(
+                        record_bot_runtime_events_batch,
+                        rows,
+                        context=context,
+                    )
                 )
-            )
         except Exception as exc:  # noqa: BLE001
             for waiter in pending.waiters:
                 if not waiter.done():

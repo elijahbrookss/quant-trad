@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -368,5 +370,82 @@ def test_intake_router_lifecycle_ingest_skips_persistence_and_only_enqueues_proj
         assert persisted_called is False
         assert batch.seq == 9
         assert [event.event_name.value for event in batch.events] == ["RUN_READY"]
+
+    asyncio.run(scenario())
+
+
+def test_intake_router_serializes_event_ledger_writes_within_one_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        guard = threading.Lock()
+        active = 0
+        max_active = 0
+
+        def _record(rows, *, context=None):
+            nonlocal active, max_active
+            _ = rows, context
+            with guard:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.03)
+            with guard:
+                active -= 1
+            return 1
+
+        monkeypatch.setattr(intake_mod, "record_bot_runtime_events_batch", _record)
+        router = IntakeRouter(registry=_FakeRegistry(), persist_batch_max_rows=1)
+        contexts = [
+            {
+                "bot_id": "bot-1",
+                "run_id": "run-1",
+                "series_key": f"instrument-{index}|1m",
+                "message_kind": BRIDGE_FACTS_KIND,
+                "pipeline_stage": "botlens_ingest_facts",
+            }
+            for index in range(3)
+        ]
+
+        await asyncio.gather(*(
+            router._persist_rows(rows=[{"event_id": f"event-{index}"}], context=context)
+            for index, context in enumerate(contexts)
+        ))
+
+        assert max_active == 1
+
+    asyncio.run(scenario())
+
+
+def test_intake_router_keeps_independent_run_writes_parallel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        barrier = threading.Barrier(2)
+        completed: list[str] = []
+
+        def _record(rows, *, context=None):
+            _ = rows
+            barrier.wait(timeout=1.0)
+            completed.append(str((context or {}).get("run_id") or ""))
+            return 1
+
+        monkeypatch.setattr(intake_mod, "record_bot_runtime_events_batch", _record)
+        router = IntakeRouter(registry=_FakeRegistry(), persist_batch_max_rows=1)
+
+        await asyncio.gather(*(
+            router._persist_rows(
+                rows=[{"event_id": f"event-{index}"}],
+                context={
+                    "bot_id": f"bot-{index}",
+                    "run_id": f"run-{index}",
+                    "series_key": "instrument-btc|1m",
+                    "message_kind": BRIDGE_FACTS_KIND,
+                    "pipeline_stage": "botlens_ingest_facts",
+                },
+            )
+            for index in range(2)
+        ))
+
+        assert sorted(completed) == ["run-0", "run-1"]
 
     asyncio.run(scenario())
