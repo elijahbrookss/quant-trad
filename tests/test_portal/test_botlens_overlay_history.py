@@ -193,6 +193,25 @@ def test_overlay_history_stops_at_clock_gap_and_marks_page_incomplete() -> None:
     assert "overlay_timeline_gap_or_order_violation" in evidence["reason_codes"]
 
 
+def test_overlay_history_uses_overlay_clock_when_persistence_arrival_is_reordered() -> None:
+    events = [_terminal_overlay_event(), _first_overlay_event()]
+
+    overlays, evidence = build_chart_overlay_history(
+        events=events,
+        symbol_key="instrument-btc|1m",
+        run_status="completed",
+        range_start_epoch=60,
+        range_end_epoch=240,
+        timeframe_seconds=60,
+        has_more_after=False,
+    )
+
+    assert evidence["complete_for_returned_candles"] is True
+    assert evidence["ordering_assured"] is True
+    assert evidence["applied_event_count"] == 2
+    assert len(overlays) == 1
+
+
 def test_overlay_history_requires_terminal_checkpoint_for_latest_terminal_page() -> None:
     event = _event(
         overlay_seq=1,

@@ -626,7 +626,7 @@ async def bot_lens_symbol_detail(
 
 
 @router.get("/runs/{run_id}/series/{series_key}/chart")
-async def bot_lens_series_chart_history(
+def bot_lens_series_chart_history(
     run_id: str,
     series_key: str,
     start_time: Optional[str] = None,

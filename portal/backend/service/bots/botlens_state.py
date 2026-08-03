@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections import OrderedDict
@@ -871,6 +872,50 @@ def _overlay_clock_int(value: Any, default: int) -> int:
         return default
 
 
+def _overlay_patch_fingerprint(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _apply_polyline_tail_patch(payload: Dict[str, Any], value: Any) -> None:
+    patch = value if isinstance(value, Mapping) else {}
+    expected_fingerprint = str(patch.get("expected_fingerprint") or "").strip()
+    result_fingerprint = str(patch.get("result_fingerprint") or "").strip()
+    entries = patch.get("entries") if isinstance(patch.get("entries"), list) else []
+    polylines = payload.get("polylines")
+    if not expected_fingerprint or not result_fingerprint or not entries:
+        raise ValueError("overlay_delta.polyline_tail contract is incomplete")
+    if not isinstance(polylines, list):
+        raise ValueError("overlay_delta.polyline_tail requires existing polylines")
+    if _overlay_patch_fingerprint(polylines) != expected_fingerprint:
+        raise ValueError("overlay_delta.polyline_tail base fingerprint mismatch")
+    next_polylines = [dict(line) if isinstance(line, Mapping) else line for line in polylines]
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise ValueError("overlay_delta.polyline_tail entry must be a mapping")
+        index = _overlay_clock_int(entry.get("index"), -1)
+        expected_count = _overlay_clock_int(entry.get("expected_count"), -1)
+        drop_prefix = _overlay_clock_int(entry.get("drop_prefix"), -1)
+        append = entry.get("append") if isinstance(entry.get("append"), list) else []
+        if index < 0 or index >= len(next_polylines):
+            raise ValueError("overlay_delta.polyline_tail index is out of range")
+        line = next_polylines[index]
+        if not isinstance(line, Mapping) or not isinstance(line.get("points"), list):
+            raise ValueError("overlay_delta.polyline_tail requires existing point lists")
+        points = list(line["points"])
+        if len(points) != expected_count:
+            raise ValueError("overlay_delta.polyline_tail point count mismatch")
+        if drop_prefix < 0 or drop_prefix > len(points):
+            raise ValueError("overlay_delta.polyline_tail drop_prefix is out of range")
+        next_polylines[index] = {
+            **dict(line),
+            "points": [*points[drop_prefix:], *append],
+        }
+    if _overlay_patch_fingerprint(next_polylines) != result_fingerprint:
+        raise ValueError("overlay_delta.polyline_tail result fingerprint mismatch")
+    payload["polylines"] = next_polylines
+
+
 def apply_overlay_delta(overlays: Any, delta: Any) -> Tuple[Dict[str, Any], ...]:
     current = project_overlay_state(overlays)
     payload = delta if isinstance(delta, Mapping) else {}
@@ -914,6 +959,8 @@ def apply_overlay_delta(overlays: Any, delta: Any) -> Tuple[Dict[str, Any], ...]
             replace = patch.get("replace") if isinstance(patch.get("replace"), Mapping) else {}
             for replace_key, replace_value in replace.items():
                 payload[str(replace_key)] = replace_value
+            if patch.get("polyline_tail") is not None:
+                _apply_polyline_tail_patch(payload, patch.get("polyline_tail"))
             normalized["payload"] = payload
             payload_summary = patch.get("payload_summary") if isinstance(patch.get("payload_summary"), Mapping) else None
             if payload_summary is not None:

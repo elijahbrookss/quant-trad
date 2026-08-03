@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -150,3 +154,51 @@ def test_overlay_delta_patches_stable_overlay_payload_changes() -> None:
     assert second["ops"][0]["op"] == "patch"
     projected = apply_overlay_delta([first["ops"][0]["overlay"]], second)
     assert projected[0]["payload"]["markers"] == second_overlay["payload"]["markers"]
+
+
+def test_overlay_delta_encodes_large_rolling_polylines_as_small_exact_tail_patch() -> None:
+    from portal.backend.service.bots.botlens_state import apply_overlay_delta
+
+    runtime = _DummyRuntime()
+    cache: dict[str, object] = {}
+
+    def overlay(start: int) -> dict:
+        return {
+            "overlay_id": "indicator.lines",
+            "type": "strategy_signal",
+            "payload": {
+                "polylines": [
+                    {
+                        "role": f"line-{line_index}",
+                        "color": "#38bdf8",
+                        "points": [
+                            {"time": point, "price": float(point + line_index)}
+                            for point in range(start, start + 640)
+                        ],
+                    }
+                    for line_index in range(3)
+                ]
+            },
+        }
+
+    first = runtime._build_overlay_delta(cache, [overlay(0)])
+    second = runtime._build_overlay_delta(cache, [overlay(25)])
+
+    assert first is not None
+    assert second is not None
+    patch = second["ops"][0]["payload_patch"]
+    assert "polylines" not in patch.get("replace", {})
+    assert [entry["drop_prefix"] for entry in patch["polyline_tail"]["entries"]] == [25, 25, 25]
+    assert [len(entry["append"]) for entry in patch["polyline_tail"]["entries"]] == [25, 25, 25]
+    assert len(json.dumps(second, separators=(",", ":")).encode("utf-8")) < 10_000
+
+    projected = apply_overlay_delta([first["ops"][0]["overlay"]], second)
+    assert projected[0]["payload"]["polylines"] == overlay(25)["payload"]["polylines"]
+
+    corrupted = [dict(first["ops"][0]["overlay"])]
+    corrupted[0]["payload"] = {
+        **dict(corrupted[0]["payload"]),
+        "polylines": [{**line, "points": list(line["points"])[1:]} for line in corrupted[0]["payload"]["polylines"]],
+    }
+    with pytest.raises(ValueError, match="base fingerprint mismatch"):
+        apply_overlay_delta(corrupted, second)

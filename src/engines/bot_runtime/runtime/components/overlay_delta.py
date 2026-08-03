@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -171,6 +172,62 @@ def _json_size(value: Any) -> int:
         return len(str(value).encode("utf-8"))
 
 
+def _json_fingerprint(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _polyline_tail_patch(
+    previous: Any,
+    current: Any,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(previous, list) or not isinstance(current, list):
+        return None
+    if len(previous) != len(current):
+        return None
+    entries: list[Dict[str, Any]] = []
+    for index, (previous_line, current_line) in enumerate(zip(previous, current)):
+        if not isinstance(previous_line, Mapping) or not isinstance(current_line, Mapping):
+            return None
+        previous_static = {str(key): value for key, value in previous_line.items() if str(key) != "points"}
+        current_static = {str(key): value for key, value in current_line.items() if str(key) != "points"}
+        if previous_static != current_static:
+            return None
+        previous_points = previous_line.get("points")
+        current_points = current_line.get("points")
+        if not isinstance(previous_points, list) or not isinstance(current_points, list):
+            return None
+        if previous_points == current_points:
+            continue
+        drop_prefix = None
+        append: list[Any] = []
+        for candidate in range(len(previous_points) + 1):
+            retained = previous_points[candidate:]
+            if len(retained) > len(current_points):
+                continue
+            if retained == current_points[: len(retained)]:
+                drop_prefix = candidate
+                append = list(current_points[len(retained) :])
+                break
+        if drop_prefix is None:
+            return None
+        entries.append(
+            {
+                "index": index,
+                "expected_count": len(previous_points),
+                "drop_prefix": drop_prefix,
+                "append": append,
+            }
+        )
+    if not entries:
+        return None
+    return {
+        "expected_fingerprint": _json_fingerprint(previous),
+        "result_fingerprint": _json_fingerprint(current),
+        "entries": entries,
+    }
+
+
 def _overlay_static_payload(overlay: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         str(key): value
@@ -187,21 +244,30 @@ def _overlay_payload_patch(
         return None
     replace: Dict[str, Any] = {}
     remove: list[str] = []
+    polyline_tail: Optional[Dict[str, Any]] = None
     previous_keys = {str(key) for key in previous_payload.keys()}
     next_keys = {str(key) for key in next_payload.keys()}
     for key in sorted(previous_keys - next_keys):
         remove.append(key)
     for raw_key, value in next_payload.items():
         key = str(raw_key)
-        if previous_payload.get(raw_key) != value and previous_payload.get(key) != value:
-            replace[key] = value
-    if not replace and not remove:
+        previous_value = previous_payload.get(raw_key)
+        if previous_value == value or previous_payload.get(key) == value:
+            continue
+        if key == "polylines":
+            polyline_tail = _polyline_tail_patch(previous_value, value)
+            if polyline_tail is not None:
+                continue
+        replace[key] = value
+    if not replace and not remove and polyline_tail is None:
         return None
     patch: Dict[str, Any] = {}
     if replace:
         patch["replace"] = replace
     if remove:
         patch["remove"] = remove
+    if polyline_tail is not None:
+        patch["polyline_tail"] = polyline_tail
     summary = overlay_payload_summary(next_payload)
     if summary:
         patch["payload_summary"] = summary

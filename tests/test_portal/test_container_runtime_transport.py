@@ -650,6 +650,10 @@ def test_telemetry_runtime_fact_coalesce_key_excludes_material_facts() -> None:
         **visual_payload,
         "facts": [{"fact_type": "trade_opened", "trade": {"trade_id": "trade-1"}}],
     }
+    overlay_payload = {
+        **visual_payload,
+        "facts": [{"fact_type": "overlay_ops_emitted", "overlay_delta": {"overlay_commit_seq": 2}}],
+    }
 
     assert telemetry_mod.TelemetryEmitter._coalesce_key_for_payload(visual_payload) == (
         "botlens_runtime_facts",
@@ -659,6 +663,7 @@ def test_telemetry_runtime_fact_coalesce_key_excludes_material_facts() -> None:
         "session-1",
     )
     assert telemetry_mod.TelemetryEmitter._coalesce_key_for_payload(material_payload) is None
+    assert telemetry_mod.TelemetryEmitter._coalesce_key_for_payload(overlay_payload) is None
 
 
 def test_telemetry_emitter_coalescing_preserves_inflight_head(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1200,6 +1205,60 @@ def test_telemetry_emitter_close_flushes_control_lane(
         closer.join(timeout=2.0)
         assert not closer.is_alive()
         assert json.loads(connections[0].sent[0])["seq"] == 10
+    finally:
+        send_gate.set()
+        closer.join(timeout=2.0)
+
+
+def test_telemetry_emitter_close_flushes_material_general_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    send_gate = threading.Event()
+    connections: list[_FakeAsyncWebSocket] = []
+
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
+        del open_timeout, close_timeout
+        ws = _FakeAsyncWebSocket(send_gate=send_gate)
+        connections.append(ws)
+        return ws
+
+    monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
+    emitter = telemetry_mod.TelemetryEmitter(
+        "ws://example.test/telemetry",
+        queue_max=8,
+        queue_timeout_ms=50,
+        retry_ms=10,
+    )
+    assert emitter.send(
+        {
+            "kind": "botlens_runtime_facts",
+            "bot_id": "bot-1",
+            "run_id": "run-1",
+            "series_key": "instrument-btc|1m",
+            "facts": [
+                {
+                    "fact_type": "overlay_ops_emitted",
+                    "overlay_delta": {
+                        "overlay_commit_seq": 2,
+                        "base_overlay_commit_seq": 1,
+                        "overlay_commit_seq_status": "overlay_scoped",
+                        "ops": [],
+                    },
+                }
+            ],
+        }
+    )
+
+    closer = threading.Thread(target=emitter.close)
+    closer.start()
+    try:
+        _wait_until(lambda: len(connections) == 1)
+        assert closer.is_alive()
+        send_gate.set()
+        closer.join(timeout=2.0)
+        assert not closer.is_alive()
+        payload = json.loads(connections[0].sent[0])
+        assert payload["facts"][0]["fact_type"] == "overlay_ops_emitted"
     finally:
         send_gate.set()
         closer.join(timeout=2.0)

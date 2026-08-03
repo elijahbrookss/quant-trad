@@ -44,6 +44,7 @@ _MATERIAL_FACT_TYPES = frozenset(
         "trade_closed",
         "wallet_ledger_event",
         "decision_emitted",
+        "overlay_ops_emitted",
     }
 )
 
@@ -861,34 +862,36 @@ class TelemetryEmitter:
 
     def close(self) -> None:
         flush_deadline = time.monotonic() + (_CONTROL_FLUSH_TIMEOUT_MS / 1000.0)
-        timed_out_depth = 0
+        timed_out_depths: Dict[str, int] = {}
         with self._state_lock:
             self._closing = True
-            self._drop_queue_locked(_GENERAL_QUEUE_NAME)
             self._emit_queue_gauges_locked()
             self._state_lock.notify_all()
             self._wake_async_worker()
-            while self._queue_depth_locked(_CONTROL_QUEUE_NAME) > 0:
+            while self._queue_depth_total_locked() > 0:
                 remaining = flush_deadline - time.monotonic()
                 if remaining <= 0:
-                    timed_out_depth = self._queue_depth_locked(_CONTROL_QUEUE_NAME)
-                    self._drop_queue_locked(_CONTROL_QUEUE_NAME)
+                    for queue_name in (_CONTROL_QUEUE_NAME, _GENERAL_QUEUE_NAME):
+                        depth = self._queue_depth_locked(queue_name)
+                        if depth > 0:
+                            timed_out_depths[queue_name] = depth
+                            self._drop_queue_locked(queue_name)
                     break
                 self._state_lock.wait(timeout=min(remaining, 0.25))
             self._stop = True
             self._emit_queue_gauges_locked()
             self._state_lock.notify_all()
             self._wake_async_worker()
-        if timed_out_depth > 0:
+        for queue_name, timed_out_depth in timed_out_depths.items():
             _OBSERVER.increment(
-                "telemetry_control_flush_timeout_total",
-                queue_name=_CONTROL_QUEUE_NAME,
+                "telemetry_shutdown_flush_timeout_total",
+                queue_name=queue_name,
             )
             _OBSERVER.event(
-                "telemetry_control_flush_timeout",
+                "telemetry_shutdown_flush_timeout",
                 level=logging.WARN,
                 queue_depth=timed_out_depth,
-                queue_name=_CONTROL_QUEUE_NAME,
+                queue_name=queue_name,
                 flush_timeout_ms=_CONTROL_FLUSH_TIMEOUT_MS,
             )
         thread = self._worker_thread
@@ -899,7 +902,7 @@ class TelemetryEmitter:
                 _OBSERVER.event(
                     "telemetry_worker_close_timeout",
                     level=logging.WARN,
-                    queue_depth=0,
+                    queue_depth=sum(timed_out_depths.values()),
                     flush_timeout_ms=_CONTROL_FLUSH_TIMEOUT_MS,
                 )
 

@@ -368,9 +368,41 @@ def _durable_overlay_payload_patch(value: Any) -> Dict[str, Any]:
         if str(entry).strip()
     ]
     summary = _mapping(mapping.get("payload_summary"))
+    tail_mapping = _mapping(mapping.get("polyline_tail"))
+    tail_entries: List[Dict[str, Any]] = []
+    for entry in tail_mapping.get("entries") if isinstance(tail_mapping.get("entries"), list) else []:
+        if not isinstance(entry, Mapping):
+            continue
+        index = _coerce_int(entry.get("index"), -1)
+        expected_count = _coerce_int(entry.get("expected_count"), -1)
+        drop_prefix = _coerce_int(entry.get("drop_prefix"), -1)
+        append = entry.get("append") if isinstance(entry.get("append"), list) else []
+        if index < 0 or expected_count < 0 or drop_prefix < 0:
+            continue
+        durable_append = serialize_value(append)
+        tail_entries.append(
+            {
+                "index": index,
+                "expected_count": expected_count,
+                "drop_prefix": drop_prefix,
+                "append": durable_append if isinstance(durable_append, list) else [],
+            }
+        )
+    expected_fingerprint = _optional_text(tail_mapping.get("expected_fingerprint"))
+    result_fingerprint = _optional_text(tail_mapping.get("result_fingerprint"))
+    polyline_tail = (
+        {
+            "expected_fingerprint": expected_fingerprint,
+            "result_fingerprint": result_fingerprint,
+            "entries": tail_entries,
+        }
+        if expected_fingerprint and result_fingerprint and tail_entries
+        else None
+    )
     durable = {
         "replace": durable_replace or None,
         "remove": remove or None,
+        "polyline_tail": polyline_tail,
         "payload_summary": summary or None,
     }
     return {

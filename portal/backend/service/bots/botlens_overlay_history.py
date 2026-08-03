@@ -286,7 +286,13 @@ def build_chart_overlay_history(
     timeframe_seconds: int,
     has_more_after: bool,
 ) -> tuple[list[Dict[str, Any]], Dict[str, Any]]:
-    rows = list(events)
+    rows = sorted(
+        list(events),
+        key=lambda event: (
+            _int(_mapping(_mapping(event.context).get("overlay_delta")).get("overlay_commit_seq"), 0),
+            str(getattr(event, "event_id", "") or ""),
+        ),
+    )
     if len(rows) > _MAX_OVERLAY_EVENTS:
         raise RuntimeError(
             "botlens_chart_overlay_history_limit_exceeded: "
