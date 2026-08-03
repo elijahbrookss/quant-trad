@@ -272,6 +272,11 @@ export const ChartPanel = memo(function ChartPanel({
   const barCount = Array.isArray(model.candles) ? model.candles.length : 0
   const overlayProjection = model.overlayProjection || {}
   const overlayCount = Number(overlayProjection.overlays || 0) || 0
+  const tradeEvidence = model.tradeEvidence || {}
+  const loadedTradeCount = Number(tradeEvidence.loaded_trade_count || tradeEvidence.trade_count || 0) || 0
+  const loadedTradeCoverageComplete = Boolean(
+    tradeEvidence.complete_for_loaded_candles ?? tradeEvidence.complete_for_returned_candles,
+  )
 
   useEffect(() => {
     if (!isFullscreen) return undefined
@@ -301,10 +306,16 @@ export const ChartPanel = memo(function ChartPanel({
                 source {model.historyEvidenceSource.kind.replaceAll('_', ' ')}
               </span>
             ) : null}
+            {loadedTradeCount > 0 ? (
+              <span className="text-xs text-slate-500">
+                {loadedTradeCount} {loadedTradeCount === 1 ? 'trade' : 'trades'} · {loadedTradeCoverageComplete ? 'ledger verified' : 'provisional'}
+              </span>
+            ) : null}
             {overlayCount > 0 ? (
               <span className="text-xs text-slate-500">
                 {overlayCount} {overlayCount === 1 ? 'overlay' : 'overlays'}
-                {overlayProjection.mode ? ` · ${overlayProjection.mode}` : ''}
+                {overlayProjection.mode ? ' · ' + overlayProjection.mode : ''}
+                {model.overlayEvidence?.complete_for_returned_candles === false ? ' · live window' : ''}
               </span>
             ) : null}
           </div>

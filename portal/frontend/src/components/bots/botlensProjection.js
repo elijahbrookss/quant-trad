@@ -5,6 +5,7 @@ const DEFAULT_SYMBOL_STATE_LIMIT = 6
 const MAX_LOGS = 300
 const MAX_DECISIONS = 600
 const MAX_TRADES = 240
+export const MAX_CHART_HISTORY_TRADES = 10000
 const SYMBOL_DELTA_DROP_WARN_INTERVAL_MS = 10000
 const logger = createLogger('botlensProjection')
 const symbolDeltaDropWarnings = new Map()
@@ -341,7 +342,7 @@ function tradeIsClosed(trade) {
   return tradeState === 'closed' || ['closed', 'completed', 'complete'].includes(status)
 }
 
-function mergeTradeProjection(existing, incoming) {
+export function mergeTradeProjection(existing, incoming) {
   if (!existing || typeof existing !== 'object') return incoming
   const existingClosed = tradeIsClosed(existing)
   const incomingClosed = tradeIsClosed(incoming)
@@ -437,6 +438,30 @@ function positionCommitSeq(trade) {
   return toPositiveInt(trade?.position_commit_seq)
 }
 
+export function mergeCanonicalTrades(...collections) {
+  const byTradeId = new Map()
+  collections.forEach((collection) => {
+    ;(Array.isArray(collection) ? collection : []).forEach((trade) => {
+      const normalized = normalizeTrade(trade)
+      if (!normalized) return
+      const existing = byTradeId.get(normalized.trade_id)
+      byTradeId.set(
+        normalized.trade_id,
+        mergeTradeProjection(existing, normalized),
+      )
+    })
+  })
+  const ordered = Array.from(byTradeId.values()).sort((left, right) => {
+    const timeDelta = Number(toSec(left.entry_time || left.opened_at) || 0)
+      - Number(toSec(right.entry_time || right.opened_at) || 0)
+    if (timeDelta !== 0) return timeDelta
+    return String(left.trade_id || "").localeCompare(String(right.trade_id || ""))
+  })
+  return ordered.length > MAX_CHART_HISTORY_TRADES
+    ? ordered.slice(-MAX_CHART_HISTORY_TRADES)
+    : ordered
+}
+
 function warningSeverityRank(value) {
   const normalized = String(value || '').trim().toLowerCase()
   if (normalized === 'error' || normalized === 'critical') return 0
@@ -444,7 +469,7 @@ function warningSeverityRank(value) {
   return 2
 }
 
-function normalizeWarning(warning, index = 0) {
+function normalizeWarning(warning) {
   if (!warning || typeof warning !== 'object') return null
   const warningType = String(warning.warning_type || '').trim()
   const warningId = String(warning.warning_id || '').trim()

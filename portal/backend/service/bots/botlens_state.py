@@ -1060,7 +1060,7 @@ def _closed_tombstone_dominates(closed_trade: Mapping[str, Any] | None, incoming
     return incoming_seq <= closed_seq
 
 
-def _merge_trade_projection_entry(
+def merge_trade_projection_entry(
     existing: Mapping[str, Any] | None,
     incoming: Mapping[str, Any],
     *,
@@ -1526,16 +1526,23 @@ def _decision_entry(event: BotLensDomainEvent) -> Dict[str, Any]:
     }
 
 
-def _trade_entry(event: BotLensDomainEvent) -> Dict[str, Any]:
-    context = event.context.to_dict()
+def trade_projection_entry_from_context(
+    *,
+    context: Mapping[str, Any],
+    event_name: BotLensDomainEventName | str,
+    event_id: str | None,
+    event_ts: Any,
+) -> Dict[str, Any]:
+    context = dict(context)
     entry_time = context.get("opened_at") or context.get("entry_time")
     exit_time = context.get("exit_time") or context.get("closed_at")
     quantity = context.get("quantity") if context.get("quantity") is not None else context.get("qty")
     close_reason = context.get("close_reason") or context.get("reason_code")
+    normalized_event_name = event_name.value if isinstance(event_name, BotLensDomainEventName) else str(event_name)
     return {
-        "event_id": event.event_id,
-        "event_name": event.event_name.value,
-        "event_ts": _iso_or_none(event.event_ts),
+        "event_id": event_id,
+        "event_name": normalized_event_name,
+        "event_ts": _iso_or_none(event_ts),
         "trade_id": context.get("trade_id"),
         "symbol_key": context.get("series_key"),
         "instrument_id": context.get("instrument_id"),
@@ -1565,9 +1572,18 @@ def _trade_entry(event: BotLensDomainEvent) -> Dict[str, Any]:
         "metrics": _mapping_copy(context.get("metrics")),
         "opened_at": context.get("opened_at"),
         "closed_at": context.get("closed_at") or exit_time,
-        "updated_at": _iso_or_none(event.event_ts),
+        "updated_at": _iso_or_none(event_ts),
         "status": context.get("trade_state"),
     }
+
+
+def _trade_entry(event: BotLensDomainEvent) -> Dict[str, Any]:
+    return trade_projection_entry_from_context(
+        context=event.context.to_dict(),
+        event_name=event.event_name,
+        event_id=event.event_id,
+        event_ts=event.event_ts,
+    )
 
 
 def _diagnostic_entry(event: BotLensDomainEvent) -> Dict[str, Any]:
@@ -1822,7 +1838,7 @@ def apply_symbol_trade_projector(
             continue
         trade_entry = _trade_entry(event)
         existing_trade = _trade_by_trade_id(next_state.trades, trade_entry.get("trade_id"))
-        trade_entry = _merge_trade_projection_entry(
+        trade_entry = merge_trade_projection_entry(
             existing_trade,
             trade_entry,
             event_name=event.event_name,
@@ -2339,6 +2355,7 @@ __all__ = [
     "empty_symbol_projection_snapshot",
     "is_open_trade",
     "merge_candles",
+    "merge_trade_projection_entry",
     "normalize_candle_time",
     "normalize_trade",
     "overlay_identity",
@@ -2348,6 +2365,7 @@ __all__ = [
     "read_symbol_projection_snapshot",
     "reset_run_symbol_scope",
     "select_default_symbol_key",
+    "trade_projection_entry_from_context",
     "serialize_run_projection_snapshot",
     "serialize_symbol_projection_snapshot",
 ]

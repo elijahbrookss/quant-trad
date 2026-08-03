@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   selectSelectedSymbolChartCandles,
+  selectSelectedSymbolChartTrades,
   selectSelectedSymbolState,
 } from '../src/features/bots/botlens/state/botlensRuntimeSelectors.js'
 import {
@@ -389,4 +390,57 @@ test('warnings without canonical warning_id are dropped instead of aliased', () 
   })
 
   assert.deepEqual(state.runState.health.warnings, [])
+})
+
+
+test('chart history merges newest-first trade pages without reopening a closed trade', () => {
+  let state = bootstrapState()
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 120, open: 100, high: 102, low: 99, close: 101 }],
+    trades: [{
+      trade_id: 'trade-1',
+      symbol_key: 'instrument-btc|1m',
+      trade_state: 'closed',
+      status: 'closed',
+      entry_time: '1970-01-01T00:01:00Z',
+      entry_price: 100,
+      exit_time: '1970-01-01T00:02:00Z',
+      exit_price: 101,
+      position_commit_seq: 2,
+    }],
+    tradeEvidence: { complete_for_returned_candles: true, trade_count: 1 },
+    overlayEvidence: { complete_for_returned_candles: false, coverage: 'live_viewport_only' },
+  })
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 60, open: 99, high: 101, low: 98, close: 100 }],
+    trades: [{
+      trade_id: 'trade-1',
+      symbol_key: 'instrument-btc|1m',
+      trade_state: 'open',
+      status: 'open',
+      entry_time: '1970-01-01T00:01:00Z',
+      entry_price: 100,
+      position_commit_seq: 1,
+    }],
+  })
+
+  const trades = selectSelectedSymbolChartTrades(state)
+  assert.equal(trades.length, 1)
+  assert.equal(trades[0].trade_state, 'closed')
+  assert.equal(trades[0].exit_time, '1970-01-01T00:02:00Z')
+  assert.equal(selectSelectedSymbolState(state).recent_trades.length, 0)
+  assert.equal(
+    state.retrieval.chartHistoryBySymbol['instrument-btc|1m'].tradeEvidence.complete_for_returned_candles,
+    true,
+  )
+  assert.equal(
+    state.retrieval.chartHistoryBySymbol['instrument-btc|1m'].overlayEvidence.coverage,
+    'live_viewport_only',
+  )
 })

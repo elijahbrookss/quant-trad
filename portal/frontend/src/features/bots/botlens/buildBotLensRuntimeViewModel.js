@@ -539,6 +539,7 @@ export function buildBotLensRuntimeViewModel({
   chartHistoryStatus,
   chartOverlays,
   chartTrades,
+  recentTrades = chartTrades,
   error,
   forensicDocuments,
   forensicError,
@@ -577,7 +578,7 @@ export function buildBotLensRuntimeViewModel({
   const selectedNetPnlLabel = formatSignedNumber(selectedNetPnlValue)
   const priceContext = buildPriceContext(chartCandles)
   const openTradeCount = Object.keys(runState?.openTradesIndex || {}).length
-  const recentTradeRows = buildRecentTradeRows(chartTrades)
+  const recentTradeRows = buildRecentTradeRows(recentTrades)
   const topTone = topBarTone(runState?.health?.status || botStatus)
   const strategyName = String(runState?.runMeta?.strategy_name || bot?.strategy_variant_name || bot?.strategy_id || 'Strategy').trim()
   const selectedStats = selectedSymbolState?.stats && typeof selectedSymbolState.stats === 'object'
@@ -616,7 +617,7 @@ export function buildBotLensRuntimeViewModel({
   })
   const walletRows = buildBotLensWalletRows({
     openTradeCount: selectedOpenTradeCount,
-    recentTrades: chartTrades,
+    recentTrades,
     runtime: runtimeSnapshot,
     stats: selectedStats,
   })
@@ -818,6 +819,8 @@ export function buildBotLensRuntimeViewModel({
       historyStatus: chartHistoryStatus || 'idle',
       historyError: chartHistory?.error || null,
       historyEvidenceSource: chartHistory?.evidenceSource || null,
+      tradeEvidence: chartHistory?.tradeEvidence || null,
+      overlayEvidence: chartHistory?.overlayEvidence || null,
       hasMoreBefore: chartHistory?.range?.has_more_before !== false,
       historyCount: Number(chartHistory?.candles?.length || 0),
       cacheCount: Number(chartHistoryCacheCount || 0),

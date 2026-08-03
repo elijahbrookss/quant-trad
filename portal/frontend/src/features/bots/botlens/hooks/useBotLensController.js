@@ -15,6 +15,7 @@ import {
   selectActiveRunId,
   selectSelectedSymbolChartHistory,
   selectSelectedSymbolChartHistoryStatus,
+  selectSelectedSymbolChartTrades,
   selectOpenTrades,
   selectSelectedSymbolBaseSlices,
   selectSelectedSymbolBootstrapStatus,
@@ -318,6 +319,8 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   const selectedSymbolOverlays = useMemo(() => selectSelectedSymbolOverlays(state), [selectedSymbolProjection, selectedSymbolKey])
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
   const selectedSymbolRecentTrades = useMemo(() => selectSelectedSymbolRecentTrades(state), [selectedSymbolProjection, selectedSymbolKey])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- history and live tails are independently scoped
+  const chartTrades = useMemo(() => selectSelectedSymbolChartTrades(state), [selectedSymbolProjection, chartHistoryForSymbol, selectedSymbolKey])
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
   const selectedSymbolLogs = useMemo(() => selectSelectedSymbolLogs(state), [selectedSymbolProjection, selectedSymbolKey])
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
@@ -741,8 +744,11 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
           runId: activeRunId,
           symbolKey: selectedSymbolKey,
           candles: Array.isArray(page?.candles) ? page.candles : [],
+          trades: Array.isArray(page?.trades) ? page.trades : [],
           range: page?.range,
           evidenceSource: page?.evidence_source,
+          tradeEvidence: page?.trade_evidence,
+          overlayEvidence: page?.overlay_evidence,
         })
       })
       .catch((err) => {
@@ -842,8 +848,11 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
         runId: activeRunId,
         symbolKey: selectedSymbolKey,
         candles,
+        trades: Array.isArray(page?.trades) ? page.trades : [],
         range: page?.range,
         evidenceSource: page?.evidence_source,
+        tradeEvidence: page?.trade_evidence,
+        overlayEvidence: page?.overlay_evidence,
       })
     } catch (err) {
       dispatch({
@@ -885,7 +894,8 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     chartHistoryCacheCount,
     chartHistoryStatus,
     chartOverlays: selectedSymbolOverlays,
-    chartTrades: selectedSymbolRecentTrades,
+    chartTrades,
+    recentTrades: selectedSymbolRecentTrades,
     clearError,
     closeModal,
     changeSelectedSymbol,

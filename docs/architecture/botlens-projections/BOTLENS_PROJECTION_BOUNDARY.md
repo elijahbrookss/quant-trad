@@ -168,6 +168,15 @@ reports included and available counts, `ordering=latest_tail`, and whether it
 was truncated. The full projector remains authoritative for live state; the
 durable cursor path is authoritative for complete historical inspection.
 
+Chart-history pages pair each bounded candle range with trade states rebuilt from
+the retained `TRADE_OPENED`, `TRADE_UPDATED`, and `TRADE_CLOSED` facts. The
+response reports ordering assurance, terminal-run completeness for the returned
+candles, the event and trade counts, and a stable evidence fingerprint. Page
+merging uses the same close-dominance and `position_commit_seq` semantics as the
+live projector, so loading an older entry page cannot reopen a closed trade. The
+frontend keeps this bounded chart-marker history separate from the compact
+recent-trades table.
+
 Cold decision inspection pages typed domain truth by run, selected series, and
 the stable after_seq/after_row_id cursor. Each page is bounded to 200 events in
 the operator UI (the backend contract caps requests at 1,000). Snapshot and cold
@@ -251,7 +260,12 @@ available current trade batch as a projection resync boundary.
 
 Visual overlays are projection/read-model artifacts. They are not stored on
 `StrategySeries`, do not participate in strategy decisions, and are not built by
-ordinary runtime push updates.
+ordinary runtime push updates. The current overlay delta is a bounded live
+viewport and is not retained as complete historical overlay evidence. Completed
+chart-history responses therefore report `overlay_evidence.coverage=live_viewport_only`
+and `complete_for_returned_candles=false`; the UI must not advertise a full
+historical overlay toggle for those runs. Frozen candles, typed decisions, and
+durable trades remain independently inspectable.
 
 Runtime configures each indicator's render-only overlay-history bound from
 `bot_runtime.botlens.overlay_window_bars` through the indicator engine's single
@@ -344,6 +358,8 @@ or bootstrap facts.
 - BotLens is a debugger, not a demo path.
 - Projection and transport payloads stay bounded.
 - Heavy event history belongs on cold paths.
+- Complete trade markers require ledger-backed range evidence; selected-symbol tails are never presented as complete history.
+- Historical indicator overlays remain unavailable until a separate durable overlay archive contract exists.
 - Runtime truth remains in execution events and trade rows.
 - Closed-trade truth in the durable ledger must dominate stale projection
   notifications.

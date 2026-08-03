@@ -14,6 +14,7 @@ import {
   createRunStore,
   isTypedSymbolDeltaMessage,
   mergeCanonicalCandles,
+  mergeCanonicalTrades,
   normalizeSeriesKey,
   selectSymbol,
 } from '../../../../components/bots/botlensProjection.js'
@@ -112,8 +113,40 @@ function commitProjectionStore(state, projectionStore) {
   }
 }
 
-function updateChartHistoryCache(cache, { symbolKey, candles, range, evidenceSource }) {
+function updateChartHistoryCache(cache, {
+  symbolKey,
+  candles,
+  trades,
+  range,
+  evidenceSource,
+  tradeEvidence,
+  overlayEvidence,
+}) {
   const existing = cache?.[symbolKey] || null
+  const mergedTrades = mergeCanonicalTrades(existing?.trades || [], trades || [])
+  const pageTradeEvidence = tradeEvidence && typeof tradeEvidence === 'object'
+    ? { ...tradeEvidence }
+    : null
+  const pageFingerprints = Array.from(new Set([
+    ...(Array.isArray(existing?.tradeEvidence?.page_fingerprints)
+      ? existing.tradeEvidence.page_fingerprints
+      : []),
+    pageTradeEvidence?.fingerprint,
+  ].filter(Boolean))).slice(-64)
+  const mergedTradeEvidence = pageTradeEvidence
+    ? {
+        ...pageTradeEvidence,
+        loaded_trade_count: mergedTrades.length,
+        complete_for_loaded_candles: Boolean(
+          pageTradeEvidence.complete_for_returned_candles
+          && (existing?.tradeEvidence
+            ? existing.tradeEvidence.complete_for_loaded_candles
+              ?? existing.tradeEvidence.complete_for_returned_candles
+            : true),
+        ),
+        page_fingerprints: pageFingerprints,
+      }
+    : existing?.tradeEvidence || null
   return {
     ...(cache || {}),
     [symbolKey]: {
@@ -121,10 +154,15 @@ function updateChartHistoryCache(cache, { symbolKey, candles, range, evidenceSou
       status: 'ready',
       error: null,
       candles: mergeCanonicalCandles(candles || [], existing?.candles || []),
+      trades: mergedTrades,
       range: range && typeof range === 'object' ? { ...range } : existing?.range || null,
       evidenceSource: evidenceSource && typeof evidenceSource === 'object'
         ? { ...evidenceSource }
         : existing?.evidenceSource || null,
+      tradeEvidence: mergedTradeEvidence,
+      overlayEvidence: overlayEvidence && typeof overlayEvidence === 'object'
+        ? { ...overlayEvidence }
+        : existing?.overlayEvidence || null,
     },
   }
 }
@@ -485,8 +523,11 @@ export function reduceBotLensState(state, action) {
             {
               symbolKey: normalizedSymbolKey,
               candles: action.candles,
+              trades: action.trades,
               range: action.range,
               evidenceSource: action.evidenceSource,
+              tradeEvidence: action.tradeEvidence,
+              overlayEvidence: action.overlayEvidence,
             },
           ),
         },

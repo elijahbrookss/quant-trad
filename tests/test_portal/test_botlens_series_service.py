@@ -701,3 +701,99 @@ def test_list_run_symbols_uses_catalog_transport_contract(monkeypatch: pytest.Mo
 
     assert result["owner"] == "catalog"
     assert "instrument-btc|1m" in result["symbol_catalog"]
+
+
+def test_completed_chart_history_reconstructs_complete_range_trade_markers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    symbol_key = "instrument-btc|1m"
+    monkeypatch.setattr(
+        chart_svc,
+        "get_bot_run",
+        lambda run_id: {"run_id": run_id, "bot_id": "bot-1", "status": "completed"},
+    )
+
+    def _event(name: str, event_id: str, context: dict[str, Any]):
+        return SimpleNamespace(
+            event_name=name,
+            event_id=event_id,
+            event_ts=context["bar_time"],
+            context=context,
+        )
+
+    opened = {
+        "series_key": symbol_key,
+        "trade_id": "trade-1",
+        "bar_time": "1970-01-01T00:01:00Z",
+        "opened_at": "1970-01-01T00:01:00Z",
+        "trade_state": "open",
+        "side": "long",
+        "quantity": 2.0,
+        "entry_price": 100.0,
+        "position_commit_seq": 1,
+        "position_commit_seq_status": "position_scoped",
+        "run_seq": 10,
+        "run_seq_status": "runtime_assigned",
+        "legs": [],
+    }
+    closed = {
+        **opened,
+        "bar_time": "1970-01-01T00:02:00Z",
+        "trade_state": "closed",
+        "closed_at": "1970-01-01T00:02:00Z",
+        "exit_time": "1970-01-01T00:02:00Z",
+        "exit_price": 101.0,
+        "net_pnl": 2.0,
+        "position_commit_seq": 2,
+        "run_seq": 11,
+        "legs": [
+            {
+                "id": "target-1",
+                "status": "target",
+                "exit_time": "1970-01-01T00:02:00Z",
+                "exit_price": 101.0,
+            }
+        ],
+    }
+
+    def _iter(**kwargs):
+        if tuple(kwargs.get("event_names") or ()) == chart_svc._CANDLE_EVENT_NAMES:
+            return iter(
+                [
+                    SimpleNamespace(context={"candle": {"time": "1970-01-01T00:01:00Z", "open": 99, "high": 101, "low": 98, "close": 100}}),
+                    SimpleNamespace(context={"candle": {"time": "1970-01-01T00:02:00Z", "open": 100, "high": 102, "low": 99, "close": 101}}),
+                ]
+            )
+        return iter(
+            [
+                _event("TRADE_OPENED", "event-open", opened),
+                _event("TRADE_CLOSED", "event-close", closed),
+            ]
+        )
+
+    monkeypatch.setattr(chart_svc, "iter_all_run_domain_truth", _iter)
+
+    result = chart_svc.get_symbol_chart_history(
+        run_id="run-1",
+        symbol_key=symbol_key,
+        start_time="1970-01-01T00:01:00Z",
+        end_time="1970-01-01T00:03:00Z",
+        limit=10,
+    )
+
+    assert result["schema_version"] == 3
+    assert len(result["trades"]) == 1
+    assert result["trades"][0]["trade_id"] == "trade-1"
+    assert result["trades"][0]["entry_time"] == "1970-01-01T00:01:00Z"
+    assert result["trades"][0]["exit_time"] == "1970-01-01T00:02:00Z"
+    assert result["trades"][0]["position_commit_seq"] == 2
+    assert result["trade_evidence"]["complete_for_returned_candles"] is True
+    assert result["trade_evidence"]["ordering_assured"] is True
+    assert result["trade_evidence"]["event_count"] == 2
+    assert len(result["trade_evidence"]["fingerprint"]) == 64
+    assert result["overlay_evidence"] == {
+        "schema_version": "botlens_chart_overlay_evidence.v1",
+        "coverage": "live_viewport_only",
+        "complete_for_returned_candles": False,
+        "reason": "visual_overlay_transport_not_persisted",
+    }

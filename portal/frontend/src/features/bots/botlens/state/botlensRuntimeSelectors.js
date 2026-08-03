@@ -1,6 +1,7 @@
 import {
   getSelectedSymbolSlices,
   mergeCanonicalCandles,
+  mergeCanonicalTrades,
   normalizeSeriesKey,
 } from '../../../../components/bots/botlensProjection.js'
 import { getBotLensProjectionStore } from './botlensRuntimeState.js'
@@ -48,6 +49,12 @@ export function selectSelectedSymbolChartCandles(state) {
   const history = selectSelectedSymbolChartHistory(state)
   const provisional = baseSlices?.provisionalCandle ? [baseSlices.provisionalCandle] : []
   return mergeCanonicalCandles(history?.candles || [], baseSlices?.candles || [], provisional)
+}
+
+export function selectSelectedSymbolChartTrades(state) {
+  const baseSlices = selectSelectedSymbolBaseSlices(state)
+  const history = selectSelectedSymbolChartHistory(state)
+  return mergeCanonicalTrades(history?.trades || [], baseSlices?.recentTrades || [])
 }
 
 export function selectSymbolOptions(state) {
