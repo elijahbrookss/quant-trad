@@ -91,6 +91,33 @@ test('completed dataset runs request an initial bounded chart page', () => {
   )
 })
 
+test('active BotLens uses its ready bootstrap instead of cold chart reconstruction', () => {
+  assert.equal(
+    shouldLoadInitialBotLensHistory({
+      open: true,
+      activeRunId: 'run-live',
+      selectedSymbolKey: 'instrument-btc|1m',
+      datasetId: 'mds-frozen',
+      chartHistoryStatus: 'idle',
+      transportEligible: true,
+      chartCandles: [{ time: 1767225600, open: 1, high: 1, low: 1, close: 1 }],
+    }),
+    false,
+  )
+  assert.equal(
+    shouldLoadInitialBotLensHistory({
+      open: true,
+      activeRunId: 'run-live',
+      selectedSymbolKey: 'instrument-btc|1m',
+      datasetId: 'mds-frozen',
+      chartHistoryStatus: 'idle',
+      transportEligible: true,
+      chartCandles: [],
+    }),
+    true,
+  )
+})
+
 test('forensic replay deduplicates cursor documents and blocks completed streams', () => {
   const merged = mergeBotLensForensicDocuments(
     [

@@ -57,13 +57,21 @@ export function shouldLoadInitialBotLensHistory({
   selectedSymbolKey,
   datasetId,
   chartHistoryStatus,
+  transportEligible = false,
+  chartCandles = [],
 }) {
+  const liveBootstrapReady = Boolean(
+    transportEligible
+    && Array.isArray(chartCandles)
+    && chartCandles.length > 0,
+  )
   return Boolean(
     open
     && activeRunId
     && selectedSymbolKey
     && datasetId
-    && chartHistoryStatus === 'idle',
+    && chartHistoryStatus === 'idle'
+    && !liveBootstrapReady,
   )
 }
 
@@ -716,6 +724,8 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
       selectedSymbolKey,
       datasetId,
       chartHistoryStatus,
+      transportEligible,
+      chartCandles,
     })) return undefined
 
     const requestKey = [activeRunId, selectedSymbolKey].join(':')
@@ -777,12 +787,14 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   }, [
     activeRunId,
     bot?.id,
+    chartCandles,
     chartHistoryStatus,
     datasetId,
     initialHistoryEnd,
     logger,
     open,
     selectedSymbolKey,
+    transportEligible,
   ])
 
   useBotLensLiveTransport({
