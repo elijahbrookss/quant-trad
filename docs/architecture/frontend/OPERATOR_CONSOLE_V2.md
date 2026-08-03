@@ -28,6 +28,9 @@ code_paths:
   - portal/backend/controller/reports.py
   - portal/backend/controller/research.py
   - portal/backend/service/bots/bot_service.py
+  - portal/backend/service/storage/repos/runs.py
+  - portal/backend/service/storage/repos/market_structure.py
+  - portal/backend/workers/market_data_collector.py
   - portal/backend/service/bots/botlens_bootstrap_service.py
   - portal/backend/service/reports
   - portal/backend/service/research
@@ -55,7 +58,7 @@ The console owns:
 - browser-local filters, sort order, pagination, tabs, and safe navigation;
 - view models over typed backend read contracts;
 - explicit loading, partial, unavailable, stale, invalid, and empty states;
-- bounded refresh and polling of read-only projections;
+- bounded snapshots, cursors, and change-only streams over read-only projections;
 - run-scoped navigation to persisted supporting evidence;
 - readable operator summaries with copyable technical error details.
 
@@ -105,8 +108,7 @@ identity, and sorts by severity followed by recency. Active work contains real
 run instances, in-flight attempts, and leased stream sessions. Enabled
 definitions are never counted as running.
 
-Collector rollups mean **on-schedule delivery evidence**. They do not imply the
-collector process is alive. Market posture keeps collection, coverage, book
+Collector rollups are healthy only when the durable worker heartbeat is current, an active attempt is not stalled, the schedule is current, and recent successful delivery evidence is fresh. Liveness, schedule, and delivery remain separately inspectable. Market posture keeps collection, coverage, book
 validity, archive, normalization, admission, and quality evidence independent.
 
 ## Operations Contract
@@ -124,11 +126,7 @@ Collector rows group facts such as `derivatives.open_interest` and
 `derivatives.funding_rate` under the same provider and provider product.
 Canonical instrument identity remains visible but is not the primary label.
 
-Every inventory uses explicit page controls. The current read model remains
-bounded to the latest 50 runs per bot definition and 200 research records, then
-uses 12-row client pages. This removes unbounded visual scrolling but is not a
-global server-pagination contract. A later scale slice should replace the
-per-definition run fan-out with a typed global cursor projection.
+Run inventory uses `bot_run_inventory.v1`: one reverse-chronological, 100-row server window with a stable `(before_sort_at, before_run_id)` continuation cursor. It does not fan out by bot definition. Market inventory uses `market_structure_operator_snapshot.v1` plus a change-only SSE stream; the compact list projection is built in one database round trip while full per-definition archive, coverage, book, and quality forensics stay lazy behind the lens. Research remains bounded to 200 records. Client tables may window these results, but numbered pages are not the primary historical retrieval contract.
 
 ## BotLens Modal And Replay
 
@@ -159,13 +157,12 @@ bounded, and operationally reliable.
 The console may say:
 
 - API reachable: the health request succeeded;
-- definitions streaming: the definition SSE projection is connected;
+- collectors live: the durable collector worker heartbeat is current;
+- market updates live: the market-structure snapshot stream is connected;
 - BotLens live: an eligible run projection is sequenced and resynchronizable;
 - on schedule: collector attempts satisfy delivery timing.
 
-The console may not collapse those facts into “platform healthy” or “containers
-live.” There is no authoritative platform-wide container or collector
-heartbeat in the current contracts.
+The console may not collapse those facts into “platform healthy” or “all containers live.” Collector-worker heartbeat authority is deliberately scoped to scheduled market-data collection; bot container state, stream leases, and API reachability retain their own evidence boundaries.
 
 ## Failure Presentation
 
@@ -180,7 +177,7 @@ failed; invalid means evidence explicitly failed a validity contract.
 
 ## Deliberate Limits
 
-- no authoritative platform-wide heartbeat;
+- no single synthetic platform-wide heartbeat; collector workers, bot containers, streams, and API reachability retain separate authority;
 - no browser mutation or run-control commands;
 - no complete historical inventory beyond the visible read bounds;
 - no claim that every completed run has usable BotLens evidence;

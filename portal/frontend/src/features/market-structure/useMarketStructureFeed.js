@@ -1,12 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
-  fetchMarketStructureStatus,
-  listMarketNormalizationSpecs,
-  listMarketStructureDefinitions,
-  listMarketStructureSessions,
+  fetchMarketStructureSnapshot,
+  openMarketStructureStream,
 } from '../../adapters/marketData.adapter.js'
-
-const POLL_INTERVAL_MS = 60_000
 
 export function useMarketStructureFeed() {
   const [definitions, setDefinitions] = useState([])
@@ -15,102 +11,71 @@ export function useMarketStructureFeed() {
   const [statusByDefinition, setStatusByDefinition] = useState({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [streamError, setStreamError] = useState(null)
   const [observedAt, setObservedAt] = useState(null)
   const [refreshRevision, setRefreshRevision] = useState(0)
-  const definitionsRef = useRef([])
   const refresh = useCallback(() => setRefreshRevision((value) => value + 1), [])
 
   useEffect(() => {
     let mounted = true
-    let timeoutId = null
+    let source = null
 
-    async function load() {
-      const sourceResults = await Promise.allSettled([
-        listMarketStructureDefinitions(),
-        listMarketStructureSessions({ limit: 250 }),
-        listMarketNormalizationSpecs(),
-      ])
-      if (!mounted) return
-
-      const errors = []
-      const [definitionResult, sessionResult, specResult] = sourceResults
-      let definitionRows = definitionsRef.current
-
-      if (definitionResult.status === 'fulfilled') {
-        definitionRows = definitionResult.value
-        definitionsRef.current = definitionRows
-        setDefinitions(definitionRows)
-      } else {
-        errors.push(
-          'Stream definitions: ' +
-          (definitionResult.reason?.message || 'evidence unavailable'),
-        )
-      }
-
-      if (sessionResult.status === 'fulfilled') {
-        setSessions(sessionResult.value)
-      } else {
-        errors.push(
-          'Stream sessions: ' +
-          (sessionResult.reason?.message || 'evidence unavailable'),
-        )
-      }
-
-      if (specResult.status === 'fulfilled') {
-        setNormalizationSpecs(specResult.value)
-      } else {
-        errors.push(
-          'Normalization specs: ' +
-          (specResult.reason?.message || 'evidence unavailable'),
-        )
-      }
-
-      const statusResults = await Promise.allSettled(
-        definitionRows.map((definition) =>
-          fetchMarketStructureStatus(definition.id),
-        ),
-      )
-      if (!mounted) return
-
-      const nextStatus = {}
-      let unavailableCount = 0
-      statusResults.forEach((result, index) => {
-        const definitionId = definitionRows[index]?.id
-        if (!definitionId) return
-        if (result.status === 'fulfilled') {
-          nextStatus[definitionId] = {
-            available: true,
-            value: result.value,
-          }
-        } else {
-          unavailableCount += 1
-          nextStatus[definitionId] = {
-            available: false,
-            error: result.reason?.message || 'Status unavailable',
-            value: null,
-          }
-        }
-      })
-      setStatusByDefinition(nextStatus)
-      if (unavailableCount) {
-        errors.push(
-          'Evidence status unavailable for ' +
-          unavailableCount +
-          ' stream definition' +
-          (unavailableCount === 1 ? '.' : 's.'),
-        )
-      }
-      setError(errors.join(' ') || null)
-      setObservedAt(new Date().toISOString())
+    function applyPayload(payload) {
+      if (!mounted || !payload) return
+      const nextDefinitions = Array.isArray(payload.definitions) ? payload.definitions : []
+      const summaries = payload.status_by_definition && typeof payload.status_by_definition === 'object'
+        ? payload.status_by_definition
+        : {}
+      setDefinitions(nextDefinitions)
+      setSessions(Array.isArray(payload.sessions) ? payload.sessions : [])
+      setNormalizationSpecs(Array.isArray(payload.normalization_specs) ? payload.normalization_specs : [])
+      setStatusByDefinition(Object.fromEntries(nextDefinitions.map((definition) => {
+        const value = summaries[definition.id]
+        return [definition.id, value
+          ? { available: true, value }
+          : { available: false, value: null, error: 'Status unavailable' }]
+      })))
+      setObservedAt(payload.observed_at || new Date().toISOString())
+      setError(null)
       setLoading(false)
-      timeoutId = setTimeout(load, POLL_INTERVAL_MS)
     }
 
-    setLoading(true)
+    function applyEvent(event) {
+      try {
+        applyPayload(JSON.parse(event.data))
+        setStreamError(null)
+      } catch (_error) {
+        setStreamError('Live market update could not be read; reconnecting.')
+      }
+    }
+
+    async function load() {
+      setLoading(true)
+      try {
+        applyPayload(await fetchMarketStructureSnapshot({ sessionLimit: 250 }))
+      } catch (loadError) {
+        if (mounted) {
+          setError(loadError?.message || 'Market evidence unavailable')
+          setLoading(false)
+        }
+      }
+    }
+
     load()
+    source = openMarketStructureStream({ sessionLimit: 250 })
+    if (source) {
+      source.addEventListener('snapshot', applyEvent)
+      source.addEventListener('delta', applyEvent)
+      source.onerror = () => {
+        if (mounted) setStreamError('Live market updates disconnected; reconnecting.')
+      }
+    } else {
+      setStreamError('Live market updates are unavailable in this browser.')
+    }
+
     return () => {
       mounted = false
-      if (timeoutId) clearTimeout(timeoutId)
+      source?.close()
     }
   }, [refreshRevision])
 
@@ -121,6 +86,7 @@ export function useMarketStructureFeed() {
     statusByDefinition,
     loading,
     error,
+    streamError,
     observedAt,
     refresh,
   }

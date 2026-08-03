@@ -76,6 +76,17 @@ export async function fetchCollectorAttempts(definitionId, { limit } = {}) {
   return Array.isArray(payload?.attempts) ? payload.attempts : []
 }
 
+export async function fetchMarketStructureSnapshot({ sessionLimit = 250 } = {}) {
+  return request('/api/market-data/market-structure/snapshot' + buildQuery({ session_limit: sessionLimit }))
+}
+
+export function openMarketStructureStream({ sessionLimit = 250 } = {}) {
+  return openSse(
+    '/api/market-data/market-structure/stream' + buildQuery({ session_limit: sessionLimit }),
+    { withCredentials: false, base: BASE },
+  )
+}
+
 export async function listMarketStructureDefinitions({ definitionId } = {}) {
   const payload = await request(
     `/api/market-data/market-structure/definitions${buildQuery({

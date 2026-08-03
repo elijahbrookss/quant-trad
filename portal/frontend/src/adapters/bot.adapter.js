@@ -105,6 +105,18 @@ export async function fetchBotActiveRun(botId) {
   return request(`/api/bots/${encodeURIComponent(botId)}/active-run`)
 }
 
+export async function fetchRunInventory({
+  limit = 100,
+  beforeSortAt,
+  beforeRunId,
+} = {}) {
+  const params = new URLSearchParams()
+  params.set("limit", String(Math.max(1, Number(limit) || 100)))
+  if (beforeSortAt) params.set("before_sort_at", String(beforeSortAt))
+  if (beforeRunId) params.set("before_run_id", String(beforeRunId))
+  return request("/api/bots/runs?" + params.toString())
+}
+
 export async function fetchBotRuns(botId, { limit = 25 } = {}) {
   const params = new URLSearchParams()
   params.set('limit', String(Math.max(1, Number(limit) || 25)))

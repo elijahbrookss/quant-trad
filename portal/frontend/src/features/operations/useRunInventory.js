@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { fetchBotRuns } from '../../adapters/bot.adapter.js'
-
-const RUNS_PER_DEFINITION = 50
+import { fetchRunInventory } from '../../adapters/bot.adapter.js'
 
 export function useRunInventory(definitions = []) {
   const [runs, setRuns] = useState([])
@@ -25,43 +23,25 @@ export function useRunInventory(definitions = []) {
 
   useEffect(() => {
     let mounted = true
-    if (!definitions.length) {
-      setRuns([])
-      setLoading(false)
-      setError(null)
-      setObservedAt(new Date().toISOString())
-      return undefined
-    }
-
     async function load() {
       setLoading(true)
       try {
-        const results = await Promise.allSettled(
-          definitions.map(async (definition) => ({
-            definition,
-            payload: await fetchBotRuns(definition.id, {
-              limit: RUNS_PER_DEFINITION,
-            }),
-          })),
-        )
+        const payload = await fetchRunInventory({ limit: 100 })
         if (!mounted) return
-        const failures = results.filter((result) => result.status === 'rejected')
-        const nextRuns = results
-          .filter((result) => result.status === 'fulfilled')
-          .flatMap((result) => {
-            const definition = result.value.definition
-            const rows = Array.isArray(result.value.payload?.runs)
-              ? result.value.payload.runs
-              : []
-            return rows.map((run) => ({ ...run, definition }))
-          })
-        setRuns(nextRuns)
-        setError(
-          failures.length
-            ? `Run history unavailable for ${failures.length} definition${failures.length === 1 ? '' : 's'}.`
-            : null,
+        const definitionById = new Map(
+          definitions.map((definition) => [String(definition?.id || ''), definition]),
         )
-        setObservedAt(new Date().toISOString())
+        const rows = Array.isArray(payload?.runs) ? payload.runs : []
+        setRuns(rows.map((run) => ({
+          ...run,
+          definition: definitionById.get(String(run?.bot_id || '')) || null,
+        })))
+        setError(null)
+        setObservedAt(payload?.observed_at || new Date().toISOString())
+      } catch (loadError) {
+        if (mounted) {
+          setError(loadError?.message || 'Run inventory unavailable')
+        }
       } finally {
         if (mounted) setLoading(false)
       }
