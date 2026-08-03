@@ -762,6 +762,39 @@ def test_telemetry_emitter_reuses_single_websocket_for_multiple_messages(monkeyp
     assert connections[0].close_calls == 1
 
 
+def test_telemetry_emitter_idle_wait_keeps_protocol_loop_responsive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connections: list[_FakeAsyncWebSocket] = []
+    protocol_callback_serviced = threading.Event()
+
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
+        assert open_timeout == 2
+        assert close_timeout == 1
+        asyncio.get_running_loop().call_later(0.03, protocol_callback_serviced.set)
+        ws = _FakeAsyncWebSocket()
+        connections.append(ws)
+        return ws
+
+    monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
+
+    emitter = telemetry_mod.TelemetryEmitter(
+        "ws://example.test/telemetry",
+        queue_max=8,
+        queue_timeout_ms=50,
+        retry_ms=25,
+    )
+    try:
+        assert emitter.send(
+            {"kind": "botlens_runtime_facts", "bot_id": "bot-1", "run_id": "run-1", "run_seq": 1}
+        )
+        _wait_until(lambda: len(connections) == 1 and len(connections[0].sent) == 1)
+
+        assert protocol_callback_serviced.wait(timeout=0.3)
+    finally:
+        emitter.close()
+
+
 def test_ephemeral_telemetry_uses_async_transport_inside_running_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     connections: list[_FakeAsyncWebSocket] = []
 

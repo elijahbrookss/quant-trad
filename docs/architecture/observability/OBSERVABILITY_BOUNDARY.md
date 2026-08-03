@@ -206,10 +206,14 @@ complete database pressure signal.
   writes. Persistence runs in bounded background batches and emits explicit
   errors on failure so API websocket receive loops are not held hostage by
   ordinary projection/debug storage pressure.
-- The telemetry ingest WebSocket yields to the event loop after every routed
-  frame. Backlogged frames may otherwise let receive and routing complete
-  synchronously long enough to starve Uvicorn keepalive handling and cause
-  deterministic 40-second code-1006 reconnect churn.
+- Telemetry transport loops remain event-loop cooperative on both sides of the
+  connection. The ingest WebSocket yields after every routed frame, while the
+  runtime emitter waits for cross-thread queue work with an `asyncio.Event`
+  instead of blocking its asyncio loop on a `threading.Condition`. This keeps
+  Uvicorn and client protocol ping/pong tasks schedulable under both sustained
+  backtest traffic and idle queue intervals. A blocking idle wait produces
+  deterministic 40-second code-1006 reconnect churn with the default
+  20-second ping interval and timeout.
 - Scheduled collector liveness is a mutable worker-state projection. Heartbeat
   expiry means the process is not proven alive; it does not rewrite previously
   accepted market facts. Attempt timing stays bounded inside the existing typed

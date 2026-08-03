@@ -205,6 +205,8 @@ class TelemetryEmitter:
         self._retry_ms = int(retry_ms)
         self._async_connect = None
         self._async_ws = None
+        self._async_worker_loop_ref: asyncio.AbstractEventLoop | None = None
+        self._async_worker_wake_event: asyncio.Event | None = None
         self._state_lock = threading.Condition()
         self._pending_messages: Dict[str, deque[Dict[str, Any]]] = {
             _CONTROL_QUEUE_NAME: deque(),
@@ -354,6 +356,18 @@ class TelemetryEmitter:
             self._coalesced_runtime_messages += dropped
         return dropped
 
+    def _wake_async_worker(self) -> None:
+        loop = self._async_worker_loop_ref
+        wake_event = self._async_worker_wake_event
+        if loop is None or wake_event is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(wake_event.set)
+        except RuntimeError:
+            # The worker may finish between the state read and callback enqueue.
+            # Shutdown owns final delivery evidence and will expose a timeout.
+            return
+
     def _drop_failed_if_superseded_locked(
         self,
         queue_name: str,
@@ -469,13 +483,15 @@ class TelemetryEmitter:
                 self._state_lock.notify_all()
 
     async def _async_worker_loop(self) -> None:
+        with self._state_lock:
+            self._async_worker_loop_ref = asyncio.get_running_loop()
+            self._async_worker_wake_event = asyncio.Event()
         try:
             while True:
                 entry = None
                 queue_name = _GENERAL_QUEUE_NAME
+                wake_event: asyncio.Event | None = None
                 with self._state_lock:
-                    while not self._stop and self._queue_depth_total_locked() <= 0:
-                        self._state_lock.wait(timeout=0.25)
                     if self._stop and self._queue_depth_total_locked() <= 0:
                         break
                     for candidate in (_CONTROL_QUEUE_NAME, _GENERAL_QUEUE_NAME):
@@ -484,7 +500,18 @@ class TelemetryEmitter:
                             queue_name = candidate
                             entry = dict(queue[0])
                             break
+                    if entry is None:
+                        wake_event = self._async_worker_wake_event
+                        if wake_event is not None:
+                            wake_event.clear()
                 if not isinstance(entry, Mapping):
+                    if wake_event is not None:
+                        try:
+                            await asyncio.wait_for(wake_event.wait(), timeout=0.25)
+                        except TimeoutError:
+                            pass
+                    else:
+                        await asyncio.sleep(0)
                     continue
                 message = str(entry.get("message") or "")
                 context = entry.get("context") if isinstance(entry.get("context"), Mapping) else {}
@@ -538,6 +565,10 @@ class TelemetryEmitter:
                     await asyncio.sleep(min(max(retry_deadline - time.monotonic(), 0.0), 0.25))
         finally:
             await self._close_async_connection()
+            with self._state_lock:
+                self._async_worker_wake_event = None
+                self._async_worker_loop_ref = None
+                self._state_lock.notify_all()
 
     def send_message(
         self,
@@ -616,6 +647,7 @@ class TelemetryEmitter:
             )
             self._emit_queue_gauges_locked(context=resolved_context)
             self._state_lock.notify_all()
+            self._wake_async_worker()
         _OBSERVER.increment("telemetry_enqueue_success_total", **labels)
         return True
 
@@ -835,6 +867,7 @@ class TelemetryEmitter:
             self._drop_queue_locked(_GENERAL_QUEUE_NAME)
             self._emit_queue_gauges_locked()
             self._state_lock.notify_all()
+            self._wake_async_worker()
             while self._queue_depth_locked(_CONTROL_QUEUE_NAME) > 0:
                 remaining = flush_deadline - time.monotonic()
                 if remaining <= 0:
@@ -845,6 +878,7 @@ class TelemetryEmitter:
             self._stop = True
             self._emit_queue_gauges_locked()
             self._state_lock.notify_all()
+            self._wake_async_worker()
         if timed_out_depth > 0:
             _OBSERVER.increment(
                 "telemetry_control_flush_timeout_total",
