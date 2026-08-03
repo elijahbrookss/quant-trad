@@ -1,3 +1,7 @@
+import { getBotCardDisplayState } from '../bots/state/botRuntimeStatus.js'
+
+const ACTIVE_RUN_STATUSES = new Set(['starting', 'running', 'degraded', 'telemetry_degraded', 'paused'])
+
 function toEpochMs(value) {
   const parsed = Date.parse(String(value || ''))
   return Number.isFinite(parsed) ? parsed : null
@@ -43,6 +47,54 @@ export function buildRunRows(runs = [], { nowEpochMs = Date.now() } = {}) {
       isActive: Boolean(run.is_active),
     }
   })
+}
+
+export function buildProjectedRunsFromBots(bots = [], { nowEpochMs = Date.now() } = {}) {
+  return bots.flatMap((bot) => {
+    const display = getBotCardDisplayState(bot, { nowEpochMs })
+    const runId = String(display?.runId || '').trim()
+    if (!runId) return []
+    const runtimeStats = bot?.runtime?.stats && typeof bot.runtime.stats === 'object'
+      ? bot.runtime.stats
+      : {}
+    const persistedSummary = bot?.run?.summary && typeof bot.run.summary === 'object'
+      ? bot.run.summary
+      : {}
+    return [{
+      ...(bot?.run || {}),
+      run_id: runId,
+      bot_id: bot.id,
+      bot_name: bot.name,
+      run_type: bot.run_type,
+      execution_mode: bot.execution_mode,
+      strategy_id: bot.strategy_id,
+      strategy_name: bot.strategy_name,
+      symbols: bot?.run?.symbols || bot.symbols || [],
+      timeframe: bot?.run?.timeframe || bot.timeframe,
+      started_at: display.startedAt || bot?.run?.started_at || null,
+      ended_at: display.endedAt || bot?.run?.ended_at || null,
+      known_at: bot?.lifecycle?.updated_at || bot?.updated_at || null,
+      runtime_status: display.statusKey,
+      lifecycle: {
+        ...(bot.lifecycle || {}),
+        status: display.statusKey,
+      },
+      summary: { ...persistedSummary, ...runtimeStats },
+      botlens_available: Boolean(display?.controls?.canOpenLens),
+      botlens_reason: display?.controls?.canOpenLens
+        ? null
+        : 'BotLens opens after this run has a projected run identity and inspectable evidence.',
+      is_active: ACTIVE_RUN_STATUSES.has(display.statusKey),
+      definition: bot,
+    }]
+  })
+}
+
+export function buildCurrentRunRowsFromBots(bots = [], { nowEpochMs = Date.now() } = {}) {
+  return buildRunRows(
+    buildProjectedRunsFromBots(bots, { nowEpochMs }).filter((run) => run.is_active),
+    { nowEpochMs },
+  )
 }
 
 export function filterAndSortRunRows(rows = [], {

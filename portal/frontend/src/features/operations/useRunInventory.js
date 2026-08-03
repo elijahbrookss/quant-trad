@@ -1,5 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { fetchRunInventory } from '../../adapters/bot.adapter.js'
+
+export function buildRunInventoryScopeKey(definitions = []) {
+  return definitions
+    .map((definition) => [
+      definition?.id,
+      definition?.active_run_id,
+      definition?.latest_run_id,
+    ].join(':'))
+    .sort()
+    .join('|')
+}
 
 export function useRunInventory(definitions = [], { enabled = true } = {}) {
   const [runs, setRuns] = useState([])
@@ -10,17 +21,9 @@ export function useRunInventory(definitions = [], { enabled = true } = {}) {
   const [loadingMore, setLoadingMore] = useState(false)
   const [refreshRevision, setRefreshRevision] = useState(0)
 
-  const scopeKey = useMemo(
-    () => definitions
-      .map((definition) => [
-        definition?.id,
-        definition?.active_run_id,
-        definition?.latest_run_id,
-      ].join(':'))
-      .sort()
-      .join('|'),
-    [definitions],
-  )
+  const definitionsRef = useRef(definitions)
+  definitionsRef.current = definitions
+  const scopeKey = useMemo(() => buildRunInventoryScopeKey(definitions), [definitions])
   const refresh = useCallback(() => setRefreshRevision((value) => value + 1), [])
 
   useEffect(() => {
@@ -32,10 +35,10 @@ export function useRunInventory(definitions = [], { enabled = true } = {}) {
     async function load() {
       setLoading(true)
       try {
-        const payload = await fetchRunInventory({ limit: 50 })
+        const payload = await fetchRunInventory({ limit: 20 })
         if (!mounted) return
         const definitionById = new Map(
-          definitions.map((definition) => [String(definition?.id || ''), definition]),
+          definitionsRef.current.map((definition) => [String(definition?.id || ''), definition]),
         )
         const rows = Array.isArray(payload?.runs) ? payload.runs : []
         setRuns(rows.map((run) => ({
@@ -58,19 +61,19 @@ export function useRunInventory(definitions = [], { enabled = true } = {}) {
     return () => {
       mounted = false
     }
-  }, [definitions, enabled, scopeKey, refreshRevision])
+  }, [enabled, scopeKey, refreshRevision])
 
   const loadMore = useCallback(async () => {
     if (!nextCursor || loadingMore || !enabled) return
     setLoadingMore(true)
     try {
       const payload = await fetchRunInventory({
-        limit: 50,
+        limit: 20,
         beforeSortAt: nextCursor.before_sort_at,
         beforeRunId: nextCursor.before_run_id,
       })
       const definitionById = new Map(
-        definitions.map((definition) => [String(definition?.id || ''), definition]),
+        definitionsRef.current.map((definition) => [String(definition?.id || ''), definition]),
       )
       const incoming = (Array.isArray(payload?.runs) ? payload.runs : []).map((run) => ({
         ...run,
@@ -89,7 +92,7 @@ export function useRunInventory(definitions = [], { enabled = true } = {}) {
     } finally {
       setLoadingMore(false)
     }
-  }, [definitions, enabled, loadingMore, nextCursor])
+  }, [enabled, loadingMore, nextCursor])
 
   return {
     runs,

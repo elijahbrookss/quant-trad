@@ -2,10 +2,13 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  buildCurrentRunRowsFromBots,
+  buildProjectedRunsFromBots,
   buildRunRows,
   filterAndSortRunRows,
   filterResearchRows,
 } from '../src/features/operations/buildOperationsViewModel.js'
+import { buildRunInventoryScopeKey } from '../src/features/operations/useRunInventory.js'
 
 const NOW = Date.parse('2026-08-02T12:00:00Z')
 
@@ -40,6 +43,39 @@ test('run filters are deterministic with run id as the secondary key', () => {
   const selected = filterAndSortRunRows(rows, { status: 'completed', runType: 'backtest', sort: 'recent' })
   assert.deepEqual(selected.map((row) => row.id), ['run-a', 'run-b'])
   assert.deepEqual(filterAndSortRunRows(rows, { query: 'eth' }).map((row) => row.id), ['run-b'])
+})
+
+test('current run rows come from live bot projections and exclude terminal definitions', () => {
+  const bots = [
+    {
+      id: 'bot-live',
+      name: 'Live backtest',
+      run_type: 'backtest',
+      active_run_id: 'run-live',
+      status: 'running',
+      lifecycle: { status: 'running', phase: 'live', telemetry: { run_id: 'run-live', seq: 4 } },
+      runtime: { status: 'running', run_id: 'run-live', stats: { total_trades: 3 } },
+      run: { started_at: '2026-08-02T11:00:00Z' },
+      controls: { can_open_lens: true },
+    },
+    {
+      id: 'bot-done',
+      name: 'Finished backtest',
+      latest_run_id: 'run-done',
+      status: 'completed',
+      runtime: { status: 'completed', run_id: 'run-done' },
+      run: { started_at: '2026-08-02T09:00:00Z', ended_at: '2026-08-02T10:00:00Z' },
+    },
+  ]
+
+  assert.deepEqual(buildCurrentRunRowsFromBots(bots, { nowEpochMs: NOW }).map((row) => row.id), ['run-live'])
+  assert.deepEqual(buildProjectedRunsFromBots(bots, { nowEpochMs: NOW }).map((run) => run.run_id), ['run-live', 'run-done'])
+})
+
+test('history inventory scope is stable across equivalent live array identities', () => {
+  const first = [{ id: 'bot-1', active_run_id: 'run-1', latest_run_id: 'run-0' }]
+  const second = first.map((definition) => ({ ...definition }))
+  assert.equal(buildRunInventoryScopeKey(first), buildRunInventoryScopeKey(second))
 })
 
 test('research evidence filtering is status-aware and newest-first', () => {

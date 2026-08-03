@@ -11,6 +11,7 @@ import {
 } from '../../features/market-structure/buildMarketPosture.js'
 import { formatMarketStructureComponentError, useMarketStructureFeed } from '../../features/market-structure/useMarketStructureFeed.js'
 import {
+  buildCurrentRunRowsFromBots,
   buildRunRows,
   filterAndSortRunRows,
   filterResearchRows,
@@ -112,6 +113,41 @@ function RunsTable({ pageModel, loading, hasMore, loadingMore, onLoadMore }) {
         {hasMore ? <button type="button" className="qt2-button" onClick={onLoadMore} disabled={loadingMore}>{loadingMore ? 'Loading older…' : 'Load older runs'}</button> : <span>Beginning of available history</span>}
       </div>
     </>
+  )
+}
+
+function CurrentRunCards({ rows, loading }) {
+  if (loading && !rows.length) return <OperatorSkeleton rows={4} label="Connecting to active operations" />
+  if (!rows.length) return <div className="qt2-empty">No running, starting, paused, or degraded run is currently evidenced.</div>
+  return (
+    <div className="qt2-active-run-grid">
+      {rows.map((row) => (
+        <article className="qt2-active-run-card" key={row.id}>
+          <div className="qt2-active-run-head">
+            <StatusBadge value={row.status} />
+            <span>{row.runType} · {row.executionMode}</span>
+          </div>
+          <div>
+            <h2>{row.definitionName}</h2>
+            <p>{row.strategy}</p>
+          </div>
+          <dl>
+            <div><dt>Scope</dt><dd>{row.instruments.join(', ') || 'Instrument unavailable'} · {row.timeframe}</dd></div>
+            <div><dt>Runtime</dt><dd>{formatDuration(row.durationMs)}</dd></div>
+            <div><dt>Phase</dt><dd>{row.phase || 'Lifecycle phase unavailable'}</dd></div>
+            <div><dt>Evidence</dt><dd>{formatTime(row.knownAt || row.startedAt)}</dd></div>
+          </dl>
+          <div className="qt2-active-run-actions">
+            {row.botLensAvailable ? (
+              <Link className="qt2-button qt2-button-primary" to={'/operations/runs/' + row.id} state={{ run: row.run, definition: row.definition, from: '/operations?tab=runs' }}>Open BotLens</Link>
+            ) : (
+              <button type="button" className="qt2-button" disabled title={row.botLensReason}>BotLens connecting</button>
+            )}
+            <RunMenu row={row} />
+          </div>
+        </article>
+      ))}
+    </div>
   )
 }
 
@@ -274,8 +310,9 @@ export function FleetRoom() {
     ? 'market'
     : rawTab
   const tab = TABS.some((item) => item.id === requestedTab) ? requestedTab : 'runs'
+  const runView = params.get('view') === 'history' ? 'history' : 'current'
   const { sortedBots, error: botsError, nowEpochMs, hasReceivedSnapshot, refresh: refreshBots } = useFleetBotsFeed()
-  const runInventory = useRunInventory(sortedBots, { enabled: tab === 'runs' })
+  const runInventory = useRunInventory(sortedBots, { enabled: tab === 'runs' && runView === 'history' })
   const collectorFeed = useCollectorsFeed({ enabled: tab === 'market' })
   const marketFeed = useMarketStructureFeed({ enabled: tab === 'market' })
   const [researchItems, setResearchItems] = useState([])
@@ -314,9 +351,11 @@ export function FleetRoom() {
   useEffect(() => setPage(1), [tab, query, status, runType, sort])
 
   const runRows = useMemo(() => filterAndSortRunRows(
-    buildRunRows(runInventory.runs, { nowEpochMs }),
+    runView === 'history'
+      ? buildRunRows(runInventory.runs, { nowEpochMs })
+      : buildCurrentRunRowsFromBots(sortedBots, { nowEpochMs }),
     { query, status, runType, sort },
-  ), [runInventory.runs, nowEpochMs, query, status, runType, sort])
+  ), [runInventory.runs, runView, sortedBots, nowEpochMs, query, status, runType, sort])
   const collectorGroups = useMemo(
     () => buildCollectorGroups(collectorFeed, nowEpochMs, query),
     [collectorFeed, nowEpochMs, query],
@@ -336,9 +375,9 @@ export function FleetRoom() {
     nowEpochMs,
   }).filter((row) => matchesMarketQuery(row, query)), [marketFeed.definitions, marketFeed.sessions, marketFeed.statusByDefinition, marketFeed.normalizationSpecs, marketFeed.componentErrors.normalization_specs, collectorFeed.collectors, nowEpochMs, query])
   const statusOptions = useMemo(() => {
-    const source = tab === 'research' ? researchItems.map((item) => item.status) : runInventory.runs.map((run) => run.runtime_status || run.status)
+    const source = tab === 'research' ? researchItems.map((item) => item.status) : runRows.map((run) => run.status)
     return [...new Set(source.filter(Boolean))].sort()
-  }, [tab, researchItems, runInventory.runs])
+  }, [tab, researchItems, runRows])
   const visibleRows = tab === 'research' ? researchRows : []
   const pageModel = paginateRows(visibleRows, page, PAGE_SIZE)
   const runPageModel = paginateRows(runRows, 1, Math.max(PAGE_SIZE, runRows.length))
@@ -353,10 +392,16 @@ export function FleetRoom() {
     setParams({ tab: nextTab }, { replace: true })
   }
 
+  function selectRunView(nextView) {
+    setStatus('all')
+    setPage(1)
+    setParams({ tab: 'runs', ...(nextView === 'history' ? { view: 'history' } : {}) }, { replace: true })
+  }
+
   function refresh() {
     if (tab === 'runs') {
       refreshBots()
-      runInventory.refresh()
+      if (runView === 'history') runInventory.refresh()
     } else if (tab === 'market') {
       collectorFeed.refresh()
       marketFeed.refresh()
@@ -382,6 +427,14 @@ export function FleetRoom() {
         {TABS.map((item) => <button type="button" role="tab" aria-selected={tab === item.id} key={item.id} className={tab === item.id ? 'is-active' : ''} onClick={() => selectTab(item.id)}>{item.label}</button>)}
       </div>
 
+      {tab === 'runs' ? (
+        <div className="qt2-run-view-switch" role="tablist" aria-label="Run inventory scope">
+          <button type="button" role="tab" aria-selected={runView === 'current'} className={runView === 'current' ? 'is-active' : ''} onClick={() => selectRunView('current')}>Current</button>
+          <button type="button" role="tab" aria-selected={runView === 'history'} className={runView === 'history' ? 'is-active' : ''} onClick={() => selectRunView('history')}>History</button>
+          <span>{runView === 'current' ? 'Live fleet projections only' : 'Persisted terminal and prior runs · 20 at a time'}</span>
+        </div>
+      ) : null}
+
       <div className="qt2-filterbar">
         <label className="qt2-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tab === 'market' ? 'Provider, instrument, pair, or fact' : 'Filter this inventory'} /></label>
         {(tab === 'runs' || tab === 'research') ? <select className="qt2-select" value={status} onChange={(event) => setStatus(event.target.value)}><option value="all">All states</option>{statusOptions.map((value) => <option value={value} key={value}>{value}</option>)}</select> : null}
@@ -393,8 +446,12 @@ export function FleetRoom() {
         {tab === 'runs' ? (
           <>
             {botsError ? <OperatorErrorNotice error={botsError} compact /> : null}
-            {runInventory.error ? <OperatorErrorNotice error={runInventory.error} compact /> : null}
-            <RunsTable pageModel={runPageModel} loading={runInventory.loading} hasMore={runInventory.hasMore} loadingMore={runInventory.loadingMore} onLoadMore={runInventory.loadMore} />
+            {runView === 'history' && runInventory.error ? <OperatorErrorNotice error={runInventory.error} compact /> : null}
+            {runView === 'current' ? (
+              <CurrentRunCards rows={runRows} loading={!hasReceivedSnapshot && !sortedBots.length} />
+            ) : (
+              <RunsTable pageModel={runPageModel} loading={runInventory.loading} hasMore={runInventory.hasMore} loadingMore={runInventory.loadingMore} onLoadMore={runInventory.loadMore} />
+            )}
           </>
         ) : null}
         {tab === 'market' ? (

@@ -9,7 +9,7 @@ import {
   buildMarketPostureRows,
   buildStreamSessionRows,
 } from '../../features/market-structure/buildMarketPosture.js'
-import { useRunInventory } from '../../features/operations/useRunInventory.js'
+import { buildProjectedRunsFromBots } from '../../features/operations/buildOperationsViewModel.js'
 import {
   ACTIVITY_FILTERS,
   useOverviewBacktestActivity,
@@ -86,12 +86,15 @@ function marketIssueCount(rows) {
 }
 
 export function OverviewRoom() {
-  const { sortedBots, nowEpochMs, error: botsError, refresh: refreshBots } = useFleetBotsFeed()
-  const runInventory = useRunInventory(sortedBots)
+  const { sortedBots, nowEpochMs, loading: botsLoading, error: botsError, refresh: refreshBots } = useFleetBotsFeed()
   const collectorFeed = useCollectorsFeed()
   const marketFeed = useMarketStructureFeed()
   const [activityType, setActivityType] = useState('backtests_completed')
   const researchFeed = useOverviewBacktestActivity(activityType)
+  const projectedRuns = useMemo(
+    () => buildProjectedRunsFromBots(sortedBots, { nowEpochMs }),
+    [sortedBots, nowEpochMs],
+  )
 
   const postureRows = useMemo(() => buildMarketPostureRows({
     definitions: marketFeed.definitions,
@@ -107,17 +110,17 @@ export function OverviewRoom() {
     sessions: marketFeed.sessions,
   }), [marketFeed.definitions, marketFeed.sessions])
   const attentionItems = useMemo(() => rankAttentionItems({
-    runs: runInventory.runs,
+    runs: projectedRuns,
     collectors: collectorFeed.collectors,
     postureRows,
     researchItems: researchFeed.researchItems,
     nowEpochMs,
-  }), [runInventory.runs, collectorFeed.collectors, postureRows, researchFeed.researchItems, nowEpochMs])
+  }), [projectedRuns, collectorFeed.collectors, postureRows, researchFeed.researchItems, nowEpochMs])
   const currentOperations = useMemo(() => buildCurrentOperations({
-    runs: runInventory.runs,
+    runs: projectedRuns,
     collectors: collectorFeed.collectors,
     streamRows,
-  }), [runInventory.runs, collectorFeed.collectors, streamRows])
+  }), [projectedRuns, collectorFeed.collectors, streamRows])
   const collectorSummary = useMemo(() => {
     const rows = collectorFeed.collectors
       .map(({ definition, attempts }) => ({
@@ -133,7 +136,6 @@ export function OverviewRoom() {
   const filter = ACTIVITY_FILTERS.find((item) => item.value === activityType)
   const currentOperationIssues = [
     { component: "Run definitions", error: botsError },
-    { component: "Run inventory", error: runInventory.error },
     { component: "Collector schedules", error: collectorFeed.error },
     { component: "Collector live updates", error: collectorFeed.streamError },
     { component: "Market structure", error: marketFeed.error },
@@ -145,11 +147,10 @@ export function OverviewRoom() {
   ]
   const researchActivityIssues = researchFeed.errors.filter((issue) => issue.component === "Research activity")
   const topResultIssues = researchFeed.errors.filter((issue) => issue.component === "Top result")
-  const operationsLoading = runInventory.loading || collectorFeed.loading || marketFeed.loading
+  const operationsLoading = botsLoading || collectorFeed.loading || marketFeed.loading
 
   function refresh() {
     refreshBots()
-    runInventory.refresh()
     collectorFeed.refresh()
     marketFeed.refresh()
     researchFeed.refresh()
@@ -167,7 +168,7 @@ export function OverviewRoom() {
 
       <div className="qt2-summary-grid">
         <SummaryCard label="Attention" value={attentionItems.length || 'Clear'} detail={attentionItems.length ? "Within " + ATTENTION_CONTRACT.lookbackHours + " hours" : 'No known actionable issues'} tone={attentionItems.length ? 'danger' : 'success'} to="/operations" loading={operationsLoading && !attentionItems.length} partial={attentionIssues.length > 0} />
-        <SummaryCard label="Active runs" value={activeRuns} detail={activeRuns === 1 ? 'One live run projection' : 'Run instances evidenced active'} tone={activeRuns ? 'info' : 'neutral'} to="/operations?tab=runs" loading={runInventory.loading && !runInventory.runs.length} error={runInventory.error && !runInventory.runs.length ? runInventory.error : null} partial={Boolean(botsError || runInventory.error)} />
+        <SummaryCard label="Active runs" value={activeRuns} detail={activeRuns === 1 ? 'One live run projection' : 'Run instances evidenced active'} tone={activeRuns ? 'info' : 'neutral'} to="/operations?tab=runs" loading={botsLoading && !projectedRuns.length} error={botsError && !projectedRuns.length ? botsError : null} partial={Boolean(botsError)} />
         <SummaryCard label="Collectors" value={collectorSummary.enabled ? `${collectorSummary.healthy}/${collectorSummary.enabled}` : 'None'} detail={collectorSummary.issues ? `${collectorSummary.issues} schedule${collectorSummary.issues === 1 ? '' : 's'} need attention` : 'On-schedule delivery evidence'} tone={collectorSummary.issues ? 'warning' : 'success'} to="/operations?tab=market" loading={collectorFeed.loading && !collectorFeed.collectors.length} error={collectorFeed.error && !collectorFeed.collectors.length ? collectorFeed.error : null} partial={Boolean(collectorFeed.error || collectorFeed.streamError)} />
         <SummaryCard label="Market pairs" value={postureRows.length || 'None'} detail={marketIssues ? `${marketIssues} pair${marketIssues === 1 ? '' : 's'} need review` : 'No known quality issues'} tone={marketIssues ? 'warning' : 'success'} to="/operations?tab=market" loading={marketFeed.loading && !postureRows.length} error={!postureRows.length ? marketFeed.error || formatMarketStructureComponentError(marketFeed.componentErrors.definitions) : null} partial={Boolean(marketFeed.error || marketFeed.streamError || Object.keys(marketFeed.componentErrors).length)} />
       </div>
