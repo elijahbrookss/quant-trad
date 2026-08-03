@@ -33,6 +33,7 @@ code_paths:
   - portal/backend/service/storage/repos/market_structure.py
   - portal/backend/workers/market_data_collector.py
   - portal/backend/service/bots/botlens_bootstrap_service.py
+  - portal/backend/service/bots/botlens_domain_events.py
   - portal/backend/service/reports
   - portal/backend/service/research
 ---
@@ -223,7 +224,14 @@ The console may say:
 - BotLens live: an eligible run projection is sequenced and resynchronizable;
 - on schedule: collector attempts satisfy delivery timing.
 
-The console may not collapse those facts into “platform healthy” or “all containers live.” Collector-worker heartbeat authority is deliberately scoped to scheduled market-data collection; bot container state, stream leases, and API reachability retain their own evidence boundaries.
+`run_live` is derived through the canonical lifecycle normalizer from phase and
+status; an omitted redundant boolean may not contradict `phase=live` and
+`status=running`. Terminal lifecycle evidence clears run-level live readiness.
+
+The console may not collapse those facts into “platform healthy” or “all
+containers live.” Collector-worker heartbeat authority is deliberately scoped
+to scheduled market-data collection; bot container state, stream leases, and API
+reachability retain their own evidence boundaries.
 
 ## Failure Presentation
 
@@ -236,7 +244,12 @@ Errors render beside the component and action they affect, not in a page-level
 stack. Summary cards, attention, current operations, scheduled facts, structure
 streams, research evidence, and lenses each own their loading and failure state.
 A readable summary is primary; a disclosure and copy action preserve exact
-technical details. Independent sources fail independently. Successful evidence stays visible.
+technical details. Independent sources fail independently. Successful evidence
+stays visible.
+Overview never concatenates independent failures into a page-level warning.
+Composite dashboard panels expose one collapsed, source-labeled availability
+disclosure; valid snapshot values remain visible and are labeled partial when a
+stream or sibling read fails.
 Unknown means a contract/evidence fact is absent; unavailable means a read
 failed; invalid means evidence explicitly failed a validity contract.
 
