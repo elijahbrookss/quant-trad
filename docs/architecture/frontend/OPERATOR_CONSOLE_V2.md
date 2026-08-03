@@ -175,14 +175,23 @@ Eligibility rules:
 
 Historical bootstrap is bounded to 30 seconds. A timeout states that historical
 replay did not become ready and offers retry/report evidence; it never spins
-indefinitely. Chart history is fetched in 240-bar pages. Panning to the left
-edge triggers one guarded page request; moving away rearms the trigger. The
-manual **Load earlier** action remains as an accessible fallback.
+indefinitely. Run inventory determines replay eligibility from either a hot
+projection or compact durable BotLens-ledger evidence; the inventory read never
+reconstructs the run.
 
-This does not claim that the full historical decision ledger is already
-available in BotLens. Persisted report datasets remain authoritative for
-completed decisions and trades until cold BotLens reconstruction proves equal,
-bounded, and operationally reliable.
+Dataset-bound backtest charts read only the run's frozen dataset series at its
+recorded commit boundary. They never fall through to later canonical revisions.
+The initial view requests the latest 240 bars, left-edge movement requests one
+guarded older page, and the manual **Load earlier** action remains as an
+accessible fallback. Every chart response names its evidence source.
+
+Decision replay uses the typed durable event ledger in ascending 200-event
+pages keyed by after_seq and after_row_id and scoped to the selected instrument.
+The UI deduplicates those documents against the bounded projection snapshot,
+streams the next page near the scroll edge, and retains **Continue replay** as
+an accessible fallback. Signals, decisions, fills, and trade lifecycle events
+keep their domain identity and context. A component-local failure preserves
+already loaded evidence and exposes copyable details.
 
 ## Liveness And Freshness Language
 

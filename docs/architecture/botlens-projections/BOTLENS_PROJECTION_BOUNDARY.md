@@ -13,6 +13,10 @@ tags:
 code_paths:
   - portal/backend/service/bots/botlens_contract.py
   - portal/backend/service/bots/botlens_bootstrap_service.py
+  - portal/backend/service/bots/botlens_chart_service.py
+  - portal/backend/service/bots/botlens_forensics_service.py
+  - portal/backend/service/storage/repos/candles.py
+  - portal/backend/service/storage/repos/runtime_events.py
   - portal/backend/service/bots/botlens_candle_continuity.py
   - portal/backend/service/bots/botlens_canonical_facts.py
   - portal/backend/service/bots/botlens_domain_events.py
@@ -142,9 +146,30 @@ They are still projection inputs, not canonical run truth.
 
 Replay and reports rebuild from material runtime truth plus compact context:
 series metadata, candle-continuity summaries, selected decision evidence, and
-source candle/catalog references. Cold chart-history reads use source candle
-storage and catalog references when raw `CANDLE_OBSERVED` runtime rows are not
-retained.
+source candle/catalog references. When raw CANDLE_OBSERVED runtime rows are not
+retained, a dataset-bound backtest chart reads only the matching frozen series
+at its dataset commit boundary. A non-dataset paper/live chart may read the
+current canonical hot store. The response labels which source supplied bars; a
+dataset-bound run never silently falls through to later canonical revisions.
+
+## Durable Eligibility And Cold Replay
+
+Run inventories do not reconstruct terminal projections. They batch one compact
+durable-ledger summary per requested run and report replay eligibility from that
+evidence or from an existing hot projection. Selecting a terminal run performs
+the exact reconstruction under the bounded bootstrap timeout.
+
+Cold decision inspection pages typed domain truth by run, selected series, and
+the stable after_seq/after_row_id cursor. Each page is bounded to 200 events in
+the operator UI (the backend contract caps requests at 1,000). Snapshot and cold
+rows are deduplicated by domain event identity; missing, failed, or exhausted
+pages remain explicit. Cold reads never become execution authority.
+
+Event identity must distinguish distinct observations while remaining stable for
+retries of the same observation. SERIES_METADATA_REPORTED therefore includes
+its known-at observation time in event identity. Reusing an identity for changed
+material remains a fail-loud divergent collision; the projector does not choose
+one row silently.
 
 ## Live Handoff Without Execution Authority
 

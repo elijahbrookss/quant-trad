@@ -84,6 +84,33 @@ rebuildable, a cold BotLens bootstrap did not produce a chart within a bounded
 70-second browser observation. This means the current completed-run experience
 does not yet satisfy a promise of full decision/overlay replay.
 
+## Post-remediation Validation (2026-08-03)
+
+The campaign kept the original run as a hard historical fixture and repaired
+the read boundaries rather than hiding its earlier diagnostics. Current local
+validation found:
+
+| Check | Result |
+| --- | --- |
+| Terminal inventory eligibility | Durable BotLens-ledger evidence is reported without reconstruction |
+| Exact terminal bootstrap | 5.565 seconds cold; 0.098 seconds warm; bootstrap_ready |
+| Initial completed chart | 240 frozen hourly bars in 0.979 seconds |
+| Chart provenance | Frozen dataset ID, hash, series ID, and max commit sequence returned |
+| Decision replay | Two consecutive 200-event pages in 1.67 seconds |
+| Replay cursor | Stable ascending after_seq/after_row_id continuation |
+| Event coverage | Signals, decisions, entry/exit fills, and trade lifecycle facts |
+
+The SERIES_METADATA_REPORTED identity now includes observation known-at time, so
+retries of one observation remain idempotent while later observations cannot
+reuse the same identity with different material. The historical fixture still
+contains its already-persisted collision diagnostics; this change does not
+rewrite old evidence or retroactively make that run a golden candidate.
+
+The completed chart now reads only the run's frozen dataset commit boundary.
+The decision surface merges bounded snapshot rows with cursor-paged durable
+domain truth and owns its own loading/error/end-of-stream state. Full historical
+overlay equivalence is still not claimed.
+
 ## Honest Product Boundary
 
 The frontend can promise:
@@ -92,27 +119,37 @@ The frontend can promise:
   sequence and resynchronization contracts;
 - explicit on-schedule collector delivery evidence;
 - API connectivity and definition-stream connectivity as separate facts;
-- completed persisted report and dataset evidence when readiness says so.
+- completed persisted report and dataset evidence when readiness says so;
+- frozen-dataset chart paging and typed decision/trade replay when a terminal
+  run reports durable BotLens evidence.
 
 The frontend cannot promise:
 
 - near-real-time status for every container;
 - collector process liveness;
-- complete historical BotLens replay for every completed run;
+- complete historical overlay replay or usable replay for every completed run;
 - that a completed lifecycle alone implies report, replay, or golden readiness.
 
-## Follow-up Required Before Full Completed Replay
+## Remaining Proof And Observation Gates
 
-1. Fix divergent event material sharing one BotLens event identity.
-2. Prove replay equality after the collision fix.
-3. Bound and measure terminal `ensure_run_snapshot` reconstruction latency.
-4. Reconcile full persisted decisions/trades against reconstructed BotLens
-   counts, timestamps, markers, and overlays.
-5. Expose authoritative report readiness independently from stale
-   `report_materialization` state.
-6. Add a paged cold decision ledger to BotLens or explicitly route completed
-   forensic review to the persisted report datasets.
+Completed in this campaign:
 
-Until those pass, the UI labels terminal evidence **Rebuildable**, enforces a
-30-second bootstrap timeout, and surfaces the failure instead of claiming a
-usable replay.
+1. Distinct series-metadata observations no longer share event identity.
+2. Terminal reconstruction is measured and bounded by the 30-second UI timeout.
+3. Durable decision/trade evidence is available through the typed cursor path.
+4. Dataset-bound chart reads are frozen and provenance-labeled.
+5. Replay eligibility comes from durable evidence without inventory-time replay.
+
+Still required before a golden/full-replay claim:
+
+1. Run a fresh post-fix backtest and prove duplicate-delivery, replay, and
+   persisted report agreement without historical collision contamination.
+2. Reconcile complete decision/trade counts, timestamps, markers, and overlays
+   for that fresh run.
+3. Prove full historical overlay equivalence or keep overlays explicitly bounded.
+4. Complete the deferred 24-hour observational gate after Phase 4. The campaign
+   retains the one-hour soak as its implementation-time stability gate.
+
+The UI labels only runs with hot or durable BotLens evidence as selectable,
+enforces a 30-second bootstrap timeout, and surfaces component-local failure
+instead of claiming universal replay.
