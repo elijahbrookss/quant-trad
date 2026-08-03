@@ -41,6 +41,37 @@ def test_collector_snapshot_route_is_bounded_and_observed(monkeypatch) -> None:
     assert response.json()["worker_health"]["status"] == "alive"
 
 
+def test_collector_fact_history_route_clamps_window_and_limit(monkeypatch) -> None:
+    observed = {}
+
+    def fake_fact_history(*, definition_id: str, hours: int, limit: int):
+        observed.update(
+            definition_id=definition_id,
+            hours=hours,
+            limit=limit,
+        )
+        return {
+            "schema_version": "market_collector_fact_history.v1",
+            "definition_id": definition_id,
+            "facts": [],
+        }
+
+    monkeypatch.setattr(
+        controller.market_data_collector, "fact_history", fake_fact_history
+    )
+    response = _client().get(
+        "/api/market-data/collectors/definition-a/facts",
+        params={"hours": 999, "limit": 9999},
+    )
+
+    assert response.status_code == 200
+    assert observed == {
+        "definition_id": "definition-a",
+        "hours": 168,
+        "limit": 1000,
+    }
+
+
 def test_collector_stream_fingerprint_ignores_observation_clock_only() -> None:
     first = {
         "observed_at": "2026-08-02T12:00:00+00:00",

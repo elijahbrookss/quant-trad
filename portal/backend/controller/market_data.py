@@ -287,6 +287,22 @@ def set_collector_enabled(
     }
 
 
+@router.get("/collectors/{definition_id}/facts")
+def collector_fact_history(
+    definition_id: str,
+    hours: int = 24,
+    limit: int = 240,
+) -> dict[str, Any]:
+    try:
+        return market_data_collector.fact_history(
+            definition_id=definition_id,
+            hours=max(1, min(int(hours or 24), 24 * 7)),
+            limit=max(1, min(int(limit or 240), 1000)),
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/collectors/{definition_id}/attempts")
 def list_collector_attempts(
     definition_id: str, limit: int = 100

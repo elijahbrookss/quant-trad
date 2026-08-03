@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -147,6 +148,64 @@ def test_collector_snapshot_groups_attempts_and_exposes_worker_liveness() -> Non
         "BIP-20DEC30-CDE"
     )
     assert snapshot["collectors"][0]["attempts"][0]["id"] == "mca_test"
+
+
+def test_fact_history_is_bounded_and_uses_canonical_typed_store() -> None:
+    class HistoryRepo:
+        def list_definitions(self, **_kwargs: Any) -> list[dict[str, Any]]:
+            return [
+                {
+                    "id": "mcd_test",
+                    "series_id": 22,
+                    "fact_type": "derivatives.open_interest",
+                }
+            ]
+
+    class HistoryStore(_Store):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads = []
+
+        def read_open_interest(self, **kwargs: Any):
+            self.reads.append(kwargs)
+            return [
+                SimpleNamespace(
+                    series_id=22,
+                    revision=1,
+                    market_commit_seq=41,
+                    ingestion_run_id="mca_test",
+                    source_identity_key="source-test",
+                    source=SimpleNamespace(
+                        provider="COINBASE",
+                        venue="COINBASE_DIRECT",
+                        source_kind="poll_api",
+                        adapter_version="test.v1",
+                    ),
+                    provenance={"response_hash": "a" * 64},
+                    fact=SimpleNamespace(
+                        to_dict=lambda: {
+                            "sample_time": SCHEDULED,
+                            "known_at": SCHEDULED + timedelta(seconds=1),
+                            "value": 42.0,
+                            "unit": "contracts",
+                        }
+                    ),
+                )
+            ]
+
+    store = HistoryStore()
+    service = MarketDataCollectorService(
+        collection_repo=HistoryRepo(), store=store, clock=lambda: SCHEDULED
+    )
+
+    result = service.fact_history(
+        definition_id="mcd_test", hours=999, limit=9999
+    )
+
+    assert result["schema_version"] == "market_collector_fact_history.v1"
+    assert result["samples"][0]["fact"]["value"] == 42.0
+    assert result["samples"][0]["source"]["provider"] == "COINBASE"
+    assert store.reads[0]["start"] == SCHEDULED - timedelta(days=7)
 
 
 def test_collection_accepts_one_fenced_known_at_open_interest_fact() -> None:

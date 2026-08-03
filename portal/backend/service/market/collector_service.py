@@ -678,6 +678,79 @@ class MarketDataCollectorService:
             "provider_product_id": provider_product_id,
         }
 
+    def fact_history(
+        self,
+        *,
+        definition_id: str,
+        hours: int = 24,
+        limit: int = 240,
+    ) -> dict[str, Any]:
+        """Return bounded canonical fact history for one collector definition."""
+
+        definitions = self.list_definitions(definition_id=definition_id)
+        if not definitions:
+            raise ValueError(
+                f"market_collection_definition_unknown: definition_id={definition_id}"
+            )
+        definition = definitions[0]
+        fact_type = str(definition.get("fact_type") or "")
+        bounded_hours = max(1, min(int(hours or 24), 24 * 7))
+        bounded_limit = max(1, min(int(limit or 240), 1000))
+        end = self.clock().astimezone(UTC)
+        start = end - timedelta(hours=bounded_hours)
+        if fact_type == OPEN_INTEREST_FACT_TYPE:
+            records = self.store.read_open_interest(
+                series_id=int(definition["series_id"]), start=start, end=end
+            )
+        elif fact_type == FUNDING_RATE_FACT_TYPE:
+            records = self.store.read_funding_rates(
+                series_id=int(definition["series_id"]), start=start, end=end
+            )
+        else:
+            raise ValueError(
+                f"market_collection_fact_history_unsupported: fact_type={fact_type}"
+            )
+
+        samples = []
+        for record in records[-bounded_limit:]:
+            fact = record.fact.to_dict()
+            fact = {
+                key: (
+                    value.astimezone(UTC).isoformat()
+                    if isinstance(value, datetime)
+                    else value
+                )
+                for key, value in fact.items()
+            }
+            samples.append(
+                {
+                    "series_id": record.series_id,
+                    "revision": record.revision,
+                    "market_commit_seq": record.market_commit_seq,
+                    "ingestion_run_id": record.ingestion_run_id,
+                    "source_identity_key": record.source_identity_key,
+                    "source": {
+                        "provider": record.source.provider,
+                        "venue": record.source.venue,
+                        "source_kind": record.source.source_kind,
+                        "adapter_version": record.source.adapter_version,
+                    },
+                    "provenance": dict(record.provenance),
+                    "fact": fact,
+                }
+            )
+        return {
+            "schema_version": "market_collector_fact_history.v1",
+            "definition_id": str(definition_id),
+            "series_id": int(definition["series_id"]),
+            "fact_type": fact_type,
+            "range_start": start.isoformat(),
+            "range_end": end.isoformat(),
+            "samples": samples,
+            "truncated": len(records) > bounded_limit,
+            "observed_at": end.isoformat(),
+        }
+
     def latest_open_interest(
         self,
         *,
