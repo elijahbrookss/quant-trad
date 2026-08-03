@@ -183,17 +183,50 @@ def test_selected_symbol_snapshot_bounds_heavy_evidence_and_reports_window() -> 
     )
 
     current = payload["selected_symbol"]["current"]
-    assert len(current["signals"]) == 32
-    assert current["signals"][0]["event_id"] == "signal-8"
-    assert len(current["decisions"]) == 32
-    assert len(current["recent_trades"]) == 64
+    assert len(current["signals"]) == 16
+    assert current["signals"][0]["event_id"] == "signal-24"
+    assert len(current["decisions"]) == 16
+    assert len(current["recent_trades"]) == 32
     assert current["evidence_window"]["signals"] == {
         "ordering": "latest_tail",
-        "included": 32,
+        "included": 16,
         "available": 40,
         "truncated": True,
     }
     assert current["evidence_window"]["recent_trades"]["available"] == 80
+
+
+def test_selected_symbol_snapshot_bounds_warning_details_without_losing_count() -> None:
+    warnings = [
+        {"warning_id": f"warning-{index}", "severity": "warning", "message": "detail"}
+        for index in range(40)
+    ]
+
+    payload = selected_symbol_snapshot_contract(
+        bot_id="bot-1",
+        run_id="run-1",
+        symbol_key="instrument-btc|1m",
+        symbol_state=_symbol_state(),
+        symbol_catalog_entry=None,
+        run_health={"status": "running", "warning_count": 40, "warnings": warnings},
+        run_bootstrap_seq=11,
+        base_seq=17,
+        stream_session_id="stream-1",
+        run_live=True,
+        transport_eligible=True,
+        message="BotLens selected-symbol snapshot ready.",
+    )
+
+    runtime = payload["selected_symbol"]["current"]["runtime"]
+    assert runtime["warning_count"] == 40
+    assert len(runtime["warnings"]) == 16
+    assert runtime["warnings"][0]["warning_id"] == "warning-24"
+    assert runtime["warning_details"] == {
+        "ordering": "latest_tail",
+        "included": 16,
+        "available": 40,
+        "truncated": True,
+    }
 
 
 def test_symbol_detail_contract_remains_separate_from_selected_symbol_snapshot_contract() -> None:

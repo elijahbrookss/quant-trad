@@ -54,6 +54,10 @@ def _json_size_bytes(value: Any) -> int:
 
 def _runtime_payload(health_state: Mapping[str, Any] | None) -> Dict[str, Any]:
     source = health_state if isinstance(health_state, Mapping) else {}
+    available_warnings = [
+        dict(entry) for entry in source.get("warnings", []) if isinstance(entry, Mapping)
+    ]
+    included_warnings = available_warnings[-_RUNTIME_WARNING_DETAIL_LIMIT:]
     warning_types = [
         str(entry).strip().lower()
         for entry in source.get("warning_types", [])
@@ -62,8 +66,14 @@ def _runtime_payload(health_state: Mapping[str, Any] | None) -> Dict[str, Any]:
     payload = {
         "status": str(source.get("status") or "").strip() or None,
         "phase": source.get("phase"),
-        "warning_count": int(source.get("warning_count") or 0),
-        "warnings": [dict(entry) for entry in source.get("warnings", []) if isinstance(entry, Mapping)],
+        "warning_count": max(int(source.get("warning_count") or 0), len(available_warnings)),
+        "warnings": included_warnings,
+        "warning_details": {
+            "ordering": "latest_tail",
+            "included": len(included_warnings),
+            "available": len(available_warnings),
+            "truncated": len(available_warnings) > len(included_warnings),
+        },
         "last_event_at": source.get("last_event_at"),
         "worker_count": int(source.get("worker_count") or 0),
         "active_workers": int(source.get("active_workers") or 0),
@@ -165,10 +175,11 @@ def _symbol_detail_payload(state: SymbolProjectionSnapshot, *, run_health: Mappi
     }
 
 
-_SNAPSHOT_SIGNAL_LIMIT = 32
-_SNAPSHOT_DECISION_LIMIT = 32
-_SNAPSHOT_TRADE_LIMIT = 64
-_SNAPSHOT_LOG_LIMIT = 32
+_RUNTIME_WARNING_DETAIL_LIMIT = 16
+_SNAPSHOT_SIGNAL_LIMIT = 16
+_SNAPSHOT_DECISION_LIMIT = 16
+_SNAPSHOT_TRADE_LIMIT = 32
+_SNAPSHOT_LOG_LIMIT = 16
 _SNAPSHOT_OVERLAY_LIMIT = 160
 
 
