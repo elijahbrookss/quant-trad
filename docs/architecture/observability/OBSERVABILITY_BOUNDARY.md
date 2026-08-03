@@ -195,7 +195,9 @@ complete database pressure signal.
   `botlens_runtime_facts` messages by run/series while preserving control-lane
   and material trade, wallet, and decision fact delivery. Coalescing is a live
   projection pressure valve only; canonical fact persistence remains the source
-  of durable truth.
+  of durable truth. Coalescing volume is retained as a source-budgeted metric,
+  not one durable event per superseded projection message, so diagnostic noise
+  cannot consume a run report's bounded event-evidence window.
 - Runtime step traces are aggregated in memory into compact profiler rollups
   before persistence. The hot path records timing samples, but the writer ships
   mergeable bucket rows instead of one payload per bar. Shutdown drains pending
@@ -204,6 +206,10 @@ complete database pressure signal.
   writes. Persistence runs in bounded background batches and emits explicit
   errors on failure so API websocket receive loops are not held hostage by
   ordinary projection/debug storage pressure.
+- The telemetry ingest WebSocket yields to the event loop after every routed
+  frame. Backlogged frames may otherwise let receive and routing complete
+  synchronously long enough to starve Uvicorn keepalive handling and cause
+  deterministic 40-second code-1006 reconnect churn.
 - Scheduled collector liveness is a mutable worker-state projection. Heartbeat
   expiry means the process is not proven alive; it does not rewrite previously
   accepted market facts. Attempt timing stays bounded inside the existing typed

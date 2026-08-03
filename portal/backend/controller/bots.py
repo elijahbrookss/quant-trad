@@ -727,6 +727,10 @@ async def bot_telemetry_ingest(websocket: WebSocket) -> None:
             **labels,
         )
         await telemetry_hub.ingest(payload)
+        # A hot socket may already have the next frame buffered, and intake
+        # routing commonly completes without blocking. Yield explicitly so
+        # Uvicorn can service protocol keepalives under sustained backtests.
+        await asyncio.sleep(0)
 
 
 

@@ -665,6 +665,7 @@ def test_telemetry_emitter_coalescing_preserves_inflight_head(monkeypatch: pytes
     send_gate = threading.Event()
     send_started = threading.Event()
     connections: list[_FakeAsyncWebSocket] = []
+    observer = MagicMock()
 
     def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
         assert open_timeout == 2
@@ -674,6 +675,7 @@ def test_telemetry_emitter_coalescing_preserves_inflight_head(monkeypatch: pytes
         return ws
 
     monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
+    monkeypatch.setattr(telemetry_mod, "_OBSERVER", observer)
 
     emitter = telemetry_mod.TelemetryEmitter(
         "ws://example.test/telemetry",
@@ -696,15 +698,33 @@ def test_telemetry_emitter_coalescing_preserves_inflight_head(monkeypatch: pytes
             "run_seq": 2,
             "facts": [{"fact_type": "runtime_state_observed", "runtime": {"status": "running", "progress_state": "progressing"}}],
         }
+        third_payload = {
+            **second_payload,
+            "run_seq": 3,
+        }
 
         assert emitter.send(first_payload)
         _wait_until(lambda: send_started.is_set() and len(connections) == 1)
         assert emitter.send(second_payload)
+        assert emitter.send(third_payload)
 
         send_gate.set()
         _wait_until(lambda: len(connections[0].sent) == 2)
 
-        assert [json.loads(message)["run_seq"] for message in connections[0].sent] == [1, 2]
+        assert [json.loads(message)["run_seq"] for message in connections[0].sent] == [1, 3]
+        observer.increment.assert_any_call(
+            "telemetry_messages_coalesced_total",
+            value=1,
+            bot_id="bot-1",
+            run_id="run-1",
+            series_key="instrument-btc|1m",
+            worker_id=None,
+            message_kind="botlens_runtime_facts",
+            queue_name="telemetry_emit_queue",
+        )
+        assert "telemetry_runtime_message_coalesced" not in {
+            call.args[0] for call in observer.event.call_args_list if call.args
+        }
     finally:
         send_gate.set()
         emitter.close()

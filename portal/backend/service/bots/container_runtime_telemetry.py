@@ -570,13 +570,6 @@ class TelemetryEmitter:
             coalesced = self._drop_older_coalesced_locked(resolved_queue_name, coalesce_key)
             if coalesced:
                 _OBSERVER.increment("telemetry_messages_coalesced_total", value=coalesced, **labels)
-                _OBSERVER.event(
-                    "telemetry_runtime_message_coalesced",
-                    coalesced_count=coalesced,
-                    queue_depth=len(queue),
-                    queue_capacity=queue_capacity,
-                    **labels,
-                )
             while len(queue) >= queue_capacity and not self._closing and not self._stop:
                 if not self._backpressure_active[resolved_queue_name]:
                     _OBSERVER.event(

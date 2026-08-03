@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 pytest.importorskip("sqlalchemy")
+from fastapi import WebSocketDisconnect
 
 from portal.backend.service.observability import (
     BackendObserver,
@@ -69,6 +70,7 @@ from portal.backend.service.bots.botlens_projector_registry import ProjectorRegi
 from portal.backend.service.bots.botlens_intake_router import IntakeRouter
 import portal.backend.service.bots.botlens_intake_router as intake_mod
 import portal.backend.service.bots.botlens_run_projector as run_mod
+from portal.backend.controller import bots as bots_controller
 
 
 @pytest.fixture(autouse=True)
@@ -115,6 +117,50 @@ def _iso_candle_time(candle_time: int) -> str:
 def _epoch_candle_time(candle_time: int) -> int:
     value = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=int(candle_time))
     return int(value.timestamp())
+
+
+def test_telemetry_ingest_yields_for_websocket_protocol_fairness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fairness_tick = asyncio.Event()
+    ingested: list[dict[str, Any]] = []
+
+    class _BackloggedIngestWebSocket:
+        def __init__(self) -> None:
+            self.accepted = False
+            self.receive_count = 0
+
+        async def accept(self) -> None:
+            self.accepted = True
+
+        async def receive_text(self) -> str:
+            self.receive_count += 1
+            if self.receive_count == 1:
+                asyncio.get_running_loop().call_soon(fairness_tick.set)
+                return json.dumps(
+                    {
+                        "kind": BRIDGE_FACTS_KIND,
+                        "bot_id": "bot-1",
+                        "run_id": "run-1",
+                        "series_key": "instrument-btc|1m",
+                        "facts": [],
+                    }
+                )
+            assert fairness_tick.is_set()
+            raise WebSocketDisconnect()
+
+    async def _ingest(payload: dict[str, Any]) -> None:
+        ingested.append(dict(payload))
+
+    websocket = _BackloggedIngestWebSocket()
+    monkeypatch.setattr(bots_controller.telemetry_hub, "ingest", _ingest)
+
+    asyncio.run(bots_controller.bot_telemetry_ingest(websocket))  # type: ignore[arg-type]
+
+    assert websocket.accepted is True
+    assert websocket.receive_count == 2
+    assert len(ingested) == 1
+    assert ingested[0]["run_id"] == "run-1"
 
 
 def _intake_payload(payload: dict) -> dict:
