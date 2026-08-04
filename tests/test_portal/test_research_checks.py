@@ -2104,27 +2104,25 @@ def test_research_job_routes_delegate_to_async_dispatch(monkeypatch: pytest.Monk
     monkeypatch.setattr(research_controller.research_async_dispatch, "get_research_job_status", fake_status)
     monkeypatch.setattr(research_controller.research_async_dispatch, "get_research_job_result", fake_result)
 
-    dispatch_response = asyncio.run(
-        research_controller.dispatch_research_check_sweep(
-            research_controller.ResearchCheckSweepRequest(
-                **{
-                    "check_family": "candidate_lifecycle",
-                    "scope": {
-                        "indicator_id": "indicator-1",
-                        "instrument_id": "inst-1",
-                        "timeframe": "1h",
-                        "start": "2026-01-01T00:00:00Z",
-                        "end": "2026-01-02T00:00:00Z",
-                    },
-                    "detector": {"type": "candidate_lifecycle"},
-                    "variants": [{"id": "base", "param_overrides": {}}],
-                    "ranking": {"rank_by": "sample_count", "direction": "desc"},
-                }
-            )
+    dispatch_response = research_controller.dispatch_research_check_sweep(
+        research_controller.ResearchCheckSweepRequest(
+            **{
+                "check_family": "candidate_lifecycle",
+                "scope": {
+                    "indicator_id": "indicator-1",
+                    "instrument_id": "inst-1",
+                    "timeframe": "1h",
+                    "start": "2026-01-01T00:00:00Z",
+                    "end": "2026-01-02T00:00:00Z",
+                },
+                "detector": {"type": "candidate_lifecycle"},
+                "variants": [{"id": "base", "param_overrides": {}}],
+                "ranking": {"rank_by": "sample_count", "direction": "desc"},
+            }
         )
     )
-    status_response = asyncio.run(research_controller.get_research_job_status("job-1"))
-    result_response = asyncio.run(research_controller.get_research_job_result("job-1"))
+    status_response = research_controller.get_research_job_status("job-1")
+    result_response = research_controller.get_research_job_result("job-1")
 
     assert dispatch_response["job_id"] == "job-1"
     assert status_response["status"] == "queued"

@@ -387,7 +387,7 @@ class SymbolPresetOut(SymbolPresetRequest):
 
 
 @router.get("/")
-async def list_strategies() -> Dict[str, Any]:
+def list_strategies() -> Dict[str, Any]:
     """Return all stored strategies."""
 
     records = strategy_service.list_strategies()
@@ -406,7 +406,7 @@ async def list_strategies() -> Dict[str, Any]:
 
 
 @router.post("/", status_code=201)
-async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
+def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
     """Create a new strategy record."""
 
     try:
@@ -472,14 +472,14 @@ async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
 
 # Static endpoints (place before parameterised routes to avoid path collisions)
 @router.get("/atm-templates", response_model=List[ATMTemplateOut])
-async def list_atm_templates() -> List[Dict[str, Any]]:
+def list_atm_templates() -> List[Dict[str, Any]]:
     """Return all saved ATM templates."""
 
     return strategy_service.list_atm_templates()
 
 
 @router.post("/atm-templates", response_model=ATMTemplateOut, status_code=201)
-async def save_atm_template(body: ATMTemplateRequest) -> Dict[str, Any]:
+def save_atm_template(body: ATMTemplateRequest) -> Dict[str, Any]:
     """Create or update an ATM template."""
 
     try:
@@ -492,7 +492,7 @@ async def save_atm_template(body: ATMTemplateRequest) -> Dict[str, Any]:
 
 
 @router.get("/{strategy_id}/variants")
-async def list_strategy_variants(strategy_id: str) -> Dict[str, Any]:
+def list_strategy_variants(strategy_id: str) -> Dict[str, Any]:
     """Return saved output-filter variants for a strategy."""
 
     try:
@@ -505,7 +505,7 @@ async def list_strategy_variants(strategy_id: str) -> Dict[str, Any]:
 
 
 @router.post("/{strategy_id}/variants", response_model=StrategyVariantOut, status_code=201)
-async def create_strategy_variant(strategy_id: str, body: StrategyVariantRequest) -> Dict[str, Any]:
+def create_strategy_variant(strategy_id: str, body: StrategyVariantRequest) -> Dict[str, Any]:
     """Create a saved output-filter variant for a strategy."""
 
     try:
@@ -524,7 +524,7 @@ async def create_strategy_variant(strategy_id: str, body: StrategyVariantRequest
 
 
 @router.put("/{strategy_id}/variants/{variant_id}", response_model=StrategyVariantOut)
-async def update_strategy_variant(
+def update_strategy_variant(
     strategy_id: str,
     variant_id: str,
     body: StrategyVariantUpdateRequest,
@@ -545,7 +545,7 @@ async def update_strategy_variant(
 
 
 @router.delete("/{strategy_id}/variants/{variant_id}", status_code=204, response_class=Response)
-async def delete_strategy_variant(strategy_id: str, variant_id: str) -> Response:
+def delete_strategy_variant(strategy_id: str, variant_id: str) -> Response:
     """Delete a saved non-default strategy variant."""
 
     try:
@@ -558,7 +558,7 @@ async def delete_strategy_variant(strategy_id: str, variant_id: str) -> Response
 
 
 @router.get("/{strategy_id}/definition")
-async def get_strategy_definition(strategy_id: str) -> Dict[str, Any]:
+def get_strategy_definition(strategy_id: str) -> Dict[str, Any]:
     """Retrieve the core strategy definition."""
 
     try:
@@ -569,7 +569,7 @@ async def get_strategy_definition(strategy_id: str) -> Dict[str, Any]:
 
 
 @router.get("/{strategy_id}/bindings")
-async def get_strategy_bindings(strategy_id: str) -> Dict[str, Any]:
+def get_strategy_bindings(strategy_id: str) -> Dict[str, Any]:
     """Retrieve instrument and indicator bindings without full indicator manifests."""
 
     try:
@@ -580,7 +580,7 @@ async def get_strategy_bindings(strategy_id: str) -> Dict[str, Any]:
 
 
 @router.get("/{strategy_id}/rules")
-async def get_strategy_rules(strategy_id: str) -> Dict[str, Any]:
+def get_strategy_rules(strategy_id: str) -> Dict[str, Any]:
     """Retrieve stored strategy rules only."""
 
     try:
@@ -591,7 +591,7 @@ async def get_strategy_rules(strategy_id: str) -> Dict[str, Any]:
 
 
 @router.get("/{strategy_id}/effective")
-async def get_effective_strategy_contract(
+def get_effective_strategy_contract(
     strategy_id: str,
     variant_id: Optional[str] = Query(default=None),
     variant_name: Optional[str] = Query(default=None),
@@ -612,7 +612,7 @@ async def get_effective_strategy_contract(
 
 
 @router.get("/{strategy_id}/decision-inputs")
-async def get_strategy_decision_inputs(
+def get_strategy_decision_inputs(
     strategy_id: str,
     variant_id: Optional[str] = Query(default=None),
     variant_name: Optional[str] = Query(default=None),
@@ -633,7 +633,7 @@ async def get_strategy_decision_inputs(
 
 
 @router.get("/{strategy_id}")
-async def get_strategy(strategy_id: str) -> Dict[str, Any]:
+def get_strategy(strategy_id: str) -> Dict[str, Any]:
     """Retrieve the core strategy definition."""
 
     try:
@@ -644,7 +644,7 @@ async def get_strategy(strategy_id: str) -> Dict[str, Any]:
 
 
 @router.put("/{strategy_id}")
-async def update_strategy(strategy_id: str, body: StrategyUpdateRequest) -> Dict[str, Any]:
+def update_strategy(strategy_id: str, body: StrategyUpdateRequest) -> Dict[str, Any]:
     """Update an existing strategy."""
 
     try:
@@ -659,7 +659,7 @@ async def update_strategy(strategy_id: str, body: StrategyUpdateRequest) -> Dict
 
 
 @router.delete("/{strategy_id}", status_code=204, response_class=Response)
-async def delete_strategy(strategy_id: str) -> Response:
+def delete_strategy(strategy_id: str) -> Response:
     """Delete a strategy."""
 
     try:
@@ -673,7 +673,7 @@ async def delete_strategy(strategy_id: str) -> Response:
 
 
 @router.post("/{strategy_id}/indicators/{indicator_id}")
-async def attach_indicator(strategy_id: str, indicator_id: str) -> Dict[str, Any]:
+def attach_indicator(strategy_id: str, indicator_id: str) -> Dict[str, Any]:
     """Attach an indicator to a strategy."""
 
     try:
@@ -686,7 +686,7 @@ async def attach_indicator(strategy_id: str, indicator_id: str) -> Dict[str, Any
 
 
 @router.delete("/{strategy_id}/indicators/{indicator_id}")
-async def detach_indicator(strategy_id: str, indicator_id: str) -> Dict[str, Any]:
+def detach_indicator(strategy_id: str, indicator_id: str) -> Dict[str, Any]:
     """Detach an indicator from a strategy."""
 
     try:
@@ -697,7 +697,7 @@ async def detach_indicator(strategy_id: str, indicator_id: str) -> Dict[str, Any
 
 
 @router.post("/{strategy_id}/rules", status_code=201)
-async def create_rule(strategy_id: str, body: StrategyRuleCreateRequest) -> Dict[str, Any]:
+def create_rule(strategy_id: str, body: StrategyRuleCreateRequest) -> Dict[str, Any]:
     """Create a rule for a strategy."""
 
     try:
@@ -720,7 +720,7 @@ async def create_rule(strategy_id: str, body: StrategyRuleCreateRequest) -> Dict
 
 
 @router.put("/{strategy_id}/rules/{rule_id}")
-async def update_rule(strategy_id: str, rule_id: str, body: StrategyRuleUpdateRequest) -> Dict[str, Any]:
+def update_rule(strategy_id: str, rule_id: str, body: StrategyRuleUpdateRequest) -> Dict[str, Any]:
     """Update an existing rule."""
 
     try:
@@ -734,7 +734,7 @@ async def update_rule(strategy_id: str, rule_id: str, body: StrategyRuleUpdateRe
 
 
 @router.delete("/{strategy_id}/rules/{rule_id}")
-async def delete_rule(strategy_id: str, rule_id: str) -> Dict[str, Any]:
+def delete_rule(strategy_id: str, rule_id: str) -> Dict[str, Any]:
     """Delete a strategy rule."""
 
     try:
@@ -745,7 +745,7 @@ async def delete_rule(strategy_id: str, rule_id: str) -> Dict[str, Any]:
 
 
 @router.post("/{strategy_id}/compile")
-async def compile_strategy_contract(
+def compile_strategy_contract(
     strategy_id: str,
     body: Optional[StrategyVariantSelectionRequest] = None,
 ) -> Dict[str, Any]:
@@ -765,7 +765,7 @@ async def compile_strategy_contract(
 
 
 @router.post("/{strategy_id}/preview")
-async def run_preview(strategy_id: str, body: StrategyPreviewRequest) -> Dict[str, Any]:
+def run_preview(strategy_id: str, body: StrategyPreviewRequest) -> Dict[str, Any]:
     """Run a rule-logic preview for a strategy."""
 
     try:
@@ -786,7 +786,7 @@ async def run_preview(strategy_id: str, body: StrategyPreviewRequest) -> Dict[st
 
 
 @router.post("/{strategy_id}/preview/summary")
-async def run_preview_summary(strategy_id: str, body: StrategyPreviewSummaryRequest) -> Dict[str, Any]:
+def run_preview_summary(strategy_id: str, body: StrategyPreviewSummaryRequest) -> Dict[str, Any]:
     """Run a rule-logic preview and return its compact summary."""
 
     try:
@@ -809,7 +809,7 @@ async def run_preview_summary(strategy_id: str, body: StrategyPreviewSummaryRequ
 
 
 @router.post("/preview/compare")
-async def compare_previews(body: StrategyPreviewCompareRequest) -> Dict[str, Any]:
+def compare_previews(body: StrategyPreviewCompareRequest) -> Dict[str, Any]:
     """Run and compare compact previews for several strategies."""
 
     try:
@@ -829,7 +829,7 @@ async def compare_previews(body: StrategyPreviewCompareRequest) -> Dict[str, Any
 
 
 @router.get("/{strategy_id}/previews/{preview_id}/signals/{signal_id}")
-async def get_preview_signal_detail(strategy_id: str, preview_id: str, signal_id: str) -> Dict[str, Any]:
+def get_preview_signal_detail(strategy_id: str, preview_id: str, signal_id: str) -> Dict[str, Any]:
     """Return one retained strategy preview signal with audit context."""
 
     try:
@@ -839,14 +839,14 @@ async def get_preview_signal_detail(strategy_id: str, preview_id: str, signal_id
 
 
 @router.get("/presets/symbols", response_model=List[SymbolPresetOut])
-async def list_symbol_presets() -> List[Dict[str, Any]]:
+def list_symbol_presets() -> List[Dict[str, Any]]:
     """Return saved symbol presets."""
 
     return strategy_service.list_symbol_presets_service()
 
 
 @router.post("/presets/symbols", response_model=SymbolPresetOut, status_code=201)
-async def save_symbol_preset(body: SymbolPresetRequest) -> Dict[str, Any]:
+def save_symbol_preset(body: SymbolPresetRequest) -> Dict[str, Any]:
     """Create or update a symbol preset."""
 
     try:
@@ -865,7 +865,7 @@ async def save_symbol_preset(body: SymbolPresetRequest) -> Dict[str, Any]:
 
 
 @router.delete("/presets/symbols/{preset_id}", status_code=204, response_class=Response)
-async def delete_symbol_preset(preset_id: str) -> Response:
+def delete_symbol_preset(preset_id: str) -> Response:
     """Delete a stored symbol preset."""
 
     strategy_service.delete_symbol_preset_service(preset_id)
