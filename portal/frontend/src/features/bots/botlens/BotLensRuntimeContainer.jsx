@@ -126,6 +126,7 @@ export function BotLensRuntimeContainer({ bot, runId = null, open = Boolean(bot)
       contextHeader={contextHeader}
       changeSelectedSymbol={controller.changeSelectedSymbol}
       loadOlderHistory={controller.loadOlderHistory}
+      loadNewerHistory={controller.loadNewerHistory}
       loadMoreDecisionEvidence={controller.loadMoreDecisionEvidence}
       loadDecisionEvidencePage={controller.loadDecisionEvidencePage}
       loadTradeEvidencePage={controller.loadTradeEvidencePage}

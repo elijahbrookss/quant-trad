@@ -396,6 +396,26 @@ def list_candles_for_series_windows(
     return results
 
 
+def _frozen_dataset_page_flags(
+    *,
+    frozen_start: Any,
+    frozen_end: Any,
+    effective_start: Any,
+    effective_end: Any,
+    has_extra: bool,
+    prefer_latest: bool,
+) -> tuple[bool, bool]:
+    """Return dataset-relative paging flags for a bounded frozen candle page."""
+
+    has_more_before = bool(
+        effective_start > frozen_start or (has_extra and prefer_latest)
+    )
+    has_more_after = bool(
+        effective_end < frozen_end or (has_extra and not prefer_latest)
+    )
+    return has_more_before, has_more_after
+
+
 def read_frozen_dataset_candles(
     *,
     dataset_id: str,
@@ -440,10 +460,18 @@ def read_frozen_dataset_candles(
             value for value in (requested_end, frozen["range_end"]) if value is not None
         )
         if effective_end <= effective_start:
+            has_more_before, has_more_after = _frozen_dataset_page_flags(
+                frozen_start=frozen["range_start"],
+                frozen_end=frozen["range_end"],
+                effective_start=effective_start,
+                effective_end=effective_end,
+                has_extra=False,
+                prefer_latest=prefer_latest,
+            )
             return {
                 "candles": [],
-                "has_more_before": False,
-                "has_more_after": False,
+                "has_more_before": has_more_before,
+                "has_more_after": has_more_after,
                 "range_start": frozen["range_start"],
                 "range_end": frozen["range_end"],
                 "max_commit_seq": int(frozen["max_commit_seq"]),
@@ -478,6 +506,14 @@ def read_frozen_dataset_candles(
         ).mappings().all()
 
     has_extra = len(rows) > normalized_limit
+    has_more_before, has_more_after = _frozen_dataset_page_flags(
+        frozen_start=frozen["range_start"],
+        frozen_end=frozen["range_end"],
+        effective_start=effective_start,
+        effective_end=effective_end,
+        has_extra=has_extra,
+        prefer_latest=prefer_latest,
+    )
     selected = rows[:normalized_limit]
     candles = sorted(
         [
@@ -497,8 +533,8 @@ def read_frozen_dataset_candles(
     )
     return {
         "candles": candles,
-        "has_more_before": bool(has_extra and prefer_latest),
-        "has_more_after": bool(has_extra and not prefer_latest),
+        "has_more_before": has_more_before,
+        "has_more_after": has_more_after,
         "range_start": frozen["range_start"],
         "range_end": frozen["range_end"],
         "max_commit_seq": int(frozen["max_commit_seq"]),

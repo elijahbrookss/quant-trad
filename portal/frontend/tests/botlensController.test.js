@@ -13,6 +13,7 @@ import {
   shouldRetryBotLensSelectedSymbolBootstrap,
   shouldStartDurableEvidenceStages,
   shouldLoadOlderBotLensHistory,
+  shouldLoadNewerBotLensHistory,
   shouldPollSelectedSymbolVisual,
 } from '../src/features/bots/botlens/hooks/useBotLensController.js'
 
@@ -81,6 +82,28 @@ test('load older history stops at the frozen dataset boundary', () => {
   )
 })
 
+test('load newer history follows the forward frozen-dataset boundary', () => {
+  const base = {
+    activeRunId: 'run-1',
+    selectedSymbolKey: 'instrument-btc|1m',
+    chartCandles: [{ time: 1767225600, open: 1, high: 1, low: 1, close: 1 }],
+    chartHistoryStatus: 'ready',
+  }
+  assert.equal(
+    shouldLoadNewerBotLensHistory({
+      ...base,
+      hasMoreAfter: true,
+    }),
+    true,
+  )
+  assert.equal(
+    shouldLoadNewerBotLensHistory({
+      ...base,
+      hasMoreAfter: false,
+    }),
+    false,
+  )
+})
 test('completed dataset runs request an initial bounded chart page', () => {
   assert.equal(
     shouldLoadInitialBotLensHistory({

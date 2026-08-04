@@ -970,6 +970,7 @@ export function buildBotLensRuntimeViewModel({
       overlayEvidence: chartHistory?.overlayEvidence || null,
       overlayValidity,
       hasMoreBefore: chartHistory?.range?.has_more_before !== false,
+      hasMoreAfter: chartHistory?.range?.has_more_after !== false,
       historyCount: Number(chartHistory?.candles?.length || 0),
       cacheCount: Number(chartHistoryCacheCount || 0),
       focusTime: chartHistory?.focusTime || null,

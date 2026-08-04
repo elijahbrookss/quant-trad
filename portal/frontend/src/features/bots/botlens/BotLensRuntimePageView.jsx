@@ -12,6 +12,7 @@ export function BotLensRuntimePageView({
   changeSelectedSymbol,
   loadOlderHistory,
   loadMoreDecisionEvidence,
+  loadNewerHistory,
   loadDecisionEvidencePage,
   loadTradeEvidencePage,
   loadDiagnosticEvidencePage,
@@ -29,6 +30,7 @@ export function BotLensRuntimePageView({
         loadOlderHistory={loadOlderHistory}
         loadMoreDecisionEvidence={loadMoreDecisionEvidence}
         loadDecisionEvidencePage={loadDecisionEvidencePage}
+        loadNewerHistory={loadNewerHistory}
         loadTradeEvidencePage={loadTradeEvidencePage}
         loadDiagnosticEvidencePage={loadDiagnosticEvidencePage}
         focusDecision={focusDecision}

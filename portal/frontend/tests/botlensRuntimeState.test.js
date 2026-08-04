@@ -565,6 +565,48 @@ test('chart history is a bounded sliding window and focused replacements discard
   assert.equal(history.focusToken, 'trade-2:1')
 })
 
+test('bidirectional chart pages preserve the combined loaded-window boundaries', () => {
+  let state = reduceBotLensState(bootstrapState(), {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 120, open: 1, high: 1, low: 1, close: 1 }],
+    range: { has_more_before: true, has_more_after: true },
+    mergeMode: 'replace',
+  })
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 180, open: 2, high: 2, low: 2, close: 2 }],
+    range: { has_more_before: true, has_more_after: false },
+    mergeMode: 'append',
+  })
+
+  let history = state.retrieval.chartHistoryBySymbol['instrument-btc|1m']
+  assert.deepEqual(history.candles.map((row) => row.time), [120, 180])
+  assert.equal(history.range.has_more_before, true)
+  assert.equal(history.range.has_more_after, false)
+  assert.equal(history.range.returned_start_time, 120)
+  assert.equal(history.range.returned_end_time, 180)
+
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 60, open: 3, high: 3, low: 3, close: 3 }],
+    range: { has_more_before: false, has_more_after: true },
+    mergeMode: 'prepend',
+  })
+
+  history = state.retrieval.chartHistoryBySymbol['instrument-btc|1m']
+  assert.deepEqual(history.candles.map((row) => row.time), [60, 120, 180])
+  assert.equal(history.range.has_more_before, false)
+  assert.equal(history.range.has_more_after, false)
+  assert.equal(history.range.returned_start_time, 60)
+  assert.equal(history.range.returned_end_time, 180)
+})
+
 test('chart history rejects stale success and failure actions by request identity', () => {
   let state = bootstrapState()
   state = reduceBotLensState(state, {

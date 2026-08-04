@@ -221,6 +221,23 @@ function updateChartHistoryCache(cache, {
         page_fingerprints: overlayPages.map((page) => page.fingerprint),
       }
     : existing?.overlayEvidence || null
+  const pageRange = range && typeof range === 'object' ? { ...range } : null
+  const sourceRange = pageRange || existing?.range || null
+  const wasTrimmed = mergedCandles.length > boundedCandles.length
+  const mergedRange = sourceRange
+    ? {
+        ...sourceRange,
+        returned_start_time: boundedCandles[0]?.time ?? null,
+        returned_end_time: boundedCandles[boundedCandles.length - 1]?.time ?? null,
+        has_more_before: mergeMode === 'append'
+          ? Boolean((existing?.range?.has_more_before ?? sourceRange.has_more_before) || wasTrimmed)
+          : Boolean(sourceRange.has_more_before || (mergeMode === 'replace' && wasTrimmed)),
+        has_more_after: mergeMode === 'prepend'
+          ? Boolean((existing?.range?.has_more_after ?? sourceRange.has_more_after) || wasTrimmed)
+          : Boolean(sourceRange.has_more_after),
+      }
+    : null
+
   return {
     ...(cache || {}),
     [symbolKey]: {
@@ -231,7 +248,7 @@ function updateChartHistoryCache(cache, {
       trades: boundedTrades,
       overlays: overlayPages.flatMap((page) => page.overlays),
       overlayPages,
-      range: range && typeof range === 'object' ? { ...range } : existing?.range || null,
+      range: mergedRange,
       evidenceSource: evidenceSource && typeof evidenceSource === 'object'
         ? { ...evidenceSource }
         : existing?.evidenceSource || null,

@@ -155,6 +155,7 @@ export function BotLensChart({
   dataUpdateToken = null,
   overlayVisibility = {},
   onNearHistoryStart = null,
+  onNearHistoryEnd = null,
   viewportResetKey = null,
 }) {
   const containerRef = useRef(null)
@@ -270,6 +271,7 @@ export function BotLensChart({
   const showTradeRegions = overlayVisibility.trade_regions !== false
 
   const markerManager = useMarkerManager({ seriesRef, markersApiRef, markerCacheRef })
+  const refreshMarkers = markerManager.flush
 
   const { recenter, requestIntent, attachRangeGuards, setAnimationActive, focusAtTime, resetViewport } = useCameraLock({
     chartRef,
@@ -279,6 +281,7 @@ export function BotLensChart({
     markerManager,
     debugRanges,
     onNearHistoryStart,
+    onNearHistoryEnd,
   })
 
   const { pulseTradeElements, clearPulseArtifacts } = usePulseMarkers({
@@ -494,9 +497,10 @@ export function BotLensChart({
         payload: { ...(pending.payload || {}), segments: artifacts.tradeSegments },
         reason: pending.reason,
       })
+      refreshMarkers({ force: true })
       pendingCameraIntentRef.current = null
     }
-  }, [applyArtifacts, candleData, computeArtifacts, requestIntent, resolvedOverlays, tradeMarkerTooltips, tradeMarkers, tradePriceLines, tradeRegions, tradeSegments])
+  }, [applyArtifacts, candleData, computeArtifacts, refreshMarkers, requestIntent, resolvedOverlays, tradeMarkerTooltips, tradeMarkers, tradePriceLines, tradeRegions, tradeSegments])
 
   const containerClasses = [
     'relative w-full overflow-hidden rounded-[3px] border border-white/10 bg-[#0f1118]',

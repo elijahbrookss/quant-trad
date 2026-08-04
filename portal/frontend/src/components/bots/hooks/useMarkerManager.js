@@ -9,7 +9,7 @@ export const useMarkerManager = ({ seriesRef, markersApiRef, markerCacheRef }) =
   const ensureApi = useCallback(() => {
     if (markersApiRef.current) return markersApiRef.current
     if (!seriesRef.current) return null
-    markersApiRef.current = createSeriesMarkers(seriesRef.current, [])
+    markersApiRef.current = createSeriesMarkers(seriesRef.current, [], { zOrder: 'aboveSeries' })
     return markersApiRef.current
   }, [markersApiRef, seriesRef])
 
@@ -31,7 +31,7 @@ export const useMarkerManager = ({ seriesRef, markersApiRef, markerCacheRef }) =
     layersRef.current.delete(name)
   }, [])
 
-  const flush = useCallback(() => {
+  const flush = useCallback(({ force = false } = {}) => {
     const api = ensureApi()
     if (!api) return
     const now = performance.now()
@@ -70,7 +70,7 @@ export const useMarkerManager = ({ seriesRef, markersApiRef, markerCacheRef }) =
         return `${time}|${position}|${shape}|${color}|${text}|${id}`
       })
       .join('||')
-    if (signature !== lastSignatureRef.current) {
+    if (force || signature !== lastSignatureRef.current) {
       api.setMarkers(deduped)
       lastSignatureRef.current = signature
     }

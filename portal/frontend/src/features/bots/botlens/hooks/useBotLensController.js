@@ -35,12 +35,12 @@ import {
 } from '../state/botlensRuntimeSelectors.js'
 import { createInitialBotLensState, reduceBotLensState } from '../state/botlensRuntimeState.js'
 
-export function shouldLoadOlderBotLensHistory({
+function shouldLoadBotLensHistoryPage({
   activeRunId,
   selectedSymbolKey,
   chartCandles,
   chartHistoryStatus,
-  hasMoreBefore,
+  hasMore,
 }) {
   return Boolean(
     activeRunId
@@ -48,8 +48,22 @@ export function shouldLoadOlderBotLensHistory({
     && Array.isArray(chartCandles)
     && chartCandles.length > 0
     && chartHistoryStatus !== 'loading'
-    && hasMoreBefore !== false,
+    && hasMore !== false,
   )
+}
+
+export function shouldLoadOlderBotLensHistory(args) {
+  return shouldLoadBotLensHistoryPage({
+    ...args,
+    hasMore: args?.hasMoreBefore,
+  })
+}
+
+export function shouldLoadNewerBotLensHistory(args) {
+  return shouldLoadBotLensHistoryPage({
+    ...args,
+    hasMore: args?.hasMoreAfter,
+  })
 }
 
 export function shouldLoadInitialBotLensHistory({
@@ -686,9 +700,10 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
       }
     }
 
-    load()
+    const loadTimer = window.setTimeout(load, 0)
     return () => {
       cancelled = true
+      window.clearTimeout(loadTimer)
       bootstrapController.abort()
       bootstrapLoads.clear()
     }
@@ -1126,36 +1141,43 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     [abortChartRequests, activeRunId, bot?.id, logger],
   )
 
-  const loadOlderHistory = useCallback(async () => {
-    if (!shouldLoadOlderBotLensHistory({
+  const loadHistoryPage = useCallback(async (direction) => {
+    const prepend = direction === 'older'
+    const hasMore = prepend
+      ? chartHistory?.range?.has_more_before
+      : chartHistory?.range?.has_more_after
+    if (!shouldLoadBotLensHistoryPage({
       activeRunId,
       selectedSymbolKey,
       chartCandles,
       chartHistoryStatus,
-      hasMoreBefore: chartHistory?.range?.has_more_before,
+      hasMore,
     })) {
       return
     }
-    const oldest = chartCandles[0]
-    const endTime = oldest?.time ? new Date(Number(oldest.time) * 1000).toISOString() : undefined
+    const boundary = prepend ? chartCandles[0] : chartCandles[chartCandles.length - 1]
+    const boundaryEpoch = Number(boundary?.time)
+    const cursorTime = Number.isFinite(boundaryEpoch)
+      ? new Date((boundaryEpoch + (prepend ? 0 : 1)) * 1000).toISOString()
+      : undefined
     const request = beginChartRequest({
       runId: activeRunId,
       symbolKey: selectedSymbolKey,
-      requestKey: `older:${endTime || 'start'}`,
+      requestKey: `${direction}:${cursorTime || 'boundary'}`,
     })
     if (!request) return
     try {
       const page = await fetchBotLensChartHistory(activeRunId, selectedSymbolKey, {
-        endTime,
+        ...(prepend ? { endTime: cursorTime } : { startTime: cursorTime }),
         limit: 240,
         signal: request.controller.signal,
       })
       if (!isCurrentChartRequest(request)) return
       if (String(page?.run_id || '') !== String(activeRunId)) {
-        throw new Error('Older chart history returned a mismatched run scope')
+        throw new Error(`${direction} chart history returned a mismatched run scope`)
       }
       if (normalizeSeriesKey(page?.symbol_key || '') !== normalizeSeriesKey(selectedSymbolKey)) {
-        throw new Error('Older chart history returned a mismatched symbol scope')
+        throw new Error(`${direction} chart history returned a mismatched symbol scope`)
       }
       const candles = Array.isArray(page?.candles) ? page.candles : []
       dispatch({
@@ -1169,7 +1191,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
         evidenceSource: page?.evidence_source,
         tradeEvidence: page?.trade_evidence,
         overlayEvidence: page?.overlay_evidence,
-        mergeMode: 'prepend',
+        mergeMode: prepend ? 'prepend' : 'append',
         requestId: request.requestId,
       })
     } catch (err) {
@@ -1187,13 +1209,17 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
           bot_id: bot?.id || null,
           run_id: activeRunId,
           symbol_key: selectedSymbolKey,
+          direction,
         },
         err,
       )
     } finally {
       finishChartRequest(request)
     }
-  }, [activeRunId, beginChartRequest, bot?.id, chartCandles, chartHistory?.range?.has_more_before, chartHistoryStatus, finishChartRequest, isCurrentChartRequest, logger, selectedSymbolKey])
+  }, [activeRunId, beginChartRequest, bot?.id, chartCandles, chartHistory?.range?.has_more_after, chartHistory?.range?.has_more_before, chartHistoryStatus, finishChartRequest, isCurrentChartRequest, logger, selectedSymbolKey])
+
+  const loadOlderHistory = useCallback(() => loadHistoryPage('older'), [loadHistoryPage])
+  const loadNewerHistory = useCallback(() => loadHistoryPage('newer'), [loadHistoryPage])
 
   const focusEvidence = useCallback(async (evidence, {
     kind = 'evidence',
@@ -1321,6 +1347,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     forensicHasMore: forensicReplay.hasMore,
     forensicNextCursor: forensicReplay.nextCursor,
     forensicStatus: forensicReplay.status,
+    loadNewerHistory,
     loadOlderHistory,
     logs: selectedSymbolLogs,
     openTrades,

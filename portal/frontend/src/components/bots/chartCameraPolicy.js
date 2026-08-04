@@ -4,7 +4,7 @@ export const resolveCandleUpdateViewport = ({ updateMode = null, visibleRange = 
   const from = Number(visibleRange?.from)
   const to = Number(visibleRange?.to)
   if (
-    updateMode !== 'prepend'
+    !['prepend', 'append'].includes(updateMode)
     || !Number.isFinite(from)
     || !Number.isFinite(to)
     || to <= from
@@ -13,7 +13,7 @@ export const resolveCandleUpdateViewport = ({ updateMode = null, visibleRange = 
 }
 
 export const resolveCandleUpdateCameraIntent = ({ previous = [], next = [], updateMode = null } = {}) => {
-  if (updateMode === 'prepend') return null
+  if (updateMode === 'prepend' || updateMode === 'append') return null
 
   const prevLast = previous[previous.length - 1]
   const nextLast = next[next.length - 1]

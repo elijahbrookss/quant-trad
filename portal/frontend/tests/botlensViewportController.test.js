@@ -79,7 +79,7 @@ test('camera policy follows only initial load and symbol reset, not live appends
   })
 })
 
-test('historical prepend preserves the visible time range and never follows latest', () => {
+test('historical page merges preserve the visible time range and never follow latest', () => {
   const previous = makeCandles(200)
   const prepended = makeCandles(240, previous[0].time - 40 * 60)
   const visibleRange = {
@@ -93,5 +93,11 @@ test('historical prepend preserves the visible time range and never follows late
     updateMode: 'prepend',
   }), null)
   assert.deepEqual(resolveCandleUpdateViewport({ updateMode: 'prepend', visibleRange }), visibleRange)
+  assert.equal(resolveCandleUpdateCameraIntent({
+    previous,
+    next: prepended,
+    updateMode: 'append',
+  }), null)
+  assert.deepEqual(resolveCandleUpdateViewport({ updateMode: 'append', visibleRange }), visibleRange)
   assert.equal(resolveCandleUpdateViewport({ updateMode: 'replace', visibleRange }), null)
 })

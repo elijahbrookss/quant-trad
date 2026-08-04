@@ -179,6 +179,7 @@ function ChartViewport({
   isFullscreen,
   model,
   onNearHistoryStart,
+  onNearHistoryEnd,
   onToggleFullscreen,
   overlayVisibility,
   viewportResetKey,
@@ -231,6 +232,7 @@ function ChartViewport({
             dataUpdateToken={model.dataUpdateToken}
             overlayVisibility={overlayVisibility}
             onNearHistoryStart={onNearHistoryStart}
+            onNearHistoryEnd={onNearHistoryEnd}
             viewportResetKey={viewportResetKey}
             heightClass={chartHeightClass}
           />
@@ -250,6 +252,7 @@ export const ChartPanel = memo(function ChartPanel({
   overlayOptions,
   overlayVisibility,
   onLoadOlderHistory,
+  onLoadNewerHistory,
   onSelectSymbol,
   onToggleOverlay,
   onToggleOverlayCollapse,
@@ -373,7 +376,7 @@ export const ChartPanel = memo(function ChartPanel({
         centerView={centerView}
         isFullscreen={isFullscreen}
         model={model}
-        onLoadOlderHistory={onLoadOlderHistory}
+        onNearHistoryEnd={onLoadNewerHistory}
         onNearHistoryStart={onLoadOlderHistory}
         onToggleFullscreen={() => setIsFullscreen((value) => !value)}
         overlayVisibility={overlayVisibility}
