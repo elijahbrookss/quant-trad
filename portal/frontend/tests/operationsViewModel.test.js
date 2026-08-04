@@ -7,6 +7,7 @@ import {
   buildRunRows,
   filterAndSortRunRows,
   filterResearchRows,
+  formatBacktestWindow,
 } from '../src/features/operations/buildOperationsViewModel.js'
 import { buildRunInventoryScopeKey } from '../src/features/operations/useRunInventory.js'
 
@@ -31,6 +32,20 @@ test('run inventory keeps definition identity and run instance identity separate
   assert.equal(rows[0].definitionId, 'definition-1')
   assert.equal(rows[0].definitionName, 'Definition name')
   assert.equal(rows[0].durationMs, 3_600_000)
+})
+
+test('historical backtests expose a stable UTC evaluation window', () => {
+  const rows = buildRunRows([{
+    run_id: 'run-year',
+    run_type: 'backtest',
+    backtest_start: '2024-01-01T00:00:00Z',
+    backtest_end: '2025-01-01T00:00:00Z',
+  }], { nowEpochMs: NOW })
+
+  assert.equal(rows[0].simulatedStart, '2024-01-01T00:00:00Z')
+  assert.equal(rows[0].simulatedEnd, '2025-01-01T00:00:00Z')
+  assert.equal(rows[0].simulatedWindowLabel, 'Jan 1, 2024 → Jan 1, 2025')
+  assert.equal(formatBacktestWindow('invalid', '2025-01-01T00:00:00Z'), null)
 })
 
 test('run filters are deterministic with run id as the secondary key', () => {

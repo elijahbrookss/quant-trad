@@ -92,7 +92,18 @@ function RunsTable({ pageModel, loading, hasMore, loadingMore, onLoadMore }) {
             {pageModel.rows.map((row) => (
               <tr key={row.id}>
                 <td><strong>{row.definitionName}</strong><small>{row.strategy}</small><small>{formatTime(row.startedAt)}</small></td>
-                <td><strong>{row.instruments.join(', ') || 'Unavailable'}</strong><small>{row.runType} · {row.executionMode} · {row.timeframe}</small></td>
+                <td>
+                  <strong>{row.instruments.join(', ') || 'Unavailable'}</strong>
+                  <small>{row.runType} · {row.executionMode} · {row.timeframe}</small>
+                  {row.runType === 'backtest' ? (
+                    <small
+                      className="qt2-run-window"
+                      title="Backtests evaluate the start boundary through, but not including, the displayed end boundary."
+                    >
+                      Test window · {row.simulatedWindowLabel || 'Unavailable'}
+                    </small>
+                  ) : null}
+                </td>
                 <td><StatusBadge value={row.status} /><small>{row.phase || 'Lifecycle phase unavailable'}</small></td>
                 <td><strong>{row.status === 'completed' ? `${formatNumber(row.netPnl)} net P&L` : formatDuration(row.durationMs)}</strong><small>{row.totalTrades !== null ? `${row.totalTrades} trades` : 'Trade count unavailable'}</small></td>
                 <td className="qt2-actions-cell">

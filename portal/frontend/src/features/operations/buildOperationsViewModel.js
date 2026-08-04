@@ -50,6 +50,20 @@ function toEpochMs(value) {
   return Number.isFinite(parsed) ? parsed : null
 }
 
+const BACKTEST_DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  day: 'numeric',
+  month: 'short',
+  timeZone: 'UTC',
+  year: 'numeric',
+})
+
+export function formatBacktestWindow(start, end) {
+  const startMs = toEpochMs(start)
+  const endMs = toEpochMs(end)
+  if (startMs === null || endMs === null) return null
+  return `${BACKTEST_DATE_FORMATTER.format(startMs)} → ${BACKTEST_DATE_FORMATTER.format(endMs)}`
+}
+
 function durationMs(start, end, nowEpochMs) {
   const startMs = toEpochMs(start)
   if (startMs === null) return null
@@ -98,6 +112,7 @@ export function buildRunRows(runs = [], { nowEpochMs = Date.now() } = {}) {
       durationMs: durationMs(run.started_at, run.ended_at, nowEpochMs),
       simulatedStart: run.backtest_start || null,
       simulatedEnd: run.backtest_end || null,
+      simulatedWindowLabel: formatBacktestWindow(run.backtest_start, run.backtest_end),
       netPnl: run?.summary?.net_pnl,
       totalTrades: Number.isFinite(Number(totalTrades)) ? Number(totalTrades) : null,
       datasetId: run?.config_snapshot?.dataset_binding?.dataset_id || run?.dataset_id || null,
