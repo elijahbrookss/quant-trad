@@ -137,6 +137,7 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_BOT_RUNTIME_BOTLENS_MAX_DECISIONS", ("bot_runtime", "botlens", "max_decisions")),
     ("QT_BOT_RUNTIME_BOTLENS_MAX_WARNINGS", ("bot_runtime", "botlens", "max_warnings")),
     ("QT_BOT_RUNTIME_BOTLENS_RING_SIZE", ("bot_runtime", "botlens", "ring_size")),
+    ("QT_BOT_RUNTIME_BOTLENS_VIEWER_SEND_TIMEOUT_MS", ("bot_runtime", "botlens", "viewer_send_timeout_ms")),
     ("QT_BOT_RUNTIME_BOTLENS_INGEST_QUEUE_MAX", ("bot_runtime", "botlens", "ingest_queue_max")),
     ("QT_BOT_RUNTIME_BOTLENS_PERSIST_OBSERVER_CONTINUITY", ("bot_runtime", "botlens", "persist_observer_continuity")),
     ("QT_BOT_RUNTIME_STEP_TRACE_QUEUE_MAX", ("bot_runtime", "step_trace", "queue_max")),
@@ -498,6 +499,7 @@ class BotlensSettings:
     max_decisions: int
     max_warnings: int
     ring_size: int
+    viewer_send_timeout_ms: int
     ingest_queue_max: int
     persist_observer_continuity: bool
 
@@ -906,6 +908,7 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                 max_decisions=_coerce_int(botlens_payload.get("max_decisions"), 600, minimum=100),
                 max_warnings=_coerce_int(botlens_payload.get("max_warnings"), 120, minimum=20),
                 ring_size=_coerce_int(botlens_payload.get("ring_size"), 8192, minimum=32),
+                viewer_send_timeout_ms=_coerce_int(botlens_payload.get("viewer_send_timeout_ms"), 1500, minimum=100),
                 ingest_queue_max=_coerce_int(botlens_payload.get("ingest_queue_max"), 4096, minimum=64),
                 persist_observer_continuity=_coerce_bool(
                     botlens_payload.get("persist_observer_continuity"), False

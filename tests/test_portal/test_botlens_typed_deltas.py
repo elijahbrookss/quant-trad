@@ -459,3 +459,33 @@ def test_run_stream_requests_fresh_bootstrap_when_replay_window_expired() -> Non
         assert "replay_requested_gap_max" in metric_names
 
     asyncio.run(scenario())
+
+
+def test_run_stream_evicts_a_slow_viewer_without_delaying_healthy_viewers() -> None:
+    class SlowAfterConnectedWebSocket(FakeWebSocket):
+        async def send_text(self, payload: str) -> None:
+            if self.messages:
+                await asyncio.sleep(0.2)
+            await super().send_text(payload)
+
+    async def scenario() -> None:
+        stream = BotLensRunStream(viewer_send_timeout_ms=100)
+        fast = FakeWebSocket()
+        slow = SlowAfterConnectedWebSocket()
+        await stream.add_run_viewer(run_id="run-1", ws=fast, selected_symbol_key="instrument-btc|1m")
+        await stream.add_run_viewer(run_id="run-1", ws=slow, selected_symbol_key="instrument-btc|1m")
+
+        transport = BotLensTransport()
+        state = empty_run_projection_snapshot(bot_id="bot-1", run_id="run-1")
+        delta = transport.build_run_prepared_deltas(
+            state=state,
+            deltas=(RunHealthDelta(seq=2, event_time="2026-01-01T00:00:02Z", health={"status": "running"}),),
+        )[0]
+        delivery = await stream.broadcast_live_delta(delta)
+
+        assert fast.messages[-1]["type"] == "botlens_run_health_delta"
+        assert delivery.viewer_count == 2
+        assert delivery.stale_viewer_count == 1
+        assert stream.viewer_count_for_run("run-1") == 1
+
+    asyncio.run(scenario())

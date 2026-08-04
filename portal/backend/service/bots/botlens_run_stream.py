@@ -38,7 +38,7 @@ def _stream_json(payload: Mapping[str, Any]) -> str:
 
 
 class BotLensRunStream:
-    def __init__(self, *, ring_size: int | None = None) -> None:
+    def __init__(self, *, ring_size: int | None = None, viewer_send_timeout_ms: int | None = None) -> None:
         self.transport = BotLensTransport()
         self._run_viewers: DefaultDict[str, Dict[WebSocket, Dict[str, Any]]] = defaultdict(dict)
         self._run_stream_session_id: Dict[str, str] = {}
@@ -47,6 +47,8 @@ class BotLensRunStream:
         self._run_symbol_scope_seq: DefaultDict[str, Dict[str, int]] = defaultdict(dict)
         self._run_bot_ids: Dict[str, str] = {}
         self._ring_size = max(int(ring_size or _BOTLENS_SETTINGS.ring_size), 1)
+        resolved_send_timeout_ms = viewer_send_timeout_ms or _BOTLENS_SETTINGS.viewer_send_timeout_ms
+        self._viewer_send_timeout_seconds = max(int(resolved_send_timeout_ms), 100) / 1000.0
         self._run_message_ring: Dict[str, Deque[Dict[str, Any]]] = {}
         self._run_ring_high_water: Dict[str, int] = {}
         self._run_max_requested_gap: Dict[str, int] = {}
@@ -238,7 +240,10 @@ class BotLensRunStream:
             message_kind=message_kind,
         )
         try:
-            await ws.send_text(message)
+            await asyncio.wait_for(
+                ws.send_text(message),
+                timeout=self._viewer_send_timeout_seconds,
+            )
             _OBSERVER.observe(
                 "viewer_send_ms",
                 max((time.perf_counter() - started) * 1000.0, 0.0),
@@ -666,20 +671,18 @@ class BotLensRunStream:
             message_kind=message_kind,
             pipeline_stage=pipeline_stage,
         )
-        stale: list[WebSocket] = []
-        successful = 0
-        for ws in targets:
-            sent = await self._send_message(
+        deliveries = await asyncio.gather(*(
+            self._send_message(
                 ws,
                 serialized,
                 run_id=str(run_id),
                 message_kind=message_kind,
                 series_key=series_key,
             )
-            if not sent:
-                stale.append(ws)
-                continue
-            successful += 1
+            for ws in targets
+        ))
+        stale = [ws for ws, sent in zip(targets, deliveries) if not sent]
+        successful = sum(1 for sent in deliveries if sent)
         for ws in stale:
             await self.remove_run_viewer(run_id=str(run_id), ws=ws)
         _OBSERVER.increment(
