@@ -224,9 +224,11 @@ indefinitely. Terminal run bootstrap reconstructs run/catalog scope only and
 marks selected-symbol state as a required secondary read. That lets the frozen
 240-bar chart and first 100-record decision, trade, and diagnostic pages load in
 parallel with cold symbol projection instead of blocking all useful content
-behind it. Run inventory determines replay eligibility from either a hot
-projection or compact durable BotLens-ledger evidence; the inventory read never
-reconstructs the run.
+behind it. Historical run scope recovers instrument ID and timeframe from the
+canonical series key when older catalog rows omit those routing fields; it does
+not invent a human symbol. Run inventory determines replay eligibility from
+either a hot projection or compact durable BotLens-ledger evidence; the
+inventory read never reconstructs the run.
 
 Chart-history reconstruction is a blocking database/replay read and therefore
 runs in FastAPI's worker threadpool, never on the shared async event loop that

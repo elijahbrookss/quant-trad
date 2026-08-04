@@ -90,6 +90,36 @@ def test_run_bootstrap_contract_is_run_scoped_and_excludes_selected_symbol_state
     assert "detail" not in payload
 
 
+def test_run_bootstrap_contract_recovers_routing_identity_from_canonical_series_key() -> None:
+    payload = run_bootstrap_contract(
+        bot_id="bot-1",
+        run_id="run-1",
+        run_meta={"run_id": "run-1"},
+        lifecycle={"phase": "terminal", "status": "completed"},
+        health={"status": "completed", "warning_count": 0, "warnings": []},
+        symbol_catalog={
+            "instrument-btc|1h": {
+                "symbol_key": "instrument-btc|1h",
+            }
+        },
+        open_trades={},
+        selected_symbol_key="instrument-btc|1h",
+        state="ready",
+        run_live=False,
+        transport_eligible=False,
+        message="Historical BotLens bootstrap ready.",
+        bootstrap_seq=11,
+        base_seq=17,
+        stream_session_id="stream-1",
+    )
+
+    identity = payload["navigation"]["symbols"][0]["identity"]
+    assert identity["instrument_id"] == "instrument-btc"
+    assert identity["timeframe"] == "1h"
+    assert identity["symbol"] is None
+    assert identity["display_label"] == "instrument-btc · 1h"
+
+
 def test_selected_symbol_snapshot_contract_is_symbol_scoped_and_not_detail_contract() -> None:
     symbol_state = _symbol_state()
 

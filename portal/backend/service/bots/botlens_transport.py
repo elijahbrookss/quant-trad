@@ -247,6 +247,30 @@ def _symbol_current_payload(
     }
 
 
+def _catalog_series_identity(
+    *,
+    symbol_key: Any,
+    catalog_entry: Mapping[str, Any] | None,
+) -> tuple[str, Any, str, str]:
+    """Resolve routing identity without waiting for a projected symbol snapshot."""
+
+    entry = dict(catalog_entry or {})
+    normalized_symbol_key = normalize_series_key(
+        symbol_key or entry.get("symbol_key")
+    )
+    key_instrument_id, separator, key_timeframe = normalized_symbol_key.partition("|")
+    instrument_id = entry.get("instrument_id") or (
+        key_instrument_id if separator else None
+    )
+    symbol = str(entry.get("symbol") or "").strip().upper()
+    timeframe = (
+        str(entry.get("timeframe") or (key_timeframe if separator else ""))
+        .strip()
+        .lower()
+    )
+    return normalized_symbol_key, instrument_id, symbol, timeframe
+
+
 def _run_catalog_entry_payload(
     *,
     catalog_entry: Mapping[str, Any],
@@ -254,16 +278,17 @@ def _run_catalog_entry_payload(
     open_trades: Iterable[Mapping[str, Any]],
 ) -> Dict[str, Any]:
     identity = dict(catalog_entry)
-    symbol_key = normalize_series_key(identity.get("symbol_key"))
-    symbol = str(identity.get("symbol") or "").strip().upper()
-    timeframe = str(identity.get("timeframe") or "").strip().lower()
+    symbol_key, instrument_id, symbol, timeframe = _catalog_series_identity(
+        symbol_key=identity.get("symbol_key"),
+        catalog_entry=identity,
+    )
     open_trade_list = [dict(entry) for entry in open_trades if isinstance(entry, Mapping)]
     readiness = dict(identity.get("readiness") or {}) if isinstance(identity.get("readiness"), Mapping) else {}
     warning_summary = _symbol_warning_summary_payload(health_state=health_state, symbol_key=symbol_key)
     return {
         "symbol_key": symbol_key,
         "identity": {
-            "instrument_id": identity.get("instrument_id"),
+            "instrument_id": instrument_id,
             "symbol": symbol or None,
             "timeframe": timeframe or None,
             "display_label": display_label(symbol=symbol, timeframe=timeframe, symbol_key=symbol_key),
@@ -300,15 +325,16 @@ def _live_symbol_summary_payload(
     open_trades: Iterable[Mapping[str, Any]],
 ) -> Dict[str, Any]:
     identity = dict(catalog_entry)
-    symbol_key = normalize_series_key(identity.get("symbol_key"))
-    symbol = str(identity.get("symbol") or "").strip().upper()
-    timeframe = str(identity.get("timeframe") or "").strip().lower()
+    symbol_key, instrument_id, symbol, timeframe = _catalog_series_identity(
+        symbol_key=identity.get("symbol_key"),
+        catalog_entry=identity,
+    )
     open_trade_list = [dict(entry) for entry in open_trades if isinstance(entry, Mapping)]
     readiness = dict(identity.get("readiness") or {}) if isinstance(identity.get("readiness"), Mapping) else {}
     warning_summary = _symbol_warning_summary_payload(health_state=health_state, symbol_key=symbol_key)
     return {
         "symbol_key": symbol_key,
-        "instrument_id": identity.get("instrument_id"),
+        "instrument_id": instrument_id,
         "symbol": symbol or None,
         "timeframe": timeframe or None,
         "display_label": display_label(symbol=symbol, timeframe=timeframe, symbol_key=symbol_key),
@@ -338,13 +364,13 @@ def _symbol_identity_from_catalog_entry(
     symbol_key: str,
     catalog_entry: Mapping[str, Any] | None,
 ) -> Dict[str, Any]:
-    entry = dict(catalog_entry or {})
-    normalized_symbol_key = normalize_series_key(symbol_key or entry.get("symbol_key"))
-    symbol = str(entry.get("symbol") or "").strip().upper()
-    timeframe = str(entry.get("timeframe") or "").strip().lower()
+    normalized_symbol_key, instrument_id, symbol, timeframe = _catalog_series_identity(
+        symbol_key=symbol_key,
+        catalog_entry=catalog_entry,
+    )
     return {
         "symbol_key": normalized_symbol_key,
-        "instrument_id": entry.get("instrument_id"),
+        "instrument_id": instrument_id,
         "symbol": symbol or None,
         "timeframe": timeframe or None,
         "display_label": display_label(symbol=symbol, timeframe=timeframe, symbol_key=normalized_symbol_key),

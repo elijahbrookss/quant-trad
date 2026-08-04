@@ -177,7 +177,10 @@ evidence or from an existing hot projection. Selecting a terminal run rebuilds
 only run/catalog scope under the bounded bootstrap timeout; it does not embed a
 full selected-symbol history. The selected-symbol projector is a secondary read,
 while a dataset-bound chart and typed terminal evidence pages may begin as soon
-as run scope identifies the frozen dataset and canonical series.
+as run scope identifies the frozen dataset and canonical series. For historical
+catalog entries that retain only the canonical series key, bootstrap derives
+only its encoded instrument ID and timeframe; human symbol identity remains
+unknown until supported by source evidence.
 
 Selected-symbol snapshot transport is an explicit latest-tail window: 16 signals,
 16 decisions, 32 trade states, 16 diagnostics, and 160 overlays. Runtime health
