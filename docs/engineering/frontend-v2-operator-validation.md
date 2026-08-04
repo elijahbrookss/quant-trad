@@ -304,3 +304,63 @@ interactive browser review.
 The UI labels only runs with hot or durable BotLens evidence as selectable,
 enforces a 30-second bootstrap timeout, and surfaces component-local failure
 instead of claiming universal replay.
+
+## Operator Read Plane And Replay Remediation (2026-08-03)
+
+The follow-up implementation removed the legacy inventory polling relationship
+from Current Operations and bounded the costly cold paths:
+
+- Current Operations uses an initial active-run stream snapshot plus run-scoped
+  deltas. A four-second HTTP fallback is used only when the stream is unhealthy;
+  there is no interval loop issuing `GET /api/bots/runs?limit=50`.
+- One bot definition can display multiple simultaneous run cards because each
+  card is owned by an exact `run_id`, container identity, and lease.
+- Completed history remains cursor-paged but now reads a compact typed
+  projection. It excludes the full configuration snapshot while preserving the
+  dataset ID and provenance hashes required for list decisions.
+- Exact-run BotLens cold rebuild seeds only the selected symbol's bounded
+  candles, latest trades, decisions, diagnostics, and compact overlay headers.
+  It loads full overlay geometry only for event IDs accepted by the overlay
+  commit chain.
+
+Measured against the rebuilt local stack after database recovery:
+
+| Read | Before | After |
+| --- | ---: | ---: |
+| Active runs while other reads execute | route unavailable | 0.004–0.007 seconds |
+| 50-row run history | 4,737,643 bytes; 2.36–6.7 seconds | 81,715 bytes; 0.488 seconds |
+| Cold exact-run BotLens bootstrap | 3.4–5.44 seconds | 0.952 seconds |
+| Selected symbol after bootstrap | 9.55–11.7 seconds | 0.014 seconds |
+| Warm exact-run bootstrap | not separately bounded | 0.074 seconds |
+| Warm selected symbol | not separately bounded | 0.018 seconds |
+| 43-row report catalog | full artifact/list coupling | 88,883 bytes; 0.373 seconds |
+
+The active-run request remained in the 4–7 millisecond range while history and
+exact-run bootstrap were issued concurrently. This supports the intended
+separation between an executing run and portal reads on this measured local
+stack; it is not an unbounded concurrency claim.
+
+On the final rebuilt backend, four simultaneous requests completed as follows:
+active runs in 0.005 seconds, 50-run history in 0.204 seconds, the 43-row report
+catalog in 0.353 seconds, and exact-run BotLens bootstrap in 0.961 seconds.
+Backend/runtime coverage passed 332 targeted tests, the focused report/readiness
+suite passed 37 tests, frontend coverage passed 215 tests, the production Vite
+build completed, and Python compilation completed. Ruff was unavailable in the
+repository virtual environment and is not claimed as a completed gate.
+
+The retained run
+`62e08195-6150-4f3d-be0f-734b5b9d6100` remains an honest legacy replay fixture.
+Its overlay layer is invalid because replay expected base commit 59 and observed
+79, but the selected-symbol response still exposes candles, 16 decisions, and
+32 recent closed trades. A direct durable audit found 508 trades and 508 latest
+`TRADE_CLOSED` lifecycle facts, with a maximum of one concurrently open
+position. The prior UI display of eight open positions was a stale-projection
+bug; closing tombstones now retain `position_commit_seq`, preventing delayed
+open packets from resurrecting terminal trades.
+
+The implementation does not rewrite that old run or advertise its overlays as
+complete. Recurring and terminal full-state checkpoints make future runs
+recoverable after an overlay gap, while component-local validity keeps unrelated
+facts available. Interactive visual QA remains outstanding because the Codex
+Desktop browser bridge rejected the WSL workspace URI; this validation claims
+contract, HTTP, and replay behavior, not pixel equivalence.

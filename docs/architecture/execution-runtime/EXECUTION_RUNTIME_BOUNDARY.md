@@ -15,6 +15,9 @@ code_paths:
   - src/engines/bot_runtime
   - src/engines/bot_runtime/runtime/components/canonical_facts.py
   - portal/backend/service/bots/bot_watchdog.py
+  - portal/backend/service/bots/runner.py
+  - portal/backend/service/bots/runtime_control_service.py
+  - portal/backend/service/bots/startup_service.py
   - portal/backend/service/bots/runner_observability.py
   - portal/backend/service/bots/run_lease.py
   - portal/backend/service/bots/container_runtime.py
@@ -237,11 +240,31 @@ source; `portal_bots` remains a bot definition row and must not carry
 must fail loud if they lose the lease or cannot renew it before continuing to
 emit run facts.
 
+One bot definition may own multiple simultaneous run instances. Each start
+request creates a distinct `run_id`, run-scoped container identity, lease, and
+event ledger unless the caller repeats the same idempotency request ID. A stop
+request identifies the run it intends to stop; omitting `run_id` is allowed only
+when exactly one active run exists for that definition. The backend returns a
+conflict for an ambiguous stop instead of choosing a sibling run.
+
+The lease store, not backend process memory, is liveness truth. The watchdog's
+registered-run map is an observability cache only: ordinary ticks must not
+manufacture heartbeats, renew ownership, or serialize unrelated run reads.
+Watchdog maintenance may prune stale registrations by comparing them with
+active leases.
+
 The backend-owned `run_id` is mandatory container input. A runtime container
 must fail before loading config, claiming a lease, emitting lifecycle facts, or
 mutating wallet state when `QT_BOT_RUNTIME_RUN_ID` is absent. Generating a
 local replacement would create a disconnected lifecycle and accounting
 identity.
+
+Runtime progress is a causal fraction produced by the runtime from completed
+work over the admitted run window. It is bounded to `[0, 1]`, run-scoped, and
+may be displayed by the frontend without estimating progress from wall-clock
+time or container age. Operational health requires both an unexpired lease and
+fresh projected runtime evidence; a lease without recent projection evidence is
+`awaiting telemetry`, not silently healthy.
 
 ## Execution Semantics
 

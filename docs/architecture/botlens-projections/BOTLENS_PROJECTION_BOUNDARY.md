@@ -23,6 +23,7 @@ code_paths:
   - portal/backend/service/bots/botlens_candle_continuity.py
   - portal/backend/service/bots/botlens_canonical_facts.py
   - portal/backend/service/bots/botlens_domain_events.py
+  - portal/backend/service/bots/botlens_event_replay.py
   - portal/backend/service/bots/botlens_event_retention.py
   - portal/backend/service/bots/botlens_intake_router.py
   - portal/backend/service/bots/botlens_lifecycle_bridge.py
@@ -115,6 +116,11 @@ after the run-level lifecycle projection has already advanced beyond that
 notification and removed the trade. Closed-trade truth in the durable runtime
 ledger dominates stale live projection state.
 
+Trade removals therefore carry the closing `position_commit_seq`. Backend and
+frontend run projections retain that sequence as a tombstone even after the
+open-trade row is removed. A late open/upsert at the same or an older position
+clock cannot resurrect the trade merely because no current row exists.
+
 Symbol projection owns symbol-level state:
 
 - candles,
@@ -176,6 +182,15 @@ warning count and typed summary. Every concern
 reports included and available counts, `ordering=latest_tail`, and whether it
 was truncated. The full projector remains authoritative for live state; the
 durable cursor path is authoritative for complete historical inspection.
+
+Cold selected-symbol rebuild does not scan every retained event or deserialize
+every overlay payload. It reads a bounded latest-tail seed for metadata, stats,
+candles, signals, decisions, latest state per trade, and diagnostics. Overlay
+replay first reads compact clock/checkpoint headers ordered by
+`overlay_commit_seq`; only event IDs in the accepted contiguous suffix are then
+loaded with geometry. Run-scope rebuild uses an explicit event-name allowlist
+and excludes symbol overlay payloads. These are query-plan optimizations over
+the same typed evidence, not alternate reconstruction semantics.
 
 Chart-history pages pair each bounded candle range with trade states rebuilt from
 the retained `TRADE_OPENED`, `TRADE_UPDATED`, and `TRADE_CLOSED` facts. The
@@ -274,8 +289,10 @@ unbounded indicator history. Rolling polyline changes use a typed tail patch:
 the patch names the line index, expected point count, dropped prefix, and
 appended points, and carries SHA-256 fingerprints for both the previous and
 resulting polyline collection. A mismatch fails replay rather than silently
-accepting divergent geometry. The first overlay state remains a bounded full
-checkpoint; recurring changes avoid retransmitting the entire rolling window.
+accepting divergent geometry. The first overlay state is a bounded full
+checkpoint; runtime also emits a `checkpoint_kind=full_state` recovery snapshot
+every 20 overlay commits and at terminal projection. Changes between checkpoints
+avoid retransmitting the entire rolling window.
 Wallet ledger and diagnostic facts keep full
 canonical payloads on the producer-side canonical append path while live
 transport drops repeated wallet snapshots and raw diagnostic context that the
@@ -330,6 +347,14 @@ overlay retention return `overlay_timeline_not_retained`; the frontend labels
 them unavailable instead of substituting a live tail. Frozen candles, typed
 decisions, and durable trades remain independently inspectable.
 
+Selected-symbol projection keeps a typed validity state for this layer:
+`validity_status`, invalid reason/detail, invalidating run sequence,
+expected/observed overlay clocks, and recovery sequence. A clock gap or
+fingerprint mismatch suppresses overlay geometry only. It must not throw away
+candles, decisions, trades, diagnostics, or the selected-symbol base state. A
+later full-state checkpoint is accepted as a new deterministic base and closes
+the invalid interval; without that checkpoint the invalid state remains visible.
+
 Runtime configures each indicator's render-only overlay-history bound from
 `bot_runtime.botlens.overlay_window_bars` through the indicator engine's single
 overlay-history dispatcher. This is not a research range, evaluation range,
@@ -343,9 +368,10 @@ The ordinary runtime push update emits compact BotLens facts for candles,
 series state, health, decisions, trades, wallet, logs, and stats. After a bar is
 finalized, a separate `overlay_projection` step may build visible overlay
 geometry, diff it against the overlay projection cache, and emit
-`overlay_ops_emitted` only when there are changed overlay operations. A terminal
-bar forces one final delta even when geometry is unchanged; that no-op clock
-advance is the explicit terminal checkpoint, not invented geometry.
+`overlay_ops_emitted` only when there are changed overlay operations. Every
+twentieth overlay commit and the terminal bar force a bounded full-state
+checkpoint even when ordinary diffing would emit only a patch or no geometry
+change. The checkpoint is explicit recovery evidence, not invented geometry.
 
 Overlay projection cadence is bar based, not wall-clock based. The cadence is
 controlled by `bot_runtime.botlens.overlay_emit_every_bars`, with terminal bars
@@ -370,9 +396,10 @@ transport operations only. It is separate from the selected-symbol websocket
 
 Selected-symbol snapshots carry the current overlay cursor beside the bounded
 overlay payload. The next overlay delta must advance that cursor and declare
-the matching `base_overlay_commit_seq`; otherwise the frontend treats the delta
-as stale projection transport, advances the stream cursor, and does not mutate
-overlay state.
+the matching `base_overlay_commit_seq`; otherwise the projection marks the
+overlay layer invalid, advances the outer stream cursor, and does not mutate
+other selected-symbol concerns. A full-state checkpoint may establish a new
+base without matching the invalid prior overlay fingerprint.
 
 Symbol-to-run notifications are live projection transport. A newer pending
 notification may replace an older one for the same run and symbol, keeping the
@@ -412,6 +439,8 @@ or bootstrap facts.
 - Stale selected-symbol snapshots are rejected or refreshed.
 - Stream continuity uses sequence/cursor fields.
 - Rebuild failures surface bounded operational faults.
+- Overlay clock/fingerprint failure invalidates only the overlay concern until
+  a typed full-state checkpoint recovers it.
 - Visual overlay projection failure records `overlay_projection` diagnostics
   and degrades BotLens overlay freshness without rewriting execution truth.
 - Forensics can page the ledger when live projection is insufficient.

@@ -22,6 +22,7 @@ code_paths:
   - portal/backend/service/storage/repos/lifecycle.py
   - portal/backend/service/storage/repos/run_leases.py
   - portal/backend/service/storage/repos/runtime_events.py
+  - portal/backend/service/storage/repos/runs.py
   - portal/backend/service/bots/botlens_domain_events.py
   - portal/backend/service/bots/botlens_canonical_facts.py
   - portal/backend/service/bots/botlens_event_retention.py
@@ -35,6 +36,7 @@ code_paths:
   - scripts/db/manual_migration_versioning_hard_cutover.sql
   - scripts/db/manual_migration_canonical_lifecycle_ledger_v1.sql
   - scripts/db/manual_migration_async_job_fencing_v1.sql
+  - scripts/db/manual_add_operator_read_path_indexes_v1.sql
 ---
 # Persistence Boundary
 
@@ -214,12 +216,41 @@ Runtime events should carry typed hot fields for common query paths:
 
 The full payload can remain richer, but readers should not parse giant blobs for ordinary routing and correlation.
 
+Operator list reads are typed column projections, not entity dumps. Global run
+history reads scalar run/card fields, bounded summary, provenance hashes,
+execution semantics, and compact dataset identity; it does not select the full
+`portal_bot_runs.config_snapshot`. Exact-run inspection remains the boundary
+that may read the complete configuration. This distinction keeps list cost
+bounded as completed-run count grows without discarding durable provenance.
+
+Report catalog status reads follow the same rule. Batched rows select status,
+fingerprint inputs, and typed readiness scalars from the materialized artifact;
+they never hydrate the full report artifact. The catalog recomputes the input
+fingerprint from compact run fields and aggregate event/trade high-water marks.
+Only fingerprint-verified artifact readiness may advertise comparison safety;
+exact report reads remain the full-artifact boundary.
+
+Selected-symbol cold rebuilds use indexes aligned to the scoped reads:
+`(bot_id, run_id, series_key, event_name, run_seq, id)` for bounded concern and
+overlay-header reads, `(bot_id, run_id, series_key, trade_id, run_seq, id)` for
+latest trade state, `(run_id, updated_at, id)` for run trade history, and
+`(bot_id, run_id, status)` for open/closed trade ownership checks. The ORM
+declares these indexes for fresh schemas; the manual SQL file is an out-of-band
+repair artifact for an existing local database.
+
 `seq` is a producer/batch sequence and may repeat for multiple BotLens-domain
 facts emitted in one runtime batch. Canonical replay order is `run_seq`: a
 dense, monotonic, per-run event sequence assigned by the runtime-event
 persistence boundary at canonical append time. `run_seq` starts at 1 for a run
 and is stamped into durable event context with `run_seq_status=runtime_assigned`.
 It is not assigned by frontend, projection, reporting, or export code.
+
+`run_seq` remains cross-domain persistence order; it does not replace a scoped
+domain clock. In particular, retained overlay rows may arrive out of `run_seq`
+order across asynchronous producers. Overlay reconstruction orders compact
+headers by `overlay_commit_seq`, proves each `base_overlay_commit_seq`, and
+loads geometry only for the accepted contiguous suffix or a later full-state
+checkpoint.
 
 Within one producer/batch `seq`, persistence preserves the producer's semantic
 event order while assigning dense `run_seq` values. Event IDs are idempotency
@@ -287,8 +318,9 @@ canonical persistence also failed.
 Source-owned runtime batches carry both live facts and durable facts. The
 durable writer filters those batches through
 `botlens_event_retention.py`: signals, decisions, material trades, wallet facts,
-and compact catalog facts are retained; raw candle, health, overlay, stats, and
-nonmaterial diagnostic messages are summarized, aggregated, or kept live-only.
+compact catalog facts, and bounded overlay delta/checkpoint research context are
+retained; raw candle, repeated health, stats, and nonmaterial diagnostic
+messages are summarized, aggregated, or kept live-only.
 Before retention, the runtime fact stream already compacts high-volume
 projection/debug facts at the source: health facts exclude full snapshots,
 series identity excludes full instrument/provider blobs and is emitted only on

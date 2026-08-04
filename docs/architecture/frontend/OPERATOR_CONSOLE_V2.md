@@ -134,7 +134,7 @@ Operations has three task domains rather than exposing backend subsystem names:
 
 | Domain | Primary row grain | Deep detail |
 | --- | --- | --- |
-| Runs / Current | active run projected by the live fleet feed | BotLens modal and run actions |
+| Runs / Current | one fresh leased run instance from the active-run stream | BotLens modal and exact-run actions |
 | Runs / History | persisted terminal or prior run instance | replay, report/research evidence, copy-only rerun command |
 | Market | grouped scheduled facts and configured structure pairs | Market Lens facts, attempts, latency, and quality |
 | Research | persisted research item | relationship trail and raw provider-free evidence |
@@ -146,11 +146,19 @@ coverage, book-validity, archive, normalization, admission, and quality states
 for configured futures/spot relationships. The grouping reduces scan cost but
 does not merge their typed backend contracts.
 
-Runs opens on **Current**. Current run cards are derived from the live fleet
-projection and include only evidenced starting, running, paused, or degraded
-run instances. Overview uses the same live projection and never opens the
-global historical inventory endpoint. A configured or terminal bot definition
-is not an active run.
+Runs opens on **Current**. Current run cards consume `active_run_list.v1` from
+`GET /api/bots/runs/active` and its `GET /api/bots/runs/stream` SSE companion.
+The stream's initial snapshot is primary; the browser performs one bounded HTTP
+fallback only when the first stream snapshot does not arrive. Runtime deltas
+update an exact `run_id` locally, while membership changes trigger one bounded
+resynchronization read. There is no interval polling.
+
+The active projection begins with fresh run leases, joins run/lifecycle truth in
+batches, and includes only evidenced starting, running, paused, or degraded run
+instances. Two active runs of one bot definition remain two cards because
+definition identity and run identity are not interchangeable. Overview uses the
+same active-run projection and never opens the global historical inventory
+endpoint. A configured or terminal bot definition is not an active run.
 
 **History** is an explicit secondary view. Only after the operator selects it
 does the console read `bot_run_inventory.v1`: one 20-run
@@ -163,6 +171,17 @@ completed run or replay. Market inventory uses
 the scheduled-fact projection has its own durable snapshot and stream. Research
 remains bounded to 200 records. Only the selected task domain performs its
 secondary inventory reads.
+
+The history repository selects only list-card scalar fields, summary, hashes,
+execution semantics, and compact dataset identity. It does not read or return a
+run's full `config_snapshot`; opening the exact run is the boundary that may
+load that configuration. This keeps thousands of historical runs cheap to scan
+without weakening exact-run provenance.
+
+Scheduled-fact and market-structure hooks are also stream-first. When an SSE
+surface exists they wait up to four seconds for its initial snapshot before one
+HTTP fallback. Manual refresh remains an explicit resynchronization action;
+mounting a page does not launch an HTTP snapshot and SSE snapshot in parallel.
 
 The market snapshot is a partial-success contract. `component_errors` is keyed
 by `definitions`, `sessions`, `normalization_specs`, or `status_by_definition`;
@@ -245,6 +264,13 @@ inside the delta loop, but it still verifies ordering and every typed tail-patch
 result before emitting the same stable page fingerprint. Performance work must
 not turn a corrupt overlay chain into apparently complete chart evidence.
 
+Overlay validity is component-owned. A missing overlay commit or fingerprint
+mismatch marks only `overlay_validity` invalid, clears/suppresses overlay
+geometry, and displays a readable chart-local notice with copyable technical
+detail. Frozen candles, decisions, trade markers, and forensic paging remain
+available. A later typed full-state overlay checkpoint may recover that layer;
+the UI never mutates an old snapshot to pretend the missing evidence arrived.
+
 Selected-symbol snapshots are latest-tail views: 16 signals, 16 decisions, 32
 trade states, 16 logs, and 160 overlays at most. Runtime warning detail is also
 limited to the latest 16 entries while the total count, type/severity summary,
@@ -268,6 +294,7 @@ The console may say:
 - collectors live: the durable collector worker heartbeat is current;
 - market updates live: the market-structure snapshot stream is connected;
 - BotLens live: an eligible run projection is sequenced and resynchronizable;
+- active run alive: a fresh run lease has a hot projected runtime update;
 - on schedule: collector attempts satisfy delivery timing.
 
 `run_live` is derived through the canonical lifecycle normalizer from phase and
@@ -278,6 +305,11 @@ The console may not collapse those facts into “platform healthy” or “all
 containers live.” Collector-worker heartbeat authority is deliberately scoped
 to scheduled market-data collection; bot container state, stream leases, and API
 reachability retain their own evidence boundaries.
+
+An active lease without a hot projected runtime update is labeled **Awaiting
+telemetry**, not alive. The console therefore promises near-real-time run
+projection only after that typed evidence exists; it does not infer container
+liveness from a configured definition or an open browser connection.
 
 ## Failure Presentation
 

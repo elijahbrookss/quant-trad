@@ -155,6 +155,24 @@ For architecture-affecting changes, follow `AGENTS.md`: inspect
 `docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md`, update targeted component
 docs, refresh the index, and run `make sync-docs`.
 
+## Hard-Shutdown And Desktop UI Recovery
+
+After an unclean workstation shutdown, prove PostgreSQL readiness before
+restarting backend and collector processes. The backend supervisor starts API,
+indicator, and research workers together; starting that fanout while PostgreSQL
+is still in crash recovery produces connection-reset noise and can exaggerate
+cold-start latency. Use `pg_isready`, then restart the affected services once
+the database accepts connections. Do not treat the initial failed schema checks
+as application data corruption without independent evidence.
+
+Codex Desktop browser QA from a WSL checkout requires the desktop browser
+bridge to accept the workspace's WSL file URI. If the bridge rejects it with
+`sandboxCwd is not a local file URI`, continue API, contract, compilation, and
+live HTTP validation, but do not substitute an unapproved hidden browser and do
+not claim pixel or click-path verification. Reopen the repository through a
+supported Remote WSL/native path or repair the bridge before making an
+interactive-browser claim.
+
 ## Codex Audit Shape
 
 Do not hide full audits behind one opaque target. Keep the pieces composable:
