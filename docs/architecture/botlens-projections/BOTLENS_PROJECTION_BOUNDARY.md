@@ -265,6 +265,11 @@ BotLens request. If the serving loop is unavailable, the bridge emits a WARN and
 leaves the hot copy deferred; the durable lifecycle record remains authoritative
 and a later bootstrap rebuilds from it.
 
+BotLens async reads may inspect hot in-memory projector state inline. Run-row
+lookup, historical ledger reconstruction, blocking chart/forensic reads, and
+other synchronous persistence work must execute through an explicit thread
+offload seam. See [ADR 0054](../decisions/0054-keep-blocking-api-work-off-the-event-loop.md).
+
 ## Bounded Hot Views
 
 The live websocket stream is a bounded viewport transport, not a replicated

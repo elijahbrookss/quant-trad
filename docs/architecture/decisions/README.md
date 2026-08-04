@@ -78,3 +78,5 @@ respect.
 | [0050](0050-use-one-canonical-append-only-market-data-store.md) | Use one canonical append-only market-data store | Accepted, retroactive cleanup |
 | [0051](0051-require-frozen-datasets-for-canonical-backtests.md) | Require frozen datasets for canonical backtests | Accepted |
 | [0052](0052-use-typed-fact-collectors-and-explicit-instrument-roles.md) | Use typed fact collectors and explicit instrument roles | Accepted |
+| [0053](0053-use-tiered-market-structure-archive-and-replay-boundary.md) | Use a tiered market-structure archive and replay boundary | Accepted |
+| [0054](0054-keep-blocking-api-work-off-the-event-loop.md) | Keep blocking API work off the event loop | Accepted |

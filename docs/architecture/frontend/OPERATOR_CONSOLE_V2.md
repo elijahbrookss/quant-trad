@@ -245,6 +245,12 @@ the same blocking work. A slow container inspection or replay may delay its own
 component, but it must not occupy the async event loop that serves health,
 navigation, or unrelated live sockets.
 
+This is an API-wide boundary, not a BotLens-only optimization. Synchronous HTTP
+handlers use `def` so FastAPI owns their worker-thread dispatch. Routes remain
+`async def` only when they await cooperative stream, queue, WebSocket, or job
+work; any synchronous lookup or replay inside such a route crosses an explicit
+thread offload seam. See [ADR 0054](../decisions/0054-keep-blocking-api-work-off-the-event-loop.md).
+
 Dataset-bound backtest charts read only the run's frozen dataset series at its
 recorded commit boundary. They never fall through to later canonical revisions.
 The initial view requests the latest 240 bars, left-edge movement requests one
